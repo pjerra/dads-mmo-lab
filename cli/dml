@@ -143,7 +143,15 @@ _stream_cmd() {
 # Shared guard for games start/stop/restart. Sets gid, dir, compose_dir or
 # emits the right error (respecting DML_JSON) and exits 1.
 _games_resolve_or_fail() {
-    gid="${1:?Usage: dml games <start|stop|restart> <title>}"
+    gid="${1:-}"
+    if [[ -z "$gid" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_error NOT_FOUND "Missing title" "Usage: dml games <start|stop|restart> <title> --json"
+        else
+            echo "Usage: dml games <start|stop|restart> <title>" >&2
+        fi
+        exit 1
+    fi
     dir="$GAMES_DIR/$gid"
     if [[ ! -d "$dir" ]]; then
         if [[ "$DML_JSON" == 1 ]]; then ndjson_error NOT_FOUND "Title not found: $gid" "Run: dml games list --json"
@@ -169,7 +177,15 @@ _games_start_impl() {
     _games_resolve_or_fail "$1"
     [[ "$DML_JSON" == 1 ]] && ndjson_section_start "$mode"
     cd "$compose_dir"
-    _check_port_conflicts > >(if [[ "$DML_JSON" == 1 ]]; then while IFS= read -r _l; do ndjson_line warn "$_l"; done; else cat; fi)
+    local _pc
+    _pc="$(_check_port_conflicts || true)"
+    if [[ -n "$_pc" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then
+            while IFS= read -r _l; do ndjson_line warn "$_l"; done <<< "$_pc"
+        else
+            printf '%s\n' "$_pc"
+        fi
+    fi
     local rc=0
     if [[ -x "./dml-start.sh" ]]; then
         _stream_cmd bash ./dml-start.sh "$mode" || rc=$?
@@ -960,7 +976,11 @@ case "$cmd" in
         json_ok "$out"
         ;;
       status)
-        gid="${1:?Usage: dml games status <title> --json}"
+        gid="${1:-}"
+        if [[ -z "$gid" ]]; then
+            json_err NOT_FOUND "Missing title" "Usage: dml games status <title> --json"
+            exit 1
+        fi
         dir="$GAMES_DIR/$gid"
         if [[ ! -d "$dir" ]]; then
             json_err NOT_FOUND "Title not found: $gid" "Run: dml games list --json"
