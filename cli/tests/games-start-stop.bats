@@ -80,3 +80,51 @@ EOS
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'staged start: mode=restart'
 }
+
+@test "games start unknown title returns NOT_FOUND" {
+  run bash "$DML" games start nope --json
+  [ "$status" -eq 1 ]
+  last="$(echo "$output" | tail -1)"
+  [ "$(echo "$last" | jq -r '.event')" = "error" ]
+  [ "$(echo "$last" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "games start install-only title returns NO_COMPOSE" {
+  add_game runescape install
+  run bash "$DML" games start runescape --json
+  [ "$status" -eq 1 ]
+  last="$(echo "$output" | tail -1)"
+  [ "$(echo "$last" | jq -r '.event')" = "error" ]
+  [ "$(echo "$last" | jq -r '.error.code')" = "NO_COMPOSE" ]
+}
+
+@test "games start ignores non-executable hook and falls back to compose" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] HOOK_MARKER_SHOULD_NOT_RUN"
+EOS
+  # deliberately not chmod +x -- hook must be ignored and compose used instead
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"HOOK_MARKER_SHOULD_NOT_RUN"* ]]
+  [[ "$output" == *"up -d"* ]]
+}
+
+@test "games start in text mode prints legacy-style message" {
+  add_game wow compose
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games start wow
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[dml] wow started"* ]]
+  [[ "$output" != *'"event"'* ]]
+}
+
+@test "games stop in text mode prints legacy-style message" {
+  add_game wow compose
+  run bash "$DML" games stop wow
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[dml] wow stopped"* ]]
+  [[ "$output" != *'"event"'* ]]
+}
