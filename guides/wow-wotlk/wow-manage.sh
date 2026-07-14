@@ -7011,6 +7011,187 @@ menu_server_modifications() {
         esac
     done
 }
+# ── Update server source (AzerothCore + mod-playerbots) ──────
+# Scripted version of the previously-manual process: git pull the
+# AzerothCore (Playerbot branch) checkout and modules/mod-playerbots,
+# then rebuild the worldserver to compile the new code.
+update_server_source() {
+    print_step "Update Server (AzerothCore + Playerbots)"
+
+    if [ "$SERVER_TYPE" != "playerbots" ]; then
+        print_warning "Source update is only supported on Playerbots installs."
+        print_info "Base/NPCBots use prebuilt images and are updated by pulling new images."
+        return 1
+    fi
+
+    cd "$SERVER_DIR" || { print_error "Can't cd to $SERVER_DIR"; return 1; }
+    if [ ! -d .git ]; then
+        print_error "$SERVER_DIR is not a git checkout — can't update from source."
+        return 1
+    fi
+
+    echo ""
+    if ! ask_yes_no "Do you want to update the server now?"; then
+        print_info "Update cancelled."
+        return 0
+    fi
+
+    echo ""
+    echo -e "${WHITE}This will:${RST}"
+    echo -e "  ${WHITE}1. Pull the latest AzerothCore (Playerbot branch) source${RST}"
+    echo -e "  ${WHITE}2. Pull the latest mod-playerbots module${RST}"
+    echo -e "  ${WHITE}3. Rebuild the worldserver to compile the update${RST}"
+    echo ""
+    echo -e "${WHITE}Your local changes are preserved:${RST}"
+    echo -e "${DIM}   • Edits to source files are backed up, then re-applied on top of${RST}"
+    echo -e "${DIM}     the updated files. If an edit conflicts with the update, the${RST}"
+    echo -e "${DIM}     updated file wins and your version is kept in a backup patch.${RST}"
+    echo -e "${DIM}   • Untracked files (docker-compose.override.yml, custom configs,${RST}"
+    echo -e "${DIM}     added scripts) are never touched by the update.${RST}"
+    echo ""
+    echo -e "${YELLOW}⚠️  New core revisions can apply DB migrations on next start.${RST}"
+    echo -e "${DIM}   A database backup beforehand is recommended (Server maintenance menu).${RST}"
+    echo ""
+    if ! ask_yes_no "Continue with the update?"; then
+        print_info "Skipped."
+        return 0
+    fi
+
+    local _changed=false _before _after
+
+    # Verify we're pulling from the expected repos. Playerbots requires the
+    # CUSTOM AzerothCore fork (mod-playerbots/azerothcore-wotlk, Playerbot
+    # branch) — pulling upstream azerothcore/azerothcore-wotlk here would
+    # break the playerbots integration. Old installs may still point at the
+    # original liyunfan1223 repos; GitHub redirects those to the new org, so
+    # they are accepted too.
+    _check_remote() {
+        local dir="$1" expected="$2" label="$3"
+        local url
+        url=$(git -C "$dir" remote get-url origin 2>/dev/null)
+        case "$url" in
+            *"$expected"*|*liyunfan1223*)
+                print_info "$label remote: $url"
+                return 0 ;;
+            *)
+                print_warning "$label origin is NOT the expected fork:"
+                print_warning "  found:    ${url:-<none>}"
+                print_warning "  expected: https://github.com/$expected"
+                if ask_yes_no "Pull from this remote anyway?"; then
+                    return 0
+                fi
+                return 1 ;;
+        esac
+    }
+
+    _check_remote "$SERVER_DIR" "mod-playerbots/azerothcore-wotlk" "AzerothCore" || return 1
+    if [ -d "$SERVER_DIR/modules/mod-playerbots/.git" ]; then
+        _check_remote "$SERVER_DIR/modules/mod-playerbots" "mod-playerbots/mod-playerbots" "mod-playerbots" || return 1
+    fi
+
+    # The playerbots core lives on the Playerbot branch — make sure we're on it
+    local _branch
+    _branch=$(git -C "$SERVER_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)
+    if [ "$_branch" != "Playerbot" ]; then
+        print_warning "AzerothCore checkout is on branch '$_branch' (expected 'Playerbot')."
+        if ! ask_yes_no "Pull on '$_branch' anyway?"; then
+            return 1
+        fi
+    fi
+
+    # Pull one repo while preserving the user's local file edits.
+    #   1. Modified tracked files are backed up to a timestamped .patch file
+    #      AND stashed (double safety).
+    #   2. git pull --ff-only brings in the update.
+    #   3. The stash is re-applied, so the user's edits land ON TOP of the
+    #      freshly-updated files.
+    #   4. If an edit conflicts with the update, the updated file wins and
+    #      the user's version stays recoverable in the stash + patch file.
+    # Untracked files are never touched by any of this.
+    # Sets _PULL_CHANGED=true when new commits arrived.
+    _pull_repo() {
+        local dir="$1" label="$2"
+        _PULL_CHANGED=false
+        local before after dirty stamp patch
+        before=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)
+
+        dirty=$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null)
+        if [ -n "$dirty" ]; then
+            print_info "$label: you have local changes in these files:"
+            echo "$dirty" | sed 's/^/      /'
+            stamp=$(date +%Y%m%d-%H%M%S)
+            patch="$dir/local-changes-$stamp.patch"
+            if ! git -C "$dir" diff > "$patch" 2>/dev/null; then
+                print_error "$label: could not back up local changes — aborting."
+                return 1
+            fi
+            print_info "Backup saved: $patch"
+            if ! git -C "$dir" stash push -m "wow-manage auto-stash $stamp" >/dev/null 2>&1; then
+                print_error "$label: could not stash local changes — aborting."
+                return 1
+            fi
+        fi
+
+        print_info "Updating $label..."
+        if ! git -C "$dir" pull --ff-only; then
+            print_error "git pull failed for $label (diverged branch?)."
+            if [ -n "$dirty" ]; then
+                git -C "$dir" stash pop >/dev/null 2>&1
+                print_info "Your local changes were restored unchanged."
+            fi
+            print_info "Inspect manually:  cd $dir && git status"
+            return 1
+        fi
+        after=$(git -C "$dir" rev-parse --short HEAD 2>/dev/null)
+        [ "$before" != "$after" ] && _PULL_CHANGED=true
+
+        if [ -n "$dirty" ]; then
+            if git -C "$dir" stash pop >/dev/null 2>&1; then
+                print_success "$label: your local edits were re-applied on top of the update."
+            else
+                # Pop conflicted: git keeps the stash entry. Clear the
+                # conflicted working tree back to the clean updated state.
+                git -C "$dir" checkout -f -- . 2>/dev/null
+                git -C "$dir" reset --hard HEAD >/dev/null 2>&1
+                print_warning "$label: some of your edits CONFLICT with this update."
+                print_warning "The updated files were kept so the server builds cleanly."
+                print_info "Your edits are safe in two places:"
+                print_info "  • Patch file:  $patch"
+                print_info "  • Git stash:   cd $dir && git stash pop   (resolve conflicts manually)"
+            fi
+        fi
+
+        if [ "$before" = "$after" ]; then
+            print_success "$label already up to date ($after)"
+        else
+            print_success "$label updated: $before → $after"
+        fi
+        return 0
+    }
+
+    # 1) AzerothCore source (custom mod-playerbots fork)
+    _pull_repo "$SERVER_DIR" "AzerothCore" || return 1
+    [ "$_PULL_CHANGED" = true ] && _changed=true
+
+    # 2) mod-playerbots module
+    if [ -d "$SERVER_DIR/modules/mod-playerbots/.git" ]; then
+        _pull_repo "$SERVER_DIR/modules/mod-playerbots" "mod-playerbots" || return 1
+        [ "$_PULL_CHANGED" = true ] && _changed=true
+    else
+        print_warning "modules/mod-playerbots not found — skipping module update."
+    fi
+
+    # 3) Rebuild
+    echo ""
+    if [ "$_changed" = false ]; then
+        print_success "Everything is already up to date — no rebuild needed."
+        if ! ask_yes_no "Rebuild the worldserver anyway?"; then
+            return 0
+        fi
+    fi
+    rebuild_worldserver
+}
+
 menu_server_controls() {
     while true; do
         if [ "$_RESIZE_NEEDED" = true ]; then
@@ -7028,6 +7209,7 @@ menu_server_controls() {
         printf "  ${WHITE}5)${RST} View logs\n"
         printf "  ${WHITE}6)${RST} Attach to console\n"
         printf "  ${WHITE}7)${RST} Server maintenance\n"
+        printf "  ${WHITE}8)${RST} Update server (AzerothCore + Playerbots)\n"
         printf "  ${GOLD}──────────────────────────────────────────────────${RST}\n"
         printf "  ${DIM}  [ENTER] Back${RST}\n"
         local _tlines; _tlines=$_TERM_LINES
@@ -7045,8 +7227,9 @@ menu_server_controls() {
             5)  with_full_screen server_logs ;;
             6)  with_full_screen server_attach ;;
             7)  menu_server_maintenance ;;
+            8)  update_server_source; press_enter ;;
             "")  return ;;
-            *)  print_warning "Enter 1–7 or ENTER to go back."; press_enter ;;
+            *)  print_warning "Enter 1–8 or ENTER to go back."; press_enter ;;
         esac
     done
 }

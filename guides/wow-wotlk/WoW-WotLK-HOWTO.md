@@ -262,7 +262,7 @@ It opens a full-screen interactive menu with three sub-menus:
 
 | Menu | What it does |
 |---|---|
-| **Server Controls** | Start, stop, restart, check status, view live logs, attach to the server console |
+| **Server Controls** | Start, stop, restart, check status, view live logs, attach to the server console, update the server (pulls the latest AzerothCore + Playerbots and rebuilds) |
 | **Server Modifications** | Add/remove AzerothCore modules, ALE Lua mods, and SQL mods |
 | **Configurations** | Set your WoW client folder, configure AH Bot and ALE, rebuild the worldserver |
 

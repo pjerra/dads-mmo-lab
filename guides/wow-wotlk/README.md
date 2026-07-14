@@ -149,7 +149,7 @@ chmod +x ~/Downloads/wow-manage.sh
 
 | Menu | What it does |
 |---|---|
-| **Server Controls** | Start, stop, restart, status, live logs, attach to console |
+| **Server Controls** | Start, stop, restart, status, live logs, attach to console, update server (AzerothCore + Playerbots) |
 | **Server Modifications** | Add/remove AzerothCore modules, ALE Lua mods, SQL mods |
 | **Configurations** | Set WoW client folder, configure AH Bot and ALE, rebuild the worldserver |
 
