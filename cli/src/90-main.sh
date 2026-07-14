@@ -70,6 +70,73 @@ _resolve_compose_dir() {
     return 0
 }
 
+# Runs a command, streaming its combined output. In JSON mode each line
+# becomes an NDJSON "line" event; in text mode lines pass through unchanged.
+# Returns the command's exit code (set -o pipefail is active globally).
+_stream_cmd() {
+    if [[ "$DML_JSON" == 1 ]]; then
+        "$@" 2>&1 | while IFS= read -r _l; do ndjson_line info "$_l"; done
+    else
+        "$@" 2>&1
+    fi
+}
+
+# Shared guard for games start/stop/restart. Sets gid, dir, compose_dir or
+# emits the right error (respecting DML_JSON) and exits 1.
+_games_resolve_or_fail() {
+    gid="${1:?Usage: dml games <start|stop|restart> <title>}"
+    dir="$GAMES_DIR/$gid"
+    if [[ ! -d "$dir" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_error NOT_FOUND "Title not found: $gid" "Run: dml games list --json"
+        else echo "[dml] ERROR: Title not found: $gid" >&2; fi
+        exit 1
+    fi
+    compose_dir="$(_resolve_compose_dir "$dir/")"
+    if [[ -z "$compose_dir" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_error NO_COMPOSE "No compose file found in $gid or its subdirectories." "Reinstall the title or check $dir"
+        else echo "[dml] ERROR: No compose file found in $gid or its subdirectories." >&2; fi
+        exit 1
+    fi
+    if ! docker info &>/dev/null; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_error DOCKER_DOWN "Docker is not running." "Try: sudo systemctl start docker (or dml doctor)"
+        else echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2; fi
+        exit 1
+    fi
+}
+
+# Start or restart with hook support. $1 = title, $2 = start|restart
+_games_start_impl() {
+    local mode="$2"
+    _games_resolve_or_fail "$1"
+    [[ "$DML_JSON" == 1 ]] && ndjson_section_start "$mode"
+    cd "$compose_dir"
+    _check_port_conflicts > >(if [[ "$DML_JSON" == 1 ]]; then while IFS= read -r _l; do ndjson_line warn "$_l"; done; else cat; fi)
+    local rc=0
+    if [[ -x "./dml-start.sh" ]]; then
+        _stream_cmd bash ./dml-start.sh "$mode" || rc=$?
+    else
+        if [[ "$mode" == "restart" ]]; then
+            _stream_cmd docker compose down || rc=$?
+        fi
+        [[ $rc -eq 0 ]] && { _stream_cmd docker compose up -d || rc=$?; }
+    fi
+    if [[ $rc -ne 0 ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_section_end "$mode" error
+            ndjson_error START_FAILED "$gid failed to $mode (exit $rc)" "Check logs: docker compose logs, or dml doctor"
+        else
+            echo "[dml] ERROR: $gid failed to $mode (exit $rc)" >&2
+        fi
+        exit 1
+    fi
+    if [[ "$DML_JSON" == 1 ]]; then
+        ndjson_section_end "$mode" ok
+        ndjson_done "{\"id\":\"$(json_escape "$gid")\",\"state\":\"running\"}"
+    else
+        echo "[dml] $gid started"
+    fi
+}
+
 _check_port_conflicts() {
     local in_use
     in_use=$(ss -tlnp 2>/dev/null)
@@ -846,6 +913,34 @@ case "$cmd" in
             state=running
         fi
         json_ok "{\"id\":\"$(json_escape "$gid")\",\"state\":\"$state\"}"
+        ;;
+      start)
+        _games_start_impl "${1:-}" start
+        ;;
+      restart)
+        _games_start_impl "${1:-}" restart
+        ;;
+      stop)
+        _games_resolve_or_fail "${1:-}"
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start stop
+        cd "$compose_dir"
+        rc=0
+        _stream_cmd docker compose down || rc=$?
+        if [[ $rc -ne 0 ]]; then
+            if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end stop error
+                ndjson_error STOP_FAILED "$gid failed to stop (exit $rc)" "Try: dml kill $gid"
+            else
+                echo "[dml] ERROR: $gid failed to stop (exit $rc)" >&2
+            fi
+            exit 1
+        fi
+        if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_section_end stop ok
+            ndjson_done "{\"id\":\"$(json_escape "$gid")\",\"state\":\"stopped\"}"
+        else
+            echo "[dml] $gid stopped"
+        fi
         ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown games subcommand: $sub" "Try: dml games list --json"

@@ -1,0 +1,82 @@
+#!/usr/bin/env bats
+load helpers/env.bash
+
+setup() {
+  DML="$BATS_TEST_DIRNAME/../dml"
+  bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
+  make_fixture
+  use_docker_stub
+}
+
+teardown() { teardown_fixture; }
+
+@test "games start streams NDJSON and ends with done running" {
+  add_game wow compose
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"  # post-start state
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 0 ]
+  first="$(echo "$output" | head -1)"
+  last="$(echo "$output" | tail -1)"
+  [ "$(echo "$first" | jq -r '.event')" = "section_start" ]
+  [ "$(echo "$last" | jq -r '.event')" = "done" ]
+  [ "$(echo "$last" | jq -r '.data.state')" = "running" ]
+  # every line is valid JSON
+  echo "$output" | while IFS= read -r l; do echo "$l" | jq -e . >/dev/null; done
+}
+
+@test "games start uses dml-start.sh hook when present and streams its output" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] staged start: mode=$1"
+exit 0
+EOS
+  chmod +x "$DML_GAMES_DIR/wow/dml-start.sh"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'staged start: mode=start'
+}
+
+@test "games start fails with START_FAILED when hook exits nonzero" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] ERROR: db not healthy" >&2
+exit 1
+EOS
+  chmod +x "$DML_GAMES_DIR/wow/dml-start.sh"
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 1 ]
+  last="$(echo "$output" | tail -1)"
+  [ "$(echo "$last" | jq -r '.event')" = "error" ]
+  [ "$(echo "$last" | jq -r '.error.code')" = "START_FAILED" ]
+}
+
+@test "games start with docker down returns DOCKER_DOWN" {
+  add_game wow compose
+  export DML_STUB_DOCKER_DOWN=1
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | tail -1 | jq -r '.error.code')" = "DOCKER_DOWN" ]
+}
+
+@test "games stop ends with done stopped" {
+  add_game wow compose
+  run bash "$DML" games stop wow --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | tail -1 | jq -r '.data.state')" = "stopped" ]
+}
+
+@test "games restart passes restart mode to hook" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] staged start: mode=$1"
+EOS
+  chmod +x "$DML_GAMES_DIR/wow/dml-start.sh"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games restart wow --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'staged start: mode=restart'
+}
