@@ -29,3 +29,15 @@ setup() {
   run bash "$DML" --json version
   [ "$(echo "$output" | jq -r '.data.version')" = "3.0.0" ]
 }
+
+@test "no arguments prints help and exits 0" {
+  run bash "$DML"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"dml -- Dad's MMO Lab CLI"* ]]
+}
+
+@test "duplicate --json flags are tolerated" {
+  run bash "$DML" version --json --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.version')" = "3.0.0" ]
+}

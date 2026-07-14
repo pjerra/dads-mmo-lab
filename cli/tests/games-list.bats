@@ -21,6 +21,18 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.games | length')" = "3" ]
   [ "$(echo "$output" | jq -r '.data.games[] | select(.id=="wow-server-playerbots") | .running')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.games[] | select(.id=="junk") | .id' )" = "" ]
+  [ "$(echo "$output" | jq -r '.data.games[] | select(.id=="runescape") | .running')" = "false" ]
+  [[ "$(echo "$output" | jq -r '.data.games[] | select(.id=="runescape") | .path')" == */runescape ]]
+  [[ "$(echo "$output" | jq -r '.data.games[] | select(.id=="tortoise") | .path')" == */tortoise/sub ]]
+}
+
+@test "games list --json with docker down still returns envelope" {
+  add_game wow-server-playerbots compose
+  export DML_STUB_DOCKER_DOWN=1
+  run bash "$DML" games list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.games[0].running')" = "false" ]
 }
 
 @test "games list --json marks running titles via compose ps" {

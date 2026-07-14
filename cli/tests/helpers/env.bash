@@ -48,6 +48,17 @@ if [[ "${1:-}" == "ps" ]]; then exit 0; fi
 exit 0
 EOS
   chmod +x "$STUB_BIN/docker"
+
+  # _check_port_conflicts (90-main.sh) shells out to `ss` to scan the real
+  # host's listening ports. Stub it so port-conflict warnings are always
+  # empty/deterministic in tests instead of depending on whatever is actually
+  # listening on the machine running the suite.
+  cat > "$STUB_BIN/ss" <<'EOS'
+#!/usr/bin/env bash
+exit 0
+EOS
+  chmod +x "$STUB_BIN/ss"
+
   export PATH="$STUB_BIN:$PATH"
 }
 

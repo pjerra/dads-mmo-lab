@@ -128,3 +128,21 @@ EOS
   [[ "$output" == *"[dml] wow stopped"* ]]
   [[ "$output" != *'"event"'* ]]
 }
+
+@test "games start with missing title emits terminal NOT_FOUND error event" {
+  # --json is stripped by the arg parser before reaching the games dispatcher,
+  # so $1 is empty here -- this pins the ${1:?}-replacement guard (fix 1a).
+  run bash "$DML" games start --json
+  [ "$status" -eq 1 ]
+  last="$(echo "$output" | tail -1)"
+  [ "$(echo "$last" | jq -r '.event')" = "error" ]
+  [ "$(echo "$last" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "games restart in text mode prints restarted" {
+  add_game wow compose
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games restart wow
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[dml] wow restarted"* ]]
+}

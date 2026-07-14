@@ -30,3 +30,17 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
+
+@test "games status with missing title returns NOT_FOUND envelope" {
+  # --json is stripped before the games dispatcher sees argv, so $1 is empty.
+  run bash "$DML" games status --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "games status install-only title reports stopped" {
+  add_game runescape install
+  run bash "$DML" games status runescape --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.state')" = "stopped" ]
+}
