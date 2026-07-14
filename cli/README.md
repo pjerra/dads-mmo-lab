@@ -32,6 +32,12 @@ Commands:
 - `dml games start|restart|stop <id> --json` → NDJSON stream
 - `dml version --json` → `{"version":"3.0.0"}`
 
+`dml games list` and `dml games status` are JSON-first: they always emit JSON,
+even without `--json`. A JSON-mode `games start|stop|restart|status` call with
+a missing title still emits a terminal error (NDJSON `error` event, or the
+`status` envelope) with code `NOT_FOUND` — parser-side synthesis of a missing
+terminal event is never needed.
+
 `games start|restart` run `<compose_dir>/dml-start.sh <mode>` when present
 (staged AzerothCore start that avoids re-running ac-db-import); otherwise
 `docker compose up -d` / `down`.

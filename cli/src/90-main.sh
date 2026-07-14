@@ -149,7 +149,7 @@ _games_start_impl() {
         ndjson_section_end "$mode" ok
         ndjson_done "{\"id\":\"$(json_escape "$gid")\",\"state\":\"running\"}"
     else
-        echo "[dml] $gid started"
+        echo "[dml] $gid ${mode}ed"
     fi
 }
 
@@ -161,7 +161,7 @@ _check_port_conflicts() {
     if echo "$in_use" | grep -q ':3306[[:space:]]'; then
         if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
             printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
-            echo "[dml] Port 3306 in use â€” remapped DB host port to 13306"
+            echo "[dml] Port 3306 in use -- remapped DB host port to 13306"
         fi
     fi
 
