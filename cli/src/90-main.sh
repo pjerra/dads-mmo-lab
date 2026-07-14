@@ -66,6 +66,16 @@ _check_port_conflicts() {
     done
 }
 
+# --- machine-readable mode: strip --json from argv anywhere -----------------
+DML_JSON=0
+_args=()
+for _a in "$@"; do
+    if [[ "$_a" == "--json" ]]; then DML_JSON=1; else _args+=("$_a"); fi
+done
+set -- ${_args[@]+"${_args[@]}"}
+unset _args _a
+# ---------------------------------------------------------------------------
+
 cmd="${1:-help}"
 shift || true
 
@@ -757,7 +767,11 @@ case "$cmd" in
     ;;
 
   version)
-    echo "dml v$VERSION"
+    if [[ "$DML_JSON" == 1 ]]; then
+        json_ok "{\"version\":\"$VERSION\"}"
+    else
+        echo "dml v$VERSION"
+    fi
     ;;
 
   help|--help|-h)
@@ -784,8 +798,12 @@ case "$cmd" in
     ;;
 
   *)
-    echo "[dml] Unknown command: $cmd" >&2
-    echo "Run 'dml help' for usage." >&2
+    if [[ "$DML_JSON" == 1 ]]; then
+        json_err UNKNOWN_COMMAND "Unknown command: $cmd" "Run 'dml help' for usage."
+    else
+        echo "[dml] Unknown command: $cmd" >&2
+        echo "Run 'dml help' for usage." >&2
+    fi
     exit 1
     ;;
 esac
