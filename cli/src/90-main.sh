@@ -23,6 +23,39 @@ _compose_running() {
     { docker compose -f "$compose_file" ps --status running -q 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
 }
 
+# Prints one "id<TAB>compose_dir" line per installed title (compose_dir may be
+# empty for install.sh-only titles). Mirrors the legacy list/status scan rules.
+_scan_games() {
+    [[ -d "$GAMES_DIR" ]] || return 0
+    local dir subdir title
+    declare -A _scan_seen=()
+    for dir in "$GAMES_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        title=$(basename "$dir")
+        [[ -n "${_scan_seen[$title]:-}" ]] && continue
+        if _has_compose "$dir"; then
+            printf '%s\t%s\n' "$title" "${dir%/}"
+            _scan_seen["$title"]=1
+        elif [[ -f "$dir/install.sh" ]]; then
+            printf '%s\t%s\n' "$title" ""
+            _scan_seen["$title"]=1
+        else
+            for subdir in "$dir"*/; do
+                [[ -d "$subdir" ]] || continue
+                if _has_compose "$subdir"; then
+                    printf '%s\t%s\n' "$title" "${subdir%/}"
+                    _scan_seen["$title"]=1
+                    break
+                elif [[ -f "$subdir/install.sh" ]]; then
+                    printf '%s\t%s\n' "$title" ""
+                    _scan_seen["$title"]=1
+                    break
+                fi
+            done
+        fi
+    done
+}
+
 _check_port_conflicts() {
     local in_use
     in_use=$(ss -tlnp 2>/dev/null)
@@ -762,6 +795,33 @@ case "$cmd" in
         ;;
       *)
         echo "$lan_usage"; exit 1
+        ;;
+    esac
+    ;;
+
+  games)
+    sub="${1:-list}"
+    shift || true
+    case "$sub" in
+      list)
+        first=1
+        out='{"games":['
+        while IFS=$'\t' read -r gid gdir; do
+            [[ -z "$gid" ]] && continue
+            running=false
+            if [[ -n "$gdir" ]] && [[ "$(_compose_running "$gdir")" -gt 0 ]]; then
+                running=true
+            fi
+            [[ $first -eq 0 ]] && out+=','
+            out+="{\"id\":\"$(json_escape "$gid")\",\"path\":\"$(json_escape "${gdir:-$GAMES_DIR/$gid}")\",\"running\":$running}"
+            first=0
+        done < <(_scan_games)
+        out+=']}'
+        json_ok "$out"
+        ;;
+      *)
+        json_err UNKNOWN_COMMAND "Unknown games subcommand: $sub" "Try: dml games list --json"
+        exit 1
         ;;
     esac
     ;;
