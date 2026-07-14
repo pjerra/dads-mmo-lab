@@ -1178,6 +1178,29 @@ detect_wow_client() {
         fi
     fi
     print_step "Detecting WoW client install"
+
+    # Ask before locking in an auto-detected client — auto-detection can
+    # pick the wrong folder (especially when scanning Windows drives under
+    # /mnt/). Rejecting continues the search; if nothing else is found the
+    # manual path prompt follows.
+    local -a _rejected=()
+    _confirm_client() {
+        # Never re-offer a folder the user already said no to
+        local _r
+        for _r in ${_rejected[@]+"${_rejected[@]}"}; do
+            [ "$1" = "$_r" ] && return 1
+        done
+        print_success "WoW client found: $1"
+        if ask_yes_no "Use this client folder?"; then
+            WOW_CLIENT_DIR="$1"
+            echo "$WOW_CLIENT_DIR" > "$_cache"
+            print_info "Change it anytime: Configurations → WoW client folder."
+            return 0
+        fi
+        _rejected+=("$1")
+        print_info "Skipping — continuing search..."
+        return 1
+    }
     # Known parent directories that may contain a WoW client as a subdirectory
     local -a _parent_dirs=(
         "$HOME/.steam/steam/steamapps/common"
@@ -1188,6 +1211,20 @@ detect_wow_client() {
         "$HOME/Games"
         "$HOME"
     )
+    # On Windows (WSL2), the client usually lives on a Windows drive, which is
+    # mounted under /mnt/ inside WSL. Scan the common spots too.
+    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
+        local _mnt
+        for _mnt in /mnt/[a-z]; do
+            [ -d "$_mnt" ] || continue
+            _parent_dirs+=(
+                "$_mnt/Games"
+                "$_mnt/Program Files (x86)"
+                "$_mnt/wow wotlk"
+                "$_mnt"
+            )
+        done
+    fi
     # Known exact client folder names (direct children of above parents, or absolute)
     local -a _names=(
         "World of Warcraft"
@@ -1209,10 +1246,7 @@ detect_wow_client() {
             if [ -d "$p" ] && \
                 ( [ -f "$p/Wow.exe" ] || [ -f "$p/wow.exe" ] || \
                   [ -f "$p/WowT.exe" ] || [ -d "$p/Interface" ] ); then
-                WOW_CLIENT_DIR="$p"
-                print_success "WoW client found: $WOW_CLIENT_DIR"
-                echo "$WOW_CLIENT_DIR" > "$_cache"
-                return 0
+                _confirm_client "$p" && return 0
             fi
         done
     done
@@ -1225,25 +1259,41 @@ detect_wow_client() {
             if [ -d "$p" ] && \
                 ( [ -f "$p/Wow.exe" ] || [ -f "$p/wow.exe" ] || \
                   [ -f "$p/WowT.exe" ] || [ -d "$p/Interface" ] ); then
-                WOW_CLIENT_DIR="$p"
-                print_success "WoW client found: $WOW_CLIENT_DIR"
-                echo "$WOW_CLIENT_DIR" > "$_cache"
-                return 0
+                _confirm_client "$p" && return 0
             fi
         done < <(ls -1 "$pd" 2>/dev/null)
     done
     print_warning "WoW client not found automatically."
     echo ""
+    if grep -qi "microsoft\|wsl" /proc/version 2>/dev/null; then
+        print_info "Windows user? Your drives are mounted under /mnt/ inside WSL:"
+        print_info "  C:\\Games\\WoW-3.3.5a   ->   /mnt/c/Games/WoW-3.3.5a"
+        print_info "  D:\\WoW               ->   /mnt/d/WoW"
+        print_info "You can also paste the Windows path directly (C:\\...) and it"
+        print_info "will be converted for you."
+        echo ""
+    fi
     printf "${WHITE}Enter full path to WoW client folder (leave blank to skip): ${RST}"
     read -r _manual
     # Expand ~ and strip surrounding quotes the user may have typed
     _manual="${_manual#\"}" ; _manual="${_manual%\"}"
     _manual="${_manual#\'}" ; _manual="${_manual%\'}"
     _manual="${_manual/#\~/$HOME}"
+    # Auto-convert a pasted Windows path (C:\Games\WoW or C:/Games/WoW)
+    # to its WSL equivalent (/mnt/c/Games/WoW)
+    if [[ "$_manual" =~ ^[A-Za-z]:[\\/] ]]; then
+        local _drive="${_manual:0:1}"
+        _drive="${_drive,,}"
+        local _rest="${_manual:2}"
+        _rest="${_rest//\\//}"
+        _manual="/mnt/${_drive}${_rest}"
+        print_info "Windows path detected — using WSL path: $_manual"
+    fi
     if [ -n "$_manual" ] && [ -d "$_manual" ]; then
         WOW_CLIENT_DIR="$_manual"
         echo "$WOW_CLIENT_DIR" > "$_cache"
         print_success "WoW client set to: $WOW_CLIENT_DIR"
+        print_info "Change it anytime: Configurations → WoW client folder."
         return 0
     elif [ -n "$_manual" ]; then
         print_warning "Directory not found: $_manual"

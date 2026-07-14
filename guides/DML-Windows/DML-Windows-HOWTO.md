@@ -312,6 +312,8 @@ A full text menu for running and customizing your WoW server: add or remove modu
 
 It opens in its own terminal window — follow the numbered on-screen menu.
 
+> 🪟 **Entering your WoW client path (important for Windows users):** whenever the manager or an installer asks for the path to your WoW client folder, remember you are *inside WSL* — Windows drives are mounted under `/mnt/`. So a client at `C:\Games\WoW-3.3.5a` is entered as `/mnt/c/Games/WoW-3.3.5a` (lowercase drive letter). `D:\WoW` becomes `/mnt/d/WoW`, and so on. You can also paste the Windows path directly (`C:\...`) and the manager will convert it for you.
+
 > Adding a module that includes a compiled component rebuilds the worldserver, which takes time and memory — see the build note below.
 
 ### Wrath Unbound Add-On

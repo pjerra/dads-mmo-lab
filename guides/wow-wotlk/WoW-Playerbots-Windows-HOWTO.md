@@ -134,6 +134,8 @@ Return to the installer window and press **Enter** to continue.
 
 ## Step 3 — Set Your Realmlist
 
+> 🪟 **Entering your WoW client path (important for Windows users):** whenever the manager or an installer asks for the path to your WoW client folder, remember you are *inside WSL* — Windows drives are mounted under `/mnt/`. So a client at `C:\Games\WoW-3.3.5a` is entered as `/mnt/c/Games/WoW-3.3.5a` (lowercase drive letter). `D:\WoW` becomes `/mnt/d/WoW`, and so on. You can also paste the Windows path directly (`C:\...`) and the manager will convert it for you.
+
 In your WoW WotLK client folder, find `realmlist.wtf` and make sure it contains:
 
 ```
