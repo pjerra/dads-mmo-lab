@@ -1,0 +1,796 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="2.6.0"
+GAMES_DIR="$HOME/games"
+
+_require_docker() {
+    if ! docker info &>/dev/null; then
+        echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2
+        exit 1
+    fi
+}
+
+_has_compose() {
+    local dir="$1" name
+    for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        [[ -f "$dir/$name" ]] && return 0
+    done
+    return 1
+}
+
+_compose_running() {
+    local dir="$1" name compose_file=""
+    for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [[ -f "$dir/$name" ]]; then compose_file="$dir/$name"; break; fi
+    done
+    [[ -z "$compose_file" ]] && echo 0 && return
+    { docker compose -f "$compose_file" ps --status running -q 2>/dev/null || true; } | wc -l | tr -d '[:space:]'
+}
+
+_check_port_conflicts() {
+    local in_use
+    in_use=$(ss -tlnp 2>/dev/null)
+
+    # DB port: remap silently -- safe to move because clients never connect to it directly
+    if echo "$in_use" | grep -q ':3306[[:space:]]'; then
+        if ! grep -q 'DOCKER_DB_EXTERNAL_PORT' .env 2>/dev/null; then
+            printf 'DOCKER_DB_EXTERNAL_PORT=13306\n' >> .env
+            echo "[dml] Port 3306 in use â€” remapped DB host port to 13306"
+        fi
+    fi
+
+    # Game server ports: warn only -- clients connect to fixed ports, cannot silently remap
+    local _ports=(
+        "3724:WoW auth/login server (TrinityCore, AzerothCore, MaNGOS)"
+        "8085:WoW world server (TrinityCore, AzerothCore)"
+        "8086:WoW SOAP API (TrinityCore, AzerothCore)"
+        "4000:EverQuest zone server (EQEmu)"
+        "5998:EverQuest login server (EQEmu)"
+        "5999:EverQuest login server (EQEmu)"
+        "9000:EverQuest world/zone server (EQEmu)"
+        "2593:Ultima Online game server (ServUO / RunUO)"
+        "7171:Tibia game server (OpenTibia / OTServBR)"
+        "6112:Blizzard legacy port (Warcraft III / Diablo II)"
+        "43594:RuneScape private server (RSPS)"
+        "2106:Lineage II login server (L2J)"
+        "7777:Lineage II game server (L2J)"
+        "54230:Final Fantasy XI auth server (Darkstar)"
+        "54231:Final Fantasy XI game server (Darkstar)"
+        "44453:Star Wars Galaxies login server"
+        "44462:Star Wars Galaxies connection server"
+    )
+    local entry port desc
+    for entry in "${_ports[@]}"; do
+        port="${entry%%:*}"
+        desc="${entry#*:}"
+        if echo "$in_use" | grep -q ":${port}[[:space:]]"; then
+            echo "[WARN] Port $port is already in use -- $desc."
+            echo "[WARN]   Stop whatever is using port $port before starting this server."
+        fi
+    done
+}
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  doctor)
+    echo "[dml] Checking DML environment..."
+    errors=0
+
+    if systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; then
+        echo "[ok]  systemd is running"
+    else
+        echo "[WARN] systemd is not running -- from Windows run: wsl --shutdown, then reopen"
+        errors=$((errors + 1))
+    fi
+
+    if docker info &>/dev/null; then
+        echo "[ok]  Docker Engine is running"
+    else
+        echo "[WARN] Docker is not responding -- try: sudo systemctl start docker"
+        errors=$((errors + 1))
+    fi
+
+    free_kb=$(df /home --output=avail 2>/dev/null | tail -1 | tr -d ' ')
+    if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
+        free_gb=$(( free_kb / 1024 / 1024 ))
+        if (( free_gb >= 20 )); then
+            echo "[ok]  Disk space: ${free_gb} GB free on ext4"
+        else
+            echo "[WARN] Low disk space: ${free_gb} GB free under /home (need 20+ GB for most titles)"
+            errors=$((errors + 1))
+        fi
+    else
+        echo "[WARN] Could not read disk space for /home"
+        errors=$((errors + 1))
+    fi
+
+    if curl -fsS --max-time 5 https://www.google.com > /dev/null 2>&1; then
+        echo "[ok]  Internet connection"
+    else
+        echo "[WARN] No internet connection detected"
+        errors=$((errors + 1))
+    fi
+
+    if (( errors == 0 )); then
+        echo "[ok]  Environment healthy. Run 'dml run <url>' to install a title."
+    else
+        echo "[dml] Found $errors warning(s) above."
+    fi
+    ;;
+
+  list)
+    if [[ ! -d "$GAMES_DIR" ]]; then
+        echo "[dml] No titles installed yet. Run 'dml run <url>' to install one."
+        exit 0
+    fi
+    found=0
+    declare -A _list_seen
+    for dir in "$GAMES_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        title=$(basename "$dir")
+        if _has_compose "$dir" || [[ -f "$dir/install.sh" ]]; then
+            echo "$title"
+            found=$((found + 1))
+            _list_seen["$title"]=1
+        else
+            for subdir in "$dir"*/; do
+                [[ -d "$subdir" ]] || continue
+                [[ -n "${_list_seen[$title]:-}" ]] && continue
+                if _has_compose "$subdir" || [[ -f "$subdir/install.sh" ]]; then
+                    echo "$title"
+                    found=$((found + 1))
+                    _list_seen["$title"]=1
+                    break
+                fi
+            done
+        fi
+    done
+    if [[ $found -eq 0 ]]; then
+        echo "[dml] No titles found in $GAMES_DIR"
+    fi
+    ;;
+
+  status)
+    target="${1:-}"
+    if [[ -n "$target" ]]; then
+        dir="$GAMES_DIR/$target"
+        if [[ ! -d "$dir" ]]; then echo "not-found"; exit 1; fi
+        compose_dir="$dir"
+        if ! _has_compose "$dir"; then
+            for subdir in "$dir"*/; do
+                if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                    compose_dir="$subdir"; break
+                fi
+            done
+        fi
+        if _has_compose "$compose_dir"; then
+            count=$(_compose_running "$compose_dir")
+            if [[ "$count" -gt 0 ]]; then echo "running"; else echo "stopped"; fi
+        else
+            echo "stopped"
+        fi
+    else
+        [[ ! -d "$GAMES_DIR" ]] && exit 0
+        declare -A _seen
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            title=$(basename "$dir")
+            if _has_compose "$dir"; then
+                count=$(_compose_running "$dir")
+                if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                _seen["$title"]=1
+            else
+                # One level deeper -- catches repos with compose file in a subdirectory
+                for subdir in "$dir"*/; do
+                    [[ -d "$subdir" ]] || continue
+                    _has_compose "$subdir" || continue
+                    [[ -n "${_seen[$title]:-}" ]] && continue
+                    count=$(_compose_running "$subdir")
+                    if [[ "$count" -gt 0 ]]; then echo "$title:running"; else echo "$title:stopped"; fi
+                    _seen["$title"]=1
+                    break
+                done
+            fi
+        done
+        # Fallback: catch running Compose projects not found by directory scan
+        while IFS= read -r project; do
+            [[ -z "$project" ]] && continue
+            [[ -n "${_seen[$project]:-}" ]] && continue
+            echo "$project:running"
+        done < <(docker ps --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null | sort -u | grep -v '^$')
+    fi
+    ;;
+
+  start)
+    title="${1:?Usage: dml start <title>}"
+    dir="$GAMES_DIR/$title"
+    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
+    compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    fi
+    _require_docker
+    cd "$compose_dir"
+    _check_port_conflicts
+    echo "[dml] Starting $title..."
+    docker compose up -d
+    echo "[dml] $title started"
+    ;;
+
+  stop)
+    title="${1:?Usage: dml stop <title>}"
+    dir="$GAMES_DIR/$title"
+    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title" >&2; exit 1; fi
+    compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories." >&2; exit 1
+    fi
+    _require_docker
+    cd "$compose_dir"
+    echo "[dml] Stopping $title..."
+    docker compose down
+    echo "[dml] $title stopped"
+    ;;
+
+  scan)
+    _require_docker
+    echo "[dml] Scanning for all running containers in dml-arch..."
+    echo ""
+
+    total=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    if [[ "$total" -eq 0 ]]; then
+        echo "[dml] No running containers found."
+        exit 0
+    fi
+
+    declare -A _known_ports
+    _known_ports["3306"]="MySQL/MariaDB"
+    _known_ports["3724"]="WoW auth/login"
+    _known_ports["8085"]="WoW world server"
+    _known_ports["8086"]="WoW SOAP API"
+    _known_ports["4000"]="EQ zone (EQEmu)"
+    _known_ports["5998"]="EQ login (EQEmu)"
+    _known_ports["5999"]="EQ login (EQEmu)"
+    _known_ports["9000"]="EQ world (EQEmu)"
+    _known_ports["2593"]="Ultima Online"
+    _known_ports["7171"]="Tibia"
+    _known_ports["6112"]="Blizzard legacy"
+    _known_ports["43594"]="RuneScape (RSPS)"
+    _known_ports["2106"]="Lineage II login"
+    _known_ports["7777"]="Lineage II game"
+    _known_ports["54230"]="FFXI auth"
+    _known_ports["54231"]="FFXI game"
+    _known_ports["44453"]="SWG login"
+    _known_ports["44462"]="SWG connection"
+
+    prev_project="__unset__"
+    while IFS='|' read -r cid cname project; do
+        if [[ "$project" != "$prev_project" ]]; then
+            [[ "$prev_project" != "__unset__" ]] && echo ""
+            if [[ -z "$project" ]]; then
+                echo "[ standalone containers -- no compose project ]"
+            else
+                echo "[ project: $project ]"
+            fi
+            prev_project="$project"
+        fi
+        printf "  %-40s  %s\n" "$cname" "$cid"
+        while IFS= read -r pline; do
+            [[ -z "$pline" ]] && continue
+            hostport=$(echo "$pline" | grep -oE ':[0-9]+$' | tr -d ':')
+            note="${_known_ports[$hostport]:-}"
+            if [[ -n "$note" ]]; then
+                printf "    %-36s  [%s]\n" "$pline" "$note"
+            else
+                printf "    %s\n" "$pline"
+            fi
+        done < <(docker port "$cid" 2>/dev/null)
+    done < <(docker ps --format '{{.ID}}|{{.Names}}|{{index .Labels "com.docker.compose.project"}}' \
+             2>/dev/null | sort -t'|' -k3)
+
+    echo ""
+    echo "[dml] To stop a project: dml kill <project-name>  or  dml kill --all"
+    ;;
+
+  kill)
+    _require_docker
+    target="${1:-}"
+    if [[ -z "$target" ]]; then
+        echo "[dml] Usage: dml kill <project-name> | --all" >&2
+        exit 1
+    fi
+
+    if [[ "$target" == "--all" ]]; then
+        running=$(docker ps -q 2>/dev/null)
+        if [[ -z "$running" ]]; then
+            echo "[dml] No running containers to stop."
+            exit 0
+        fi
+        count=$(echo "$running" | wc -l | tr -d '[:space:]')
+        echo "[dml] Stopping $count running container(s)..."
+        echo "$running" | xargs docker stop 2>/dev/null || true
+        echo "$running" | xargs docker rm -f 2>/dev/null || true
+        docker network prune -f 2>/dev/null || true
+        echo "[ok]  All containers stopped, removed, and orphaned networks pruned."
+    else
+        # Find containers by project label -- works with any compose version, no directory needed
+        containers=$(docker ps -q --filter "label=com.docker.compose.project=$target" 2>/dev/null)
+        if [[ -z "$containers" ]]; then
+            echo "[dml] ERROR: No running containers found for project '$target'." >&2
+            echo "[dml]   Run 'dml scan' to see what is currently running." >&2
+            exit 1
+        fi
+        count=$(echo "$containers" | wc -l | tr -d '[:space:]')
+        echo "[dml] Stopping $count container(s) for project '$target'..."
+        echo "$containers" | xargs docker stop 2>/dev/null || true
+        # Compose down cleans up networks and volumes; fall back to direct rm if unavailable
+        if ! docker compose -p "$target" down 2>/dev/null; then
+            echo "$containers" | xargs docker rm -f 2>/dev/null || true
+        fi
+        echo "[ok]  '$target' stopped."
+    fi
+    ;;
+
+  clean)
+    _require_docker
+    yes_flag="${1:-}"
+    _confirm() {
+        local prompt="$1" ans
+        if [[ "$yes_flag" == "--yes" ]]; then return 0; fi
+        read -rp "    $prompt [y/N] " ans
+        [[ "$ans" =~ ^[Yy] ]]
+    }
+
+    echo "[dml] Running DML cleanup..."
+    echo ""
+
+    # 1. Stop DML-managed containers (compose-project containers only; standalone containers not touched)
+    running=$(docker ps -q --filter "label=com.docker.compose.project" 2>/dev/null)
+    if [[ -n "$running" ]]; then
+        count=$(echo "$running" | wc -l | tr -d '[:space:]')
+        echo "[dml] $count Docker Compose container(s) found:"
+        docker ps --filter "label=com.docker.compose.project" \
+            --format '  {{.Names}}  (project: {{index .Labels "com.docker.compose.project"}})' 2>/dev/null
+        echo ""
+        echo "  Note: standalone containers not part of a compose project are not affected."
+        echo ""
+        if _confirm "Stop these containers?"; then
+            echo "$running" | xargs docker stop 2>/dev/null || true
+            echo "$running" | xargs docker rm -f 2>/dev/null || true
+            echo "[ok]  Containers stopped."
+        fi
+    else
+        echo "[ok]  No running Docker Compose containers found."
+    fi
+    echo ""
+
+    # 2. Identify and optionally remove incomplete install directories
+    if [[ -d "$GAMES_DIR" ]]; then
+        echo "[dml] Checking $GAMES_DIR for incomplete installs..."
+        declare -a incomplete
+        for dir in "$GAMES_DIR"/*/; do
+            [[ -d "$dir" ]] || continue
+            if ! _has_compose "$dir" && [[ ! -f "$dir/install.sh" ]]; then
+                found_nested=0
+                for subdir in "$dir"*/; do
+                    if [[ -d "$subdir" ]] && ( _has_compose "$subdir" || [[ -f "$subdir/install.sh" ]] ); then
+                        found_nested=1; break
+                    fi
+                done
+                [[ $found_nested -eq 0 ]] && incomplete+=("$dir")
+            fi
+        done
+
+        if [[ ${#incomplete[@]} -gt 0 ]]; then
+            echo "[dml] Incomplete directories (no compose file or install.sh found):"
+            for d in "${incomplete[@]}"; do echo "    $(basename "$d")  ($d)"; done
+            echo ""
+            if _confirm "Remove these directories?"; then
+                for d in "${incomplete[@]}"; do
+                    [[ -z "$d" ]] && continue
+                    rm -rf "$d" && echo "[ok]  Removed: $(basename "$d")"
+                done
+            fi
+        else
+            echo "[ok]  No incomplete install directories found."
+        fi
+    fi
+    echo ""
+
+    # 3. Docker prune
+    dangling=$(docker images -f dangling=true -q 2>/dev/null | wc -l | tr -d '[:space:]')
+    stopped_ct=$(docker ps -a -q --filter status=exited 2>/dev/null | wc -l | tr -d '[:space:]')
+    echo "[dml] Docker: $dangling dangling image(s), $stopped_ct exited container(s)."
+    if [[ "$dangling" -gt 0 || "$stopped_ct" -gt 0 ]]; then
+        if _confirm "Run docker system prune? Warning: removes ALL unused Docker resources system-wide, not just DML ones."; then
+            docker system prune -f
+            echo "[ok]  Docker pruned."
+        fi
+    else
+        echo "[ok]  Docker is already clean."
+    fi
+    echo ""
+    echo "[ok]  Cleanup complete."
+    ;;
+
+  shell)
+    exec bash --login
+    ;;
+
+  run)
+    target="${1:?Usage: dml run <git-url|local-path>}"
+    _require_docker
+    mkdir -p "$GAMES_DIR"
+
+    if [[ "$target" == /* ]]; then
+        if [[ ! -d "$target" ]]; then
+            echo "[dml] ERROR: Local path not found: $target" >&2; exit 1
+        fi
+        repo_name=$(basename "$target")
+        clone_dir="$GAMES_DIR/$repo_name"
+        if [[ -d "$clone_dir" ]]; then
+            echo "[dml] $repo_name already exists in games dir -- skipping copy"
+        else
+            echo "[dml] Copying $target -> $clone_dir ..."
+            cp -r "$target" "$clone_dir"
+        fi
+    else
+        repo_name=$(basename "$target" .git)
+        clone_dir="$GAMES_DIR/$repo_name"
+        if [[ -d "$clone_dir/.git" ]]; then
+            echo "[dml] $repo_name already cloned -- pulling latest"
+            git -C "$clone_dir" pull
+        else
+            echo "[dml] Cloning $target ..."
+            git clone "$target" "$clone_dir"
+        fi
+    fi
+
+    entrypoint="install.sh"
+    if [[ -f "$clone_dir/dml.manifest" ]]; then
+        declared=$(jq -r '.entrypoint // empty' "$clone_dir/dml.manifest" 2>/dev/null || true)
+        [[ -n "$declared" ]] && entrypoint="$declared"
+    fi
+
+    if [[ ! -f "$clone_dir/$entrypoint" ]]; then
+        echo "[dml] ERROR: $entrypoint not found in $repo_name" >&2
+        echo "[dml] This repo may not follow the DML convention (install.sh at root)." >&2
+        exit 1
+    fi
+
+    echo "[dml] Starting $entrypoint from $repo_name ..."
+    cd "$clone_dir"
+    exec bash "$entrypoint"
+    ;;
+
+  manage)
+    # Open the WoW Server Manager (wow-manage.sh) -- a self-contained TUI for
+    # AzerothCore WoW servers (modules, AH bot, server controls). It is NOT
+    # embedded in this installer: it is 7000+ lines and updated independently,
+    # so we pull the latest copy from GitHub on each launch and cache it under
+    # ~/.dml. That keeps the available options current without re-shipping the
+    # launcher. Offline, we fall back to the last cached copy.
+    manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/wow-manage.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$manage_url" 2>/dev/null; then
+        # Trust the download only if it looks like the manager. A captive
+        # portal login page or truncated transfer would otherwise clobber a
+        # known-good cached copy. (No pipe here -- a SIGPIPE under pipefail
+        # would read as a false validation failure.)
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'MANAGER_VERSION=' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] WoW Server Manager is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded manager failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached WoW Server Manager." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the WoW Server Manager and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml manage' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
+  unbound)
+    # Layer the Wrath Unbound multi-class add-on onto an existing WotLK
+    # Playerbots server. Same fetch-and-run model as 'dml manage': the
+    # installer is maintained upstream and pulled fresh each launch (validated,
+    # cached under ~/.dml, offline falls back to the cached copy). It force-
+    # rebuilds the worldserver, so it is left to run interactively in a
+    # terminal -- the tray only offers it for the running wow-server-playerbots
+    # title.
+    unbound_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/unbound-wrath/install-wrath-unbound-addon.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/install-wrath-unbound-addon.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$unbound_url" 2>/dev/null; then
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'WIZARD_VERSION=' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] Wrath Unbound add-on installer is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded add-on installer failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached Wrath Unbound add-on installer." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the Wrath Unbound add-on installer and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml unbound' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
+  unbound-remove)
+    # Uninstall the Wrath Unbound add-on: drops its tables, reverts the
+    # core-engine patch and worldserver.conf, removes module files, and
+    # rebuilds the worldserver without the module. Same fetch-and-run model as
+    # 'dml unbound'. The uninstaller has no version constant, so we validate on
+    # a structural sentinel (its detect_server_dir function) instead. It is
+    # interactive and prompts for confirmation before destructive steps.
+    unbound_rm_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/unbound-wrath/uninstall-wrath-unbound-addon.sh"
+    cache_dir="$HOME/.dml"
+    cache_file="$cache_dir/uninstall-wrath-unbound-addon.sh"
+    mkdir -p "$cache_dir"
+
+    tmp_file="$cache_file.download.$$"
+    if curl -fsSL --max-time 30 -o "$tmp_file" "$unbound_rm_url" 2>/dev/null; then
+        first_line=$(head -1 "$tmp_file")
+        if [[ "$first_line" == *bash* ]] && grep -q 'detect_server_dir' "$tmp_file"; then
+            mv -f "$tmp_file" "$cache_file"
+            echo "[dml] Wrath Unbound uninstaller is up to date (latest from GitHub)."
+        else
+            rm -f "$tmp_file"
+            echo "[dml] Downloaded uninstaller failed validation -- keeping existing copy." >&2
+        fi
+    else
+        rm -f "$tmp_file"
+        [[ -f "$cache_file" ]] && echo "[dml] Offline -- using the cached Wrath Unbound uninstaller." >&2
+    fi
+
+    if [[ ! -f "$cache_file" ]]; then
+        echo "[dml] ERROR: Could not download the Wrath Unbound uninstaller and no cached copy exists." >&2
+        echo "[dml] Check your internet connection and try 'dml unbound-remove' again." >&2
+        exit 1
+    fi
+
+    chmod +x "$cache_file" 2>/dev/null || true
+    exec bash "$cache_file"
+    ;;
+
+  lan)
+    # dml lan <title> on <ip> | off | status | refresh <ip>
+    #
+    # LAN play = point the realm's advertised address at the Windows host's
+    # LAN IP so other PCs on the home network can reach the world server.
+    # The Windows side (portproxy + firewall, set up by Install-DML.ps1)
+    # carries LAN traffic to 127.0.0.1; this command only flips the address
+    # the auth server hands to clients (acore_auth.realmlist).
+    #
+    # Messages go to STDOUT even on failure -- the DML Launcher tray only
+    # captures stdout, and these are user-facing results, not diagnostics.
+    title="${1:-}"
+    action="${2:-}"
+    lan_usage="[dml] Usage: dml lan <title> on <lan-ip> | off | status | refresh <lan-ip>"
+    if [[ -z "$title" || -z "$action" ]]; then echo "$lan_usage"; exit 1; fi
+
+    # Validate arguments up front -- the database wait below can take a
+    # while, and a usage mistake should fail instantly, not after it.
+    ip="${3:-}"
+    case "$action" in
+      on|refresh)
+        if [[ -z "$ip" ]]; then echo "$lan_usage"; exit 1; fi ;;
+      off|status) ;;
+      *) echo "$lan_usage"; exit 1 ;;
+    esac
+
+    dir="$GAMES_DIR/$title"
+    if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title"; exit 1; fi
+    compose_dir="$dir"
+    if ! _has_compose "$dir"; then
+        for subdir in "$dir"*/; do
+            if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+                compose_dir="$subdir"; break
+            fi
+        done
+    fi
+    if ! _has_compose "$compose_dir"; then
+        echo "[dml] ERROR: No compose file found in $title or its subdirectories."; exit 1
+    fi
+    _require_docker
+    cd "$compose_dir"
+
+    # Two server families support LAN play. Both advertise their address in a
+    # 'realmlist' row (id=1), so everything below the family split is shared;
+    # only the database container, name, and credentials differ:
+    #   * AzerothCore  -- 'ac-database' service, DB acore_auth, root/password
+    #   * Tortoise WoW -- MaNGOS-Zero 'db' service, DB tw_logon; the MariaDB
+    #                     root password is field 4 of LoginDatabase.Info in
+    #                     etc/mangosd.conf ("db;3306;mangos;<pw>;tw_logon").
+    services=$(docker compose config --services 2>/dev/null || true)
+    if echo "$services" | grep -qx 'ac-database'; then
+        db=$(docker compose ps -q ac-database 2>/dev/null | head -1 || true)
+        if [[ -z "$db" ]]; then
+            echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
+            exit 1
+        fi
+        _lan_sql() { docker exec "$db" mysql -uroot -ppassword acore_auth -sN -e "$1" 2>/dev/null; }
+    else
+        # MaNGOS family. Only Tortoise (login DB 'tw_logon') is verified;
+        # CMaNGOS titles (DB 'realmd') fall through to "not supported yet".
+        conf="$compose_dir/etc/mangosd.conf"
+        login_info=$(grep -m1 -E '^[[:space:]]*LoginDatabase\.Info' "$conf" 2>/dev/null || true)
+        login_db=$(printf '%s' "$login_info" | cut -d';' -f5 | tr -d '"[:space:]')
+        if [[ "$login_db" != "tw_logon" ]]; then
+            echo "[dml] LAN play is not supported for '$title' yet."
+            echo "[dml] (Currently supported: AzerothCore servers and Tortoise WoW.)"
+            exit 1
+        fi
+        db=$(docker compose ps -q db 2>/dev/null | head -1 || true)
+        if [[ -z "$db" ]]; then
+            echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
+            exit 1
+        fi
+        dbpw=$(printf '%s' "$login_info" | cut -d';' -f4)
+        _lan_sql() { docker exec "$db" mariadb -uroot -p"$dbpw" tw_logon -sN -e "$1" 2>/dev/null; }
+    fi
+
+    # The database can lag the containers (first boot imports take a while).
+    # 'refresh' is fired automatically by the tray right after 'dml start',
+    # so it gets a long budget; interactive actions get a short one.
+    if [[ "$action" == "refresh" ]]; then _lan_tries=60; _lan_gap=10; else _lan_tries=18; _lan_gap=5; fi
+    _n=0
+    until _lan_sql "SELECT 1" >/dev/null 2>&1; do
+        _n=$((_n + 1))
+        if (( _n >= _lan_tries )); then
+            echo "[dml] ERROR: The realm database is not answering yet. Wait for the server to finish starting, then try again."
+            exit 1
+        fi
+        sleep "$_lan_gap"
+    done
+
+    _lan_set() {
+        local ip="$1" newaddr
+        if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            echo "[dml] ERROR: '$ip' does not look like an IPv4 address."; exit 1
+        fi
+        if ! _lan_sql "UPDATE realmlist SET address='$ip' WHERE id=1;"; then
+            echo "[dml] ERROR: Could not update the realm address."; exit 1
+        fi
+        # Read back what actually landed: an UPDATE that matches no row
+        # (realm id != 1) still exits 0, and reporting success on a no-op
+        # would leave the user chasing ghosts on the other PCs.
+        newaddr=$(_lan_sql "SELECT address FROM realmlist WHERE id=1;" || true)
+        if [[ "$newaddr" != "$ip" ]]; then
+            echo "[dml] ERROR: The realm address did not change (no realm with id 1?)."
+            echo "[dml]   Wanted '$ip' but the database says '${newaddr:-nothing}'."
+            exit 1
+        fi
+    }
+
+    current=$(_lan_sql "SELECT address FROM realmlist WHERE id=1;" || true)
+    case "$action" in
+      on)
+        _lan_set "$ip"
+        echo "[ok] LAN play ENABLED for $title."
+        echo ""
+        echo "Other PCs on your network: set realmlist $ip"
+        echo "(in realmlist.wtf inside the WoW client folder)"
+        echo ""
+        echo "This PC keeps working with 127.0.0.1 or $ip -- both reach the server."
+        ;;
+      off)
+        _lan_set "127.0.0.1"
+        echo "[ok] LAN play DISABLED for $title."
+        echo "The server only accepts world connections from this PC again."
+        ;;
+      status)
+        if [[ -z "$current" ]]; then
+            echo "[dml] ERROR: Could not read the realm address from the database."
+            exit 1
+        elif [[ "$current" == "127.0.0.1" ]]; then
+            echo "LAN play: OFF (realm address 127.0.0.1 -- this PC only)"
+        else
+            echo "LAN play: ON  (realm address $current)"
+            echo "Other PCs use: set realmlist $current"
+        fi
+        ;;
+      refresh)
+        # Re-point an already-LAN-enabled realm at the host's current IP
+        # (DHCP can hand the PC a new address between sessions). No-op when
+        # LAN play is off. Called automatically by the tray after each start.
+        if [[ -z "$current" || "$current" == "127.0.0.1" ]]; then
+            echo "[dml] LAN play is off for $title -- nothing to refresh."
+            exit 0
+        fi
+        if [[ "$current" == "$ip" ]]; then
+            echo "[ok] LAN address already current ($ip)."
+            exit 0
+        fi
+        # Only rewrite private (LAN) addresses. A public IP means the user
+        # set up internet hosting by hand -- clobbering it with the LAN IP
+        # on every start would silently lock their friends out.
+        if [[ ! "$current" =~ ^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+            echo "[dml] Realm address $current is not a LAN address -- leaving it alone."
+            exit 0
+        fi
+        _lan_set "$ip"
+        echo "[ok] LAN address refreshed: $current -> $ip"
+        ;;
+      *)
+        echo "$lan_usage"; exit 1
+        ;;
+    esac
+    ;;
+
+  version)
+    echo "dml v$VERSION"
+    ;;
+
+  help|--help|-h)
+    echo "dml -- Dad's MMO Lab CLI v$VERSION"
+    echo ""
+    echo "Commands:"
+    echo "  doctor                check environment health"
+    echo "  list                  list installed titles"
+    echo "  status [<title>]      show running/stopped status (all titles if no arg)"
+    echo "  start <title>         start a title's Docker server"
+    echo "  stop <title>          stop a title's Docker server"
+    echo "  lan <title> <action>  LAN play: on <lan-ip> | off | status | refresh <lan-ip>"
+    echo "  scan                  show all running containers and which game ports they hold"
+    echo "  kill <name|--all>     force-stop by project name (no directory needed)"
+    echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
+    echo "  shell                 open an interactive shell"
+    echo "  run <url|path>        install a title from GitHub URL or local folder"
+    echo "  manage                open the WoW Server Manager (AzerothCore; auto-updates from GitHub)"
+    echo "  unbound               install/update the Wrath Unbound add-on (wow-server-playerbots only)"
+    echo "  unbound-remove        uninstall the Wrath Unbound add-on (wow-server-playerbots only)"
+    echo "  version               print version"
+    echo ""
+    echo "Game data lives in /home/dml/ (ext4), never /mnt/c."
+    ;;
+
+  *)
+    echo "[dml] Unknown command: $cmd" >&2
+    echo "Run 'dml help' for usage." >&2
+    exit 1
+    ;;
+esac

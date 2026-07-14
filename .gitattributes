@@ -20,3 +20,6 @@
 *.zsh   text eol=lf
 *.ksh   text eol=lf
 *.fish  text eol=lf
+
+# Extensionless built CLI artifact (bash script, no .sh suffix) — see note above.
+cli/dml text eol=lf
