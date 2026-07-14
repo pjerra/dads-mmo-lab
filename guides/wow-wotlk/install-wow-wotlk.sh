@@ -96,7 +96,31 @@ press_enter() {
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
-SERVER_DIR="$HOME/wow-server-playerbots"
+# DML convention: game titles live under ~/games/ so the DML Launcher and
+# wow-manage.sh can find them. Existing installs at the old home-folder
+# location are detected and reused (backward compatible), and a symlink is
+# created so the title is visible in both places either way.
+# Override with:  WOW_SERVER_DIR=/custom/path ./install-wow-wotlk.sh
+GAMES_DIR="$HOME/games"
+LEGACY_SERVER_DIR="$HOME/wow-server-playerbots"
+if [ -n "${WOW_SERVER_DIR:-}" ]; then
+    SERVER_DIR="$WOW_SERVER_DIR"
+elif [ -d "$LEGACY_SERVER_DIR" ] && [ ! -L "$LEGACY_SERVER_DIR" ]; then
+    # Existing install found at the pre-games/ location -- keep using it so
+    # nothing (launcher paths, docker volumes) breaks.
+    SERVER_DIR="$LEGACY_SERVER_DIR"
+else
+    SERVER_DIR="$GAMES_DIR/wow-server-playerbots"
+fi
+
+ensure_games_visibility() {
+    # Make the server visible under ~/games/ regardless of where it lives,
+    # so the DML Launcher tray menu always detects the title.
+    mkdir -p "$GAMES_DIR"
+    if [ "$SERVER_DIR" = "$LEGACY_SERVER_DIR" ] && [ ! -e "$GAMES_DIR/wow-server-playerbots" ]; then
+        ln -s "$SERVER_DIR" "$GAMES_DIR/wow-server-playerbots"
+    fi
+}
 
 # ─────────────────────────────────────────
 # SYSTEM CHECKS
@@ -428,6 +452,7 @@ install_server() {
     print_warning "This will take 2-4 hours to compile!"
     print_info "Keep your Steam Deck plugged in!"
 
+    mkdir -p "$(dirname "$SERVER_DIR")"
     git clone \
         https://github.com/mod-playerbots/azerothcore-wotlk.git \
         --branch=Playerbot \
@@ -756,6 +781,8 @@ CREATE ACCOUNTS:
 INFO
 
     print_success "Server info saved to: $SERVER_DIR/MY_SERVER.txt"
+
+    ensure_games_visibility
 }
 
 # ─────────────────────────────────────────

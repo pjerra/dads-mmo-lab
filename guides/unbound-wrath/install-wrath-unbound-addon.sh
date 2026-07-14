@@ -157,7 +157,7 @@ detect_server_dir() {
 
     # ── 1 & 2: known locations ───────────────────────────────────────────────
     local windows_found=()   # Windows-FS paths found but skipped
-    for candidate in "$LINUX_HOME/wow-server-playerbots" "$LINUX_HOME/wow-unbound"; do
+    for candidate in "$LINUX_HOME/games/wow-server-playerbots" "$LINUX_HOME/wow-server-playerbots" "$LINUX_HOME/wow-unbound"; do
         if [ -d "$candidate" ] && [ -f "$candidate/docker-compose.yml" ]; then
             if is_windows_fs_path "$candidate"; then
                 windows_found+=("$candidate")

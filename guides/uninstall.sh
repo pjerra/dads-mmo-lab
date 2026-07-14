@@ -47,6 +47,17 @@ confirm_delete() {
 # ─────────────────────────────────────────
 # GENERIC UNINSTALL CORE
 # ─────────────────────────────────────────
+# Resolve the WoW Playerbots install dir: DML games/ convention first,
+# then the legacy home-folder location. -d follows symlinks, so a symlinked
+# games/ entry resolves to the real install either way.
+wow_playerbots_dir() {
+    if [ -d "$HOME/games/wow-server-playerbots" ]; then
+        echo "$HOME/games/wow-server-playerbots"
+    else
+        echo "$HOME/wow-server-playerbots"
+    fi
+}
+
 do_uninstall() {
     local server_dir="$1"
     shift
@@ -78,7 +89,7 @@ do_uninstall() {
 # ─────────────────────────────────────────
 show_status() {
     local entries=(
-        "WoW Playerbots:$HOME/wow-server-playerbots"
+        "WoW Playerbots:$(wow_playerbots_dir)"
         "WoW Vanilla:$HOME/wow-vanilla-server"
         "WoW TBC:$HOME/wow-tbc-server"
         "Dark Age of Camelot:$HOME/daoc-server"
@@ -120,7 +131,7 @@ show_status() {
 
 uninstall_wow_wotlk() {
     confirm_delete "WoW Playerbots (AzerothCore WotLK)" || return
-    do_uninstall "$HOME/wow-server-playerbots" \
+    do_uninstall "$(wow_playerbots_dir)" \
         "$HOME/wow-playerbots-launcher.sh"
     docker volume rm wow-server-playerbots_ac-database \
         wow-server-playerbots_client-data 2>/dev/null || true
@@ -501,7 +512,7 @@ uninstall_all() {
     echo ""
 
     local dirs=(
-        "WoW Playerbots:$HOME/wow-server-playerbots"
+        "WoW Playerbots:$(wow_playerbots_dir)"
         "WoW Vanilla:$HOME/wow-vanilla-server"
         "WoW TBC:$HOME/wow-tbc-server"
         "Dark Age of Camelot:$HOME/daoc-server"

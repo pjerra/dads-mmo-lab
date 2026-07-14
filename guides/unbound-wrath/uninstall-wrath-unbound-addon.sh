@@ -81,8 +81,17 @@ BACKUP_DIR=""
 detect_server_dir() {
     print_step "Locating your WotLK Playerbots server..."
 
+    local GAMES_DIR_PATH="$HOME/games/wow-server-playerbots"
     local DEFAULT_DIR="$HOME/wow-server-playerbots"
     local ALT_DIR="$HOME/wow-unbound"
+
+    # Step 0: check DML games/ convention path first
+    if [ -f "$GAMES_DIR_PATH/docker-compose.yml" ] && [ -d "$GAMES_DIR_PATH/env/dist" ]; then
+        SERVER_DIR="$GAMES_DIR_PATH"
+        print_success "Server found at $SERVER_DIR"
+        echo ""
+        return
+    fi
 
     # Step 1: check default path
     if [ -f "$DEFAULT_DIR/docker-compose.yml" ] && [ -d "$DEFAULT_DIR/env/dist" ]; then
