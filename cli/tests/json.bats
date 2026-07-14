@@ -1,0 +1,50 @@
+#!/usr/bin/env bats
+# Contract tests for the JSON emit helpers.
+
+setup() {
+  source "$BATS_TEST_DIRNAME/../src/10-json.sh"
+}
+
+@test "json_ok wraps data in success envelope" {
+  run json_ok '{"version":"3.0.0"}'
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.version')" = "3.0.0" ]
+}
+
+@test "json_ok defaults data to null" {
+  run json_ok
+  [ "$(echo "$output" | jq -c '.data')" = "null" ]
+}
+
+@test "json_err builds error envelope with code/message/hint" {
+  run json_err DOCKER_DOWN 'Docker is not running' 'Try: sudo systemctl start docker'
+  [ "$(echo "$output" | jq -r '.ok')" = "false" ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "DOCKER_DOWN" ]
+  [ "$(echo "$output" | jq -r '.error.message')" = "Docker is not running" ]
+  [ "$(echo "$output" | jq -r '.error.hint')" = "Try: sudo systemctl start docker" ]
+}
+
+@test "json_escape handles quotes backslashes and newlines" {
+  run json_escape $'he said "hi\\" and\nleft'
+  [ "$output" = 'he said \"hi\\\" and\nleft' ]
+}
+
+@test "ndjson_line emits a single valid JSON line" {
+  run ndjson_line info 'Starting wow...'
+  [ "$(echo "$output" | jq -r '.event')" = "line" ]
+  [ "$(echo "$output" | jq -r '.level')" = "info" ]
+  [ "$(echo "$output" | jq -r '.text')" = "Starting wow..." ]
+}
+
+@test "ndjson section and done events are valid JSON" {
+  run ndjson_section_start start
+  [ "$(echo "$output" | jq -r '.event')" = "section_start" ]
+  run ndjson_section_end start ok
+  [ "$(echo "$output" | jq -r '.status')" = "ok" ]
+  run ndjson_done '{"state":"running"}'
+  [ "$(echo "$output" | jq -r '.event')" = "done" ]
+  [ "$(echo "$output" | jq -r '.data.state')" = "running" ]
+  run ndjson_error NOT_FOUND 'no such title' ''
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
