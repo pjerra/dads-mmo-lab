@@ -30,6 +30,21 @@ setup() {
   [ "$output" = 'he said \"hi\\\" and\nleft' ]
 }
 
+@test "json_escape converts carriage return to literal \\r" {
+  run json_escape $'line one\rline two'
+  [ "$output" = 'line one\rline two' ]
+}
+
+@test "json_escape converts tab to literal \\t" {
+  run json_escape $'col1\tcol2'
+  [ "$output" = 'col1\tcol2' ]
+}
+
+@test "json_escape strips raw control bytes not covered by named escapes" {
+  run json_escape $'before'$'\x01''after'
+  [ "$output" = 'beforeafter' ]
+}
+
 @test "ndjson_line emits a single valid JSON line" {
   run ndjson_line info 'Starting wow...'
   [ "$(echo "$output" | jq -r '.event')" = "line" ]
