@@ -115,6 +115,20 @@ _scan_games() {
     done
 }
 
+# Echoes the compose dir for a title dir (itself, or first subdir with a
+# compose file). Echoes nothing if none found. Mirrors legacy start/stop.
+_resolve_compose_dir() {
+    local dir="$1" subdir
+    if _has_compose "$dir"; then echo "${dir%/}"; return 0; fi
+    for subdir in "$dir"*/; do
+        if [[ -d "$subdir" ]] && _has_compose "$subdir"; then
+            echo "${subdir%/}"
+            return 0
+        fi
+    done
+    return 0
+}
+
 _check_port_conflicts() {
     local in_use
     in_use=$(ss -tlnp 2>/dev/null)
@@ -877,6 +891,20 @@ case "$cmd" in
         done < <(_scan_games)
         out+=']}'
         json_ok "$out"
+        ;;
+      status)
+        gid="${1:?Usage: dml games status <title> --json}"
+        dir="$GAMES_DIR/$gid"
+        if [[ ! -d "$dir" ]]; then
+            json_err NOT_FOUND "Title not found: $gid" "Run: dml games list --json"
+            exit 1
+        fi
+        compose_dir="$(_resolve_compose_dir "$dir/")"
+        state=stopped
+        if [[ -n "$compose_dir" ]] && [[ "$(_compose_running "$compose_dir")" -gt 0 ]]; then
+            state=running
+        fi
+        json_ok "{\"id\":\"$(json_escape "$gid")\",\"state\":\"$state\"}"
         ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown games subcommand: $sub" "Try: dml games list --json"
