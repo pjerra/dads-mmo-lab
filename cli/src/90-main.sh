@@ -1048,6 +1048,21 @@ case "$cmd" in
 
         json_ok "{\"changed\":$changed,\"restart_required\":$changed}"
         ;;
+      soap-exec)
+        cmd="${1:?Usage: dml wow soap-exec \"<command>\"}"
+        # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
+        # this whole script. An unguarded `out="$(soap_exec "$cmd")"` would
+        # make bash abort right here on any non-zero soap_exec exit (fault,
+        # auth failure, unreachable) -- before the case below ever runs -- so
+        # the failure must be captured inside a conditional.
+        if out="$(soap_exec "$cmd")"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "{\"result\":\"$(json_escape "$out")\"}" ;;
+          2) json_err SOAP_FAULT "$out" "The worldserver rejected the command." ; exit 1 ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "Check admin account / gmlevel 3." ; exit 1 ;;
+          *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup" ; exit 1 ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1

@@ -65,3 +65,19 @@ EOS
 teardown_fixture() {
   [[ -n "${FIXTURE:-}" ]] && rm -rf "$FIXTURE"
 }
+
+use_curl_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+  cat > "$STUB_BIN/curl" <<'EOS'
+#!/usr/bin/env bash
+# Canned SOAP responder. Ignores all args; emits the file in DML_STUB_SOAP_RESPONSE
+# to stdout and exits with DML_STUB_CURL_EXIT (default 0). For HTTP-code mode,
+# if DML_STUB_HTTP is set, append it as the trailing line (callers use -w).
+[[ -n "${DML_STUB_SOAP_RESPONSE:-}" ]] && cat "$DML_STUB_SOAP_RESPONSE"
+[[ -n "${DML_STUB_HTTP:-}" ]] && printf '%s' "$DML_STUB_HTTP"
+exit "${DML_STUB_CURL_EXIT:-0}"
+EOS
+  chmod +x "$STUB_BIN/curl"
+  export PATH="$STUB_BIN:$PATH"
+}
