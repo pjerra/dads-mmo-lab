@@ -194,3 +194,61 @@ silently ignored (treated as if omitted), rather than rejected.
   icon (same caveat as `items search` — client DBC enrichment is a
   follow-up, not built here). Errors: `BAD_ARG` (invalid `--char`),
   `NOT_FOUND` (no such character or nothing equipped), `DB_UNREACHABLE`.
+
+- `dml wow accounts --json` →
+  `{"accounts":[{"id","username","characters":[{"guid","name","level"}]}]}`
+  Read-only list of real player accounts and their characters (the GUI's
+  character picker). Ambient-bot accounts (`RNDBOT*`) and `AHBOT` are
+  filtered out; accounts with no characters (e.g. a SOAP-only account) come
+  back with an empty `characters` array. Errors: `DB_UNREACHABLE`.
+
+- `dml wow server-info --json` →
+  `{"online","version","players","uptime","mean_ms","median_ms"}`
+  Parsed `server info` over SOAP. A down/unreachable worldserver is
+  `online:false` with `ok:true` — down is an answer, not an error; only bad
+  credentials stay an error (`SOAP_AUTH`). Unparseable fields are `null`.
+
+- `dml wow config list --json` →
+  `{"settings":[{"key","group","label","explain","type","min","max","value",
+  "default","restart_required","env"}]}`
+  The curated settings registry with live values. Values are read from the
+  wow title's `docker-compose.override.yml` environment (the write target is
+  the source of truth); an unset key shows its default. `type` is one of
+  `float|int|bool|text|char`; `value`/`default` are always JSON strings
+  (bools are `"1"`/`"0"`; the AHBot seller character's value is the stored
+  character GUID). `restart_required` is per-row: `true` for the eight
+  env-backed settings, `false` for `server.motd` — its row's `env` is the
+  sentinel `-` and its `value` is instead read live (read-only) from
+  `acore_auth.motd` (realm 1), falling back to the registry default if the
+  DB is down or the row is empty. Errors: `NOT_FOUND` (wow title not
+  installed), `MISSING_DEP` (yq).
+
+- `dml wow config set --key <k> --value <v> --json` →
+  `{"changed":bool,"restart_required":bool}` (mirrors `changed`, like
+  soap-setup). The value is validated against the registry (type + range) —
+  `BAD_ARG` otherwise; unknown key is `NOT_FOUND`. For most keys this writes
+  the mapped `AC_*` env var into the override via yq (same proven merge path
+  as soap-setup; never a second top-level `services:` block). Special cases:
+  `bots.population` writes BOTH `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` and
+  `..._MAX_RANDOM_BOTS` to the one number; `ahbot.character` resolves the
+  character name read-only to its guid+account and writes
+  `AC_AUCTION_HOUSE_BOT_GUID` + `AC_AUCTION_HOUSE_BOT_ACCOUNT`
+  (`NOT_FOUND` if no such character). `server.motd` is not env-backed at
+  all — this AC build has no Motd conf/env key, so instead the CLI strips
+  double quotes and CR/LF (replaced with a space) from the value and sends
+  `server set motd 1 enUS <text>` over SOAP, applying it **instantly**:
+  `{"changed":true,"restart_required":false}` on success. That call needs a
+  *running* worldserver — `SOAP_UNREACHABLE` (hint: start it first) if it
+  isn't, plus the usual `SOAP_AUTH`/`SOAP_FAULT` for this key only.
+
+- `dml wow config raw-read --file <name> --json` → `{"file","content"}` and
+  `dml wow config raw-write --file <name> --json` (new content on stdin) →
+  `{"written":true,"backup":"<name>.bak"|null}`
+  The Advanced files editor. `<name>` must be one of `.env`,
+  `docker-compose.override.yml`, `playerbots.conf`, `mod_ahbot.conf`,
+  `mod_ale.conf` (`NOT_FOUND` otherwise — the literal-name allowlist is
+  also the path-traversal guard; module confs are host files because the
+  base compose bind-mounts `./env/dist/etc`). Every overwrite keeps a
+  single-slot `.bak` of the previous content. The compose override is
+  YAML-validated before writing — invalid YAML is `BAD_ARG` and the file
+  is untouched.
