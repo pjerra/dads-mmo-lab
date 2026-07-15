@@ -71,9 +71,10 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   `DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878` in `.env`, so Docker only maps
   the port onto the host's loopback interface — nothing on the LAN can reach
   it. Auth is HTTP Basic.
-- Every SOAP call (`soap-exec`, `mail-item`, `teleport`) is serialized under
-  an `flock` on `~/.dml/soap.lock` — the worldserver console runs on a single
-  thread, so the CLI never issues two commands concurrently.
+- Every SOAP call is serialized under an `flock` on `~/.dml/soap.lock` — the
+  lock lives inside the shared `soap_exec` helper, so every verb that talks
+  SOAP inherits it. The worldserver console runs on a single thread, so the
+  CLI never issues two commands concurrently.
 - Mutations always go through a SOAP GM console command, never a direct
   database write. The MySQL access used by `items search`, `teleport-list`,
   `characters`, and `paperdoll` is **read-only**.
@@ -96,10 +97,11 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   `DML_SOAP_PASS` / `DML_SOAP_URL` (default `admin` / `admin` /
   `http://127.0.0.1:7878/`) and `DML_DB_ROOT_PASSWORD` (default `password`).
 
-Note for GUI authors: `characters`, `teleport-list`, and `paperdoll` only
-recognize their flag (`--account`/`--search`/`--char`) as the very first
-argument — a first-arg-only check, not a `while`-loop flag parser like
-`items search`/`mail-item`/`teleport`. Put the flag anywhere else and it's
+Note for GUI authors: `characters`, `teleport-list`, `paperdoll`, and
+`config raw-read`/`config raw-write` only recognize their flag
+(`--account`/`--search`/`--char`/`--file`) as the very first argument — a
+first-arg-only check, not a `while`-loop flag parser like `items search`/
+`mail-item`/`teleport`/`config set`. Put the flag anywhere else and it's
 silently ignored (treated as if omitted), rather than rejected.
 
 **Commands:**
@@ -205,8 +207,10 @@ silently ignored (treated as if omitted), rather than rejected.
 - `dml wow server-info --json` →
   `{"online","version","players","uptime","mean_ms","median_ms"}`
   Parsed `server info` over SOAP. A down/unreachable worldserver is
-  `online:false` with `ok:true` — down is an answer, not an error; only bad
-  credentials stay an error (`SOAP_AUTH`). Unparseable fields are `null`.
+  `online:false` with `ok:true` — down is an answer, not an error — and a
+  SOAP fault response is folded into the same `online:false` bucket; only
+  bad credentials stay an error (`SOAP_AUTH`). Unparseable fields are
+  `null`.
 
 - `dml wow config list --json` →
   `{"settings":[{"key","group","label","explain","type","min","max","value",
@@ -240,6 +244,10 @@ silently ignored (treated as if omitted), rather than rejected.
   `{"changed":true,"restart_required":false}` on success. That call needs a
   *running* worldserver — `SOAP_UNREACHABLE` (hint: start it first) if it
   isn't, plus the usual `SOAP_AUTH`/`SOAP_FAULT` for this key only.
+  Additional errors: `NOT_FOUND` (wow title not installed) and `MISSING_DEP`
+  (yq) — the same preamble as `config list`; `DB_UNREACHABLE` for the
+  `ahbot.character` branch when the character lookup can't reach the DB (or
+  returns garbage).
 
 - `dml wow config raw-read --file <name> --json` → `{"file","content"}` and
   `dml wow config raw-write --file <name> --json` (new content on stdin) →
@@ -251,4 +259,6 @@ silently ignored (treated as if omitted), rather than rejected.
   base compose bind-mounts `./env/dist/etc`). Every overwrite keeps a
   single-slot `.bak` of the previous content. The compose override is
   YAML-validated before writing — invalid YAML is `BAD_ARG` and the file
-  is untouched.
+  is untouched. Both verbs run the shared config preamble first, so
+  `NOT_FOUND` (wow title not installed) and `MISSING_DEP` (yq) apply here
+  too.
