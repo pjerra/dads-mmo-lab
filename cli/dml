@@ -1287,6 +1287,13 @@ case "$cmd" in
                 *) json_err BAD_ARG "Unknown flag: $1" "See: dml wow items search --name <text>"; exit 1 ;;
               esac
             done
+            # --name is required: an empty/whitespace-only name would fall
+            # through to where="1=1" in build_item_search_sql and silently
+            # browse up to --limit rows of item_template instead of erroring.
+            if [[ -z "${name//[[:space:]]/}" ]]; then
+              json_err BAD_ARG "items search requires a non-empty --name" "Example: dml wow items search --name hearthstone --json"
+              exit 1
+            fi
             # Numeric flags are inlined (unquoted) into the SQL text by
             # build_item_search_sql -- validate they are pure digits (or the
             # "-" sentinel) here, before that happens, so a crafted

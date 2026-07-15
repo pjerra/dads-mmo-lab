@@ -50,3 +50,14 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "DB_UNREACHABLE" ]
 }
+
+@test "items search with empty --name returns BAD_ARG" {
+  export DML_STUB_DB_ROWS="$BATS_TEST_DIRNAME/fixtures/items.tsv"
+  run bash "$DML" wow items search --name "" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+
+  run bash "$DML" wow items search --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
