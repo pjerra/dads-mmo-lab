@@ -1,5 +1,6 @@
 use std::ffi::OsString;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 
 use super::envelope::{decode_wsl_output, parse_envelope, Envelope};
 
@@ -56,6 +57,56 @@ impl DmlRunner {
         let stdout = decode_wsl_output(&out.stdout);
         parse_envelope(&stdout).map_err(|_| RunnerError::BadOutput { raw: stdout.clone() })
     }
+
+    pub fn run_stream(
+        &self,
+        args: &[&str],
+        mut on_event: impl FnMut(serde_json::Value),
+    ) -> Result<i32, RunnerError> {
+        let mut child = self
+            .command(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+
+        let stdout = child.stdout.take().expect("stdout piped above");
+        let mut saw_terminal = false;
+        for line in BufReader::new(stdout).split(b'\n') {
+            let bytes = line.map_err(|e| RunnerError::Spawn(e.to_string()))?;
+            let text = decode_wsl_output(&bytes);
+            let text = text.trim_end_matches('\r').trim();
+            if text.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(text) {
+                Ok(v) => v,
+                Err(_) => serde_json::json!({"event":"line","level":"warn","text": text}),
+            };
+            if is_terminal(&value) {
+                saw_terminal = true;
+            }
+            on_event(value);
+        }
+
+        let status = child.wait().map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        let code = status.code().unwrap_or(-1);
+        if code != 0 && !saw_terminal {
+            on_event(serde_json::json!({
+                "event": "error",
+                "error": {
+                    "code": "CLI_CRASH",
+                    "message": format!("dml exited with code {code} before finishing"),
+                    "hint": "Check WSL: wsl -d dml-arch"
+                }
+            }));
+        }
+        Ok(code)
+    }
+}
+
+fn is_terminal(v: &serde_json::Value) -> bool {
+    matches!(v["event"].as_str(), Some("done") | Some("error"))
 }
 
 #[cfg(test)]
@@ -106,5 +157,44 @@ mod tests {
         let r = DmlRunner::default();
         assert_eq!(r.program, std::ffi::OsString::from("wsl.exe"));
         assert_eq!(r.prefix_args, vec!["-d", "dml-arch", "-u", "dml", "--", "dml"]);
+    }
+
+    #[test]
+    fn run_stream_forwards_events_in_order() {
+        let mut seen: Vec<serde_json::Value> = vec![];
+        let code = fixture_runner()
+            .run_stream(&[&fixture("stream_ok.cmd")], |v| seen.push(v))
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0]["event"], "section_start");
+        assert_eq!(seen[3]["event"], "done");
+        assert_eq!(seen[3]["data"]["state"], "running");
+    }
+
+    #[test]
+    fn run_stream_synthesizes_error_on_silent_crash() {
+        let mut seen: Vec<serde_json::Value> = vec![];
+        let code = fixture_runner()
+            .run_stream(&[&fixture("stream_crash.cmd")], |v| seen.push(v))
+            .unwrap();
+        assert_eq!(code, 3);
+        let last = seen.last().unwrap();
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], "CLI_CRASH");
+        assert!(last["error"]["message"].as_str().unwrap().contains("3"));
+    }
+
+    #[test]
+    fn run_stream_wraps_non_json_lines_as_warn() {
+        // garbage.cmd prints a non-JSON line and exits 0 → wrapped line + CLI_CRASH-free
+        let mut seen: Vec<serde_json::Value> = vec![];
+        let code = fixture_runner()
+            .run_stream(&[&fixture("garbage.cmd")], |v| seen.push(v))
+            .unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(seen[0]["event"], "line");
+        assert_eq!(seen[0]["level"], "warn");
+        assert!(seen[0]["text"].as_str().unwrap().contains("not json"));
     }
 }
