@@ -39,3 +39,139 @@ function streamAction(cmd: "games_start" | "games_stop") {
 
 export const gamesStart = streamAction("games_start");
 export const gamesStop = streamAction("games_stop");
+
+export interface CharacterSummary {
+  guid: number;
+  name: string;
+  level: number;
+}
+export interface Account {
+  id: number;
+  username: string;
+  characters: CharacterSummary[];
+}
+export interface ServerInfo {
+  online: boolean;
+  version: string | null;
+  players: number | null;
+  uptime: string | null;
+  mean_ms: number | null;
+  median_ms: number | null;
+}
+export interface ItemRow {
+  entry: number;
+  name: string;
+  quality: number;
+  item_level: number;
+  required_level: number;
+  class: number;
+  subclass: number;
+  inventory_type: number;
+  displayid: number;
+}
+export interface TeleLocation {
+  name: string;
+  x: number;
+  y: number;
+  z: number;
+  map: number;
+}
+export interface PaperdollItem {
+  slot: number;
+  entry: number;
+  name: string;
+  quality: number;
+  item_level: number;
+  displayid: number;
+}
+export interface PaperdollData {
+  name: string;
+  level: number;
+  class: number;
+  gold: number;
+  note: string;
+  equipped: PaperdollItem[];
+}
+export interface ConfigSetting {
+  key: string;
+  group: string;
+  label: string;
+  explain: string;
+  type: "float" | "int" | "bool" | "text" | "char";
+  min: number | null;
+  max: number | null;
+  value: string;
+  default: string;
+  restart_required: boolean;
+  env: string;
+}
+export type RawFileName =
+  | ".env"
+  | "docker-compose.override.yml"
+  | "playerbots.conf"
+  | "mod_ahbot.conf"
+  | "mod_ale.conf";
+
+export async function wowAccounts(): Promise<Account[]> {
+  const data = await invoke<{ accounts: Account[] }>("wow_accounts");
+  return data.accounts;
+}
+export async function wowServerInfo(): Promise<ServerInfo> {
+  return await invoke("wow_server_info");
+}
+export async function wowItemsSearch(p: {
+  name: string;
+  quality?: number;
+  minLevel?: number;
+  maxLevel?: number;
+}): Promise<ItemRow[]> {
+  const data = await invoke<{ items: ItemRow[] }>("wow_items_search", p);
+  return data.items;
+}
+export async function wowMailItem(p: {
+  to: string;
+  items: string;
+  subject?: string;
+  body?: string;
+}): Promise<{ sent: boolean; to: string; attachments: number }> {
+  return await invoke("wow_mail_item", p);
+}
+export async function wowTeleportList(search?: string): Promise<TeleLocation[]> {
+  const data = await invoke<{ locations: TeleLocation[] }>("wow_teleport_list", { search });
+  return data.locations;
+}
+export async function wowTeleport(
+  charName: string,
+  to: string,
+): Promise<{ teleported: boolean; char: string; to: string }> {
+  return await invoke("wow_teleport", { charName, to });
+}
+export async function wowPaperdoll(charName: string): Promise<PaperdollData> {
+  return await invoke("wow_paperdoll", { charName });
+}
+export async function wowConfigList(): Promise<ConfigSetting[]> {
+  const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_list");
+  return data.settings;
+}
+export async function wowConfigSet(
+  key: string,
+  value: string,
+): Promise<{ changed: boolean; restart_required: boolean }> {
+  return await invoke("wow_config_set", { key, value });
+}
+export async function wowConfigRawRead(
+  file: RawFileName,
+): Promise<{ file: string; content: string }> {
+  return await invoke("wow_config_raw_read", { file });
+}
+export async function wowConfigRawWrite(
+  file: RawFileName,
+  content: string,
+): Promise<{ written: boolean; backup: string | null }> {
+  return await invoke("wow_config_raw_write", { file, content });
+}
+export const gamesRestart = (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("games_restart", { id, onEvent: ch });
+};
