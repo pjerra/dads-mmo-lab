@@ -41,18 +41,20 @@
   }
 
   async function send() {
-    if (!sendItem || !sendTo) return;
+    const item = sendItem;
+    const to = sendTo;
+    if (!item || !to) return;
     const count = Math.min(200, Math.max(1, Math.floor(sendCount) || 1));
     sending = true;
     error = null;
     try {
       await wowMailItem({
-        to: sendTo,
-        items: `${sendItem.entry}:${count}`,
+        to,
+        items: `${item.entry}:${count}`,
         subject: sendSubject.trim() || undefined,
       });
-      sentMsg = `Sent ${count}x ${sendItem.name} to ${sendTo} (check the mailbox).`;
-      sendItem = null;
+      sentMsg = `Sent ${count}x ${item.name} to ${to} (check the mailbox).`;
+      if (sendItem === item) sendItem = null;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -95,7 +97,7 @@
             <td>{qualityName(it.quality)}</td>
             <td>{it.item_level}</td>
             <td>{it.required_level}</td>
-            <td><button onclick={() => { sendItem = it; sentMsg = null; }}>Send</button></td>
+            <td><button disabled={sending} onclick={() => { sendItem = it; sentMsg = null; }}>Send</button></td>
           </tr>
         {/each}
       </tbody>
