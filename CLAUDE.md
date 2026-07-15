@@ -7,7 +7,8 @@ Dad's MMO Lab: self-hosted MMO private-server tooling (WoW WotLK via AzerothCore
 Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-source "The Lab". Spec: `docs/superpowers/specs/2026-07-14-dml-launcher-windows-design.md`. Plans in `docs/superpowers/plans/`:
 - Plan 1 (dml CLI JSON foundation) — **complete**, final review verdict READY TO MERGE (merge = user decision, not done)
 - Plan 2 (launcher shell, Tauri 2 + Svelte 5) — **code-complete + reviewed**; two USER-SUPERVISED gates remain: live `tauri dev` smoke (plan Task 7 Step 4) and one launch of the release exe
-- Plan 3 (WoW SOAP+MySQL features) — written, NOT started; its tasks reconfigure the live worldserver (SOAP), needs the user present
+- Plan 3 (WoW SOAP+MySQL features) — **code-complete + final-reviewed (SAFE TO SHIP)**; adds the `dml wow` namespace (see cli/ section). USER GATES remain: create the `dmlsoap` GM3 SOAP account (worldserver console), then SOAP end-to-end verify + live mutating smokes (mail-item/teleport on a throwaway char)
+- Plan 4 (My Party) — NOT written yet; build it on `docs/superpowers/specs/2026-07-15-my-party-spike-findings.md` (rigor-reviewed mechanism: SOAP → Eluna helper → `Player:RunCommand` → `.playerbots bot addclass`; SOAP alone CANNOT add bots)
 - Only ONE controller session may execute a plan on this checkout at a time (a Task-6 double-dispatch already happened once; check `.superpowers/sdd/progress.md` and `git log` before dispatching anything).
 
 ## launcher/ — DML Launcher (Plan 2 output)
@@ -18,9 +19,12 @@ Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-sou
 - Release: `npm run tauri build` → NSIS+MSI under `src-tauri/target/release/bundle/`; bare exe is `launcher.exe` (crate name), installers use productName "DML Launcher". Unsigned — SmartScreen warning expected.
 - Terminal event contract: TermEvent union in api.ts must stay in sync with `cli/src/10-json.sh` emitters; unknown events (e.g. reserved `pct`) must be IGNORED, never crash.
 
-## cli/ — the dml CLI (Plan 1 output)
+## cli/ — the dml CLI (Plan 1 + Plan 3 output)
 
-- `cli/dml` is a **committed build artifact**: `bash cli/build.sh` concatenates `cli/src/*.sh` in glob order (00-head, 10-json, 90-main). NEVER edit `cli/dml` directly; edit `cli/src/*.sh` and rebuild.
+- `cli/dml` is a **committed build artifact**: `bash cli/build.sh` concatenates `cli/src/*.sh` in glob order (00-head, 10-json, 20-soap, 30-db, 90-main). NEVER edit `cli/dml` directly; edit `cli/src/*.sh` and rebuild.
+- `dml wow` namespace (Plan 3): `soap-setup`, `soap-exec`, `items search`, `mail-item`, `teleport`/`teleport-list`, `characters`/`paperdoll` — documented in `cli/README.md` "wow subcommands". Security posture: SOAP host-published on 127.0.0.1:7878 only (pinned via the title's `.env` `DOCKER_SOAP_EXTERNAL_PORT` — base compose already publishes the port; never add a second `ports:` entry, Compose concatenates lists); SOAP calls flock-serialized (`~/.dml/soap.lock`); MySQL access strictly read-only (mutations via SOAP GM commands only); creds via `DML_SOAP_URL/USER/PASS` env (default admin/admin).
+- Sanitization invariants (tested; keep them): `_xml_escape` escapes `&` FIRST; `sql_escape` escapes `\` then `'`; SOAP-bound free text strips `"`/CR/LF (AC #2695 second-command surface); numeric values are `^[0-9]+$`-whitelisted before SQL splice; every value-taking flag calls `_need_flag_val` before reading `$2` (else `set -u` aborts with no JSON envelope).
+- bash while-read loops fed from command substitution need `|| [[ -n "$var" ]]` (trailing-newline strip silently drops the last row otherwise) — see `_items_rows_to_json`.
 - Runs inside WSL2 distro `dml-arch` as user `dml`; games in `$HOME/games` (override for tests: `DML_GAMES_DIR`). Repo inside WSL: `/mnt/c/Users/perzi/dads-mmo-lab`.
 - `--json` contract (envelopes + NDJSON streams, error codes) is documented in `cli/README.md` — the Tauri GUI and Plan 2+ build against it; changing it is a breaking change.
 - Tests: `wsl -d dml-arch -u dml -- bash -lc "cd /mnt/c/Users/perzi/dads-mmo-lab/cli && bats tests/"` (bats + jq installed in the distro; jq is test-only, never a runtime dep). Windows call-path smoke: `powershell -File cli\tests\windows-smoke.ps1` (also dev-installs the built CLI into the distro via `cli/dev-install.ps1`).
