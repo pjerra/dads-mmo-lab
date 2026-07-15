@@ -5,9 +5,18 @@ Dad's MMO Lab: self-hosted MMO private-server tooling (WoW WotLK via AzerothCore
 ## Current work: DML Launcher (branch `feat/dml-launcher-windows`)
 
 Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-source "The Lab". Spec: `docs/superpowers/specs/2026-07-14-dml-launcher-windows-design.md`. Plans in `docs/superpowers/plans/`:
-- Plan 1 (dml CLI JSON foundation) — **complete** on this branch
-- Plan 2 (launcher shell, Tauri 2 + Svelte 5) / Plan 3 (WoW SOAP+MySQL features) — written, pending execution
+- Plan 1 (dml CLI JSON foundation) — **complete**, final review verdict READY TO MERGE (merge = user decision, not done)
+- Plan 2 (launcher shell, Tauri 2 + Svelte 5) — **code-complete + reviewed**; two USER-SUPERVISED gates remain: live `tauri dev` smoke (plan Task 7 Step 4) and one launch of the release exe
+- Plan 3 (WoW SOAP+MySQL features) — written, NOT started; its tasks reconfigure the live worldserver (SOAP), needs the user present
 - Only ONE controller session may execute a plan on this checkout at a time (a Task-6 double-dispatch already happened once; check `.superpowers/sdd/progress.md` and `git log` before dispatching anything).
+
+## launcher/ — DML Launcher (Plan 2 output)
+
+- Tauri 2 (2.11.5) + Svelte 5 **SvelteKit** app: UI lives in `launcher/src/routes/+page.svelte` (there is NO App.svelte); shared code in `src/lib/` (api.ts invoke wrappers, terminal-state.ts pure reducer, Terminal.svelte); Rust shell in `src-tauri/src/` (`dml/envelope.rs`, `dml/runner.rs`, commands in `lib.rs`).
+- Dev loop (from `launcher/`): `npm run tauri dev` / `npm test` (vitest, reducer) / `npm run check` (svelte-check) / `cd src-tauri; cargo test` (fixture-driven runner tests use cmd.exe scripts under `src-tauri/tests/fixtures/`).
+- Production spawn is exactly `wsl.exe -d dml-arch -u dml -- dml <cmd> --json`; game ids validated `[A-Za-z0-9._-]+` in Rust before any spawn.
+- Release: `npm run tauri build` → NSIS+MSI under `src-tauri/target/release/bundle/`; bare exe is `launcher.exe` (crate name), installers use productName "DML Launcher". Unsigned — SmartScreen warning expected.
+- Terminal event contract: TermEvent union in api.ts must stay in sync with `cli/src/10-json.sh` emitters; unknown events (e.g. reserved `pct`) must be IGNORED, never crash.
 
 ## cli/ — the dml CLI (Plan 1 output)
 
