@@ -1,140 +1,125 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { gamesList, gamesStart, gamesStop, type Game } from "$lib/api";
+  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import Terminal from "$lib/Terminal.svelte";
+
+  let games: Game[] = $state([]);
+  let loadError: string | null = $state(null);
+  let busyId: string | null = $state(null);
+  let term: TermState = $state(initialTermState());
+  let showTerm = $state(false);
+
+  async function refresh() {
+    try {
+      games = await gamesList();
+      loadError = null;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      loadError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    }
+  }
+  onMount(refresh);
+
+  async function act(id: string, action: "start" | "stop") {
+    busyId = id;
+    showTerm = true;
+    term = initialTermState();
+    try {
+      const run = action === "start" ? gamesStart : gamesStop;
+      await run(id, (e) => {
+        term = applyEvent(term, e);
+      });
+    } catch (e) {
+      const err = e as { code?: string; message?: string; hint?: string };
+      term = applyEvent(term, {
+        event: "error",
+        error: {
+          code: err.code ?? "IPC",
+          message: err.message ?? String(e),
+          hint: err.hint ?? "",
+        },
+      });
+    } finally {
+      busyId = null;
+      await refresh();
+    }
+  }
 </script>
 
-<main class="container">
-  <h1>Welcome to Tauri + Svelte</h1>
+<main class="shell">
+  <nav class="sidebar">
+    <h1>DML<span>Launcher</span></h1>
+    <a class="active" href="#library">Library</a>
+    <a class="disabled" href="#dashboard" aria-disabled="true">Dashboard</a>
+    <a class="disabled" href="#items" aria-disabled="true">Item Database</a>
+    <a class="disabled" href="#bots" aria-disabled="true">Playerbots</a>
+    <a class="disabled" href="#teleport" aria-disabled="true">Teleport</a>
+    <a class="disabled" href="#modules" aria-disabled="true">Modules</a>
+  </nav>
 
-  <div class="row">
-    <a href="https://vite.dev" target="_blank">
-      <img src="/vite.svg" class="logo vite" alt="Vite Logo" />
-    </a>
-    <a href="https://tauri.app" target="_blank">
-      <img src="/tauri.svg" class="logo tauri" alt="Tauri Logo" />
-    </a>
-    <a href="https://svelte.dev" target="_blank">
-      <img src="/svelte.svg" class="logo svelte-kit" alt="SvelteKit Logo" />
-    </a>
-  </div>
-  <p>Click on the Tauri, Vite, and SvelteKit logos to learn more.</p>
+  <section class="content">
+    <header class="bar">
+      <h2>Game Library</h2>
+      <button onclick={refresh}>Refresh</button>
+    </header>
+
+    {#if loadError}
+      <div class="error-card">
+        <strong>Couldn't reach the DML backend.</strong>
+        <p>{loadError}</p>
+      </div>
+    {:else if games.length === 0}
+      <p class="muted">No games installed yet. (Install flows arrive in a later release.)</p>
+    {/if}
+
+    <div class="cards">
+      {#each games as g (g.id)}
+        <div class="card">
+          <div class="card-title">
+            <span class="dot {g.running ? 'on' : 'off'}"></span>
+            {g.id}
+          </div>
+          <div class="card-actions">
+            {#if g.running}
+              <button disabled={busyId !== null} onclick={() => act(g.id, "stop")}>Stop</button>
+            {:else}
+              <button class="primary" disabled={busyId !== null} onclick={() => act(g.id, "start")}>
+                Start
+              </button>
+            {/if}
+          </div>
+        </div>
+      {/each}
+    </div>
+
+    {#if showTerm}
+      <Terminal state={term} />
+    {/if}
+  </section>
 </main>
 
 <style>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.svelte-kit:hover {
-  filter: drop-shadow(0 0 2em #ff3e00);
-}
-
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-.container {
-  margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
-}
-
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
-}
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
+  :global(body) { margin: 0; background: #010409; color: #c9d1d9; font-family: "Segoe UI", system-ui, sans-serif; }
+  .shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
+  .sidebar { background: #0d1117; border-right: 1px solid #30363d; padding: 16px 0; display: flex; flex-direction: column; gap: 2px; }
+  .sidebar h1 { font-size: 16px; margin: 0 16px 14px; color: #58a6ff; }
+  .sidebar h1 span { color: #c9d1d9; font-weight: 300; margin-left: 4px; }
+  .sidebar a { padding: 8px 16px; color: #8b949e; text-decoration: none; font-size: 14px; }
+  .sidebar a.active { color: #f0f6fc; background: #161b22; border-left: 2px solid #58a6ff; }
+  .sidebar a.disabled { opacity: 0.35; pointer-events: none; }
+  .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+  .bar { display: flex; justify-content: space-between; align-items: center; }
+  .bar h2 { margin: 0; font-size: 18px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 12px; }
+  .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; min-width: 260px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+  .card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .dot.on { background: #3fb950; }
+  .dot.off { background: #6e7681; }
+  button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+  button.primary { background: #238636; border-color: #2ea043; color: white; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .muted { color: #8b949e; }
+  .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
 </style>
