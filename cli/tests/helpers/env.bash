@@ -77,6 +77,15 @@ use_curl_stub() {
 # "\n<code>" line -- so this stub always appends one too, defaulting to 200
 # when DML_STUB_HTTP is unset, and honoring an explicit DML_STUB_HTTP value
 # when the caller wants to simulate a non-200 (e.g. 401).
+#
+# soap_exec pipes the request body into curl via `--data-binary @-` (stdin).
+# When DML_STUB_CAPTURE is set, save that stdin verbatim so tests can assert
+# on the exact XML/command text the server would have received.
+if [[ -n "${DML_STUB_CAPTURE:-}" ]]; then
+  cat > "$DML_STUB_CAPTURE"
+else
+  cat >/dev/null
+fi
 [[ -n "${DML_STUB_SOAP_RESPONSE:-}" ]] && cat "$DML_STUB_SOAP_RESPONSE"
 printf '\n%s' "${DML_STUB_HTTP:-200}"
 exit "${DML_STUB_CURL_EXIT:-0}"

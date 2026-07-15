@@ -1336,8 +1336,15 @@ case "$cmd" in
           attach+=" $s"
         done
         # subject/body are placed inside double quotes in the console command;
-        # strip any double quotes to keep the command well-formed.
-        subject="${subject//\"/}"; body="${body//\"/}"
+        # strip any double quotes to keep the command well-formed. Also strip
+        # CR/LF (replaced with a space, not deleted, so words don't glue
+        # together) -- an embedded newline would otherwise survive bash,
+        # _xml_escape (which only escapes &/</>), and curl --data-binary
+        # verbatim, reaching the worldserver console-command text. That's the
+        # AC #2695 `.send items` crash surface: a newline in the argument can
+        # be read as a second console command.
+        subject="${subject//\"/}"; subject="${subject//$'\n'/ }"; subject="${subject//$'\r'/ }"
+        body="${body//\"/}"; body="${body//$'\n'/ }"; body="${body//$'\r'/ }"
         cmd="send items \"$to\" \"$subject\" \"$body\"$attach"
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
         # this whole script (same reason as the identical guard on wow

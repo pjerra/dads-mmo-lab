@@ -67,3 +67,40 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
 }
+
+# --- Payload sanitization: assert on the actual SOAP command text ------
+# The curl stub (helpers/env.bash) captures the request body it receives on
+# stdin (the XML posted via --data-binary @-) to DML_STUB_CAPTURE when set --
+# i.e. exactly what would go to the worldserver. These tests assert on that
+# captured text rather than trusting the shell-level string ops in isolation.
+
+@test "mail-item strips a double quote from --subject out of the SOAP command" {
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
+  run bash "$DML" wow mail-item --to Testchar --items 6948:1 --subject 'a"b' --json
+  [ "$status" -eq 0 ]
+  [ -s "$DML_STUB_CAPTURE" ]
+  captured="$(cat "$DML_STUB_CAPTURE")"
+  cmd="${captured#*<command>}"; cmd="${cmd%%</command>*}"
+  # Quote stripped: the raw injected subject a"b never reaches the wire...
+  [[ "$cmd" != *'a"b'* ]]
+  # ...it arrives stripped down to ab, still correctly quoted by the CLI.
+  [[ "$cmd" == *'"ab"'* ]]
+}
+
+@test "mail-item neutralizes an embedded newline in --subject instead of letting it inject a second console command" {
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
+  run bash "$DML" wow mail-item --to Testchar --items 6948:1 \
+    --subject $'gift\n.server shutdown 1' --json
+  [ "$status" -eq 0 ]
+  [ -s "$DML_STUB_CAPTURE" ]
+  captured="$(cat "$DML_STUB_CAPTURE")"
+  cmd="${captured#*<command>}"; cmd="${cmd%%</command>*}"
+  # No raw newline reached the wire: the whole <command>...</command> is one line.
+  [ "$(printf '%s' "$cmd" | wc -l)" -eq 0 ]
+  # The injected ".server shutdown 1" stayed part of the subject argument, on
+  # the same line/text as "gift" -- it was neutralized to a space, not treated
+  # as a separate command.
+  [[ "$cmd" == *'gift .server shutdown 1'* ]]
+}
