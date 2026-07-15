@@ -112,7 +112,7 @@ soap_parse_result() {
 
 # soap_exec <command> -> prints result text; exit 0 ok / 2 fault / 3 auth / 4 unreachable
 soap_exec() {
-    local cmd="$1" body resp code lockdir="$HOME/.dml"
+    local cmd="$1" body resp code lockdir="$HOME/.dml" lockfd
     mkdir -p "$lockdir"
     body="$(soap_envelope "$cmd")"
     exec {lockfd}>>"$lockdir/soap.lock"

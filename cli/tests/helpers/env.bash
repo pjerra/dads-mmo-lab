@@ -72,10 +72,13 @@ use_curl_stub() {
   cat > "$STUB_BIN/curl" <<'EOS'
 #!/usr/bin/env bash
 # Canned SOAP responder. Ignores all args; emits the file in DML_STUB_SOAP_RESPONSE
-# to stdout and exits with DML_STUB_CURL_EXIT (default 0). For HTTP-code mode,
-# if DML_STUB_HTTP is set, append it as the trailing line (callers use -w).
+# to stdout and exits with DML_STUB_CURL_EXIT (default 0). Real `curl -w
+# '\n%{http_code}'` (what soap_exec actually passes) ALWAYS appends a trailing
+# "\n<code>" line -- so this stub always appends one too, defaulting to 200
+# when DML_STUB_HTTP is unset, and honoring an explicit DML_STUB_HTTP value
+# when the caller wants to simulate a non-200 (e.g. 401).
 [[ -n "${DML_STUB_SOAP_RESPONSE:-}" ]] && cat "$DML_STUB_SOAP_RESPONSE"
-[[ -n "${DML_STUB_HTTP:-}" ]] && printf '%s' "$DML_STUB_HTTP"
+printf '\n%s' "${DML_STUB_HTTP:-200}"
 exit "${DML_STUB_CURL_EXIT:-0}"
 EOS
   chmod +x "$STUB_BIN/curl"

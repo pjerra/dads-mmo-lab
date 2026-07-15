@@ -36,7 +36,10 @@ teardown() { teardown_fixture; }
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   run bash "$DML" wow soap-exec "server info" --json
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r '.data.result')" != "null" ]
+  # Assert the actual parsed <result> text from soap-ok.xml (not just
+  # "not null") so a real parse regression (e.g. truncation, wrong tag,
+  # whitespace mangling) is caught instead of masked.
+  [ "$(echo "$output" | jq -r '.data.result')" = "Console command executed." ]
 }
 
 @test "wow soap-exec maps fault to SOAP_FAULT" {
@@ -52,4 +55,12 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow soap-exec "server info" --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
+}
+
+@test "wow soap-exec maps HTTP 401 to SOAP_AUTH" {
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-401-unauthorized.txt"
+  export DML_STUB_HTTP=401
+  run bash "$DML" wow soap-exec "server info" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
