@@ -18,6 +18,26 @@ teardown() { teardown_fixture; }
   [[ "$output" == *"server info &amp; &lt;x&gt;"* ]]
 }
 
+@test "soap creds load from ~/.dml/soap.env when present" {
+  mkdir -p "$FIXTURE/.dml"
+  printf 'DML_SOAP_USER=fileuser\nDML_SOAP_PASS=filepass\n' > "$FIXTURE/.dml/soap.env"
+  run bash -c 'unset DML_SOAP_USER DML_SOAP_PASS DML_SOAP_URL
+    source "'"$BATS_TEST_DIRNAME"'/../src/20-soap.sh"
+    echo "$(soap_user):$(soap_pass)"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "fileuser:filepass" ]
+}
+
+@test "explicit DML_SOAP_* env wins over ~/.dml/soap.env" {
+  mkdir -p "$FIXTURE/.dml"
+  printf 'DML_SOAP_USER=fileuser\nDML_SOAP_PASS=filepass\n' > "$FIXTURE/.dml/soap.env"
+  run bash -c 'export DML_SOAP_USER=envuser; unset DML_SOAP_PASS DML_SOAP_URL
+    source "'"$BATS_TEST_DIRNAME"'/../src/20-soap.sh"
+    echo "$(soap_user):$(soap_pass)"'
+  [ "$status" -eq 0 ]
+  [ "$output" = "envuser:filepass" ]
+}
+
 @test "soap_parse_result extracts result text" {
   source "$BATS_TEST_DIRNAME/../src/20-soap.sh"
   run soap_parse_result "$(cat "$BATS_TEST_DIRNAME/fixtures/soap-ok.xml")"

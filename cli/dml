@@ -66,6 +66,27 @@ soap_url()  { echo "${DML_SOAP_URL:-http://127.0.0.1:7878/}"; }
 soap_user() { echo "${DML_SOAP_USER:-admin}"; }
 soap_pass() { echo "${DML_SOAP_PASS:-admin}"; }
 
+# Optional credentials file ~/.dml/soap.env (chmod 600): shell assignments
+# DML_SOAP_USER= / DML_SOAP_PASS= / DML_SOAP_URL=, written once the server
+# has a dedicated GM3 SOAP account (the AC docker install's admin/admin is
+# not usable for SOAP out of the box). Explicit DML_SOAP_* environment
+# variables win over the file so tests and one-off overrides keep working.
+# The trailing `return 0` is load-bearing: under the global `set -e`, a
+# final failing [[ ]] && ... would otherwise abort the whole script when
+# the last variable happens to be unset.
+_soap_load_env() {
+    local f="$HOME/.dml/soap.env"
+    [[ -r "$f" ]] || return 0
+    local _u="${DML_SOAP_URL:-}" _s="${DML_SOAP_USER:-}" _p="${DML_SOAP_PASS:-}"
+    # shellcheck disable=SC1090
+    . "$f"
+    [[ -n "$_u" ]] && DML_SOAP_URL="$_u"
+    [[ -n "$_s" ]] && DML_SOAP_USER="$_s"
+    [[ -n "$_p" ]] && DML_SOAP_PASS="$_p"
+    return 0
+}
+_soap_load_env
+
 # XML-escape stdin argument.
 _xml_escape() {
     local s="${1-}"
