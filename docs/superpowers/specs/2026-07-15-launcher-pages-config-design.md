@@ -137,7 +137,7 @@ already used by this stack for `AC_AI_PLAYERBOT_*` and `AC_SOAP_*`) is verified.
 | AHBot | Auction seller bot | bool | `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` (conf key `AuctionHouseBot.EnableSeller`; mangling rule proven by the worldserver's own log: `Updates.EnableDatabases` → `AC_UPDATES_ENABLE_DATABASES`) |
 | AHBot | Auction buyer bot | bool | `AC_AUCTION_HOUSE_BOT_ENABLE_BUYER` |
 | AHBot | Seller character — user picks a character; the CLI resolves it read-only to its guid+account and writes BOTH env keys | char name | `AC_AUCTION_HOUSE_BOT_GUID` + `AC_AUCTION_HOUSE_BOT_ACCOUNT` |
-| Server | Message of the day | text (quotes/CR/LF stripped) | `AC_MOTD` |
+| Server | Message of the day | text (quotes/CR/LF stripped) | **AMENDED 2026-07-15 (user-approved):** this AC build has NO `Motd` conf key — MOTD lives in the auth DB (`motd` table, `MotdMgr`) and is set live via the `.server set motd <realmId> <locale> <text>` console command. So `config set server.motd` sends `server set motd 1 enUS <text>` over SOAP (applies INSTANTLY, `restart_required:false`; needs the server running — `SOAP_UNREACHABLE` with a "start it first" hint otherwise), and `config list` reads it back read-only from `acore_auth.motd` (guarded; falls back to the default if the DB is down). The one registry row whose `restart_required` is false. |
 
 Registry is intentionally small; adding a row is the extension path.
 

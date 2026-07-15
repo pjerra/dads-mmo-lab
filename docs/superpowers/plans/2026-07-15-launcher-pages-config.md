@@ -385,6 +385,23 @@ git commit -m "feat(cli): dml wow server-info (parsed status; down is online:fal
   - `dml wow config set --key <k> --value <v> --json` → `{"changed":bool,"restart_required":bool}` (restart_required mirrors changed, same as soap-setup). Unknown key → `NOT_FOUND`; bad value → `BAD_ARG`; missing yq → `MISSING_DEP`; no wow install → `NOT_FOUND`.
   - Registry helper contract for Task 4+11: `_cfg_rows` prints pipe-separated rows `key|group|label|type|min|max|env|default|explain`.
 
+> **AMENDMENT (2026-07-15, user-approved after Step 1 found it):** `Motd` is NOT a
+> conf key on this AC build (17.0.0-dev) — MOTD is DB-backed (`acore_auth.motd`,
+> `MotdMgr`) and set live via the `.server set motd <realmId> <locale> <text>`
+> console command; `AC_MOTD` would silently no-op. The `server.motd` registry row
+> therefore: env column is the sentinel `-`; `config set server.motd` sanitizes
+> (strip `"`, CR/LF→space) then sends `server set motd 1 enUS <text>` over
+> `soap_exec` (rc 0 → `{"changed":true,"restart_required":false}`; rc 3 →
+> SOAP_AUTH; rc 2 → SOAP_FAULT; rc 4 → SOAP_UNREACHABLE with hint "The server
+> must be running to change the message of the day — start it first.");
+> `config list` reads the motd row's value read-only from
+> `db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;"` (guarded,
+> default on empty/failure) and reports `restart_required:false` for this row
+> only. Tests use the curl capture stub (`DML_STUB_CAPTURE`) to assert the exact
+> posted command text, plus a mysql stub for the list read-back and a
+> DB-down-falls-back-to-default case. The code blocks below predate the
+> amendment where they mention `AC_MOTD`.
+
 - [ ] **Step 1: Verify the pinned conf keys against the real stack (evidence step, no code)**
 
 Run: `wsl -d dml-arch -u dml -- bash -lc "grep -hE '^(Rate\.XP\.Kill|Rate\.XP\.Quest|Rate\.Drop\.Money|Motd) ' ~/games/wow-server-playerbots/env/dist/etc/worldserver.conf.dist | head; grep -hE '^AuctionHouseBot\.(EnableSeller|EnableBuyer|Account|GUID) ' ~/games/wow-server-playerbots/env/dist/etc/modules/mod_ahbot.conf.dist"`
