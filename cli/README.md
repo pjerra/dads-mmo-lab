@@ -63,9 +63,14 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
 `UNKNOWN_COMMAND` are reused from the base list.
 
 **Security posture:**
-- SOAP is bound to `127.0.0.1:7878` only — `dml wow soap-setup` pins the
-  port mapping to localhost via `.env`, it is never exposed on `0.0.0.0` or
-  the LAN. Auth is HTTP Basic.
+- SOAP is unreachable from the LAN. The worldserver's *in-container* bind
+  (`AC_SOAP_IP=0.0.0.0`, set by `soap-setup`) is required for Docker's
+  port-publish NAT to route to it at all — that `0.0.0.0` is internal to the
+  container network, not a host-facing bind. The setting that actually
+  controls host reachability is the *published* port: `soap-setup` pins
+  `DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878` in `.env`, so Docker only maps
+  the port onto the host's loopback interface — nothing on the LAN can reach
+  it. Auth is HTTP Basic.
 - Every SOAP call (`soap-exec`, `mail-item`, `teleport`) is serialized under
   an `flock` on `~/.dml/soap.lock` — the worldserver console runs on a single
   thread, so the CLI never issues two commands concurrently.
@@ -85,6 +90,12 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
 - Credentials come from environment variables, not flags: `DML_SOAP_USER` /
   `DML_SOAP_PASS` / `DML_SOAP_URL` (default `admin` / `admin` /
   `http://127.0.0.1:7878/`) and `DML_DB_ROOT_PASSWORD` (default `password`).
+
+Note for GUI authors: `characters`, `teleport-list`, and `paperdoll` only
+recognize their flag (`--account`/`--search`/`--char`) as the very first
+argument — a first-arg-only check, not a `while`-loop flag parser like
+`items search`/`mail-item`/`teleport`. Put the flag anywhere else and it's
+silently ignored (treated as if omitted), rather than rejected.
 
 **Commands:**
 
@@ -113,13 +124,15 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   Read-only query against `acore_world.item_template`. `--name` is
   **required** and must be non-empty — an empty name would otherwise
   silently fall through to browsing the whole table — `BAD_ARG` otherwise.
-  `--quality`/`--min-level`/`--max-level`/`--limit` must be pure digits (or
-  omitted); any non-numeric value is `BAD_ARG` (these are inlined unquoted
-  into the SQL, so this doubles as the injection guard). `--limit` defaults
-  to 50. Icons are **not** included — `displayid` is the raw display id;
-  turning that into an icon path needs client DBC (`ItemDisplayInfo.dbc`)
-  enrichment, which is a follow-up, not built here. Errors `DB_UNREACHABLE`
-  if `ac-database` can't be queried.
+  `--name` is matched with `LIKE '%...%'`, SQL-escaped (same treatment as
+  `teleport-list`'s `--search`). `--quality`/`--min-level`/`--max-level`/
+  `--limit` must be pure digits (or omitted); any non-numeric value is
+  `BAD_ARG` (these are inlined unquoted into the SQL, so this doubles as the
+  injection guard). `--limit` defaults to 50. Icons are **not** included —
+  `displayid` is the raw display id; turning that into an icon path needs
+  client DBC (`ItemDisplayInfo.dbc`) enrichment, which is a follow-up, not
+  built here. Errors: `BAD_ARG` (missing/invalid `--name` or a non-numeric
+  flag), `DB_UNREACHABLE` (if `ac-database` can't be queried).
 
 - `dml wow mail-item --to <char> --items <id:count>[,<id:count>...] [--subject <s>] [--body <s>] --json`
   → `{"sent":true,"to":"<char>","attachments":N}`
@@ -129,8 +142,9 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   pairs (each `^[0-9]+:[0-9]+$`); 0 or more than 12 is `BAD_ARG`.
   `--subject`/`--body` default to `"Dad's MMO Lab"` / `"Enjoy!"`; both are
   sanitized (quotes stripped, CR/LF replaced with a space) before being
-  spliced into the console command. Errors: `SOAP_FAULT`, `SOAP_AUTH`,
-  `SOAP_UNREACHABLE`.
+  spliced into the console command. Errors: `BAD_ARG` (invalid `--to`,
+  malformed/out-of-range `--items`, or an unknown flag), `SOAP_FAULT`,
+  `SOAP_AUTH`, `SOAP_UNREACHABLE`.
 
 - `dml wow teleport-list [--search <text>] --json` →
   `{"locations":[{"name","x","y","z","map"}]}`
@@ -170,5 +184,7 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   the characters table as of its last DB save, which can lag an online
   character's true live state until their next auto-save/logout — a
   live-accurate view would need a SOAP `.pinfo`-style call, not built here.
-  Errors: `BAD_ARG` (invalid `--char`), `NOT_FOUND` (no such character or
-  nothing equipped), `DB_UNREACHABLE`.
+  Each equipped item's `displayid` is likewise the raw display id, not an
+  icon (same caveat as `items search` — client DBC enrichment is a
+  follow-up, not built here). Errors: `BAD_ARG` (invalid `--char`),
+  `NOT_FOUND` (no such character or nothing equipped), `DB_UNREACHABLE`.

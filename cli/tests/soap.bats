@@ -64,3 +64,12 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
+
+@test "soap-exec with no command returns BAD_ARG envelope" {
+  run bash "$DML" wow soap-exec --json
+  [ "$status" -eq 1 ]
+  # Must still be a valid JSON envelope, not a bare stderr message from an
+  # unguarded ${1:?...} abort under set -euo pipefail.
+  echo "$output" | jq -e . >/dev/null
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}

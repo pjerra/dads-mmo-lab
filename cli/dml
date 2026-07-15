@@ -1266,7 +1266,8 @@ case "$cmd" in
         json_ok "{\"changed\":$changed,\"restart_required\":$changed}"
         ;;
       soap-exec)
-        cmd="${1:?Usage: dml wow soap-exec \"<command>\"}"
+        cmd="${1:-}"
+        [[ -n "$cmd" ]] || { json_err BAD_ARG "Missing console command" "Usage: dml wow soap-exec \"<command>\" --json"; exit 1; }
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
         # this whole script. An unguarded `out="$(soap_exec "$cmd")"` would
         # make bash abort right here on any non-zero soap_exec exit (fault,
