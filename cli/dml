@@ -1360,6 +1360,61 @@ case "$cmd" in
           *) json_err SOAP_UNREACHABLE "Could not reach the server" "Run: dml wow soap-setup, then start the server." ; exit 1 ;;
         esac
         ;;
+      teleport-list)
+        search=""
+        [[ "${1:-}" == "--search" ]] && { search="$2"; shift 2; }
+        where="1=1"
+        [[ -n "$search" ]] && where="name LIKE '%$(sql_escape "$search")%'"
+        sql="SELECT name,position_x,position_y,position_z,map FROM game_tele WHERE $where ORDER BY name LIMIT 500;"
+        rows="$(db_world_query "$sql")" || { json_err DB_UNREACHABLE "Could not query teleport locations" ""; exit 1; }
+        first=1; out='['
+        while IFS=$'\t' read -r nm x y z mp; do
+          [[ -z "$nm" ]] && continue
+          [[ $first -eq 0 ]] && out+=','
+          out+="{\"name\":\"$(json_escape "$nm")\",\"x\":$x,\"y\":$y,\"z\":$z,\"map\":$mp}"
+          first=0
+        done <<< "$rows"
+        out+=']'
+        json_ok "{\"locations\":$out}"
+        ;;
+      teleport)
+        char=""; to=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --char) char="$2"; shift 2 ;;
+            --to) to="$2"; shift 2 ;;
+            --coords) json_err BAD_ARG "Coordinate teleport is not available yet" "Use --to <named location>; coords need an offline DB path (planned)."; exit 1 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+          esac
+        done
+        _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        [[ -n "$to" ]] || { json_err BAD_ARG "Missing --to <location>" "List with: dml wow teleport-list --json"; exit 1; }
+        # --to is free-form (game_tele location names aren't restricted to the
+        # charname allowlist) and is placed inside double quotes in the SOAP
+        # console command -- strip embedded double quotes so it can't break
+        # out of its quoting. Also strip CR/LF (replaced with a space, not
+        # deleted, so words don't glue together): an embedded newline would
+        # otherwise survive bash and reach the worldserver console-command
+        # text intact, exactly like the AC #2695 `.send items` crash surface
+        # documented on wow mail-item above -- a newline in the argument can
+        # be read as a second console command. Same mitigation, reused here.
+        to_clean="${to//\"/}"
+        to_clean="${to_clean//$'\n'/ }"; to_clean="${to_clean//$'\r'/ }"
+        # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
+        # this whole script (same reason as the identical guard on wow
+        # soap-exec / mail-item above). An unguarded `out="$(soap_exec
+        # "$cmd")"; rc=$?` would make bash abort right here on any non-zero
+        # soap_exec exit (fault, auth failure, unreachable) -- before rc=$?
+        # or the case below ever runs -- so the failure must be captured
+        # inside a conditional.
+        if out="$(soap_exec "teleport name \"$char\" \"$to_clean\"")"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "{\"teleported\":true,\"char\":\"$(json_escape "$char")\",\"to\":\"$(json_escape "$to_clean")\"}" ;;
+          2) json_err SOAP_FAULT "$out" "Unknown location? See dml wow teleport-list." ; exit 1 ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "" ; exit 1 ;;
+          *) json_err SOAP_UNREACHABLE "Could not reach the server" "" ; exit 1 ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
