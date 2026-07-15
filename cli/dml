@@ -286,6 +286,13 @@ _wow_server_dir() {
     _resolve_compose_dir "$dir/"
 }
 
+# Character name / item-spec validators for `wow mail-item`. Both feed
+# straight into a SOAP console command string (see soap_exec) -- an
+# unvalidated name or spec would be command-injection-equivalent, so each is
+# checked against an allowlist regex before any command string is built.
+_valid_charname() { [[ "$1" =~ ^[A-Za-z0-9_]{1,12}$ ]]; }
+_valid_item_spec() { [[ "$1" =~ ^[0-9]+:[0-9]+$ ]]; }
+
 # Runs a command, streaming its combined output. In JSON mode each line
 # becomes an NDJSON "line" event; in text mode lines pass through unchanged.
 # Returns the command's exit code (set -o pipefail is active globally).
@@ -1307,6 +1314,43 @@ case "$cmd" in
             json_ok "{\"items\":$(printf '%s' "$rows" | _items_rows_to_json)}"
             ;;
           *) json_err BAD_ARG "Unknown items subcommand: $isub" "Try: dml wow items search --name <text>"; exit 1 ;;
+        esac
+        ;;
+      mail-item)
+        to=""; items=""; subject="Dad's MMO Lab"; body="Enjoy!"
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --to) to="$2"; shift 2 ;;
+            --items) items="$2"; shift 2 ;;
+            --subject) subject="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+          esac
+        done
+        _valid_charname "$to" || { json_err BAD_ARG "Invalid character name: $to" "1-12 letters/digits/underscore."; exit 1; }
+        IFS=',' read -ra specs <<< "$items"
+        [[ "${#specs[@]}" -ge 1 && "${#specs[@]}" -le 12 ]] || { json_err BAD_ARG "Provide 1-12 items as id:count[,id:count…]" ""; exit 1; }
+        attach=""
+        for s in "${specs[@]}"; do
+          _valid_item_spec "$s" || { json_err BAD_ARG "Malformed item spec: $s" "Use itemid:count"; exit 1; }
+          attach+=" $s"
+        done
+        # subject/body are placed inside double quotes in the console command;
+        # strip any double quotes to keep the command well-formed.
+        subject="${subject//\"/}"; body="${body//\"/}"
+        cmd="send items \"$to\" \"$subject\" \"$body\"$attach"
+        # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
+        # this whole script (same reason as the identical guard on wow
+        # soap-exec above). An unguarded `out="$(soap_exec "$cmd")"; rc=$?`
+        # would make bash abort right here on any non-zero soap_exec exit
+        # (fault, auth failure, unreachable) -- before rc=$? or the case below
+        # ever runs -- so the failure must be captured inside a conditional.
+        if out="$(soap_exec "$cmd")"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "{\"sent\":true,\"to\":\"$(json_escape "$to")\",\"attachments\":${#specs[@]}}" ;;
+          2) json_err SOAP_FAULT "$out" "The server rejected the mail command." ; exit 1 ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "" ; exit 1 ;;
+          *) json_err SOAP_UNREACHABLE "Could not reach the server" "Run: dml wow soap-setup, then start the server." ; exit 1 ;;
         esac
         ;;
       *)
