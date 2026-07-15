@@ -129,6 +129,13 @@ _resolve_compose_dir() {
     return 0
 }
 
+# Compose dir of the WoW Playerbots title, or empty.
+_wow_server_dir() {
+    local dir="$GAMES_DIR/wow-server-playerbots"
+    [[ -d "$dir" ]] || return 0
+    _resolve_compose_dir "$dir/"
+}
+
 # Runs a command, streaming its combined output. In JSON mode each line
 # becomes an NDJSON "line" event; in text mode lines pass through unchanged.
 # Returns the command's exit code (set -o pipefail is active globally).
@@ -228,7 +235,7 @@ _check_port_conflicts() {
     local _ports=(
         "3724:WoW auth/login server (TrinityCore, AzerothCore, MaNGOS)"
         "8085:WoW world server (TrinityCore, AzerothCore)"
-        "8086:WoW SOAP API (TrinityCore, AzerothCore)"
+        "7878:WoW SOAP API (TrinityCore, AzerothCore)"
         "4000:EverQuest zone server (EQEmu)"
         "5998:EverQuest login server (EQEmu)"
         "5999:EverQuest login server (EQEmu)"
@@ -458,7 +465,7 @@ case "$cmd" in
     _known_ports["3306"]="MySQL/MariaDB"
     _known_ports["3724"]="WoW auth/login"
     _known_ports["8085"]="WoW world server"
-    _known_ports["8086"]="WoW SOAP API"
+    _known_ports["7878"]="WoW SOAP API"
     _known_ports["4000"]="EQ zone (EQEmu)"
     _known_ports["5998"]="EQ login (EQEmu)"
     _known_ports["5999"]="EQ login (EQEmu)"
@@ -1023,6 +1030,42 @@ case "$cmd" in
         ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown games subcommand: $sub" "Try: dml games list --json"
+        exit 1
+        ;;
+    esac
+    ;;
+
+  wow)
+    wsub="${1:-}"
+    shift || true
+    case "$wsub" in
+      soap-setup)
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+            json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
+            exit 1
+        fi
+        ovr="$sdir/docker-compose.override.yml"
+        [[ -f "$ovr" ]] || printf 'services:\n  ac-worldserver:\n    environment:\n' > "$ovr"
+        changed=false
+        if ! grep -q 'AC_SOAP_ENABLED' "$ovr"; then
+            # Merge the SOAP env + a localhost-bound port into the EXISTING
+            # ac-worldserver service with yq (mikefarah v4) — never a second
+            # top-level `services:` block (that would be a duplicate YAML key
+            # and silently drop the existing playerbot env). ports uses unique
+            # so re-runs never duplicate the mapping.
+            yq -i '
+              .services.ac-worldserver.environment.AC_SOAP_ENABLED = "1" |
+              .services.ac-worldserver.environment.AC_SOAP_IP = "0.0.0.0" |
+              .services.ac-worldserver.environment.AC_SOAP_PORT = "7878" |
+              .services.ac-worldserver.ports = ((.services.ac-worldserver.ports // []) + ["127.0.0.1:7878:7878"] | unique)
+            ' "$ovr"
+            changed=true
+        fi
+        json_ok "{\"changed\":$changed,\"restart_required\":$changed}"
+        ;;
+      *)
+        json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
         ;;
     esac
