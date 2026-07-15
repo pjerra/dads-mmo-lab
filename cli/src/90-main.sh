@@ -1229,6 +1229,20 @@ case "$cmd" in
           *) json_err SOAP_UNREACHABLE "Could not reach the server" "" ; exit 1 ;;
         esac
         ;;
+      accounts)
+        # Read-only list of real player accounts and their characters.
+        # The 250 RNDBOT* ambient-bot accounts and AHBOT are noise for the
+        # GUI's character picker; SOAP-only accounts (e.g. DMLSOAP) simply
+        # have no characters and are harmless to include.
+        sql="SELECT a.id, a.username, COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
+             FROM acore_auth.account a
+             LEFT JOIN characters c ON c.account = a.id
+             WHERE a.username NOT LIKE 'RNDBOT%' AND a.username <> 'AHBOT'
+             ORDER BY a.id, c.level DESC;"
+        rows="$(db_chars_query "$sql")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
+        json_ok "{\"accounts\":$(printf '%s' "$rows" | _accounts_rows_to_json)}"
+        ;;
       characters)
         acct=""
         [[ "${1:-}" == "--account" ]] && { _need_flag_val "$1" $#; acct="$2"; shift 2; }

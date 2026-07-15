@@ -101,6 +101,7 @@ use_mysql_stub() {
 #!/usr/bin/env bash
 # Minimal docker stub for `docker exec ac-database mysql …`.
 if [[ "${1:-}" == "exec" ]]; then
+  [[ -n "${DML_STUB_DB_QUERY_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_DB_QUERY_LOG"
   [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
   exit "${DML_STUB_DB_EXIT:-0}"
 fi

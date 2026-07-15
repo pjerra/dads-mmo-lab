@@ -59,3 +59,34 @@ _items_rows_to_json() {
     out+=']'
     printf '%s' "$out"
 }
+
+# Reads TSV rows (account_id, username, guid, char_name, level) sorted by
+# account_id, emits a JSON array of account objects with nested characters.
+# LEFT JOIN misses arrive as empty guid/name/level fields. Same last-row
+# guard as _items_rows_to_json (see the long comment there).
+_accounts_rows_to_json() {
+    local out='[' first=1 cur_id="" cur_name="" chars="" cfirst=1
+    local aid uname guid cname clvl
+    while IFS=$'\t' read -r aid uname guid cname clvl || [[ -n "$aid" ]]; do
+        [[ -z "$aid" ]] && continue
+        if [[ "$aid" != "$cur_id" ]]; then
+            if [[ -n "$cur_id" ]]; then
+                [[ $first -eq 0 ]] && out+=','
+                out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+                first=0
+            fi
+            cur_id="$aid"; cur_name="$uname"; chars=""; cfirst=1
+        fi
+        if [[ -n "$guid" ]]; then
+            [[ $cfirst -eq 0 ]] && chars+=','
+            chars+="{\"guid\":$guid,\"name\":\"$(json_escape "$cname")\",\"level\":$clvl}"
+            cfirst=0
+        fi
+    done
+    if [[ -n "$cur_id" ]]; then
+        [[ $first -eq 0 ]] && out+=','
+        out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+    fi
+    out+=']'
+    printf '%s' "$out"
+}

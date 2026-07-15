@@ -230,6 +230,37 @@ _items_rows_to_json() {
     printf '%s' "$out"
 }
 
+# Reads TSV rows (account_id, username, guid, char_name, level) sorted by
+# account_id, emits a JSON array of account objects with nested characters.
+# LEFT JOIN misses arrive as empty guid/name/level fields. Same last-row
+# guard as _items_rows_to_json (see the long comment there).
+_accounts_rows_to_json() {
+    local out='[' first=1 cur_id="" cur_name="" chars="" cfirst=1
+    local aid uname guid cname clvl
+    while IFS=$'\t' read -r aid uname guid cname clvl || [[ -n "$aid" ]]; do
+        [[ -z "$aid" ]] && continue
+        if [[ "$aid" != "$cur_id" ]]; then
+            if [[ -n "$cur_id" ]]; then
+                [[ $first -eq 0 ]] && out+=','
+                out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+                first=0
+            fi
+            cur_id="$aid"; cur_name="$uname"; chars=""; cfirst=1
+        fi
+        if [[ -n "$guid" ]]; then
+            [[ $cfirst -eq 0 ]] && chars+=','
+            chars+="{\"guid\":$guid,\"name\":\"$(json_escape "$cname")\",\"level\":$clvl}"
+            cfirst=0
+        fi
+    done
+    if [[ -n "$cur_id" ]]; then
+        [[ $first -eq 0 ]] && out+=','
+        out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+    fi
+    out+=']'
+    printf '%s' "$out"
+}
+
 _require_docker() {
     if ! docker info &>/dev/null; then
         echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2
@@ -1459,6 +1490,20 @@ case "$cmd" in
           3) json_err SOAP_AUTH "SOAP authentication failed" "" ; exit 1 ;;
           *) json_err SOAP_UNREACHABLE "Could not reach the server" "" ; exit 1 ;;
         esac
+        ;;
+      accounts)
+        # Read-only list of real player accounts and their characters.
+        # The 250 RNDBOT* ambient-bot accounts and AHBOT are noise for the
+        # GUI's character picker; SOAP-only accounts (e.g. DMLSOAP) simply
+        # have no characters and are harmless to include.
+        sql="SELECT a.id, a.username, COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
+             FROM acore_auth.account a
+             LEFT JOIN characters c ON c.account = a.id
+             WHERE a.username NOT LIKE 'RNDBOT%' AND a.username <> 'AHBOT'
+             ORDER BY a.id, c.level DESC;"
+        rows="$(db_chars_query "$sql")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
+        json_ok "{\"accounts\":$(printf '%s' "$rows" | _accounts_rows_to_json)}"
         ;;
       characters)
         acct=""
