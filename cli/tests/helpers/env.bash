@@ -84,3 +84,20 @@ EOS
   chmod +x "$STUB_BIN/curl"
   export PATH="$STUB_BIN:$PATH"
 }
+
+use_mysql_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+  cat > "$STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+# Minimal docker stub for `docker exec ac-database mysql …`.
+if [[ "${1:-}" == "exec" ]]; then
+  [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
+  exit "${DML_STUB_DB_EXIT:-0}"
+fi
+if [[ "${1:-}" == "info" ]]; then exit 0; fi
+exit 0
+EOS
+  chmod +x "$STUB_BIN/docker"
+  export PATH="$STUB_BIN:$PATH"
+}

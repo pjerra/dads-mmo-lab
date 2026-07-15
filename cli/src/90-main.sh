@@ -1063,6 +1063,36 @@ case "$cmd" in
           *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup" ; exit 1 ;;
         esac
         ;;
+      items)
+        isub="${1:-}"; shift || true
+        case "$isub" in
+          search)
+            name=""; quality="-"; minl="-"; maxl="-"; limit=50
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --name) name="$2"; shift 2 ;;
+                --quality) quality="$2"; shift 2 ;;
+                --min-level) minl="$2"; shift 2 ;;
+                --max-level) maxl="$2"; shift 2 ;;
+                --limit) limit="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "See: dml wow items search --name <text>"; exit 1 ;;
+              esac
+            done
+            # Numeric flags are inlined (unquoted) into the SQL text by
+            # build_item_search_sql -- validate they are pure digits (or the
+            # "-" sentinel) here, before that happens, so a crafted
+            # --quality "0 OR 1=1" can't inject.
+            for v in "$quality" "$minl" "$maxl" "$limit"; do
+              [[ "$v" == "-" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
+            done
+            sql="$(build_item_search_sql "$name" "$quality" "$minl" "$maxl" "$limit")"
+            rows="$(db_world_query "$sql")" || {
+              json_err DB_UNREACHABLE "Could not query the item database" "Is ac-database running? Try: dml games status wow-server-playerbots"; exit 1; }
+            json_ok "{\"items\":$(printf '%s' "$rows" | _items_rows_to_json)}"
+            ;;
+          *) json_err BAD_ARG "Unknown items subcommand: $isub" "Try: dml wow items search --name <text>"; exit 1 ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
