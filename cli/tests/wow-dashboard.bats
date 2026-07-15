@@ -95,3 +95,16 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
+
+@test "characters with valueless --account emits a BAD_ARG envelope, not an unbound-variable abort" {
+  # Regression (final whole-plan review): see the same test in wow-items.bats.
+  run bash "$DML" wow characters --account --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "paperdoll with valueless --char emits a BAD_ARG envelope, not an unbound-variable abort" {
+  run bash "$DML" wow paperdoll --char --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}

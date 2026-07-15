@@ -104,3 +104,11 @@ teardown() { teardown_fixture; }
   # as a separate command.
   [[ "$cmd" == *'gift .server shutdown 1'* ]]
 }
+
+@test "mail-item with valueless --to emits a BAD_ARG envelope, not an unbound-variable abort" {
+  # Regression (final whole-plan review): see the same test in wow-items.bats.
+  use_curl_stub
+  run bash "$DML" wow mail-item --to --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}

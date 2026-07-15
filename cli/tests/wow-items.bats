@@ -61,3 +61,13 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
+
+@test "items search with valueless --name emits a BAD_ARG envelope, not an unbound-variable abort" {
+  # Regression (final whole-plan review): under `set -u` a value flag as the
+  # LAST token (after --json stripping) read the unset $2 and aborted with a
+  # bare stderr error and NO envelope. _need_flag_val guards every value flag.
+  run bash "$DML" wow items search --name --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.ok')" = "false" ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}

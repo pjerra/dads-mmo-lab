@@ -84,6 +84,17 @@ _wow_server_dir() {
 _valid_charname() { [[ "$1" =~ ^[A-Za-z0-9_]{1,12}$ ]]; }
 _valid_item_spec() { [[ "$1" =~ ^[0-9]+:[0-9]+$ ]]; }
 
+# Arity guard for value-taking flags. Under the global `set -u`, reading $2
+# when a value flag is the LAST token aborts the whole script with a bare
+# "$2: unbound variable" on stderr and NO JSON envelope -- breaking the
+# documented one-envelope-always contract. Call as `_need_flag_val "$1" $#`
+# before consuming $2 in any flag parser.
+_need_flag_val() {
+    [[ "$2" -ge 2 ]] && return 0
+    json_err BAD_ARG "Missing value for $1" "Every value flag needs an argument, e.g. $1 <value>"
+    exit 1
+}
+
 # Runs a command, streaming its combined output. In JSON mode each line
 # becomes an NDJSON "line" event; in text mode lines pass through unchanged.
 # Returns the command's exit code (set -o pipefail is active globally).
@@ -1078,11 +1089,11 @@ case "$cmd" in
             name=""; quality="-"; minl="-"; maxl="-"; limit=50
             while [[ $# -gt 0 ]]; do
               case "$1" in
-                --name) name="$2"; shift 2 ;;
-                --quality) quality="$2"; shift 2 ;;
-                --min-level) minl="$2"; shift 2 ;;
-                --max-level) maxl="$2"; shift 2 ;;
-                --limit) limit="$2"; shift 2 ;;
+                --name) _need_flag_val "$1" $#; name="$2"; shift 2 ;;
+                --quality) _need_flag_val "$1" $#; quality="$2"; shift 2 ;;
+                --min-level) _need_flag_val "$1" $#; minl="$2"; shift 2 ;;
+                --max-level) _need_flag_val "$1" $#; maxl="$2"; shift 2 ;;
+                --limit) _need_flag_val "$1" $#; limit="$2"; shift 2 ;;
                 *) json_err BAD_ARG "Unknown flag: $1" "See: dml wow items search --name <text>"; exit 1 ;;
               esac
             done
@@ -1112,10 +1123,10 @@ case "$cmd" in
         to=""; items=""; subject="Dad's MMO Lab"; body="Enjoy!"
         while [[ $# -gt 0 ]]; do
           case "$1" in
-            --to) to="$2"; shift 2 ;;
-            --items) items="$2"; shift 2 ;;
-            --subject) subject="$2"; shift 2 ;;
-            --body) body="$2"; shift 2 ;;
+            --to) _need_flag_val "$1" $#; to="$2"; shift 2 ;;
+            --items) _need_flag_val "$1" $#; items="$2"; shift 2 ;;
+            --subject) _need_flag_val "$1" $#; subject="$2"; shift 2 ;;
+            --body) _need_flag_val "$1" $#; body="$2"; shift 2 ;;
             *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
           esac
         done
@@ -1154,7 +1165,7 @@ case "$cmd" in
         ;;
       teleport-list)
         search=""
-        [[ "${1:-}" == "--search" ]] && { search="$2"; shift 2; }
+        [[ "${1:-}" == "--search" ]] && { _need_flag_val "$1" $#; search="$2"; shift 2; }
         where="1=1"
         [[ -n "$search" ]] && where="name LIKE '%$(sql_escape "$search")%'"
         sql="SELECT name,position_x,position_y,position_z,map FROM game_tele WHERE $where ORDER BY name LIMIT 500;"
@@ -1173,8 +1184,8 @@ case "$cmd" in
         char=""; to=""
         while [[ $# -gt 0 ]]; do
           case "$1" in
-            --char) char="$2"; shift 2 ;;
-            --to) to="$2"; shift 2 ;;
+            --char) _need_flag_val "$1" $#; char="$2"; shift 2 ;;
+            --to) _need_flag_val "$1" $#; to="$2"; shift 2 ;;
             --coords) json_err BAD_ARG "Coordinate teleport is not available yet" "Use --to <named location>; coords need an offline DB path (planned)."; exit 1 ;;
             *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
           esac
@@ -1192,6 +1203,13 @@ case "$cmd" in
         # be read as a second console command. Same mitigation, reused here.
         to_clean="${to//\"/}"
         to_clean="${to_clean//$'\n'/ }"; to_clean="${to_clean//$'\r'/ }"
+        # A --to made only of quotes/CR/LF sanitizes to nothing (or bare
+        # spaces) -- catch that here as BAD_ARG instead of sending
+        # `teleport name "X" ""` and surfacing a raw worldserver SOAP_FAULT.
+        if [[ -z "${to_clean//[[:space:]]/}" ]]; then
+          json_err BAD_ARG "Location is empty after sanitizing: $to" "Provide a valid location; list with: dml wow teleport-list --json"
+          exit 1
+        fi
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
         # this whole script (same reason as the identical guard on wow
         # soap-exec / mail-item above). An unguarded `out="$(soap_exec
@@ -1209,7 +1227,7 @@ case "$cmd" in
         ;;
       characters)
         acct=""
-        [[ "${1:-}" == "--account" ]] && { acct="$2"; shift 2; }
+        [[ "${1:-}" == "--account" ]] && { _need_flag_val "$1" $#; acct="$2"; shift 2; }
         [[ -n "$acct" ]] || { json_err BAD_ARG "Missing --account <name>" ""; exit 1; }
         # Test seam: DML_STUB_ACCOUNT_ID lets bats tests skip the auth-schema
         # lookup and go straight to a deterministic account id, since the
@@ -1241,7 +1259,7 @@ case "$cmd" in
         ;;
       paperdoll)
         char=""
-        [[ "${1:-}" == "--char" ]] && { char="$2"; shift 2; }
+        [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
         sql="SELECT c.name,c.level,c.class,c.money,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid
              FROM characters c

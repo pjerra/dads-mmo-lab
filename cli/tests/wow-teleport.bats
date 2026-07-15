@@ -133,3 +133,38 @@ teardown() { teardown_fixture; }
   # treated as a separate command.
   [[ "$cmd" == *'Stormwind .server shutdown 1'* ]]
 }
+
+# --- Envelope contract for malformed argv (final whole-plan review) -----
+# Under the global `set -u`, a value flag arriving as the LAST token (after
+# --json is stripped from argv) used to read the unset $2 and abort the
+# whole script with a bare "unbound variable" on stderr -- empty stdout, no
+# JSON envelope, breaking the documented one-envelope-always contract.
+# _need_flag_val (90-main.sh) turns that shape into a BAD_ARG envelope.
+
+@test "teleport with valueless --char emits a BAD_ARG envelope, not an unbound-variable abort" {
+  use_curl_stub
+  run bash "$DML" wow teleport --char --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.ok')" = "false" ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "teleport-list with valueless --search emits a BAD_ARG envelope" {
+  use_mysql_stub
+  run bash "$DML" wow teleport-list --search --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "teleport --to that sanitizes to empty is BAD_ARG, not a worldserver SOAP_FAULT" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
+  # A --to of a lone double quote sanitizes to "" -- must be caught locally
+  # instead of sending `teleport name "Testchar" ""` to the worldserver.
+  run bash "$DML" wow teleport --char Testchar --to '"' --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  # Nothing reached the wire: the guard fires before soap_exec runs.
+  [ ! -s "$DML_STUB_CAPTURE" ]
+}
