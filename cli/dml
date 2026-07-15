@@ -1431,6 +1431,11 @@ case "$cmd" in
             || { json_err DB_UNREACHABLE "Could not reach the auth database" ""; exit 1; }
         fi
         [[ -n "$aid" ]] || { json_err NOT_FOUND "No such account: $acct" ""; exit 1; }
+        # Numeric whitelist: $aid is spliced unquoted into the SQL below, and
+        # can come from the DML_STUB_ACCOUNT_ID test seam (a shipped bypass)
+        # as well as the db_auth_query lookup -- guard BOTH branches before
+        # it ever reaches a query string.
+        [[ "$aid" =~ ^[0-9]+$ ]] || { json_err DB_UNREACHABLE "Unexpected account id" "Account lookup returned a non-numeric id"; exit 1; }
         rows="$(db_chars_query "SELECT guid,name,level,class,race,gender,money FROM characters WHERE account=$aid ORDER BY level DESC;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         first=1; out='['
@@ -1447,7 +1452,7 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
-        sql="SELECT c.name,c.level,c.class,c.money,ci.slot,it.entry,it.name,it.Quality,it.displayid
+        sql="SELECT c.name,c.level,c.class,c.money,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid
              FROM characters c
              JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18
              JOIN item_instance ii ON ii.guid=ci.item
@@ -1457,11 +1462,11 @@ case "$cmd" in
         [[ -n "$rows" ]] || { json_err NOT_FOUND "No such character or no equipped items: $char" ""; exit 1; }
         cname=""; clevel=0; cclass=0; cmoney=0
         first=1; eq='['
-        while IFS=$'\t' read -r nm lvl cls money slot entry iname q disp; do
+        while IFS=$'\t' read -r nm lvl cls money slot entry iname q ilvl disp; do
           [[ -z "$nm" ]] && continue
           cname="$nm"; clevel="$lvl"; cclass="$cls"; cmoney="$money"
           [[ $first -eq 0 ]] && eq+=','
-          eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"displayid\":$disp}"
+          eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"item_level\":$ilvl,\"displayid\":$disp}"
           first=0
         done <<< "$rows"
         eq+=']'
