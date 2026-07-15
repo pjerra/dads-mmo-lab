@@ -1082,6 +1082,16 @@ case "$cmd" in
           *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup" ; exit 1 ;;
         esac
         ;;
+      server-info)
+        # Down is an answer, not an error: unreachable/fault -> online:false.
+        # Only auth failure stays an error (creds are wrong, not the server).
+        if out="$(soap_exec 'server info')"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "$(printf '%s' "$out" | _parse_server_info)" ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+          *) json_ok '{"online":false,"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null}' ;;
+        esac
+        ;;
       items)
         isub="${1:-}"; shift || true
         case "$isub" in

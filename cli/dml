@@ -260,6 +260,39 @@ _accounts_rows_to_json() {
     out+=']'
     printf '%s' "$out"
 }
+# ---------------------------------------------------------------------------
+# WoW config registry + server-info parsing for the DML Launcher.
+# (Registry + config verbs land in this file too — see `wow config` in main.)
+# ---------------------------------------------------------------------------
+
+# Parses the raw text of the SOAP `server info` result (stdin) into a JSON
+# object (stdout). The raw text carries literal `&#xD;` entities because
+# soap_parse_result extracts the <result> text without XML-decoding it.
+# Unparseable fields become null rather than an error -- the Dashboard
+# renders "unknown" for those instead of failing the whole card.
+_parse_server_info() {
+    local raw line version="" players="" uptime="" mean="" median=""
+    raw="$(cat)"
+    raw="${raw//&#xD;/}"
+    while IFS= read -r line; do
+        case "$line" in
+            AzerothCore\ rev.*) version="${line#AzerothCore rev. }" ;;
+            Connected\ players:*) players="${line#Connected players: }"; players="${players%%.*}" ;;
+            Server\ uptime:*) uptime="${line#Server uptime: }" ;;
+            *'|- Mean:'*) mean="${line#*Mean: }"; mean="${mean%%ms*}" ;;
+            *'|- Median:'*) median="${line#*Median: }"; median="${median%%ms*}" ;;
+        esac
+    done <<< "$raw"
+    [[ "$players" =~ ^[0-9]+$ ]] || players=null
+    [[ "$mean" =~ ^[0-9]+$ ]] || mean=null
+    [[ "$median" =~ ^[0-9]+$ ]] || median=null
+    local vjson=null ujson=null
+    [[ -n "$version" ]] && vjson="\"$(json_escape "$version")\""
+    [[ -n "$uptime" ]] && ujson="\"$(json_escape "$uptime")\""
+    printf '{"online":true,"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s}' \
+        "$vjson" "$players" "$ujson" "$mean" "$median"
+    return 0
+}
 
 _require_docker() {
     if ! docker info &>/dev/null; then
@@ -1342,6 +1375,16 @@ case "$cmd" in
           2) json_err SOAP_FAULT "$out" "The worldserver rejected the command." ; exit 1 ;;
           3) json_err SOAP_AUTH "SOAP authentication failed" "Check admin account / gmlevel 3." ; exit 1 ;;
           *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup" ; exit 1 ;;
+        esac
+        ;;
+      server-info)
+        # Down is an answer, not an error: unreachable/fault -> online:false.
+        # Only auth failure stays an error (creds are wrong, not the server).
+        if out="$(soap_exec 'server info')"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "$(printf '%s' "$out" | _parse_server_info)" ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+          *) json_ok '{"online":false,"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null}' ;;
         esac
         ;;
       items)
