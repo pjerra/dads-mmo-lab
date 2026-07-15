@@ -77,6 +77,12 @@ impl DmlRunner {
         })
     }
 
+    /// NB: stdin is written to completion BEFORE the child's stdout is drained
+    /// (`wait_with_output` starts reading only after `write_all` returns). Safe
+    /// for children that consume all of stdin before emitting output (the dml
+    /// raw-write contract), but a child that streams output while still reading
+    /// a large stdin can deadlock both sides on full pipe buffers — if you add
+    /// such a caller, move the write to a dedicated thread first.
     pub fn run_json_with_stdin(&self, args: &[&str], input: &str) -> Result<Envelope, RunnerError> {
         use std::io::Write;
         let mut child = self
