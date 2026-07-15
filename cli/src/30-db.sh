@@ -9,6 +9,7 @@ _db_query() {  # _db_query <schema> <sql>
 }
 db_world_query() { _db_query acore_world "$1"; }
 db_chars_query() { _db_query acore_characters "$1"; }
+db_auth_query() { _db_query acore_auth "$1"; }
 
 sql_escape() {
     local s="${1-}"
