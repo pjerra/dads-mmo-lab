@@ -2,7 +2,11 @@
   import { onMount } from "svelte";
   import { wowAccounts, type Account } from "$lib/api";
 
-  let { selected = $bindable("") }: { selected?: string } = $props();
+  let {
+    selected = $bindable(""),
+    disabled = false,
+    onpick,
+  }: { selected?: string; disabled?: boolean; onpick?: (name: string) => void } = $props();
   let accounts: Account[] = $state([]);
   let accountName = $state("");
   let error: string | null = $state(null);
@@ -25,18 +29,27 @@
 
   function onAccountChange() {
     selected = current?.characters[0]?.name ?? "";
+    onpick?.(selected);
+  }
+
+  function onCharChange() {
+    onpick?.(selected);
   }
 </script>
 
 {#if error}
   <span class="err">Couldn't load characters: {error}</span>
 {:else}
-  <select bind:value={accountName} onchange={onAccountChange}>
+  <select bind:value={accountName} onchange={onAccountChange} {disabled}>
     {#each accounts as a (a.id)}
       <option value={a.username}>{a.username}</option>
     {/each}
   </select>
-  <select bind:value={selected} disabled={!current || current.characters.length === 0}>
+  <select
+    bind:value={selected}
+    onchange={onCharChange}
+    disabled={disabled || !current || current.characters.length === 0}
+  >
     {#each current?.characters ?? [] as c (c.guid)}
       <option value={c.name}>{c.name} (lvl {c.level})</option>
     {/each}
