@@ -981,6 +981,15 @@ case "$cmd" in
     shift || true
     case "$wsub" in
       soap-setup)
+        # yq (mikefarah v4) is required for the YAML merge below and is not
+        # provisioned by the dml-arch installer -- fail with a clean envelope
+        # rather than a bare "command not found" (exit 127). DML_YQ_BIN is an
+        # override seam for tests (mirrors DML_GAMES_DIR from Plan 1).
+        DML_YQ_BIN="${DML_YQ_BIN:-yq}"
+        if ! command -v "$DML_YQ_BIN" >/dev/null 2>&1; then
+            json_err MISSING_DEP "yq is required for soap-setup but not installed" "Run: pacman -S go-yq (inside dml-arch as root)"
+            exit 1
+        fi
         sdir="$(_wow_server_dir)"
         if [[ -z "$sdir" ]]; then
             json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
@@ -988,21 +997,55 @@ case "$cmd" in
         fi
         ovr="$sdir/docker-compose.override.yml"
         [[ -f "$ovr" ]] || printf 'services:\n  ac-worldserver:\n    environment:\n' > "$ovr"
+        envf="$sdir/.env"
+        # The base compose file already publishes
+        # "${DOCKER_SOAP_EXTERNAL_PORT:-7878}:7878" for ac-worldserver.
+        # Compose CONCATENATES ports: lists across base+override, so adding a
+        # ports: entry here would create a second 0.0.0.0 binding alongside
+        # this one, not replace it. Instead we pin the *value* of the
+        # variable the base file already reads, via the compose project's
+        # .env -- that yields exactly one mapping, host_ip 127.0.0.1.
+        soap_line="DOCKER_SOAP_EXTERNAL_PORT=127.0.0.1:7878"
         changed=false
-        if ! grep -q 'AC_SOAP_ENABLED' "$ovr"; then
-            # Merge the SOAP env + a localhost-bound port into the EXISTING
-            # ac-worldserver service with yq (mikefarah v4) — never a second
-            # top-level `services:` block (that would be a duplicate YAML key
-            # and silently drop the existing playerbot env). ports uses unique
-            # so re-runs never duplicate the mapping.
-            yq -i '
+
+        # Merge the SOAP env into the EXISTING ac-worldserver service with yq
+        # — never a second top-level `services:` block (that would be a
+        # duplicate YAML key and silently drop the existing playerbot env).
+        # changed reflects the FULL desired state, not just one key, so a
+        # partially-applied override (e.g. from a future manual edit) is
+        # still detected and repaired.
+        if ! "$DML_YQ_BIN" -e '
+              .services.ac-worldserver.environment.AC_SOAP_ENABLED == "1" and
+              .services.ac-worldserver.environment.AC_SOAP_IP == "0.0.0.0" and
+              .services.ac-worldserver.environment.AC_SOAP_PORT == "7878"
+            ' "$ovr" >/dev/null 2>&1; then
+            "$DML_YQ_BIN" -i '
               .services.ac-worldserver.environment.AC_SOAP_ENABLED = "1" |
               .services.ac-worldserver.environment.AC_SOAP_IP = "0.0.0.0" |
-              .services.ac-worldserver.environment.AC_SOAP_PORT = "7878" |
-              .services.ac-worldserver.ports = ((.services.ac-worldserver.ports // []) + ["127.0.0.1:7878:7878"] | unique)
+              .services.ac-worldserver.environment.AC_SOAP_PORT = "7878"
             ' "$ovr"
             changed=true
         fi
+
+        # Pin the SOAP port mapping to localhost via .env, never clobbering
+        # unrelated lines that might already be there.
+        if [[ ! -f "$envf" ]]; then
+            printf '%s\n' "$soap_line" > "$envf"
+            changed=true
+        elif ! grep -qxF "$soap_line" "$envf"; then
+            if grep -q '^DOCKER_SOAP_EXTERNAL_PORT=' "$envf"; then
+                tmp="$envf.tmp.$$"
+                awk -v line="$soap_line" '
+                  /^DOCKER_SOAP_EXTERNAL_PORT=/ { print line; next }
+                  { print }
+                ' "$envf" > "$tmp" && mv "$tmp" "$envf"
+            else
+                [[ -s "$envf" ]] && [[ "$(tail -c1 "$envf")" != $'\n' ]] && printf '\n' >> "$envf"
+                printf '%s\n' "$soap_line" >> "$envf"
+            fi
+            changed=true
+        fi
+
         json_ok "{\"changed\":$changed,\"restart_required\":$changed}"
         ;;
       *)
