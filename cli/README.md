@@ -82,11 +82,16 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   allowlist-validated or sanitized first — an unvalidated value would be
   command-injection-equivalent (arbitrary console commands on the
   worldserver, i.e. RCE-equivalent). Character names must match
-  `^[A-Za-z0-9_]{1,12}$`; free-form text (teleport `--to`, mail
+  `^[A-Za-z0-9_]{1,12}$`; teleport `--to` must be a single clean token
+  (`^[A-Za-z0-9_-]+$`) — anything else is `BAD_ARG`; free-form text (mail
   `--subject`/`--body`) has embedded double quotes stripped and CR/LF
-  replaced with a space before being quoted into the command — this closes
-  the AC #2695 `.send items` class of bug, where an embedded newline in an
-  argument can be read by the worldserver as a second console command.
+  replaced with a space before being quoted into the command. Both guards
+  close the AC #2695 `.send items` class of bug, where an embedded newline
+  in an argument can be read by the worldserver as a second console command.
+  Note (live-confirmed): AC's modern command parser does **not** strip
+  double quotes around name/location args — only `#subject`/`#text` style
+  QuotedString args take quotes — so the CLI sends names and locations as
+  bare tokens and relies on the allowlists above.
 - Credentials come from environment variables, not flags: `DML_SOAP_USER` /
   `DML_SOAP_PASS` / `DML_SOAP_URL` (default `admin` / `admin` /
   `http://127.0.0.1:7878/`) and `DML_DB_ROOT_PASSWORD` (default `password`).
@@ -155,11 +160,12 @@ silently ignored (treated as if omitted), rather than rejected.
 
 - `dml wow teleport --char <char> --to <location> --json` →
   `{"teleported":true,"char":"<char>","to":"<location>"}`
-  Mutating: sends `teleport name "<char>" "<to>"` over SOAP. `--char` is
-  validated the same way as `mail-item`'s `--to`. `--to` is free-form
-  (`game_tele` location names aren't restricted to the charname allowlist)
-  but has embedded quotes stripped and CR/LF neutralized to a space before
-  being spliced into the console command (same guard as `mail-item`).
+  Mutating: sends `teleport name <char> <to>` over SOAP (both tokens
+  deliberately unquoted — see the parser note above). `--char` is validated
+  the same way as `mail-item`'s `--to`. `--to` must be a single token
+  matching `^[A-Za-z0-9_-]+$` (`BAD_ARG` otherwise); nearly all stock
+  `game_tele` names fit, and the handful containing a space remain
+  reachable via the server's partial-name match on their first word.
   **`--to` is not pre-validated against `game_tele`** — there is no
   existence check before the SOAP call, so an unknown/misspelled location
   surfaces as `SOAP_FAULT` from the worldserver, not a friendlier

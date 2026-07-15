@@ -88,50 +88,48 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
 }
 
-# --- Payload sanitization: assert on the actual SOAP command text ------
+# --- Payload safety: assert on the actual SOAP command text ------------
 # The curl stub (helpers/env.bash) captures the request body it receives on
 # stdin (the XML posted via --data-binary @-) to DML_STUB_CAPTURE when set --
-# i.e. exactly what would go to the worldserver. These tests assert on that
-# captured text rather than trusting the shell-level string ops in isolation.
-# --to is a free-form location name that is used in BOTH a SQL query
-# (teleport-list's --search, sql_escape'd) and a SOAP console command
-# (teleport's --to) -- each context needs its own escaping. This proves the
-# SOAP context strips the same injection surface mail-item already guards
-# (a literal double quote, and an embedded newline that could otherwise be
-# read by the worldserver as a second console command -- the AC #2695
-# `.send items` crash class).
+# i.e. exactly what would go to the worldserver. AC's modern ChatCommands
+# parser does NOT strip double quotes around PlayerIdentifier/GameTele args
+# (live-confirmed 2026-07-15: a quoted token arrives with literal quotes and
+# the command fails), so teleport sends both tokens UNQUOTED and instead
+# allowlists --to to a single clean token. Rejecting (not sanitizing) also
+# closes the AC #2695 embedded-newline surface for this path.
 
-@test "teleport strips a double quote from --to out of the SOAP command" {
+@test "teleport sends unquoted char and location tokens" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
-  run bash "$DML" wow teleport --char Testchar --to 'Storm"wind' --json
+  run bash "$DML" wow teleport --char Testchar --to Stormwind --json
   [ "$status" -eq 0 ]
   [ -s "$DML_STUB_CAPTURE" ]
   captured="$(cat "$DML_STUB_CAPTURE")"
   cmd="${captured#*<command>}"; cmd="${cmd%%</command>*}"
-  # Quote stripped: the raw injected quote never reaches the wire...
-  [[ "$cmd" != *'Storm"wind'* ]]
-  # ...it arrives stripped down to Stormwind, still correctly quoted by the CLI.
-  [[ "$cmd" == *'"Stormwind"'* ]]
+  [ "$cmd" = "teleport name Testchar Stormwind" ]
 }
 
-@test "teleport neutralizes an embedded newline in --to instead of letting it inject a second console command" {
+@test "teleport rejects a double quote in --to as BAD_ARG before any command is built" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
+  run bash "$DML" wow teleport --char Testchar --to 'Storm"wind' --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  # Nothing reached the wire.
+  [ ! -s "$DML_STUB_CAPTURE" ]
+}
+
+@test "teleport rejects an embedded newline in --to as BAD_ARG (AC #2695 surface)" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
   run bash "$DML" wow teleport --char Testchar \
     --to $'Stormwind\n.server shutdown 1' --json
-  [ "$status" -eq 0 ]
-  [ -s "$DML_STUB_CAPTURE" ]
-  captured="$(cat "$DML_STUB_CAPTURE")"
-  cmd="${captured#*<command>}"; cmd="${cmd%%</command>*}"
-  # No raw newline reached the wire: the whole <command>...</command> is one line.
-  [ "$(printf '%s' "$cmd" | wc -l)" -eq 0 ]
-  # The injected ".server shutdown 1" stayed part of the --to argument, on
-  # the same line/text as "Stormwind" -- it was neutralized to a space, not
-  # treated as a separate command.
-  [[ "$cmd" == *'Stormwind .server shutdown 1'* ]]
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ ! -s "$DML_STUB_CAPTURE" ]
 }
 
 # --- Envelope contract for malformed argv (final whole-plan review) -----
@@ -156,12 +154,12 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
 
-@test "teleport --to that sanitizes to empty is BAD_ARG, not a worldserver SOAP_FAULT" {
+@test "teleport --to of a lone quote is BAD_ARG, not a worldserver SOAP_FAULT" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
-  # A --to of a lone double quote sanitizes to "" -- must be caught locally
-  # instead of sending `teleport name "Testchar" ""` to the worldserver.
+  # A --to of a lone double quote fails the location allowlist -- must be
+  # caught locally instead of reaching the worldserver as a garbage token.
   run bash "$DML" wow teleport --char Testchar --to '"' --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]

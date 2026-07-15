@@ -112,3 +112,17 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
+
+@test "mail-item sends the receiver unquoted (AC PlayerIdentifier keeps literal quotes)" {
+  # Live-confirmed 2026-07-15: `send items "Name" ...` fails with the usage
+  # text because AC's parser treats the quotes as part of the name token.
+  # Only #subject/#text are QuotedString args that require quotes.
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/captured.xml"
+  run bash "$DML" wow mail-item --to Testchar --items 6948:1 --subject sub --body bod --json
+  [ "$status" -eq 0 ]
+  [ -s "$DML_STUB_CAPTURE" ]
+  captured="$(cat "$DML_STUB_CAPTURE")"
+  cmd="${captured#*<command>}"; cmd="${cmd%%</command>*}"
+  [ "$cmd" = 'send items Testchar "sub" "bod" 6948:1' ]
+}

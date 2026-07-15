@@ -1148,7 +1148,13 @@ case "$cmd" in
         # be read as a second console command.
         subject="${subject//\"/}"; subject="${subject//$'\n'/ }"; subject="${subject//$'\r'/ }"
         body="${body//\"/}"; body="${body//$'\n'/ }"; body="${body//$'\r'/ }"
-        cmd="send items \"$to\" \"$subject\" \"$body\"$attach"
+        # The receiver is deliberately UNQUOTED: AC's modern ChatCommands
+        # parser (PlayerIdentifier) does not strip double quotes -- a quoted
+        # name arrives as the literal token "Name" and the command fails
+        # with its usage text (found live, 2026-07-15). Only #subject/#text
+        # are QuotedString args that REQUIRE quotes. $to is safe unquoted:
+        # it already passed the strict _valid_charname allowlist above.
+        cmd="send items $to \"$subject\" \"$body\"$attach"
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
         # this whole script (same reason as the identical guard on wow
         # soap-exec above). An unguarded `out="$(soap_exec "$cmd")"; rc=$?`
@@ -1192,22 +1198,20 @@ case "$cmd" in
         done
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
         [[ -n "$to" ]] || { json_err BAD_ARG "Missing --to <location>" "List with: dml wow teleport-list --json"; exit 1; }
-        # --to is free-form (game_tele location names aren't restricted to the
-        # charname allowlist) and is placed inside double quotes in the SOAP
-        # console command -- strip embedded double quotes so it can't break
-        # out of its quoting. Also strip CR/LF (replaced with a space, not
-        # deleted, so words don't glue together): an embedded newline would
-        # otherwise survive bash and reach the worldserver console-command
-        # text intact, exactly like the AC #2695 `.send items` crash surface
-        # documented on wow mail-item above -- a newline in the argument can
-        # be read as a second console command. Same mitigation, reused here.
-        to_clean="${to//\"/}"
-        to_clean="${to_clean//$'\n'/ }"; to_clean="${to_clean//$'\r'/ }"
-        # A --to made only of quotes/CR/LF sanitizes to nothing (or bare
-        # spaces) -- catch that here as BAD_ARG instead of sending
-        # `teleport name "X" ""` and surfacing a raw worldserver SOAP_FAULT.
-        if [[ -z "${to_clean//[[:space:]]/}" ]]; then
-          json_err BAD_ARG "Location is empty after sanitizing: $to" "Provide a valid location; list with: dml wow teleport-list --json"
+        # --to is allowlist-validated instead of quote-wrapped: AC's modern
+        # ChatCommands parser does NOT strip double quotes around
+        # PlayerIdentifier/GameTele args -- a quoted token arrives with the
+        # quotes as literal characters and the command fails (found live,
+        # 2026-07-15: `teleport name "Testen" "Orgrimmar"` -> "Character
+        # '\"testen\"' does not exist"). So both tokens go UNQUOTED, and to
+        # keep that safe --to must be a single clean token. Rejecting (not
+        # sanitizing) also closes the AC #2695 newline surface here: a CR/LF
+        # or quote in --to is now BAD_ARG before any command is built.
+        # game_tele coverage: 1983/1989 stock names match this charset; the
+        # 6 space-containing oddballs remain reachable via AC's partial-name
+        # match on their first word.
+        if [[ ! "$to" =~ ^[A-Za-z0-9_-]+$ ]]; then
+          json_err BAD_ARG "Invalid location name: $to" "Single token, letters/digits/_/- only; list names with: dml wow teleport-list --json"
           exit 1
         fi
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
@@ -1217,9 +1221,9 @@ case "$cmd" in
         # soap_exec exit (fault, auth failure, unreachable) -- before rc=$?
         # or the case below ever runs -- so the failure must be captured
         # inside a conditional.
-        if out="$(soap_exec "teleport name \"$char\" \"$to_clean\"")"; then rc=0; else rc=$?; fi
+        if out="$(soap_exec "teleport name $char $to")"; then rc=0; else rc=$?; fi
         case "$rc" in
-          0) json_ok "{\"teleported\":true,\"char\":\"$(json_escape "$char")\",\"to\":\"$(json_escape "$to_clean")\"}" ;;
+          0) json_ok "{\"teleported\":true,\"char\":\"$(json_escape "$char")\",\"to\":\"$(json_escape "$to")\"}" ;;
           2) json_err SOAP_FAULT "$out" "Unknown location? See dml wow teleport-list." ; exit 1 ;;
           3) json_err SOAP_AUTH "SOAP authentication failed" "" ; exit 1 ;;
           *) json_err SOAP_UNREACHABLE "Could not reach the server" "" ; exit 1 ;;
