@@ -110,9 +110,11 @@ bats tests. Mutations stay SOAP-or-registry-env only; MySQL stays read-only.
   argv length/quoting issues) → `{"written":true,"backup":"<name>.bak"}`.
   `<name>` must be in the file allowlist (`NOT_FOUND` otherwise): `.env`,
   `docker-compose.override.yml`, and the module confs present on the stack
-  (`playerbots.conf`, `mod_ahbot.conf`, `mod_ale.conf`). Implementation pins how
-  each is reached (host bind-mount path vs `docker cp` round-trip) from the real
-  install; the CLI hides that detail. YAML targets are `yq`-validated pre-write;
+  (`playerbots.conf`, `mod_ahbot.conf`, `mod_ale.conf`). Mechanism PINNED
+  (verified on the real install 2026-07-15): the base compose bind-mounts
+  `./env/dist/etc` into the container, so module confs are plain host files at
+  `<server dir>/env/dist/etc/modules/` — raw read/write is ordinary file IO, no
+  `docker cp`. YAML targets (`docker-compose.override.yml` only) are `yq`-validated pre-write;
   invalid → `BAD_ARG`, file untouched. Every write copies the current file to
   `<file>.bak` first (single-slot backup).
 
@@ -130,10 +132,10 @@ already used by this stack for `AC_AI_PLAYERBOT_*` and `AC_SOAP_*`) is verified.
 | Rates | XP from kills | float 0.5–20 | `AC_RATE_XP_KILL` |
 | Rates | XP from quests | float 0.5–20 | `AC_RATE_XP_QUEST` |
 | Rates | Gold drops | float 0.5–20 | `AC_RATE_DROP_MONEY` |
-| Playerbots | World bot population — ONE number, written to BOTH min and max (stable population; matches this stack's min=max=500 default) | int 0–1000 | `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` / `..._MAX_RANDOM_BOTS` |
-| Playerbots | Bots log in at server start | bool | `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` |
-| AHBot | Auction seller bot | bool | `AC_AUCTION_HOUSE_BOT_SELLER_ENABLED` |
-| AHBot | Auction buyer bot | bool | `AC_AUCTION_HOUSE_BOT_BUYER_ENABLED` |
+| Playerbots | World bot population — ONE number, written to BOTH min and max (stable population; NB the installed stack currently has min 1600 / max 2000, so read-back shows the max and the first save normalizes min=max) | int 0–3000 | `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` / `..._MAX_RANDOM_BOTS` (verified: both already present in the stack's override.yml) |
+| Playerbots | Bots log in at server start | bool | `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` (verified in override.yml) |
+| AHBot | Auction seller bot | bool | `AC_AUCTION_HOUSE_BOT_ENABLE_SELLER` (conf key `AuctionHouseBot.EnableSeller`; mangling rule proven by the worldserver's own log: `Updates.EnableDatabases` → `AC_UPDATES_ENABLE_DATABASES`) |
+| AHBot | Auction buyer bot | bool | `AC_AUCTION_HOUSE_BOT_ENABLE_BUYER` |
 | AHBot | Seller character — user picks a character; the CLI resolves it read-only to its guid+account and writes BOTH env keys | char name | `AC_AUCTION_HOUSE_BOT_GUID` + `AC_AUCTION_HOUSE_BOT_ACCOUNT` |
 | Server | Message of the day | text (quotes/CR/LF stripped) | `AC_MOTD` |
 
