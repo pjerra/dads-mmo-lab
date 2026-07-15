@@ -294,6 +294,76 @@ _parse_server_info() {
     return 0
 }
 
+# --- Config registry -------------------------------------------------------
+# One row per curated setting: key|group|label|type|min|max|env|default|explain
+# type: float | int | bool | text | char. bool values are "1"/"0" strings
+# (that is what the AC env bridge expects). ahbot.character is special-cased
+# in `config set` (resolves a character name to GUID+ACCOUNT, writes both).
+# bots.population is special-cased (one number written to MIN and MAX).
+# server.motd is special-cased end to end: this AC build has NO Motd conf key
+# (verified against worldserver.conf.dist 2026-07-15) -- motd lives in
+# acore_auth.motd, is loaded by MotdMgr, and is applied LIVE by the console
+# command `.server set motd`. So its env column is a "-" sentinel, `list`
+# reads it from the DB, and `set` goes over SOAP instead of the override.
+_cfg_rows() {
+cat <<'EOF'
+rates.xp_kill|Rates|XP from kills|float|0.5|20|AC_RATE_XP_KILL|1|Multiplies XP earned from kills. 3 = level three times as fast.
+rates.xp_quest|Rates|XP from quests|float|0.5|20|AC_RATE_XP_QUEST|1|Multiplies XP from quest turn-ins.
+rates.gold|Rates|Gold drops|float|0.5|20|AC_RATE_DROP_MONEY|1|Multiplies money dropped by creatures.
+bots.population|Playerbots|World bot population|int|0|3000|AC_AI_PLAYERBOT_MAX_RANDOM_BOTS|500|How many ambient bots populate the world. Saving writes min and max to this one number.
+bots.autologin|Playerbots|Bots log in at server start|bool|||AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN|1|When on, ambient bots log in automatically after the server starts.
+ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
+ahbot.buyer|AHBot|Auction buyer bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_BUYER|0|When on, the bot occasionally buys player auctions.
+ahbot.character|AHBot|Seller character|char|||AC_AUCTION_HOUSE_BOT_GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
+server.motd|Server|Message of the day|text|||-|Welcome to Dad's MMO Lab!|Shown to every player at login. Applies instantly while the server runs - no restart needed. Quotes and line breaks are removed.
+EOF
+}
+
+# Shared preamble for every `wow config` subcommand: needs yq + the wow dir.
+# Sets: cfg_sdir, cfg_ovr. Emits the error envelope and exits on failure.
+_cfg_preamble() {
+    DML_YQ_BIN="${DML_YQ_BIN:-yq}"
+    if ! command -v "$DML_YQ_BIN" >/dev/null 2>&1; then
+        json_err MISSING_DEP "yq is required for wow config but not installed" "Run: pacman -S go-yq (inside dml-arch as root)"
+        exit 1
+    fi
+    cfg_sdir="$(_wow_server_dir)"
+    if [[ -z "$cfg_sdir" ]]; then
+        json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
+        exit 1
+    fi
+    cfg_ovr="$cfg_sdir/docker-compose.override.yml"
+    return 0
+}
+
+# _cfg_env_read <ENV>: echoes the override's value for that env key, or "".
+_cfg_env_read() {
+    [[ -f "$cfg_ovr" ]] || { printf ''; return 0; }
+    E="$1" "$DML_YQ_BIN" -r '.services.ac-worldserver.environment[strenv(E)] // ""' "$cfg_ovr" 2>/dev/null || printf ''
+    return 0
+}
+
+# _cfg_env_write <ENV> <value>: merges the key into the EXISTING service
+# (soap-setup's proven pattern -- never a second top-level services: block).
+# strenv() keeps hostile values out of the yq program text entirely.
+# Sets CFG_CHANGED=true when the stored value actually changed.
+_cfg_env_write() {
+    local cur
+    cur="$(_cfg_env_read "$1")"
+    [[ "$cur" == "$2" ]] && return 0
+    [[ -f "$cfg_ovr" ]] || printf 'services:\n  ac-worldserver:\n    environment:\n' > "$cfg_ovr"
+    E="$1" V="$2" "$DML_YQ_BIN" -i \
+        '.services.ac-worldserver.environment[strenv(E)] = strenv(V)' "$cfg_ovr"
+    CFG_CHANGED=true
+    return 0
+}
+
+# _float_in_range <val> <min> <max>: 0 iff val is a decimal in [min,max].
+_float_in_range() {
+    [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+    awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'
+}
+
 _require_docker() {
     if ! docker info &>/dev/null; then
         echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2
@@ -1607,6 +1677,117 @@ case "$cmd" in
         # live state until their next auto-save/logout. Live-accurate data
         # would need a SOAP .pinfo call (future refinement, not built here).
         json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
+        ;;
+      config)
+        csub="${1:-}"; shift || true
+        case "$csub" in
+          list)
+            _cfg_preamble
+            # server.motd's live value is DB-backed (acore_auth.motd; no
+            # conf/env var exists in this AC build -- see the registry note).
+            # Look it up ONCE before the loop: db_auth_query's `docker exec
+            # -i` reads stdin, and inside the while-read loop it would swallow
+            # the remaining registry rows from the process substitution.
+            # Guarded (set -e): a down DB or absent docker falls back to the
+            # registry default below, so `list` still answers.
+            if motd_live="$(db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;")"; then :; else motd_live=""; fi
+            first=1; out='['
+            while IFS='|' read -r key group label type minv maxv env def explain; do
+              [[ -z "$key" ]] && continue
+              # Every row is restart-to-apply EXCEPT server.motd, which the
+              # worldserver applies live (MotdMgr) when `set` runs over SOAP.
+              rreq=true
+              if [[ "$key" == "server.motd" ]]; then
+                rreq=false
+                val="$motd_live"
+              else
+                val="$(_cfg_env_read "$env")"
+              fi
+              [[ -n "$val" ]] || val="$def"
+              minj="${minv:-null}"; maxj="${maxv:-null}"
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$(json_escape "$label")\",\"explain\":\"$(json_escape "$explain")\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$(json_escape "$val")\",\"default\":\"$(json_escape "$def")\",\"restart_required\":$rreq,\"env\":\"$env\"}"
+              first=0
+            done < <(_cfg_rows)
+            out+=']'
+            json_ok "{\"settings\":$out}"
+            ;;
+          set)
+            key=""; value=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; key="$2"; shift 2 ;;
+                --value) _need_flag_val "$1" $#; value="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config list --json"; exit 1; }
+            row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
+            [[ "$row" == "$key|"* ]] || { json_err NOT_FOUND "Unknown setting: $key" "See: dml wow config list --json"; exit 1; }
+            IFS='|' read -r _ group label type minv maxv env def explain <<< "$row"
+            _cfg_preamble
+            CFG_CHANGED=false
+            case "$type" in
+              float)
+                _float_in_range "$value" "$minv" "$maxv" \
+                  || { json_err BAD_ARG "$label must be a number between $minv and $maxv, got: $value" ""; exit 1; }
+                ;;
+              int)
+                [[ "$value" =~ ^[0-9]+$ ]] && (( value >= minv && value <= maxv )) \
+                  || { json_err BAD_ARG "$label must be a whole number between $minv and $maxv, got: $value" ""; exit 1; }
+                ;;
+              bool)
+                [[ "$value" =~ ^[01]$ ]] \
+                  || { json_err BAD_ARG "$label takes 1 (on) or 0 (off), got: $value" ""; exit 1; }
+                ;;
+              text)
+                value="${value//\"/}"; value="${value//$'\n'/ }"; value="${value//$'\r'/ }"
+                ;;
+              char)
+                _valid_charname "$value" \
+                  || { json_err BAD_ARG "Invalid character name: $value" "1-12 letters/digits/underscore."; exit 1; }
+                ;;
+            esac
+            if [[ "$key" == "server.motd" ]]; then
+              # Motd is DB-backed and applied LIVE by the worldserver (MotdMgr)
+              # -- no conf/env var exists in this AC build, so `set` goes over
+              # SOAP (`.server set motd <realm> <locale> <text>`) instead of
+              # the override env path, and restart_required is false. The text
+              # is the command's tail, so spaces are fine unquoted -- and it
+              # must NOT be quote-wrapped (AC's parser keeps quotes literal;
+              # live-confirmed 2026-07-15). Guarded assignment (set -e; same
+              # pattern as wow soap-exec above).
+              if out="$(soap_exec "server set motd 1 enUS $value")"; then rc=0; else rc=$?; fi
+              case "$rc" in
+                0) json_ok '{"changed":true,"restart_required":false}' ;;
+                3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env"; exit 1 ;;
+                2) json_err SOAP_FAULT "$out" "The server rejected the motd command."; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "The server must be running to change the message of the day - start it first."; exit 1 ;;
+              esac
+            else
+              if [[ "$key" == "ahbot.character" ]]; then
+                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
+                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
+                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
+                IFS=$'\t' read -r cguid cacct <<< "$crow"
+                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
+                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+                _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
+                _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
+              elif [[ "$key" == "bots.population" ]]; then
+                _cfg_env_write AC_AI_PLAYERBOT_MIN_RANDOM_BOTS "$value"
+                _cfg_env_write AC_AI_PLAYERBOT_MAX_RANDOM_BOTS "$value"
+              else
+                _cfg_env_write "$env" "$value"
+              fi
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
+            fi
+            ;;
+          *)
+            json_err BAD_ARG "Unknown config subcommand: $csub" "Try: dml wow config list --json"
+            exit 1
+            ;;
+        esac
         ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"

@@ -1313,6 +1313,117 @@ case "$cmd" in
         # would need a SOAP .pinfo call (future refinement, not built here).
         json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
         ;;
+      config)
+        csub="${1:-}"; shift || true
+        case "$csub" in
+          list)
+            _cfg_preamble
+            # server.motd's live value is DB-backed (acore_auth.motd; no
+            # conf/env var exists in this AC build -- see the registry note).
+            # Look it up ONCE before the loop: db_auth_query's `docker exec
+            # -i` reads stdin, and inside the while-read loop it would swallow
+            # the remaining registry rows from the process substitution.
+            # Guarded (set -e): a down DB or absent docker falls back to the
+            # registry default below, so `list` still answers.
+            if motd_live="$(db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;")"; then :; else motd_live=""; fi
+            first=1; out='['
+            while IFS='|' read -r key group label type minv maxv env def explain; do
+              [[ -z "$key" ]] && continue
+              # Every row is restart-to-apply EXCEPT server.motd, which the
+              # worldserver applies live (MotdMgr) when `set` runs over SOAP.
+              rreq=true
+              if [[ "$key" == "server.motd" ]]; then
+                rreq=false
+                val="$motd_live"
+              else
+                val="$(_cfg_env_read "$env")"
+              fi
+              [[ -n "$val" ]] || val="$def"
+              minj="${minv:-null}"; maxj="${maxv:-null}"
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$(json_escape "$label")\",\"explain\":\"$(json_escape "$explain")\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$(json_escape "$val")\",\"default\":\"$(json_escape "$def")\",\"restart_required\":$rreq,\"env\":\"$env\"}"
+              first=0
+            done < <(_cfg_rows)
+            out+=']'
+            json_ok "{\"settings\":$out}"
+            ;;
+          set)
+            key=""; value=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; key="$2"; shift 2 ;;
+                --value) _need_flag_val "$1" $#; value="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config list --json"; exit 1; }
+            row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
+            [[ "$row" == "$key|"* ]] || { json_err NOT_FOUND "Unknown setting: $key" "See: dml wow config list --json"; exit 1; }
+            IFS='|' read -r _ group label type minv maxv env def explain <<< "$row"
+            _cfg_preamble
+            CFG_CHANGED=false
+            case "$type" in
+              float)
+                _float_in_range "$value" "$minv" "$maxv" \
+                  || { json_err BAD_ARG "$label must be a number between $minv and $maxv, got: $value" ""; exit 1; }
+                ;;
+              int)
+                [[ "$value" =~ ^[0-9]+$ ]] && (( value >= minv && value <= maxv )) \
+                  || { json_err BAD_ARG "$label must be a whole number between $minv and $maxv, got: $value" ""; exit 1; }
+                ;;
+              bool)
+                [[ "$value" =~ ^[01]$ ]] \
+                  || { json_err BAD_ARG "$label takes 1 (on) or 0 (off), got: $value" ""; exit 1; }
+                ;;
+              text)
+                value="${value//\"/}"; value="${value//$'\n'/ }"; value="${value//$'\r'/ }"
+                ;;
+              char)
+                _valid_charname "$value" \
+                  || { json_err BAD_ARG "Invalid character name: $value" "1-12 letters/digits/underscore."; exit 1; }
+                ;;
+            esac
+            if [[ "$key" == "server.motd" ]]; then
+              # Motd is DB-backed and applied LIVE by the worldserver (MotdMgr)
+              # -- no conf/env var exists in this AC build, so `set` goes over
+              # SOAP (`.server set motd <realm> <locale> <text>`) instead of
+              # the override env path, and restart_required is false. The text
+              # is the command's tail, so spaces are fine unquoted -- and it
+              # must NOT be quote-wrapped (AC's parser keeps quotes literal;
+              # live-confirmed 2026-07-15). Guarded assignment (set -e; same
+              # pattern as wow soap-exec above).
+              if out="$(soap_exec "server set motd 1 enUS $value")"; then rc=0; else rc=$?; fi
+              case "$rc" in
+                0) json_ok '{"changed":true,"restart_required":false}' ;;
+                3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env"; exit 1 ;;
+                2) json_err SOAP_FAULT "$out" "The server rejected the motd command."; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "The server must be running to change the message of the day - start it first."; exit 1 ;;
+              esac
+            else
+              if [[ "$key" == "ahbot.character" ]]; then
+                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
+                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
+                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
+                IFS=$'\t' read -r cguid cacct <<< "$crow"
+                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
+                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+                _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
+                _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
+              elif [[ "$key" == "bots.population" ]]; then
+                _cfg_env_write AC_AI_PLAYERBOT_MIN_RANDOM_BOTS "$value"
+                _cfg_env_write AC_AI_PLAYERBOT_MAX_RANDOM_BOTS "$value"
+              else
+                _cfg_env_write "$env" "$value"
+              fi
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
+            fi
+            ;;
+          *)
+            json_err BAD_ARG "Unknown config subcommand: $csub" "Try: dml wow config list --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
