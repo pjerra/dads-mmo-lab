@@ -55,7 +55,22 @@ impl DmlRunner {
             .output()
             .map_err(|e| RunnerError::Spawn(e.to_string()))?;
         let stdout = decode_wsl_output(&out.stdout);
-        parse_envelope(&stdout).map_err(|_| RunnerError::BadOutput { raw: stdout.clone() })
+        parse_envelope(&stdout).map_err(|parse_err| {
+            if stdout.trim().is_empty() && !out.status.success() {
+                let stderr = decode_wsl_output(&out.stderr);
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    RunnerError::Spawn(format!(
+                        "wsl exited with code {} and no output",
+                        out.status.code().unwrap_or(-1)
+                    ))
+                } else {
+                    RunnerError::Spawn(stderr.to_string())
+                }
+            } else {
+                RunnerError::BadOutput { raw: parse_err }
+            }
+        })
     }
 
     pub fn run_stream(
@@ -142,6 +157,28 @@ mod tests {
     fn run_json_garbage_is_bad_output() {
         match fixture_runner().run_json(&[&fixture("garbage.cmd")]) {
             Err(RunnerError::BadOutput { raw }) => assert!(raw.contains("not json")),
+            other => panic!("expected BadOutput, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_json_empty_stdout_nonzero_exit_is_spawn_error() {
+        match fixture_runner().run_json(&[&fixture("wsl_down.cmd")]) {
+            Err(RunnerError::Spawn(msg)) => assert!(
+                msg.contains("dml-arch"),
+                "expected spawn message to mention dml-arch, got: {msg}"
+            ),
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_json_bad_output_carries_parse_detail() {
+        match fixture_runner().run_json(&[&fixture("garbage.cmd")]) {
+            Err(RunnerError::BadOutput { raw }) => {
+                assert!(raw.contains("not json"));
+                assert!(raw.contains("unparseable"));
+            }
             other => panic!("expected BadOutput, got {other:?}"),
         }
     }
