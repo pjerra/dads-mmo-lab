@@ -100,6 +100,21 @@ features to reach eventual parity with. Representative clusters:
   `import_guest_character`, `pull_visit_snapshot`, `return_home`,
   `list_visit_backups`, `merge_visit_backup`.
 
+### Backlog additions (post-approval, user-requested)
+
+- **Multi-function config editor (requested 2026-07-15):** a config-editing
+  panel that opens **in the same content slot the embedded Terminal uses**
+  (bottom pane of the page area, not a separate OS window). "Multi-function"
+  = one editor covering the several config surfaces the stack already has:
+  the title's `.env` values, `docker-compose.override.yml` env merges (the
+  `soap-setup` write path), and module confs (`playerbots.conf`,
+  `mod_ahbot.conf`, `mod_ale.conf` — The Lab's `update_module_conf` /
+  `read_module_conf_raw` / `write_module_conf_raw` parity cluster above).
+  Needs a matching `dml wow config get|set` CLI verb pair (GUI stays a thin
+  shell); mutations that need a worldserver restart must say so in the
+  response (`restart_required`, same contract as `soap-setup`). Slot it into
+  the launcher-pages plan alongside lighting up the sidebar.
+
 ## 5. Architecture
 
 ```

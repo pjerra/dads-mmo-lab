@@ -9,6 +9,7 @@ Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-sou
 - Plan 2 (launcher shell, Tauri 2 + Svelte 5) — **code-complete + reviewed**; two USER-SUPERVISED gates remain: live `tauri dev` smoke (plan Task 7 Step 4) and one launch of the release exe
 - Plan 3 (WoW SOAP+MySQL features) — **code-complete + final-reviewed (SAFE TO SHIP)**; adds the `dml wow` namespace (see cli/ section). USER GATES remain: create the `dmlsoap` GM3 SOAP account (worldserver console), then SOAP end-to-end verify + live mutating smokes (mail-item/teleport on a throwaway char)
 - Plan 4 (My Party) — NOT written yet; build it on `docs/superpowers/specs/2026-07-15-my-party-spike-findings.md` (rigor-reviewed mechanism: SOAP → Eluna helper → `Player:RunCommand` → `.playerbots bot addclass`; SOAP alone CANNOT add bots)
+- Launcher-pages plan — NOT written yet; light up the disabled sidebar pages (Item DB/Teleport/Dashboard on the Plan 3 CLI backend) + **user-requested multi-function config editor** opening in the Terminal's content slot (see "Backlog additions" in the design spec; needs `dml wow config get|set`)
 - Only ONE controller session may execute a plan on this checkout at a time (a Task-6 double-dispatch already happened once; check `.superpowers/sdd/progress.md` and `git log` before dispatching anything).
 
 ## launcher/ — DML Launcher (Plan 2 output)
