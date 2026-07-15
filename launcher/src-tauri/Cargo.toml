@@ -1,8 +1,9 @@
 [package]
 name = "launcher"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "DML Launcher — graphical front door to the Dad's MMO Lab tooling"
+authors = ["Dad's MMO Lab contributors"]
+license = "AGPL-3.0-only"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
