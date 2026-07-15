@@ -33,6 +33,7 @@
   let file: RawFileName = $state(".env");
   let fileContent = $state("");
   let fileLoaded = $state(false);
+  let loadingFile = $state(false);
   let lastBackup: string | null = $state(null);
 
   let term: TermState = $state(initialTermState());
@@ -78,13 +79,21 @@
     error = null;
     fileLoaded = false;
     lastBackup = null;
+    loadingFile = true;
+    const target = file;
     try {
-      const r = await wowConfigRawRead(file);
-      fileContent = r.content;
-      fileLoaded = true;
+      const r = await wowConfigRawRead(target);
+      if (file === target) {
+        fileContent = r.content;
+        fileLoaded = true;
+      }
     } catch (e) {
       const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      if (file === target) {
+        error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      }
+    } finally {
+      loadingFile = false;
     }
   }
 
@@ -239,10 +248,10 @@
     </div>
   {:else}
     <div class="row">
-      <select bind:value={file} onchange={onFileSelect} disabled={saving || restarting}>
+      <select bind:value={file} onchange={onFileSelect} disabled={saving || restarting || loadingFile}>
         {#each FILES as f (f)}<option value={f}>{f}</option>{/each}
       </select>
-      <button onclick={loadFile} disabled={saving || restarting}>Open</button>
+      <button onclick={loadFile} disabled={saving || restarting || loadingFile}>Open</button>
     </div>
     {#if fileLoaded}
       <textarea
