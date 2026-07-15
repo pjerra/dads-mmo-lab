@@ -283,9 +283,13 @@ All VERIFIED from Lab strings (`hasModAle`, `luaScriptsMissing`, `hasElunaMount`
 
 ## Open items / what a live test would still settle
 
-- **PENDING-LIVE (cosmetic):** exact rejection text of a naked SOAP `playerbots bot add …`
-  once `dmlsoap` exists — predicted `"You may only add bots from an active session"` or a
-  console-availability/usage rejection. Does not change the conclusion.
+- **~~PENDING-LIVE~~ → LIVE-CONFIRMED (2026-07-15, as `dmlsoap`):** naked SOAP
+  `playerbots bot add Somebotname` (and the `playerbot` spelling) fails with the
+  console-availability/usage rejection — the SOAP fault is the `.playerbots` USAGE text
+  listing only `debug / gtask / pmon / rndbot`. The `bot` subcommand (Console::No) is not
+  even *visible* to a session-less invoker, so the command never reaches the
+  "active session" guard. SOAP-only bot add: confirmed impossible, live, exactly as
+  concluded above.
 - **PENDING-LIVE (acceptance):** the full relay (SOAP → `dml_addclass` → in-game join) has not
   been exercised on this server because the bridge scripts are not yet deployed here and no GM
   SOAP account exists. Task 8 of the Plan 4 breakdown is that test.
