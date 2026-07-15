@@ -111,8 +111,9 @@ Eluna player-context relay*. Note it is **not** the client-addon-SavedVariables 
 `BotAutologin`, **not** the TCP `:8888` command server (see Q-notes), and **not** a direct
 `group_member` DB insert — the only DB touch is a *read* to confirm the join (below).
 
-**Join confirmation (VERIFIED, from Lab binary strings):** after firing the command, The Lab
-polls `acore_characters.group_member` for the new member for ~6 s:
+**Join confirmation (INFERRED, from Lab binary strings — co-occurrence, not traced control
+flow):** after firing the command, The Lab appears to poll `acore_characters.group_member` for
+the new member for ~6 s:
 > "No new member joined the group within 6 s. The bot may have spawned but not yet attached"
 
 Party membership is read with (Lab binary string, verbatim):
@@ -187,9 +188,12 @@ SELECT c.guid, c.name, c.class, c.level
  WHERE t.account_type IN (1, 2);
 ```
 
-**How to satisfy from the CLI:** ensure `AiPlayerbot.AddClassCommand=1` (and optionally raise
-`AddClassAccountPoolSize`) via the existing module-conf write path, restart, then use the
-addclass relay. No manual `.account create` needed. (Own-account / guild / linked paths remain
+**How to satisfy from the CLI:** the shipped defaults already satisfy this —
+`playerbots.conf.dist` has `AiPlayerbot.AddClassCommand=1` and `AddClassAccountPoolSize=50`, so
+in the common case nothing needs writing; just use the addclass relay. (No CLI path writes
+`AiPlayerbot.*` keys today — if Plan 4 wants to expose these knobs, that's a new verb to build,
+following the `dml wow soap-setup` env-var/override pattern in `cli/src/90-main.sh`.) No manual
+`.account create` needed. (Own-account / guild / linked paths remain
 available as alternatives but require the bot characters to already exist under the right
 account — more provisioning, so not the recommended default.)
 
@@ -269,7 +273,11 @@ All VERIFIED from Lab strings (`hasModAle`, `luaScriptsMissing`, `hasElunaMount`
    party creation, and clearly flagged as "restarts the server".
 8. **Live gate (user-supervised).** With `dmlsoap` created and a character online, end-to-end:
    `party add` → bot appears in the player's group in-game within 6 s. This is the real
-   acceptance test that the whole relay works on this box.
+   acceptance test that the whole relay works on this box. Check item: if the join is refused,
+   inspect `AiPlayerbot.GroupInvitationPermission` (default 1) — it gates invite acceptance by
+   level/guild in `PlayerbotSecurity::LevelFor` and could bite if the curated bot's level and
+   the master's level diverge sharply (likely only affects non-owner invites to random bots,
+   but cheap to rule out at the gate).
 
 ---
 
