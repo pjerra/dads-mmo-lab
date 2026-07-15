@@ -48,6 +48,21 @@ fn envelope_to_result(env: Envelope) -> Result<serde_json::Value, CmdError> {
     }
 }
 
+async fn run_json_cmd(
+    state: State<'_, AppState>,
+    args: Vec<String>,
+) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        runner.run_json(&refs)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+    .map_err(CmdError::from)
+    .and_then(envelope_to_result)
+}
+
 pub fn validate_game_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -96,6 +111,135 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
         .and_then(envelope_to_result)
 }
 
+#[tauri::command]
+async fn wow_accounts(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "accounts".into()]).await
+}
+
+#[tauri::command]
+async fn wow_server_info(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "server-info".into()]).await
+}
+
+#[tauri::command]
+async fn wow_items_search(
+    name: String,
+    quality: Option<u32>,
+    min_level: Option<u32>,
+    max_level: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> =
+        vec!["wow".into(), "items".into(), "search".into(), "--name".into(), name];
+    if let Some(q) = quality {
+        args.extend(["--quality".into(), q.to_string()]);
+    }
+    if let Some(l) = min_level {
+        args.extend(["--min-level".into(), l.to_string()]);
+    }
+    if let Some(l) = max_level {
+        args.extend(["--max-level".into(), l.to_string()]);
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
+async fn wow_mail_item(
+    to: String,
+    items: String,
+    subject: Option<String>,
+    body: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> =
+        vec!["wow".into(), "mail-item".into(), "--to".into(), to, "--items".into(), items];
+    if let Some(s) = subject {
+        args.extend(["--subject".into(), s]);
+    }
+    if let Some(b) = body {
+        args.extend(["--body".into(), b]);
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
+async fn wow_teleport_list(
+    search: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "teleport-list".into()];
+    if let Some(s) = search {
+        args.extend(["--search".into(), s]);
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
+async fn wow_teleport(
+    char_name: String,
+    to: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "teleport".into(), "--char".into(), char_name, "--to".into(), to],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_paperdoll(
+    char_name: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "paperdoll".into(), "--char".into(), char_name]).await
+}
+
+#[tauri::command]
+async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "config".into(), "list".into()]).await
+}
+
+#[tauri::command]
+async fn wow_config_set(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "config".into(), "set".into(), "--key".into(), key, "--value".into(), value],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_config_raw_read(
+    file: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "config".into(), "raw-read".into(), "--file".into(), file]).await
+}
+
+#[tauri::command]
+async fn wow_config_raw_write(
+    file: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        runner.run_json_with_stdin(
+            &["wow", "config", "raw-write", "--file", &file],
+            &content,
+        )
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+    .map_err(CmdError::from)
+    .and_then(envelope_to_result)
+}
+
 async fn stream_action(
     action: &'static str,
     id: String,
@@ -135,6 +279,15 @@ async fn games_stop(
     stream_action("stop", id, on_event, state).await
 }
 
+#[tauri::command]
+async fn games_restart(
+    id: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_action("restart", id, on_event, state).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -145,7 +298,19 @@ pub fn run() {
             games_list,
             games_status,
             games_start,
-            games_stop
+            games_stop,
+            games_restart,
+            wow_accounts,
+            wow_server_info,
+            wow_items_search,
+            wow_mail_item,
+            wow_teleport_list,
+            wow_teleport,
+            wow_paperdoll,
+            wow_config_list,
+            wow_config_set,
+            wow_config_raw_read,
+            wow_config_raw_write
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -54,6 +54,10 @@ impl DmlRunner {
             .command(args)
             .output()
             .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        self.finish_json(out)
+    }
+
+    fn finish_json(&self, out: std::process::Output) -> Result<Envelope, RunnerError> {
         let stdout = decode_wsl_output(&out.stdout);
         parse_envelope(&stdout).map_err(|parse_err| {
             if stdout.trim().is_empty() && !out.status.success() {
@@ -71,6 +75,27 @@ impl DmlRunner {
                 RunnerError::BadOutput { raw: parse_err }
             }
         })
+    }
+
+    pub fn run_json_with_stdin(&self, args: &[&str], input: &str) -> Result<Envelope, RunnerError> {
+        use std::io::Write;
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        {
+            let mut stdin = child.stdin.take().expect("stdin piped above");
+            stdin
+                .write_all(input.as_bytes())
+                .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        } // dropping stdin closes it so the child sees EOF
+        let out = child
+            .wait_with_output()
+            .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        self.finish_json(out)
     }
 
     pub fn run_stream(
@@ -220,6 +245,15 @@ mod tests {
         assert_eq!(last["event"], "error");
         assert_eq!(last["error"]["code"], "CLI_CRASH");
         assert!(last["error"]["message"].as_str().unwrap().contains("3"));
+    }
+
+    #[test]
+    fn run_json_with_stdin_delivers_input_to_the_child() {
+        let env = fixture_runner()
+            .run_json_with_stdin(&[&fixture("stdin_echo.cmd")], "hello world")
+            .unwrap();
+        assert!(env.ok);
+        assert_eq!(env.data["echo"], "hello world");
     }
 
     #[test]
