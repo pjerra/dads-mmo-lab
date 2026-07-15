@@ -101,3 +101,18 @@ _float_in_range() {
     [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
     awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'
 }
+
+# _cfg_file_path <name>: maps an allowlisted file name to its host path
+# under $cfg_sdir (the base compose bind-mounts ./env/dist/etc into the
+# container, so module confs are ordinary host files). Unknown name -> rc 1.
+# The allowlist is the traversal guard: names are matched literally, never
+# used as path fragments.
+_cfg_file_path() {
+    case "$1" in
+        .env) printf '%s' "$cfg_sdir/.env" ;;
+        docker-compose.override.yml) printf '%s' "$cfg_sdir/docker-compose.override.yml" ;;
+        playerbots.conf|mod_ahbot.conf|mod_ale.conf) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
+        *) return 1 ;;
+    esac
+    return 0
+}

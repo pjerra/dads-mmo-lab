@@ -1418,6 +1418,43 @@ case "$cmd" in
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
             fi
             ;;
+          raw-read)
+            fname=""
+            [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; fname="$2"; shift 2; }
+            [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
+            _cfg_preamble
+            fpath="$(_cfg_file_path "$fname")" \
+              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+            [[ -f "$fpath" ]] || { json_err NOT_FOUND "File does not exist yet: $fname" ""; exit 1; }
+            json_ok "{\"file\":\"$(json_escape "$fname")\",\"content\":\"$(json_escape "$(cat "$fpath")")\"}"
+            ;;
+          raw-write)
+            fname=""
+            [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; fname="$2"; shift 2; }
+            [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
+            _cfg_preamble
+            fpath="$(_cfg_file_path "$fname")" \
+              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+            mkdir -p "$(dirname "$fpath")"
+            tmp="$fpath.tmp.$$"
+            cat > "$tmp"
+            if [[ "$fname" == "docker-compose.override.yml" ]]; then
+              # A syntactically broken override stops the whole stack from
+              # even starting -- validate BEFORE touching the real file.
+              if ! "$DML_YQ_BIN" e '.' "$tmp" >/dev/null 2>&1; then
+                rm -f "$tmp"
+                json_err BAD_ARG "That is not valid YAML - not saved" "Fix the syntax and save again."
+                exit 1
+              fi
+            fi
+            bakjson=null
+            if [[ -f "$fpath" ]]; then
+              cp -p "$fpath" "$fpath.bak"
+              bakjson="\"$(json_escape "$fname.bak")\""
+            fi
+            mv "$tmp" "$fpath"
+            json_ok "{\"written\":true,\"backup\":$bakjson}"
+            ;;
           *)
             json_err BAD_ARG "Unknown config subcommand: $csub" "Try: dml wow config list --json"
             exit 1

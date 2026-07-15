@@ -144,3 +144,47 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "MISSING_DEP" ]
 }
+
+@test "config raw-read returns file content; unknown name is NOT_FOUND" {
+  printf 'FOO=bar\nBAZ=1\n' > "$GDIR/.env"
+  run bash "$DML" wow config raw-read --file .env --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.file')" = ".env" ]
+  # NB: $(cat file) inside the arm strips the trailing newline before
+  # json_escape, and $(...) here strips it again -- compare without it.
+  [ "$(echo "$output" | jq -r '.data.content')" = $'FOO=bar\nBAZ=1' ]
+  run bash "$DML" wow config raw-read --file worldserver.conf --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  run bash "$DML" wow config raw-read --file ../../../etc/passwd --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "config raw-write writes via stdin and keeps a .bak of the old content" {
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  printf 'old=1\n' > "$GDIR/env/dist/etc/modules/playerbots.conf"
+  run bash -c 'printf "new=2\n" | bash "'"$DML"'" wow config raw-write --file playerbots.conf --json'
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.written')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.backup')" = "playerbots.conf.bak" ]
+  [ "$(cat "$GDIR/env/dist/etc/modules/playerbots.conf")" = "new=2" ]
+  [ "$(cat "$GDIR/env/dist/etc/modules/playerbots.conf.bak")" = "old=1" ]
+}
+
+@test "config raw-write of a brand-new file reports backup null" {
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  rm -f "$GDIR/env/dist/etc/modules/mod_ale.conf"
+  run bash -c 'printf "x=1\n" | bash "'"$DML"'" wow config raw-write --file mod_ale.conf --json'
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.backup')" = "null" ]
+}
+
+@test "config raw-write rejects invalid YAML for the override and leaves it untouched" {
+  printf 'services: {}\n' > "$OVR"
+  run bash -c 'printf "services: [unclosed\n" | bash "'"$DML"'" wow config raw-write --file docker-compose.override.yml --json'
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ "$(cat "$OVR")" = "services: {}" ]
+  [ ! -f "$OVR.bak" ]
+}
