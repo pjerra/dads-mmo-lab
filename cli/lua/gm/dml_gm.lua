@@ -49,7 +49,7 @@ local function OnGmCommand(event, player, command)
         local p = find_online(mname)
         if not p then return false end
         local copper = tonumber(mcopper)
-        if not copper then return false end
+        if not copper or copper < 0 or copper ~= math.floor(copper) then return false end
         p:SetCoinage(copper)
         p:SaveToDB()
         print(string.format("[dml_gm] %s coinage -> %d", mname, copper))
