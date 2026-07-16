@@ -75,7 +75,7 @@
     <button onclick={loadDoll} disabled={!charName || loadingDoll}>Show gear</button>
   </div>
   {#if dollError}
-    <div class="error-card"><p>{dollError}</p></div>
+    <div class="error-card"><strong>Couldn't load character gear.</strong><p>{dollError}</p></div>
   {:else if doll}
     <div class="card doll">
       <strong>{doll.name}</strong> — level {doll.level}, {doll.gold} gold

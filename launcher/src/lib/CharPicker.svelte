@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowAccounts, type Account } from "$lib/api";
+  import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
 
   let {
     selected = $bindable(""),
@@ -11,24 +11,35 @@
   let accountName = $state("");
   let error: string | null = $state(null);
 
+  // Every action verb (teleport/mail/etc.) enforces ^[A-Za-z0-9_]{1,12}$ on char
+  // names, but the accounts read path doesn't -- so extended-Latin/Cyrillic
+  // names would otherwise get listed here and then fail every action with an
+  // opaque BAD_ARG. Filter them out before they're ever offered as a choice.
+  const ACTIONABLE_NAME = /^[A-Za-z0-9_]{1,12}$/;
+  function actionable(chars: CharacterSummary[]): CharacterSummary[] {
+    return chars.filter((c) => ACTIONABLE_NAME.test(c.name));
+  }
+
   const current = $derived(accounts.find((a) => a.username === accountName));
+  const currentChars = $derived(actionable(current?.characters ?? []));
 
   onMount(async () => {
     try {
       accounts = await wowAccounts();
-      const first = accounts.find((a) => a.characters.length > 0);
+      const first = accounts.find((a) => actionable(a.characters).length > 0);
       if (first) {
         accountName = first.username;
-        selected = first.characters[0].name;
+        selected = actionable(first.characters)[0].name;
+        onpick?.(selected);
       }
     } catch (e) {
-      const err = e as { message?: string };
-      error = err.message ?? String(e);
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
     }
   });
 
   function onAccountChange() {
-    selected = current?.characters[0]?.name ?? "";
+    selected = currentChars[0]?.name ?? "";
     onpick?.(selected);
   }
 
@@ -48,9 +59,9 @@
   <select
     bind:value={selected}
     onchange={onCharChange}
-    disabled={disabled || !current || current.characters.length === 0}
+    disabled={disabled || !current || currentChars.length === 0}
   >
-    {#each current?.characters ?? [] as c (c.guid)}
+    {#each currentChars as c (c.guid)}
       <option value={c.name}>{c.name} (lvl {c.level})</option>
     {/each}
   </select>

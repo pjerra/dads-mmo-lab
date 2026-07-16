@@ -11,6 +11,7 @@
   } from "$lib/api";
   import { dirtyKeys } from "$lib/config-diff";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
 
@@ -28,7 +29,6 @@
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
   let saving = $state(false);
-  let restartNeeded = $state(false);
 
   let file: RawFileName = $state(".env");
   let fileContent = $state("");
@@ -38,7 +38,6 @@
 
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
-  let restarting = $state(false);
 
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
   const dirty = $derived(dirtyKeys(settings, edits));
@@ -62,7 +61,7 @@
       const toSave = dirty;
       for (const key of toSave) {
         const r = await wowConfigSet(key, edits[key]);
-        if (r.restart_required) restartNeeded = true;
+        if (r.restart_required) restartState.needed = true;
       }
       await load();
       return true;
@@ -105,7 +104,7 @@
       const content = fileContent;
       const r = await wowConfigRawWrite(targetFile, content);
       lastBackup = r.backup;
-      restartNeeded = true;
+      restartState.needed = true;
       return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
@@ -124,14 +123,14 @@
     }
     confirmingRestart = false;
     if (!(await saveFn())) return;
-    restarting = true;
+    restartState.restarting = true;
     showTerm = true;
     term = initialTermState();
     try {
       await gamesRestart(WOW_ID, (e) => {
         term = applyEvent(term, e);
       });
-      restartNeeded = false;
+      restartState.needed = false;
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       term = applyEvent(term, {
@@ -139,7 +138,7 @@
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
     } finally {
-      restarting = false;
+      restartState.restarting = false;
     }
   }
 
@@ -170,7 +169,7 @@
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
-  {#if restartNeeded}
+  {#if restartState.needed}
     <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
   {/if}
 
@@ -187,7 +186,7 @@
             <input
               type="checkbox"
               checked={(edits[s.key] ?? s.value) === "1"}
-              disabled={saving || restarting}
+              disabled={saving || restartState.restarting}
               onchange={(e) => {
                 edits[s.key] = e.currentTarget.checked ? "1" : "0";
                 confirmingRestart = false;
@@ -200,7 +199,7 @@
               max={s.max}
               step={s.type === "float" ? "0.5" : "1"}
               value={edits[s.key] ?? s.value}
-              disabled={saving || restarting}
+              disabled={saving || restartState.restarting}
               oninput={(e) => {
                 edits[s.key] = e.currentTarget.value;
                 confirmingRestart = false;
@@ -211,7 +210,7 @@
               <span class="muted">current id: {s.value}</span>
               <CharPicker
                 selected={edits[s.key] ?? ""}
-                disabled={saving || restarting}
+                disabled={saving || restartState.restarting}
                 onpick={(v: string) => {
                   edits[s.key] = v;
                   confirmingRestart = false;
@@ -221,7 +220,7 @@
           {:else}
             <input
               value={edits[s.key] ?? s.value}
-              disabled={saving || restarting}
+              disabled={saving || restartState.restarting}
               oninput={(e) => {
                 edits[s.key] = e.currentTarget.value;
                 confirmingRestart = false;
@@ -235,23 +234,23 @@
       <button
         class="primary"
         onclick={saveSettings}
-        disabled={dirty.length === 0 || saving || restarting}
+        disabled={dirty.length === 0 || saving || restartState.restarting}
       >
         Save {dirty.length > 0 ? `(${dirty.length})` : ""}
       </button>
       <button
         onclick={() => saveAndRestart(saveSettings)}
-        disabled={dirty.length === 0 || saving || restarting}
+        disabled={dirty.length === 0 || saving || restartState.restarting}
       >
         {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
       </button>
     </div>
   {:else}
     <div class="row">
-      <select bind:value={file} onchange={onFileSelect} disabled={saving || restarting || loadingFile}>
+      <select bind:value={file} onchange={onFileSelect} disabled={saving || restartState.restarting || loadingFile}>
         {#each FILES as f (f)}<option value={f}>{f}</option>{/each}
       </select>
-      <button onclick={loadFile} disabled={saving || restarting || loadingFile}>Open</button>
+      <button onclick={loadFile} disabled={saving || restartState.restarting || loadingFile}>Open</button>
     </div>
     {#if fileLoaded}
       <textarea
@@ -259,12 +258,12 @@
         spellcheck="false"
         bind:value={fileContent}
         oninput={() => (confirmingRestart = false)}
-        disabled={saving || restarting}
+        disabled={saving || restartState.restarting}
       ></textarea>
       {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
       <div class="row">
-        <button class="primary" onclick={saveFile} disabled={saving || restarting}>Save</button>
-        <button onclick={() => saveAndRestart(saveFile)} disabled={saving || restarting}>
+        <button class="primary" onclick={saveFile} disabled={saving || restartState.restarting}>Save</button>
+        <button onclick={() => saveAndRestart(saveFile)} disabled={saving || restartState.restarting}>
           {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
         </button>
       </div>

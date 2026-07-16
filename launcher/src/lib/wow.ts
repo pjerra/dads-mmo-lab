@@ -5,6 +5,8 @@ const QUALITY_NAMES: Record<number, string> = {
   3: "Rare",
   4: "Epic",
   5: "Legendary",
+  6: "Artifact",
+  7: "Heirloom",
 };
 
 export const QUALITY_COLORS: Record<number, string> = {
@@ -14,6 +16,8 @@ export const QUALITY_COLORS: Record<number, string> = {
   3: "#0070dd",
   4: "#a335ee",
   5: "#ff8000",
+  6: "#e6cc80",
+  7: "#00ccff",
 };
 
 export function qualityName(q: number): string {

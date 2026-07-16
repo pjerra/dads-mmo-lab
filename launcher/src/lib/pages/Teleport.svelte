@@ -66,7 +66,7 @@
 
   <div class="row">
     <span class="muted">Who:</span>
-    <CharPicker bind:selected={charName} />
+    <CharPicker bind:selected={charName} onpick={() => { confirming = false; doneMsg = null; }} />
     {#if picked}
       <span class="muted">→ {picked}</span>
       <button class="primary" onclick={go} disabled={!charName || teleporting}>

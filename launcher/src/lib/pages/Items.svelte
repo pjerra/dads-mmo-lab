@@ -5,8 +5,8 @@
 
   let name = $state("");
   let quality = $state<string>("");
-  let minLevel = $state<string>("");
-  let maxLevel = $state<string>("");
+  let minLevel = $state<string | number>("");
+  let maxLevel = $state<string | number>("");
   let rows: ItemRow[] = $state([]);
   let searched = $state(false);
   let searching = $state(false);
@@ -28,8 +28,8 @@
       rows = await wowItemsSearch({
         name: name.trim(),
         quality: quality === "" ? undefined : Number(quality),
-        minLevel: minLevel === "" ? undefined : Number(minLevel),
-        maxLevel: maxLevel === "" ? undefined : Number(maxLevel),
+        minLevel: minLevel === "" ? undefined : Math.max(0, Math.floor(Number(minLevel)) || 0),
+        maxLevel: maxLevel === "" ? undefined : Math.max(0, Math.floor(Number(maxLevel)) || 0),
       });
       searched = true;
     } catch (e) {
@@ -75,8 +75,8 @@
         <option value={String(q)}>{qualityName(q)}</option>
       {/each}
     </select>
-    <input placeholder="Min lvl" size="6" bind:value={minLevel} />
-    <input placeholder="Max lvl" size="6" bind:value={maxLevel} />
+    <input placeholder="Min lvl" size="6" type="number" min="0" step="1" bind:value={minLevel} />
+    <input placeholder="Max lvl" size="6" type="number" min="0" step="1" bind:value={maxLevel} />
     <button class="primary" type="submit" disabled={!name.trim() || searching}>Search</button>
   </form>
 
