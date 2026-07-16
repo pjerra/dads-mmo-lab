@@ -8,8 +8,9 @@ Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-sou
 - Plan 1 (dml CLI JSON foundation) — **complete**, final review verdict READY TO MERGE (merge = user decision, not done)
 - Plan 2 (launcher shell, Tauri 2 + Svelte 5) — **code-complete + reviewed**; two USER-SUPERVISED gates remain: live `tauri dev` smoke (plan Task 7 Step 4) and one launch of the release exe
 - Plan 3 (WoW SOAP+MySQL features) — **code-complete + final-reviewed (SAFE TO SHIP)**; adds the `dml wow` namespace (see cli/ section). USER GATES remain: create the `dmlsoap` GM3 SOAP account (worldserver console), then SOAP end-to-end verify + live mutating smokes (mail-item/teleport on a throwaway char)
-- Plan 4 (My Party, `docs/superpowers/plans/2026-07-16-my-party.md`) — built via SDD, pending final review + user live gate
-- Launcher-pages plan (Item DB/Teleport/Dashboard/Config editor) — **built via SDD, all 12 tasks + gates green**; pending final whole-branch review + the USER-SUPERVISED live click-through (Task 12 Step 5) before merge consideration
+- Plan 4 (My Party, `docs/superpowers/plans/2026-07-16-my-party.md`) — **code-complete + 4-lens final review clean (fix wave re-approved)**; only the USER live gate remains (Enable My Party → restart → add class → bot joins)
+- Launcher-pages plan (Item DB/Teleport/Dashboard/Config editor) — **complete + live-verified** (user click-through passed 2026-07-16)
+- Sidebar-reorg round (Lab-parity round 1, `docs/superpowers/plans/2026-07-16-sidebar-reorg.md`) — **built via SDD, 4-lens final review clean (0 confirmed)**; pending USER click-through (Home landing + start/stop, grouped sidebar, Settings/Modules split, `.env` read-only). Later rounds: GM tools → summon NPCs → My Party phase 2 → char backup/restore.
 - Only ONE controller session may execute a plan on this checkout at a time (a Task-6 double-dispatch already happened once; check `.superpowers/sdd/progress.md` and `git log` before dispatching anything).
 
 ## launcher/ — DML Launcher (Plan 2 output)
