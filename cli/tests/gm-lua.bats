@@ -50,15 +50,19 @@ LUA2="$BATS_TEST_DIRNAME/../lua/gm/dml_summon_npc.lua"
 @test "summon bridge registers hook 42 and gates to console/SOAP origin" {
   grep -q 'RegisterPlayerEvent(42,' "$LUA2"
   grep -qE 'if +player +~= +nil +then +return' "$LUA2"
+  gate_line=$(grep -n 'if player ~= nil then return end' "$LUA2" | head -1 | cut -d: -f1)
+  match_line=$(grep -n 'command:match' "$LUA2" | head -1 | cut -d: -f1)
+  [ "$gate_line" -lt "$match_line" ]
 }
 
 @test "summon bridge pins the dml_summon_npc token with a digits-only entry" {
   grep -q 'dml_summon_npc%s' "$LUA2"
   grep -q '(%d+)' "$LUA2"
+  grep -q 'math.cos(o) \* 2.0' "$LUA2"
 }
 
-@test "summon bridge uses timed self-despawn (type 8, 300000 ms)" {
-  grep -q ', 8, 300000)' "$LUA2"
+@test "summon bridge uses timed self-despawn (type 3, 300000 ms)" {
+  grep -q ', 3, 300000)' "$LUA2"
 }
 
 @test "summon bridge handler returns false to suppress the not-found" {

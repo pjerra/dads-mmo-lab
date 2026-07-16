@@ -4,7 +4,7 @@
 
 **Goal:** A "Summon an NPC" card on the GM Tools page (6 presets + custom entry id) that temp-spawns a service NPC next to an online character via a new `dml_summon_npc` Eluna bridge, with a read-only creature_template existence check in the CLI.
 
-**Architecture:** Same relay as GM tools: page → typed Tauri command → `dml wow gm summon` → SOAP → Eluna hook 42 → `SpawnCreature(..., 8, 300000)` (5-minute self-despawn). The new Lua file lands in `cli/lua/gm/`, so round 2's `bridge-setup` deploys it with zero deploy-code changes.
+**Architecture:** Same relay as GM tools: page → typed Tauri command → `dml wow gm summon` → SOAP → Eluna hook 42 → `SpawnCreature(..., 3, 300000)` (5-minute self-despawn). The new Lua file lands in `cli/lua/gm/`, so round 2's `bridge-setup` deploys it with zero deploy-code changes.
 
 **Tech Stack:** Eluna Lua, bash CLI (built artifact `cli/dml`), bats, Rust/Tauri 2, Svelte 5 runes.
 
@@ -19,7 +19,7 @@
 - Names pass `_valid_charname` before entering any command string. Entry: `^[0-9]+$` AND 1–999999 → else `BAD_ARG`.
 - Existence check order (spec-pinned): validate name → validate entry → `db_world_query` existence+name lookup (`NOT_FOUND` if empty, `DB_UNREACHABLE` on query error) → `_gm_require_online` → `_party_fire`.
 - Success payload exactly: `{"summoned":true,"player":"X","entry":N,"npc":"<name>"}` (npc JSON-escaped).
-- Spawn invariant: type **8** (TEMPSUMMON_TIMED_DESPAWN), timer **300000** ms — pinned by a Lua test.
+- Spawn invariant: type **3** (TEMPSUMMON_TIMED_DESPAWN), timer **300000** ms — pinned by a Lua test.
 - Presets exactly (verified live 2026-07-16): Auctioneer 8661, Banker 5060, Innkeeper 6272, Stable Master 9896, Repair Bot 14337, Casino 990000.
 - `launcher/src-tauri/Cargo.toml` ghost modification: NEVER stage.
 - Committed blobs LF (lua/sh/dml/ts/svelte); bats runs inside the dml-arch WSL distro (`wsl -d dml-arch -u dml -- bash -lc "cd /mnt/c/Users/perzi/dads-mmo-lab/cli && bash build.sh && bats tests/"`); known DrvFs flake ("cannot execute binary file") — re-run once before treating as real.
@@ -67,8 +67,8 @@ Append at the end of the file:
   grep -q '(%d+)' "$LUA2"
 }
 
-@test "summon bridge uses timed self-despawn (type 8, 300000 ms)" {
-  grep -q ', 8, 300000)' "$LUA2"
+@test "summon bridge uses timed self-despawn (type 3, 300000 ms)" {
+  grep -q ', 3, 300000)' "$LUA2"
 }
 
 @test "summon bridge handler returns false to suppress the not-found" {
@@ -96,7 +96,7 @@ Create `cli/lua/gm/dml_summon_npc.lua`:
         dml_summon_npc <playerName> <creatureEntry>
 
     Temp-spawns <creatureEntry> just in front of the ONLINE player.
-    Spawn type 8 = TEMPSUMMON_TIMED_DESPAWN with a 300000 ms timer --
+    Spawn type 3 = TEMPSUMMON_TIMED_DESPAWN with a 300000 ms timer --
     the creature vanishes after 5 minutes no matter what, so repeated
     summons can't litter the world. No DB writes.
 
@@ -125,7 +125,7 @@ local function OnSummonCommand(event, player, command)
     local fy = y + math.sin(o) * 2.0
 
     -- WorldObject:SpawnCreature(entry, x, y, z, o, spawnType, despawnTimer)
-    p:SpawnCreature(e, fx, fy, z, o, 8, 300000)
+    p:SpawnCreature(e, fx, fy, z, o, 3, 300000)
     print(string.format("[dml_summon_npc] %s -> npc %d", pname, e))
     return false
 end

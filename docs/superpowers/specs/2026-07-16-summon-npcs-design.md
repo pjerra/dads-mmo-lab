@@ -15,8 +15,8 @@ AGPL reimplementation of The Lab's `dml_summon_npc.lua` (reference read live fro
 - One command: `dml_summon_npc <playerName> <creatureEntry>` — entry matched with `(%d+)` (digits only at the Lua layer too).
 - Console/SOAP origin gate first: `if player ~= nil then return end`.
 - Resolve via `GetPlayerByName`; if offline, log + `return false` (CLI's online guard makes this unreachable in practice).
-- Spawn 2 yards in front of the player so it doesn't stand inside them: `fx = x + cos(o)*2.0`, `fy = y + sin(o)*2.0`, then `p:SpawnCreature(entry, fx, fy, z, o, 8, 300000)`.
-- **Spawn type 8 = TEMPSUMMON_TIMED_DESPAWN, timer 300000 ms** — the creature vanishes after 5 minutes no matter what; repeated summons can't litter the world. No DB writes.
+- Spawn 2 yards in front of the player so it doesn't stand inside them: `fx = x + cos(o)*2.0`, `fy = y + sin(o)*2.0`, then `p:SpawnCreature(entry, fx, fy, z, o, 3, 300000)`.
+- **Spawn type 3 = TEMPSUMMON_TIMED_DESPAWN, timer 300000 ms** — the creature vanishes after 5 minutes no matter what; repeated summons can't litter the world. No DB writes. (NB: The Lab's own reference uses 8 with a comment claiming timed despawn — on our AC source 8 is TEMPSUMMON_MANUAL_DESPAWN, i.e. never despawns; verified in src/server/game/Entities/Object/Object.h + TemporarySummon.cpp. Deliberate deviation from the reference.)
 - Why a bridge at all (from the Lab's header): `.npc add` needs an in-world GM session with a position, which SOAP doesn't have — Eluna routes through the player's own position.
 
 Because the script lives in the `gm/` family dir, round 2's `dml wow bridge-setup` deploys it with **zero deploy-code changes** (the deploy loop copies every `*.lua` under each family dir). Users who deployed before this round need one redeploy + restart — the existing "Deploy server bridges" button covers it.
@@ -63,7 +63,7 @@ Nothing novel: envelope → CmdError → error card chain. New cases are all CLI
 
 ## Testing & gates
 
-- **gm-lua.bats** (append, against a second file var pointing at `dml_summon_npc.lua`): file exists; AGPL/Dad's MMO Lab header; hook 42; origin gate; token pin `dml_summon_npc%s`; spawn-args pin `, 8, 300000` (the self-despawn invariant); `grep -q 'return false'` on this file (single-handler script, so presence suffices — the count-≥3 pin on `dml_gm.lua` stays as-is).
+- **gm-lua.bats** (append, against a second file var pointing at `dml_summon_npc.lua`): file exists; AGPL/Dad's MMO Lab header; hook 42; origin gate; token pin `dml_summon_npc%s`; spawn-args pin `, 3, 300000` (the self-despawn invariant); `grep -q 'return false'` on this file (single-handler script, so presence suffices — the count-≥3 pin on `dml_gm.lua` stays as-is).
 - **wow-gm.bats** (append): capture-assert `dml_summon_npc Testen 8661` fired; unknown entry (empty DB rows) → NOT_FOUND; DB error → DB_UNREACHABLE; entry 0 / 1000000 / abc → BAD_ARG; offline → NOT_FOUND; SOAP fault → SOAP_FAULT with bridge-setup hint; success payload carries the npc name from the stubbed row.
 - NB the test-stub nuance: the existence lookup (world DB) and the online guard (chars DB) both go through the same docker-exec mysql stub — use `DML_STUB_DB_ROWS_SEQ` (successive row files) like the party add tests where a test needs both lookups.
 - Gates: full bats suite, `svelte-check` 0/0, vitest, `cargo test`, tauri release build.

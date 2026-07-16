@@ -9,7 +9,7 @@
         dml_summon_npc <playerName> <creatureEntry>
 
     Temp-spawns <creatureEntry> just in front of the ONLINE player.
-    Spawn type 8 = TEMPSUMMON_TIMED_DESPAWN with a 300000 ms timer --
+    Spawn type 3 = TEMPSUMMON_TIMED_DESPAWN with a 300000 ms timer --
     the creature vanishes after 5 minutes no matter what, so repeated
     summons can't litter the world. No DB writes.
 
@@ -38,7 +38,7 @@ local function OnSummonCommand(event, player, command)
     local fy = y + math.sin(o) * 2.0
 
     -- WorldObject:SpawnCreature(entry, x, y, z, o, spawnType, despawnTimer)
-    p:SpawnCreature(e, fx, fy, z, o, 8, 300000)
+    p:SpawnCreature(e, fx, fy, z, o, 3, 300000)
     print(string.format("[dml_summon_npc] %s -> npc %d", pname, e))
     return false
 end
