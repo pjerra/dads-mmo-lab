@@ -44,4 +44,6 @@ LUA_DIR="$BATS_TEST_DIRNAME/../lua/party"
 
 @test "scripts carry an AGPL/Dad's MMO Lab header, not Lab bytes" {
   grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_addclass.lua"
+  grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_uninvite.lua"
+  grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_login.lua"
 }

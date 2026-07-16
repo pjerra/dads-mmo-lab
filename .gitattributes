@@ -21,7 +21,11 @@
 *.ksh   text eol=lf
 *.fish  text eol=lf
 *.bats  text eol=lf
-*.lua   text eol=lf
+
+# Our Eluna bridge scripts only (deployed straight to the Linux AC server's
+# lua_scripts dir). Scoped deliberately: a repo-wide *.lua rule would rewrite
+# the CRLF-carrying pristine upstream reference copies under guides/.
+cli/lua/**/*.lua text eol=lf
 
 # Extensionless built CLI artifact (bash script, no .sh suffix) — see note above.
 cli/dml text eol=lf
