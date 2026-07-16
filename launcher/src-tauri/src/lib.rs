@@ -343,6 +343,15 @@ async fn wow_gm_revive(player: String, state: State<'_, AppState>) -> Result<ser
 }
 
 #[tauri::command]
+async fn wow_gm_summon(player: String, entry: u32, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "gm".into(), "summon".into(), "--player".into(), player, "--entry".into(), entry.to_string()],
+    )
+    .await
+}
+
+#[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
@@ -402,7 +411,8 @@ pub fn run() {
             wow_gm_level,
             wow_gm_gold,
             wow_gm_heal,
-            wow_gm_revive
+            wow_gm_revive,
+            wow_gm_summon
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

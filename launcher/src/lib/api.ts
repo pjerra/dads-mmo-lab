@@ -207,6 +207,7 @@ export interface GmLevelResult { leveled: boolean; player: string; level: number
 export interface GmGoldResult { gold_set: boolean; player: string; gold: number; }
 export interface GmHealResult { healed: boolean; player: string; }
 export interface GmReviveResult { revived: boolean; player: string; }
+export interface GmSummonResult { summoned: boolean; player: string; entry: number; npc: string; }
 
 export async function wowGmLevel(player: string, level: number): Promise<GmLevelResult> {
   return await invoke("wow_gm_level", { player, level });
@@ -219,6 +220,9 @@ export async function wowGmHeal(player: string): Promise<GmHealResult> {
 }
 export async function wowGmRevive(player: string): Promise<GmReviveResult> {
   return await invoke("wow_gm_revive", { player });
+}
+export async function wowGmSummon(player: string, entry: number): Promise<GmSummonResult> {
+  return await invoke("wow_gm_summon", { player, entry });
 }
 export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
