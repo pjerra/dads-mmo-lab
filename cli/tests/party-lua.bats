@@ -47,3 +47,14 @@ LUA_DIR="$BATS_TEST_DIRNAME/../lua/party"
   grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_uninvite.lua"
   grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_login.lua"
 }
+
+@test "each bridge matches the exact dml_<verb> token the CLI fires" {
+  # Pins the literal match token in each script's command:match() pattern to
+  # the dml_<verb> prefix the CLI actually fires (50-party.sh / 90-main.sh).
+  # A rename on either side (CLI or Lua) that drifts the token would break
+  # the relay silently in-game while both suites stayed green -- this test
+  # fails that drift here instead.
+  grep -q 'dml_addclass%s' "$LUA_DIR/dml_addclass.lua"
+  grep -q 'dml_uninvite%s' "$LUA_DIR/dml_uninvite.lua"
+  grep -q 'dml_login%s' "$LUA_DIR/dml_login.lua"
+}

@@ -77,6 +77,30 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.bot')" = "Botmage" ]
 }
 
+@test "party add group-diff targets the new bot, not a pre-existing one" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  use_mysql_stub
+  # Before-set already has bot 8000; only 9001 is new. A dropped-diff
+  # refactor could still report joined:true here by latching onto the
+  # pre-existing guid, so assert on the QUERY LOG: the name-lookup query
+  # (the only query with a literal guid=<n>) must target the new bot 9001,
+  # never the pre-existing bot 8000.
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n8000\n' > "$FIXTURE/before.tsv"
+  printf '2503\n8000\n9001\n' > "$FIXTURE/after.tsv"
+  printf 'Botmage\n' > "$FIXTURE/botname.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/before.tsv $FIXTURE/after.tsv $FIXTURE/botname.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=3 DML_PARTY_POLL_SLEEP=0
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "true" ]
+  grep -q 'guid=9001' "$FIXTURE/q.log"
+  ! grep -q 'guid=8000' "$FIXTURE/q.log"
+}
+
 @test "party add returns joined:false with a note when no member appears in time" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
@@ -125,6 +149,21 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
   [ "$cmd" = "dml_addclass Testen druid female" ]
+}
+
+@test "party add with no --gender fires the bridge command without a trailing token" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.xml"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"; printf '2503\n' > "$FIXTURE/solo.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/solo.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
+  [ "$cmd" = "dml_addclass Testen mage" ]
 }
 
 @test "party list returns group members with bot flags" {
@@ -190,4 +229,22 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow party kick --bot Botmage --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+}
+
+@test "party kick maps HTTP 401 to SOAP_AUTH" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-401-unauthorized.txt"
+  export DML_STUB_HTTP=401
+  run bash "$DML" wow party kick --bot Botmage --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
+}
+
+@test "party kick maps curl connection failure to SOAP_UNREACHABLE" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CURL_EXIT=7
+  run bash "$DML" wow party kick --bot Botmage --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
 }
