@@ -310,6 +310,39 @@ async fn wow_party_relogin(player: String, bot: String, state: State<'_, AppStat
 }
 
 #[tauri::command]
+async fn wow_bridge_setup(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "bridge-setup".into()], on_event, state).await
+}
+
+#[tauri::command]
+async fn wow_gm_level(player: String, level: u32, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "gm".into(), "level".into(), "--player".into(), player, "--level".into(), level.to_string()],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_gm_gold(player: String, gold: u32, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "gm".into(), "gold".into(), "--player".into(), player, "--gold".into(), gold.to_string()],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_gm_heal(player: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "gm".into(), "heal".into(), "--player".into(), player]).await
+}
+
+#[tauri::command]
+async fn wow_gm_revive(player: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "gm".into(), "revive".into(), "--player".into(), player]).await
+}
+
+#[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
@@ -364,7 +397,12 @@ pub fn run() {
             wow_party_add,
             wow_party_list,
             wow_party_kick,
-            wow_party_relogin
+            wow_party_relogin,
+            wow_bridge_setup,
+            wow_gm_level,
+            wow_gm_gold,
+            wow_gm_heal,
+            wow_gm_revive
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
