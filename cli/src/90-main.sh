@@ -1674,8 +1674,42 @@ case "$cmd" in
             fi
             json_ok "{\"leveled\":true,\"player\":\"$(json_escape "$player")\",\"level\":$level}"
             ;;
+          gold)
+            player=""; gold=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --gold) _need_flag_val "$1" $#; gold="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            if ! [[ "$gold" =~ ^[0-9]+$ ]] || (( gold > 214748 )); then
+              json_err BAD_ARG "Invalid gold amount: $gold" "Whole gold, 0-214748 (the WotLK money cap)."; exit 1
+            fi
+            _gm_require_online "$player"
+            copper=$(( gold * 10000 ))
+            _party_fire "dml_gm_money $player $copper" "gold"
+            json_ok "{\"gold_set\":true,\"player\":\"$(json_escape "$player")\",\"gold\":$gold}"
+            ;;
+          heal)
+            player=""
+            [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _gm_require_online "$player"
+            _party_fire "dml_gm_health $player 100" "heal"
+            json_ok "{\"healed\":true,\"player\":\"$(json_escape "$player")\"}"
+            ;;
+          revive)
+            player=""
+            [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _gm_require_online "$player"
+            _party_fire "dml_gm_revive $player" "revive"
+            json_ok "{\"revived\":true,\"player\":\"$(json_escape "$player")\"}"
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level --player X --level N --json"
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive --json"
             exit 1
             ;;
         esac

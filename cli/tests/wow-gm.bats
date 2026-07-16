@@ -74,3 +74,81 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "UNKNOWN_COMMAND" ]
 }
+
+# ---------- gm gold / heal / revive (bridge-backed, online-guarded) ----------
+
+@test "gm gold converts gold to copper and fires dml_gm_money" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm gold --player Testen --gold 5000 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.gold_set')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.gold')" = "5000" ]
+  grep -q 'dml_gm_money Testen 50000000' "$FIXTURE/cap.txt"
+}
+
+@test "gm gold accepts the exact cap and rejects one over it" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm gold --player Testen --gold 214748 --json
+  [ "$status" -eq 0 ]
+  grep -q 'dml_gm_money Testen 2147480000' "$FIXTURE/cap.txt"
+  run bash "$DML" wow gm gold --player Testen --gold 214749 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "gm gold rejects negative and non-numeric amounts" {
+  for bad in -5 12.5 abc; do
+    run bash "$DML" wow gm gold --player Testen --gold "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done
+}
+
+@test "gm gold/heal/revive are online-guarded (offline -> NOT_FOUND)" {
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  for sub in "gold --player Ghost --gold 5" "heal --player Ghost" "revive --player Ghost"; do
+    run bash "$DML" wow gm $sub --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  done
+}
+
+@test "gm heal fires dml_gm_health <name> 100" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm heal --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.healed')" = "true" ]
+  grep -q 'dml_gm_health Testen 100' "$FIXTURE/cap.txt"
+}
+
+@test "gm revive fires dml_gm_revive <name>" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm revive --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.revived')" = "true" ]
+  grep -q 'dml_gm_revive Testen' "$FIXTURE/cap.txt"
+}
+
+@test "gm revive maps a SOAP fault to SOAP_FAULT with the bridge-setup hint" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow gm revive --player Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+  echo "$output" | grep -q 'bridge-setup'
+}
