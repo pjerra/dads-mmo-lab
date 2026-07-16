@@ -8,6 +8,28 @@ The GUI is a thin shell: every feature calls the `dml` CLI inside the
 and renders the JSON envelopes / NDJSON event streams documented in
 `../cli/README.md`. No server logic lives in the GUI.
 
+## Pages
+
+- **Library** — install status per game, Start/Stop with live terminal output.
+- **Dashboard** — world up/down, uptime, players online, update-time stats;
+  character viewer (level, gold, equipped gear as of the last save).
+- **Item Database** — search `item_template` by name/quality/level; send any
+  item to a character by in-game mail.
+- **Teleport** — pick a character and one of the ~2000 named locations
+  (two-step confirm).
+- **Config** — Settings tab: curated server settings (XP/gold rates, bot
+  population, bot autologin, AHBot, message of the day) with safe ranges.
+  Every setting except the message of the day writes an `AC_*` env var into
+  the wow title's compose override (restart-to-apply); the message of the
+  day has no env/conf key in this AC build, so it is instead sent over SOAP
+  and applies **instantly** while the server keeps running — no restart.
+  Files tab (Advanced): direct editor for `.env`, the compose override
+  (YAML-validated before save), and the module confs — every save keeps a
+  `.bak`. Both tabs offer **Save** (shows a restart-needed banner) and
+  **Save & Restart** (confirm → streams the restart into the terminal
+  panel).
+- **Playerbots** — disabled until the My Party feature (Plan 4).
+
 ## Dev loop
 
     powershell -File ..\cli\dev-install.ps1   # install/refresh the dml CLI in WSL
