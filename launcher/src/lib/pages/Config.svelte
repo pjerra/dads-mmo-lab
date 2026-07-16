@@ -23,8 +23,10 @@
     "mod_ahbot.conf",
     "mod_ale.conf",
   ];
+  // UI mirror of the CLI's raw-write lock (cli rejects these two names).
+  const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
 
-  let tab: "settings" | "files" = $state("settings");
+  let { tab = "settings" }: { tab?: "settings" | "files" } = $props();
   let settings: ConfigSetting[] = $state([]);
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
@@ -41,6 +43,7 @@
 
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
   const dirty = $derived(dirtyKeys(settings, edits));
+  const fileReadonly = $derived(READONLY_FILES.includes(file));
 
   async function load() {
     error = null;
@@ -116,6 +119,12 @@
   }
 
   let confirmingRestart = $state(false);
+  // Switching between the Settings and Modules sidebar entries changes `tab`
+  // without remounting -- an armed "sure?" confirmation must not survive that.
+  $effect(() => {
+    void tab;
+    confirmingRestart = false;
+  });
   async function saveAndRestart(saveFn: () => Promise<boolean>) {
     if (!confirmingRestart) {
       confirmingRestart = true;
@@ -142,11 +151,6 @@
     }
   }
 
-  function setTab(t: "settings" | "files") {
-    tab = t;
-    confirmingRestart = false;
-  }
-
   function onFileSelect() {
     // Changing which file is targeted must invalidate whatever was loaded/armed
     // for the previous file -- otherwise a stale `fileContent` could get written
@@ -161,11 +165,7 @@
 
 <section class="content">
   <header class="bar">
-    <h2>Config</h2>
-    <div class="tabs">
-      <button class:active={tab === "settings"} onclick={() => setTab("settings")}>Settings</button>
-      <button class:active={tab === "files"} onclick={() => setTab("files")}>Files (Advanced)</button>
-    </div>
+    <h2>{tab === "settings" ? "Settings" : "Modules"}</h2>
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
@@ -258,15 +258,20 @@
         spellcheck="false"
         bind:value={fileContent}
         oninput={() => (confirmingRestart = false)}
+        readonly={fileReadonly}
         disabled={saving || restartState.restarting}
       ></textarea>
-      {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
-      <div class="row">
-        <button class="primary" onclick={saveFile} disabled={saving || restartState.restarting}>Save</button>
-        <button onclick={() => saveAndRestart(saveFile)} disabled={saving || restartState.restarting}>
-          {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
-        </button>
-      </div>
+      {#if fileReadonly}
+        <p class="muted">Read-only — locked so a bad edit can't run commands on your PC. Change these via the Settings page.</p>
+      {:else}
+        {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
+        <div class="row">
+          <button class="primary" onclick={saveFile} disabled={saving || restartState.restarting}>Save</button>
+          <button onclick={() => saveAndRestart(saveFile)} disabled={saving || restartState.restarting}>
+            {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
+          </button>
+        </div>
+      {/if}
     {/if}
   {/if}
 
@@ -279,8 +284,6 @@
   .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
-  .tabs button { background: none; border: 1px solid #30363d; color: #8b949e; border-radius: 6px 6px 0 0; padding: 6px 14px; cursor: pointer; }
-  .tabs button.active { color: #f0f6fc; background: #161b22; }
   h3 { margin: 10px 0 0; font-size: 15px; color: #58a6ff; }
   .setting { display: flex; justify-content: space-between; align-items: center; gap: 16px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
   .setting.dirty { border-color: #d29922; }
