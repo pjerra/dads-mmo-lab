@@ -2,6 +2,7 @@
 # Static pins for the GM bridge script (no Eluna runtime in CI).
 # Same posture as party-lua.bats: assert the load-bearing invariants.
 LUA="$BATS_TEST_DIRNAME/../lua/gm/dml_gm.lua"
+LUA2="$BATS_TEST_DIRNAME/../lua/gm/dml_summon_npc.lua"
 
 @test "gm bridge script exists" {
   [ -f "$LUA" ]
@@ -38,4 +39,28 @@ LUA="$BATS_TEST_DIRNAME/../lua/gm/dml_gm.lua"
 @test "gm bridge carries an AGPL/Dad's MMO Lab header, not Lab bytes" {
   grep -qiE "Dad's MMO Lab" "$LUA"
   grep -qi 'AGPL' "$LUA"
+}
+
+@test "summon bridge exists with an AGPL/Dad's MMO Lab header" {
+  [ -f "$LUA2" ]
+  grep -qi 'AGPL' "$LUA2"
+  grep -qiE "Dad's MMO Lab" "$LUA2"
+}
+
+@test "summon bridge registers hook 42 and gates to console/SOAP origin" {
+  grep -q 'RegisterPlayerEvent(42,' "$LUA2"
+  grep -qE 'if +player +~= +nil +then +return' "$LUA2"
+}
+
+@test "summon bridge pins the dml_summon_npc token with a digits-only entry" {
+  grep -q 'dml_summon_npc%s' "$LUA2"
+  grep -q '(%d+)' "$LUA2"
+}
+
+@test "summon bridge uses timed self-despawn (type 8, 300000 ms)" {
+  grep -q ', 8, 300000)' "$LUA2"
+}
+
+@test "summon bridge handler returns false to suppress the not-found" {
+  grep -q 'return false' "$LUA2"
 }
