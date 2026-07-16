@@ -112,7 +112,7 @@
     <strong>Set level</strong>
     <input type="number" min="1" max="255" bind:value={level}
       oninput={() => (confirming = null)} disabled={busy} />
-    <button onclick={applyLevel} disabled={!charName || busy || level < 1 || level > 255}>
+    <button onclick={applyLevel} disabled={!charName || busy || !Number.isInteger(level) || level < 1 || level > 255}>
       {confirming === "level" ? "This can lower the level — sure?" : "Apply"}
     </button>
     <span class="muted">1–255; your server's max level applies. Works offline.</span>
@@ -122,7 +122,7 @@
     <strong>Set gold</strong>
     <input type="number" min="0" max="214748" bind:value={gold}
       oninput={() => (confirming = null)} disabled={busy} />
-    <button onclick={applyGold} disabled={!charName || !isOnline || busy || gold < 0 || gold > 214748}>
+    <button onclick={applyGold} disabled={!charName || !isOnline || busy || !Number.isInteger(gold) || gold < 0 || gold > 214748}>
       {confirming === "gold" ? "This replaces their current money — sure?" : "Apply"}
     </button>
     <span class="muted">Sets the total (not adds). Max 214,748 gold.</span>
