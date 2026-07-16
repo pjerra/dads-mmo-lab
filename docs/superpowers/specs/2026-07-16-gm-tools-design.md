@@ -36,7 +36,7 @@ All return the standard JSON envelope; character names pass `_valid_charname` be
 
 | Verb | Args | Path | Notes |
 |---|---|---|---|
-| `gm level` | `--player X --level N` | stock SOAP `.character level X N` | N range-checked 1–80 (`BAD_ARG` outside); works for **offline** characters; absolute (can de-level) |
+| `gm level` | `--player X --level N` | stock SOAP `.character level X N` | N range-checked 1–255 (AC's hard cap; the server's own MaxPlayerLevel config governs beyond that — the live box already has a level-100 character, so 80 would be a false limit); `BAD_ARG` outside; works for **offline** characters; absolute (can de-level) |
 | `gm gold` | `--player X --gold N` | bridge `dml_gm_money X <N*10000>` | gold→copper ×10,000; cap 214,748 gold (2^31−1 copper) → `BAD_ARG` above; online-guarded |
 | `gm heal` | `--player X` | bridge `dml_gm_health X 100` | online-guarded |
 | `gm revive` | `--player X` | bridge `dml_gm_revive X` | online-guarded |
@@ -52,7 +52,7 @@ Bash constraints carried from prior rounds: `set -euo pipefail` — guard every 
 **New page `launcher/src/lib/pages/GMTools.svelte`:**
 - Character row: existing `CharPicker` (any character) + Online/Offline badge from `wowPartyOnline()` (already excludes bots; no new CLI) + Refresh.
 - **Revive** / **Full heal**: single-click buttons; disabled with a "needs the character online" hint when offline.
-- **Set level**: number input 1–80 + Apply with the standard two-step confirm ("This can lower the level — sure?"); enabled regardless of online state.
+- **Set level**: number input 1–255 (hint: "your server's max level applies") + Apply with the standard two-step confirm ("This can lower the level — sure?"); enabled regardless of online state.
 - **Set gold**: number input 0–214748 + Apply with two-step confirm ("This replaces their current money — sure?").
 - Feedback: short success note per action ("Revived Testen"); failures in the standard error card with the CLI hint.
 - One-time **"Deploy server bridges"** two-step button (same pattern/copy family as Playerbots' Enable): streams `wow_bridge_setup` into the shared Terminal, sets `restartState.needed` on `done.restart_required`, notes that a restart loads the scripts. Needed for users who ran party-setup before this round (their server lacks the GM script until a redeploy + restart).
@@ -71,7 +71,8 @@ Nothing novel: CLI envelopes → Rust CmdError → error card with hint (establi
 - **lua pin tests** (like party-lua.bats): AGPL header on `dml_gm.lua`; grep-pin each trigger token (`dml_gm_health%s`, `dml_gm_money%s`, `dml_gm_revive%s`) so a CLI↔Lua rename can't silently break the relay; origin-gate line present.
 - **vitest**: nav pins updated (gmtools in CHARACTERS).
 - Gates: full bats suite, `svelte-check` 0/0, vitest, `cargo test`, tauri release build.
-- **User live gate (later, with round 1's click-through):** bridge-setup + restart; revive/heal/gold on an online char; level on an offline char; `.character level` output shape confirmed live (server was down during design — stock AC command, syntax verified against AC source conventions, parse pinned at the gate).
+- **`.character level` pinned LIVE during design** (server started 2026-07-16; a Docker bridge-networking failure was diagnosed and fixed on the way — daemon restart rebuilt iptables): success `{"ok":true,"data":{"result":"You changed level of Testen to 1.&#xD;"}}`; unknown char → `SOAP_FAULT` with AC's "Either/Or" ambiguity text. The gm level verb treats any ok envelope as success and emits its own `{leveled:true,...}` payload — no text parsing.
+- **User live gate (later, with round 1's click-through):** bridge-setup + restart; revive/heal/gold on an online char; level on an offline char.
 
 ## Out of scope
 
