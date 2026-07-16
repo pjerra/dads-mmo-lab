@@ -1619,6 +1619,27 @@ case "$cmd" in
             out+=']'
             json_ok "{\"members\":$out}"
             ;;
+          kick)
+            bot=""
+            [[ "${1:-}" == "--bot" ]] && { _need_flag_val "$1" $#; bot="$2"; shift 2; }
+            _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
+            _party_fire "dml_uninvite $bot" "kick"
+            json_ok "{\"kicked\":true}"
+            ;;
+          relogin)
+            player=""; bot=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
+            _party_fire "dml_login $player $bot" "relogin"
+            json_ok "{\"relogged\":true}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online --json"
             exit 1

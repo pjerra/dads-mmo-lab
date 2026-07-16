@@ -154,3 +154,40 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
+
+@test "party kick fires dml_uninvite over SOAP" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.xml"
+  run bash "$DML" wow party kick --bot Botmage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.kicked')" = "true" ]
+  cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
+  [ "$cmd" = "dml_uninvite Botmage" ]
+}
+
+@test "party kick rejects a bad bot name" {
+  use_curl_stub
+  run bash "$DML" wow party kick --bot 'x y' --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "party relogin fires dml_login player+bot over SOAP" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.xml"
+  run bash "$DML" wow party relogin --player Testen --bot Botmage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.relogged')" = "true" ]
+  cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
+  [ "$cmd" = "dml_login Testen Botmage" ]
+}
+
+@test "party kick maps a SOAP fault to a party-setup hint" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow party kick --bot Botmage --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+}
