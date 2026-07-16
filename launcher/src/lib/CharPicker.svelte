@@ -30,7 +30,11 @@
       if (first) {
         accountName = first.username;
         selected = actionable(first.characters)[0].name;
-        onpick?.(selected);
+        // NB: deliberately NOT calling onpick here. Mount-time staging is wrong
+        // for one-way consumers (Config's AHBot seller row): it would mark the
+        // row dirty on page load and sweep a silent seller reassignment into any
+        // unrelated save. A displayed default must not commit itself -- the user
+        // must actively pick (onCharChange/onAccountChange fire onpick).
       }
     } catch (e) {
       const err = e as { message?: string; hint?: string };
