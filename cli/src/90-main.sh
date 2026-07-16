@@ -1476,6 +1476,45 @@ case "$cmd" in
             ;;
         esac
         ;;
+      party-setup|setup)
+        # Streaming (NDJSON) like games start/restart. NB: matched directly
+        # on $wsub ("dml wow party-setup"), not via a nested "party" dispatch
+        # -- $wsub is the single token "party-setup", so a `party)` arm would
+        # never match it (bash case patterns are exact/glob, not prefix).
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start party-setup
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_section_end party-setup error
+            ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+          else echo "[dml] ERROR: wow server not installed" >&2; fi
+          exit 1
+        fi
+        # Preflight: SOAP reachable (a loaded bridge needs a running,
+        # SOAP-reachable server to matter). Probe with a harmless command.
+        [[ "$DML_JSON" == 1 ]] && ndjson_line info "checking SOAP..."
+        if out="$(soap_exec 'server info')"; then :; else
+          rc=$?
+          if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_section_end party-setup error
+            case "$rc" in
+              3) ndjson_error SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ;;
+              *) ndjson_error SOAP_UNREACHABLE "Could not reach the server over SOAP" "Start the server, then re-run." ;;
+            esac
+          fi
+          exit 1
+        fi
+        [[ "$DML_JSON" == 1 ]] && ndjson_line info "deploying bridge scripts..."
+        changed="$(_party_deploy_scripts "$sdir")"
+        ch=false; [[ "$changed" == changed ]] && ch=true   # bare (top-level dispatch, no `local`)
+        if [[ "$DML_JSON" == 1 ]]; then
+          ndjson_line info "scripts deployed (changed=$ch)"
+          ndjson_section_end party-setup ok
+          ndjson_done "{\"changed\":$ch,\"restart_required\":$ch}"
+        else
+          echo "[dml] party-setup done (changed=$ch, restart_required=$ch)"
+        fi
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
