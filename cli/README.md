@@ -272,3 +272,41 @@ silently ignored (treated as if omitted), rather than rejected.
   message specific if malformed content is ever submitted). Both verbs run
   the shared config preamble first, so `NOT_FOUND` (wow title not
   installed) and `MISSING_DEP` (yq) apply here too.
+
+## party subcommands (My Party)
+
+`dml wow party …` builds a playerbot party for a logged-in player via
+SOAP-triggered Eluna bridge scripts (deployed by `party-setup`). Every op
+needs the player's character **online**. Mutations go through the bridges
+(`dml_addclass`/`dml_uninvite`/`dml_login`) over SOAP; reads are read-only
+MySQL. Ambient random bots are excluded from `party online` and flagged in
+`party list` via `acore_playerbots.playerbots_account_type`.
+
+- `dml wow party-setup --json` → NDJSON stream, terminal `done` data
+  `{"changed":bool,"restart_required":bool}`. Deploys the 3 bridge scripts
+  into `<server dir>/env/dist/etc/modules/lua_scripts/` and preflights SOAP.
+  `restart_required` is true whenever scripts changed — Eluna loads them at
+  worldserver startup (this build has no live Lua reload), so a one-time
+  restart is needed. Errors: `NOT_FOUND` (server not installed), `SOAP_AUTH`,
+  `SOAP_UNREACHABLE`.
+- `dml wow party online --json` → `{"online":[{"guid","name","class","level"}]}`.
+  Read-only: human characters currently online (bots excluded). `class` is the
+  numeric class id (1=Warrior … 11=Druid). Errors: `DB_UNREACHABLE`.
+- `dml wow party add --player <name> --class <c> [--gender male|female] --json`
+  → `{"added":true,"joined":bool,"bot":<name|null>,"note":<str|null>}`.
+  `<c>` ∈ warrior/paladin/hunter/rogue/priest/shaman/mage/warlock/druid
+  (`BAD_ARG` otherwise). Online-guarded (`NOT_FOUND` if the player isn't
+  online). Fires `dml_addclass` then polls `group_member` (~6 s) for a new
+  member: `joined:true` + the bot's name, or `joined:false` + a soft note.
+  A `SOAP_FAULT` here usually means the bridge isn't loaded — run party-setup
+  and restart. Errors: `BAD_ARG`, `NOT_FOUND`, `SOAP_AUTH`, `SOAP_FAULT`,
+  `SOAP_UNREACHABLE`.
+- `dml wow party list --player <name> --json` →
+  `{"members":[{"guid","name","class","level","is_bot"}]}`. Read-only group
+  members (empty if solo). Online-guarded. Errors: `BAD_ARG`, `NOT_FOUND`,
+  `DB_UNREACHABLE`.
+- `dml wow party kick --bot <name> --json` → `{"kicked":true}` (fires
+  `dml_uninvite`). `dml wow party relogin --player <name> --bot <name> --json`
+  → `{"relogged":true}` (fires `dml_login`). Names allowlisted
+  `^[A-Za-z0-9_]{1,12}$`. Errors: `BAD_ARG`, `SOAP_AUTH`, `SOAP_FAULT`,
+  `SOAP_UNREACHABLE`.

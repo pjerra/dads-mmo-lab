@@ -388,7 +388,7 @@ _cfg_file_path() {
 # relative to this script's own location at build time is not possible in the
 # concatenated artifact, so we resolve from the CLI's known repo layout via
 # DML_LUA_DIR (test seam), falling back to the install-relative path.
-_party_lua_src_dir() { echo "${DML_LUA_DIR:-/mnt/c/Users/perzi/dads-mmo-lab/cli/lua/party}"; }
+_party_lua_src_dir() { echo "${DML_LUA_DIR:-/usr/local/share/dml/lua/party}"; }
 
 # Host dir where mod-ale loads scripts (bind-mounted into the container at
 # ALE.ScriptPath). <server dir>/env/dist/etc/modules/lua_scripts.
