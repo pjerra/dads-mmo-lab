@@ -1659,9 +1659,10 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            if ! [[ "$level" =~ ^[0-9]+$ ]] || (( level < 1 || level > 255 )); then
+            if ! [[ "$level" =~ ^[0-9]+$ ]] || (( 10#$level < 1 || 10#$level > 255 )); then
               json_err BAD_ARG "Invalid level: $level" "Use 1-255 (your server's own max level still applies)."; exit 1
             fi
+            level=$(( 10#$level ))
             # Stock AC command; works for OFFLINE characters too. Success is
             # the ok envelope itself -- the result text is not parsed.
             if out="$(soap_exec ".character level $player $level")"; then :; else
@@ -1684,9 +1685,10 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            if ! [[ "$gold" =~ ^[0-9]+$ ]] || (( gold > 214748 )); then
+            if ! [[ "$gold" =~ ^[0-9]+$ ]] || (( 10#$gold > 214748 )); then
               json_err BAD_ARG "Invalid gold amount: $gold" "Whole gold, 0-214748 (the WotLK money cap)."; exit 1
             fi
+            gold=$(( 10#$gold ))
             _gm_require_online "$player"
             copper=$(( gold * 10000 ))
             _party_fire "dml_gm_money $player $copper" "gold"
@@ -1718,9 +1720,10 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            if ! [[ "$entry" =~ ^[0-9]+$ ]] || (( entry < 1 || entry > 999999 )); then
+            if ! [[ "$entry" =~ ^[0-9]+$ ]] || (( 10#$entry < 1 || 10#$entry > 999999 )); then
               json_err BAD_ARG "Invalid creature entry: $entry" "Creature entry id, 1-999999."; exit 1
             fi
+            entry=$(( 10#$entry ))
             # Existence + name lookup (read-only) BEFORE any SOAP fire, so a
             # bad custom entry fails with a clean message instead of an
             # in-game silent no-op.

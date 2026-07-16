@@ -230,3 +230,26 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
   echo "$output" | grep -q 'bridge-setup'
 }
+
+@test "gm summon normalizes leading-zero entries (octal-safe)" {
+  printf 'Auctioneer Beardo\n' > "$FIXTURE/npc.tsv"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/npc.tsv $FIXTURE/guid.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm summon --player Testen --entry 0008661 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.entry')" = "8661" ]
+  grep -q 'dml_summon_npc Testen 8661' "$FIXTURE/cap.txt"
+}
+
+@test "gm validators reject octal-looking out-of-range values with BAD_ARG (no bash error leak)" {
+  run bash "$DML" wow gm summon --player Testen --entry 081000000 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  run bash "$DML" wow gm level --player Testen --level 0999 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
