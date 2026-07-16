@@ -28,7 +28,10 @@ and renders the JSON envelopes / NDJSON event streams documented in
   `.bak`. Both tabs offer **Save** (shows a restart-needed banner) and
   **Save & Restart** (confirm → streams the restart into the terminal
   panel).
-- **Playerbots** — disabled until the My Party feature (Plan 4).
+- **Playerbots (My Party)** — auto-detects your online character and builds a
+  party of playerbots: click a class to add a bot, see your group, kick or
+  re-summon bots. First use shows **Enable My Party** (one-time: deploys the
+  Eluna bridge scripts + one server restart). Requires the character online.
 
 ## Dev loop
 
