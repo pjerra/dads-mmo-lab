@@ -5,6 +5,7 @@
   import Dashboard from "$lib/pages/Dashboard.svelte";
   import Items from "$lib/pages/Items.svelte";
   import Teleport from "$lib/pages/Teleport.svelte";
+  import GMTools from "$lib/pages/GMTools.svelte";
   import Config from "$lib/pages/Config.svelte";
   import Playerbots from "$lib/pages/Playerbots.svelte";
 
@@ -26,6 +27,7 @@
   {#if page === "library"}<Library />{/if}
   {#if page === "dashboard"}<Dashboard />{/if}
   {#if page === "teleport"}<Teleport />{/if}
+  {#if page === "gmtools"}<GMTools />{/if}
   {#if page === "items"}<Items />{/if}
   {#if page === "playerbots"}<Playerbots />{/if}
   {#if page === "settings" || page === "modules"}

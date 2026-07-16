@@ -13,6 +13,7 @@ export const NAV = [
     pages: [
       { id: "dashboard", label: "Dashboard" },
       { id: "teleport", label: "Teleport" },
+      { id: "gmtools", label: "GM Tools" },
     ],
   },
   {

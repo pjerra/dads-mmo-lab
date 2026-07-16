@@ -10,6 +10,7 @@ describe("NAV", () => {
       "library",
       "dashboard",
       "teleport",
+      "gmtools",
       "items",
       "playerbots",
       "settings",
