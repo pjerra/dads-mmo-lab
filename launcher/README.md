@@ -10,29 +10,43 @@ and renders the JSON envelopes / NDJSON event streams documented in
 
 ## Pages
 
+The sidebar is grouped into sections; entries for upcoming features appear
+as they ship.
+
+**Server**
+- **Home** — landing page: world up/down card (players, uptime, update-time
+  stats) plus Start/Stop for the WoW server with live terminal output.
 - **Library** — install status per game, Start/Stop with live terminal output.
+
+**Characters**
 - **Dashboard** — world up/down, uptime, players online, update-time stats;
   character viewer (level, gold, equipped gear as of the last save).
-- **Item Database** — search `item_template` by name/quality/level; send any
-  item to a character by in-game mail.
 - **Teleport** — pick a character and one of the ~2000 named locations
   (two-step confirm).
-- **Config** — Settings tab: curated server settings (XP/gold rates, bot
-  population, bot autologin, AHBot, message of the day) with safe ranges.
-  Every setting except the message of the day writes an `AC_*` env var into
-  the wow title's compose override (restart-to-apply); the message of the
-  day has no env/conf key in this AC build, so it is instead sent over SOAP
-  and applies **instantly** while the server keeps running — no restart.
-  Files tab (Advanced): direct editor for `.env`, the compose override
-  (YAML-validated before save), and the module confs — every save keeps a
-  `.bak`. Both tabs offer **Save** (shows a restart-needed banner) and
-  **Save & Restart** (confirm → streams the restart into the terminal
-  panel).
+
+**Items & Bots**
+- **Item Database** — search `item_template` by name/quality/level; send any
+  item to a character by in-game mail.
 - **Playerbots (My Party)** — auto-detects your online character and builds a
   party of playerbots: click a class to add a bot, see your group, kick or
   re-summon bots. First use shows **Enable My Party** (one-time: deploys the
-  Eluna bridge scripts — then restart the server from Library or Config to
-  load them). Requires the character online.
+  Eluna bridge scripts — then stop and start the server from Home or Library
+  to load them). Requires the character online.
+
+**Config** (Settings and Modules are one editor split across two entries; a
+save on either shows the restart-needed banner on both)
+- **Settings** — curated server settings (XP/gold rates, bot population, bot
+  autologin, AHBot, message of the day) with safe ranges. Every setting
+  except the message of the day writes an `AC_*` env var into the wow
+  title's compose override (restart-to-apply); the message of the day has no
+  env/conf key in this AC build, so it is instead sent over SOAP and applies
+  **instantly** while the server keeps running — no restart.
+- **Modules** — direct editor for the module confs (`playerbots.conf`,
+  `mod_ahbot.conf`, `mod_ale.conf`, YAML/`.bak` semantics unchanged: every
+  save keeps a `.bak`). `.env` and the compose override open **read-only** —
+  a bad edit there could run commands on the host, so they are locked; change
+  them via Settings. Save shows a restart-needed banner; Save & Restart
+  streams the restart into the terminal panel.
 
 ## Dev loop
 
