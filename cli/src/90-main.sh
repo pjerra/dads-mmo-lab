@@ -1447,6 +1447,21 @@ case "$cmd" in
                 exit 1
               fi
             fi
+            # SECURITY: .env and the compose override are readable via
+            # raw-read (the allowlist above still covers all 5 names) but
+            # NOT writable here. A raw-write to either, combined with
+            # `games restart`, would let the Advanced Files editor drive
+            # host command execution (env/volume/entrypoint injection into
+            # Docker Compose). Reject BEFORE the real path is ever touched
+            # (tmp is discarded, never mv'd) -- writable only via the
+            # curated `config set` path / Settings tab.
+            case "$fname" in
+              .env|docker-compose.override.yml)
+                rm -f "$tmp"
+                json_err BAD_ARG "That file is read-only in the editor" "Change these settings from the Settings tab; .env and the compose override can't be overwritten here."
+                exit 1
+                ;;
+            esac
             bakjson=null
             if [[ -f "$fpath" ]]; then
               cp -p "$fpath" "$fpath.bak"

@@ -256,9 +256,19 @@ silently ignored (treated as if omitted), rather than rejected.
   `docker-compose.override.yml`, `playerbots.conf`, `mod_ahbot.conf`,
   `mod_ale.conf` (`NOT_FOUND` otherwise — the literal-name allowlist is
   also the path-traversal guard; module confs are host files because the
-  base compose bind-mounts `./env/dist/etc`). Every overwrite keeps a
-  single-slot `.bak` of the previous content. The compose override is
-  YAML-validated before writing — invalid YAML is `BAD_ARG` and the file
-  is untouched. Both verbs run the shared config preamble first, so
-  `NOT_FOUND` (wow title not installed) and `MISSING_DEP` (yq) apply here
-  too.
+  base compose bind-mounts `./env/dist/etc`). **`.env` and
+  `docker-compose.override.yml` are read-only in `raw-write`** — both are
+  still readable via `raw-read`, but overwriting either one, combined with
+  `games restart`, would let this editor drive host command execution
+  (env/volume/entrypoint injection into Docker Compose), so `raw-write`
+  rejects them as `BAD_ARG` before touching the real file. Change those
+  settings from the Settings tab (the curated `config set` keys) instead —
+  `raw-write` only actually persists the three module confs
+  (`playerbots.conf`, `mod_ahbot.conf`, `mod_ale.conf`). Every successful
+  overwrite keeps a single-slot `.bak` of the previous content. The
+  compose override is still YAML-validated on submit for diagnostic
+  purposes — invalid YAML is `BAD_ARG` and the file is untouched (moot in
+  practice now that the file can't be written at all, but keeps the error
+  message specific if malformed content is ever submitted). Both verbs run
+  the shared config preamble first, so `NOT_FOUND` (wow title not
+  installed) and `MISSING_DEP` (yq) apply here too.

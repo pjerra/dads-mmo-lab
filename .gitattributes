@@ -24,3 +24,9 @@
 
 # Extensionless built CLI artifact (bash script, no .sh suffix) — see note above.
 cli/dml text eol=lf
+
+# Test fixtures parsed byte-for-byte by CLI code (e.g. the server-info SOAP
+# parser splits on LF): a CRLF-injected checkout on an autocrlf=true box
+# would corrupt these and break the tests they feed.
+cli/tests/fixtures/*.txt text eol=lf
+cli/tests/fixtures/*.xml text eol=lf

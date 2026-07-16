@@ -18,6 +18,8 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.accounts | length')" = "2" ]
   [ "$(echo "$output" | jq -r '.data.accounts[0].username')" = "HYPEER" ]
+  [ "$(echo "$output" | jq -r '.data.accounts[0].id')" = "251" ]
+  [ "$(echo "$output" | jq -r '.data.accounts[1].id')" = "253" ]
   [ "$(echo "$output" | jq -r '.data.accounts[1].characters | length')" = "2" ]
   [ "$(echo "$output" | jq -r '.data.accounts[1].characters[1].name')" = "Altchar" ]
   [ "$(echo "$output" | jq -r '.data.accounts[1].characters[0].level')" = "1" ]
@@ -58,4 +60,19 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   grep -q "NOT LIKE 'RNDBOT%'" "$FIXTURE/query.log"
   grep -q "<> 'AHBOT'" "$FIXTURE/query.log"
+}
+
+@test "accounts SQL orders by a.id (grouping depends on contiguous rows)" {
+  # _accounts_rows_to_json (30-db.sh) groups characters under an account by
+  # watching for the account id to change between consecutive rows -- that
+  # only works if same-account rows are contiguous, which depends on the
+  # query's ORDER BY starting with a.id. The stub ignores query text and
+  # returns canned rows regardless, so this pins the QUERY STRING itself
+  # (same DML_STUB_DB_QUERY_LOG seam as the bot-account-filter test above).
+  printf '' > "$FIXTURE/rows.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  run bash "$DML" wow accounts --json
+  [ "$status" -eq 0 ]
+  grep -q "ORDER BY a.id" "$FIXTURE/query.log"
 }

@@ -52,3 +52,14 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
+
+@test "server-info folds a SOAP fault into online:false (not an error)" {
+  # Only rc=4 (unreachable, above) and rc=3 (auth, above) were pinned --
+  # a fault (rc=2, e.g. "There is no such command") falls through the same
+  # `*)` arm in 90-main.sh's server-info case and must also read as "down",
+  # not as a CLI error.
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow server-info --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.online')" = "false" ]
+}

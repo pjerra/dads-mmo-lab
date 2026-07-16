@@ -187,4 +187,61 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
   [ "$(cat "$OVR")" = "services: {}" ]
   [ ! -f "$OVR.bak" ]
+  [[ "$(echo "$output" | jq -r '.error.message')" == *"valid YAML"* ]]
+}
+
+# --- Advanced Files read-only guard (final-review security fix) -----------
+# raw-write over .env or docker-compose.override.yml, combined with games
+# restart, would let the Advanced Files editor drive host command execution
+# (Docker Compose env/volume/entrypoint injection). Both stay READABLE via
+# raw-read but must be REJECTED before any write, ahead of the tmp-file
+# write and (for the override) the YAML validation step.
+
+@test "config raw-write refuses to overwrite .env (read-only in the editor)" {
+  printf 'FOO=bar\n' > "$GDIR/.env"
+  run bash -c 'printf "EVIL=1\n" | bash "'"$DML"'" wow config raw-write --file .env --json'
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ "$(cat "$GDIR/.env")" = "FOO=bar" ]
+}
+
+@test "config raw-write refuses to overwrite docker-compose.override.yml (read-only in the editor)" {
+  printf 'services: {}\n' > "$OVR"
+  run bash -c 'printf "services: {}\n" | bash "'"$DML"'" wow config raw-write --file docker-compose.override.yml --json'
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ "$(cat "$OVR")" = "services: {}" ]
+}
+
+@test "config raw-write of playerbots.conf still works after the .env/override read-only guard" {
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  printf 'old=1\n' > "$GDIR/env/dist/etc/modules/playerbots.conf"
+  run bash -c 'printf "new=2\n" | bash "'"$DML"'" wow config raw-write --file playerbots.conf --json'
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.written')" = "true" ]
+  [ "$(cat "$GDIR/env/dist/etc/modules/playerbots.conf")" = "new=2" ]
+}
+
+# --- server.motd SOAP error arms (final-review pin) ------------------------
+# `config set server.motd` folds its SOAP result through the same soap_exec
+# rc mapping as soap-exec/teleport (see 90-main.sh) -- only the UNREACHABLE
+# arm had a test. These mirror wow-teleport.bats's fault/401 tests.
+
+@test "config set server.motd maps SOAP fault to SOAP_FAULT" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  export HOME="$FIXTURE"
+  run bash "$DML" wow config set --key server.motd --value Hi --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+}
+
+@test "config set server.motd maps HTTP 401 to SOAP_AUTH" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-401-unauthorized.txt"
+  export DML_STUB_HTTP=401
+  export HOME="$FIXTURE"
+  run bash "$DML" wow config set --key server.motd --value Hi --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
