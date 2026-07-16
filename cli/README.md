@@ -330,5 +330,4 @@ restart first (`SOAP_FAULT` with a bridge-setup hint until then).
 self-despawn) after checking the entry exists in `creature_template`
 (read-only) — unknown entry → `NOT_FOUND`; the payload carries the
 creature's name.
-Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline), `SOAP_AUTH`,
-`SOAP_FAULT`, `SOAP_UNREACHABLE`.
+Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline character, or unknown creature entry for summon), `DB_UNREACHABLE` (summon's existence check), `SOAP_AUTH`, `SOAP_FAULT`, `SOAP_UNREACHABLE`.
