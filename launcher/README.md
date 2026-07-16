@@ -31,7 +31,8 @@ and renders the JSON envelopes / NDJSON event streams documented in
 - **Playerbots (My Party)** — auto-detects your online character and builds a
   party of playerbots: click a class to add a bot, see your group, kick or
   re-summon bots. First use shows **Enable My Party** (one-time: deploys the
-  Eluna bridge scripts + one server restart). Requires the character online.
+  Eluna bridge scripts — then restart the server from Library or Config to
+  load them). Requires the character online.
 
 ## Dev loop
 

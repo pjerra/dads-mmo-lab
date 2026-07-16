@@ -86,8 +86,8 @@
     <div class="card">
       <p class="muted">No character is logged into the game. Log one in, then Refresh.</p>
       <p class="muted">First time? <button onclick={enableMyParty} disabled={setting}>
-        {confirmSetup ? "Deploy scripts + restart the server?" : "Enable My Party"}</button>
-        <span class="muted">— sets up the bot bridge (one-time; restarts the server).</span></p>
+        {confirmSetup ? "Deploy the bot bridge scripts?" : "Enable My Party"}</button>
+        <span class="muted">— one-time setup; afterward restart the server (Library or Config) to load the scripts.</span></p>
     </div>
   {:else}
     <div class="card">
