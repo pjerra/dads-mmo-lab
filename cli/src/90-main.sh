@@ -1708,8 +1708,31 @@ case "$cmd" in
             _party_fire "dml_gm_revive $player" "revive"
             json_ok "{\"revived\":true,\"player\":\"$(json_escape "$player")\"}"
             ;;
+          summon)
+            player=""; entry=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --entry) _need_flag_val "$1" $#; entry="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            if ! [[ "$entry" =~ ^[0-9]+$ ]] || (( entry < 1 || entry > 999999 )); then
+              json_err BAD_ARG "Invalid creature entry: $entry" "Creature entry id, 1-999999."; exit 1
+            fi
+            # Existence + name lookup (read-only) BEFORE any SOAP fire, so a
+            # bad custom entry fails with a clean message instead of an
+            # in-game silent no-op.
+            npcname="$(db_world_query "SELECT name FROM creature_template WHERE entry=$entry LIMIT 1;")" \
+              || { json_err DB_UNREACHABLE "Could not check the creature entry" "Is ac-database running?"; exit 1; }
+            [[ -n "$npcname" ]] || { json_err NOT_FOUND "No creature with entry $entry" "Check the id (creature_template.entry)."; exit 1; }
+            _gm_require_online "$player"
+            _party_fire "dml_summon_npc $player $entry" "summon"
+            json_ok "{\"summoned\":true,\"player\":\"$(json_escape "$player")\",\"entry\":$entry,\"npc\":\"$(json_escape "$npcname")\"}"
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive --json"
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon --json"
             exit 1
             ;;
         esac

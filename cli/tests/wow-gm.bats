@@ -152,3 +152,81 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
   echo "$output" | grep -q 'bridge-setup'
 }
+
+# ---------- gm summon (bridge-backed, existence-checked, online-guarded) ----------
+
+@test "gm summon fires dml_summon_npc and returns the npc name" {
+  printf 'Auctioneer Beardo\n' > "$FIXTURE/npc.tsv"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/npc.tsv $FIXTURE/guid.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm summon --player Testen --entry 8661 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.summoned')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.entry')" = "8661" ]
+  [ "$(echo "$output" | jq -r '.data.npc')" = "Auctioneer Beardo" ]
+  grep -q 'dml_summon_npc Testen 8661' "$FIXTURE/cap.txt"
+}
+
+@test "gm summon rejects entry 0, 1000000 and non-numeric" {
+  for bad in 0 1000000 abc; do
+    run bash "$DML" wow gm summon --player Testen --entry "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done
+}
+
+@test "gm summon rejects an invalid character name" {
+  run bash "$DML" wow gm summon --player 'x; drop' --entry 8661 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "gm summon unknown entry maps to NOT_FOUND before any SOAP fire" {
+  printf '' > "$FIXTURE/nonpc.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/nonpc.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm summon --player Testen --entry 424242 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  echo "$output" | grep -q '424242'
+  [ ! -s "$FIXTURE/cap.txt" ]
+}
+
+@test "gm summon maps a DB error to DB_UNREACHABLE" {
+  export DML_STUB_DB_EXIT=1
+  run bash "$DML" wow gm summon --player Testen --entry 8661 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "DB_UNREACHABLE" ]
+}
+
+@test "gm summon offline player maps to NOT_FOUND (after the entry check)" {
+  printf 'World Banker\n' > "$FIXTURE/npc.tsv"
+  printf '' > "$FIXTURE/noguid.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/npc.tsv $FIXTURE/noguid.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow gm summon --player Ghost --entry 5060 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  echo "$output" | grep -qi 'not online'
+}
+
+@test "gm summon maps a SOAP fault to SOAP_FAULT with the bridge-setup hint" {
+  printf 'World Banker\n' > "$FIXTURE/npc.tsv"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/npc.tsv $FIXTURE/guid.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow gm summon --player Testen --entry 5060 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+  echo "$output" | grep -q 'bridge-setup'
+}
