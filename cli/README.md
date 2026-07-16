@@ -276,7 +276,7 @@ silently ignored (treated as if omitted), rather than rejected.
 ## party subcommands (My Party)
 
 `dml wow party …` builds a playerbot party for a logged-in player via
-SOAP-triggered Eluna bridge scripts (deployed by `party-setup`). Every op
+SOAP-triggered Eluna bridge scripts (deployed by `bridge-setup`; `party-setup` is a legacy alias). Every op
 needs the player's character **online**. Mutations go through the bridges
 (`dml_addclass`/`dml_uninvite`/`dml_login`) over SOAP; reads are read-only
 MySQL. Ambient random bots are excluded from `party online` and flagged in
@@ -299,7 +299,7 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
   (`BAD_ARG` otherwise). Online-guarded (`NOT_FOUND` if the player isn't
   online). Fires `dml_addclass` then polls `group_member` (~6 s) for a new
   member: `joined:true` + the bot's name, or `joined:false` + a soft note.
-  A `SOAP_FAULT` here usually means the bridge isn't loaded — run party-setup
+  A `SOAP_FAULT` here usually means the bridge isn't loaded — run `bridge-setup`
   and restart. Errors: `BAD_ARG`, `NOT_FOUND`, `SOAP_AUTH`, `SOAP_FAULT`,
   `SOAP_UNREACHABLE`.
 - `dml wow party list --player <name> --json` →
@@ -312,7 +312,7 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
   `^[A-Za-z0-9_]{1,12}$`. Errors: `BAD_ARG`, `SOAP_AUTH`, `SOAP_FAULT`,
   `SOAP_UNREACHABLE`.
 
-### gm — GM character tools
+## gm subcommands (GM character tools)
 
     dml wow gm level  --player <name> --level <1-255> --json
     dml wow gm gold   --player <name> --gold <0-214748> --json
