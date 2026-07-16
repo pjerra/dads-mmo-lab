@@ -2,13 +2,17 @@
 # My Party (Plan 4): Eluna bridge deployment + group-join confirmation.
 # Bridge scripts run playerbot commands in the online player's own session
 # (SOAP -> Eluna hook 42 -> Player:RunCommand). See docs/.../my-party-design.
+#
+# Deployment (bridge-setup, Plan/Task 2) is family-generic: it copies every
+# *.lua file under every subdir of the lua ROOT (party/, gm/, ...) into the
+# server's flat lua_scripts dir. party-setup/setup remain accepted aliases.
 # ---------------------------------------------------------------------------
 
-# Source dir of the committed bridge scripts (repo cli/lua/party). Resolved
-# relative to this script's own location at build time is not possible in the
-# concatenated artifact, so we resolve from the CLI's known repo layout via
-# DML_LUA_DIR (test seam), falling back to the install-relative path.
-_party_lua_src_dir() { echo "${DML_LUA_DIR:-/usr/local/share/dml/lua/party}"; }
+# Root of the committed bridge scripts (repo cli/lua -> installed
+# /usr/local/share/dml/lua). Contains one subdir per bridge family
+# (party/, gm/, ...). DML_LUA_DIR is the test seam and now points at
+# this ROOT, not a single family dir.
+_bridge_lua_root() { echo "${DML_LUA_DIR:-/usr/local/share/dml/lua}"; }
 
 # Host dir where mod-ale loads scripts (bind-mounted into the container at
 # ALE.ScriptPath). <server dir>/env/dist/etc/modules/lua_scripts.
@@ -17,19 +21,22 @@ _party_lua_dest_dir() {
     echo "$sdir/env/dist/etc/modules/lua_scripts"
 }
 
-# Copy the 3 bridge scripts into dest; echo "changed" if any file's content
-# differs from what's already there (idempotence), "" otherwise.
-_party_deploy_scripts() {
-    local src dest changed=""
-    src="$(_party_lua_src_dir)"
+# Copy every family's *.lua into dest (flat -- mod-ale loads a flat dir);
+# echo "changed" if any file's content differs (idempotence), "" otherwise.
+_bridge_deploy_scripts() {
+    local root dest changed="" d f
+    root="$(_bridge_lua_root)"
     dest="$(_party_lua_dest_dir "$1")"
     mkdir -p "$dest"
-    local f
-    for f in dml_addclass.lua dml_uninvite.lua dml_login.lua; do
-        if [[ ! -f "$dest/$f" ]] || ! cmp -s "$src/$f" "$dest/$f"; then
-            cp "$src/$f" "$dest/$f"
-            changed=1
-        fi
+    for d in "$root"/*/; do
+        [[ -d "$d" ]] || continue
+        for f in "$d"*.lua; do
+            [[ -f "$f" ]] || continue
+            if [[ ! -f "$dest/$(basename "$f")" ]] || ! cmp -s "$f" "$dest/$(basename "$f")"; then
+                cp "$f" "$dest/$(basename "$f")"
+                changed=1
+            fi
+        done
     done
     [[ -n "$changed" ]] && echo changed
     return 0
@@ -66,7 +73,7 @@ _party_fire() {
     fi
     case "$rc" in
       3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ;;
-      2) json_err SOAP_FAULT "The $2 command was rejected" "Run 'Enable My Party' (party-setup) and restart the server first." ;;
+      2) json_err SOAP_FAULT "The $2 command was rejected" "Deploy the server bridges (bridge-setup) and restart the server first." ;;
       *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ;;
     esac
     exit 1

@@ -1476,16 +1476,16 @@ case "$cmd" in
             ;;
         esac
         ;;
-      party-setup|setup)
+      bridge-setup|party-setup|setup)
         # Streaming (NDJSON) like games start/restart. NB: matched directly
-        # on $wsub ("dml wow party-setup"), not via a nested "party" dispatch
-        # -- $wsub is the single token "party-setup", so a `party)` arm would
+        # on $wsub ("dml wow bridge-setup"), not via a nested "party" dispatch
+        # -- $wsub is the single token "bridge-setup", so a `party)` arm would
         # never match it (bash case patterns are exact/glob, not prefix).
-        [[ "$DML_JSON" == 1 ]] && ndjson_section_start party-setup
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start bridge-setup
         sdir="$(_wow_server_dir)"
         if [[ -z "$sdir" ]]; then
           if [[ "$DML_JSON" == 1 ]]; then
-            ndjson_section_end party-setup error
+            ndjson_section_end bridge-setup error
             ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
           else echo "[dml] ERROR: wow server not installed" >&2; fi
           exit 1
@@ -1496,7 +1496,7 @@ case "$cmd" in
         if out="$(soap_exec 'server info')"; then :; else
           rc=$?
           if [[ "$DML_JSON" == 1 ]]; then
-            ndjson_section_end party-setup error
+            ndjson_section_end bridge-setup error
             case "$rc" in
               3) ndjson_error SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ;;
               *) ndjson_error SOAP_UNREACHABLE "Could not reach the server over SOAP" "Start the server, then re-run." ;;
@@ -1505,14 +1505,14 @@ case "$cmd" in
           exit 1
         fi
         [[ "$DML_JSON" == 1 ]] && ndjson_line info "deploying bridge scripts..."
-        changed="$(_party_deploy_scripts "$sdir")"
+        changed="$(_bridge_deploy_scripts "$sdir")"
         ch=false; [[ "$changed" == changed ]] && ch=true   # bare (top-level dispatch, no `local`)
         if [[ "$DML_JSON" == 1 ]]; then
           ndjson_line info "scripts deployed (changed=$ch)"
-          ndjson_section_end party-setup ok
+          ndjson_section_end bridge-setup ok
           ndjson_done "{\"changed\":$ch,\"restart_required\":$ch}"
         else
-          echo "[dml] party-setup done (changed=$ch, restart_required=$ch)"
+          echo "[dml] bridge-setup done (changed=$ch, restart_required=$ch)"
         fi
         ;;
       party)
@@ -1564,7 +1564,7 @@ case "$cmd" in
               # A fault here most likely means the bridge isn't loaded yet.
               case "$rc" in
                 3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env"; exit 1 ;;
-                2) json_err SOAP_FAULT "The add command was rejected" "Run 'Enable My Party' (party-setup) and restart the server first."; exit 1 ;;
+                2) json_err SOAP_FAULT "The add command was rejected" "Deploy the server bridges (bridge-setup) and restart the server first."; exit 1 ;;
                 *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?"; exit 1 ;;
               esac
             fi
