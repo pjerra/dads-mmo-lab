@@ -1515,6 +1515,35 @@ case "$cmd" in
           echo "[dml] party-setup done (changed=$ch, restart_required=$ch)"
         fi
         ;;
+      party)
+        psub="${1:-}"; shift || true
+        case "$psub" in
+          online)
+            sql="SELECT c.guid, c.name, c.class, c.level
+                 FROM characters c
+                 WHERE c.online = 1
+                   AND c.account NOT IN (
+                     SELECT account_id FROM acore_playerbots.playerbots_account_type
+                     WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            rows="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not query online characters" "Is ac-database running?"; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r guid name cls lvl || [[ -n "$guid" ]]; do
+              [[ -z "$guid" ]] && continue
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"level\":$lvl}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"online\":$out}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
