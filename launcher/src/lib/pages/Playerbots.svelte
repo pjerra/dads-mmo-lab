@@ -7,6 +7,7 @@
   import { className } from "$lib/wow";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { restartState } from "$lib/restart-state.svelte";
 
   const CLASSES = ["warrior","paladin","hunter","rogue","priest","shaman","mage","warlock","druid"];
 
@@ -29,6 +30,8 @@
 
   async function refresh() {
     error = null;
+    confirmSetup = false;
+    note = null;
     try {
       online = await wowPartyOnline();
       if (!online.find((o) => o.name === player)) player = online[0]?.name ?? "";
@@ -69,7 +72,13 @@
     if (!confirmSetup) { confirmSetup = true; return; }
     confirmSetup = false; setting = true; showTerm = true; term = initialTermState();
     try {
-      await wowPartySetup((e) => { term = applyEvent(term, e); });
+      await wowPartySetup((e) => {
+        term = applyEvent(term, e);
+        if (e.event === "done") {
+          const d = e.data as { restart_required?: boolean } | undefined;
+          if (d?.restart_required) restartState.needed = true;
+        }
+      });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       term = applyEvent(term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
