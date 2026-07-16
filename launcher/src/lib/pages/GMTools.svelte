@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowBridgeSetup,
+    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowBridgeSetup,
     type OnlineChar,
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
@@ -17,6 +17,7 @@
 
   let level = $state(80);
   let gold = $state(1000);
+  let customEntry = $state(990000);
   let confirming: "level" | "gold" | null = $state(null);
 
   let term: TermState = $state(initialTermState());
@@ -25,6 +26,15 @@
   let confirmDeploy = $state(false);
 
   const isOnline = $derived(online.some((o) => o.name === charName));
+
+  const NPCS = [
+    { entry: 8661, label: "Auctioneer" },
+    { entry: 5060, label: "Banker" },
+    { entry: 6272, label: "Innkeeper" },
+    { entry: 9896, label: "Stable Master" },
+    { entry: 14337, label: "Repair Bot" },
+    { entry: 990000, label: "Casino" },
+  ];
 
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -59,6 +69,15 @@
     confirming = null;
     const p = charName; const g = gold;
     act(() => wowGmGold(p, g), `${p} now has ${g} gold.`);
+  }
+
+  async function summon(entry: number) {
+    const p = charName;
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowGmSummon(p, entry);
+      note = `Summoned ${r.npc} — despawns in 5 minutes.`;
+    } catch (e) { showErr(e); } finally { busy = false; }
   }
 
   async function deployBridges() {
@@ -126,6 +145,24 @@
       {confirming === "gold" ? "This replaces their current money — sure?" : "Apply"}
     </button>
     <span class="muted">Sets the total (not adds). Max 214,748 gold.</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <strong>Summon an NPC</strong>
+      {#each NPCS as n (n.entry)}
+        <button onclick={() => summon(n.entry)} disabled={!charName || !isOnline || busy}>{n.label}</button>
+      {/each}
+    </div>
+    <div class="row" style="margin-top: 8px;">
+      <span class="muted">Custom entry id:</span>
+      <input type="number" min="1" max="999999" bind:value={customEntry} disabled={busy} />
+      <button onclick={() => summon(customEntry)}
+        disabled={!charName || !isOnline || busy || !Number.isInteger(customEntry) || customEntry < 1 || customEntry > 999999}>
+        Summon
+      </button>
+    </div>
+    <p class="muted" style="margin-top: 8px;">Temporary — the NPC despawns after 5 minutes. Needs the character online.</p>
   </div>
 
   <p class="muted">

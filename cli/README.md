@@ -318,6 +318,7 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
     dml wow gm gold   --player <name> --gold <0-214748> --json
     dml wow gm heal   --player <name> --json
     dml wow gm revive --player <name> --json
+    dml wow gm summon --player <name> --entry <1-999999> --json
 
 `level` uses the stock `.character level` command and works for OFFLINE
 characters (absolute value — it can lower a level). `gold` (sets the total,
@@ -325,5 +326,9 @@ in whole gold), `heal` (100% HP) and `revive` (full HP, no resurrection
 sickness) go through the `dml_gm_*` Eluna bridge and need the character
 ONLINE (`NOT_FOUND` otherwise). Bridge ops need `bridge-setup` + one server
 restart first (`SOAP_FAULT` with a bridge-setup hint until then).
+`summon` temp-spawns the creature next to the ONLINE player (5-minute
+self-despawn) after checking the entry exists in `creature_template`
+(read-only) — unknown entry → `NOT_FOUND`; the payload carries the
+creature's name.
 Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline), `SOAP_AUTH`,
 `SOAP_FAULT`, `SOAP_UNREACHABLE`.

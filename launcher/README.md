@@ -28,6 +28,9 @@ as they ship.
   need them logged in (instant, no relog — applied through the same server
   bridge My Party uses). Level and gold ask for confirmation before
   applying. First use may need **Deploy server bridges** + a server restart.
+  Also summons temporary service NPCs (auctioneer, banker, innkeeper,
+  stable master, repair bot, casino — or any creature entry id); they
+  despawn after 5 minutes.
 
 **Items & Bots**
 - **Item Database** — search `item_template` by name/quality/level; send any
