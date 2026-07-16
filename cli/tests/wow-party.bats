@@ -92,6 +92,26 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.note')" != "null" ]
 }
 
+@test "party add still succeeds (bot:null) when the bot-name lookup fails" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  use_mysql_stub
+  # Same as the join case, but the name-lookup (call 4) returns empty rows,
+  # simulating a transient ac-database blip: the bot has already joined, so
+  # the add must still emit ONE success envelope (joined:true) with bot:null.
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n' > "$FIXTURE/before.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/after.tsv"
+  printf '' > "$FIXTURE/noname.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/before.tsv $FIXTURE/after.tsv $FIXTURE/noname.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=3 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.bot')" = "null" ]
+}
+
 @test "party add fires the correct bridge command over SOAP" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"

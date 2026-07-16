@@ -1581,8 +1581,15 @@ case "$cmd" in
               [[ "$slp" != "0" ]] && sleep "$slp"
             done
             if [[ -n "$newguid" ]]; then
-              botname="$(db_chars_query "SELECT name FROM characters WHERE guid=$newguid LIMIT 1;" 2>/dev/null)"
-              json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+              botname=""
+              if [[ "$newguid" =~ ^[0-9]+$ ]]; then
+                botname="$(db_chars_query "SELECT name FROM characters WHERE guid=$newguid LIMIT 1;" 2>/dev/null)" || botname=""
+              fi
+              if [[ -n "$botname" ]]; then
+                json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+              else
+                json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":null}"
+              fi
             else
               json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
             fi
