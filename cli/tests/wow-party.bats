@@ -126,3 +126,26 @@ teardown() { teardown_fixture; }
   cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
   [ "$cmd" = "dml_addclass Testen druid female" ]
 }
+
+@test "party list returns group members with bot flags" {
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  # members rows: guid, name, class, level, is_bot
+  printf '2503\tTesten\t8\t1\t0\n9001\tBotmage\t8\t80\t1\n' > "$FIXTURE/mem.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/mem.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow party list --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.members | length')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.members[1].name')" = "Botmage" ]
+  [ "$(echo "$output" | jq -r '.data.members[1].is_bot')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.members[0].is_bot')" = "false" ]
+}
+
+@test "party list of an offline player is NOT_FOUND" {
+  use_mysql_stub
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  run bash "$DML" wow party list --player Ghost --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}

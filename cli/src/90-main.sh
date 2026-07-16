@@ -1594,6 +1594,31 @@ case "$cmd" in
               json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
             fi
             ;;
+          list)
+            player=""
+            [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            pguid="$(_party_online_guid "$player")"
+            [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
+            sql="SELECT c.guid, c.name, c.class, c.level,
+                        CASE WHEN c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) THEN 1 ELSE 0 END AS is_bot
+                 FROM group_member gm
+                 JOIN characters c ON c.guid = gm.memberGuid
+                 WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
+                 ORDER BY is_bot, c.name;"
+            rows="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not query the party" ""; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r guid name cls lvl isbot || [[ -n "$guid" ]]; do
+              [[ -z "$guid" ]] && continue
+              [[ $first -eq 0 ]] && out+=','
+              local_bot=false; [[ "$isbot" == "1" ]] && local_bot=true
+              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"level\":$lvl,\"is_bot\":$local_bot}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"members\":$out}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online --json"
             exit 1
