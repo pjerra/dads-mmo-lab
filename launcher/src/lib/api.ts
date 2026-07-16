@@ -202,3 +202,26 @@ export const wowPartySetup = (onEvent: (e: TermEvent) => void): Promise<void> =>
   ch.onmessage = onEvent;
   return invoke("wow_party_setup", { onEvent: ch });
 };
+
+export interface GmLevelResult { leveled: boolean; player: string; level: number; }
+export interface GmGoldResult { gold_set: boolean; player: string; gold: number; }
+export interface GmHealResult { healed: boolean; player: string; }
+export interface GmReviveResult { revived: boolean; player: string; }
+
+export async function wowGmLevel(player: string, level: number): Promise<GmLevelResult> {
+  return await invoke("wow_gm_level", { player, level });
+}
+export async function wowGmGold(player: string, gold: number): Promise<GmGoldResult> {
+  return await invoke("wow_gm_gold", { player, gold });
+}
+export async function wowGmHeal(player: string): Promise<GmHealResult> {
+  return await invoke("wow_gm_heal", { player });
+}
+export async function wowGmRevive(player: string): Promise<GmReviveResult> {
+  return await invoke("wow_gm_revive", { player });
+}
+export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_bridge_setup", { onEvent: ch });
+};
