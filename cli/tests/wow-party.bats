@@ -37,3 +37,72 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "DB_UNREACHABLE" ]
 }
+
+@test "party add rejects a class outside the allowlist" {
+  use_curl_stub
+  run bash "$DML" wow party add --player Testen --class necromancer --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "party add rejects an offline/unknown player" {
+  use_mysql_stub
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party add --player Ghost --class mage --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "party add confirms a join when a new group member appears" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  use_mysql_stub
+  # Call 1 = online-guard lookup (player guid 2503).
+  # Call 2 = pre-fire group snapshot (solo: just the player).
+  # Call 3+ = post-fire poll (player + new bot guid 9001).
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n' > "$FIXTURE/before.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/after.tsv"
+  # Bot name lookup for guid 9001.
+  printf 'Botmage\n' > "$FIXTURE/botname.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/before.tsv $FIXTURE/after.tsv $FIXTURE/botname.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=3 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.added')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.bot')" = "Botmage" ]
+}
+
+@test "party add returns joined:false with a note when no member appears in time" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n' > "$FIXTURE/solo.tsv"   # never grows
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/solo.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=2 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.note')" != "null" ]
+}
+
+@test "party add fires the correct bridge command over SOAP" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.xml"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"; printf '2503\n' > "$FIXTURE/solo.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/solo.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class druid --gender female --json
+  [ "$status" -eq 0 ]
+  cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
+  [ "$cmd" = "dml_addclass Testen druid female" ]
+}

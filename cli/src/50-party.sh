@@ -34,3 +34,15 @@ _party_deploy_scripts() {
     [[ -n "$changed" ]] && echo changed
     return 0
 }
+
+# Online player's guid, or empty if not online (online-guard).
+_party_online_guid() {
+    db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$1")' AND online=1 LIMIT 1;" 2>/dev/null
+    return 0
+}
+
+# The memberGuids of the group the player (guid $1) belongs to; empty if solo.
+_party_group_member_guids() {
+    db_chars_query "SELECT memberGuid FROM group_member WHERE guid=(SELECT guid FROM group_member WHERE memberGuid=$1 LIMIT 1);" 2>/dev/null
+    return 0
+}

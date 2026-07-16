@@ -102,6 +102,17 @@ use_mysql_stub() {
 # Minimal docker stub for `docker exec ac-database mysql …`.
 if [[ "${1:-}" == "exec" ]]; then
   [[ -n "${DML_STUB_DB_QUERY_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_DB_QUERY_LOG"
+  if [[ -n "${DML_STUB_DB_ROWS_SEQ:-}" ]]; then
+    # DML_STUB_DB_ROWS_SEQ = space-separated list of row-files; return the
+    # next one per call, then stick on the last. State in $DML_STUB_DB_SEQ_STATE.
+    st="${DML_STUB_DB_SEQ_STATE:-/tmp/dml_seq_state.$$}"
+    i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+    files=($DML_STUB_DB_ROWS_SEQ)
+    idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
+    [[ -f "${files[$idx]}" ]] && cat "${files[$idx]}"
+    echo $(( i + 1 )) > "$st"
+    exit "${DML_STUB_DB_EXIT:-0}"
+  fi
   [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
   exit "${DML_STUB_DB_EXIT:-0}"
 fi
