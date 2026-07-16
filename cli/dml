@@ -458,6 +458,20 @@ _party_fire() {
     esac
     exit 1
 }
+# ---------------------------------------------------------------------------
+# GM tools (Lab-parity round 2): shared guard for the bridge-backed gm ops.
+# The gm dispatch arms live in 90-main.sh next to the other wow arms; only
+# reusable helpers live here. See docs/.../2026-07-16-gm-tools-design.md.
+# ---------------------------------------------------------------------------
+
+# Online-guard shared by gm gold/heal/revive (the Eluna bridge can only
+# mutate a live Player object). Emits NOT_FOUND and exits if offline.
+_gm_require_online() {
+    local g
+    g="$(_party_online_guid "$1")"
+    [[ "$g" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $1" "This action needs the character logged in. (Set level works offline.)"; exit 1; }
+    return 0
+}
 
 _require_docker() {
     if ! docker info &>/dev/null; then
@@ -2102,6 +2116,40 @@ case "$cmd" in
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online --json"
+            exit 1
+            ;;
+        esac
+        ;;
+      gm)
+        gsub="${1:-}"; shift || true
+        case "$gsub" in
+          level)
+            player=""; level=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --level) _need_flag_val "$1" $#; level="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            if ! [[ "$level" =~ ^[0-9]+$ ]] || (( level < 1 || level > 255 )); then
+              json_err BAD_ARG "Invalid level: $level" "Use 1-255 (your server's own max level still applies)."; exit 1
+            fi
+            # Stock AC command; works for OFFLINE characters too. Success is
+            # the ok envelope itself -- the result text is not parsed.
+            if out="$(soap_exec ".character level $player $level")"; then :; else
+              rc=$?
+              case "$rc" in
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env"; exit 1 ;;
+                2) json_err SOAP_FAULT "The level command was rejected" "Does the character exist? The server said no."; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?"; exit 1 ;;
+              esac
+            fi
+            json_ok "{\"leveled\":true,\"player\":\"$(json_escape "$player")\",\"level\":$level}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level --player X --level N --json"
             exit 1
             ;;
         esac

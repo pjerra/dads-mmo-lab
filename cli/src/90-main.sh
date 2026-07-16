@@ -1646,6 +1646,40 @@ case "$cmd" in
             ;;
         esac
         ;;
+      gm)
+        gsub="${1:-}"; shift || true
+        case "$gsub" in
+          level)
+            player=""; level=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --level) _need_flag_val "$1" $#; level="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            if ! [[ "$level" =~ ^[0-9]+$ ]] || (( level < 1 || level > 255 )); then
+              json_err BAD_ARG "Invalid level: $level" "Use 1-255 (your server's own max level still applies)."; exit 1
+            fi
+            # Stock AC command; works for OFFLINE characters too. Success is
+            # the ok envelope itself -- the result text is not parsed.
+            if out="$(soap_exec ".character level $player $level")"; then :; else
+              rc=$?
+              case "$rc" in
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env"; exit 1 ;;
+                2) json_err SOAP_FAULT "The level command was rejected" "Does the character exist? The server said no."; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?"; exit 1 ;;
+              esac
+            fi
+            json_ok "{\"leveled\":true,\"player\":\"$(json_escape "$player")\",\"level\":$level}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level --player X --level N --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
