@@ -140,6 +140,11 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.members[1].name')" = "Botmage" ]
   [ "$(echo "$output" | jq -r '.data.members[1].is_bot')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.members[0].is_bot')" = "false" ]
+  # jq -r prints bare true/false for BOTH a JSON boolean and the string
+  # "true"/"false", so assert the TYPE too -- a regression to a quoted is_bot
+  # would slip past the value asserts above.
+  [ "$(echo "$output" | jq -r '.data.members[1].is_bot | type')" = "boolean" ]
+  [ "$(echo "$output" | jq -r '.data.members[0].is_bot | type')" = "boolean" ]
 }
 
 @test "party list of an offline player is NOT_FOUND" {
