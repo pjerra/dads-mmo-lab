@@ -30,3 +30,4 @@ cli/dml text eol=lf
 # would corrupt these and break the tests they feed.
 cli/tests/fixtures/*.txt text eol=lf
 cli/tests/fixtures/*.xml text eol=lf
+cli/tests/fixtures/*.tsv text eol=lf

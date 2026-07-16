@@ -207,7 +207,11 @@ teardown() { teardown_fixture; }
 
 @test "config raw-write refuses to overwrite docker-compose.override.yml (read-only in the editor)" {
   printf 'services: {}\n' > "$OVR"
-  run bash -c 'printf "services: {}\n" | bash "'"$DML"'" wow config raw-write --file docker-compose.override.yml --json'
+  # Submit DIFFERENT, syntactically VALID YAML (the real attack shape: a
+  # valid override injecting a privileged service) so the unchanged-check
+  # below is load-bearing -- it proves the read-only guard blocks even
+  # well-formed content, not just that stdin happened to equal the file.
+  run bash -c 'printf "services:\n  ac-worldserver:\n    privileged: true\n" | bash "'"$DML"'" wow config raw-write --file docker-compose.override.yml --json'
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
   [ "$(cat "$OVR")" = "services: {}" ]
