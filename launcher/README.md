@@ -23,6 +23,11 @@ as they ship.
   character viewer (level, gold, equipped gear as of the last save).
 - **Teleport** — pick a character and one of the ~2000 named locations
   (two-step confirm).
+- **GM Tools** — pick any character: Revive / Full heal / Set level / Set
+  gold. Level works even while the character is offline; the other three
+  need them logged in (instant, no relog — applied through the same server
+  bridge My Party uses). Level and gold ask for confirmation before
+  applying. First use may need **Deploy server bridges** + a server restart.
 
 **Items & Bots**
 - **Item Database** — search `item_template` by name/quality/level; send any

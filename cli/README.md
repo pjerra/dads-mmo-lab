@@ -282,11 +282,12 @@ needs the player's character **online**. Mutations go through the bridges
 MySQL. Ambient random bots are excluded from `party online` and flagged in
 `party list` via `acore_playerbots.playerbots_account_type`.
 
-- `dml wow party-setup --json` → NDJSON stream, terminal `done` data
-  `{"changed":bool,"restart_required":bool}`. Deploys the 3 bridge scripts
-  into `<server dir>/env/dist/etc/modules/lua_scripts/` and preflights SOAP.
-  `restart_required` is true whenever scripts changed — Eluna loads them at
-  worldserver startup (this build has no live Lua reload), so a one-time
+- `dml wow bridge-setup --json` → NDJSON stream, terminal `done` data
+  `{"changed":bool,"restart_required":bool}`. `party-setup` and `setup`
+  remain as aliases; deploys ALL bridge script families (party/, gm/) into
+  `<server dir>/env/dist/etc/modules/lua_scripts/` and preflights SOAP.
+  `restart_required` is true whenever any script changed — Eluna loads them
+  at worldserver startup (this build has no live Lua reload), so a one-time
   restart is needed. Errors: `NOT_FOUND` (server not installed), `SOAP_AUTH`,
   `SOAP_UNREACHABLE`.
 - `dml wow party online --json` → `{"online":[{"guid","name","class","level"}]}`.
@@ -310,3 +311,19 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
   → `{"relogged":true}` (fires `dml_login`). Names allowlisted
   `^[A-Za-z0-9_]{1,12}$`. Errors: `BAD_ARG`, `SOAP_AUTH`, `SOAP_FAULT`,
   `SOAP_UNREACHABLE`.
+
+### gm — GM character tools
+
+    dml wow gm level  --player <name> --level <1-255> --json
+    dml wow gm gold   --player <name> --gold <0-214748> --json
+    dml wow gm heal   --player <name> --json
+    dml wow gm revive --player <name> --json
+
+`level` uses the stock `.character level` command and works for OFFLINE
+characters (absolute value — it can lower a level). `gold` (sets the total,
+in whole gold), `heal` (100% HP) and `revive` (full HP, no resurrection
+sickness) go through the `dml_gm_*` Eluna bridge and need the character
+ONLINE (`NOT_FOUND` otherwise). Bridge ops need `bridge-setup` + one server
+restart first (`SOAP_FAULT` with a bridge-setup hint until then).
+Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline), `SOAP_AUTH`,
+`SOAP_FAULT`, `SOAP_UNREACHABLE`.

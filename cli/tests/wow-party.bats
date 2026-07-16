@@ -223,7 +223,7 @@ teardown() { teardown_fixture; }
   [ "$cmd" = "dml_login Testen Botmage" ]
 }
 
-@test "party kick maps a SOAP fault to a party-setup hint" {
+@test "party kick maps a SOAP fault to a bridge-setup hint" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
   run bash "$DML" wow party kick --bot Botmage --json
