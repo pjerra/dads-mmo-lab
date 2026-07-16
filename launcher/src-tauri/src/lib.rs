@@ -261,6 +261,54 @@ async fn stream_action(
     .map_err(CmdError::from)
 }
 
+async fn stream_args(
+    args: Vec<String>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        runner.run_stream(&refs, |v| { let _ = on_event.send(v); })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+    .map(|_| ())
+    .map_err(CmdError::from)
+}
+
+#[tauri::command]
+async fn wow_party_setup(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "party-setup".into()], on_event, state).await
+}
+
+#[tauri::command]
+async fn wow_party_online(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "party".into(), "online".into()]).await
+}
+
+#[tauri::command]
+async fn wow_party_add(player: String, class: String, gender: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let mut a: Vec<String> = vec!["wow".into(),"party".into(),"add".into(),"--player".into(),player,"--class".into(),class];
+    if let Some(g) = gender { a.extend(["--gender".into(), g]); }
+    run_json_cmd(state, a).await
+}
+
+#[tauri::command]
+async fn wow_party_list(player: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(),"party".into(),"list".into(),"--player".into(),player]).await
+}
+
+#[tauri::command]
+async fn wow_party_kick(bot: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(),"party".into(),"kick".into(),"--bot".into(),bot]).await
+}
+
+#[tauri::command]
+async fn wow_party_relogin(player: String, bot: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(),"party".into(),"relogin".into(),"--player".into(),player,"--bot".into(),bot]).await
+}
+
 #[tauri::command]
 async fn games_start(
     id: String,
@@ -310,7 +358,13 @@ pub fn run() {
             wow_config_list,
             wow_config_set,
             wow_config_raw_read,
-            wow_config_raw_write
+            wow_config_raw_write,
+            wow_party_setup,
+            wow_party_online,
+            wow_party_add,
+            wow_party_list,
+            wow_party_kick,
+            wow_party_relogin
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
