@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { qualityName, QUALITY_COLORS } from "./wow";
+import { className } from "./wow";
 
 describe("qualityName", () => {
   it("maps the WoW quality tiers", () => {
@@ -18,5 +19,15 @@ describe("qualityName", () => {
     expect(qualityName(6)).toBe("Artifact");
     expect(qualityName(7)).toBe("Heirloom");
     expect(QUALITY_COLORS[7]).toMatch(/^#/);
+  });
+});
+
+describe("className", () => {
+  it("maps WotLK class ids", () => {
+    expect(className(1)).toBe("Warrior");
+    expect(className(5)).toBe("Priest");
+    expect(className(8)).toBe("Mage");
+    expect(className(11)).toBe("Druid");
+    expect(className(99)).toBe("Unknown");
   });
 });

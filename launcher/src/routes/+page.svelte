@@ -4,6 +4,7 @@
   import Items from "$lib/pages/Items.svelte";
   import Teleport from "$lib/pages/Teleport.svelte";
   import Config from "$lib/pages/Config.svelte";
+  import Playerbots from "$lib/pages/Playerbots.svelte";
 
   const PAGES = [
     { id: "library", label: "Library" },
@@ -11,6 +12,7 @@
     { id: "items", label: "Item Database" },
     { id: "teleport", label: "Teleport" },
     { id: "config", label: "Config" },
+    { id: "playerbots", label: "Playerbots" },
   ] as const;
   type PageId = (typeof PAGES)[number]["id"];
   let page: PageId = $state("library");
@@ -22,7 +24,6 @@
     {#each PAGES as p (p.id)}
       <button class:active={page === p.id} onclick={() => (page = p.id)}>{p.label}</button>
     {/each}
-    <button class="disabled" disabled title="Coming with My Party">Playerbots</button>
   </nav>
 
   {#if page === "library"}<Library />{/if}
@@ -30,6 +31,7 @@
   {#if page === "items"}<Items />{/if}
   {#if page === "teleport"}<Teleport />{/if}
   {#if page === "config"}<Config />{/if}
+  {#if page === "playerbots"}<Playerbots />{/if}
 </main>
 
 <style>
@@ -40,5 +42,4 @@
   .sidebar h1 span { color: #c9d1d9; font-weight: 300; margin-left: 4px; }
   .sidebar button { padding: 8px 16px; color: #8b949e; font-size: 14px; background: none; border: none; text-align: left; cursor: pointer; border-left: 2px solid transparent; }
   .sidebar button.active { color: #f0f6fc; background: #161b22; border-left-color: #58a6ff; }
-  .sidebar button.disabled { opacity: 0.35; cursor: default; }
 </style>

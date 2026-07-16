@@ -175,3 +175,30 @@ export const gamesRestart = (id: string, onEvent: (e: TermEvent) => void): Promi
   ch.onmessage = onEvent;
   return invoke("games_restart", { id, onEvent: ch });
 };
+
+export interface OnlineChar { guid: number; name: string; class: number; level: number; }
+export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }
+export interface PartyAddResult { added: boolean; joined: boolean; bot: string | null; note: string | null; }
+
+export async function wowPartyOnline(): Promise<OnlineChar[]> {
+  const d = await invoke<{ online: OnlineChar[] }>("wow_party_online");
+  return d.online;
+}
+export async function wowPartyAdd(player: string, className: string, gender?: string): Promise<PartyAddResult> {
+  return await invoke("wow_party_add", { player, class: className, gender });
+}
+export async function wowPartyList(player: string): Promise<PartyMember[]> {
+  const d = await invoke<{ members: PartyMember[] }>("wow_party_list", { player });
+  return d.members;
+}
+export async function wowPartyKick(bot: string): Promise<{ kicked: boolean }> {
+  return await invoke("wow_party_kick", { bot });
+}
+export async function wowPartyRelogin(player: string, bot: string): Promise<{ relogged: boolean }> {
+  return await invoke("wow_party_relogin", { player, bot });
+}
+export const wowPartySetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_party_setup", { onEvent: ch });
+};
