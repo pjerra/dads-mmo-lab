@@ -32,7 +32,7 @@ LUA="$BATS_TEST_DIRNAME/../lua/gm/dml_gm.lua"
 }
 
 @test "each handler returns false to suppress the not-found" {
-  grep -q 'return false' "$LUA"
+  [ "$(grep -c 'return false' "$LUA")" -ge 3 ]
 }
 
 @test "gm bridge carries an AGPL/Dad's MMO Lab header, not Lab bytes" {

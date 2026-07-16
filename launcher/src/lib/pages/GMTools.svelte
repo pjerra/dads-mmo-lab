@@ -63,7 +63,7 @@
 
   async function deployBridges() {
     if (!confirmDeploy) { confirmDeploy = true; return; }
-    confirmDeploy = false; deploying = true; showTerm = true; term = initialTermState();
+    confirmDeploy = false; deploying = true; error = null; note = null; showTerm = true; term = initialTermState();
     try {
       await wowBridgeSetup((e) => {
         term = applyEvent(term, e);
