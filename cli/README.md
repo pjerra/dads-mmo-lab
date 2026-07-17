@@ -328,10 +328,7 @@ kicks every current bot, then per saved class adds a bot, waits for the
 join, and whispers `talents autopick` + `autogear` to the newcomer
 (maintenance is deliberately not auto-run — it can walk bots to
 trainers mid-load); `done` reports `{requested, joined}`.
-Errors: BAD_ARG (names/action/preset name), NOT_FOUND (offline
-player/bot, unknown preset, party has no bots to save),
-DB_UNREACHABLE (party reads), SOAP_AUTH, SOAP_FAULT (bridge-setup
-hint), SOAP_UNREACHABLE.
+Errors: BAD_ARG (names/action/preset name), NOT_FOUND (offline player/bot, unknown preset, party has no bots to save), DB_UNREACHABLE (party reads). botcmd can additionally raise SOAP_AUTH / SOAP_FAULT (bridge-setup hint) / SOAP_UNREACHABLE; preset-load never hard-fails on SOAP — kick/add/whisper failures become warn lines and the done payload just shows fewer joined (bridge not deployed => joined:0).
 
 ## gm subcommands (GM character tools)
 
