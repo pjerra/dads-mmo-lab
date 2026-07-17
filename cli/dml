@@ -3224,6 +3224,49 @@ case "$cmd" in
             ndjson_section_end module-rebuild ok
             ndjson_done '{"rebuilt":true}'
             ;;
+          conf)
+            mkey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_cpp_key "$mkey" || { json_err BAD_ARG "Invalid module key" ""; exit 1; }
+            sdir="$(_wow_server_dir)"
+            [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" ""; exit 1; }
+            cname="$(_module_conf_name "$mkey")"
+            cstate="$(_module_conf_state "$sdir" "$mkey")"
+            cjson=null
+            [[ -n "$cname" ]] && cjson="\"$(json_escape "$cname")\""
+            json_ok "{\"key\":\"$mkey\",\"conf_name\":$cjson,\"state\":\"$cstate\"}"
+            ;;
+          conf-activate)
+            mkey=""; force=0
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                --force) force=1; shift ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_cpp_key "$mkey" || { json_err BAD_ARG "Invalid module key" ""; exit 1; }
+            sdir="$(_wow_server_dir)"
+            [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" ""; exit 1; }
+            cname="$(_module_conf_name "$mkey")"
+            [[ -z "$cname" ]] && { json_err NO_CONF "$mkey has no standard conf file" ""; exit 1; }
+            active="$sdir/env/dist/etc/modules/$cname"
+            if [[ -f "$active" && "$force" != 1 ]]; then
+              json_err EXISTS "Active conf already exists: $cname" "Pass --force to overwrite with defaults."; exit 1
+            fi
+            dist="$(_module_conf_dist "$sdir" "$mkey")"
+            if [[ -z "$dist" ]]; then
+              json_err NEEDS_REBUILD "No $cname.dist yet" "The .dist appears after a worldserver rebuild with the module present."; exit 1
+            fi
+            mkdir -p "$(dirname "$active")"
+            cp "$dist" "$active"
+            json_ok "{\"key\":\"$mkey\",\"activated\":true,\"conf_name\":\"$(json_escape "$cname")\"}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
             exit 1
