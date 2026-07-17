@@ -129,6 +129,15 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   grep -q 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/allcaps.txt"
   grep -q 'dml_whisper Testen Botmage autogear' "$FIXTURE/allcaps.txt"
   grep -q 'dml_whisper Testen Botpriest talents autopick' "$FIXTURE/allcaps.txt"
+  # Second joiner gets BOTH whispers too.
+  grep -q 'dml_whisper Testen Botpriest autogear' "$FIXTURE/allcaps.txt"
+  # Ordering: the kick precedes the first add, which precedes its whispers
+  # (the capture file appends in call order).
+  kick_line=$(grep -n 'dml_uninvite Oldbot' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
+  add_line=$(grep -n 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
+  whisper_line=$(grep -n 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
+  [ "$kick_line" -lt "$add_line" ]
+  [ "$add_line" -lt "$whisper_line" ]
 }
 
 @test "preset-load missing preset emits a NOT_FOUND error event" {
