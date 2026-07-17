@@ -2374,7 +2374,7 @@ case "$cmd" in
                     fi
                   fi
                 fi
-                sqlfail=0
+                sqlfail=0; sibnote=""
                 case "$stype" in
                   clone_sql|clone_sql_norevert)
                     ucount=0
@@ -2409,7 +2409,7 @@ case "$cmd" in
                     sib="$(_tweak_installed_sibling "$sdir" "$mkey")"
                     if [[ -n "$sib" ]]; then
                       ndjson_line info "removing active tweak $sib first (tweaks don't stack)..."
-                      if ! _tweak_reverse "$sdir" "$sib"; then sqlfail=1; else rm -f "$(_sqlmod_marker "$sdir" "$sib")"; fi
+                      if ! _tweak_reverse "$sdir" "$sib"; then sqlfail=1; else rm -f "$(_sqlmod_marker "$sdir" "$sib")"; sibnote=" (note: the previous tweak $sib was already removed)"; fi
                     fi
                     if [[ "$sqlfail" -eq 0 ]]; then
                       read -r th td ta <<< "$(_tweak_mults "$mkey")"
@@ -2420,7 +2420,7 @@ case "$cmd" in
                 esac
                 if [[ "$sqlfail" -ne 0 ]]; then
                   ndjson_section_end module-install error
-                  ndjson_error SQL_FAILED "SQL for $mkey failed" "Is ac-database running? Nothing was marked installed."; exit 1
+                  ndjson_error SQL_FAILED "SQL for $mkey failed" "Is ac-database running? Nothing was marked installed.$sibnote"; exit 1
                 fi
                 case "$stype" in
                   clone_sql_pick) printf 'HEARTHSTONE_COOLDOWN=%s\n' "$mvariant" > "$(_sqlmod_marker "$sdir" "$mkey")" ;;

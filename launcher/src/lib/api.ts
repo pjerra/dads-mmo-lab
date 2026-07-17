@@ -378,7 +378,7 @@ export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> =
   return invoke("wow_bridge_setup", { onEvent: ch });
 };
 
-export interface BackupInfo { file: string; size: number; created: string; }
+export interface BackupInfo { file: string; size: number; created: string; world: boolean; }
 
 export async function wowBackupList(): Promise<BackupInfo[]> {
   const d = await invoke<{ backups: BackupInfo[] }>("wow_backup_list");

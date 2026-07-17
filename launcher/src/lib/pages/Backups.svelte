@@ -125,6 +125,7 @@
     <input type="checkbox" bind:checked={includeWorld} disabled={busy || streaming} />
     Include world data (bigger file — recommended before installing modules)
   </label>
+  <p class="muted">Full backups share the keep-10 pool with regular ones, and restoring an older full backup while a module is still installed re-applies that module's SQL at the next server start.</p>
 
   {#if backups.length === 0}
     <p class="muted">No backups yet.</p>
@@ -132,7 +133,7 @@
     <div class="card">
       {#each backups as b (b.file)}
         <div class="row brow">
-          <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""})</span></span>
+          <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span></span>
           <button onclick={() => restoreBackup(b.file)} disabled={busy || streaming || restartState.restarting}>
             {confirming?.kind === "restore" && confirming?.file === b.file
               ? `This rolls EVERY character back to ${b.created} and restarts the server — sure?`

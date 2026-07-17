@@ -431,25 +431,25 @@ _lua_client_copy() {
         bmah)
             if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/Client Files/AddOns/BlackMarketUI" ]]; then
                 ndjson_line info "installing BlackMarketUI client addon..."
-                mkdir -p "$cpath/Interface/AddOns/BlackMarketUI"
+                mkdir -p "$cpath/Interface/AddOns/BlackMarketUI" || { ndjson_line warn "client copy failed — copy it manually"; return 0; }
                 cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/Client Files/AddOns/BlackMarketUI/." "$cpath/Interface/AddOns/BlackMarketUI/" || ndjson_line warn "client addon copy failed — copy it manually"
             fi
             ;;
         paragon)
             if [[ -d "$cdir/clientside/Interface" ]]; then
                 ndjson_line info "installing paragon client Interface files..."
-                mkdir -p "$cpath/Interface"
+                mkdir -p "$cpath/Interface" || { ndjson_line warn "client copy failed — copy it manually"; return 0; }
                 cp -r "$cdir/clientside/Interface/." "$cpath/Interface/" || ndjson_line warn "client Interface copy failed — copy it manually"
             fi
             ;;
         sod)
             if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Data" ]]; then
                 ndjson_line info "installing SOD client Data patches..."
-                mkdir -p "$cpath/Data"
+                mkdir -p "$cpath/Data" || { ndjson_line warn "client copy failed — copy it manually"; return 0; }
                 cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Data/." "$cpath/Data/" || ndjson_line warn "client Data copy failed — copy it manually"
             fi
             if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Interface" ]]; then
-                mkdir -p "$cpath/Interface"
+                mkdir -p "$cpath/Interface" || { ndjson_line warn "client copy failed — copy it manually"; return 0; }
                 cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Interface/." "$cpath/Interface/" || ndjson_line warn "client Interface copy failed — copy it manually"
             fi
             ndjson_line warn "SOD server DBC files must be copied manually — see guides/wow-wotlk/wow-manage.sh copy_server_dbc"
