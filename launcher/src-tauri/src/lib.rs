@@ -390,6 +390,26 @@ async fn wow_party_preset_load(player: String, name: String, on_event: Channel<s
 }
 
 #[tauri::command]
+async fn wow_backup_create(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "backup".into(), "create".into()], on_event, state).await
+}
+
+#[tauri::command]
+async fn wow_backup_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "backup".into(), "list".into()]).await
+}
+
+#[tauri::command]
+async fn wow_backup_delete(file: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "backup".into(), "delete".into(), "--file".into(), file]).await
+}
+
+#[tauri::command]
+async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "backup".into(), "restore".into(), "--file".into(), file], on_event, state).await
+}
+
+#[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
@@ -450,6 +470,10 @@ pub fn run() {
             wow_party_preset_list,
             wow_party_preset_delete,
             wow_party_preset_load,
+            wow_backup_create,
+            wow_backup_list,
+            wow_backup_delete,
+            wow_backup_restore,
             wow_bridge_setup,
             wow_gm_level,
             wow_gm_gold,

@@ -253,3 +253,23 @@ export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> =
   ch.onmessage = onEvent;
   return invoke("wow_bridge_setup", { onEvent: ch });
 };
+
+export interface BackupInfo { file: string; size: number; created: string; }
+
+export async function wowBackupList(): Promise<BackupInfo[]> {
+  const d = await invoke<{ backups: BackupInfo[] }>("wow_backup_list");
+  return d.backups;
+}
+export async function wowBackupDelete(file: string): Promise<{ deleted: boolean; file: string }> {
+  return await invoke("wow_backup_delete", { file });
+}
+export const wowBackupCreate = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_backup_create", { onEvent: ch });
+};
+export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_backup_restore", { file, onEvent: ch });
+};
