@@ -1568,18 +1568,7 @@ case "$cmd" in
                 *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?"; exit 1 ;;
               esac
             fi
-            tries="${DML_PARTY_POLL_TRIES:-12}"; slp="${DML_PARTY_POLL_SLEEP:-0.5}"
-            newguid=""; i=0
-            while (( i < tries )); do
-              now="$(_party_group_member_guids "$pguid" | tr '\n' ' ')"
-              for g in $now; do
-                [[ "$g" == "$pguid" ]] && continue
-                case " $before " in *" $g "*) : ;; *) newguid="$g"; break ;; esac
-              done
-              [[ -n "$newguid" ]] && break
-              i=$(( i + 1 ))
-              [[ "$slp" != "0" ]] && sleep "$slp"
-            done
+            newguid="$(_party_wait_new_member "$pguid" "$before")"
             if [[ -n "$newguid" ]]; then
               botname=""
               if [[ "$newguid" =~ ^[0-9]+$ ]]; then

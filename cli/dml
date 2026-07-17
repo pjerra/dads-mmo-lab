@@ -458,6 +458,43 @@ _party_fire() {
     esac
     exit 1
 }
+
+# Poll group membership until a NEW member (one not in $2, a space-
+# separated guid snapshot) appears for player guid $1; echo the new guid
+# or "" on timeout. Seams: DML_PARTY_POLL_TRIES (12) / _SLEEP (0.5).
+_party_wait_new_member() {
+    local pguid="$1" before="$2" tries slp newguid i now g
+    tries="${DML_PARTY_POLL_TRIES:-12}"; slp="${DML_PARTY_POLL_SLEEP:-0.5}"
+    newguid=""; i=0
+    while (( i < tries )); do
+        now="$(_party_group_member_guids "$pguid" | tr '\n' ' ')"
+        for g in $now; do
+            [[ "$g" == "$pguid" ]] && continue
+            case " $before " in *" $g "*) : ;; *) newguid="$g"; break ;; esac
+        done
+        [[ -n "$newguid" ]] && break
+        i=$(( i + 1 ))
+        [[ "$slp" != "0" ]] && sleep "$slp"
+    done
+    echo "$newguid"
+    return 0
+}
+
+# characters.class id -> the class name `party add --class` accepts.
+# Unsupported ids (6 = deathknight) echo "" -- callers skip those.
+_class_name_from_id() {
+    case "$1" in
+      1) echo warrior ;; 2) echo paladin ;; 3) echo hunter ;; 4) echo rogue ;;
+      5) echo priest ;; 7) echo shaman ;; 8) echo mage ;; 9) echo warlock ;;
+      11) echo druid ;; *) echo "" ;;
+    esac
+    return 0
+}
+
+_preset_dir() { echo "$HOME/.dml/party-presets"; }
+
+# Exit status IS the signal (same pattern as _valid_charname).
+_valid_preset_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
 # ---------------------------------------------------------------------------
 # GM tools (Lab-parity round 2): shared guard for the bridge-backed gm ops.
 # The gm dispatch arms live in 90-main.sh next to the other wow arms; only
@@ -2042,18 +2079,7 @@ case "$cmd" in
                 *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?"; exit 1 ;;
               esac
             fi
-            tries="${DML_PARTY_POLL_TRIES:-12}"; slp="${DML_PARTY_POLL_SLEEP:-0.5}"
-            newguid=""; i=0
-            while (( i < tries )); do
-              now="$(_party_group_member_guids "$pguid" | tr '\n' ' ')"
-              for g in $now; do
-                [[ "$g" == "$pguid" ]] && continue
-                case " $before " in *" $g "*) : ;; *) newguid="$g"; break ;; esac
-              done
-              [[ -n "$newguid" ]] && break
-              i=$(( i + 1 ))
-              [[ "$slp" != "0" ]] && sleep "$slp"
-            done
+            newguid="$(_party_wait_new_member "$pguid" "$before")"
             if [[ -n "$newguid" ]]; then
               botname=""
               if [[ "$newguid" =~ ^[0-9]+$ ]]; then
