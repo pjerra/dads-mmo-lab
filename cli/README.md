@@ -349,3 +349,22 @@ self-despawn) after checking the entry exists in `creature_template`
 (read-only) — unknown entry → `NOT_FOUND`; the payload carries the
 creature's name.
 Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline character, or unknown creature entry for summon), `DB_UNREACHABLE` (summon's existence check), `SOAP_AUTH`, `SOAP_FAULT`, `SOAP_UNREACHABLE`.
+
+## backup subcommands (whole-server snapshots)
+
+    dml wow backup create  --json
+    dml wow backup list    --json
+    dml wow backup delete  --file <wow-YYYYMMDD-HHMMSS.sql.gz> --json
+    dml wow backup restore --file <wow-YYYYMMDD-HHMMSS.sql.gz> --json
+
+`create` dumps `acore_characters` + `acore_playerbots` + `acore_auth`
+(`--single-transaction`, safe while the server runs) to
+`~/.dml/backups/wow-<UTC>.sql.gz`, keeping the newest
+`DML_BACKUP_KEEP` (default 10) and reporting every pruned file.
+`restore` is the project's one sanctioned write path into CHARACTER data
+(the LAN toggle's realmlist update is the only other MySQL write): it
+stops ac-worldserver+ac-authserver, takes an automatic `-prerestore`
+safety backup, imports the snapshot, and restarts the server. If the
+import fails the server is deliberately LEFT STOPPED and the error names
+the safety file. Errors: BAD_ARG (name), NOT_FOUND (missing backup/server),
+DOCKER_DOWN, BACKUP_FAILED (dump/stop/import failures).

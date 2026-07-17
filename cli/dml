@@ -512,9 +512,11 @@ _gm_require_online() {
 # ---------------------------------------------------------------------------
 # Character backups (Lab-parity round 5): whole-server snapshots.
 # mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
-# RESTORE IS THE PROJECT'S ONE SANCTIONED MYSQL-WRITE PATH: only inside
-# `backup restore`, only with world+auth stopped, always behind an automatic
-# pre-restore safety backup. See docs/.../2026-07-17-backups-design.md.
+# RESTORE IS THE PROJECT'S ONE SANCTIONED WRITE PATH INTO CHARACTER DATA
+# (the pre-existing LAN toggle's realmlist UPDATE is the only other MySQL
+# write): only inside `backup restore`, only with world+auth stopped, always
+# behind an automatic pre-restore safety backup. See
+# docs/.../2026-07-17-backups-design.md.
 # ---------------------------------------------------------------------------
 
 _backup_dir() { echo "$HOME/.dml/backups"; }

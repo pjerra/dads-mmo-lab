@@ -60,6 +60,10 @@ save on either shows the restart-needed banner on both)
   a bad edit there could run commands on the host, so they are locked; change
   them via Settings. Save shows a restart-needed banner; Save & Restart
   streams the restart into the terminal panel.
+- **Backups** — one-click snapshots of every character, account and bot
+  (works while the server runs). Restoring rolls everything back to that
+  moment: the server stops, a safety backup is taken automatically, the
+  snapshot is imported, and the server restarts. Keeps the newest 10.
 
 ## Dev loop
 
