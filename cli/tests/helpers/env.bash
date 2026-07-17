@@ -185,6 +185,14 @@ if [[ "${1:-}" == "exec" ]]; then
     printf 'SQL DUMP CONTENT\n'
     exit 0
   fi
+  # sql-mod family: `docker exec ac-database mysql -uroot -p... <db> -e <stmt>`
+  # (tweak_world multipliers, hearthstone/teleporter reversal statements).
+  # Checked BEFORE the import branch below -- order is load-bearing, since
+  # the import branch's `*" mysql"*` glob would otherwise swallow -e calls too.
+  if [[ "$args" == *" -e "* ]]; then
+    log "mysql-stmt ${args#*-e }"
+    exit "${DML_STUB_SQL_EXIT:-0}"
+  fi
   # NB: checked AFTER mysqldump (which exits above), so this only matches the import.
   if [[ "$args" == *" mysql"* ]]; then
     if [[ "$args" != *-uroot* || "$args" != *-p* ]]; then
@@ -193,7 +201,7 @@ if [[ "${1:-}" == "exec" ]]; then
     fi
     log "mysql-import"
     if [[ -n "${DML_STUB_IMPORT_CAPTURE:-}" ]]; then cat > "$DML_STUB_IMPORT_CAPTURE"; else cat > /dev/null; fi
-    exit "${DML_STUB_IMPORT_EXIT:-0}"
+    exit "${DML_STUB_SQL_EXIT:-${DML_STUB_IMPORT_EXIT:-0}}"
   fi
   exit 0
 fi

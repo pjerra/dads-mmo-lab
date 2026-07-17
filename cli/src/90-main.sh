@@ -2195,7 +2195,7 @@ case "$cmd" in
             ;;
           install)
             [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-install
-            family=""; mkey=""; murl=""; bkchoice=""
+            family=""; mkey=""; murl=""; bkchoice=""; mvariant=""
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --family) _need_flag_val "$1" $#; family="$2"; shift 2 ;;
@@ -2203,6 +2203,7 @@ case "$cmd" in
                 --url) _need_flag_val "$1" $#; murl="$2"; shift 2 ;;
                 --backup) bkchoice=backup; shift ;;
                 --no-backup) bkchoice=nobackup; shift ;;
+                --variant) _need_flag_val "$1" $#; mvariant="$2"; shift 2 ;;
                 *) ndjson_section_end module-install error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
               esac
             done
@@ -2321,8 +2322,112 @@ case "$cmd" in
                 ndjson_done "{\"key\":\"$mkey\",\"action\":\"installed\",\"reload\":\"$(json_escape "$relmsg")\"}"
                 ;;
               sql)
-                ndjson_section_end module-install error
-                ndjson_error NOT_IMPLEMENTED "sql installs land in the next update" ""; exit 1
+                srow="$(_module_registry_sql | grep -m1 -F "$mkey|" || true)"
+                if [[ "$srow" != "$mkey|"* ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "Unknown SQL mod: $mkey" ""; exit 1
+                fi
+                if [[ -n "$murl" ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "--url is not supported for SQL mods" ""; exit 1
+                fi
+                stype="$(printf '%s' "$srow" | cut -d'|' -f4)"
+                surl="$(printf '%s' "$srow" | cut -d'|' -f3)"
+                _sqlmod_dirs "$sdir"
+                if [[ -f "$(_sqlmod_marker "$sdir" "$mkey")" ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error EXISTS "$mkey is already installed" "Remove it first to re-apply."; exit 1
+                fi
+                if [[ -z "$bkchoice" ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "Pick --backup or --no-backup" "SQL mods change the world database."; exit 1
+                fi
+                if [[ "$stype" == clone_sql_pick ]]; then
+                  case "$mvariant" in
+                    1sec|1min|5min|15min|30min) ;;
+                    *) ndjson_section_end module-install error
+                       ndjson_error BAD_ARG "hearthstone-cd needs --variant 1sec|1min|5min|15min|30min" ""; exit 1 ;;
+                  esac
+                fi
+                if [[ "$stype" == clone_dist ]]; then
+                  [[ -z "$mvariant" ]] && mvariant=80
+                  if ! [[ "$mvariant" =~ ^[0-9]+$ ]] || (( 10#$mvariant < 1 || 10#$mvariant > 80 )); then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "npc-teleporter --variant is a level 1-80" ""; exit 1
+                  fi
+                  mvariant=$((10#$mvariant))
+                fi
+                if [[ "$bkchoice" == backup ]]; then
+                  if ! _module_backup_now; then
+                    ndjson_section_end module-install error
+                    ndjson_error BACKUP_FAILED "Safety backup failed — nothing was installed" ""; exit 1
+                  fi
+                fi
+                scdir="$sdir/sql_scripts/clones/$mkey"
+                if [[ -n "$surl" ]]; then
+                  if [[ ! -d "$scdir/.git" ]]; then
+                    [[ -d "$scdir" ]] && rm -rf "$scdir"
+                    ndjson_line info "cloning $mkey..."
+                    if ! _stream_cmd git clone --depth 1 "$surl" "$scdir"; then
+                      ndjson_section_end module-install error
+                      ndjson_error GIT_FAILED "git clone failed for $mkey" ""; exit 1
+                    fi
+                  fi
+                fi
+                sqlfail=0
+                case "$stype" in
+                  clone_sql|clone_sql_norevert)
+                    while IFS= read -r sf || [[ -n "$sf" ]]; do
+                      [[ -z "$sf" ]] && continue
+                      ndjson_line info "applying $(basename "$sf")..."
+                      _sqlmod_run_file acore_world "$sf" || { sqlfail=1; break; }
+                    done < <(_sqlmod_up_files "$scdir")
+                    ;;
+                  clone_sql_pick)
+                    pf="$(find "$scdir" -iname "*${mvariant}*.sql" 2>/dev/null | sort | head -n1)" || pf=""
+                    if [[ -z "$pf" ]]; then sqlfail=1; else
+                      ndjson_line info "applying $(basename "$pf")..."
+                      _sqlmod_run_file acore_world "$pf" || sqlfail=1
+                    fi
+                    ;;
+                  clone_dist)
+                    gn=0
+                    while IFS= read -r df || [[ -n "$df" ]]; do
+                      [[ -z "$df" ]] && continue
+                      gn=$(( gn + 1 ))
+                      gf="$sdir/sql_scripts/clones/${mkey}_gen_$gn.sql"
+                      sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $mvariant/" "$df" > "$gf"
+                      ndjson_line info "applying $(basename "$df") (level $mvariant)..."
+                      _sqlmod_run_file acore_world "$gf" || { sqlfail=1; break; }
+                    done < <(find "$scdir/data/sql/db-world" -name '*.dist' 2>/dev/null | sort)
+                    [[ "$gn" -eq 0 ]] && sqlfail=1
+                    ;;
+                  tweak_world)
+                    sib="$(_tweak_installed_sibling "$sdir" "$mkey")"
+                    if [[ -n "$sib" ]]; then
+                      ndjson_line info "removing active tweak $sib first (tweaks don't stack)..."
+                      if ! _tweak_reverse "$sdir" "$sib"; then sqlfail=1; else rm -f "$(_sqlmod_marker "$sdir" "$sib")"; fi
+                    fi
+                    if [[ "$sqlfail" -eq 0 ]]; then
+                      read -r th td ta <<< "$(_tweak_mults "$mkey")"
+                      ndjson_line info "applying $mkey (HP x$th / DMG x$td / ARM x$ta)..."
+                      _tweak_apply "$th" "$td" "$ta" || sqlfail=1
+                    fi
+                    ;;
+                esac
+                if [[ "$sqlfail" -ne 0 ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error SQL_FAILED "SQL for $mkey failed" "Is ac-database running? Nothing was marked installed."; exit 1
+                fi
+                case "$stype" in
+                  clone_sql_pick) printf 'HEARTHSTONE_COOLDOWN=%s\n' "$mvariant" > "$(_sqlmod_marker "$sdir" "$mkey")" ;;
+                  tweak_world)
+                    read -r th td ta <<< "$(_tweak_mults "$mkey")"
+                    printf 'APPLIED_HP_MULT=%s\nAPPLIED_DMG_MULT=%s\nAPPLIED_ARM_MULT=%s\n' "$th" "$td" "$ta" > "$(_sqlmod_marker "$sdir" "$mkey")" ;;
+                  *) : > "$(_sqlmod_marker "$sdir" "$mkey")" ;;
+                esac
+                ndjson_section_end module-install ok
+                ndjson_done "{\"key\":\"$mkey\",\"action\":\"installed\",\"type\":\"$stype\"}"
                 ;;
               *)
                 ndjson_section_end module-install error
@@ -2386,8 +2491,68 @@ case "$cmd" in
                 ndjson_done "{\"key\":\"$mkey\",\"removed\":true}"
                 ;;
               sql)
-                ndjson_section_end module-remove error
-                ndjson_error NOT_IMPLEMENTED "sql removal lands in the next update" ""; exit 1
+                srow="$(_module_registry_sql | grep -m1 -F "$mkey|" || true)"
+                if [[ "$srow" != "$mkey|"* ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error BAD_ARG "Unknown SQL mod: $mkey" ""; exit 1
+                fi
+                stype="$(printf '%s' "$srow" | cut -d'|' -f4)"
+                _sqlmod_dirs "$sdir"
+                if [[ ! -f "$(_sqlmod_marker "$sdir" "$mkey")" ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error NOT_FOUND "SQL mod not installed: $mkey" ""; exit 1
+                fi
+                if [[ "$stype" == clone_sql_norevert ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error NO_REVERT "$mkey has no automated reversal SQL" "Restore a backup from the Backups page instead."; exit 1
+                fi
+                if [[ -z "$bkchoice" ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error BAD_ARG "Pick --backup or --no-backup" "Removal changes the world database."; exit 1
+                fi
+                if [[ "$bkchoice" == backup ]]; then
+                  if ! _module_backup_now; then
+                    ndjson_section_end module-remove error
+                    ndjson_error BACKUP_FAILED "Safety backup failed — nothing was removed" ""; exit 1
+                  fi
+                fi
+                scdir="$sdir/sql_scripts/clones/$mkey"
+                sqlfail=0
+                case "$stype" in
+                  clone_sql)
+                    dcount=0
+                    while IFS= read -r sf || [[ -n "$sf" ]]; do
+                      [[ -z "$sf" ]] && continue
+                      dcount=$(( dcount + 1 ))
+                      ndjson_line info "applying $(basename "$sf")..."
+                      _sqlmod_run_file acore_world "$sf" || { sqlfail=1; break; }
+                    done < <(_sqlmod_down_files "$scdir")
+                    if [[ "$dcount" -eq 0 ]]; then
+                      ndjson_section_end module-remove error
+                      ndjson_error NO_REVERT "$mkey's clone has no down.sql" "Restore a backup instead."; exit 1
+                    fi
+                    ;;
+                  clone_sql_pick)
+                    ndjson_line info "resetting hearthstone cooldown to the 30-minute default..."
+                    _sqlmod_run_stmt acore_world "UPDATE spell_dbc SET RecoveryTime = 1800000, CategoryRecoveryTime = 1800000 WHERE Id = 8690;" || sqlfail=1
+                    ;;
+                  clone_dist)
+                    ndjson_line info "deleting teleporter NPCs..."
+                    _sqlmod_run_stmt acore_world "DELETE FROM creature WHERE id1 IN (190000,190001); DELETE FROM creature_template WHERE entry IN (190000,190001);" || sqlfail=1
+                    ;;
+                  tweak_world)
+                    ndjson_line info "reversing $mkey multipliers..."
+                    _tweak_reverse "$sdir" "$mkey" || sqlfail=1
+                    ;;
+                esac
+                if [[ "$sqlfail" -ne 0 ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error SQL_FAILED "Reversal SQL for $mkey failed" "Is ac-database running? The installed marker was kept."; exit 1
+                fi
+                rm -f "$(_sqlmod_marker "$sdir" "$mkey")"
+                rm -rf "$scdir"
+                ndjson_section_end module-remove ok
+                ndjson_done "{\"key\":\"$mkey\",\"removed\":true,\"type\":\"$stype\"}"
                 ;;
               *)
                 ndjson_section_end module-remove error

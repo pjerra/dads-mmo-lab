@@ -475,3 +475,67 @@ _lua_remove_deployed() {
     esac
     return 0
 }
+
+# --- sql-mod family ---------------------------------------------------------
+_sqlmod_dirs() { mkdir -p "$1/sql_scripts/installed" "$1/sql_scripts/clones"; return 0; }
+_sqlmod_marker() { echo "$1/sql_scripts/installed/$2.installed"; }
+
+_sqlmod_run_stmt() { docker exec ac-database mysql -uroot -p"$(_db_pw)" "$1" -e "$2"; }
+_sqlmod_run_file() { docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"; }
+
+# Apply list for clone_sql types: every .sql in the clone except reversal /
+# example files, sorted for determinism.
+_sqlmod_up_files() {
+    find "$1" -name '*.sql' 2>/dev/null | grep -viE 'down|example' | sort
+    return 0
+}
+_sqlmod_down_files() {
+    find "$1" -name '*.sql' 2>/dev/null | grep -iE 'down' | sort
+    return 0
+}
+
+# H D A multipliers per tweak key.
+_tweak_mults() {
+    case "$1" in
+        baby-mobs)  echo "0.25 0.25 0.25" ;;
+        buff-mobs)  echo "2 1.5 1.5" ;;
+        xbuff-mobs) echo "4 2 2" ;;
+        nerf-mobs)  echo "0.5 0.75 0.75" ;;
+        *) echo "" ;;
+    esac
+}
+
+_tweak_apply() {
+    _sqlmod_run_stmt acore_world "UPDATE creature_template SET HealthModifier = HealthModifier * $1, DamageModifier = DamageModifier * $2, ArmorModifier = ArmorModifier * $3;"
+}
+
+# Which sibling tweak (if any) is currently installed? (mutual exclusion)
+_tweak_installed_sibling() {
+    local sdir="$1" me="$2" k
+    for k in baby-mobs buff-mobs xbuff-mobs nerf-mobs; do
+        [[ "$k" == "$me" ]] && continue
+        [[ -f "$(_sqlmod_marker "$sdir" "$k")" ]] && { printf '%s' "$k"; return 0; }
+    done
+    return 0
+}
+
+# Inverse-apply a tweak from its marker's APPLIED_* values (fallback to the
+# registry defaults). Float-lossy by design -- manager parity.
+_tweak_reverse() {
+    local sdir="$1" key="$2" mfile h d a ih id ia
+    mfile="$(_sqlmod_marker "$sdir" "$key")"
+    h=""; d=""; a=""
+    if [[ -f "$mfile" ]]; then
+        h="$(grep -m1 '^APPLIED_HP_MULT=' "$mfile" | cut -d= -f2 || true)"
+        d="$(grep -m1 '^APPLIED_DMG_MULT=' "$mfile" | cut -d= -f2 || true)"
+        a="$(grep -m1 '^APPLIED_ARM_MULT=' "$mfile" | cut -d= -f2 || true)"
+    fi
+    if [[ -z "$h" || -z "$d" || -z "$a" ]]; then
+        read -r h d a <<< "$(_tweak_mults "$key")"
+    fi
+    [[ -z "$h" ]] && return 1
+    ih="$(awk "BEGIN{printf \"%.6f\", 1/$h}")"
+    id="$(awk "BEGIN{printf \"%.6f\", 1/$d}")"
+    ia="$(awk "BEGIN{printf \"%.6f\", 1/$a}")"
+    _tweak_apply "$ih" "$id" "$ia"
+}

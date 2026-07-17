@@ -131,8 +131,8 @@ src() {
   echo "$output" | grep -q 'NOT_FOUND'
 }
 
-@test "module install sql is NOT_IMPLEMENTED until C3 (lua landed in C2 -- see wow-module-lua.bats)" {
+@test "module install sql: family is implemented (see wow-module-sql.bats); missing backup flag is BAD_ARG" {
   run bash "$DML" wow module install --family sql --key lvl1-mounts --json
   [ "$status" -eq 1 ]
-  echo "$output" | grep -q 'NOT_IMPLEMENTED'
+  echo "$output" | grep -q 'BAD_ARG'
 }
