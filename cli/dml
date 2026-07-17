@@ -2140,8 +2140,35 @@ case "$cmd" in
             _party_fire "dml_login $player $bot" "relogin"
             json_ok "{\"relogged\":true}"
             ;;
+          botcmd)
+            player=""; bot=""; action=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
+                --action) _need_flag_val "$1" $#; action="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
+            # Closed allowlist -> fixed whisper strings. This is the whole
+            # whisper surface: no free-text path exists.
+            case "$action" in
+              gear) wmsg="autogear" ;;
+              talents) wmsg="talents autopick" ;;
+              maintain) wmsg="maintenance" ;;
+              *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain"; exit 1 ;;
+            esac
+            pguid="$(_party_online_guid "$player")"
+            [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
+            bguid="$(_party_online_guid "$bot")"
+            [[ "$bguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $bot" "The bot must be in the world -- is it still in your party?"; exit 1; }
+            _party_fire "dml_whisper $player $bot $wmsg" "botcmd"
+            json_ok "{\"sent\":true,\"player\":\"$(json_escape "$player")\",\"bot\":\"$(json_escape "$bot")\",\"action\":\"$action\"}"
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online --json"
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load --json"
             exit 1
             ;;
         esac

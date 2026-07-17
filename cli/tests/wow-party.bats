@@ -248,3 +248,73 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
 }
+
+# ---------- botcmd (My Party phase 2) ----------
+
+@test "party botcmd fires the exact whisper string for each action" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action gear --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.sent')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.action')" = "gear" ]
+  grep -q 'dml_whisper Testen Botmage autogear' "$FIXTURE/cap.txt"
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action talents --json
+  [ "$status" -eq 0 ]
+  grep -q 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/cap.txt"
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action maintain --json
+  [ "$status" -eq 0 ]
+  grep -q 'dml_whisper Testen Botmage maintenance' "$FIXTURE/cap.txt"
+}
+
+@test "party botcmd rejects an unknown action with the allowlist hint" {
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action dance --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  echo "$output" | grep -q 'gear talents maintain'
+}
+
+@test "party botcmd rejects invalid player and bot names" {
+  run bash "$DML" wow party botcmd --player 'x; drop' --bot Botmage --action gear --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  run bash "$DML" wow party botcmd --player Testen --bot 'x; drop' --action gear --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "party botcmd offline player maps to NOT_FOUND naming the player" {
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party botcmd --player Ghost --bot Botmage --action gear --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  echo "$output" | grep -q 'Ghost'
+}
+
+@test "party botcmd offline bot maps to NOT_FOUND with the party hint" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '' > "$FIXTURE/none.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/none.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party botcmd --player Testen --bot Goneb --action gear --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  echo "$output" | grep -q 'Goneb'
+  echo "$output" | grep -qi 'party'
+}
+
+@test "party botcmd maps a SOAP fault to SOAP_FAULT with the bridge-setup hint" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action gear --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+  echo "$output" | grep -q 'bridge-setup'
+}
