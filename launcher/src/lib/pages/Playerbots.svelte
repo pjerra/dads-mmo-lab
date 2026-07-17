@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import {
     wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyRelogin, wowPartySetup,
-    type OnlineChar, type PartyMember,
+    wowPartyBotcmd, wowPartyPresetSave, wowPartyPresetList, wowPartyPresetDelete, wowPartyPresetLoad,
+    type OnlineChar, type PartyMember, type PresetInfo,
   } from "$lib/api";
   import { className } from "$lib/wow";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
@@ -23,6 +24,11 @@
   let setting = $state(false);
   let confirmSetup = $state(false);
 
+  let presets: PresetInfo[] = $state([]);
+  let presetName = $state("");
+  let loadingPreset = $state(false);
+  let confirmingPreset: { kind: "load" | "delete"; name: string } | null = $state(null);
+
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
     error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -31,6 +37,7 @@
   async function refresh() {
     error = null;
     confirmSetup = false;
+    confirmingPreset = null;
     note = null;
     try {
       online = await wowPartyOnline();
@@ -38,7 +45,10 @@
       if (player) members = await wowPartyList(player); else members = [];
     } catch (e) { showErr(e); }
   }
-  onMount(refresh);
+  async function refreshPresets() {
+    try { presets = await wowPartyPresetList(); } catch (e) { showErr(e); }
+  }
+  onMount(() => { refresh(); refreshPresets(); });
 
   // add/kick/resummon snapshot `player` into a local before their first await.
   // The player <select> is also disabled while busy/setting (below), but the
@@ -66,6 +76,63 @@
     const p = player;
     busy = true; error = null;
     try { await wowPartyRelogin(p, bot); members = await wowPartyList(p); }
+    catch (e) { showErr(e); } finally { busy = false; }
+  }
+  const BOTCMD_PHRASE = { gear: "gear up", talents: "fix its talents", maintain: "do maintenance" } as const;
+  async function botcmd(bot: string, action: "gear" | "talents" | "maintain") {
+    const p = player;
+    busy = true; error = null; note = null;
+    try {
+      await wowPartyBotcmd(p, bot, action);
+      note = `Told ${bot} to ${BOTCMD_PHRASE[action]} — give it a moment.`;
+    } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  async function savePreset() {
+    const p = player; const n = presetName.trim();
+    if (!n) return;
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowPartyPresetSave(p, n);
+      note = `Saved preset "${r.name}" (${r.bots.length} bots${r.overwrote ? ", replaced the old one" : ""}).`;
+      await refreshPresets();
+    } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  async function loadPreset(name: string) {
+    if (confirmingPreset?.kind !== "load" || confirmingPreset?.name !== name) {
+      confirmingPreset = { kind: "load", name };
+      return;
+    }
+    confirmingPreset = null;
+    const p = player;
+    loadingPreset = true; error = null; note = null; showTerm = true; term = initialTermState();
+    let requested = 0, joined = 0;
+    try {
+      await wowPartyPresetLoad(p, name, (e) => {
+        term = applyEvent(term, e);
+        if (e.event === "done") {
+          const d = e.data as { requested?: number; joined?: number } | undefined;
+          requested = d?.requested ?? 0; joined = d?.joined ?? 0;
+        }
+      });
+      note = `Loaded "${name}" — ${joined} of ${requested} bots joined.`;
+    } catch (e) { showErr(e); }
+    finally {
+      loadingPreset = false;
+      await refresh();
+      await refreshPresets();
+    }
+  }
+
+  async function deletePreset(name: string) {
+    if (confirmingPreset?.kind !== "delete" || confirmingPreset?.name !== name) {
+      confirmingPreset = { kind: "delete", name };
+      return;
+    }
+    confirmingPreset = null;
+    busy = true; error = null;
+    try { await wowPartyPresetDelete(name); await refreshPresets(); }
     catch (e) { showErr(e); } finally { busy = false; }
   }
   async function enableMyParty() {
@@ -125,13 +192,43 @@
           {#each members as m (m.guid)}
             <tr>
               <td>{m.name}</td><td class="muted">{className(m.class)} · lvl {m.level}</td>
-              <td>{#if m.is_bot}<button onclick={() => kick(m.name)} disabled={busy}>Kick</button>
-                  <button onclick={() => resummon(m.name)} disabled={busy}>Re-summon</button>{:else}<span class="muted">you</span>{/if}</td>
+              <td>{#if m.is_bot}<button onclick={() => kick(m.name)} disabled={busy || loadingPreset}>Kick</button>
+                  <button onclick={() => resummon(m.name)} disabled={busy || loadingPreset}>Re-summon</button>
+                  <button onclick={() => botcmd(m.name, "gear")} disabled={busy || loadingPreset}>Gear up</button>
+                  <button onclick={() => botcmd(m.name, "talents")} disabled={busy || loadingPreset}>Fix talents</button>
+                  <button onclick={() => botcmd(m.name, "maintain")} disabled={busy || loadingPreset}>Maintain</button>{:else}<span class="muted">you</span>{/if}</td>
             </tr>
           {/each}
         </tbody>
       </table>
     {/if}
+
+    <header class="bar"><h3>Party presets</h3></header>
+    <div class="card">
+      <div class="prow">
+        <input placeholder="preset name" maxlength="32" bind:value={presetName}
+          disabled={busy || setting || loadingPreset} />
+        <button onclick={savePreset}
+          disabled={!presetName.trim() || busy || setting || loadingPreset || members.filter((m) => m.is_bot).length === 0}>
+          Save current party
+        </button>
+      </div>
+      {#if presets.length === 0}
+        <p class="muted">No presets saved yet — build a party and save it.</p>
+      {:else}
+        {#each presets as pr (pr.name)}
+          <div class="prow">
+            <span>{pr.name} <span class="muted">({pr.bots} bots)</span></span>
+            <button onclick={() => loadPreset(pr.name)} disabled={busy || setting || loadingPreset}>
+              {confirmingPreset?.kind === "load" && confirmingPreset?.name === pr.name ? "Replaces your current bots — sure?" : "Load"}
+            </button>
+            <button onclick={() => deletePreset(pr.name)} disabled={busy || setting || loadingPreset}>
+              {confirmingPreset?.kind === "delete" && confirmingPreset?.name === pr.name ? `Delete "${pr.name}" — sure?` : "Delete"}
+            </button>
+          </div>
+        {/each}
+      {/if}
+    </div>
   {/if}
 
   {#if showTerm}<Terminal state={term} />{/if}
@@ -143,6 +240,7 @@
   .bar h2, .bar h3 { margin: 0; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
   .addrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .prow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 4px 0; }
   .cls { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
   table { border-collapse: collapse; }
   td { padding: 4px 12px 4px 0; font-size: 14px; }
