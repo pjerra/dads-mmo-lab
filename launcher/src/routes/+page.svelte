@@ -8,6 +8,7 @@
   import GMTools from "$lib/pages/GMTools.svelte";
   import Config from "$lib/pages/Config.svelte";
   import Playerbots from "$lib/pages/Playerbots.svelte";
+  import Backups from "$lib/pages/Backups.svelte";
 
   let page: PageId = $state(DEFAULT_PAGE);
 </script>
@@ -33,6 +34,7 @@
   {#if page === "settings" || page === "modules"}
     <Config tab={page === "settings" ? "settings" : "files"} />
   {/if}
+  {#if page === "backups"}<Backups />{/if}
 </main>
 
 <style>

@@ -28,6 +28,7 @@ export const NAV = [
     pages: [
       { id: "settings", label: "Settings" },
       { id: "modules", label: "Modules" },
+      { id: "backups", label: "Backups" },
     ],
   },
 ] as const;

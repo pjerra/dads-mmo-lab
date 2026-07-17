@@ -15,6 +15,7 @@ describe("NAV", () => {
       "playerbots",
       "settings",
       "modules",
+      "backups",
     ]);
   });
 
