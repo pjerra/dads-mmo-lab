@@ -3,12 +3,13 @@
 # (Registry + config verbs land in this file too — see `wow config` in main.)
 # ---------------------------------------------------------------------------
 
-# Parses the raw text of the SOAP `server info` result (stdin) into a JSON
-# object (stdout). The raw text carries literal `&#xD;` entities because
+# Parses the raw text of the SOAP `server info` result (stdin) into the JSON
+# field fragment (stdout, no braces/online key) shared by server-info and
+# server-detail. The raw text carries literal `&#xD;` entities because
 # soap_parse_result extracts the <result> text without XML-decoding it.
-# Unparseable fields become null rather than an error -- the Dashboard
-# renders "unknown" for those instead of failing the whole card.
-_parse_server_info() {
+# Unparseable fields become null rather than an error -- the UI renders
+# "unknown" for those instead of failing the whole card.
+_parse_server_info_fields() {
     local raw line version="" players="" uptime="" mean="" median=""
     raw="$(cat)"
     raw="${raw//&#xD;/}"
@@ -27,8 +28,14 @@ _parse_server_info() {
     local vjson=null ujson=null
     [[ -n "$version" ]] && vjson="\"$(json_escape "$version")\""
     [[ -n "$uptime" ]] && ujson="\"$(json_escape "$uptime")\""
-    printf '{"online":true,"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s}' \
+    printf '"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s' \
         "$vjson" "$players" "$ujson" "$mean" "$median"
+    return 0
+}
+
+# Back-compat wrapper: the `server-info` verb's envelope shape is public API.
+_parse_server_info() {
+    printf '{"online":true,%s}' "$(_parse_server_info_fields)"
     return 0
 }
 
@@ -114,5 +121,50 @@ _cfg_file_path() {
         playerbots.conf|mod_ahbot.conf|mod_ale.conf) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
         *) return 1 ;;
     esac
+    return 0
+}
+
+# --- server-detail helpers -------------------------------------------------
+# All read-only. Down/absent is data, never an error.
+
+# One "name|state|status" line per long-running service (fixed order:
+# world, auth, database), from a single `docker ps -a`. Absent containers
+# (including docker daemon down) get state "absent" and empty status.
+_detail_container_rows() {
+    local ps_out="" name line found
+    ps_out="$(docker ps -a --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null || true)"
+    for name in ac-worldserver ac-authserver ac-database; do
+        found=""
+        while IFS= read -r line; do
+            [[ "${line%%|*}" == "$name" ]] && { found="$line"; break; }
+        done <<< "$ps_out"
+        if [[ -n "$found" ]]; then
+            printf '%s\n' "$found"
+        else
+            printf '%s|absent|\n' "$name"
+        fi
+    done
+    return 0
+}
+
+# Exit-status helper (like _valid_charname): 0 when the CURRENT worldserver
+# run has logged AzerothCore's boot-complete marker. `compose stop`/`start`
+# preserves container logs, so a marker from the previous run would lie
+# during a re-boot -- hence --since the container's StartedAt.
+_world_ready() {
+    local started hits
+    if started="$(docker inspect -f '{{.State.StartedAt}}' ac-worldserver 2>/dev/null)"; then :; else return 1; fi
+    [[ -z "$started" ]] && return 1
+    hits="$(docker logs --since "$started" ac-worldserver 2>&1 | grep -ic 'World Initialized In' || true)"
+    [[ "${hits:-0}" -gt 0 ]]
+}
+
+# Host port for a container's internal port as a JSON string, or `null`.
+# `docker port` prints one "0.0.0.0:8085"-style line per bind; take the first.
+_host_port_json() {
+    local out=""
+    out="$(docker port "$1" "$2" 2>/dev/null | head -n1 || true)"
+    out="${out##*:}"
+    if [[ "$out" =~ ^[0-9]+$ ]]; then printf '"%s"' "$out"; else printf 'null'; fi
     return 0
 }

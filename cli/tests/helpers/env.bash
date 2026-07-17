@@ -44,7 +44,43 @@ if [[ "${1:-}" == "compose" ]]; then
   fi
   exit 0
 fi
-if [[ "${1:-}" == "ps" ]]; then exit 0; fi
+if [[ "${1:-}" == "ps" ]]; then
+  # server-detail: `docker ps -a --format '{{.Names}}|{{.State}}|{{.Status}}'`
+  # -> canned rows from DML_STUB_PS_ROWS (a file). Daemon-down => exit 1
+  # with no output, like real docker.
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  [[ -n "${DML_STUB_PS_ROWS:-}" && -f "${DML_STUB_PS_ROWS}" ]] && cat "$DML_STUB_PS_ROWS"
+  exit 0
+fi
+if [[ "${1:-}" == "inspect" ]]; then
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  printf '%s\n' "${DML_STUB_STARTED_AT:-2026-07-17T10:00:00.000000000Z}"
+  exit 0
+fi
+if [[ "${1:-}" == "logs" ]]; then
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  # The REAL --since filtering is docker's job, so the stub emulates it:
+  # when the caller passed --since and DML_STUB_LOGS_SINCE_FILE is set,
+  # serve that file (the "current run only" view); otherwise serve the
+  # full log. The stale-marker test relies on the two views differing.
+  if [[ "$*" == *"--since"* && -n "${DML_STUB_LOGS_SINCE_FILE:-}" ]]; then
+    cat "$DML_STUB_LOGS_SINCE_FILE"
+  elif [[ -n "${DML_STUB_LOGS_FILE:-}" && -f "${DML_STUB_LOGS_FILE}" ]]; then
+    cat "$DML_STUB_LOGS_FILE"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "port" ]]; then
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  # `docker port <name> <internal>` -> DML_STUB_PORTS is a newline table of
+  # "<container> <internal> <hostport>"; matching row prints "0.0.0.0:<hostport>".
+  if [[ -n "${DML_STUB_PORTS:-}" ]]; then
+    while read -r c i h; do
+      [[ "$c" == "${2:-}" && "$i" == "${3:-}" ]] && echo "0.0.0.0:$h"
+    done <<< "$DML_STUB_PORTS"
+  fi
+  exit 0
+fi
 exit 0
 EOS
   chmod +x "$STUB_BIN/docker"

@@ -265,12 +265,13 @@ _accounts_rows_to_json() {
 # (Registry + config verbs land in this file too — see `wow config` in main.)
 # ---------------------------------------------------------------------------
 
-# Parses the raw text of the SOAP `server info` result (stdin) into a JSON
-# object (stdout). The raw text carries literal `&#xD;` entities because
+# Parses the raw text of the SOAP `server info` result (stdin) into the JSON
+# field fragment (stdout, no braces/online key) shared by server-info and
+# server-detail. The raw text carries literal `&#xD;` entities because
 # soap_parse_result extracts the <result> text without XML-decoding it.
-# Unparseable fields become null rather than an error -- the Dashboard
-# renders "unknown" for those instead of failing the whole card.
-_parse_server_info() {
+# Unparseable fields become null rather than an error -- the UI renders
+# "unknown" for those instead of failing the whole card.
+_parse_server_info_fields() {
     local raw line version="" players="" uptime="" mean="" median=""
     raw="$(cat)"
     raw="${raw//&#xD;/}"
@@ -289,8 +290,14 @@ _parse_server_info() {
     local vjson=null ujson=null
     [[ -n "$version" ]] && vjson="\"$(json_escape "$version")\""
     [[ -n "$uptime" ]] && ujson="\"$(json_escape "$uptime")\""
-    printf '{"online":true,"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s}' \
+    printf '"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s' \
         "$vjson" "$players" "$ujson" "$mean" "$median"
+    return 0
+}
+
+# Back-compat wrapper: the `server-info` verb's envelope shape is public API.
+_parse_server_info() {
+    printf '{"online":true,%s}' "$(_parse_server_info_fields)"
     return 0
 }
 
@@ -376,6 +383,51 @@ _cfg_file_path() {
         playerbots.conf|mod_ahbot.conf|mod_ale.conf) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
         *) return 1 ;;
     esac
+    return 0
+}
+
+# --- server-detail helpers -------------------------------------------------
+# All read-only. Down/absent is data, never an error.
+
+# One "name|state|status" line per long-running service (fixed order:
+# world, auth, database), from a single `docker ps -a`. Absent containers
+# (including docker daemon down) get state "absent" and empty status.
+_detail_container_rows() {
+    local ps_out="" name line found
+    ps_out="$(docker ps -a --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null || true)"
+    for name in ac-worldserver ac-authserver ac-database; do
+        found=""
+        while IFS= read -r line; do
+            [[ "${line%%|*}" == "$name" ]] && { found="$line"; break; }
+        done <<< "$ps_out"
+        if [[ -n "$found" ]]; then
+            printf '%s\n' "$found"
+        else
+            printf '%s|absent|\n' "$name"
+        fi
+    done
+    return 0
+}
+
+# Exit-status helper (like _valid_charname): 0 when the CURRENT worldserver
+# run has logged AzerothCore's boot-complete marker. `compose stop`/`start`
+# preserves container logs, so a marker from the previous run would lie
+# during a re-boot -- hence --since the container's StartedAt.
+_world_ready() {
+    local started hits
+    if started="$(docker inspect -f '{{.State.StartedAt}}' ac-worldserver 2>/dev/null)"; then :; else return 1; fi
+    [[ -z "$started" ]] && return 1
+    hits="$(docker logs --since "$started" ac-worldserver 2>&1 | grep -ic 'World Initialized In' || true)"
+    [[ "${hits:-0}" -gt 0 ]]
+}
+
+# Host port for a container's internal port as a JSON string, or `null`.
+# `docker port` prints one "0.0.0.0:8085"-style line per bind; take the first.
+_host_port_json() {
+    local out=""
+    out="$(docker port "$1" "$2" 2>/dev/null | head -n1 || true)"
+    out="${out##*:}"
+    if [[ "$out" =~ ^[0-9]+$ ]]; then printf '"%s"' "$out"; else printf 'null'; fi
     return 0
 }
 # ---------------------------------------------------------------------------
@@ -1651,6 +1703,47 @@ case "$cmd" in
           3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;
           *) json_ok '{"online":false,"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null}' ;;
         esac
+        ;;
+      server-detail)
+        # Container state first, SOAP second -- the four-state verdict.
+        # Read-only; down/booting are answers, so this verb never errors.
+        detail_rows="$(_detail_container_rows)"
+        detail_world_state=""; detail_containers=""
+        while IFS='|' read -r dc_name dc_state dc_status; do
+          case "$dc_name" in
+            ac-worldserver) dc_role=world ;;
+            ac-authserver) dc_role=auth ;;
+            *) dc_role=database ;;
+          esac
+          [[ "$dc_name" == ac-worldserver ]] && detail_world_state="$dc_state"
+          dc_entry="$(printf '{"name":"%s","role":"%s","state":"%s","status":"%s"}' \
+            "$(json_escape "$dc_name")" "$dc_role" "$(json_escape "$dc_state")" "$(json_escape "$dc_status")")"
+          if [[ -z "$detail_containers" ]]; then detail_containers="$dc_entry"
+          else detail_containers="$detail_containers,$dc_entry"; fi
+        done <<< "$detail_rows"
+        detail_ready=false
+        if [[ "$detail_world_state" == running ]] && _world_ready; then detail_ready=true; fi
+        detail_reach=false; detail_auth=null
+        detail_stats='"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null'
+        if [[ "$detail_world_state" == running ]]; then
+          if out="$(soap_exec 'server info')"; then rc=0; else rc=$?; fi
+          case "$rc" in
+            0) detail_reach=true; detail_auth=true
+               detail_stats="$(printf '%s' "$out" | _parse_server_info_fields)" ;;
+            2) detail_reach=true; detail_auth=true ;;
+            3) detail_reach=true; detail_auth=false ;;
+            *) detail_reach=false ;;
+          esac
+        fi
+        if [[ "$detail_world_state" != running ]]; then detail_verdict=stopped
+        elif [[ "$detail_reach" == true ]]; then detail_verdict=online
+        elif [[ "$detail_ready" == true ]]; then detail_verdict=soap_unreachable
+        else detail_verdict=starting; fi
+        detail_pw="$(_host_port_json ac-worldserver 8085)"
+        detail_pa="$(_host_port_json ac-authserver 3724)"
+        detail_psp="$(_host_port_json ac-worldserver 7878)"
+        detail_pd="$(_host_port_json ac-database 3306)"
+        json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
         ;;
       items)
         isub="${1:-}"; shift || true

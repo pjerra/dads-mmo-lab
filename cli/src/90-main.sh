@@ -1092,6 +1092,47 @@ case "$cmd" in
           *) json_ok '{"online":false,"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null}' ;;
         esac
         ;;
+      server-detail)
+        # Container state first, SOAP second -- the four-state verdict.
+        # Read-only; down/booting are answers, so this verb never errors.
+        detail_rows="$(_detail_container_rows)"
+        detail_world_state=""; detail_containers=""
+        while IFS='|' read -r dc_name dc_state dc_status; do
+          case "$dc_name" in
+            ac-worldserver) dc_role=world ;;
+            ac-authserver) dc_role=auth ;;
+            *) dc_role=database ;;
+          esac
+          [[ "$dc_name" == ac-worldserver ]] && detail_world_state="$dc_state"
+          dc_entry="$(printf '{"name":"%s","role":"%s","state":"%s","status":"%s"}' \
+            "$(json_escape "$dc_name")" "$dc_role" "$(json_escape "$dc_state")" "$(json_escape "$dc_status")")"
+          if [[ -z "$detail_containers" ]]; then detail_containers="$dc_entry"
+          else detail_containers="$detail_containers,$dc_entry"; fi
+        done <<< "$detail_rows"
+        detail_ready=false
+        if [[ "$detail_world_state" == running ]] && _world_ready; then detail_ready=true; fi
+        detail_reach=false; detail_auth=null
+        detail_stats='"version":null,"players":null,"uptime":null,"mean_ms":null,"median_ms":null'
+        if [[ "$detail_world_state" == running ]]; then
+          if out="$(soap_exec 'server info')"; then rc=0; else rc=$?; fi
+          case "$rc" in
+            0) detail_reach=true; detail_auth=true
+               detail_stats="$(printf '%s' "$out" | _parse_server_info_fields)" ;;
+            2) detail_reach=true; detail_auth=true ;;
+            3) detail_reach=true; detail_auth=false ;;
+            *) detail_reach=false ;;
+          esac
+        fi
+        if [[ "$detail_world_state" != running ]]; then detail_verdict=stopped
+        elif [[ "$detail_reach" == true ]]; then detail_verdict=online
+        elif [[ "$detail_ready" == true ]]; then detail_verdict=soap_unreachable
+        else detail_verdict=starting; fi
+        detail_pw="$(_host_port_json ac-worldserver 8085)"
+        detail_pa="$(_host_port_json ac-authserver 3724)"
+        detail_psp="$(_host_port_json ac-worldserver 7878)"
+        detail_pd="$(_host_port_json ac-database 3306)"
+        json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
+        ;;
       items)
         isub="${1:-}"; shift || true
         case "$isub" in
