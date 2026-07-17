@@ -1,0 +1,63 @@
+#!/usr/bin/env bats
+load helpers/env.bash
+
+setup() {
+  DML="$BATS_TEST_DIRNAME/../dml"
+  bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
+  make_fixture
+  add_game wow-server-playerbots compose
+  export HOME="$FIXTURE"   # sandboxes ~/.dml/backups
+  BDIR="$FIXTURE/.dml/backups"
+  use_backup_stub
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+}
+teardown() { teardown_fixture; }
+
+_done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
+
+@test "backup create dumps the three DBs consistently and writes a gz file" {
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  f="$(echo "$d" | jq -r '.data.file')"
+  [[ "$f" =~ ^wow-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]
+  [ -f "$BDIR/$f" ]
+  [ "$(echo "$d" | jq -r '.data.size')" -gt 0 ]
+  grep -q 'mysqldump --databases acore_characters acore_playerbots acore_auth --single-transaction --quick' "$DML_STUB_CALL_LOG"
+  gunzip -c "$BDIR/$f" | grep -q 'SQL DUMP CONTENT'
+}
+
+@test "backup create maps a dump failure to BACKUP_FAILED and leaves no partial file" {
+  export DML_STUB_DUMP_EXIT=1
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"BACKUP_FAILED"'
+  [ -z "$(ls -A "$BDIR" 2>/dev/null)" ]
+}
+
+@test "backup create maps docker-down to DOCKER_DOWN" {
+  export DML_STUB_DOCKER_DOWN=1
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"DOCKER_DOWN"'
+}
+
+@test "backup create prunes to DML_BACKUP_KEEP and reports the pruned names" {
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20200101-000000.sql.gz"
+  printf 'x' > "$BDIR/wow-20200102-000000.sql.gz"
+  export DML_BACKUP_KEEP=2
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  [ "$(echo "$d" | jq -r '.data.pruned | length')" = "1" ]
+  [ "$(echo "$d" | jq -r '.data.pruned[0]')" = "wow-20200101-000000.sql.gz" ]
+  [ ! -f "$BDIR/wow-20200101-000000.sql.gz" ]
+  [ -f "$BDIR/wow-20200102-000000.sql.gz" ]
+}
+
+@test "backup rejects an unknown subcommand" {
+  run bash "$DML" wow backup smite --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "UNKNOWN_COMMAND" ]
+}

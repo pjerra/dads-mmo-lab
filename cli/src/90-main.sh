@@ -1900,6 +1900,50 @@ case "$cmd" in
             ;;
         esac
         ;;
+      backup)
+        bsub="${1:-}"; shift || true
+        case "$bsub" in
+          create)
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start backup-create
+            if ! docker info >/dev/null 2>&1; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-create error
+                ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+              else echo "[dml] ERROR: docker down" >&2; fi
+              exit 1
+            fi
+            bdir="$(_backup_dir)"; mkdir -p "$bdir"
+            bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts..."
+            if ! _backup_dump_to "$bdir/$bfile"; then
+              errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
+              rm -f "$bdir/$bfile.err"
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-create error
+                ndjson_error BACKUP_FAILED "mysqldump failed" "$errtail"
+              else echo "[dml] ERROR: mysqldump failed" >&2; fi
+              exit 1
+            fi
+            bsize="$(stat -c %s "$bdir/$bfile" 2>/dev/null)" || bsize=0
+            first=1; parr='['
+            while IFS= read -r p || [[ -n "$p" ]]; do
+              [[ -z "$p" ]] && continue
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "pruned old backup: $p"
+              [[ $first -eq 0 ]] && parr+=','
+              parr+="\"$(json_escape "$p")\""; first=0
+            done < <(_backup_prune)
+            parr+=']'
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end backup-create ok
+              ndjson_done "{\"file\":\"$(json_escape "$bfile")\",\"size\":$bsize,\"pruned\":$parr}"
+            else echo "[dml] backup created: $bfile"; fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1

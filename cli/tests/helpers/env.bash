@@ -124,3 +124,41 @@ EOS
   chmod +x "$STUB_BIN/docker"
   export PATH="$STUB_BIN:$PATH"
 }
+
+use_backup_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+  cat > "$STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+# Backup-suite docker stub: mysqldump / mysql import / compose stop+start.
+# Appends one line per call to DML_STUB_CALL_LOG so tests can assert ORDER.
+log() { [[ -n "${DML_STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_CALL_LOG"; return 0; }
+if [[ "${1:-}" == "info" ]]; then
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1 || exit 0
+fi
+if [[ "${1:-}" == "exec" ]]; then
+  args="$*"
+  if [[ "$args" == *mysqldump* ]]; then
+    log "mysqldump ${args#*mysqldump }"
+    if [[ "${DML_STUB_DUMP_EXIT:-0}" != 0 ]]; then echo "dump boom" >&2; exit "${DML_STUB_DUMP_EXIT}"; fi
+    printf 'SQL DUMP CONTENT\n'
+    exit 0
+  fi
+  # NB: checked AFTER mysqldump (which exits above), so this only matches the import.
+  if [[ "$args" == *" mysql"* ]]; then
+    log "mysql-import"
+    cat > /dev/null
+    exit "${DML_STUB_IMPORT_EXIT:-0}"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "compose" ]]; then
+  shift
+  log "compose $*"
+  exit "${DML_STUB_COMPOSE_EXIT:-0}"
+fi
+exit 0
+EOS
+  chmod +x "$STUB_BIN/docker"
+  export PATH="$STUB_BIN:$PATH"
+}

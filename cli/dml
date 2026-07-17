@@ -509,6 +509,53 @@ _gm_require_online() {
     [[ "$g" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $1" "This action needs the character logged in. (Set level works offline.)"; exit 1; }
     return 0
 }
+# ---------------------------------------------------------------------------
+# Character backups (Lab-parity round 5): whole-server snapshots.
+# mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
+# RESTORE IS THE PROJECT'S ONE SANCTIONED MYSQL-WRITE PATH: only inside
+# `backup restore`, only with world+auth stopped, always behind an automatic
+# pre-restore safety backup. See docs/.../2026-07-17-backups-design.md.
+# ---------------------------------------------------------------------------
+
+_backup_dir() { echo "$HOME/.dml/backups"; }
+
+# Exit status IS the signal (same pattern as _valid_preset_name).
+_valid_backup_name() { [[ "$1" =~ ^wow-[0-9]{8}-[0-9]{6}(-prerestore)?\.sql\.gz$ ]]; }
+
+# Keep the newest ${DML_BACKUP_KEEP:-10} backups (ALL files incl.
+# -prerestore); delete the rest, echoing each pruned name.
+_backup_prune() {
+    local bdir keep n f
+    bdir="$(_backup_dir)"
+    keep="${DML_BACKUP_KEEP:-10}"
+    [[ -d "$bdir" ]] || return 0
+    n=0
+    while IFS= read -r f || [[ -n "$f" ]]; do
+        [[ -z "$f" ]] && continue
+        n=$(( n + 1 ))
+        if (( n > keep )); then
+            rm -f "$bdir/$f"
+            echo "$f"
+        fi
+    done < <(ls -1 "$bdir" 2>/dev/null | grep -E '\.sql\.gz$' | sort -r)
+    return 0
+}
+
+# Dump the three DBs, gzip to a tmp file, mv into place ($1) -- no partial
+# files on failure. On failure: tmp removed, "$1.err" left with stderr
+# (caller reads + removes it), returns 1. pipefail makes a mysqldump
+# failure fail the whole pipeline.
+_backup_dump_to() {
+    local out="$1" tmp
+    tmp="$out.tmp"
+    if docker exec ac-database mysqldump --databases acore_characters acore_playerbots acore_auth --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
+        mv "$tmp" "$out"
+        rm -f "$out.err"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
 
 _require_docker() {
     if ! docker info &>/dev/null; then
@@ -2407,6 +2454,50 @@ case "$cmd" in
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon --json"
+            exit 1
+            ;;
+        esac
+        ;;
+      backup)
+        bsub="${1:-}"; shift || true
+        case "$bsub" in
+          create)
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start backup-create
+            if ! docker info >/dev/null 2>&1; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-create error
+                ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+              else echo "[dml] ERROR: docker down" >&2; fi
+              exit 1
+            fi
+            bdir="$(_backup_dir)"; mkdir -p "$bdir"
+            bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts..."
+            if ! _backup_dump_to "$bdir/$bfile"; then
+              errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
+              rm -f "$bdir/$bfile.err"
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-create error
+                ndjson_error BACKUP_FAILED "mysqldump failed" "$errtail"
+              else echo "[dml] ERROR: mysqldump failed" >&2; fi
+              exit 1
+            fi
+            bsize="$(stat -c %s "$bdir/$bfile" 2>/dev/null)" || bsize=0
+            first=1; parr='['
+            while IFS= read -r p || [[ -n "$p" ]]; do
+              [[ -z "$p" ]] && continue
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "pruned old backup: $p"
+              [[ $first -eq 0 ]] && parr+=','
+              parr+="\"$(json_escape "$p")\""; first=0
+            done < <(_backup_prune)
+            parr+=']'
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end backup-create ok
+              ndjson_done "{\"file\":\"$(json_escape "$bfile")\",\"size\":$bsize,\"pruned\":$parr}"
+            else echo "[dml] backup created: $bfile"; fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
             exit 1
             ;;
         esac
