@@ -81,7 +81,7 @@ EOF
 
 @test "console-send: XML entities in the result are decoded" {
   cat > "$FIXTURE/resp.xml" <<'EOF'
-<?xml version="1.0"?><SOAP-ENV:Envelope><SOAP-ENV:Body><ns1:executeCommandResponse><result>a &lt;b&gt; &quot;c&quot; &amp;d&#xD;
+<?xml version="1.0"?><SOAP-ENV:Envelope><SOAP-ENV:Body><ns1:executeCommandResponse><result>a &lt;b&gt; &quot;c&quot; &amp;d &amp;lt;raw&#xD;
 next</result></ns1:executeCommandResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
 EOF
   export DML_STUB_SOAP_RESPONSE="$FIXTURE/resp.xml"
@@ -90,6 +90,7 @@ EOF
   result="$(echo "$output" | jq -r '.data.result')"
   [[ "$result" == *'a <b> "c" &d'* ]]
   [[ "$result" == *'next'* ]]
+  [[ "$result" == *'&lt;raw'* ]]
 }
 
 @test "console-send: empty command is BAD_ARG" {
@@ -103,6 +104,15 @@ EOF
   run bash "$DML" wow console-send --command "bogus" --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+}
+
+@test "console-send: 401 -> SOAP_AUTH" {
+  printf 'x' > "$FIXTURE/resp.xml"
+  export DML_STUB_SOAP_RESPONSE="$FIXTURE/resp.xml"
+  export DML_STUB_HTTP=401
+  run bash "$DML" wow console-send --command "server info" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
 
 @test "console-send: unreachable -> SOAP_UNREACHABLE" {
