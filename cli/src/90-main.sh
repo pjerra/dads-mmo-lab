@@ -2007,7 +2007,9 @@ case "$cmd" in
               exit 1
             fi
             bdir="$(_backup_dir)"; mkdir -p "$bdir"
-            bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            bsuffix=""
+            [[ "$incworld" == 1 ]] && bsuffix="-full"
+            bfile="wow-$(date -u +%Y%m%d-%H%M%S)$bsuffix.sql.gz"
             if [[ "$incworld" == 1 ]]; then
               [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots, accounts and world..."
             else
@@ -2046,8 +2048,10 @@ case "$cmd" in
                 fsize="$(stat -c %s "$bdir/$f" 2>/dev/null)" || fsize=0
                 d="${f:4:8}"; t="${f:13:6}"
                 created="${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2}"
+                bw=false
+                [[ "$f" == *-full.sql.gz || "$f" == *-full-prerestore.sql.gz ]] && bw=true
                 [[ $first -eq 0 ]] && out+=','
-                out+="{\"file\":\"$(json_escape "$f")\",\"size\":$fsize,\"created\":\"$created\"}"
+                out+="{\"file\":\"$(json_escape "$f")\",\"size\":$fsize,\"created\":\"$created\",\"world\":$bw}"
                 first=0
               done < <(ls -1 "$bdir" 2>/dev/null | grep -E '\.sql\.gz$' | sort -r)
             fi
@@ -2098,8 +2102,12 @@ case "$cmd" in
               exit 1
             fi
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "taking a pre-restore safety backup..."
-            safety="wow-$(date -u +%Y%m%d-%H%M%S)-prerestore.sql.gz"
-            if ! _backup_dump_to "$bdir/$safety"; then
+            rincw=0; rsuffix=""
+            if [[ "$file" == *-full.sql.gz || "$file" == *-full-prerestore.sql.gz ]]; then
+              rincw=1; rsuffix="-full"
+            fi
+            safety="wow-$(date -u +%Y%m%d-%H%M%S)$rsuffix-prerestore.sql.gz"
+            if ! _backup_dump_to "$bdir/$safety" "$rincw"; then
               rm -f "$bdir/$safety.err"
               (cd "$sdir" && docker compose start ac-worldserver ac-authserver >/dev/null 2>&1) || true
               if [[ "$DML_JSON" == 1 ]]; then

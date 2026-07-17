@@ -190,3 +190,40 @@ _seed_backup() {
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'BACKUP_FAILED'
 }
+
+@test "backup create --include-world names the file -full and list marks world:true" {
+  run bash "$DML" wow backup create --include-world --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -Eq '"file":"wow-[0-9]{8}-[0-9]{6}-full\.sql\.gz"'
+  run bash "$DML" wow backup list --json
+  [ "$(echo "$output" | jq -r '.data.backups[0].world')" = "true" ]
+  run bash "$DML" wow backup create --json
+  run bash "$DML" wow backup list --json
+  [ "$(echo "$output" | jq -r '[.data.backups[] | select(.world==false)] | length')" = "1" ]
+}
+
+@test "_valid_backup_name accepts -full and -full-prerestore, rejects scrambled order" {
+  run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/10-json.sh"; source "'"$BATS_TEST_DIRNAME"'/../src/30-db.sh" 2>/dev/null || true; source "'"$BATS_TEST_DIRNAME"'/../src/60-backup.sh"; _valid_backup_name wow-20260717-120000-full.sql.gz && echo A; _valid_backup_name wow-20260717-120000-full-prerestore.sql.gz && echo B; _valid_backup_name wow-20260717-120000-prerestore-full.sql.gz || echo C'
+  [ "${lines[0]}" = "A" ]
+  [ "${lines[1]}" = "B" ]
+  [ "${lines[2]}" = "C" ]
+}
+
+@test "restore of a -full backup takes a full safety dump" {
+  bdir="$FIXTURE/.dml/backups"; mkdir -p "$bdir"
+  printf 'x' | gzip > "$bdir/wow-20260101-000000-full.sql.gz"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow backup restore --file wow-20260101-000000-full.sql.gz --json
+  [ "$status" -eq 0 ]
+  grep 'mysqldump' "$FIXTURE/calls.log" | grep -q 'acore_world'
+  echo "$output" | grep -q -- '-full-prerestore.sql.gz'
+}
+
+@test "restore of a plain backup keeps the safety dump world-free" {
+  bdir="$FIXTURE/.dml/backups"; mkdir -p "$bdir"
+  printf 'x' | gzip > "$bdir/wow-20260101-000000.sql.gz"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow backup restore --file wow-20260101-000000.sql.gz --json
+  [ "$status" -eq 0 ]
+  ! grep 'mysqldump' "$FIXTURE/calls.log" | grep -q 'acore_world'
+}

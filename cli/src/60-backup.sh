@@ -11,7 +11,7 @@
 _backup_dir() { echo "$HOME/.dml/backups"; }
 
 # Exit status IS the signal (same pattern as _valid_preset_name).
-_valid_backup_name() { [[ "$1" =~ ^wow-[0-9]{8}-[0-9]{6}(-prerestore)?\.sql\.gz$ ]]; }
+_valid_backup_name() { [[ "$1" =~ ^wow-[0-9]{8}-[0-9]{6}(-full)?(-prerestore)?\.sql\.gz$ ]]; }
 
 # Keep the newest ${DML_BACKUP_KEEP:-10} backups (ALL files incl.
 # -prerestore); delete the rest, echoing each pruned name.
