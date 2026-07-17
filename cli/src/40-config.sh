@@ -155,7 +155,7 @@ _world_ready() {
     local started hits
     if started="$(docker inspect -f '{{.State.StartedAt}}' ac-worldserver 2>/dev/null)"; then :; else return 1; fi
     [[ -z "$started" ]] && return 1
-    hits="$(docker logs --since "$started" ac-worldserver 2>&1 | grep -ic 'World Initialized In' || true)"
+    hits="$(docker logs --since "$started" ac-worldserver 2>&1 | grep -icm1 'World Initialized In' || true)"
     [[ "${hits:-0}" -gt 0 ]]
 }
 
