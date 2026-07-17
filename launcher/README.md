@@ -40,6 +40,11 @@ as they ship.
   re-summon bots. First use shows **Enable My Party** (one-time: deploys the
   Eluna bridge scripts — then stop and start the server from Home or Library
   to load them). Requires the character online.
+  Each bot row also has **Gear up** / **Fix talents** / **Maintain**
+  (whispered to the bot as if you typed it), and a **Party presets** card
+  saves your current lineup under a name and loads it back later —
+  loading replaces your current bots and re-gears/re-talents the new
+  ones automatically.
 
 **Config** (Settings and Modules are one editor split across two entries; a
 save on either shows the restart-needed banner on both)

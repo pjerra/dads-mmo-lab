@@ -312,6 +312,27 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
   `^[A-Za-z0-9_]{1,12}$`. Errors: `BAD_ARG`, `SOAP_AUTH`, `SOAP_FAULT`,
   `SOAP_UNREACHABLE`.
 
+    dml wow party botcmd --player <name> --bot <name> --action gear|talents|maintain --json
+    dml wow party preset-save   --player <name> --name <preset> --json
+    dml wow party preset-list   --json
+    dml wow party preset-delete --name <preset> --json
+    dml wow party preset-load   --player <name> --name <preset> --json
+
+`botcmd` whispers a fixed command to the bot as if the player typed it
+(`gear` → autogear, `talents` → talents autopick, `maintain` →
+maintenance) — a closed allowlist; there is no free-text whisper.
+Presets live under `~/.dml/party-presets/<name>` (one class name per
+line). `preset-save` snapshots the LIVE party's bots (`overwrote:true`
+when replacing). `preset-load` streams NDJSON and REPLACES the party:
+kicks every current bot, then per saved class adds a bot, waits for the
+join, and whispers `talents autopick` + `autogear` to the newcomer
+(maintenance is deliberately not auto-run — it can walk bots to
+trainers mid-load); `done` reports `{requested, joined}`.
+Errors: BAD_ARG (names/action/preset name), NOT_FOUND (offline
+player/bot, unknown preset, party has no bots to save),
+DB_UNREACHABLE (party reads), SOAP_AUTH, SOAP_FAULT (bridge-setup
+hint), SOAP_UNREACHABLE.
+
 ## gm subcommands (GM character tools)
 
     dml wow gm level  --player <name> --level <1-255> --json
