@@ -264,3 +264,214 @@ _client_detect() {
     done
     return 0
 }
+
+# --- lua (ALE) family -------------------------------------------------------
+# SQL for THIS family is hand-applied -- that is normal for ALE scripts
+# (the never-hand-apply rule is about cpp modules and db-import tracking).
+
+_lua_has_sql() { [[ "$1" == accountwide || "$1" == battlepass || "$1" == bmah || "$1" == paragon ]]; }
+
+_ale_sql_file() {
+    docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"
+}
+
+# Clone or update an ALE script. sod/bmah live as subfolders of the
+# DadsMmoLab repo, so they use a sparse checkout instead of a full clone.
+_lua_clone() {
+    local sdir="$1" key="$2" url="$3" cdir sparse=""
+    cdir="$sdir/ale_scripts/$key"
+    case "$key" in
+        sod)  sparse="guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery" ;;
+        bmah) sparse="guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse" ;;
+    esac
+    mkdir -p "$sdir/ale_scripts"
+    if [[ -d "$cdir/.git" ]]; then
+        ndjson_line info "updating $key..."
+        if [[ -n "$sparse" ]]; then
+            (cd "$cdir" && _stream_cmd git pull --depth=1 origin HEAD) || return 1
+        else
+            (cd "$cdir" && _stream_cmd git pull --depth 1) || return 1
+        fi
+        return 0
+    fi
+    [[ -d "$cdir" ]] && rm -rf "$cdir"
+    ndjson_line info "cloning $key..."
+    if [[ -n "$sparse" ]]; then
+        mkdir -p "$cdir"
+        (cd "$cdir" \
+          && git init -q \
+          && git remote add origin "$url" \
+          && git config core.sparseCheckout true \
+          && printf '%s/\n' "$sparse" > .git/info/sparse-checkout \
+          && _stream_cmd git pull --depth=1 origin HEAD) || return 1
+    else
+        _stream_cmd git clone --depth 1 "$url" "$cdir" || return 1
+    fi
+    return 0
+}
+
+# Copy the script's .lua payload from the clone into lua_scripts/ (per-key
+# rules ported from ale_deploy_lua_files, incl. the activechat basename-
+# collision renames + require patches and the battlepass CSMH require strip).
+_lua_deploy() {
+    local sdir="$1" key="$2" cdir lua f
+    cdir="$sdir/ale_scripts/$key"
+    lua="$sdir/env/dist/etc/modules/lua_scripts"
+    mkdir -p "$lua"
+    ndjson_line info "deploying $key lua files..."
+    case "$key" in
+        accountwide)
+            [[ -d "$cdir/lua_scripts/AccountWide" ]] || return 1
+            mkdir -p "$lua/accountwide"
+            cp "$cdir/lua_scripts/AccountWide"/*.lua "$lua/accountwide/" || return 1
+            ;;
+        activechat)
+            [[ -d "$cdir/AzerothChatter" ]] || return 1
+            mkdir -p "$lua/AzerothChatter"
+            cp -r "$cdir/AzerothChatter/." "$lua/AzerothChatter/" || return 1
+            # ALE's loader dedupes by basename across subdirs: data/chatter.lua
+            # collides with logic/chatter.lua (same for context) -- rename the
+            # data pair and patch every require() call site to match.
+            [[ -f "$lua/AzerothChatter/data/chatter.lua" ]] && mv "$lua/AzerothChatter/data/chatter.lua" "$lua/AzerothChatter/data/chatter_data.lua"
+            [[ -f "$lua/AzerothChatter/data/context.lua" ]] && mv "$lua/AzerothChatter/data/context.lua" "$lua/AzerothChatter/data/context_data.lua"
+            while IFS= read -r f; do
+                sed -i 's/require("data\.chatter")/require("data.chatter_data")/g; s/require("data\.context")/require("data.context_data")/g' "$f"
+            done < <(find "$lua/AzerothChatter" -name '*.lua' 2>/dev/null)
+            ;;
+        battlepass)
+            [[ -d "$cdir/lua_scripts" ]] || return 1
+            cp -r "$cdir/lua_scripts/." "$lua/" || return 1
+            # ALE auto-loads .ext files before any .lua; the explicit require
+            # re-executes CSMH and corrupts its state -- strip the line.
+            [[ -f "$lua/05_BP_Communication.lua" ]] && sed -i '/require("lib\.CSMH\.CSMH_SMH")/d' "$lua/05_BP_Communication.lua"
+            ;;
+        bmah)
+            [[ -f "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/BMAH.lua" ]] || return 1
+            cp "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/BMAH.lua" "$lua/" || return 1
+            ;;
+        lootpet)
+            [[ -f "$cdir/LootPet.lua" ]] || return 1
+            cp "$cdir/LootPet.lua" "$lua/" || return 1
+            ;;
+        paragon)
+            [[ -d "$cdir/serverside/paragon" ]] || return 1
+            cp -r "$cdir/serverside/paragon" "$lua/" || return 1
+            ;;
+        sitmeanrest)
+            [[ -f "$cdir/SitMeansRest.lua" ]] || return 1
+            cp "$cdir/SitMeansRest.lua" "$lua/" || return 1
+            ;;
+        sod)
+            [[ -f "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/SOD.lua" ]] || return 1
+            cp "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/SOD.lua" "$lua/" || return 1
+            rm -rf "$lua/sod"   # stale duplicate-load guard (manager parity)
+            ;;
+        unlimitedammo)
+            [[ -f "$cdir/UnlimitedAmmo.lua" ]] || return 1
+            cp "$cdir/UnlimitedAmmo.lua" "$lua/" || return 1
+            ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+# Per-key SQL application (this family's SQL is hand-applied by design).
+_lua_apply_sql() {
+    local sdir="$1" key="$2" cdir f bn
+    cdir="$sdir/ale_scripts/$key"
+    case "$key" in
+        accountwide)
+            ndjson_line info "applying accountwide SQL (acore_characters)..."
+            _ale_sql_file acore_characters "$cdir/sql/create_accountwide_tables.sql" || return 1
+            ;;
+        battlepass)
+            ndjson_line info "applying battlepass SQL (acore_world + acore_characters)..."
+            _ale_sql_file acore_world "$cdir/sql/battlepass_world.sql" || return 1
+            _ale_sql_file acore_characters "$cdir/sql/battlepass_characters.sql" || return 1
+            ;;
+        bmah)
+            ndjson_line info "applying BMAH SQL (acore_world)..."
+            _ale_sql_file acore_world "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/sql/BMAH_Up.sql" || return 1
+            ;;
+        paragon)
+            ndjson_line info "applying paragon migrations..."
+            # 01_create_database.sql creates acore_ale (run via acore_world);
+            # remaining numbered migrations run against acore_ale, in order.
+            # Date-prefixed / Example data files are skipped (deliberate).
+            [[ -f "$cdir/sql/01_create_database.sql" ]] && { _ale_sql_file acore_world "$cdir/sql/01_create_database.sql" || return 1; }
+            while IFS= read -r f; do
+                bn="$(basename "$f")"
+                [[ "$bn" == "01_create_database.sql" ]] && continue
+                [[ "$bn" =~ ^[0-9]{2}-[0-9]{2} || "$bn" =~ [Ee]xample ]] && continue
+                ndjson_line info "  $bn"
+                _ale_sql_file acore_ale "$f" || return 1
+            done < <(find "$cdir/sql" -name '*.sql' 2>/dev/null | sort)
+            ;;
+    esac
+    return 0
+}
+
+# Client-side copies for the keys that have them; soft-skips when no client
+# path is set. sod's SERVER-side DBC step is not ported (needs a temp
+# container into the data volume) -- warned instead.
+_lua_client_copy() {
+    local sdir="$1" key="$2" cdir cpath
+    cdir="$sdir/ale_scripts/$key"
+    cpath="$(_client_path)"
+    case "$key" in
+        bmah|paragon|sod) ;;
+        *) return 0 ;;
+    esac
+    if [[ -z "$cpath" ]]; then
+        ndjson_line warn "no client folder set — skipped client files (set it on the Modules page)"
+        [[ "$key" == sod ]] && ndjson_line warn "SOD server DBC files must be copied manually — see guides/wow-wotlk/wow-manage.sh copy_server_dbc"
+        return 0
+    fi
+    case "$key" in
+        bmah)
+            if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/Client Files/AddOns/BlackMarketUI" ]]; then
+                ndjson_line info "installing BlackMarketUI client addon..."
+                mkdir -p "$cpath/Interface/AddOns/BlackMarketUI"
+                cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/Client Files/AddOns/BlackMarketUI/." "$cpath/Interface/AddOns/BlackMarketUI/" || ndjson_line warn "client addon copy failed — copy it manually"
+            fi
+            ;;
+        paragon)
+            if [[ -d "$cdir/clientside/Interface" ]]; then
+                ndjson_line info "installing paragon client Interface files..."
+                mkdir -p "$cpath/Interface"
+                cp -r "$cdir/clientside/Interface/." "$cpath/Interface/" || ndjson_line warn "client Interface copy failed — copy it manually"
+            fi
+            ;;
+        sod)
+            if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Data" ]]; then
+                ndjson_line info "installing SOD client Data patches..."
+                mkdir -p "$cpath/Data"
+                cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Data/." "$cpath/Data/" || ndjson_line warn "client Data copy failed — copy it manually"
+            fi
+            if [[ -d "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Interface" ]]; then
+                mkdir -p "$cpath/Interface"
+                cp -r "$cdir/guides/wow-wotlk/ALE-Kegs/SeasonOfDiscovery/Interface/." "$cpath/Interface/" || ndjson_line warn "client Interface copy failed — copy it manually"
+            fi
+            ndjson_line warn "SOD server DBC files must be copied manually — see guides/wow-wotlk/wow-manage.sh copy_server_dbc"
+            ;;
+    esac
+    return 0
+}
+
+# Delete deployed lua payload (mirror of _lua_deploy; DB tables kept).
+_lua_remove_deployed() {
+    local sdir="$1" key="$2" lua
+    lua="$sdir/env/dist/etc/modules/lua_scripts"
+    case "$key" in
+        accountwide)   rm -rf "$lua/accountwide" ;;
+        activechat)    rm -rf "$lua/AzerothChatter" ;;
+        battlepass)    rm -rf "$lua/battlepass" "$lua/lib/CSMH"; rm -f "$lua"/05_BP_*.lua ;;
+        bmah)          rm -f "$lua/BMAH.lua" ;;
+        lootpet)       rm -f "$lua/LootPet.lua" ;;
+        paragon)       rm -rf "$lua/paragon" ;;
+        sitmeanrest)   rm -f "$lua/SitMeansRest.lua" ;;
+        sod)           rm -f "$lua/SOD.lua" ;;
+        unlimitedammo) rm -f "$lua/UnlimitedAmmo.lua" ;;
+    esac
+    return 0
+}

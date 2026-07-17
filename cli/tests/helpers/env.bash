@@ -219,6 +219,10 @@ if [[ "${DML_STUB_GIT_EXIT:-0}" != 0 ]]; then
   echo "fatal: stub git failure" >&2
   exit "${DML_STUB_GIT_EXIT}"
 fi
+if [[ "${1:-}" == "init" ]]; then
+  mkdir -p .git/info
+  exit 0
+fi
 if [[ "${1:-}" == "clone" ]]; then
   dest="${!#}"
   mkdir -p "$dest/.git"

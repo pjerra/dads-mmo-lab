@@ -131,8 +131,8 @@ src() {
   echo "$output" | grep -q 'NOT_FOUND'
 }
 
-@test "module install lua/sql are NOT_IMPLEMENTED until C2" {
-  run bash "$DML" wow module install --family lua --key lootpet --json
+@test "module install sql is NOT_IMPLEMENTED until C3 (lua landed in C2 -- see wow-module-lua.bats)" {
+  run bash "$DML" wow module install --family sql --key lvl1-mounts --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'NOT_IMPLEMENTED'
 }

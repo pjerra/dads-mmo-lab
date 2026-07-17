@@ -2175,8 +2175,9 @@ case "$cmd" in
               [[ -z "$mk" ]] && continue
               cl=false; _lua_cloned "$sdir" "$mk" && cl=true
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
+              lsql=false; _lua_has_sql "$mk" && lsql=true
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"cloned\":$cl,\"deployed\":$dep}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'
@@ -2266,9 +2267,62 @@ case "$cmd" in
                 ndjson_section_end module-install ok
                 ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":true}"
                 ;;
-              lua|sql)
+              lua)
+                lrow="$(_module_registry_lua | grep -m1 -F "$mkey|" || true)"
+                if [[ "$lrow" != "$mkey|"* ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "Unknown lua script: $mkey" "Lua scripts come from the registry only."; exit 1
+                fi
+                if [[ -n "$murl" ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "--url is not supported for lua scripts" ""; exit 1
+                fi
+                if ! _cpp_installed "$sdir" mod-ale; then
+                  ndjson_section_end module-install error
+                  ndjson_error NOT_READY "Install the ALE module (mod-ale) first" "It's in the C++ modules list."; exit 1
+                fi
+                if _lua_has_sql "$mkey"; then
+                  if [[ -z "$bkchoice" ]]; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "Pick --backup or --no-backup" "This script applies SQL to the database."; exit 1
+                  fi
+                  if [[ "$bkchoice" == backup ]]; then
+                    if ! _module_backup_now; then
+                      ndjson_section_end module-install error
+                      ndjson_error BACKUP_FAILED "Safety backup failed — nothing was installed" ""; exit 1
+                    fi
+                  fi
+                else
+                  if [[ -n "$bkchoice" ]]; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "$mkey applies no SQL — backup flags don't apply" ""; exit 1
+                  fi
+                fi
+                lurl="$(printf '%s' "$lrow" | cut -d'|' -f3)"
+                if ! _lua_clone "$sdir" "$mkey" "$lurl"; then
+                  ndjson_section_end module-install error
+                  ndjson_error GIT_FAILED "git failed for $mkey" ""; exit 1
+                fi
+                if ! _lua_deploy "$sdir" "$mkey"; then
+                  ndjson_section_end module-install error
+                  ndjson_error DEPLOY_FAILED "Could not deploy $mkey lua files" "The clone's layout was not what the installer expects."; exit 1
+                fi
+                if _lua_has_sql "$mkey"; then
+                  if ! _lua_apply_sql "$sdir" "$mkey"; then
+                    ndjson_section_end module-install error
+                    ndjson_error SQL_FAILED "SQL for $mkey failed" "Is ac-database running? The lua files are deployed; re-run install once the DB is up."; exit 1
+                  fi
+                fi
+                _lua_client_copy "$sdir" "$mkey"
+                relmsg=".reload ale (in-game or Console page)"
+                [[ "$mkey" == bmah ]] && relmsg="restart the server (new creature_template rows don't hot-load)"
+                ndjson_line info "done — $relmsg"
+                ndjson_section_end module-install ok
+                ndjson_done "{\"key\":\"$mkey\",\"action\":\"installed\",\"reload\":\"$(json_escape "$relmsg")\"}"
+                ;;
+              sql)
                 ndjson_section_end module-install error
-                ndjson_error NOT_IMPLEMENTED "$family installs land in the next update" ""; exit 1
+                ndjson_error NOT_IMPLEMENTED "sql installs land in the next update" ""; exit 1
                 ;;
               *)
                 ndjson_section_end module-install error
@@ -2315,9 +2369,25 @@ case "$cmd" in
                 ndjson_section_end module-remove ok
                 ndjson_done "{\"key\":\"$mkey\",\"removed\":true,\"rebuild_required\":true}"
                 ;;
-              lua|sql)
+              lua)
+                if [[ -n "$bkchoice" ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error BAD_ARG "lua removal never touches the database — backup flags don't apply" "Tables the script created are kept."; exit 1
+                fi
+                if ! _lua_cloned "$sdir" "$mkey" && ! _lua_deployed "$sdir" "$mkey"; then
+                  ndjson_section_end module-remove error
+                  ndjson_error NOT_FOUND "Lua script not installed: $mkey" ""; exit 1
+                fi
+                rm -rf "$sdir/ale_scripts/$mkey"
+                _lua_remove_deployed "$sdir" "$mkey"
+                ndjson_line info "database tables created by this script are kept — removing them risks data loss"
+                ndjson_line info "client-side files (if any) are kept"
+                ndjson_section_end module-remove ok
+                ndjson_done "{\"key\":\"$mkey\",\"removed\":true}"
+                ;;
+              sql)
                 ndjson_section_end module-remove error
-                ndjson_error NOT_IMPLEMENTED "$family removal lands in the next update" ""; exit 1
+                ndjson_error NOT_IMPLEMENTED "sql removal lands in the next update" ""; exit 1
                 ;;
               *)
                 ndjson_section_end module-remove error
