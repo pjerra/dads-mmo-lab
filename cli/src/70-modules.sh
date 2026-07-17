@@ -203,3 +203,64 @@ _module_backup_now() {
     done < <(_backup_prune)
     return 0
 }
+
+# --- client path (for module client-side files) -----------------------------
+_client_path_file() { echo "$HOME/.dml/client-path"; }
+
+# Saved client path, printed only while it still exists on disk.
+_client_path() {
+    local f p
+    f="$(_client_path_file)"
+    [[ -r "$f" ]] || return 0
+    p="$(cat "$f" 2>/dev/null)" || p=""
+    [[ -d "$p" ]] && printf '%s' "$p"
+    return 0
+}
+
+# Exit-status helper: does the dir look like a WoW client? (manager heuristic)
+_client_valid() {
+    [[ -f "$1/Wow.exe" || -f "$1/wow.exe" || -f "$1/WowT.exe" || -d "$1/Interface" ]]
+}
+
+# C:\Games\WoW -> /mnt/c/Games/WoW (drive lowercased, backslashes flipped).
+# Non-Windows paths pass through untouched.
+_client_win_to_wsl() {
+    local p="$1" drive rest
+    if [[ "$p" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+        drive="${BASH_REMATCH[1],,}"
+        rest="${BASH_REMATCH[2]//\\//}"
+        printf '/mnt/%s/%s' "$drive" "$rest"
+    else
+        printf '%s' "$p"
+    fi
+    return 0
+}
+
+# Candidate scan roots (manager's list); DML_CLIENT_SCAN_ROOTS (colon-sep)
+# overrides for tests. Roots are scanned one level deep with the client
+# heuristic; capped at 10 candidates.
+_client_detect() {
+    local roots=() r d n=0
+    if [[ -n "${DML_CLIENT_SCAN_ROOTS:-}" ]]; then
+        IFS=':' read -r -a roots <<< "$DML_CLIENT_SCAN_ROOTS"
+    else
+        roots=("$HOME/Games" "$HOME/wow wotlk" "$HOME")
+        for d in /mnt/[a-z]; do
+            [[ -d "$d" ]] || continue
+            roots+=("$d/Games" "$d/Program Files (x86)" "$d/wow wotlk" "$d")
+        done
+    fi
+    for r in "${roots[@]}"; do
+        [[ -d "$r" ]] || continue
+        for d in "$r"/*/; do
+            [[ -d "$d" ]] || continue
+            d="${d%/}"
+            if _client_valid "$d"; then
+                printf '%s\n' "$d"
+                n=$(( n + 1 ))
+                (( n >= 10 )) && return 0
+            fi
+        done
+    done
+    return 0
+}

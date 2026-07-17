@@ -856,6 +856,67 @@ _module_backup_now() {
     return 0
 }
 
+# --- client path (for module client-side files) -----------------------------
+_client_path_file() { echo "$HOME/.dml/client-path"; }
+
+# Saved client path, printed only while it still exists on disk.
+_client_path() {
+    local f p
+    f="$(_client_path_file)"
+    [[ -r "$f" ]] || return 0
+    p="$(cat "$f" 2>/dev/null)" || p=""
+    [[ -d "$p" ]] && printf '%s' "$p"
+    return 0
+}
+
+# Exit-status helper: does the dir look like a WoW client? (manager heuristic)
+_client_valid() {
+    [[ -f "$1/Wow.exe" || -f "$1/wow.exe" || -f "$1/WowT.exe" || -d "$1/Interface" ]]
+}
+
+# C:\Games\WoW -> /mnt/c/Games/WoW (drive lowercased, backslashes flipped).
+# Non-Windows paths pass through untouched.
+_client_win_to_wsl() {
+    local p="$1" drive rest
+    if [[ "$p" =~ ^([A-Za-z]):[\\/](.*)$ ]]; then
+        drive="${BASH_REMATCH[1],,}"
+        rest="${BASH_REMATCH[2]//\\//}"
+        printf '/mnt/%s/%s' "$drive" "$rest"
+    else
+        printf '%s' "$p"
+    fi
+    return 0
+}
+
+# Candidate scan roots (manager's list); DML_CLIENT_SCAN_ROOTS (colon-sep)
+# overrides for tests. Roots are scanned one level deep with the client
+# heuristic; capped at 10 candidates.
+_client_detect() {
+    local roots=() r d n=0
+    if [[ -n "${DML_CLIENT_SCAN_ROOTS:-}" ]]; then
+        IFS=':' read -r -a roots <<< "$DML_CLIENT_SCAN_ROOTS"
+    else
+        roots=("$HOME/Games" "$HOME/wow wotlk" "$HOME")
+        for d in /mnt/[a-z]; do
+            [[ -d "$d" ]] || continue
+            roots+=("$d/Games" "$d/Program Files (x86)" "$d/wow wotlk" "$d")
+        done
+    fi
+    for r in "${roots[@]}"; do
+        [[ -d "$r" ]] || continue
+        for d in "$r"/*/; do
+            [[ -d "$d" ]] || continue
+            d="${d%/}"
+            if _client_valid "$d"; then
+                printf '%s\n' "$d"
+                n=$(( n + 1 ))
+                (( n >= 10 )) && return 0
+            fi
+        done
+    done
+    return 0
+}
+
 _require_docker() {
     if ! docker info &>/dev/null; then
         echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2
@@ -3271,6 +3332,49 @@ case "$cmd" in
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
             exit 1
             ;;
+        esac
+        ;;
+      client-path)
+        cpsub="${1:-}"; shift || true
+        case "$cpsub" in
+          get)
+            saved=""; f="$(_client_path_file)"
+            [[ -r "$f" ]] && { saved="$(cat "$f" 2>/dev/null)" || saved=""; }
+            if [[ -z "$saved" ]]; then
+              json_ok '{"path":null,"valid":false}'
+            else
+              cvalid=false; [[ -d "$saved" ]] && _client_valid "$saved" && cvalid=true
+              json_ok "{\"path\":\"$(json_escape "$saved")\",\"valid\":$cvalid}"
+            fi
+            ;;
+          set)
+            cpath=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --path) _need_flag_val "$1" $#; cpath="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ -z "$cpath" ]] && { json_err BAD_ARG "client-path set requires --path" ""; exit 1; }
+            cpath="$(_client_win_to_wsl "$cpath")"
+            [[ -d "$cpath" ]] || { json_err BAD_PATH "No such folder: $cpath" "WSL sees Windows drives as /mnt/c/..."; exit 1; }
+            _client_valid "$cpath" || { json_err NOT_CLIENT "That folder doesn't look like a WoW client" "Expected Wow.exe or an Interface folder inside it."; exit 1; }
+            mkdir -p "$(dirname "$(_client_path_file)")"
+            printf '%s\n' "$cpath" > "$(_client_path_file)"
+            json_ok "{\"path\":\"$(json_escape "$cpath")\",\"valid\":true}"
+            ;;
+          detect)
+            cands='['; first=1
+            while IFS= read -r c || [[ -n "$c" ]]; do
+              [[ -z "$c" ]] && continue
+              [[ $first -eq 0 ]] && cands+=','
+              cands+="\"$(json_escape "$c")\""; first=0
+            done < <(_client_detect)
+            cands+=']'
+            json_ok "{\"candidates\":$cands}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown client-path subcommand: $cpsub" "Try: dml wow client-path get|set|detect --json"; exit 1 ;;
         esac
         ;;
       *)

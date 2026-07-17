@@ -2416,6 +2416,49 @@ case "$cmd" in
             ;;
         esac
         ;;
+      client-path)
+        cpsub="${1:-}"; shift || true
+        case "$cpsub" in
+          get)
+            saved=""; f="$(_client_path_file)"
+            [[ -r "$f" ]] && { saved="$(cat "$f" 2>/dev/null)" || saved=""; }
+            if [[ -z "$saved" ]]; then
+              json_ok '{"path":null,"valid":false}'
+            else
+              cvalid=false; [[ -d "$saved" ]] && _client_valid "$saved" && cvalid=true
+              json_ok "{\"path\":\"$(json_escape "$saved")\",\"valid\":$cvalid}"
+            fi
+            ;;
+          set)
+            cpath=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --path) _need_flag_val "$1" $#; cpath="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ -z "$cpath" ]] && { json_err BAD_ARG "client-path set requires --path" ""; exit 1; }
+            cpath="$(_client_win_to_wsl "$cpath")"
+            [[ -d "$cpath" ]] || { json_err BAD_PATH "No such folder: $cpath" "WSL sees Windows drives as /mnt/c/..."; exit 1; }
+            _client_valid "$cpath" || { json_err NOT_CLIENT "That folder doesn't look like a WoW client" "Expected Wow.exe or an Interface folder inside it."; exit 1; }
+            mkdir -p "$(dirname "$(_client_path_file)")"
+            printf '%s\n' "$cpath" > "$(_client_path_file)"
+            json_ok "{\"path\":\"$(json_escape "$cpath")\",\"valid\":true}"
+            ;;
+          detect)
+            cands='['; first=1
+            while IFS= read -r c || [[ -n "$c" ]]; do
+              [[ -z "$c" ]] && continue
+              [[ $first -eq 0 ]] && cands+=','
+              cands+="\"$(json_escape "$c")\""; first=0
+            done < <(_client_detect)
+            cands+=']'
+            json_ok "{\"candidates\":$cands}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown client-path subcommand: $cpsub" "Try: dml wow client-path get|set|detect --json"; exit 1 ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
