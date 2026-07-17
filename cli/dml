@@ -819,7 +819,7 @@ _lua_deployed() {
         activechat)   [[ -d "$lua/AzerothChatter" ]] ;;
         battlepass)   [[ -d "$lua/battlepass" ]] ;;
         bmah)         [[ -f "$lua/BMAH.lua" ]] ;;
-        lootpet)      [[ -f "$lua/Lootpet.lua" ]] ;;
+        lootpet)      [[ -f "$lua/LootPet.lua" ]] ;;
         paragon)      [[ -d "$lua/paragon" ]] ;;
         sitmeanrest)  [[ -f "$lua/SitMeansRest.lua" ]] ;;
         sod)          [[ -f "$lua/SOD.lua" ]] ;;
@@ -842,7 +842,10 @@ _module_backup_now() {
     bfile="wow-$(date -u +%Y%m%d-%H%M%S)-full.sql.gz"
     ndjson_line info "backing up characters, bots, accounts and world..."
     if ! _backup_dump_to "$bdir/$bfile" 1; then
+        local errtail
+        errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
         rm -f "$bdir/$bfile.err"
+        [[ -n "$errtail" ]] && ndjson_line warn "backup failed: $errtail"
         return 1
     fi
     ndjson_line info "backup created: $bfile"
