@@ -81,7 +81,9 @@ use_curl_stub() {
 # soap_exec pipes the request body into curl via `--data-binary @-` (stdin).
 # When DML_STUB_CAPTURE is set, save that stdin verbatim so tests can assert
 # on the exact XML/command text the server would have received.
-if [[ -n "${DML_STUB_CAPTURE:-}" ]]; then
+if [[ -n "${DML_STUB_CAPTURE_APPEND:-}" ]]; then
+  cat >> "$DML_STUB_CAPTURE_APPEND"
+elif [[ -n "${DML_STUB_CAPTURE:-}" ]]; then
   cat > "$DML_STUB_CAPTURE"
 else
   cat >/dev/null

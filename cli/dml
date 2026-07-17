@@ -2232,6 +2232,85 @@ case "$cmd" in
             rm -f "$pdir/$name"
             json_ok "{\"deleted\":true,\"name\":\"$name\"}"
             ;;
+          preset-load)
+            player=""; name=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --name) _need_flag_val "$1" $#; name="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" ""; exit 1; }
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start preset-load
+            pdir="$(_preset_dir)"
+            if [[ ! -f "$pdir/$name" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end preset-load error
+                ndjson_error NOT_FOUND "No preset named $name" ""
+              else echo "[dml] ERROR: no preset $name" >&2; fi
+              exit 1
+            fi
+            pguid="$(_party_online_guid "$player")"
+            if ! [[ "$pguid" =~ ^[0-9]+$ ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end preset-load error
+                ndjson_error NOT_FOUND "Character not online: $player" "Log the character into the game first."
+              else echo "[dml] ERROR: $player not online" >&2; fi
+              exit 1
+            fi
+            # Kick phase (replace semantics): every current bot goes.
+            sql="SELECT c.name
+                 FROM group_member gm
+                 JOIN characters c ON c.guid = gm.memberGuid
+                 WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
+                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            kicklist="$(db_chars_query "$sql")" || kicklist=""
+            while IFS= read -r b || [[ -n "$b" ]]; do
+              [[ -z "$b" ]] && continue
+              if out="$(soap_exec "dml_uninvite $b")"; then
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "kicked $b"
+              else
+                [[ "$DML_JSON" == 1 ]] && ndjson_line warn "could not kick $b"
+              fi
+            done <<< "$kicklist"
+            requested=0; joined=0
+            while IFS= read -r cls || [[ -n "$cls" ]]; do
+              [[ -z "$cls" ]] && continue
+              case "$cls" in
+                warrior|paladin|hunter|rogue|priest|shaman|mage|warlock|druid) : ;;
+                *) [[ "$DML_JSON" == 1 ]] && ndjson_line warn "skipping unknown class: $cls"; continue ;;
+              esac
+              requested=$(( requested + 1 ))
+              before="$(_party_group_member_guids "$pguid" | tr '\n' ' ')"
+              if out="$(soap_exec "dml_addclass $player $cls")"; then :; else
+                [[ "$DML_JSON" == 1 ]] && ndjson_line warn "add $cls was rejected"
+                continue
+              fi
+              newguid="$(_party_wait_new_member "$pguid" "$before")"
+              if [[ "$newguid" =~ ^[0-9]+$ ]]; then
+                joined=$(( joined + 1 ))
+                bname="$(db_chars_query "SELECT name FROM characters WHERE guid=$newguid LIMIT 1;" 2>/dev/null)" || bname=""
+                if [[ -n "$bname" ]]; then
+                  out="$(soap_exec "dml_whisper $player $bname talents autopick")" || true
+                  out="$(soap_exec "dml_whisper $player $bname autogear")" || true
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "$bname joined -- talents + gear applied"
+                else
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "a $cls joined"
+                fi
+              else
+                [[ "$DML_JSON" == 1 ]] && ndjson_line warn "$cls did not attach in time"
+              fi
+            done < "$pdir/$name"
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end preset-load ok
+              ndjson_done "{\"loaded\":true,\"requested\":$requested,\"joined\":$joined}"
+            else
+              echo "[dml] preset-load done ($joined/$requested joined)"
+            fi
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load --json"
             exit 1

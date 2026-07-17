@@ -94,3 +94,97 @@ priest" ]
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
+
+# ---------- preset-load (streaming) ----------
+
+_done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
+
+@test "preset-load kicks current bots, adds each class, preps each joiner" {
+  mkdir -p "$PDIR"; printf 'mage\npriest\n' > "$PDIR/crew"
+  # SEQ call order: online-guid, kick-list (one old bot), then per class:
+  # before-snapshot, wait-poll, joiner-name.
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Oldbot\n' > "$FIXTURE/kicklist.tsv"
+  printf '2503\n' > "$FIXTURE/before1.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/after1.tsv"
+  printf 'Botmage\n' > "$FIXTURE/name1.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/before2.tsv"
+  printf '2503\n9001\n9002\n' > "$FIXTURE/after2.tsv"
+  printf 'Botpriest\n' > "$FIXTURE/name2.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/kicklist.tsv $FIXTURE/before1.tsv $FIXTURE/after1.tsv $FIXTURE/name1.tsv $FIXTURE/before2.tsv $FIXTURE/after2.tsv $FIXTURE/name2.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/allcaps.txt"
+  run bash "$DML" wow party preset-load --player Testen --name crew --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  [ "$(echo "$d" | jq -r '.data.loaded')" = "true" ]
+  [ "$(echo "$d" | jq -r '.data.requested')" = "2" ]
+  [ "$(echo "$d" | jq -r '.data.joined')" = "2" ]
+  grep -q 'dml_uninvite Oldbot' "$FIXTURE/allcaps.txt"
+  grep -q 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt"
+  grep -q 'dml_addclass Testen priest' "$FIXTURE/allcaps.txt"
+  grep -q 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/allcaps.txt"
+  grep -q 'dml_whisper Testen Botmage autogear' "$FIXTURE/allcaps.txt"
+  grep -q 'dml_whisper Testen Botpriest talents autopick' "$FIXTURE/allcaps.txt"
+}
+
+@test "preset-load missing preset emits a NOT_FOUND error event" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party preset-load --player Testen --name nosuch --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"event":"error"'
+  echo "$output" | grep -q '"code":"NOT_FOUND"'
+}
+
+@test "preset-load offline player emits a NOT_FOUND error event" {
+  mkdir -p "$PDIR"; printf 'mage\n' > "$PDIR/crew"
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party preset-load --player Ghost --name crew --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"NOT_FOUND"'
+}
+
+@test "preset-load counts a non-attaching class as requested but not joined (warn path)" {
+  mkdir -p "$PDIR"; printf 'mage\n' > "$PDIR/solo"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '' > "$FIXTURE/kicklist.tsv"
+  printf '2503\n' > "$FIXTURE/before1.tsv"
+  printf '2503\n' > "$FIXTURE/after1.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/kicklist.tsv $FIXTURE/before1.tsv $FIXTURE/after1.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party preset-load --player Testen --name solo --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  [ "$(echo "$d" | jq -r '.data.requested')" = "1" ]
+  [ "$(echo "$d" | jq -r '.data.joined')" = "0" ]
+  echo "$output" | grep -q '"level":"warn"'
+}
+
+@test "preset-load warns and skips unknown class lines (hand-edited file)" {
+  mkdir -p "$PDIR"; printf 'necromancer\nmage\n' > "$PDIR/weird"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '' > "$FIXTURE/kicklist.tsv"
+  printf '2503\n' > "$FIXTURE/before1.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/after1.tsv"
+  printf 'Botmage\n' > "$FIXTURE/name1.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/kicklist.tsv $FIXTURE/before1.tsv $FIXTURE/after1.tsv $FIXTURE/name1.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party preset-load --player Testen --name weird --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  [ "$(echo "$d" | jq -r '.data.requested')" = "1" ]
+  echo "$output" | grep -q 'necromancer'
+}
