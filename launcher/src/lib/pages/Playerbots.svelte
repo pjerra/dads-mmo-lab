@@ -108,6 +108,7 @@
     const p = player;
     loadingPreset = true; error = null; note = null; showTerm = true; term = initialTermState();
     let requested = 0, joined = 0;
+    let outcomeErr: unknown = null;
     try {
       await wowPartyPresetLoad(p, name, (e) => {
         term = applyEvent(term, e);
@@ -116,12 +117,14 @@
           requested = d?.requested ?? 0; joined = d?.joined ?? 0;
         }
       });
-      note = `Loaded "${name}" — ${joined} of ${requested} bots joined.`;
-    } catch (e) { showErr(e); }
+    } catch (e) { outcomeErr = e; }
     finally {
       loadingPreset = false;
       await refresh();
       await refreshPresets();
+      // Apply the outcome AFTER refresh() so its note/error reset can't clobber it.
+      if (outcomeErr) showErr(outcomeErr);
+      else note = `Loaded "${name}" — ${joined} of ${requested} bots joined.`;
     }
   }
 
@@ -154,7 +157,7 @@
 </script>
 
 <section class="content">
-  <header class="bar"><h2>My Party</h2><button onclick={refresh} disabled={busy || setting}>Refresh</button></header>
+  <header class="bar"><h2>My Party</h2><button onclick={refresh} disabled={busy || setting || loadingPreset}>Refresh</button></header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
 
@@ -169,7 +172,7 @@
     <div class="card">
       <strong>Building a party for
         {#if online.length > 1}
-          <select bind:value={player} onchange={() => refresh()} disabled={busy || setting}>
+          <select bind:value={player} onchange={() => refresh()} disabled={busy || setting || loadingPreset}>
             {#each online as o (o.guid)}<option value={o.name}>{o.name}</option>{/each}
           </select>
         {:else}{player}{/if}
@@ -178,7 +181,7 @@
 
     <div class="addrow">
       {#each CLASSES as c (c)}
-        <button class="cls" onclick={() => add(c)} disabled={busy || setting}>{c[0].toUpperCase() + c.slice(1)}</button>
+        <button class="cls" onclick={() => add(c)} disabled={busy || setting || loadingPreset}>{c[0].toUpperCase() + c.slice(1)}</button>
       {/each}
     </div>
     {#if note}<p class="muted">{note}</p>{/if}
