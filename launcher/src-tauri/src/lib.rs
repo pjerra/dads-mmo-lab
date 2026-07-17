@@ -122,6 +122,11 @@ async fn wow_server_info(state: State<'_, AppState>) -> Result<serde_json::Value
 }
 
 #[tauri::command]
+async fn wow_server_detail(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "server-detail".into()]).await
+}
+
+#[tauri::command]
 async fn wow_items_search(
     name: String,
     quality: Option<u32>,
@@ -450,6 +455,7 @@ pub fn run() {
             games_restart,
             wow_accounts,
             wow_server_info,
+            wow_server_detail,
             wow_items_search,
             wow_mail_item,
             wow_teleport_list,

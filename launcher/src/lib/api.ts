@@ -58,6 +58,36 @@ export interface ServerInfo {
   mean_ms: number | null;
   median_ms: number | null;
 }
+export type ServerVerdict = "stopped" | "starting" | "online" | "soap_unreachable";
+export interface ContainerRow {
+  name: string;
+  role: "world" | "auth" | "database";
+  // Docker's state string ("running", "exited", "restarting", ...) or
+  // "absent" when the container doesn't exist (e.g. after compose down).
+  state: string;
+  status: string;
+}
+export interface SoapState {
+  reachable: boolean;
+  auth_ok: boolean | null;
+  version: string | null;
+  players: number | null;
+  uptime: string | null;
+  mean_ms: number | null;
+  median_ms: number | null;
+}
+export interface ServerDetail {
+  verdict: ServerVerdict;
+  containers: ContainerRow[];
+  world_ready: boolean;
+  soap: SoapState;
+  ports: {
+    world: string | null;
+    auth: string | null;
+    soap: string | null;
+    db: string | null;
+  };
+}
 export interface ItemRow {
   entry: number;
   name: string;
@@ -118,6 +148,9 @@ export async function wowAccounts(): Promise<Account[]> {
 }
 export async function wowServerInfo(): Promise<ServerInfo> {
   return await invoke("wow_server_info");
+}
+export async function wowServerDetail(): Promise<ServerDetail> {
+  return await invoke("wow_server_detail");
 }
 export async function wowItemsSearch(p: {
   name: string;
