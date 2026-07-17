@@ -176,6 +176,7 @@ export interface LuaModule {
   name: string;
   cloned: boolean;
   deployed: boolean;
+  has_sql: boolean;
 }
 export interface SqlModule {
   key: string;
@@ -196,19 +197,22 @@ export const wowModuleInstall = (
   key: string | null,
   url: string | null,
   onEvent: (e: TermEvent) => void,
+  backup?: boolean,
+  variant?: string,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_install", { family, key, url, onEvent: ch });
+  return invoke("wow_module_install", { family, key, url, backup, variant, onEvent: ch });
 };
 export const wowModuleRemove = (
   family: string,
   key: string,
   onEvent: (e: TermEvent) => void,
+  backup?: boolean,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_remove", { family, key, onEvent: ch });
+  return invoke("wow_module_remove", { family, key, backup, onEvent: ch });
 };
 export const wowModuleRebuild = (
   backup: boolean,
@@ -223,6 +227,20 @@ export async function wowModuleConfActivate(
   force?: boolean,
 ): Promise<{ key: string; activated: boolean; conf_name: string }> {
   return await invoke("wow_module_conf_activate", { key, force });
+}
+
+export interface ClientPath {
+  path: string | null;
+  valid: boolean;
+}
+export async function wowClientPathGet(): Promise<ClientPath> {
+  return await invoke("wow_client_path_get");
+}
+export async function wowClientPathSet(path: string): Promise<ClientPath> {
+  return await invoke("wow_client_path_set", { path });
+}
+export async function wowClientPathDetect(): Promise<{ candidates: string[] }> {
+  return await invoke("wow_client_path_detect");
 }
 
 export async function wowItemsSearch(p: {

@@ -156,6 +156,8 @@ async fn wow_module_install(
     family: String,
     key: Option<String>,
     url: Option<String>,
+    backup: Option<bool>,
+    variant: Option<String>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
@@ -166,6 +168,14 @@ async fn wow_module_install(
     if let Some(u) = url {
         args.extend(["--url".into(), u]);
     }
+    match backup {
+        Some(true) => args.push("--backup".into()),
+        Some(false) => args.push("--no-backup".into()),
+        None => {}
+    }
+    if let Some(v) = variant {
+        args.extend(["--variant".into(), v]);
+    }
     stream_args(args, on_event, state).await
 }
 
@@ -173,15 +183,18 @@ async fn wow_module_install(
 async fn wow_module_remove(
     family: String,
     key: String,
+    backup: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    stream_args(
-        vec!["wow".into(), "module".into(), "remove".into(), "--family".into(), family, "--key".into(), key],
-        on_event,
-        state,
-    )
-    .await
+    let mut args: Vec<String> =
+        vec!["wow".into(), "module".into(), "remove".into(), "--family".into(), family, "--key".into(), key];
+    match backup {
+        Some(true) => args.push("--backup".into()),
+        Some(false) => args.push("--no-backup".into()),
+        None => {}
+    }
+    stream_args(args, on_event, state).await
 }
 
 #[tauri::command]
@@ -205,6 +218,28 @@ async fn wow_module_conf_activate(
         args.push("--force".into());
     }
     run_json_cmd(state, args).await
+}
+
+#[tauri::command]
+async fn wow_client_path_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "client-path".into(), "get".into()]).await
+}
+
+#[tauri::command]
+async fn wow_client_path_set(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "client-path".into(), "set".into(), "--path".into(), path],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_client_path_detect(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "client-path".into(), "detect".into()]).await
 }
 
 #[tauri::command]
@@ -548,6 +583,9 @@ pub fn run() {
             wow_module_remove,
             wow_module_rebuild,
             wow_module_conf_activate,
+            wow_client_path_get,
+            wow_client_path_set,
+            wow_client_path_detect,
             wow_items_search,
             wow_mail_item,
             wow_teleport_list,
