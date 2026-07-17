@@ -1965,6 +1965,68 @@ case "$cmd" in
             rm -f "$bdir/$file"
             json_ok "{\"deleted\":true,\"file\":\"$(json_escape "$file")\"}"
             ;;
+          restore)
+            file=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --file) _need_flag_val "$1" $#; file="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_backup_name "$file" || { json_err BAD_ARG "Invalid backup name: $file" ""; exit 1; }
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start backup-restore
+            bdir="$(_backup_dir)"
+            if [[ ! -f "$bdir/$file" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-restore error
+                ndjson_error NOT_FOUND "No backup named $file" ""
+              else echo "[dml] ERROR: no backup $file" >&2; fi
+              exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-restore error
+                ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+              else echo "[dml] ERROR: wow server not installed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "stopping the game server..."
+            if ! (cd "$sdir" && docker compose stop ac-worldserver ac-authserver >/dev/null 2>&1); then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-restore error
+                ndjson_error BACKUP_FAILED "Could not stop the server" "Nothing was changed."
+              else echo "[dml] ERROR: could not stop server" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "taking a pre-restore safety backup..."
+            safety="wow-$(date -u +%Y%m%d-%H%M%S)-prerestore.sql.gz"
+            if ! _backup_dump_to "$bdir/$safety"; then
+              rm -f "$bdir/$safety.err"
+              (cd "$sdir" && docker compose start ac-worldserver ac-authserver >/dev/null 2>&1) || true
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-restore error
+                ndjson_error BACKUP_FAILED "Safety backup failed -- nothing was restored" "The server was started again."
+              else echo "[dml] ERROR: safety backup failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "restoring $file..."
+            if ! gunzip -c "$bdir/$file" | docker exec -i ac-database mysql; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end backup-restore error
+                ndjson_error BACKUP_FAILED "Import failed -- the server was LEFT STOPPED" "Your pre-restore state is saved as $safety. Restore it, or start the server manually once resolved."
+              else echo "[dml] ERROR: import failed; server left stopped" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "starting the game server..."
+            if (cd "$sdir" && docker compose start ac-worldserver ac-authserver >/dev/null 2>&1); then :; else
+              [[ "$DML_JSON" == 1 ]] && ndjson_line warn "server start failed -- start it from Home"
+            fi
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end backup-restore ok
+              ndjson_done "{\"restored\":true,\"file\":\"$(json_escape "$file")\",\"safety_backup\":\"$(json_escape "$safety")\"}"
+            else echo "[dml] restored $file (safety: $safety)"; fi
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
             exit 1

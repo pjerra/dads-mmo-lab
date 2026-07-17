@@ -95,3 +95,72 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
     [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
   done
 }
+
+_seed_backup() {
+  mkdir -p "$BDIR"
+  printf 'RESTORE SQL\n' | gzip > "$BDIR/wow-20250101-120000.sql.gz"
+}
+
+@test "backup restore orders stop < safety dump < import < start and reports the safety file" {
+  _seed_backup
+  run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  d="$(_done_data "$output")"
+  [ "$(echo "$d" | jq -r '.data.restored')" = "true" ]
+  safety="$(echo "$d" | jq -r '.data.safety_backup')"
+  [[ "$safety" =~ -prerestore\.sql\.gz$ ]]
+  [ -f "$BDIR/$safety" ]
+  stop_line=$(grep -n 'compose stop ac-worldserver ac-authserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  dump_line=$(grep -n 'mysqldump' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  import_line=$(grep -n 'mysql-import' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  start_line=$(grep -n 'compose start ac-worldserver ac-authserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  [ "$stop_line" -lt "$dump_line" ]
+  [ "$dump_line" -lt "$import_line" ]
+  [ "$import_line" -lt "$start_line" ]
+}
+
+@test "backup restore import failure leaves the server STOPPED and names the safety file" {
+  _seed_backup
+  export DML_STUB_IMPORT_EXIT=1
+  run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"BACKUP_FAILED"'
+  echo "$output" | grep -q 'LEFT STOPPED'
+  echo "$output" | grep -q 'prerestore'
+  ! grep -q 'compose start' "$DML_STUB_CALL_LOG"
+}
+
+@test "backup restore safety-dump failure restarts the server and imports nothing" {
+  _seed_backup
+  export DML_STUB_DUMP_EXIT=1
+  run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"BACKUP_FAILED"'
+  ! grep -q 'mysql-import' "$DML_STUB_CALL_LOG"
+  grep -q 'compose start' "$DML_STUB_CALL_LOG"
+}
+
+@test "backup restore stop failure aborts before any dump or write" {
+  _seed_backup
+  export DML_STUB_COMPOSE_EXIT=1
+  run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"BACKUP_FAILED"'
+  ! grep -q 'mysqldump' "$DML_STUB_CALL_LOG"
+  ! grep -q 'mysql-import' "$DML_STUB_CALL_LOG"
+}
+
+@test "backup restore missing file emits a NOT_FOUND error event" {
+  run bash "$DML" wow backup restore --file wow-19990101-000000.sql.gz --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"event":"error"'
+  echo "$output" | grep -q '"code":"NOT_FOUND"'
+}
+
+@test "backup restore rejects invalid names (traversal-proof)" {
+  for bad in '../etc' 'wow-x.sql.gz' 'wow-20250101-120000.sql.gz;rm'; do
+    run bash "$DML" wow backup restore --file "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done
+}
