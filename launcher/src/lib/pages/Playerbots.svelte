@@ -108,13 +108,18 @@
     const p = player;
     loadingPreset = true; error = null; note = null; showTerm = true; term = initialTermState();
     let requested = 0, joined = 0;
+    let sawDone = false;
+    let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await wowPartyPresetLoad(p, name, (e) => {
         term = applyEvent(term, e);
         if (e.event === "done") {
+          sawDone = true;
           const d = e.data as { requested?: number; joined?: number } | undefined;
           requested = d?.requested ?? 0; joined = d?.joined ?? 0;
+        } else if (e.event === "error") {
+          streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
         }
       });
     } catch (e) { outcomeErr = e; }
@@ -122,9 +127,12 @@
       loadingPreset = false;
       await refresh();
       await refreshPresets();
-      // Apply the outcome AFTER refresh() so its note/error reset can't clobber it.
+      // Apply the outcome AFTER refresh() so its note/error reset can't clobber
+      // it. The stream promise resolves even when the CLI fails (an NDJSON
+      // `error` event is terminal) -- only a seen `done` event means success.
       if (outcomeErr) showErr(outcomeErr);
-      else note = `Loaded "${name}" — ${joined} of ${requested} bots joined.`;
+      else if (streamErr) showErr(streamErr);
+      else if (sawDone) note = `Loaded "${name}" — ${joined} of ${requested} bots joined.`;
     }
   }
 
