@@ -9,6 +9,7 @@ describe("NAV", () => {
       "home",
       "library",
       "console",
+      "modmanager",
       "dashboard",
       "teleport",
       "gmtools",
@@ -44,5 +45,10 @@ describe("NAV", () => {
         expect(p.label.length).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("config section's modules entry is labeled Module Configs", () => {
+    const cfg = NAV.find((s) => s.section === "Config")!;
+    expect(cfg.pages.find((p) => p.id === "modules")!.label).toBe("Module Configs");
   });
 });

@@ -11,6 +11,7 @@
   let busy = $state(false);          // list/delete request-response ops
   let streaming = $state(false);     // create/restore streaming ops
   let confirming: { kind: "restore" | "delete"; file: string } | null = $state(null);
+  let includeWorld = $state(false);
 
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
@@ -48,7 +49,7 @@
         } else if (e.event === "error") {
           streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
         }
-      });
+      }, includeWorld);
     } catch (e) { outcomeErr = e; }
     finally {
       streaming = false;
@@ -120,6 +121,10 @@
     </button>
     <span class="muted">Works while the server is running.</span>
   </div>
+  <label class="row">
+    <input type="checkbox" bind:checked={includeWorld} disabled={busy || streaming} />
+    Include world data (bigger file — recommended before installing modules)
+  </label>
 
   {#if backups.length === 0}
     <p class="muted">No backups yet.</p>

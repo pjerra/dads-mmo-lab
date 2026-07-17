@@ -7,6 +7,7 @@ export const NAV = [
       { id: "home", label: "Home" },
       { id: "library", label: "Library" },
       { id: "console", label: "Console" },
+      { id: "modmanager", label: "Modules" },
     ],
   },
   {
@@ -28,7 +29,7 @@ export const NAV = [
     section: "Config",
     pages: [
       { id: "settings", label: "Settings" },
-      { id: "modules", label: "Modules" },
+      { id: "modules", label: "Module Configs" },
       { id: "backups", label: "Backups" },
     ],
   },
