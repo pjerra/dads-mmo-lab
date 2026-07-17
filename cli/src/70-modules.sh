@@ -484,13 +484,25 @@ _sqlmod_run_stmt() { docker exec ac-database mysql -uroot -p"$(_db_pw)" "$1" -e 
 _sqlmod_run_file() { docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"; }
 
 # Apply list for clone_sql types: every .sql in the clone except reversal /
-# example files, sorted for determinism.
+# example files, sorted for determinism. Classified by BASENAME, not full
+# path -- a server path containing "down"/"example" would otherwise
+# misclassify every file underneath it.
 _sqlmod_up_files() {
-    find "$1" -name '*.sql' 2>/dev/null | grep -viE 'down|example' | sort
+    local f bn
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        bn="$(basename "$f")"
+        printf '%s' "$bn" | grep -qiE 'down|example' || printf '%s\n' "$f"
+    done < <(find "$1" -name '*.sql' 2>/dev/null | sort)
     return 0
 }
 _sqlmod_down_files() {
-    find "$1" -name '*.sql' 2>/dev/null | grep -iE 'down' | sort
+    local f bn
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        bn="$(basename "$f")"
+        printf '%s' "$bn" | grep -qiE 'down' && printf '%s\n' "$f"
+    done < <(find "$1" -name '*.sql' 2>/dev/null | sort)
     return 0
 }
 

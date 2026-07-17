@@ -2377,14 +2377,17 @@ case "$cmd" in
                 sqlfail=0
                 case "$stype" in
                   clone_sql|clone_sql_norevert)
+                    ucount=0
                     while IFS= read -r sf || [[ -n "$sf" ]]; do
                       [[ -z "$sf" ]] && continue
                       ndjson_line info "applying $(basename "$sf")..."
                       _sqlmod_run_file acore_world "$sf" || { sqlfail=1; break; }
+                      ucount=$(( ucount + 1 ))
                     done < <(_sqlmod_up_files "$scdir")
+                    [[ "$ucount" -eq 0 ]] && sqlfail=1
                     ;;
                   clone_sql_pick)
-                    pf="$(find "$scdir" -iname "*${mvariant}*.sql" 2>/dev/null | sort | head -n1)" || pf=""
+                    pf="$(find "$scdir" -iname "*${mvariant}*.sql" 2>/dev/null | grep -viE "[0-9]${mvariant}" | sort | head -n1)" || pf=""
                     if [[ -z "$pf" ]]; then sqlfail=1; else
                       ndjson_line info "applying $(basename "$pf")..."
                       _sqlmod_run_file acore_world "$pf" || sqlfail=1
@@ -2396,7 +2399,7 @@ case "$cmd" in
                       [[ -z "$df" ]] && continue
                       gn=$(( gn + 1 ))
                       gf="$sdir/sql_scripts/clones/${mkey}_gen_$gn.sql"
-                      sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $mvariant/" "$df" > "$gf"
+                      sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $mvariant/" "$df" > "$gf" || { sqlfail=1; break; }
                       ndjson_line info "applying $(basename "$df") (level $mvariant)..."
                       _sqlmod_run_file acore_world "$gf" || { sqlfail=1; break; }
                     done < <(find "$scdir/data/sql/db-world" -name '*.dist' 2>/dev/null | sort)

@@ -1136,13 +1136,25 @@ _sqlmod_run_stmt() { docker exec ac-database mysql -uroot -p"$(_db_pw)" "$1" -e 
 _sqlmod_run_file() { docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"; }
 
 # Apply list for clone_sql types: every .sql in the clone except reversal /
-# example files, sorted for determinism.
+# example files, sorted for determinism. Classified by BASENAME, not full
+# path -- a server path containing "down"/"example" would otherwise
+# misclassify every file underneath it.
 _sqlmod_up_files() {
-    find "$1" -name '*.sql' 2>/dev/null | grep -viE 'down|example' | sort
+    local f bn
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        bn="$(basename "$f")"
+        printf '%s' "$bn" | grep -qiE 'down|example' || printf '%s\n' "$f"
+    done < <(find "$1" -name '*.sql' 2>/dev/null | sort)
     return 0
 }
 _sqlmod_down_files() {
-    find "$1" -name '*.sql' 2>/dev/null | grep -iE 'down' | sort
+    local f bn
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        bn="$(basename "$f")"
+        printf '%s' "$bn" | grep -qiE 'down' && printf '%s\n' "$f"
+    done < <(find "$1" -name '*.sql' 2>/dev/null | sort)
     return 0
 }
 
@@ -3570,14 +3582,17 @@ case "$cmd" in
                 sqlfail=0
                 case "$stype" in
                   clone_sql|clone_sql_norevert)
+                    ucount=0
                     while IFS= read -r sf || [[ -n "$sf" ]]; do
                       [[ -z "$sf" ]] && continue
                       ndjson_line info "applying $(basename "$sf")..."
                       _sqlmod_run_file acore_world "$sf" || { sqlfail=1; break; }
+                      ucount=$(( ucount + 1 ))
                     done < <(_sqlmod_up_files "$scdir")
+                    [[ "$ucount" -eq 0 ]] && sqlfail=1
                     ;;
                   clone_sql_pick)
-                    pf="$(find "$scdir" -iname "*${mvariant}*.sql" 2>/dev/null | sort | head -n1)" || pf=""
+                    pf="$(find "$scdir" -iname "*${mvariant}*.sql" 2>/dev/null | grep -viE "[0-9]${mvariant}" | sort | head -n1)" || pf=""
                     if [[ -z "$pf" ]]; then sqlfail=1; else
                       ndjson_line info "applying $(basename "$pf")..."
                       _sqlmod_run_file acore_world "$pf" || sqlfail=1
@@ -3589,7 +3604,7 @@ case "$cmd" in
                       [[ -z "$df" ]] && continue
                       gn=$(( gn + 1 ))
                       gf="$sdir/sql_scripts/clones/${mkey}_gen_$gn.sql"
-                      sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $mvariant/" "$df" > "$gf"
+                      sed "s/@ONY_LEVEL := [0-9]*/@ONY_LEVEL := $mvariant/" "$df" > "$gf" || { sqlfail=1; break; }
                       ndjson_line info "applying $(basename "$df") (level $mvariant)..."
                       _sqlmod_run_file acore_world "$gf" || { sqlfail=1; break; }
                     done < <(find "$scdir/data/sql/db-world" -name '*.dist' 2>/dev/null | sort)

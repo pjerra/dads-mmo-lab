@@ -114,3 +114,48 @@ teardown() { teardown_fixture; }
   echo "$output" | grep -q 'SQL_FAILED'
   [ ! -f "$SDIR/sql_scripts/installed/buff-mobs.installed" ]
 }
+
+@test "sql install hearthstone: 5min does not match the 15min file" {
+  mkdir -p "$SDIR/sql_scripts/clones/hearthstone-cd/.git"
+  printf 'UPDATE spell_dbc SET RecoveryTime = 300000, CategoryRecoveryTime = 300000 WHERE Id = 8690;' > "$SDIR/sql_scripts/clones/hearthstone-cd/HS_5min.sql"
+  printf 'UPDATE spell_dbc SET RecoveryTime = 900000, CategoryRecoveryTime = 900000 WHERE Id = 8690;' > "$SDIR/sql_scripts/clones/hearthstone-cd/HS_15min.sql"
+  run bash "$DML" wow module install --family sql --key hearthstone-cd --variant 5min --no-backup --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'applying HS_5min.sql'
+  ! echo "$output" | grep -q 'applying HS_15min.sql'
+  grep -q 'HEARTHSTONE_COOLDOWN=5min' "$SDIR/sql_scripts/installed/hearthstone-cd.installed"
+}
+
+@test "sql install+remove clone_dist: sed level + teleporter reversal" {
+  mkdir -p "$SDIR/sql_scripts/clones/npc-teleporter/.git" "$SDIR/sql_scripts/clones/npc-teleporter/data/sql/db-world"
+  printf 'SET @ONY_LEVEL := 60;\n' > "$SDIR/sql_scripts/clones/npc-teleporter/data/sql/db-world/npc.dist"
+  run bash "$DML" wow module install --family sql --key npc-teleporter --variant 75 --no-backup --json
+  [ "$status" -eq 0 ]
+  [ -f "$SDIR/sql_scripts/clones/npc-teleporter_gen_1.sql" ]
+  grep -q '@ONY_LEVEL := 75' "$SDIR/sql_scripts/clones/npc-teleporter_gen_1.sql"
+  run bash "$DML" wow module remove --family sql --key npc-teleporter --no-backup --json
+  [ "$status" -eq 0 ]
+  grep -q '190000' "$FIXTURE/calls.log"
+  grep -q 'mysql-stmt' "$FIXTURE/calls.log"
+}
+
+@test "sql install clone_sql with no up files fails, no marker" {
+  mkdir -p "$SDIR/sql_scripts/clones/portals-capitals/.git"
+  printf 'DELETE FROM x;' > "$SDIR/sql_scripts/clones/portals-capitals/b_Down.sql"
+  run bash "$DML" wow module install --family sql --key portals-capitals --no-backup --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'SQL_FAILED'
+  [ ! -f "$SDIR/sql_scripts/installed/portals-capitals.installed" ]
+}
+
+@test "sql remove clone_sql: down file applied, marker cleared" {
+  mkdir -p "$SDIR/sql_scripts/clones/portals-capitals/.git"
+  printf 'INSERT INTO x VALUES (1);' > "$SDIR/sql_scripts/clones/portals-capitals/a_Up.sql"
+  printf 'DELETE FROM x;' > "$SDIR/sql_scripts/clones/portals-capitals/b_Down.sql"
+  run bash "$DML" wow module install --family sql --key portals-capitals --no-backup --json
+  [ "$status" -eq 0 ]
+  run bash "$DML" wow module remove --family sql --key portals-capitals --no-backup --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'applying b_Down.sql'
+  [ ! -f "$SDIR/sql_scripts/installed/portals-capitals.installed" ]
+}
