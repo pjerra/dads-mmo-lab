@@ -23,7 +23,8 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [[ "$f" =~ ^wow-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]
   [ -f "$BDIR/$f" ]
   [ "$(echo "$d" | jq -r '.data.size')" -gt 0 ]
-  grep -q 'mysqldump --databases acore_characters acore_playerbots acore_auth --single-transaction --quick' "$DML_STUB_CALL_LOG"
+  grep -q 'mysqldump -uroot' "$DML_STUB_CALL_LOG"
+  grep -q -- '--databases acore_characters acore_playerbots acore_auth --single-transaction --quick' "$DML_STUB_CALL_LOG"
   gunzip -c "$BDIR/$f" | grep -q 'SQL DUMP CONTENT'
 }
 
@@ -103,6 +104,7 @@ _seed_backup() {
 
 @test "backup restore orders stop < safety dump < import < start and reports the safety file" {
   _seed_backup
+  export DML_STUB_IMPORT_CAPTURE="$FIXTURE/imported.sql"
   run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
   [ "$status" -eq 0 ]
   d="$(_done_data "$output")"
@@ -117,6 +119,7 @@ _seed_backup() {
   [ "$stop_line" -lt "$dump_line" ]
   [ "$dump_line" -lt "$import_line" ]
   [ "$import_line" -lt "$start_line" ]
+  grep -q 'RESTORE SQL' "$FIXTURE/imported.sql"
 }
 
 @test "backup restore import failure leaves the server STOPPED and names the safety file" {

@@ -139,6 +139,10 @@ fi
 if [[ "${1:-}" == "exec" ]]; then
   args="$*"
   if [[ "$args" == *mysqldump* ]]; then
+    if [[ "$args" != *-uroot* || "$args" != *-p* ]]; then
+      echo "Access denied for user 'root'@'localhost' (using password: NO)" >&2
+      exit 1
+    fi
     log "mysqldump ${args#*mysqldump }"
     if [[ "${DML_STUB_DUMP_EXIT:-0}" != 0 ]]; then echo "dump boom" >&2; exit "${DML_STUB_DUMP_EXIT}"; fi
     printf 'SQL DUMP CONTENT\n'
@@ -146,8 +150,12 @@ if [[ "${1:-}" == "exec" ]]; then
   fi
   # NB: checked AFTER mysqldump (which exits above), so this only matches the import.
   if [[ "$args" == *" mysql"* ]]; then
+    if [[ "$args" != *-uroot* || "$args" != *-p* ]]; then
+      echo "Access denied for user 'root'@'localhost' (using password: NO)" >&2
+      exit 1
+    fi
     log "mysql-import"
-    cat > /dev/null
+    if [[ -n "${DML_STUB_IMPORT_CAPTURE:-}" ]]; then cat > "$DML_STUB_IMPORT_CAPTURE"; else cat > /dev/null; fi
     exit "${DML_STUB_IMPORT_EXIT:-0}"
   fi
   exit 0

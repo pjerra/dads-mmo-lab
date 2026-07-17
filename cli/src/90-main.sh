@@ -2011,7 +2011,7 @@ case "$cmd" in
               exit 1
             fi
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "restoring $file..."
-            if ! gunzip -c "$bdir/$file" | docker exec -i ac-database mysql; then
+            if ! gunzip -c "$bdir/$file" | docker exec -i ac-database mysql -uroot -p"$(_db_pw)"; then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end backup-restore error
                 ndjson_error BACKUP_FAILED "Import failed -- the server was LEFT STOPPED" "Your pre-restore state is saved as $safety. Restore it, or start the server manually once resolved."

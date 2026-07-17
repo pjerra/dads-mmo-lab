@@ -39,7 +39,7 @@ _backup_prune() {
 _backup_dump_to() {
     local out="$1" tmp
     tmp="$out.tmp"
-    if docker exec ac-database mysqldump --databases acore_characters acore_playerbots acore_auth --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
+    if docker exec ac-database mysqldump -uroot -p"$(_db_pw)" --databases acore_characters acore_playerbots acore_auth --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
         mv "$tmp" "$out"
         rm -f "$out.err"
         return 0

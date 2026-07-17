@@ -65,7 +65,7 @@
       return;
     }
     confirming = null;
-    streaming = true; error = null; note = null; showTerm = true; term = initialTermState();
+    streaming = true; restartState.restarting = true; error = null; note = null; showTerm = true; term = initialTermState();
     let safety: string | null = null; let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
@@ -82,6 +82,7 @@
       });
     } catch (e) { outcomeErr = e; }
     finally {
+      restartState.restarting = false;
       streaming = false;
       await refresh();
       if (outcomeErr) showErr(outcomeErr);
