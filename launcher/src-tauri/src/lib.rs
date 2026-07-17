@@ -352,6 +352,44 @@ async fn wow_gm_summon(player: String, entry: u32, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
+async fn wow_party_botcmd(player: String, bot: String, action: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "party".into(), "botcmd".into(), "--player".into(), player, "--bot".into(), bot, "--action".into(), action],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_party_preset_save(player: String, name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "party".into(), "preset-save".into(), "--player".into(), player, "--name".into(), name],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_party_preset_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "party".into(), "preset-list".into()]).await
+}
+
+#[tauri::command]
+async fn wow_party_preset_delete(name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "party".into(), "preset-delete".into(), "--name".into(), name]).await
+}
+
+#[tauri::command]
+async fn wow_party_preset_load(player: String, name: String, on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "party".into(), "preset-load".into(), "--player".into(), player, "--name".into(), name],
+        on_event,
+        state,
+    )
+    .await
+}
+
+#[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
@@ -407,6 +445,11 @@ pub fn run() {
             wow_party_list,
             wow_party_kick,
             wow_party_relogin,
+            wow_party_botcmd,
+            wow_party_preset_save,
+            wow_party_preset_list,
+            wow_party_preset_delete,
+            wow_party_preset_load,
             wow_bridge_setup,
             wow_gm_level,
             wow_gm_gold,

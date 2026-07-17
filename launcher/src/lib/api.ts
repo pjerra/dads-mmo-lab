@@ -224,6 +224,30 @@ export async function wowGmRevive(player: string): Promise<GmReviveResult> {
 export async function wowGmSummon(player: string, entry: number): Promise<GmSummonResult> {
   return await invoke("wow_gm_summon", { player, entry });
 }
+
+export interface BotcmdResult { sent: boolean; player: string; bot: string; action: string; }
+export interface PresetInfo { name: string; bots: number; }
+export interface PresetSaveResult { saved: boolean; name: string; bots: string[]; overwrote: boolean; }
+
+export async function wowPartyBotcmd(player: string, bot: string, action: "gear" | "talents" | "maintain"): Promise<BotcmdResult> {
+  return await invoke("wow_party_botcmd", { player, bot, action });
+}
+export async function wowPartyPresetSave(player: string, name: string): Promise<PresetSaveResult> {
+  return await invoke("wow_party_preset_save", { player, name });
+}
+export async function wowPartyPresetList(): Promise<PresetInfo[]> {
+  const d = await invoke<{ presets: PresetInfo[] }>("wow_party_preset_list");
+  return d.presets;
+}
+export async function wowPartyPresetDelete(name: string): Promise<{ deleted: boolean; name: string }> {
+  return await invoke("wow_party_preset_delete", { name });
+}
+export const wowPartyPresetLoad = (player: string, name: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_party_preset_load", { player, name, onEvent: ch });
+};
+
 export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
