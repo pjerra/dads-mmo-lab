@@ -79,9 +79,11 @@ a `server-detail` arm in `90-main.sh` next to `server-info`.
   deliberately excluded — "Exited (0)" is their healthy state and would only alarm.
 - **world_ready**: the `--since`-guarded marker grep (case-insensitive, `grep -m1` on
   `World Initialized In`). Only computed when ac-worldserver is running; `false` otherwise.
-- **soap**: reuses `soap_exec 'server info'` + `_parse_server_info`. rc 0 →
-  `reachable:true, auth_ok:true` + parsed stats; rc 3 (401) → `reachable:true,
-  auth_ok:false`, stats null; rc 2/4 → `reachable:false, auth_ok:null`, stats null.
+- **soap**: reuses `soap_exec 'server info'` + the parsed stats. rc 0 →
+  `reachable:true, auth_ok:true` + parsed stats; rc 2 (fault — the server *answered*,
+  so the world is up) → `reachable:true, auth_ok:true`, stats null; rc 3 (401) →
+  `reachable:true, auth_ok:false`, stats null; rc 4 → `reachable:false,
+  auth_ok:null`, stats null. Probed only when the world container is running.
 - **ports**: host ports from `docker port <name> <internal>` (world 8085, auth 3724,
   soap 7878 on ac-worldserver; db 3306 on ac-database); each `null` when unavailable
   (container absent/stopped or unpublished).
@@ -89,9 +91,9 @@ a `server-detail` arm in `90-main.sh` next to `server-info`.
   world container not `running` → `stopped`; else SOAP `reachable` → `online`; else
   `world_ready` → `soap_unreachable`; else `starting`.
 - The existing `server-info` verb is untouched (public CLI surface, tested).
-- Errors: only genuine environment failures error (`NO_WOW` when the title dir is missing,
-  matching existing wow verbs). Docker down → all containers `absent`, verdict `stopped`
-  (down is an answer, not an error — same philosophy as `server-info`).
+- Errors: none — the verb never needs the title dir (container names are fixed) and
+  never errors. Docker down → all containers `absent`, verdict `stopped` (down is an
+  answer, not an error — same philosophy as `server-info`).
 
 ## Launcher UI
 
