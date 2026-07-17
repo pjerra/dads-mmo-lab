@@ -8,6 +8,7 @@ describe("NAV", () => {
     expect(ids).toEqual([
       "home",
       "library",
+      "console",
       "dashboard",
       "teleport",
       "gmtools",

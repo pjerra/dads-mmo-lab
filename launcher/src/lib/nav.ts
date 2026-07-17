@@ -6,6 +6,7 @@ export const NAV = [
     pages: [
       { id: "home", label: "Home" },
       { id: "library", label: "Library" },
+      { id: "console", label: "Console" },
     ],
   },
   {

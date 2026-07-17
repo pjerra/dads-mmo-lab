@@ -2,6 +2,7 @@
   import { NAV, DEFAULT_PAGE, type PageId } from "$lib/nav";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
+  import Console from "$lib/pages/Console.svelte";
   import Dashboard from "$lib/pages/Dashboard.svelte";
   import Items from "$lib/pages/Items.svelte";
   import Teleport from "$lib/pages/Teleport.svelte";
@@ -26,6 +27,7 @@
 
   {#if page === "home"}<Home />{/if}
   {#if page === "library"}<Library />{/if}
+  {#if page === "console"}<Console />{/if}
   {#if page === "dashboard"}<Dashboard />{/if}
   {#if page === "teleport"}<Teleport />{/if}
   {#if page === "gmtools"}<GMTools />{/if}
