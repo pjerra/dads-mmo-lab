@@ -2325,6 +2325,48 @@ case "$cmd" in
                 ;;
             esac
             ;;
+          rebuild)
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-rebuild
+            bkchoice=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --backup) bkchoice=backup; shift ;;
+                --no-backup) bkchoice=nobackup; shift ;;
+                *) ndjson_section_end module-rebuild error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            if [[ -z "$bkchoice" ]]; then
+              ndjson_section_end module-rebuild error
+              ndjson_error BAD_ARG "Pick --backup or --no-backup" "Module SQL lands during the rebuild -- decide explicitly."; exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end module-rebuild error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" ""; exit 1
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              ndjson_section_end module-rebuild error
+              ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
+            fi
+            if [[ "$bkchoice" == backup ]]; then
+              if ! _module_backup_now; then
+                ndjson_section_end module-rebuild error
+                ndjson_error BACKUP_FAILED "Safety backup failed -- rebuild not started" ""; exit 1
+              fi
+            fi
+            ndjson_line info "stopping worldserver..."
+            (cd "$sdir" && docker compose stop ac-worldserver >/dev/null 2>&1) || true
+            ndjson_line info "building (this can take 30-90 minutes; full log: $sdir/rebuild.log)..."
+            rc=0
+            (cd "$sdir" && docker compose up -d --build 2>&1 | tee rebuild.log | while IFS= read -r _l; do ndjson_line info "$_l"; done; exit "${PIPESTATUS[0]}") || rc=$?
+            if [[ "$rc" -ne 0 ]]; then
+              ndjson_section_end module-rebuild error
+              ndjson_error BUILD_FAILED "worldserver rebuild failed" "Full log: $sdir/rebuild.log"; exit 1
+            fi
+            _rebuild_pending_clear "$sdir"
+            ndjson_section_end module-rebuild ok
+            ndjson_done '{"rebuilt":true}'
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
             exit 1
