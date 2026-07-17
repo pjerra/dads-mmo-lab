@@ -32,14 +32,16 @@ _backup_prune() {
     return 0
 }
 
-# Dump the three DBs, gzip to a tmp file, mv into place ($1) -- no partial
-# files on failure. On failure: tmp removed, "$1.err" left with stderr
-# (caller reads + removes it), returns 1. pipefail makes a mysqldump
-# failure fail the whole pipeline.
+# Dump the character DBs (plus acore_world when $2 = 1 -- used before
+# module installs, which mutate world data), gzip to a tmp file, mv into
+# place ($1) -- no partial files on failure. On failure: tmp removed,
+# "$1.err" left with stderr (caller reads + removes it), returns 1.
 _backup_dump_to() {
-    local out="$1" tmp
+    local out="$1" incw="${2:-0}" tmp
+    local dbs=(acore_characters acore_playerbots acore_auth)
+    [[ "$incw" == 1 ]] && dbs+=(acore_world)
     tmp="$out.tmp"
-    if docker exec ac-database mysqldump -uroot -p"$(_db_pw)" --databases acore_characters acore_playerbots acore_auth --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
+    if docker exec ac-database mysqldump -uroot -p"$(_db_pw)" --databases "${dbs[@]}" --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
         mv "$tmp" "$out"
         rm -f "$out.err"
         return 0

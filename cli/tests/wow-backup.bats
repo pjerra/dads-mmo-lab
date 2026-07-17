@@ -167,3 +167,26 @@ _seed_backup() {
     [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
   done
 }
+
+@test "backup create without --include-world dumps exactly the three char DBs" {
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  grep -q 'acore_characters acore_playerbots acore_auth' "$FIXTURE/calls.log"
+  ! grep -q 'acore_world' "$FIXTURE/calls.log"
+}
+
+@test "backup create --include-world adds acore_world to the same dump" {
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow backup create --include-world --json
+  [ "$status" -eq 0 ]
+  grep -q 'acore_characters acore_playerbots acore_auth acore_world' "$FIXTURE/calls.log"
+  echo "$output" | grep -q '"world":true'
+}
+
+@test "backup create --include-world failure still cleans up and errors" {
+  export DML_STUB_DUMP_EXIT=1
+  run bash "$DML" wow backup create --include-world --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'BACKUP_FAILED'
+}

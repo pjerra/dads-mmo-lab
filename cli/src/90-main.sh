@@ -1996,6 +1996,8 @@ case "$cmd" in
         bsub="${1:-}"; shift || true
         case "$bsub" in
           create)
+            incworld=0
+            [[ "${1:-}" == "--include-world" ]] && { incworld=1; shift; }
             [[ "$DML_JSON" == 1 ]] && ndjson_section_start backup-create
             if ! docker info >/dev/null 2>&1; then
               if [[ "$DML_JSON" == 1 ]]; then
@@ -2006,8 +2008,12 @@ case "$cmd" in
             fi
             bdir="$(_backup_dir)"; mkdir -p "$bdir"
             bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
-            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts..."
-            if ! _backup_dump_to "$bdir/$bfile"; then
+            if [[ "$incworld" == 1 ]]; then
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots, accounts and world..."
+            else
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts..."
+            fi
+            if ! _backup_dump_to "$bdir/$bfile" "$incworld"; then
               errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
               rm -f "$bdir/$bfile.err"
               if [[ "$DML_JSON" == 1 ]]; then
@@ -2027,7 +2033,7 @@ case "$cmd" in
             parr+=']'
             if [[ "$DML_JSON" == 1 ]]; then
               ndjson_section_end backup-create ok
-              ndjson_done "{\"file\":\"$(json_escape "$bfile")\",\"size\":$bsize,\"pruned\":$parr}"
+              ndjson_done "{\"file\":\"$(json_escape "$bfile")\",\"size\":$bsize,\"world\":$([[ "$incworld" == 1 ]] && echo true || echo false),\"pruned\":$parr}"
             else echo "[dml] backup created: $bfile"; fi
             ;;
           list)
