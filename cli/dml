@@ -2167,6 +2167,71 @@ case "$cmd" in
             _party_fire "dml_whisper $player $bot $wmsg" "botcmd"
             json_ok "{\"sent\":true,\"player\":\"$(json_escape "$player")\",\"bot\":\"$(json_escape "$bot")\",\"action\":\"$action\"}"
             ;;
+          preset-save)
+            player=""; name=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --name) _need_flag_val "$1" $#; name="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" "Letters, digits, - and _ (max 32)."; exit 1; }
+            pguid="$(_party_online_guid "$player")"
+            [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
+            sql="SELECT c.class
+                 FROM group_member gm
+                 JOIN characters c ON c.guid = gm.memberGuid
+                 WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
+                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            rows="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
+            names=""
+            while IFS=$'\t' read -r cls || [[ -n "$cls" ]]; do
+              [[ -z "$cls" ]] && continue
+              cname="$(_class_name_from_id "$cls")"
+              [[ -n "$cname" ]] && names+="$cname"$'\n'
+            done <<< "$rows"
+            [[ -n "$names" ]] || { json_err NOT_FOUND "Party has no bots to save" "Add some bots first."; exit 1; }
+            pdir="$(_preset_dir)"; mkdir -p "$pdir"
+            overwrote=false; [[ -f "$pdir/$name" ]] && overwrote=true
+            printf '%s' "$names" > "$pdir/$name"
+            jarr=""; first=1
+            while IFS= read -r n || [[ -n "$n" ]]; do
+              [[ -z "$n" ]] && continue
+              [[ $first -eq 0 ]] && jarr+=','
+              jarr+="\"$n\""; first=0
+            done <<< "$names"
+            json_ok "{\"saved\":true,\"name\":\"$name\",\"bots\":[$jarr],\"overwrote\":$overwrote}"
+            ;;
+          preset-list)
+            pdir="$(_preset_dir)"
+            first=1; out='['
+            if [[ -d "$pdir" ]]; then
+              for f in "$pdir"/*; do
+                [[ -f "$f" ]] || continue
+                pname="$(basename "$f")"
+                _valid_preset_name "$pname" || continue
+                cnt="$(grep -c . "$f" 2>/dev/null)" || cnt=0
+                [[ $first -eq 0 ]] && out+=','
+                out+="{\"name\":\"$pname\",\"bots\":$cnt}"
+                first=0
+              done
+            fi
+            out+=']'
+            json_ok "{\"presets\":$out}"
+            ;;
+          preset-delete)
+            name=""
+            [[ "${1:-}" == "--name" ]] && { _need_flag_val "$1" $#; name="$2"; shift 2; }
+            _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" ""; exit 1; }
+            pdir="$(_preset_dir)"
+            [[ -f "$pdir/$name" ]] || { json_err NOT_FOUND "No preset named $name" ""; exit 1; }
+            rm -f "$pdir/$name"
+            json_ok "{\"deleted\":true,\"name\":\"$name\"}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load --json"
             exit 1
