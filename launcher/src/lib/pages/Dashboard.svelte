@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowServerInfo, wowPaperdoll, type ServerInfo, type PaperdollData } from "$lib/api";
+  import { wowServerDetail, wowPaperdoll, type ServerDetail, type PaperdollData } from "$lib/api";
   import { qualityName, QUALITY_COLORS } from "$lib/wow";
   import CharPicker from "$lib/CharPicker.svelte";
 
-  let info: ServerInfo | null = $state(null);
+  let detail: ServerDetail | null = $state(null);
   let infoError: string | null = $state(null);
   let loadingInfo = $state(false);
 
@@ -17,7 +17,7 @@
     loadingInfo = true;
     infoError = null;
     try {
-      info = await wowServerInfo();
+      detail = await wowServerDetail();
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       infoError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -51,18 +51,36 @@
 
   {#if infoError}
     <div class="error-card"><strong>Couldn't read server status.</strong><p>{infoError}</p></div>
-  {:else if info}
-    <div class="card status">
+  {:else if detail}
+    <div class="card status" class:warn={detail.verdict === "soap_unreachable"}>
       <div>
-        <span class="dot {info.online ? 'on' : 'off'}"></span>
-        <strong>{info.online ? "World is up" : "World is down"}</strong>
+        <span
+          class="dot"
+          class:on={detail.verdict === "online"}
+          class:mid={detail.verdict === "starting"}
+          class:bad={detail.verdict === "soap_unreachable"}
+          class:off={detail.verdict === "stopped"}
+        ></span>
+        <strong>
+          {#if detail.verdict === "online"}World is up
+          {:else if detail.verdict === "starting"}Starting up…
+          {:else if detail.verdict === "soap_unreachable"}World is running, but the launcher can't reach it
+          {:else}Server is stopped{/if}
+        </strong>
       </div>
-      {#if info.online}
+      {#if detail.verdict === "online"}
         <div class="stats">
-          <span>Players online: <strong>{info.players ?? "?"}</strong></span>
-          <span>Uptime: <strong>{info.uptime ?? "?"}</strong></span>
-          <span>Update time: <strong>{info.mean_ms ?? "?"} ms avg</strong></span>
+          <span>Players online: <strong>{detail.soap.players ?? "?"}</strong></span>
+          <span>Uptime: <strong>{detail.soap.uptime ?? "?"}</strong></span>
+          <span>Update time: <strong>{detail.soap.mean_ms ?? "?"} ms avg</strong></span>
         </div>
+      {:else if detail.verdict === "starting"}
+        <p class="muted">The world is still loading — this takes a couple of minutes while bots spawn.</p>
+      {:else if detail.verdict === "soap_unreachable"}
+        <p class="muted">
+          If this persists for more than a minute, Docker's networking in the distro is likely stuck —
+          restarting Docker inside dml-arch usually fixes it.
+        </p>
       {:else}
         <p class="muted">Start it from the Library page.</p>
       {/if}
@@ -104,6 +122,9 @@
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
   .dot.on { background: #3fb950; }
   .dot.off { background: #6e7681; }
+  .dot.mid { background: #d29922; }
+  .dot.bad { background: #f85149; }
+  .card.warn { border-color: #f85149; }
   .pickrow { display: flex; gap: 8px; align-items: center; }
   table { border-collapse: collapse; margin-top: 10px; }
   td { padding: 3px 12px 3px 0; font-size: 14px; }
