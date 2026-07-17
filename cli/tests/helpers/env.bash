@@ -207,3 +207,24 @@ EOS
   chmod +x "$STUB_BIN/docker"
   export PATH="$STUB_BIN:$PATH"
 }
+
+use_git_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+  cat > "$STUB_BIN/git" <<'EOS'
+#!/usr/bin/env bash
+# git stub: logs argv; `clone` creates <dest>/.git so installed-checks pass.
+[[ -n "${DML_STUB_GIT_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_GIT_LOG"
+if [[ "${DML_STUB_GIT_EXIT:-0}" != 0 ]]; then
+  echo "fatal: stub git failure" >&2
+  exit "${DML_STUB_GIT_EXIT}"
+fi
+if [[ "${1:-}" == "clone" ]]; then
+  dest="${!#}"
+  mkdir -p "$dest/.git"
+fi
+exit 0
+EOS
+  chmod +x "$STUB_BIN/git"
+  export PATH="$STUB_BIN:$PATH"
+}
