@@ -2996,6 +2996,198 @@ case "$cmd" in
             ;;
         esac
         ;;
+      module)
+        msub="${1:-}"; shift || true
+        case "$msub" in
+          list)
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            cpp='['; first=1
+            declare -A _mod_seen=()
+            while IFS='|' read -r mk mname murl msql; do
+              [[ -z "$mk" ]] && continue
+              _mod_seen["$mk"]=1
+              inst=false; _cpp_installed "$sdir" "$mk" && inst=true
+              pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
+              cstate="$(_module_conf_state "$sdir" "$mk")"
+              [[ $first -eq 0 ]] && cpp+=','
+              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
+              first=0
+            done < <(_module_registry_cpp)
+            if [[ -d "$sdir/modules" ]]; then
+              for d in "$sdir/modules"/*/; do
+                [[ -d "$d/.git" ]] || continue
+                mk="$(basename "$d")"
+                [[ -n "${_mod_seen[$mk]:-}" ]] && continue
+                _valid_cpp_key "$mk" || continue
+                pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
+              done
+            fi
+            cpp+=']'
+            lua='['; first=1
+            while IFS='|' read -r mk mname murl; do
+              [[ -z "$mk" ]] && continue
+              cl=false; _lua_cloned "$sdir" "$mk" && cl=true
+              dep=false; _lua_deployed "$sdir" "$mk" && dep=true
+              [[ $first -eq 0 ]] && lua+=','
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"cloned\":$cl,\"deployed\":$dep}"
+              first=0
+            done < <(_module_registry_lua)
+            lua+=']'
+            sqlj='['; first=1
+            while IFS='|' read -r mk mname murl mtype; do
+              [[ -z "$mk" ]] && continue
+              inst=false; _sql_installed "$sdir" "$mk" && inst=true
+              [[ $first -eq 0 ]] && sqlj+=','
+              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"type\":\"$mtype\",\"installed\":$inst}"
+              first=0
+            done < <(_module_registry_sql)
+            sqlj+=']'
+            aleready=false; _cpp_installed "$sdir" mod-ale && aleready=true
+            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":$(_rebuild_pending_json "$sdir"),\"ale_ready\":$aleready}"
+            ;;
+          install)
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-install
+            family=""; mkey=""; murl=""; bkchoice=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --family) _need_flag_val "$1" $#; family="$2"; shift 2 ;;
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                --url) _need_flag_val "$1" $#; murl="$2"; shift 2 ;;
+                --backup) bkchoice=backup; shift ;;
+                --no-backup) bkchoice=nobackup; shift ;;
+                *) ndjson_section_end module-install error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end module-install error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            case "$family" in
+              cpp)
+                if [[ -n "$bkchoice" ]]; then
+                  ndjson_section_end module-install error
+                  ndjson_error BAD_ARG "cpp installs don't take backup flags" "Module SQL lands at rebuild time -- the backup choice belongs to: dml wow module rebuild"; exit 1
+                fi
+                regrow=""
+                if [[ -n "$murl" ]]; then
+                  if [[ -n "$mkey" ]]; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "--url and --key are mutually exclusive" "Custom modules derive their key from the URL."; exit 1
+                  fi
+                  if ! _valid_module_url "$murl"; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "Invalid module URL" "https://... git URLs only"; exit 1
+                  fi
+                  mkey="$(_module_key_from_url "$murl")"
+                  if [[ -z "$mkey" ]]; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "Custom module repos must be named mod-*" "e.g. https://github.com/you/mod-my-thing.git"; exit 1
+                  fi
+                else
+                  if ! _valid_cpp_key "$mkey"; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "Invalid module key: $mkey" ""; exit 1
+                  fi
+                  regrow="$(_module_registry_cpp | grep -m1 -F "$mkey|" || true)"
+                  [[ "$regrow" == "$mkey|"* ]] || regrow=""
+                  if [[ -z "$regrow" ]]; then
+                    ndjson_section_end module-install error
+                    ndjson_error BAD_ARG "Unknown module: $mkey" "Pass --url for a custom module."; exit 1
+                  fi
+                  murl="$(printf '%s' "$regrow" | cut -d'|' -f3)"
+                fi
+                action=installed
+                if _cpp_installed "$sdir" "$mkey"; then
+                  action=updated
+                  ndjson_line info "updating $mkey..."
+                  if ! (cd "$sdir/modules/$mkey" && _stream_cmd git pull --depth 1); then
+                    ndjson_section_end module-install error
+                    ndjson_error GIT_FAILED "git pull failed for $mkey" ""; exit 1
+                  fi
+                else
+                  mkdir -p "$sdir/modules"
+                  [[ -d "$sdir/modules/$mkey" && ! -d "$sdir/modules/$mkey/.git" ]] && rm -rf "$sdir/modules/$mkey"
+                  ndjson_line info "cloning $mkey..."
+                  if ! _stream_cmd git clone --depth 1 "$murl" "$sdir/modules/$mkey"; then
+                    ndjson_section_end module-install error
+                    ndjson_error GIT_FAILED "git clone failed for $mkey" ""; exit 1
+                  fi
+                fi
+                _rebuild_pending_add "$sdir" "$mkey"
+                ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                ndjson_section_end module-install ok
+                ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":true}"
+                ;;
+              lua|sql)
+                ndjson_section_end module-install error
+                ndjson_error NOT_IMPLEMENTED "$family installs land in the next update" ""; exit 1
+                ;;
+              *)
+                ndjson_section_end module-install error
+                ndjson_error BAD_ARG "Unknown family: $family" "cpp, lua or sql"; exit 1
+                ;;
+            esac
+            ;;
+          remove)
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-remove
+            family=""; mkey=""; bkchoice=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --family) _need_flag_val "$1" $#; family="$2"; shift 2 ;;
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                --backup) bkchoice=backup; shift ;;
+                --no-backup) bkchoice=nobackup; shift ;;
+                *) ndjson_section_end module-remove error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end module-remove error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" ""; exit 1
+            fi
+            case "$family" in
+              cpp)
+                if [[ -n "$bkchoice" ]]; then
+                  ndjson_section_end module-remove error
+                  ndjson_error BAD_ARG "cpp removals don't take backup flags" "The compiled code leaves at rebuild time."; exit 1
+                fi
+                if ! _valid_cpp_key "$mkey" || ! _cpp_installed "$sdir" "$mkey"; then
+                  ndjson_section_end module-remove error
+                  ndjson_error NOT_FOUND "Module not installed: $mkey" ""; exit 1
+                fi
+                if [[ "$mkey" == mod-arac ]]; then
+                  ndjson_line warn "mod-arac is data-only. Removing the clone does NOT revert:"
+                  ndjson_line warn "  - arac.sql data already imported into acore_world"
+                  ndjson_line warn "  - DBC files already copied to the server data volume"
+                  ndjson_line warn "  - Patch-A.MPQ already installed in your WoW client Data/"
+                fi
+                rm -rf "$sdir/modules/$mkey"
+                _rebuild_pending_add "$sdir" "$mkey"
+                ndjson_line info "database rows from this module are kept -- removing them risks data loss"
+                ndjson_section_end module-remove ok
+                ndjson_done "{\"key\":\"$mkey\",\"removed\":true,\"rebuild_required\":true}"
+                ;;
+              lua|sql)
+                ndjson_section_end module-remove error
+                ndjson_error NOT_IMPLEMENTED "$family removal lands in the next update" ""; exit 1
+                ;;
+              *)
+                ndjson_section_end module-remove error
+                ndjson_error BAD_ARG "Unknown family: $family" "cpp, lua or sql"; exit 1
+                ;;
+            esac
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
