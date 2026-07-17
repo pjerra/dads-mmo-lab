@@ -58,3 +58,35 @@ LUA_DIR="$BATS_TEST_DIRNAME/../lua/party"
   grep -q 'dml_uninvite%s' "$LUA_DIR/dml_uninvite.lua"
   grep -q 'dml_login%s' "$LUA_DIR/dml_login.lua"
 }
+
+# ---------- dml_whisper (My Party phase 2) ----------
+
+@test "whisper bridge exists with an AGPL/Dad's MMO Lab header" {
+  [ -f "$LUA_DIR/dml_whisper.lua" ]
+  grep -qi 'AGPL' "$LUA_DIR/dml_whisper.lua"
+  grep -qiE "Dad's MMO Lab" "$LUA_DIR/dml_whisper.lua"
+}
+
+@test "whisper bridge registers hook 42 and gates BEFORE matching" {
+  grep -q 'RegisterPlayerEvent(42,' "$LUA_DIR/dml_whisper.lua"
+  gate_line=$(grep -n 'if player ~= nil then return end' "$LUA_DIR/dml_whisper.lua" | head -1 | cut -d: -f1)
+  match_line=$(grep -n 'command:match' "$LUA_DIR/dml_whisper.lua" | head -1 | cut -d: -f1)
+  [ "$gate_line" -lt "$match_line" ]
+}
+
+@test "whisper bridge pins the dml_whisper token with a greedy message capture" {
+  grep -q 'dml_whisper%s' "$LUA_DIR/dml_whisper.lua"
+  grep -qF '(.+)$' "$LUA_DIR/dml_whisper.lua"
+}
+
+@test "whisper bridge resolves BOTH the player and the bot" {
+  [ "$(grep -c 'GetPlayerByName' "$LUA_DIR/dml_whisper.lua")" -ge 2 ]
+}
+
+@test "whisper bridge sends via Player:Whisper (universal language)" {
+  grep -q 'Whisper(msg, 0, b)' "$LUA_DIR/dml_whisper.lua"
+}
+
+@test "whisper bridge handler returns false to consume the command" {
+  grep -q 'return false' "$LUA_DIR/dml_whisper.lua"
+}
