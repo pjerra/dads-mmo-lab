@@ -61,3 +61,37 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "UNKNOWN_COMMAND" ]
 }
+
+@test "backup list is empty then newest-first with parsed created stamps" {
+  run bash "$DML" wow backup list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.backups | length')" = "0" ]
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20250101-120000.sql.gz"
+  printf 'xx' > "$BDIR/wow-20250201-130000-prerestore.sql.gz"
+  run bash "$DML" wow backup list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.backups | length')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].file')" = "wow-20250201-130000-prerestore.sql.gz" ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].created')" = "2025-02-01 13:00:00" ]
+  [ "$(echo "$output" | jq -r '.data.backups[1].created')" = "2025-01-01 12:00:00" ]
+}
+
+@test "backup delete removes the file; missing -> NOT_FOUND" {
+  mkdir -p "$BDIR"; printf 'x' > "$BDIR/wow-20250101-120000.sql.gz"
+  run bash "$DML" wow backup delete --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.deleted')" = "true" ]
+  [ ! -f "$BDIR/wow-20250101-120000.sql.gz" ]
+  run bash "$DML" wow backup delete --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
+@test "backup delete rejects invalid names (traversal-proof)" {
+  for bad in '../etc' 'wow-x.sql.gz' 'wow-20250101-120000.sql' 'wow-20250101-120000.sql.gz;rm'; do
+    run bash "$DML" wow backup delete --file "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done
+}

@@ -2496,6 +2496,33 @@ case "$cmd" in
               ndjson_done "{\"file\":\"$(json_escape "$bfile")\",\"size\":$bsize,\"pruned\":$parr}"
             else echo "[dml] backup created: $bfile"; fi
             ;;
+          list)
+            bdir="$(_backup_dir)"
+            first=1; out='['
+            if [[ -d "$bdir" ]]; then
+              while IFS= read -r f || [[ -n "$f" ]]; do
+                [[ -z "$f" ]] && continue
+                _valid_backup_name "$f" || continue
+                fsize="$(stat -c %s "$bdir/$f" 2>/dev/null)" || fsize=0
+                d="${f:4:8}"; t="${f:13:6}"
+                created="${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2}"
+                [[ $first -eq 0 ]] && out+=','
+                out+="{\"file\":\"$(json_escape "$f")\",\"size\":$fsize,\"created\":\"$created\"}"
+                first=0
+              done < <(ls -1 "$bdir" 2>/dev/null | grep -E '\.sql\.gz$' | sort -r)
+            fi
+            out+=']'
+            json_ok "{\"backups\":$out}"
+            ;;
+          delete)
+            file=""
+            [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; file="$2"; shift 2; }
+            _valid_backup_name "$file" || { json_err BAD_ARG "Invalid backup name: $file" ""; exit 1; }
+            bdir="$(_backup_dir)"
+            [[ -f "$bdir/$file" ]] || { json_err NOT_FOUND "No backup named $file" ""; exit 1; }
+            rm -f "$bdir/$file"
+            json_ok "{\"deleted\":true,\"file\":\"$(json_escape "$file")\"}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
             exit 1
