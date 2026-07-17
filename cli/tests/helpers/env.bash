@@ -59,6 +59,7 @@ if [[ "${1:-}" == "inspect" ]]; then
 fi
 if [[ "${1:-}" == "logs" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  [[ -n "${DML_STUB_LOGS_ARGS_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_LOGS_ARGS_LOG"
   # The REAL --since filtering is docker's job, so the stub emulates it:
   # when the caller passed --since and DML_STUB_LOGS_SINCE_FILE is set,
   # serve that file (the "current run only" view); otherwise serve the

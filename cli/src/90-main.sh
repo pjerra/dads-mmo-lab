@@ -1133,6 +1133,57 @@ case "$cmd" in
         detail_pd="$(_host_port_json ac-database 3306)"
         json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
         ;;
+      console-tail)
+        # Read-only worldserver log tail for the Console page. Down is an
+        # answer: docker/container unavailable -> available:false, exit 0.
+        lines=200
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --lines) _need_flag_val "$1" $#; lines="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow console-tail [--lines N] --json"; exit 1 ;;
+          esac
+        done
+        if [[ ! "$lines" =~ ^[0-9]+$ ]]; then
+          json_err BAD_ARG "--lines must be a number" "Usage: dml wow console-tail [--lines N] --json"; exit 1
+        fi
+        lines=$((10#$lines))
+        if (( lines < 1 || lines > 1000 )); then
+          json_err BAD_ARG "--lines must be 1-1000" "Usage: dml wow console-tail [--lines N] --json"; exit 1
+        fi
+        if raw="$(docker logs --tail "$lines" ac-worldserver 2>&1)"; then
+          if [[ -n "$raw" ]]; then
+            arr="$(printf '%s\n' "$raw" | _strip_ansi | _console_lines_json)"
+          else
+            arr="[]"
+          fi
+          json_ok "{\"available\":true,\"lines\":$arr}"
+        else
+          json_ok '{"available":false,"lines":[]}'
+        fi
+        ;;
+      console-send)
+        # The manual GM console: free text is DELIBERATE here (same
+        # capability as the public `wow soap-exec`; the closed-allowlist
+        # rule binds canned/automated actions, not the operator console).
+        # The text reaches SOAP only via soap_exec's XML escaping.
+        cmd=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --command) _need_flag_val "$1" $#; cmd="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow console-send --command \"<text>\" --json"; exit 1 ;;
+          esac
+        done
+        if [[ -z "${cmd//[[:space:]]/}" ]]; then
+          json_err BAD_ARG "console-send requires a non-empty --command" "Example: dml wow console-send --command \"server info\" --json"; exit 1
+        fi
+        if out="$(soap_exec "$cmd")"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0) json_ok "{\"result\":\"$(json_escape "$(_soap_text_decode "$out")")\"}" ;;
+          2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The worldserver rejected the command." ; exit 1 ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+          *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup" ; exit 1 ;;
+        esac
+        ;;
       items)
         isub="${1:-}"; shift || true
         case "$isub" in
