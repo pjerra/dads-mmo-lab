@@ -147,6 +147,67 @@ async fn wow_console_send(
 }
 
 #[tauri::command]
+async fn wow_module_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "module".into(), "list".into()]).await
+}
+
+#[tauri::command]
+async fn wow_module_install(
+    family: String,
+    key: Option<String>,
+    url: Option<String>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "module".into(), "install".into(), "--family".into(), family];
+    if let Some(k) = key {
+        args.extend(["--key".into(), k]);
+    }
+    if let Some(u) = url {
+        args.extend(["--url".into(), u]);
+    }
+    stream_args(args, on_event, state).await
+}
+
+#[tauri::command]
+async fn wow_module_remove(
+    family: String,
+    key: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "module".into(), "remove".into(), "--family".into(), family, "--key".into(), key],
+        on_event,
+        state,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_module_rebuild(
+    backup: bool,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let flag = if backup { "--backup" } else { "--no-backup" };
+    stream_args(vec!["wow".into(), "module".into(), "rebuild".into(), flag.into()], on_event, state).await
+}
+
+#[tauri::command]
+async fn wow_module_conf_activate(
+    key: String,
+    force: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "module".into(), "conf-activate".into(), "--key".into(), key];
+    if force.unwrap_or(false) {
+        args.push("--force".into());
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
 async fn wow_items_search(
     name: String,
     quality: Option<u32>,
@@ -415,8 +476,12 @@ async fn wow_party_preset_load(player: String, name: String, on_event: Channel<s
 }
 
 #[tauri::command]
-async fn wow_backup_create(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
-    stream_args(vec!["wow".into(), "backup".into(), "create".into()], on_event, state).await
+async fn wow_backup_create(include_world: Option<bool>, on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "backup".into(), "create".into()];
+    if include_world.unwrap_or(false) {
+        args.push("--include-world".into());
+    }
+    stream_args(args, on_event, state).await
 }
 
 #[tauri::command]
@@ -478,6 +543,11 @@ pub fn run() {
             wow_server_detail,
             wow_console_tail,
             wow_console_send,
+            wow_module_list,
+            wow_module_install,
+            wow_module_remove,
+            wow_module_rebuild,
+            wow_module_conf_activate,
             wow_items_search,
             wow_mail_item,
             wow_teleport_list,

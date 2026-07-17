@@ -162,6 +162,69 @@ export async function wowConsoleTail(lines?: number): Promise<ConsoleTail> {
 export async function wowConsoleSend(command: string): Promise<{ result: string }> {
   return await invoke("wow_console_send", { command });
 }
+
+export interface CppModule {
+  key: string;
+  name: string;
+  installed: boolean;
+  pending_rebuild: boolean;
+  conf: "none" | "needs-rebuild" | "ready" | "active";
+  custom: boolean;
+}
+export interface LuaModule {
+  key: string;
+  name: string;
+  cloned: boolean;
+  deployed: boolean;
+}
+export interface SqlModule {
+  key: string;
+  name: string;
+  type: string;
+  installed: boolean;
+}
+export interface ModuleList {
+  families: { cpp: CppModule[]; lua: LuaModule[]; sql: SqlModule[] };
+  rebuild_pending: string[];
+  ale_ready: boolean;
+}
+export async function wowModuleList(): Promise<ModuleList> {
+  return await invoke("wow_module_list");
+}
+export const wowModuleInstall = (
+  family: string,
+  key: string | null,
+  url: string | null,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_module_install", { family, key, url, onEvent: ch });
+};
+export const wowModuleRemove = (
+  family: string,
+  key: string,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_module_remove", { family, key, onEvent: ch });
+};
+export const wowModuleRebuild = (
+  backup: boolean,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_module_rebuild", { backup, onEvent: ch });
+};
+export async function wowModuleConfActivate(
+  key: string,
+  force?: boolean,
+): Promise<{ key: string; activated: boolean; conf_name: string }> {
+  return await invoke("wow_module_conf_activate", { key, force });
+}
+
 export async function wowItemsSearch(p: {
   name: string;
   quality?: number;
@@ -306,10 +369,10 @@ export async function wowBackupList(): Promise<BackupInfo[]> {
 export async function wowBackupDelete(file: string): Promise<{ deleted: boolean; file: string }> {
   return await invoke("wow_backup_delete", { file });
 }
-export const wowBackupCreate = (onEvent: (e: TermEvent) => void): Promise<void> => {
+export const wowBackupCreate = (onEvent: (e: TermEvent) => void, includeWorld?: boolean): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_backup_create", { onEvent: ch });
+  return invoke("wow_backup_create", { includeWorld, onEvent: ch });
 };
 export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
