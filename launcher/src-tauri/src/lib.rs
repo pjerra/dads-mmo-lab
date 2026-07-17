@@ -127,6 +127,26 @@ async fn wow_server_detail(state: State<'_, AppState>) -> Result<serde_json::Val
 }
 
 #[tauri::command]
+async fn wow_console_tail(
+    lines: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "console-tail".into()];
+    if let Some(l) = lines {
+        args.extend(["--lines".into(), l.to_string()]);
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
+async fn wow_console_send(
+    command: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "console-send".into(), "--command".into(), command]).await
+}
+
+#[tauri::command]
 async fn wow_items_search(
     name: String,
     quality: Option<u32>,
@@ -456,6 +476,8 @@ pub fn run() {
             wow_accounts,
             wow_server_info,
             wow_server_detail,
+            wow_console_tail,
+            wow_console_send,
             wow_items_search,
             wow_mail_item,
             wow_teleport_list,

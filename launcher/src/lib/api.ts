@@ -152,6 +152,16 @@ export async function wowServerInfo(): Promise<ServerInfo> {
 export async function wowServerDetail(): Promise<ServerDetail> {
   return await invoke("wow_server_detail");
 }
+export interface ConsoleTail {
+  available: boolean;
+  lines: string[];
+}
+export async function wowConsoleTail(lines?: number): Promise<ConsoleTail> {
+  return await invoke("wow_console_tail", { lines });
+}
+export async function wowConsoleSend(command: string): Promise<{ result: string }> {
+  return await invoke("wow_console_send", { command });
+}
 export async function wowItemsSearch(p: {
   name: string;
   quality?: number;
