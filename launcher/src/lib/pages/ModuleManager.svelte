@@ -6,8 +6,14 @@
     wowModuleRemove,
     wowModuleRebuild,
     wowModuleConfActivate,
+    wowClientPathGet,
+    wowClientPathSet,
+    wowClientPathDetect,
     type ModuleList,
     type CppModule,
+    type LuaModule,
+    type SqlModule,
+    type ClientPath,
     type TermEvent,
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
@@ -16,12 +22,30 @@
   let list: ModuleList | null = $state(null);
   let error: string | null = $state(null);
   let note: string | null = $state(null);
-  let busy = $state(false); // single flag: disables every Install/Update/Remove/Rebuild/Activate button
+  let busy = $state(false); // single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/Detect button
 
   let confirmingRebuild = $state(false);
   let backupChecked = $state(true); // "Back up the server first" defaults ON
   let confirmingRemove: string | null = $state(null); // key of the cpp module armed for removal
   let customUrl = $state("");
+
+  // Lua (ALE) card: per-row "back up first" checkbox (has_sql rows only,
+  // default ON) and the key armed for a two-step remove confirm.
+  let luaBackup: Record<string, boolean> = $state({});
+  let confirmingLuaRemove: string | null = $state(null);
+
+  // SQL mods card: per-row backup checkbox (default ON, every row), the key
+  // armed for a remove confirm, and the two variant-typed rows' inputs.
+  let sqlBackup: Record<string, boolean> = $state({});
+  let confirmingSqlRemove: string | null = $state(null);
+  let hearthstoneVariant = $state("5min");
+  let npcTeleporterLevel = $state(80);
+
+  // Client folder card.
+  let clientPath: ClientPath | null = $state(null);
+  let clientPathInput = $state("");
+  let clientError: string | null = $state(null);
+  let clientCandidates: string[] | null = $state(null);
 
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
@@ -31,9 +55,23 @@
     error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
   }
 
+  // New keys default their backup checkbox ON without stomping a value the
+  // user already toggled (called after every list refresh).
+  function ensureBackupDefaults() {
+    if (!list) return;
+    for (const m of list.families.lua) {
+      if (m.has_sql && !(m.key in luaBackup)) luaBackup[m.key] = true;
+    }
+    for (const m of list.families.sql) {
+      if (!(m.key in sqlBackup)) sqlBackup[m.key] = true;
+    }
+  }
+
   async function refresh() {
     error = null; confirmingRebuild = false; confirmingRemove = null;
-    try { list = await wowModuleList(); } catch (e) { showErr(e); }
+    confirmingLuaRemove = null; confirmingSqlRemove = null;
+    try { list = await wowModuleList(); ensureBackupDefaults(); } catch (e) { showErr(e); }
+    try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
   }
   onMount(refresh);
 
@@ -44,10 +82,11 @@
   // underlying CLI step failed.
   async function runStream(
     run: (onEvent: (e: TermEvent) => void) => Promise<void>,
-    onDone: () => void,
+    onDone: (doneData: unknown) => void,
   ) {
     busy = true; error = null; note = null; showTerm = true; term = initialTermState();
     let sawDone = false;
+    let doneData: unknown;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
@@ -55,6 +94,7 @@
         term = applyEvent(term, e);
         if (e.event === "done") {
           sawDone = true;
+          doneData = (e as { data?: unknown }).data;
         } else if (e.event === "error") {
           streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
         }
@@ -66,7 +106,7 @@
       await refresh();
       if (outcomeErr) showErr(outcomeErr);
       else if (streamErr) showErr(streamErr);
-      else if (sawDone) onDone();
+      else if (sawDone) onDone(doneData);
     }
   }
 
@@ -111,6 +151,83 @@
       note = `Activated ${r.conf_name}.`;
       await refresh();
     } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  function installLua(m: LuaModule) {
+    const backup = m.has_sql ? luaBackup[m.key] : undefined;
+    return runStream(
+      (onEvent) => wowModuleInstall("lua", m.key, null, onEvent, backup),
+      (doneData) => {
+        const d = doneData as { reload?: string } | undefined;
+        note = d?.reload ?? `Installed ${m.name}.`;
+      },
+    );
+  }
+
+  function removeLua(m: LuaModule) {
+    if (confirmingLuaRemove !== m.key) {
+      confirmingLuaRemove = m.key;
+      return;
+    }
+    confirmingLuaRemove = null;
+    return runStream(
+      (onEvent) => wowModuleRemove("lua", m.key, onEvent),
+      () => { note = `Removed ${m.name}.`; },
+    );
+  }
+
+  function installSql(m: SqlModule) {
+    let variant: string | undefined;
+    if (m.key === "hearthstone-cd") variant = hearthstoneVariant;
+    else if (m.key === "npc-teleporter") variant = String(npcTeleporterLevel);
+    return runStream(
+      (onEvent) => wowModuleInstall("sql", m.key, null, onEvent, sqlBackup[m.key], variant),
+      () => { note = `Installed ${m.name}.`; },
+    );
+  }
+
+  function removeSql(m: SqlModule) {
+    if (confirmingSqlRemove !== m.key) {
+      confirmingSqlRemove = m.key;
+      return;
+    }
+    confirmingSqlRemove = null;
+    return runStream(
+      (onEvent) => wowModuleRemove("sql", m.key, onEvent, sqlBackup[m.key]),
+      () => { note = `Removed ${m.name}.`; },
+    );
+  }
+
+  function clientErr(e: unknown) {
+    const err = e as { message?: string; hint?: string };
+    clientError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+  }
+
+  async function saveClientPath() {
+    busy = true; clientError = null; note = null;
+    try {
+      clientPath = await wowClientPathSet(clientPathInput);
+      note = `Client folder set — ${clientPath.path}.`;
+      clientPathInput = "";
+      clientCandidates = null;
+    } catch (e) { clientErr(e); } finally { busy = false; }
+  }
+
+  async function detectClientPath() {
+    busy = true; clientError = null;
+    try {
+      const r = await wowClientPathDetect();
+      clientCandidates = r.candidates;
+    } catch (e) { clientErr(e); } finally { busy = false; }
+  }
+
+  async function pickClientCandidate(path: string) {
+    busy = true; clientError = null; note = null;
+    try {
+      clientPath = await wowClientPathSet(path);
+      note = `Client folder set — ${clientPath.path}.`;
+      clientCandidates = null;
+    } catch (e) { clientErr(e); } finally { busy = false; }
   }
 
   // Copy pinned by the brief verbatim -- mod-arac's data is not reverted by
@@ -189,6 +306,79 @@
   </div>
 
   <div class="card">
+    <h3>Lua scripts (ALE)</h3>
+    {#if list}
+      {#if !list.ale_ready}
+        <p class="muted">Install the ALE module (mod-ale) first — it's in the C++ modules list above.</p>
+      {:else}
+        {#each list.families.lua as m (m.key)}
+          <div class="row mrow">
+            <strong class="mname">{m.name}</strong>
+            <span class="badge {m.cloned ? 'on' : 'off'}">Cloned</span>
+            <span class="badge {m.deployed ? 'on' : 'off'}">Deployed</span>
+            <span class="spacer"></span>
+            {#if m.has_sql}
+              <label class="row">
+                <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
+                Back up first (recommended)
+              </label>
+            {/if}
+            <button class="primary" onclick={() => installLua(m)} disabled={busy}>Install</button>
+            <button onclick={() => removeLua(m)} disabled={busy}>
+              {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
+            </button>
+          </div>
+        {/each}
+      {/if}
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>SQL mods</h3>
+    {#if list}
+      {#each list.families.sql as m (m.key)}
+        <div class="row mrow">
+          <strong class="mname">{m.name}</strong>
+          <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
+          {#if m.key === "hearthstone-cd"}
+            <label class="row">
+              Cooldown
+              <select bind:value={hearthstoneVariant} disabled={busy}>
+                <option value="1sec">1sec</option>
+                <option value="1min">1min</option>
+                <option value="5min">5min</option>
+                <option value="15min">15min</option>
+                <option value="30min">30min</option>
+              </select>
+            </label>
+          {:else if m.key === "npc-teleporter"}
+            <label class="row">
+              Level
+              <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
+            </label>
+          {/if}
+          <span class="spacer"></span>
+          <label class="row">
+            <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
+            Back up first (recommended)
+          </label>
+          <button class="primary" onclick={() => installSql(m)} disabled={busy}>Install</button>
+          {#if m.key === "rare-drops"}
+            <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
+          {:else}
+            <button onclick={() => removeSql(m)} disabled={busy}>
+              {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
+            </button>
+          {/if}
+        </div>
+        {#if m.type === "tweak_world"}
+          <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
+        {/if}
+      {/each}
+    {/if}
+  </div>
+
+  <div class="card">
     <h3>Install from URL</h3>
     <div class="row">
       <input
@@ -206,6 +396,44 @@
       </button>
     </div>
     <p class="muted">mod-* repos only</p>
+  </div>
+
+  <div class="card">
+    <h3>Client folder</h3>
+    <div class="row">
+      <strong>Current:</strong>
+      {#if !clientPath?.path}
+        <span class="muted">(not set)</span>
+      {:else}
+        <span>{clientPath.path}</span>
+        {#if !clientPath.valid}
+          <span class="warn-text">(saved folder is missing)</span>
+        {/if}
+      {/if}
+    </div>
+    {#if clientError}<p class="inline-error">{clientError}</p>{/if}
+    <div class="row">
+      <input
+        type="text"
+        placeholder="C:\Games\WoW"
+        bind:value={clientPathInput}
+        disabled={busy}
+      />
+      <button class="primary" onclick={saveClientPath} disabled={busy || !clientPathInput.trim()}>Save</button>
+      <button onclick={detectClientPath} disabled={busy}>Detect</button>
+    </div>
+    {#if clientCandidates}
+      {#if clientCandidates.length === 0}
+        <p class="muted">No WoW client folders found.</p>
+      {:else}
+        <div class="row">
+          {#each clientCandidates as c (c)}
+            <button onclick={() => pickClientCandidate(c)} disabled={busy}>{c}</button>
+          {/each}
+        </div>
+      {/if}
+    {/if}
+    <p class="muted">Needed for scripts that ship client-side files (BMAH UI, Paragon, SOD). Windows paths like C:\Games\WoW work.</p>
   </div>
 
   {#if showTerm}
@@ -231,9 +459,13 @@
   .badge.warn { color: #d29922; border-color: #d29922; }
   .badge.off { color: #8b949e; }
   input[type="text"] { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; flex: 1; min-width: 260px; }
+  input[type="number"] { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; width: 70px; }
+  select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }
+  .warn-text { color: #d29922; font-size: 13px; margin: 0; }
+  .inline-error { color: #f85149; font-size: 13px; margin: 0; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
 </style>
