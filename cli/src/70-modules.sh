@@ -592,3 +592,114 @@ _module_db_read() {
 # (rejects ../evil.sql, x.sql;DROP, etc.). Exit status IS the signal (same
 # pattern as _valid_charname).
 _valid_module_sql_filename() { [[ "$1" =~ ^[A-Za-z0-9._-]+\.sql$ ]]; }
+# ---------------------------------------------------------------------------
+# Server self-update (Round L): update-check / update.
+# Ports the manager's update_server_source / _check_remote / _pull_repo
+# (guides/wow-wotlk/wow-manage.sh:7018-7193) FAIL-CLOSED: the manager's
+# interactive "pull anyway?" overrides on a remote/branch mismatch become
+# hard errors here -- there is no prompt to answer in the launcher, and
+# silently pulling upstream AzerothCore over the Playerbots fork would break
+# the playerbots integration outright. No chained auto-rebuild either -- the
+# Modules page's existing rebuild banner + rebuild flow own that (see
+# `_rebuild_pending_add ... core-update` below). See docs/superpowers/specs/
+# 2026-07-18-server-update-design.md for the full contract.
+# ---------------------------------------------------------------------------
+
+# Guarded one-liner git reads: a bare `x="$(git ...)"` would abort the whole
+# script under the global `set -e` the instant git exits non-zero (missing
+# remote, detached HEAD, ...). Each of these always returns 0 itself (the
+# `||` fallback absorbs the failure), matching the _client_path/soap_exec
+# guarded-assignment convention used elsewhere in this codebase -- callers
+# can assign straight from them with no extra guard.
+_wow_git_url()    { (cd "$1" && git remote get-url origin) 2>/dev/null || printf ''; }
+_wow_git_branch() { (cd "$1" && git rev-parse --abbrev-ref HEAD) 2>/dev/null || printf ''; }
+_wow_git_head()   { (cd "$1" && git rev-parse --short HEAD) 2>/dev/null || printf ''; }
+_wow_git_dirty()  { (cd "$1" && git status --porcelain --untracked-files=no) 2>/dev/null || printf ''; }
+
+# Does a remote URL point at the expected fork? Old installs may still point
+# at the pre-rename liyunfan1223 org -- GitHub redirects those, so they're
+# accepted too (manager's own comment on _check_remote, ported verbatim).
+_wow_remote_ok() { [[ "$1" == *"$2"* || "$1" == *liyunfan1223* ]]; }
+
+# One `update-check` repo object. Never fails -- `behind` is null on a fetch
+# failure, not an error (this is an informational endpoint, not a gate).
+_wow_repo_check_json() {
+    local dir="$1" label="$2" url branch head dirty dcount=0 behind=null bcount
+    url="$(_wow_git_url "$dir")"
+    branch="$(_wow_git_branch "$dir")"
+    head="$(_wow_git_head "$dir")"
+    dirty="$(_wow_git_dirty "$dir")"
+    [[ -n "$dirty" ]] && dcount="$(printf '%s\n' "$dirty" | grep -c .)"
+    if (cd "$dir" && git fetch --quiet origin) >/dev/null 2>&1; then
+        if bcount="$(cd "$dir" && git rev-list --count "HEAD..origin/$branch" 2>/dev/null)"; then
+            [[ "$bcount" =~ ^[0-9]+$ ]] && behind="$bcount"
+        fi
+    fi
+    printf '{"label":"%s","url":"%s","branch":"%s","head":"%s","dirty":%s,"behind":%s}' \
+        "$(json_escape "$label")" "$(json_escape "$url")" "$(json_escape "$branch")" \
+        "$(json_escape "$head")" "$dcount" "$behind"
+    return 0
+}
+
+# Pulls one repo, preserving local edits: a dirty tracked file gets backed up
+# to a timestamped patch file AND stashed BEFORE the pull; the stash is
+# popped back on top of the update afterward. Sets _WOW_PULL_CHANGED
+# (true/false) and _WOW_PULL_SUMMARY ("<before> -> <after>" or "up to date")
+# on success. On failure this emits the ndjson_error itself and returns 1 --
+# the caller only needs to close its section and exit.
+#
+# DELIBERATE DEVIATION from the manager: no interactive "pull anyway?" --
+# the caller (`wow update`) has already fail-closed on any remote/branch
+# mismatch before this ever runs, so every path below is unconditional.
+_wow_pull_repo() {
+    local dir="$1" label="$2" before after dirty stamp patch=""
+    before="$(_wow_git_head "$dir")"
+    dirty="$(_wow_git_dirty "$dir")"
+    if [[ -n "$dirty" ]]; then
+        stamp="$(date -u +%Y%m%d-%H%M%S)"
+        patch="$dir/local-changes-$stamp.patch"
+        if ! (cd "$dir" && git diff) > "$patch" 2>/dev/null; then
+            rm -f "$patch"
+            ndjson_error EDIT_BACKUP_FAILED "$label: could not back up local changes -- aborting" "Nothing was pulled."
+            return 1
+        fi
+        ndjson_line info "$label: local changes backed up to $patch"
+        if ! (cd "$dir" && git stash push -m "dml update auto-stash $stamp") >/dev/null 2>&1; then
+            ndjson_error EDIT_BACKUP_FAILED "$label: could not stash local changes -- aborting" "Nothing was pulled."
+            return 1
+        fi
+    fi
+    ndjson_line info "updating $label..."
+    if ! (cd "$dir" && _stream_cmd git pull --ff-only); then
+        if [[ -n "$dirty" ]]; then
+            (cd "$dir" && git stash pop) >/dev/null 2>&1 || true
+            ndjson_line info "$label: your local changes were restored unchanged."
+        fi
+        ndjson_error PULL_FAILED "git pull failed for $label (diverged branch?)" "Inspect manually: cd $dir && git status"
+        return 1
+    fi
+    after="$(_wow_git_head "$dir")"
+    _WOW_PULL_CHANGED=false
+    [[ "$before" != "$after" ]] && _WOW_PULL_CHANGED=true
+    if [[ -n "$dirty" ]]; then
+        if (cd "$dir" && git stash pop) >/dev/null 2>&1; then
+            ndjson_line info "$label: your local edits were re-applied on top of the update."
+        else
+            # Pop conflicted: git keeps the stash entry. Clear the
+            # conflicted working tree back to the clean updated state so the
+            # server still builds -- best-effort (|| true), this is already
+            # the recovery path.
+            (cd "$dir" && git checkout -f -- .) >/dev/null 2>&1 || true
+            (cd "$dir" && git reset --hard HEAD) >/dev/null 2>&1 || true
+            ndjson_line warn "$label: some of your edits CONFLICT with this update. The updated files were kept so the server builds cleanly."
+            ndjson_line warn "Your edits are safe in two places -- patch file: $patch"
+            ndjson_line warn "...and git stash: cd $dir && git stash pop   (resolve conflicts manually)"
+        fi
+    fi
+    if [[ "$before" == "$after" ]]; then
+        _WOW_PULL_SUMMARY="up to date"
+    else
+        _WOW_PULL_SUMMARY="$before -> $after"
+    fi
+    return 0
+}

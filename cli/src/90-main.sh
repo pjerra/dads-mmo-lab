@@ -3297,6 +3297,122 @@ case "$cmd" in
             json_err UNKNOWN_COMMAND "Unknown client-path subcommand: $cpsub" "Try: dml wow client-path get|set|detect --json"; exit 1 ;;
         esac
         ;;
+      update-check)
+        # Read-only-ish: does a `git fetch --quiet origin` per repo to
+        # compute behind-counts, but never mutates the worktree (no pull,
+        # no stash). See docs/superpowers/specs/
+        # 2026-07-18-server-update-design.md.
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."; exit 1
+        fi
+        if [[ ! -d "$sdir/.git" ]]; then
+          json_err GIT_MISSING "$sdir is not a git checkout" "Can't check for updates."; exit 1
+        fi
+        repos="[$(_wow_repo_check_json "$sdir" AzerothCore)"
+        moddir="$sdir/modules/mod-playerbots"
+        notej=""
+        if [[ -d "$moddir/.git" ]]; then
+          repos+=",$(_wow_repo_check_json "$moddir" mod-playerbots)"
+        else
+          notej="mod-playerbots module is not installed -- nothing to check there"
+        fi
+        repos+="]"
+        if [[ -n "$notej" ]]; then
+          json_ok "{\"repos\":$repos,\"note\":\"$(json_escape "$notej")\"}"
+        else
+          json_ok "{\"repos\":$repos}"
+        fi
+        ;;
+      update)
+        # Ports the manager's update_server_source (wow-manage.sh:7018-7193)
+        # FAIL-CLOSED -- see the _wow_pull_repo/_wow_remote_ok header
+        # comments in 70-modules.sh for the full deviation rationale. Gates
+        # (server dir / git checkout / remote / branch) all run BEFORE any
+        # mutation, in that order, mirroring the design doc's numbered list.
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start server-update
+        bkchoice=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --backup) bkchoice=backup; shift ;;
+            --no-backup) bkchoice=nobackup; shift ;;
+            *) ndjson_section_end server-update error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+          esac
+        done
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          ndjson_section_end server-update error
+          ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+        fi
+        if [[ ! -d "$sdir/.git" ]]; then
+          ndjson_section_end server-update error
+          ndjson_error GIT_MISSING "$sdir is not a git checkout" "Can't update from source."; exit 1
+        fi
+        # AzerothCore must be the custom mod-playerbots fork on the
+        # Playerbot branch -- pulling upstream azerothcore/azerothcore-wotlk
+        # here would break the playerbots integration. No override: this is
+        # a hard error, unlike the manager's interactive "pull anyway?".
+        acurl="$(_wow_git_url "$sdir")"
+        if ! _wow_remote_ok "$acurl" "mod-playerbots/azerothcore-wotlk"; then
+          ndjson_section_end server-update error
+          ndjson_error REMOTE_MISMATCH "AzerothCore origin is not the expected Playerbots fork" "found: ${acurl:-<none>} -- pulling upstream AzerothCore would break Playerbots. Fix the remote manually, then retry."
+          exit 1
+        fi
+        moddir="$sdir/modules/mod-playerbots"
+        if [[ -d "$moddir/.git" ]]; then
+          pburl="$(_wow_git_url "$moddir")"
+          if ! _wow_remote_ok "$pburl" "mod-playerbots/mod-playerbots"; then
+            ndjson_section_end server-update error
+            ndjson_error REMOTE_MISMATCH "mod-playerbots origin is not the expected fork" "found: ${pburl:-<none>}"
+            exit 1
+          fi
+        fi
+        acbranch="$(_wow_git_branch "$sdir")"
+        if [[ "$acbranch" != "Playerbot" ]]; then
+          ndjson_section_end server-update error
+          ndjson_error BRANCH_MISMATCH "AzerothCore checkout is on branch '$acbranch' (expected 'Playerbot')" ""
+          exit 1
+        fi
+        if [[ -z "$bkchoice" ]]; then
+          ndjson_section_end server-update error
+          ndjson_error BAD_ARG "Pick --backup or --no-backup" "New core revisions can run DB migrations at next start -- decide explicitly."; exit 1
+        fi
+        if [[ "$bkchoice" == backup ]]; then
+          if ! _module_backup_now; then
+            ndjson_section_end server-update error
+            ndjson_error BACKUP_FAILED "Safety backup failed -- update not started" ""; exit 1
+          fi
+        fi
+        changed=false
+        if ! _wow_pull_repo "$sdir" AzerothCore; then
+          ndjson_section_end server-update error
+          exit 1
+        fi
+        [[ "$_WOW_PULL_CHANGED" == true ]] && changed=true
+        ac_summary="$_WOW_PULL_SUMMARY"
+        pb_summary="skipped"
+        if [[ -d "$moddir/.git" ]]; then
+          if ! _wow_pull_repo "$moddir" mod-playerbots; then
+            ndjson_section_end server-update error
+            exit 1
+          fi
+          [[ "$_WOW_PULL_CHANGED" == true ]] && changed=true
+          pb_summary="$_WOW_PULL_SUMMARY"
+        else
+          ndjson_line warn "modules/mod-playerbots not found -- skipping module update."
+        fi
+        if [[ "$changed" == true ]]; then
+          # Display-only marker in the rebuild-pending list -- it fails
+          # _valid_cpp_key (no mod- prefix) so the cpp custom-scan in
+          # `module list` never renders it as a module row; only the
+          # rebuild banner picks it up, and `module rebuild` clears it like
+          # any other pending entry.
+          _rebuild_pending_add "$sdir" core-update
+          ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on this page."
+        fi
+        ndjson_section_end server-update ok
+        ndjson_done "{\"changed\":$changed,\"ac\":\"$(json_escape "$ac_summary")\",\"playerbots\":\"$(json_escape "$pb_summary")\"}"
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1

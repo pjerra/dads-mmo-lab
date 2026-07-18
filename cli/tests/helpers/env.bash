@@ -281,6 +281,19 @@ use_git_stub() {
   cat > "$STUB_BIN/git" <<'EOS'
 #!/usr/bin/env bash
 # git stub: logs argv; `clone` creates <dest>/.git so installed-checks pass.
+# Extended (Round L, server-update) with seams for `wow update-check`/
+# `wow update`: DML_STUB_GIT_URL (remote get-url origin), DML_STUB_GIT_BRANCH
+# (rev-parse --abbrev-ref HEAD), DML_STUB_GIT_HEAD_SEQ (space-sep rev-parse
+# --short HEAD outputs, consumed in order via a state file in
+# DML_STUB_GIT_HEAD_SEQ_STATE, sticky on the last entry once exhausted --
+# same convention as DML_STUB_CURL_SEQ/DML_STUB_DB_ROWS_SEQ above),
+# DML_STUB_GIT_DIRTY (status --porcelain output; `diff` echoes it too, into
+# whatever the caller redirected stdout to, so a patch file ends up
+# non-empty), DML_STUB_GIT_PULL_EXIT / DML_STUB_GIT_STASH_POP_EXIT (fail
+# those two ops specifically, independent of the blanket DML_STUB_GIT_EXIT
+# below), DML_STUB_GIT_BEHIND (rev-list --count). `checkout`/`reset`/
+# `stash push`/`fetch`/`remote add` just log+exit 0 via the fallthrough at
+# the bottom -- callers only care that they ran (see DML_STUB_GIT_LOG).
 [[ -n "${DML_STUB_GIT_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_GIT_LOG"
 if [[ "${DML_STUB_GIT_EXIT:-0}" != 0 ]]; then
   echo "fatal: stub git failure" >&2
@@ -293,6 +306,57 @@ fi
 if [[ "${1:-}" == "clone" ]]; then
   dest="${!#}"
   mkdir -p "$dest/.git"
+  exit 0
+fi
+if [[ "${1:-}" == "remote" && "${2:-}" == "get-url" ]]; then
+  printf '%s\n' "${DML_STUB_GIT_URL:-https://github.com/mod-playerbots/azerothcore-wotlk.git}"
+  exit 0
+fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--abbrev-ref" ]]; then
+  printf '%s\n' "${DML_STUB_GIT_BRANCH:-Playerbot}"
+  exit 0
+fi
+if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--short" ]]; then
+  if [[ -n "${DML_STUB_GIT_HEAD_SEQ:-}" ]]; then
+    st="${DML_STUB_GIT_HEAD_SEQ_STATE:-/tmp/dml_git_head_seq.$$}"
+    i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+    shas=($DML_STUB_GIT_HEAD_SEQ)
+    idx=$i; (( idx >= ${#shas[@]} )) && idx=$(( ${#shas[@]} - 1 ))
+    printf '%s\n' "${shas[$idx]}"
+    echo $(( i + 1 )) > "$st"
+  else
+    printf '%s\n' "${DML_STUB_GIT_HEAD:-abc1234}"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "status" ]]; then
+  [[ -n "${DML_STUB_GIT_DIRTY:-}" ]] && printf '%s\n' "${DML_STUB_GIT_DIRTY}"
+  exit 0
+fi
+if [[ "${1:-}" == "diff" ]]; then
+  if [[ -n "${DML_STUB_GIT_DIRTY:-}" ]]; then
+    printf 'diff --git a/stub b/stub\n%s\n' "${DML_STUB_GIT_DIRTY}"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "stash" && "${2:-}" == "pop" ]]; then
+  if [[ "${DML_STUB_GIT_STASH_POP_EXIT:-0}" != 0 ]]; then
+    echo "fatal: stub stash pop conflict" >&2
+    exit "${DML_STUB_GIT_STASH_POP_EXIT}"
+  fi
+  exit 0
+fi
+if [[ "${1:-}" == "pull" ]]; then
+  if [[ "${DML_STUB_GIT_PULL_EXIT:-0}" != 0 ]]; then
+    echo "fatal: stub pull failure" >&2
+    exit "${DML_STUB_GIT_PULL_EXIT}"
+  fi
+  echo "Already up to date."
+  exit 0
+fi
+if [[ "${1:-}" == "rev-list" && "${2:-}" == "--count" ]]; then
+  printf '%s\n' "${DML_STUB_GIT_BEHIND:-0}"
+  exit 0
 fi
 exit 0
 EOS
