@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   AC_TO_VIEWER_SLOT,
-  acGenderToViewer,
   buildCharacterModelId,
   buildViewerItems,
   probeRenderableItems,
@@ -109,16 +108,10 @@ describe("buildViewerItems", () => {
 });
 
 describe("buildCharacterModelId", () => {
-  it("matches the recon's race*2-1+gender formula", () => {
-    expect(buildCharacterModelId(7, 1)).toBe(14); // gnome male -- recon's own worked example (id=14)
-    expect(buildCharacterModelId(1, 0)).toBe(1); // human female
-    expect(buildCharacterModelId(2, 1)).toBe(4); // orc male
-  });
-});
-
-describe("acGenderToViewer", () => {
-  it("pins the AC (0=male/1=female) <-> viewer (0=female/1=male) convention boundary", () => {
-    expect(acGenderToViewer(0)).toBe(1); // AC male -> viewer male
-    expect(acGenderToViewer(1)).toBe(0); // AC female -> viewer female
+  it("matches race*2-1+gender with AC's own 0=male/1=female convention (verified vs wrath meta)", () => {
+    expect(buildCharacterModelId(2, 0)).toBe(3); // orc male -- meta character/3.json Race=2 Gender=0
+    expect(buildCharacterModelId(2, 1)).toBe(4); // orc female -- meta character/4.json Race=2 Gender=1
+    expect(buildCharacterModelId(8, 1)).toBe(16); // troll female -- meta character/16.json
+    expect(buildCharacterModelId(1, 0)).toBe(1); // human male
   });
 });

@@ -107,19 +107,16 @@ export function buildViewerItems(
 }
 
 // Recon §1.1 (`optionsFromModel`): `models: { id: race*2-1+gender, type:
-// modelingType.CHARACTER }` -- verbatim formula. `gender`: 0 = female, 1 =
-// male (recon §1.2).
+// modelingType.CHARACTER }` -- verbatim formula. `gender` here uses the
+// SAME convention as AzerothCore (0 = male / 1 = female): verified
+// empirically 2026-07-19 against the wrath meta itself (character/3.json =
+// Race 2 Gender 0, character/4.json = Race 2 Gender 1 -- Blizzard's
+// standard 0=male pairing). The recon's §1.2 claim of an inverted
+// 0=female/1=male viewer convention was WRONG for this tree; the earlier
+// acGenderToViewer flip built on it rendered every character as the
+// opposite sex and was removed.
 export function buildCharacterModelId(race: number, gender: number): number {
   return race * 2 - 1 + gender;
-}
-
-// Convention boundary: AzerothCore's `characters.gender` column is 0=male /
-// 1=female, but the viewer's own model-id convention (see
-// buildCharacterModelId above) is the opposite -- 0=female / 1=male. Callers
-// must run AC's raw `doll.gender` through this before it ever reaches
-// buildCharacterModelId.
-export function acGenderToViewer(g: number): number {
-  return g === 0 ? 1 : 0;
 }
 
 const CONTENT_PATH = "http://zam.localhost/modelviewer/wrath/";
@@ -427,7 +424,7 @@ export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
 ): Promise<unknown> {
-  const modelId = buildCharacterModelId(doll.race, acGenderToViewer(doll.gender));
+  const modelId = buildCharacterModelId(doll.race, doll.gender);
   if (!(await geometryAvailable(modelId))) {
     throw new Error(
       "Character model files aren't downloadable from Wowhead right now — showing gear without a model.",
