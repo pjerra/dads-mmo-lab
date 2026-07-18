@@ -169,6 +169,14 @@ export async function wowServerInfo(): Promise<ServerInfo> {
 export async function wowServerDetail(): Promise<ServerDetail> {
   return await invoke("wow_server_detail");
 }
+export async function wowDockerUsage(): Promise<{ lines: string[] }> {
+  return await invoke("wow_docker_usage");
+}
+export const wowDockerClean = (level: number, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_docker_clean", { level, onEvent: ch });
+};
 export interface ConsoleTail {
   available: boolean;
   lines: string[];

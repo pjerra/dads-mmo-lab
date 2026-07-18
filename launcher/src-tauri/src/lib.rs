@@ -180,6 +180,20 @@ async fn wow_server_detail(state: State<'_, AppState>) -> Result<serde_json::Val
 }
 
 #[tauri::command]
+async fn wow_docker_usage(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "docker-usage".into()]).await
+}
+
+#[tauri::command]
+async fn wow_docker_clean(
+    level: u8,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "docker-clean".into(), "--level".into(), level.to_string()], on_event, state).await
+}
+
+#[tauri::command]
 async fn wow_console_tail(
     lines: Option<u32>,
     state: State<'_, AppState>,
@@ -900,6 +914,8 @@ pub fn run() {
             wow_account_set_gm,
             wow_server_info,
             wow_server_detail,
+            wow_docker_usage,
+            wow_docker_clean,
             wow_console_tail,
             wow_console_send,
             wow_module_list,
