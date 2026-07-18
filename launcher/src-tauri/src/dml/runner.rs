@@ -49,6 +49,30 @@ impl DmlRunner {
         cmd
     }
 
+    fn command_raw(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&self.prefix_args).args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        cmd
+    }
+
+    /// Interactive spawn for `games install`: raw text passthrough (no --json),
+    /// stdin piped so the UI can answer installer prompts, stderr already
+    /// merged by the CLI arm (2>&1).
+    pub fn spawn_interactive(&self, args: &[&str]) -> Result<std::process::Child, RunnerError> {
+        self.command_raw(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| RunnerError::Spawn(e.to_string()))
+    }
+
     pub fn run_json(&self, args: &[&str]) -> Result<Envelope, RunnerError> {
         let out = self
             .command(args)
@@ -260,6 +284,22 @@ mod tests {
             .unwrap();
         assert!(env.ok);
         assert_eq!(env.data["echo"], "hello world");
+    }
+
+    #[test]
+    fn spawn_interactive_round_trips_stdin() {
+        use std::io::{Read, Write};
+        let r = fixture_runner();
+        let mut child = r.spawn_interactive(&[&fixture("interactive_echo.cmd")]).unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"hello\r\n").unwrap();
+        drop(stdin);
+        let mut out = String::new();
+        child.stdout.take().unwrap().read_to_string(&mut out).unwrap();
+        let status = child.wait().unwrap();
+        assert!(out.contains("answer me:"));
+        assert!(out.contains("you typed hello"));
+        assert_eq!(status.code(), Some(0));
     }
 
     #[test]

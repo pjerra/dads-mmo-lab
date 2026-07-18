@@ -397,3 +397,36 @@ export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void):
   ch.onmessage = onEvent;
   return invoke("wow_backup_restore", { file, onEvent: ch });
 };
+
+export interface TitleInfo {
+  id: string;
+  name: string;
+  installed: boolean;
+  running: "running" | "stopped" | null;
+  script_available: boolean;
+}
+export async function gamesCatalog(): Promise<TitleInfo[]> {
+  const d = await invoke<{ titles: TitleInfo[] }>("games_catalog");
+  return d.titles;
+}
+export interface InstallEvent {
+  event: "chunk" | "exit";
+  text?: string;
+  code?: number;
+}
+export const gamesInstall = (id: string, onEvent: (e: InstallEvent) => void): Promise<void> => {
+  const ch = new Channel<InstallEvent>();
+  ch.onmessage = onEvent;
+  return invoke("games_install", { id, onEvent: ch });
+};
+export async function gamesInstallInput(text: string): Promise<void> {
+  return await invoke("games_install_input", { text });
+}
+export async function gamesInstallCancel(): Promise<void> {
+  return await invoke("games_install_cancel");
+}
+export const gamesRemove = (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("games_remove", { id, onEvent: ch });
+};

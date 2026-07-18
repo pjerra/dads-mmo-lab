@@ -1,14 +1,21 @@
 pub mod dml;
 
 use serde::Serialize;
+use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
 use tauri::State;
 
 use crate::dml::envelope::Envelope;
 use crate::dml::runner::{DmlRunner, RunnerError};
 
+pub struct InstallSession {
+    pub stdin: std::process::ChildStdin,
+    pub pid: u32,
+}
+
 pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
+    pub install: Arc<Mutex<Option<InstallSession>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -535,6 +542,116 @@ async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, 
 }
 
 #[tauri::command]
+async fn games_catalog(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["games".into(), "catalog".into()]).await
+}
+
+#[tauri::command]
+async fn games_install(
+    id: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let runner = state.runner.clone();
+    {
+        let guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+    }
+    let state_arc = state.install.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let mut child = match runner.spawn_interactive(&["games", "install", &id]) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = on_event.send(serde_json::json!({"event":"chunk","text": format!("failed to start: {e}\n")}));
+                let _ = on_event.send(serde_json::json!({"event":"exit","code": -1}));
+                return;
+            }
+        };
+        let stdin = child.stdin.take().expect("stdin piped");
+        let pid = child.id();
+        *state_arc.lock().unwrap() = Some(InstallSession { stdin, pid });
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
+                }
+                Err(_) => break,
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        *state_arc.lock().unwrap() = None;
+        let _ = on_event.send(serde_json::json!({"event":"exit","code": code}));
+    })
+    .await
+    .map_err(|e| CmdError { code: "IPC".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn games_install_input(text: String, state: State<'_, AppState>) -> Result<(), CmdError> {
+    use std::io::Write;
+    let mut guard = state.install.lock().unwrap();
+    match guard.as_mut() {
+        Some(sess) => sess
+            .stdin
+            .write_all(format!("{text}\n").as_bytes())
+            .map_err(|e| CmdError { code: "STDIN".into(), message: e.to_string(), hint: String::new() }),
+        None => Err(CmdError {
+            code: "NO_SESSION".into(),
+            message: "No install is running".into(),
+            hint: String::new(),
+        }),
+    }
+}
+
+#[tauri::command]
+async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError> {
+    let pid = {
+        let guard = state.install.lock().unwrap();
+        match guard.as_ref() {
+            Some(s) => s.pid,
+            None => {
+                return Err(CmdError {
+                    code: "NO_SESSION".into(),
+                    message: "No install is running".into(),
+                    hint: String::new(),
+                })
+            }
+        }
+    };
+    let mut cmd = std::process::Command::new("taskkill");
+    cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
+        .map_err(|e| CmdError { code: "KILL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn games_remove(
+    id: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(vec!["games".into(), "remove".into(), id, "--yes".into()], on_event, state).await
+}
+
+#[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
@@ -564,12 +681,20 @@ async fn games_restart(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState { runner: std::sync::Arc::new(DmlRunner::default()) })
+        .manage(AppState {
+            runner: std::sync::Arc::new(DmlRunner::default()),
+            install: Arc::new(Mutex::new(None)),
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             dml_version,
             games_list,
             games_status,
+            games_catalog,
+            games_install,
+            games_install_input,
+            games_install_cancel,
+            games_remove,
             games_start,
             games_stop,
             games_restart,
