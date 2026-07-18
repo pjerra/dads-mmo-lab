@@ -15,8 +15,14 @@ as they ship.
 
 **Server**
 - **Home** — landing page: world up/down card (players, uptime, update-time
-  stats) plus Start/Stop for the WoW server with live terminal output.
+  stats, bots online / max loadable) plus Start/Stop for the WoW server with
+  live terminal output.
 - **Library** — install status per game, Start/Stop with live terminal output.
+
+Every terminal panel keeps its transcript when you switch pages (streams keep
+writing while you're away), and has Clear + Download buttons — Download opens
+a native save dialog. The Console page fills the window; on other pages the
+terminal auto-scrolls into view when a run starts.
 
 **Characters**
 - **Dashboard** — world up/down, uptime, players online, update-time stats;

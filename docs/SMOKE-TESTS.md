@@ -24,6 +24,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Health panel (Round A) | Click the server card → panel shows world/auth/DB rows ("Up … (healthy)"), version, uptime, players, latency, ports (game 8085 / auth 3724 / SOAP 7878 / DB — expect 13306), SOAP "reachable". |
 | ✅ | [restart] Restart button (Round I) | Click Restart → streams stop+start into the terminal; card returns to "World is up" after boot. (Passed 2026-07-18 — surfaced+fixed two bugs first: dml-start.sh pipefail/grep -q readiness wait, false port-conflict warns on restart.) |
 | ⬜ | soap_unreachable diagnostic (Round A) | Next time Docker networking breaks (or force by `sudo iptables`-breaking the forward): card shows "World is running, but the launcher can't reach it" + the restart-Docker hint. |
+| ⬜ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Playerbots page header shows the same bots-online chip. |
 
 ## 2. Console (Round B)
 
@@ -32,6 +33,10 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ✅ | Log tail | Open Console with server running → worldserver log lines appear, auto-refresh follows, no ANSI garbage. Scroll up → autoscroll pauses; scroll down → resumes. (Passed 2026-07-18 user-confirmed.) |
 | ✅ | [console-send] Send command | Send `server info` → reply appears in history with real stats. Send `bogus` → the fault text shows inline, not a crash. (Passed 2026-07-18: real stats + inline fault user-confirmed.) |
 | ⬜ | Stopped-server state | Stop the server → Console shows "No server logs — is the server installed?" (or stale tail) without erroring. |
+| ⬜ | Console persistence (Round N) | Start a stream (e.g. a module conf activate or any action with a terminal) on one page, hop to another page and back → the transcript is intact and still streaming. Console page: send a command, leave, return → command history still there. |
+| ⬜ | Clear buttons (Round N) | Terminal Clear (greyed while running) empties + hides the panel; Console Clear empties command history (log tail refills on next poll — expected). |
+| ⬜ | Download log (Round N) | Terminal/Console Download opens a native save dialog; the saved file contains the transcript (sections as `== name ==` blocks); cancel does nothing. |
+| ⬜ | Console fill (Round N) | Console page: the log fills the free window height, the page itself never scrolls; only log/history scroll internally. Other pages: starting a run auto-scrolls the terminal into view; it grows tall (viewport-capped) instead of forcing page scrolling. |
 
 ## 3. Library / titles (Round D)
 
@@ -41,6 +46,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [title-install] **Cancel kills the distro process?** | Start an install, click Cancel (confirm). **FIRST CHECK:** in the distro run `top` / `docker ps` — did the installer bash/docker actually die? If it survives, report it (guest-side kill is the planned fix). UI must recover (buttons re-enable). |
 | ⬜ | [title-install] Retry same title | After a failed/cancelled install, click Install on the SAME title again → the terminal reopens and runs (regression: used to soft-lock the page). |
 | ⬜ | [title-remove] Remove a title | Remove the test title (typed-id confirm) → server dir + symlink + launcher script gone; `~/.dml` backups untouched. |
+| ⬜ | Install output survives nav (Round N) | During (or after) an install, hop to another page and back to Library → the install transcript text is preserved. KNOWN GAP: if the install is still running, the panel (and its reply input) may not re-show until the install finishes — report what you see. |
 
 ## 4. Dashboard / character view (Rounds E, F, G)
 
