@@ -287,6 +287,15 @@ export async function wowTeleport(
 ): Promise<{ teleported: boolean; char: string; to: string }> {
   return await invoke("wow_teleport", { charName, to });
 }
+export async function wowTeleportCoords(
+  charName: string,
+  map: number,
+  x: number,
+  y: number,
+  z: number,
+): Promise<{ teleported: boolean; char: string; map: number; x: number; y: number; z: number }> {
+  return await invoke("wow_teleport_coords", { charName, map, x, y, z });
+}
 export async function wowPaperdoll(charName: string): Promise<PaperdollData> {
   return await invoke("wow_paperdoll", { charName });
 }
@@ -407,6 +416,12 @@ export async function wowGmRevive(player: string): Promise<GmReviveResult> {
 export async function wowGmSummon(player: string, entry: number): Promise<GmSummonResult> {
   return await invoke("wow_gm_summon", { player, entry });
 }
+export async function wowGmAtLogin(
+  player: string,
+  flag: "rename" | "customize" | "changerace" | "changefaction",
+): Promise<{ applied: boolean; player: string; flag: string }> {
+  return await invoke("wow_gm_at_login", { player, flag });
+}
 
 export interface BotcmdResult { sent: boolean; player: string; bot: string; action: string; }
 export interface PresetInfo { name: string; bots: number; }
@@ -430,6 +445,16 @@ export const wowPartyPresetLoad = (player: string, name: string, onEvent: (e: Te
   ch.onmessage = onEvent;
   return invoke("wow_party_preset_load", { player, name, onEvent: ch });
 };
+export async function wowPartyPresetShow(name: string): Promise<{ name: string; classes: string[] }> {
+  return await invoke("wow_party_preset_show", { name });
+}
+export async function wowPartyPresetImport(
+  name: string,
+  classes: string,
+  force?: boolean,
+): Promise<{ imported: boolean; name: string; classes: string[] }> {
+  return await invoke("wow_party_preset_import", { name, classes, force });
+}
 
 export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();

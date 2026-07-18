@@ -553,6 +553,71 @@ async fn wow_gm_summon(player: String, entry: u32, state: State<'_, AppState>) -
 }
 
 #[tauri::command]
+async fn wow_teleport_coords(
+    char_name: String,
+    map: u32,
+    x: f64,
+    y: f64,
+    z: f64,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec![
+            "wow".into(),
+            "teleport-coords".into(),
+            "--char".into(),
+            char_name,
+            "--map".into(),
+            map.to_string(),
+            "--x".into(),
+            x.to_string(),
+            "--y".into(),
+            y.to_string(),
+            "--z".into(),
+            z.to_string(),
+        ],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_gm_at_login(player: String, flag: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "gm".into(), "at-login".into(), "--player".into(), player, "--flag".into(), flag],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_party_preset_show(name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "party".into(), "preset-show".into(), "--name".into(), name]).await
+}
+
+#[tauri::command]
+async fn wow_party_preset_import(
+    name: String,
+    classes: String,
+    force: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec![
+        "wow".into(),
+        "party".into(),
+        "preset-import".into(),
+        "--name".into(),
+        name,
+        "--classes".into(),
+        classes,
+    ];
+    if force.unwrap_or(false) {
+        args.push("--force".into());
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
 async fn wow_party_botcmd(player: String, bot: String, action: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(
         state,
@@ -816,6 +881,7 @@ pub fn run() {
             wow_mail_item,
             wow_teleport_list,
             wow_teleport,
+            wow_teleport_coords,
             wow_paperdoll,
             wow_item_info,
             wow_char_progress,
@@ -835,6 +901,8 @@ pub fn run() {
             wow_party_preset_list,
             wow_party_preset_delete,
             wow_party_preset_load,
+            wow_party_preset_show,
+            wow_party_preset_import,
             wow_backup_create,
             wow_backup_list,
             wow_backup_delete,
@@ -844,7 +912,8 @@ pub fn run() {
             wow_gm_gold,
             wow_gm_heal,
             wow_gm_revive,
-            wow_gm_summon
+            wow_gm_summon,
+            wow_gm_at_login
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
