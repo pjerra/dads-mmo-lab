@@ -11,6 +11,8 @@
     wowClientPathGet,
     wowClientPathSet,
     wowClientPathDetect,
+    wowDockerUsage,
+    wowDockerClean,
     type ModuleList,
     type CppModule,
     type LuaModule,
@@ -68,6 +70,15 @@
   let clientError: string | null = $state(null);
   let clientCandidates: string[] | null = $state(null);
 
+  // Disk cleanup card: usage lines fetched alongside every refresh() (own
+  // inline-error surface, separate from the page-level `error`, same
+  // separation pattern as clientError/repairError), the level select
+  // (default 1), and the two-step confirm flag.
+  let dockerUsage: string[] | null = $state(null);
+  let dockerUsageError: string | null = $state(null);
+  let cleanLevel = $state(1);
+  let confirmingClean = $state(false);
+
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
 
@@ -92,8 +103,10 @@
     error = null; confirmingRebuild = false; confirmingRemove = null;
     confirmingLuaRemove = null; confirmingSqlRemove = null;
     repairOpen = null; confirmingRepair = false;
+    confirmingClean = false;
     try { list = await wowModuleList(); ensureBackupDefaults(); } catch (e) { showErr(e); }
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
+    try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
   }
   onMount(refresh);
 
@@ -163,6 +176,26 @@
     return runStream(
       (onEvent) => wowModuleRebuild(backupChecked, onEvent),
       () => { note = "Rebuild complete."; },
+    );
+  }
+
+  function dockerUsageErr(e: unknown) {
+    const err = e as { message?: string; hint?: string };
+    dockerUsageError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+  }
+
+  function clean() {
+    if (!confirmingClean) {
+      confirmingClean = true;
+      return;
+    }
+    confirmingClean = false;
+    return runStream(
+      (onEvent) => wowDockerClean(cleanLevel, onEvent),
+      (doneData) => {
+        const d = doneData as { level?: number } | undefined;
+        note = `Docker cleanup complete (level ${d?.level ?? cleanLevel}).`;
+      },
     );
   }
 
@@ -675,6 +708,39 @@
     <p class="muted">Needed for scripts that ship client-side files (BMAH UI, Paragon, SOD). Windows paths like C:\Games\WoW work.</p>
   </div>
 
+  <div class="card">
+    <h3>Disk cleanup</h3>
+    {#if dockerUsageError}
+      <p class="inline-error">{dockerUsageError}</p>
+    {:else if dockerUsage}
+      <pre class="usage">{dockerUsage.join("\n")}</pre>
+    {/if}
+    <div class="row">
+      <label class="row">
+        Level
+        <select bind:value={cleanLevel} onchange={() => (confirmingClean = false)} disabled={busy}>
+          <option value={1}>1 — build cache only (safe)</option>
+          <option value={2}>2 — + build volume (CMake artifacts)</option>
+          <option value={3}>3 — + unused images (maximum recovery)</option>
+        </select>
+      </label>
+      {#if !confirmingClean}
+        <button
+          class="primary"
+          onclick={clean}
+          disabled={busy || featureLocked("docker-clean")}
+          title={featureLocked("docker-clean") ? LOCKED_HINT : undefined}
+        >
+          Clean
+        </button>
+      {:else}
+        <span>Stops the worldserver. The next rebuild after cleaning will be a full 30-90 minute recompile. Continue?</span>
+        <button class="primary" onclick={clean} disabled={busy}>Confirm</button>
+        <button onclick={() => (confirmingClean = false)} disabled={busy}>Cancel</button>
+      {/if}
+    </div>
+  </div>
+
   {#if showTerm}
     <Terminal state={term} />
   {/if}
@@ -714,4 +780,5 @@
   .chip.tracked { color: #3fb950; border-color: #3fb950; }
   .chip.untracked { color: #8b949e; }
   .repair-results { display: flex; flex-direction: column; gap: 6px; }
+  .usage { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; margin: 0; font-size: 12px; color: #8b949e; overflow-x: auto; white-space: pre; }
 </style>

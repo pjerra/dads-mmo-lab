@@ -43,6 +43,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "backup-restore": "untested",
   accounts: "untested",
   "bridge-setup": "untested",
+  "docker-clean": "untested",
 };
 
 export const LOCKED_HINT =

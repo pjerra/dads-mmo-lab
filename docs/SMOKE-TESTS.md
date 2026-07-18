@@ -103,6 +103,8 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [modules-sql] SQL mods | Install a tweak (buff-mobs) → mobs visibly buffed; install nerf-mobs → replaces it. Install+remove portals-capitals; install a hearthstone-cd variant → cooldown actually matches the chosen variant. |
 | ⬜ | [client-path] Client folder | Detect finds the client; Save validates; bad folder → NOT_CLIENT error. |
 | ⬜ | [module-repair] Repair panel (J) | Break tracking on purpose (Clear a row for an installed module) → restart → db-import re-applies (or fails per SQL type) → use Mark to fix → server starts clean. |
+| ⬜ | [docker-clean] Usage (K) | Open Modules → Disk cleanup card's usage `<pre>` shows real Docker disk sizes (not empty/error). |
+| ⬜ | [docker-clean] Level-1 clean (K) | Clean (level 1, two-step confirm) → streams cleanup, reports reclaimed space. Rebuild afterwards succeeds (30-90 min full recompile expected). |
 
 ## 11. Backups (round 5 + C)
 
