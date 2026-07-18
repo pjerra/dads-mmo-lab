@@ -32,8 +32,19 @@
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
   import { chunkIds, formatEpochDate } from "$lib/progress";
+  import { learnedRank, treePoints, treeRows, type Tree, type Talent } from "$lib/talent-trees";
+  import talentTreesJson from "$lib/talent-trees-wotlk.json";
   import CharPicker from "$lib/CharPicker.svelte";
   import CharacterModel from "$lib/CharacterModel.svelte";
+
+  // Keyed by class id (as a string, matching the JSON's object keys) -- cast
+  // once here rather than at every lookup site. The raw JSON's inferred
+  // literal-key type doesn't accept a computed string index, and this data
+  // is static/trusted (checked into the repo, not user input).
+  const talentTreesByClass = talentTreesJson as unknown as Record<string, Tree[]>;
+  function talentTreesForClass(classId: number): Tree[] {
+    return talentTreesByClass[String(classId)] ?? [];
+  }
 
   let detail: ServerDetail | null = $state(null);
   let infoError: string | null = $state(null);
@@ -294,11 +305,13 @@
   </div>
 {/snippet}
 
-{#snippet talentTile(spellId: number)}
+{#snippet talentTile(talent: Talent, rank: number)}
+  {@const spellId = talent.ranks[rank - 1]}
   {@const info = entityInfo("spell", spellId)}
   <div
-    class="tile"
+    class="tile tree-tile"
     class:filled={!!info?.icon_b64}
+    style="grid-row: {talent.row + 1}; grid-column: {talent.col + 1};"
     role="button"
     tabindex="0"
     aria-label={info?.wowhead?.name ?? `Spell #${spellId}`}
@@ -311,6 +324,33 @@
     {#if info?.icon_b64}
       <img class="tile-icon" src="data:image/jpeg;base64,{info.icon_b64}" alt={info.wowhead?.name ?? String(spellId)} />
     {/if}
+    <span class="rank-badge" class:maxed={rank === talent.ranks.length}>{rank}/{talent.ranks.length}</span>
+  </div>
+{/snippet}
+
+{#snippet talentCell(talent: Talent, rank: number)}
+  {#if rank > 0}
+    {@render talentTile(talent, rank)}
+  {:else}
+    <div
+      class="tile tree-tile empty"
+      style="grid-row: {talent.row + 1}; grid-column: {talent.col + 1};"
+      aria-hidden="true"
+    ></div>
+  {/if}
+{/snippet}
+
+{#snippet treePanel(tree: Tree, learnedSet: Set<number>)}
+  <div class="tree-panel">
+    <div class="tree-head">{tree.name} ({treePoints(tree, learnedSet)})</div>
+    <div
+      class="tree-grid"
+      style="grid-template-rows: repeat({Math.max(treeRows(tree), 1)}, 40px);"
+    >
+      {#each tree.talents as talent (talent.id)}
+        {@render talentCell(talent, learnedRank(talent, learnedSet))}
+      {/each}
+    </div>
   </div>
 {/snippet}
 
@@ -418,7 +458,7 @@
     </div>
 
     <div class="progress-row">
-      <div class="card">
+      <div class="card talents-card">
         <div class="card-head">
           <h3>Talents</h3>
           {#if progress && progress.talents.groups_count > 1}
@@ -430,10 +470,15 @@
         {:else if loadingProgress && !progress}
           <p class="muted">Loading…</p>
         {:else if progress}
-          <p class="muted">{progress.talents.spells.length} talents (active spec)</p>
-          <div class="tile-grid">
-            {#each progress.talents.spells as spellId (spellId)}
-              {@render talentTile(spellId)}
+          {@const learnedSet = new Set(progress.talents.spells)}
+          {@const trees = talentTreesForClass(doll.class)}
+          {@const pointsPerTree = trees.map((t) => treePoints(t, learnedSet))}
+          <p class="muted">
+            {pointsPerTree.reduce((a, b) => a + b, 0)} points — {pointsPerTree.join("/")}
+          </p>
+          <div class="tree-row">
+            {#each trees as tree (tree.id)}
+              {@render treePanel(tree, learnedSet)}
             {/each}
           </div>
         {/if}
@@ -576,6 +621,9 @@
      row; wraps to stacked on narrow windows like .doll-row. */
   .progress-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
   .progress-row .card { flex: 1 1 320px; min-width: 280px; }
+  /* Three 4-col/40px tree panels need more room than the achievements
+     card's single icon+text list -- give it a bigger share of the row. */
+  .progress-row .talents-card { flex: 2 1 560px; min-width: 560px; }
   .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .card-head h3 { margin: 0; font-size: 14px; color: #f0f6fc; }
   .badge {
@@ -587,9 +635,9 @@
   }
 
   /* Talent tiles: same visual language as paperdoll slots (dashed border
-     placeholder / solid once an icon lands) but smaller, and wrapping
-     instead of a fixed grid since spell counts vary per class/spec. */
-  .tile-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+     placeholder / solid once an icon lands). Base size is the achievement-
+     row icon size; the in-game-style talent tree grid below sizes its
+     tiles up to 40px via .tree-tile. */
   .tile {
     box-sizing: border-box;
     width: 28px;
@@ -600,7 +648,31 @@
     cursor: pointer;
   }
   .tile.filled { border-style: solid; }
+  .tile.empty { cursor: default; }
   .tile-icon { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+
+  /* In-game-style talent trees: three tree panels side by side (wrap on
+     narrow), each a 4-column CSS grid positioned by the data's row/col
+     (not element order), matching the paperdoll slot's visual language at
+     a slightly larger (40px) size to read like the in-game panel. */
+  .tree-row { display: flex; gap: 20px; flex-wrap: wrap; margin-top: 8px; }
+  .tree-head { font-size: 12px; font-weight: 600; color: #f0f6fc; margin-bottom: 6px; }
+  .tree-grid { display: grid; grid-template-columns: repeat(4, 40px); gap: 4px; }
+  .tree-tile { width: 40px; height: 40px; position: relative; }
+  .rank-badge {
+    position: absolute;
+    bottom: -3px;
+    right: -3px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    color: #3fb950;
+    background: #0d1117;
+    border: 1px solid #3fb950;
+    border-radius: 3px;
+    padding: 1px 3px;
+  }
+  .rank-badge.maxed { color: #d4af37; border-color: #d4af37; }
 
   .arow-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
   .arow { display: flex; align-items: center; gap: 8px; cursor: pointer; }
