@@ -13,6 +13,8 @@
     wowClientPathDetect,
     wowDockerUsage,
     wowDockerClean,
+    wowUpdateCheck,
+    wowServerUpdate,
     type ModuleList,
     type CppModule,
     type LuaModule,
@@ -22,6 +24,7 @@
     type ModuleTracking,
     type ModuleRepair,
     type RepairResult,
+    type UpdateCheck,
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -70,6 +73,17 @@
   let clientError: string | null = $state(null);
   let clientCandidates: string[] | null = $state(null);
 
+  // Server update card: the last `Check for updates` result (fetched only on
+  // explicit button click -- it does a `git fetch` per repo, unlike the
+  // other cards' data, so it does NOT ride along with every refresh()), its
+  // own inline-error surface (same separation pattern as
+  // clientError/repairError/dockerUsageError), the backup checkbox (default
+  // ON), and the two-step confirm flag.
+  let updateCheck: UpdateCheck | null = $state(null);
+  let updateCheckError: string | null = $state(null);
+  let updateBackup = $state(true);
+  let confirmingUpdate = $state(false);
+
   // Disk cleanup card: usage lines fetched alongside every refresh() (own
   // inline-error surface, separate from the page-level `error`, same
   // separation pattern as clientError/repairError), the level select
@@ -103,7 +117,7 @@
     error = null; confirmingRebuild = false; confirmingRemove = null;
     confirmingLuaRemove = null; confirmingSqlRemove = null;
     repairOpen = null; confirmingRepair = false;
-    confirmingClean = false;
+    confirmingClean = false; confirmingUpdate = false;
     try { list = await wowModuleList(); ensureBackupDefaults(); } catch (e) { showErr(e); }
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
     try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
@@ -176,6 +190,39 @@
     return runStream(
       (onEvent) => wowModuleRebuild(backupChecked, onEvent),
       () => { note = "Rebuild complete."; },
+    );
+  }
+
+  function showUpdateCheckErr(e: unknown) {
+    const err = e as { message?: string; hint?: string };
+    updateCheckError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+  }
+
+  async function checkUpdates() {
+    busy = true; updateCheckError = null;
+    try {
+      updateCheck = await wowUpdateCheck();
+    } catch (e) {
+      showUpdateCheckErr(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function serverUpdate() {
+    if (!confirmingUpdate) {
+      confirmingUpdate = true;
+      return;
+    }
+    confirmingUpdate = false;
+    return runStream(
+      (onEvent) => wowServerUpdate(updateBackup, onEvent),
+      (doneData) => {
+        const d = doneData as { changed?: boolean } | undefined;
+        note = d?.changed
+          ? "Update pulled — rebuild required (see the banner above)."
+          : "Already up to date.";
+      },
     );
   }
 
@@ -706,6 +753,55 @@
       {/if}
     {/if}
     <p class="muted">Needed for scripts that ship client-side files (BMAH UI, Paragon, SOD). Windows paths like C:\Games\WoW work.</p>
+  </div>
+
+  <div class="card">
+    <h3>Server update</h3>
+    <div class="row">
+      <button onclick={checkUpdates} disabled={busy}>Check for updates</button>
+    </div>
+    {#if updateCheckError}<p class="inline-error">{updateCheckError}</p>{/if}
+    {#if updateCheck}
+      {#each updateCheck.repos as r (r.label)}
+        <div class="row mrow">
+          <strong class="mname">{r.label}</strong>
+          <span class="muted">{r.branch}</span>
+          <span class="muted">{r.head}</span>
+          <span class="spacer"></span>
+          {#if r.behind === 0}
+            <span class="badge on">up to date</span>
+          {:else if r.behind === null}
+            <span class="badge off">? behind</span>
+          {:else}
+            <span class="badge warn">{r.behind} behind</span>
+          {/if}
+          {#if r.dirty > 0}
+            <span class="badge warn">{r.dirty} local edits</span>
+          {/if}
+        </div>
+      {/each}
+      {#if updateCheck.note}<p class="muted">{updateCheck.note}</p>{/if}
+    {/if}
+    <div class="row">
+      <label class="row">
+        <input type="checkbox" bind:checked={updateBackup} disabled={busy} />
+        Back up the server first (recommended)
+      </label>
+      {#if !confirmingUpdate}
+        <button
+          class="primary"
+          onclick={serverUpdate}
+          disabled={busy || featureLocked("server-update")}
+          title={featureLocked("server-update") ? LOCKED_HINT : undefined}
+        >
+          Update
+        </button>
+      {:else}
+        <span>Pulls the latest AzerothCore + mod-playerbots. Local edits are preserved (conflicts saved as patch files). New revisions can run DB migrations at next start. Continue?</span>
+        <button class="primary" onclick={serverUpdate} disabled={busy}>Confirm</button>
+        <button onclick={() => (confirmingUpdate = false)} disabled={busy}>Cancel</button>
+      {/if}
+    </div>
   </div>
 
   <div class="card">

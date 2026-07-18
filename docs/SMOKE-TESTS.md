@@ -105,6 +105,8 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [module-repair] Repair panel (J) | Break tracking on purpose (Clear a row for an installed module) → restart → db-import re-applies (or fails per SQL type) → use Mark to fix → server starts clean. |
 | ⬜ | [docker-clean] Usage (K) | Open Modules → Disk cleanup card's usage `<pre>` shows real Docker disk sizes (not empty/error). |
 | ⬜ | [docker-clean] Level-1 clean (K) | Clean (level 1, two-step confirm) → streams cleanup, reports reclaimed space. Rebuild afterwards succeeds (30-90 min full recompile expected). |
+| ⬜ | [server-update] Check for updates (L) | Server update card → Check for updates → repo rows show real state for AzerothCore + mod-playerbots (branch `Playerbot`, short sha, correct behind count). |
+| ⬜ | [server-update] Update (L) | On a clean tree: Update (backup checkbox ON, two-step confirm) → either pulls (rebuild banner gains `core-update`, note "Update pulled — rebuild required") or reports "Already up to date." if nothing to pull. If pulled, a subsequent rebuild compiles successfully. |
 
 ## 11. Backups (round 5 + C)
 
