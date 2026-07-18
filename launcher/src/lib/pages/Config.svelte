@@ -198,6 +198,20 @@
   {/if}
 
   {#if tab === "settings"}
+    <div class="card testing-card">
+      <label class="row">
+        <input
+          type="checkbox"
+          checked={testingModeOn()}
+          onchange={(e) => setTestingMode(e.currentTarget.checked)}
+        />
+        Enable untested features (for smoke testing)
+      </label>
+      <p class="muted">
+        Untested features stay disabled until their smoke test passes. The checklist lives in
+        docs/SMOKE-TESTS.md.
+      </p>
+    </div>
     {#each groups as g (g)}
       <h3>{g}</h3>
       {#each settings.filter((s) => s.group === g) as s (s.key)}
@@ -272,20 +286,6 @@
       </button>
     </div>
 
-    <div class="card testing-card">
-      <label class="row">
-        <input
-          type="checkbox"
-          checked={testingModeOn()}
-          onchange={(e) => setTestingMode(e.currentTarget.checked)}
-        />
-        Enable untested features (for smoke testing)
-      </label>
-      <p class="muted">
-        Untested features stay disabled until their smoke test passes. The checklist lives in
-        docs/SMOKE-TESTS.md.
-      </p>
-    </div>
   {:else}
     <div class="row">
       <select bind:value={file} onchange={onFileSelect} disabled={saving || restartState.restarting || loadingFile}>
