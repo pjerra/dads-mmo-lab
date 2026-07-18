@@ -59,7 +59,10 @@ required external tool, currently just `yq`, is not installed),
 rejected the console command — a SOAP fault body came back), `SOAP_AUTH`
 (SOAP HTTP Basic auth failed — HTTP 401), `SOAP_UNREACHABLE` (curl could
 not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
-(the MySQL query against `ac-database` failed). `NOT_FOUND` and
+(the MySQL query against `ac-database` failed), `CHAR_ONLINE`
+(`teleport-coords` refused to write an online character's position —
+"Character must be logged out."), `EXISTS` (`preset-import` refused to
+overwrite an existing preset without `--force`). `NOT_FOUND` and
 `UNKNOWN_COMMAND` are reused from the base list.
 
 **Security posture:**
@@ -75,9 +78,13 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
   lock lives inside the shared `soap_exec` helper, so every verb that talks
   SOAP inherits it. The worldserver console runs on a single thread, so the
   CLI never issues two commands concurrently.
-- Mutations always go through a SOAP GM console command, never a direct
-  database write. The MySQL access used by `items search`, `teleport-list`,
-  `characters`, and `paperdoll` is **read-only**.
+- Mutations almost always go through a SOAP GM console command, never a
+  direct database write. The MySQL access used by `items search`,
+  `teleport-list`, `characters`, and `paperdoll` is **read-only**. Three
+  direct MySQL writes are sanctioned project-wide: the pre-existing `lan`
+  toggle's `realmlist` UPDATE, `backup restore`, and (new)
+  `teleport-coords`' `characters.position_x/y/z/map/orientation` UPDATE
+  (OFFLINE characters only — see below).
 - Any value that ends up spliced into a SOAP console-command string
   (character names, item specs, teleport locations, mail subject/body) is
   allowlist-validated or sanitized first — an unvalidated value would be
@@ -171,9 +178,24 @@ silently ignored (treated as if omitted), rather than rejected.
   **`--to` is not pre-validated against `game_tele`** — there is no
   existence check before the SOAP call, so an unknown/misspelled location
   surfaces as `SOAP_FAULT` from the worldserver, not a friendlier
-  "location not found." **`--coords` is deferred**: it always returns
-  `BAD_ARG` ("Coordinate teleport is not available yet") — coordinate-based
-  teleport needs an offline DB path that isn't built yet.
+  "location not found." **`--coords` on this verb is rejected as `BAD_ARG`**
+  with a hint pointing at `teleport-coords` below.
+
+- `dml wow teleport-coords --char <char> --map <id> --x <n> --y <n> --z <n> --json`
+  → `{"teleported":true,"char":"<char>","map":N,"x":N,"y":N,"z":N}`
+  Coordinate teleport for an **OFFLINE** character: writes
+  `characters.position_x/y/z/map` (`orientation` reset to `0`) directly via
+  MySQL (`_chars_write_stmt`, `30-db.sh`) — this is one of the three
+  sanctioned direct writes (see the security posture note above), used
+  instead of SOAP because AC's `teleport` console command only works on an
+  online player. `--map` is 1-3 digits; `--x`/`--y`/`--z` are plain numbers
+  with at most 5 integer digits and a magnitude cap of 20000 (`BAD_ARG`
+  otherwise, checked before any SQL is built). The character is looked up
+  first (`NOT_FOUND` if unknown); an **online** character is rejected as
+  `CHAR_ONLINE` ("Character must be logged out.") — a live worldserver holds
+  its own in-memory position and would clobber this write on the
+  character's next auto-save/logout. Errors: `BAD_ARG`, `NOT_FOUND`,
+  `CHAR_ONLINE`, `DB_UNREACHABLE`.
 
 - `dml wow characters --account <name> --json` →
   `{"characters":[{"guid","name","level","class","race","gender","gold"}]}`
@@ -317,6 +339,8 @@ MySQL. Ambient random bots are excluded from `party online` and flagged in
     dml wow party preset-list   --json
     dml wow party preset-delete --name <preset> --json
     dml wow party preset-load   --player <name> --name <preset> --json
+    dml wow party preset-show   --name <preset> --json
+    dml wow party preset-import --name <preset> --classes <c1,c2,...> [--force] --json
 
 `botcmd` whispers a fixed command to the bot as if the player typed it
 (`gear` → autogear, `talents` → talents autopick, `maintain` →
@@ -328,15 +352,26 @@ kicks every current bot, then per saved class adds a bot, waits for the
 join, and whispers `talents autopick` + `autogear` to the newcomer
 (maintenance is deliberately not auto-run — it can walk bots to
 trainers mid-load); `done` reports `{requested, joined}`.
-Errors: BAD_ARG (names/action/preset name), NOT_FOUND (offline player/bot, unknown preset, party has no bots to save), DB_UNREACHABLE (party reads). botcmd can additionally raise SOAP_AUTH / SOAP_FAULT (bridge-setup hint) / SOAP_UNREACHABLE; preset-load never hard-fails on SOAP — kick/add/whisper failures become warn lines and the done payload just shows fewer joined (bridge not deployed => joined:0).
+`preset-show --name <preset> --json` → `{"name","classes":[...]}` reads a
+preset file back (e.g. for a GUI export box) — `NOT_FOUND` if it doesn't
+exist. `preset-import --name <preset> --classes <c1,c2,...> [--force] --json`
+→ `{"imported":true,"name","classes":[...]}` writes a preset from a
+comma-separated class list (the GUI's paste-in-a-list import) — every
+token is validated against the SAME class allowlist as `party add
+--class`/`preset-load` (`_valid_bot_class`, `50-party.sh`) **before
+anything is written**, so one bad token leaves the file untouched.
+An existing preset name without `--force` is rejected as `EXISTS` (file
+untouched); with `--force` it's overwritten.
+Errors: BAD_ARG (names/action/preset name/class token), NOT_FOUND (offline player/bot, unknown preset, party has no bots to save), EXISTS (preset-import without --force), DB_UNREACHABLE (party reads). botcmd can additionally raise SOAP_AUTH / SOAP_FAULT (bridge-setup hint) / SOAP_UNREACHABLE; preset-load never hard-fails on SOAP — kick/add/whisper failures become warn lines and the done payload just shows fewer joined (bridge not deployed => joined:0).
 
 ## gm subcommands (GM character tools)
 
-    dml wow gm level  --player <name> --level <1-255> --json
-    dml wow gm gold   --player <name> --gold <0-214748> --json
-    dml wow gm heal   --player <name> --json
-    dml wow gm revive --player <name> --json
-    dml wow gm summon --player <name> --entry <1-999999> --json
+    dml wow gm level    --player <name> --level <1-255> --json
+    dml wow gm gold     --player <name> --gold <0-214748> --json
+    dml wow gm heal     --player <name> --json
+    dml wow gm revive   --player <name> --json
+    dml wow gm summon   --player <name> --entry <1-999999> --json
+    dml wow gm at-login --player <name> --flag rename|customize|changerace|changefaction --json
 
 `level` uses the stock `.character level` command and works for OFFLINE
 characters (absolute value — it can lower a level). `gold` (sets the total,
@@ -348,7 +383,13 @@ restart first (`SOAP_FAULT` with a bridge-setup hint until then).
 self-despawn) after checking the entry exists in `creature_template`
 (read-only) — unknown entry → `NOT_FOUND`; the payload carries the
 creature's name.
-Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline character, or unknown creature entry for summon), `DB_UNREACHABLE` (summon's existence check), `SOAP_AUTH`, `SOAP_FAULT`, `SOAP_UNREACHABLE`.
+`at-login` uses the stock `character <flag>` console command family
+(`rename`/`customize`/`changerace`/`changefaction`, a closed allowlist —
+`BAD_ARG` otherwise) to flag a character for that action at its **next
+login**; works for OFFLINE characters too (same family as `.character
+level` — no `.` prefix on this command family, though). Returns
+`{"applied":true,"player","flag"}`.
+Errors: `BAD_ARG` (name/range/flag), `NOT_FOUND` (offline character, or unknown creature entry for summon), `DB_UNREACHABLE` (summon's existence check), `SOAP_AUTH`, `SOAP_FAULT`, `SOAP_UNREACHABLE`.
 
 ## backup subcommands (whole-server snapshots)
 
@@ -361,8 +402,10 @@ Errors: `BAD_ARG` (name/range), `NOT_FOUND` (offline character, or unknown creat
 (`--single-transaction`, safe while the server runs) to
 `~/.dml/backups/wow-<UTC>.sql.gz`, keeping the newest
 `DML_BACKUP_KEEP` (default 10) and reporting every pruned file.
-`restore` is the project's one sanctioned write path into CHARACTER data
-(the LAN toggle's realmlist update is the only other MySQL write): it
+`restore` is the project's one sanctioned write path for whole CHARACTER-DB
+snapshots (the LAN toggle's realmlist update and `teleport-coords`'
+position update are the other two sanctioned direct MySQL writes — see the
+security posture note under `wow subcommands` above): it
 stops ac-worldserver+ac-authserver, takes an automatic `-prerestore`
 safety backup, imports the snapshot, and restarts the server. If the
 import fails the server is deliberately LEFT STOPPED and the error names

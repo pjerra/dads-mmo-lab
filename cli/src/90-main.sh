@@ -84,6 +84,15 @@ _wow_server_dir() {
 _valid_charname() { [[ "$1" =~ ^[A-Za-z0-9_]{1,12}$ ]]; }
 _valid_item_spec() { [[ "$1" =~ ^[0-9]+:[0-9]+$ ]]; }
 
+# Coordinate validator for `wow teleport-coords`: up to 5 integer digits
+# (implies |v| < 100000) plus an explicit magnitude cap of 20000, checked via
+# awk since bash arithmetic doesn't do floats. Exit status IS the signal
+# (same pattern as _valid_charname).
+_valid_coord() {
+    [[ "$1" =~ ^-?[0-9]{1,5}(\.[0-9]+)?$ ]] || return 1
+    awk -v v="$1" 'BEGIN{ if (v<0) v=-v; exit (v>20000) }'
+}
+
 # Account username/password validators for `wow account create|set-password|
 # set-gm`. Same rationale as the two above: these values are spliced
 # straight into a SOAP console command string (see soap_exec), so each is
@@ -1405,7 +1414,7 @@ case "$cmd" in
           case "$1" in
             --char) _need_flag_val "$1" $#; char="$2"; shift 2 ;;
             --to) _need_flag_val "$1" $#; to="$2"; shift 2 ;;
-            --coords) json_err BAD_ARG "Coordinate teleport is not available yet" "Use --to <named location>; coords need an offline DB path (planned)."; exit 1 ;;
+            --coords) json_err BAD_ARG "Coordinate teleport is not available here" "Use: dml wow teleport-coords --char … --map … --x … --y … --z …"; exit 1 ;;
             *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
           esac
         done
@@ -1441,6 +1450,45 @@ case "$cmd" in
           3) json_err SOAP_AUTH "SOAP authentication failed" "" ; exit 1 ;;
           *) json_err SOAP_UNREACHABLE "Could not reach the server" "" ; exit 1 ;;
         esac
+        ;;
+      teleport-coords)
+        # THIRD sanctioned direct MySQL write (see 30-db.sh / 60-backup.sh
+        # headers): writes characters.position_x/y/z/map/orientation
+        # directly via _chars_write_stmt, bypassing SOAP entirely. Only safe
+        # OFFLINE -- a live worldserver holds its own in-memory position and
+        # would clobber this write on the character's next auto-save/logout,
+        # so an online character is rejected (CHAR_ONLINE) before any write.
+        char=""; map=""; x=""; y=""; z=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --char) _need_flag_val "$1" $#; char="$2"; shift 2 ;;
+            --map) _need_flag_val "$1" $#; map="$2"; shift 2 ;;
+            --x) _need_flag_val "$1" $#; x="$2"; shift 2 ;;
+            --y) _need_flag_val "$1" $#; y="$2"; shift 2 ;;
+            --z) _need_flag_val "$1" $#; z="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+          esac
+        done
+        # All validators run BEFORE any SQL is built -- see _valid_coord /
+        # _valid_charname above.
+        _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        [[ "$map" =~ ^[0-9]{1,3}$ ]] || { json_err BAD_ARG "Invalid map id: $map" "A map id is 1-3 digits, e.g. --map 0 for Eastern Kingdoms."; exit 1; }
+        _valid_coord "$x" || { json_err BAD_ARG "Invalid coordinate: $x" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
+        _valid_coord "$y" || { json_err BAD_ARG "Invalid coordinate: $y" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
+        _valid_coord "$z" || { json_err BAD_ARG "Invalid coordinate: $z" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
+        row="$(db_chars_query "SELECT guid, online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
+        [[ -n "$row" ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
+        IFS=$'\t' read -r guid online <<< "$row"
+        [[ "$guid" =~ ^[0-9]+$ ]] || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+        if [[ "$online" != "0" ]]; then
+          json_err CHAR_ONLINE "Character must be logged out: $char" "Character must be logged out."
+          exit 1
+        fi
+        sql="UPDATE characters SET position_x=$x, position_y=$y, position_z=$z, map=$map, orientation=0 WHERE guid=$guid;"
+        _chars_write_stmt "$sql" \
+          || { json_err DB_UNREACHABLE "Could not update the character's position" "Is ac-database running?"; exit 1; }
+        json_ok "{\"teleported\":true,\"char\":\"$(json_escape "$char")\",\"map\":$map,\"x\":$x,\"y\":$y,\"z\":$z}"
         ;;
       accounts)
         # Read-only list of real player accounts and their characters.
@@ -1905,10 +1953,7 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            case "$class" in
-              warrior|paladin|hunter|rogue|priest|shaman|mage|warlock|druid) : ;;
-              *) json_err BAD_ARG "Invalid class: $class" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1 ;;
-            esac
+            _valid_bot_class "$class" || { json_err BAD_ARG "Invalid class: $class" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1; }
             case "$gender" in ""|male|female) : ;; *) json_err BAD_ARG "Invalid gender: $gender" "male or female"; exit 1 ;; esac
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first, then try again."; exit 1; }
@@ -2124,10 +2169,7 @@ case "$cmd" in
             requested=0; joined=0
             while IFS= read -r cls || [[ -n "$cls" ]]; do
               [[ -z "$cls" ]] && continue
-              case "$cls" in
-                warrior|paladin|hunter|rogue|priest|shaman|mage|warlock|druid) : ;;
-                *) [[ "$DML_JSON" == 1 ]] && ndjson_line warn "skipping unknown class: $cls"; continue ;;
-              esac
+              _valid_bot_class "$cls" || { [[ "$DML_JSON" == 1 ]] && ndjson_line warn "skipping unknown class: $cls"; continue; }
               requested=$(( requested + 1 ))
               before="$(_party_group_member_guids "$pguid" | tr '\n' ' ')"
               if out="$(soap_exec "dml_addclass $player $cls")"; then :; else
@@ -2156,8 +2198,56 @@ case "$cmd" in
               echo "[dml] preset-load done ($joined/$requested joined)"
             fi
             ;;
+          preset-show)
+            name=""
+            [[ "${1:-}" == "--name" ]] && { _need_flag_val "$1" $#; name="$2"; shift 2; }
+            _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" ""; exit 1; }
+            pdir="$(_preset_dir)"
+            [[ -f "$pdir/$name" ]] || { json_err NOT_FOUND "No preset named $name" ""; exit 1; }
+            jarr=""; first=1
+            while IFS= read -r cls || [[ -n "$cls" ]]; do
+              [[ -z "$cls" ]] && continue
+              [[ $first -eq 0 ]] && jarr+=','
+              jarr+="\"$(json_escape "$cls")\""; first=0
+            done < "$pdir/$name"
+            json_ok "{\"name\":\"$(json_escape "$name")\",\"classes\":[$jarr]}"
+            ;;
+          preset-import)
+            name=""; classes=""; force=0
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --name) _need_flag_val "$1" $#; name="$2"; shift 2 ;;
+                --classes) _need_flag_val "$1" $#; classes="$2"; shift 2 ;;
+                --force) force=1; shift ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" "Letters, digits, - and _ (max 32)."; exit 1; }
+            [[ -n "$classes" ]] || { json_err BAD_ARG "Missing --classes <comma-separated list>" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1; }
+            # Validate EVERY token before writing anything -- a bad class
+            # anywhere in the list must leave the filesystem untouched.
+            IFS=',' read -ra _import_classes <<< "$classes"
+            lines=""
+            for c in "${_import_classes[@]}"; do
+              _valid_bot_class "$c" || { json_err BAD_ARG "Invalid class: $c" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1; }
+              lines+="$c"$'\n'
+            done
+            pdir="$(_preset_dir)"
+            if [[ -f "$pdir/$name" && "$force" != 1 ]]; then
+              json_err EXISTS "Preset already exists: $name" "Pass --force to overwrite."
+              exit 1
+            fi
+            mkdir -p "$pdir"
+            printf '%s' "$lines" > "$pdir/$name"
+            jarr=""; first=1
+            for c in "${_import_classes[@]}"; do
+              [[ $first -eq 0 ]] && jarr+=','
+              jarr+="\"$c\""; first=0
+            done
+            json_ok "{\"imported\":true,\"name\":\"$(json_escape "$name")\",\"classes\":[$jarr]}"
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load --json"
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
             exit 1
             ;;
         esac
@@ -2250,8 +2340,33 @@ case "$cmd" in
             _party_fire "dml_summon_npc $player $entry" "summon"
             json_ok "{\"summoned\":true,\"player\":\"$(json_escape "$player")\",\"entry\":$entry,\"npc\":\"$(json_escape "$npcname")\"}"
             ;;
+          at-login)
+            player=""; flag=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --flag) _need_flag_val "$1" $#; flag="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            case "$flag" in
+              rename|customize|changerace|changefaction) : ;;
+              *) json_err BAD_ARG "Invalid flag: $flag" "One of: rename customize changerace changefaction"; exit 1 ;;
+            esac
+            # Stock AC `character <flag>` commands: set a per-character flag
+            # the client honors at that character's NEXT login. Works for
+            # OFFLINE characters too (same family as `.character level`).
+            if out="$(soap_exec "character $flag $player")"; then rc=0; else rc=$?; fi
+            case "$rc" in
+              0) json_ok "{\"applied\":true,\"player\":\"$(json_escape "$player")\",\"flag\":\"$flag\"}" ;;
+              2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The worldserver rejected the command." ; exit 1 ;;
+              3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+              *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+            esac
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon --json"
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon|at-login --json"
             exit 1
             ;;
         esac

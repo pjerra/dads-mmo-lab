@@ -115,3 +115,15 @@ _preset_dir() { echo "$HOME/.dml/party-presets"; }
 
 # Exit status IS the signal (same pattern as _valid_charname).
 _valid_preset_name() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,32}$ ]]; }
+
+# The class set `party add --class` accepts. Shared by preset-load (skips
+# unknown lines from a hand-edited preset file) and preset-import (BAD_ARG
+# on any bad token). Exit status IS the signal (same pattern as
+# _valid_charname/_valid_preset_name). Deathknight (class id 6) is
+# deliberately excluded -- see _class_name_from_id above.
+_valid_bot_class() {
+    case "$1" in
+      warrior|paladin|hunter|rogue|priest|shaman|mage|warlock|druid) return 0 ;;
+      *) return 1 ;;
+    esac
+}
