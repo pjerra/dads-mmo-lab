@@ -123,7 +123,16 @@ export function acGenderToViewer(g: number): number {
 }
 
 const CONTENT_PATH = "http://zam.localhost/modelviewer/wrath/";
-const VIEWER_SCRIPT_URL = "http://zam.localhost/modelviewer/wrath/viewer/viewer.min.js";
+// Engine from the LIVE tree, data from the WRATH tree (live smoke
+// 2026-07-19): Wowhead migrated model storage from monolithic `mo3/` to
+// native `m2/`+`skin/`+`anim/` files in EVERY content tree -- wrath
+// included (wrath/m2/<id>.m2 serves 200) -- but the wrath tree's own
+// viewer/viewer.min.js is still the legacy engine that requests the
+// removed mo3 files (verified byte-identical across fetches). The live
+// tree's viewer.min.js is the new-format engine; it is contentPath-driven
+// and its only site-global needs (WH.debug, WH.WebP.getImageExtension)
+// are already stubbed above, so it renders wrath data natively.
+const VIEWER_SCRIPT_URL = "http://zam.localhost/modelviewer/live/viewer/viewer.min.js";
 
 // Recon §4 ("Container sizing"): `aspect` is required (the constructor
 // throws "Bad aspect ratio given" if falsy) and combines with the
@@ -383,22 +392,19 @@ async function fetchProbe(url: string): Promise<boolean | null> {
   }
 }
 
-// Pre-flight: is the character's GEOMETRY actually downloadable? Live smoke
-// 2026-07-19 found wow.zamimg.com no longer hosts ANY `mo3/` (or `bone/`)
-// files -- for characters and items alike, in every content tree -- while
-// meta/textures still resolve. (WotLK Classic ended; the geometry store was
-// evidently pruned.) The engine constructs fine and then renders an empty
-// grey canvas, so without this check the failure is silent. Probing the
-// real file through the proxy keeps this self-healing: if Wowhead ever
-// restores the files, the viewer starts working again with no code change
-// (and the probe's GET pre-warms the cache).
+// Pre-flight: is the character's GEOMETRY actually downloadable? Wowhead's
+// format migration (see VIEWER_SCRIPT_URL note) means geometry now lives at
+// `m2/{Model}.m2`; a mid-migration or future upstream change would leave
+// the engine constructing fine and then rendering an empty grey canvas, so
+// probe the real file first and fail with an explanation instead. The
+// probe's GET also pre-warms the proxy cache with the geometry itself.
 export async function geometryAvailable(modelId: number): Promise<boolean> {
   try {
     const meta = await fetch(`${CONTENT_PATH}meta/character/${modelId}.json`);
     if (!meta.ok) return false;
     const j = (await meta.json()) as { Model?: number };
     if (!j.Model) return false;
-    const geo = await fetch(`${CONTENT_PATH}mo3/${j.Model}.mo3`);
+    const geo = await fetch(`${CONTENT_PATH}m2/${j.Model}.m2`);
     return geo.ok;
   } catch {
     return false;
@@ -424,7 +430,7 @@ export async function createCharacterViewer(
   const modelId = buildCharacterModelId(doll.race, acGenderToViewer(doll.gender));
   if (!(await geometryAvailable(modelId))) {
     throw new Error(
-      "Wowhead no longer hosts the WotLK 3D model files — showing gear without a model. (Auto-recovers if they return.)",
+      "Character model files aren't downloadable from Wowhead right now — showing gear without a model.",
     );
   }
   let charCustomization: { options: { optionId: number; choiceId: number }[] } | undefined;
