@@ -3413,6 +3413,68 @@ case "$cmd" in
         ndjson_section_end server-update ok
         ndjson_done "{\"changed\":$changed,\"ac\":\"$(json_escape "$ac_summary")\",\"playerbots\":\"$(json_escape "$pb_summary")\"}"
         ;;
+      commands)
+        # Per-installed-mod in-game command reference (Round M). Walks the
+        # same three registries + custom-cpp-clone scan as `module list`
+        # (dedup via _cmd_seen mirrors _mod_seen there), keeping only mods
+        # that are BOTH installed AND have a block in _cmd_block_for
+        # (47-commands.sh -- verbatim copy of the manager's case table). No
+        # flags are accepted.
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow commands --json"; exit 1 ;;
+          esac
+        done
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+        fi
+        cmods='['; cfirst=1
+        declare -A _cmd_seen=()
+        while IFS='|' read -r mk mname murl msql; do
+          [[ -z "$mk" ]] && continue
+          _cmd_seen["$mk"]=1
+          _cpp_installed "$sdir" "$mk" || continue
+          ctext="$(_cmd_block_for "$mk")"
+          [[ -z "$ctext" ]] && continue
+          [[ $cfirst -eq 0 ]] && cmods+=','
+          cmods+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"text\":\"$(json_escape "$ctext")\"}"
+          cfirst=0
+        done < <(_module_registry_cpp)
+        if [[ -d "$sdir/modules" ]]; then
+          for d in "$sdir/modules"/*/; do
+            [[ -d "$d/.git" ]] || continue
+            mk="$(basename "$d")"
+            [[ -n "${_cmd_seen[$mk]:-}" ]] && continue
+            _valid_cpp_key "$mk" || continue
+            ctext="$(_cmd_block_for "$mk")"
+            [[ -z "$ctext" ]] && continue
+            [[ $cfirst -eq 0 ]] && cmods+=','
+            cmods+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"text\":\"$(json_escape "$ctext")\"}"
+            cfirst=0
+          done
+        fi
+        while IFS='|' read -r mk mname murl; do
+          [[ -z "$mk" ]] && continue
+          _lua_cloned "$sdir" "$mk" || continue
+          ctext="$(_cmd_block_for "$mk")"
+          [[ -z "$ctext" ]] && continue
+          [[ $cfirst -eq 0 ]] && cmods+=','
+          cmods+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"text\":\"$(json_escape "$ctext")\"}"
+          cfirst=0
+        done < <(_module_registry_lua)
+        while IFS='|' read -r mk mname murl mtype; do
+          [[ -z "$mk" ]] && continue
+          _sql_installed "$sdir" "$mk" || continue
+          ctext="$(_cmd_block_for "$mk")"
+          [[ -z "$ctext" ]] && continue
+          [[ $cfirst -eq 0 ]] && cmods+=','
+          cmods+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"text\":\"$(json_escape "$ctext")\"}"
+          cfirst=0
+        done < <(_module_registry_sql)
+        cmods+=']'
+        json_ok "{\"mods\":$cmods}"
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1
