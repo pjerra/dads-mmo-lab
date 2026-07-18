@@ -29,7 +29,10 @@ install_module() {  # install_module <key> -- satisfies _cpp_installed
   printf 'CREATE TABLE x;\n' > "$SDIR/modules/mod-transmog/data/sql/db-world/trasmorg.sql"
   printf 'trasmorg.sql\n' > "$FIXTURE/world.tsv"
   printf '' > "$FIXTURE/empty.tsv"
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/world.tsv $FIXTURE/empty.tsv $FIXTURE/empty.tsv"
+  printf '1\n' > "$FIXTURE/count.tsv"
+  # Query order: world LIKE -> world COUNT (exact-name, for the one
+  # discovered file) -> characters LIKE -> auth LIKE.
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/world.tsv $FIXTURE/count.tsv $FIXTURE/empty.tsv $FIXTURE/empty.tsv"
   export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
   run bash "$DML" wow module tracking --key mod-transmog --json
   [ "$status" -eq 0 ]
@@ -53,6 +56,30 @@ install_module() {  # install_module <key> -- satisfies _cpp_installed
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.dbs.world.files[0].name')" = "legacy.sql" ]
   [ "$(echo "$output" | jq -r '.data.dbs.world.files[0].tracked')" = "false" ]
+}
+
+@test "tracking: per-file tracked is an exact-name lookup, independent of the LIKE tracked_rows list" {
+  # Real-world regression: mod-ah-bot ships mod_auctionhousebot.sql, which is
+  # genuinely tracked in the DB but whose name contains neither LIKE term
+  # ("ah-bot" / "ah_bot"), so tracked_rows stays empty while the file's own
+  # `tracked` flag must still come back true (exact-name COUNT, not a LIKE
+  # substring match).
+  install_module mod-ah-bot
+  mkdir -p "$SDIR/modules/mod-ah-bot/data/sql/db-world"
+  printf 'CREATE TABLE ah;\n' > "$SDIR/modules/mod-ah-bot/data/sql/db-world/mod_auctionhousebot.sql"
+  printf '' > "$FIXTURE/empty.tsv"
+  printf '1\n' > "$FIXTURE/count.tsv"
+  # Query order for `world characters auth`: world LIKE (empty) -> world
+  # COUNT for the one discovered file (1, i.e. tracked) -> characters LIKE
+  # (empty, no discovered files so no COUNT call) -> auth LIKE (empty, same).
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/empty.tsv $FIXTURE/count.tsv $FIXTURE/empty.tsv $FIXTURE/empty.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow module tracking --key mod-ah-bot --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.dbs.world.tracked_rows | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.dbs.world.files | length')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.dbs.world.files[0].name')" = "mod_auctionhousebot.sql" ]
+  [ "$(echo "$output" | jq -r '.data.dbs.world.files[0].tracked')" = "true" ]
 }
 
 @test "tracking on a module that isn't installed -> NOT_FOUND" {

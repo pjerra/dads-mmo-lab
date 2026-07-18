@@ -4533,23 +4533,26 @@ case "$cmd" in
             for db_short in world characters auth; do
               rows="$(_module_db_read "$db_short" "SELECT name FROM updates WHERE name LIKE '%${stripped}%' OR name LIKE '%${term1}%';")" \
                 || { json_err DB_UNREACHABLE "Could not reach the $db_short database" "Is ac-database running?"; exit 1; }
-              trackedj='['; tfirst=1; tracked_names=()
+              trackedj='['; tfirst=1
               while IFS= read -r trow || [[ -n "$trow" ]]; do
                 [[ -z "$trow" ]] && continue
-                tracked_names+=("$trow")
                 [[ $tfirst -eq 0 ]] && trackedj+=','
                 trackedj+="\"$(json_escape "$trow")\""
                 tfirst=0
               done <<< "$rows"
               trackedj+=']'
+              # Per-file `tracked` is an EXACT-name lookup, independent of the
+              # LIKE-based tracked_rows diagnosis above -- a file whose name
+              # doesn't contain the key's LIKE terms (e.g. mod-ah-bot's
+              # mod_auctionhousebot.sql) can still be genuinely tracked.
               filesj='['; ffirst=1
               discovered="$(_module_discover_sql_files "$sdir" "$mkey" "$db_short")"
               for f in $discovered; do
                 [[ -z "$f" ]] && continue
+                _valid_module_sql_filename "$f" || continue
+                fcount="$(_module_db_read "$db_short" "SELECT COUNT(*) FROM updates WHERE name = '$f';")" || fcount=0
                 istracked=false
-                for tn in "${tracked_names[@]:-}"; do
-                  [[ "$tn" == "$f" ]] && { istracked=true; break; }
-                done
+                [[ "$fcount" =~ ^[0-9]+$ && "$fcount" -gt 0 ]] && istracked=true
                 [[ $ffirst -eq 0 ]] && filesj+=','
                 filesj+="{\"name\":\"$(json_escape "$f")\",\"tracked\":$istracked}"
                 ffirst=0
