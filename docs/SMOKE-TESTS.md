@@ -55,7 +55,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Paperdoll + tooltips (E) | Show gear for a real char → slot grid with icons; hover a standard item → wowhead-style tooltip; hover a CUSTOM item → local tooltip (name/ilvl/stats). Second view of the same char is instant. |
 | ✅ | 3D model (F) | Model renders in the middle of the gear window, correct SEX and race, wearing renderable gear. Rotate/zoom works. Second view fast. (Passed 2026-07-19 after rebuilding on Wowhead's NEW engine — live-tree viewer + native wrath m2 data; the old mo3 format was retired upstream. Also fixed en route: WH env stub, error surfacing, in-window placement.) |
 | ⬜ | **3D model with a custom-displayid item (F1)** | View a char wearing a custom/GM item → model must still render (unrenderable items skipped via the probe fallback; naked model as last resort). |
-| ⬜ | Talents card (G) | Talent icons fill in (chunk-at-a-time on first view — batches of 25, NOT broken); hover a maxed multi-rank talent → correct rank tooltip; Dual spec badge on a dual-spec char; only active-spec talents. |
+| ⬜ | Talents card (G + Round O trees) | Three in-game-style tree panels side by side (name + points per tree, e.g. "Fury (52)"; summary "NN points — X/Y/Z"): learned talents lit with icons + rank badges (green partial / gold maxed), unlearned as dark empty slots at the right grid positions. Icons fill chunk-at-a-time on first view (NOT broken); hover a maxed multi-rank talent → correct rank tooltip; Dual spec badge on a dual-spec char; only active-spec talents. Check the rank badges don't overlap neighbors. |
 | ⬜ | Achievements card (G) | Total + 10 recent with icons/names/dates; hover → achievement tooltip. |
 
 ## 5. Teleport (rounds 1-5 + I)
