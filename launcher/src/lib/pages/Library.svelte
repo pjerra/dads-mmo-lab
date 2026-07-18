@@ -25,6 +25,12 @@
   // still active (drives the cross-action busy gate below).
   let installId: string | null = $state(null);
   let installRunning = $state(false);
+  // Bumped on every startInstall() so the {#key} block below always remounts
+  // InstallTerminal, even when re-installing the same title id after a
+  // failed/cancelled run (installId alone wouldn't change -> no remount ->
+  // onMount(run) never re-fires -> no exit event -> installRunning stuck
+  // true -> every control disabled forever until nav-away).
+  let installNonce = $state(0);
 
   // Install session OR a remove stream blocks the other mutating actions
   // (start/stop, arm/confirm remove, open a new install).
@@ -127,6 +133,7 @@
 
   function startInstall(id: string) {
     installId = id;
+    installNonce += 1;
     installRunning = true;
     actionError = null;
     note = null;
@@ -218,7 +225,7 @@
   </div>
 
   {#if installId}
-    {#key installId}
+    {#key installNonce}
       <InstallTerminal id={installId} onExit={onInstallExit} />
     {/key}
   {/if}

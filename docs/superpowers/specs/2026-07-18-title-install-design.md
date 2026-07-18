@@ -112,9 +112,10 @@ new `games_install` command:
   echoes it, exits 0) — chunk events observed, stdin write round-trips, exit event carries
   the code; BUSY/NO_SESSION state-machine tests where cheap.
 - **vitest/check**: existing pins stay green (no nav changes — Library already exists).
-- **Live gate (batched)**: install MapleStory (smallest, no giant client download risk?)
-  or re-run the wotlk installer against the existing install (it detects + reuses),
-  answer prompts in the launcher terminal, cancel mid-install once, remove a test title.
+- **Live gate (batched)**: install MapleStory (smallest footprint), answer prompts in the
+  launcher terminal, cancel mid-install once — first checking whether cancel actually stops
+  the distro-side process (watch `docker ps`/`top` in the distro) — retry the same title
+  after the failure (regression check for the remount fix), and remove a test title.
 
 ### Out of scope
 

@@ -2301,6 +2301,10 @@ case "$cmd" in
         fi
         targets=""
         [[ -e "$GAMES_DIR/$gid" || -L "$GAMES_DIR/$gid" ]] && targets+="$GAMES_DIR/$gid "
+        if [[ -L "$GAMES_DIR/$gid" ]]; then
+          tres="$(readlink -f "$GAMES_DIR/$gid" 2>/dev/null || true)"
+          [[ -n "$tres" ]] && targets+="-> $tres "
+        fi
         [[ -d "$HOME/$gid" && ! -L "$HOME/$gid" ]] && targets+="$HOME/$gid "
         [[ -n "$tlauncher" && -e "$HOME/$tlauncher" ]] && targets+="$HOME/$tlauncher"
         if [[ "$confirm" != 1 ]]; then
