@@ -101,3 +101,40 @@ _iteminfo_one() {
     _iteminfo_local "$entry"
     return 0
 }
+
+# --- kind-generalized wowhead entities (Round G: spell|achievement) --------
+# Same fetch/cache/icon machinery as items, but NO local fallback -- these
+# kinds have no names in the server DB. Cache key carries the kind so ids
+# can't collide across kinds (items keep their legacy un-prefixed files).
+_entity_one() {
+    local kind="$1" id="$2" cache tj raw code icon="" iconfile iconjson=null b64json=null
+    cache="$(_iteminfo_cache)"
+    tj="$cache/tooltips/$kind-$id.json"
+    if [[ ! -f "$tj" ]]; then
+        code="$(_iteminfo_fetch "$(_wowhead_base)/wotlk/tooltip/$kind/$id?dataEnv=8&locale=0" "$tj.tmp")"
+        if [[ "$code" == 200 ]]; then mv "$tj.tmp" "$tj"; else rm -f "$tj.tmp"; fi
+    fi
+    if [[ -f "$tj" ]]; then
+        raw="$(cat "$tj")"
+        if [[ "$raw" == \{*\} && "$raw" == *'"name":"'* && "$raw" == *'"tooltip":"'* ]]; then
+            if [[ "$raw" =~ \"icon\":\"([A-Za-z0-9_.-]+)\" ]]; then icon="${BASH_REMATCH[1]}"; fi
+            if [[ -n "$icon" ]]; then
+                iconfile="$cache/icons/$icon.jpg"
+                if [[ ! -f "$iconfile" ]]; then
+                    code="$(_iteminfo_fetch "$(_zamimg_base)/images/wow/icons/large/$icon.jpg" "$iconfile.tmp")"
+                    if [[ "$code" == 200 ]]; then mv "$iconfile.tmp" "$iconfile"; else rm -f "$iconfile.tmp"; fi
+                fi
+                if [[ -f "$iconfile" ]]; then
+                    b64json="\"$(base64 -w0 < "$iconfile")\""
+                fi
+                iconjson="\"$icon\""
+            fi
+            printf '{"id":%s,"source":"wowhead","icon":%s,"icon_b64":%s,"wowhead":%s}' \
+                "$id" "$iconjson" "$b64json" "$raw"
+            return 0
+        fi
+        rm -f "$tj"   # poisoned cache entry
+    fi
+    printf '{"id":%s,"source":"unavailable"}' "$id"
+    return 0
+}

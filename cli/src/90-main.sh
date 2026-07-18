@@ -1509,6 +1509,41 @@ case "$cmd" in
         cfacial=$(( cpb2 & 0xFF ))
         json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"race\":$crace_s,\"gender\":$cgender_s,\"skin\":$cskin,\"face\":$cface,\"hair_style\":$chairs,\"hair_color\":$chairc,\"facial_style\":$cfacial,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
         ;;
+      char-progress)
+        char=""
+        [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
+        _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
+        [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
+        atrow="$(db_chars_query "SELECT activeTalentGroup, talentGroupsCount FROM characters WHERE guid=$cguid;")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
+        IFS=$'\t' read -r agroup gcount <<< "$atrow"
+        [[ "$agroup" =~ ^[0-9]+$ ]] || agroup=0
+        [[ "$gcount" =~ ^[0-9]+$ ]] || gcount=1
+        atotal="$(db_chars_query "SELECT COUNT(*) FROM character_achievement WHERE guid=$cguid;")" || atotal=0
+        [[ "$atotal" =~ ^[0-9]+$ ]] || atotal=0
+        arecent='['; first=1
+        while IFS=$'\t' read -r aid adate; do
+          [[ -z "$aid" ]] && continue
+          [[ "$aid" =~ ^[0-9]+$ ]] || continue
+          [[ "$adate" =~ ^[0-9]+$ ]] || adate=0
+          [[ $first -eq 0 ]] && arecent+=','
+          arecent+="{\"id\":$aid,\"date\":$adate}"
+          first=0
+        done < <(db_chars_query "SELECT achievement, date FROM character_achievement WHERE guid=$cguid ORDER BY date DESC LIMIT 10;" || true)
+        arecent+=']'
+        tspells='['; first=1
+        while IFS= read -r sid; do
+          [[ -z "$sid" ]] && continue
+          [[ "$sid" =~ ^[0-9]+$ ]] || continue
+          [[ $first -eq 0 ]] && tspells+=','
+          tspells+="$sid"
+          first=0
+        done < <(db_chars_query "SELECT spell FROM character_talent WHERE guid=$cguid AND (specMask & (1 << $agroup)) ORDER BY spell;" || true)
+        tspells+=']'
+        json_ok "{\"achievements\":{\"total\":$atotal,\"recent\":$arecent},\"talents\":{\"groups_count\":$gcount,\"active_group\":$agroup,\"spells\":$tspells}}"
+        ;;
       item-info)
         entries=""
         while [[ $# -gt 0 ]]; do
@@ -1537,6 +1572,37 @@ case "$cmd" in
         done
         iout+=']'
         json_ok "{\"items\":$iout}"
+        ;;
+      entity-info)
+        ekind=""; eids=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --kind) _need_flag_val "$1" $#; ekind="$2"; shift 2 ;;
+            --ids) _need_flag_val "$1" $#; eids="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow entity-info --kind spell|achievement --ids 1,2 --json"; exit 1 ;;
+          esac
+        done
+        case "$ekind" in spell|achievement) ;; *) json_err BAD_ARG "--kind must be spell or achievement" ""; exit 1 ;; esac
+        if [[ ! "$eids" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+          json_err BAD_ARG "--ids must be comma-separated ids" ""; exit 1
+        fi
+        IFS=',' read -r -a eidarr <<< "$eids"
+        if (( ${#eidarr[@]} > 25 )); then
+          json_err BAD_ARG "--ids max 25 per call" ""; exit 1
+        fi
+        mkdir -p "$(_iteminfo_cache)/tooltips" "$(_iteminfo_cache)/icons"
+        declare -A _ee_seen=()
+        eout='['; first=1
+        for eid in "${eidarr[@]}"; do
+          eid=$((10#$eid))
+          [[ -n "${_ee_seen[$eid]:-}" ]] && continue
+          _ee_seen["$eid"]=1
+          eobj="$(_entity_one "$ekind" "$eid")"
+          [[ $first -eq 0 ]] && eout+=','
+          eout+="$eobj"; first=0
+        done
+        eout+=']'
+        json_ok "{\"entities\":$eout}"
         ;;
       config)
         csub="${1:-}"; shift || true
