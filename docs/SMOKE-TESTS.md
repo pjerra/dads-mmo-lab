@@ -53,8 +53,8 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | Status | Test | Steps / expected |
 |---|---|---|
 | ⬜ | Paperdoll + tooltips (E) | Show gear for a real char → slot grid with icons; hover a standard item → wowhead-style tooltip; hover a CUSTOM item → local tooltip (name/ilvl/stats). Second view of the same char is instant. |
-| ⬜ | 3D model (F) | Model renders beside the paperdoll wearing the right gear, correct SEX and race. Rotate/zoom works. Second view fast/offline. |
-| ⬜ | **3D model with a custom-displayid item (F1)** | View a char wearing a custom item → model must still render (item skipped) — if the whole model dies, report it (fix is pre-planned). |
+| ⚠️ | 3D model (F) | **EXTERNAL LIMITATION (2026-07-19):** Wowhead removed the WotLK 3D geometry files (mo3/bone) from their CDN — everything else (engine, meta, textures) still resolves. The model card now says so instead of showing an empty grey box, and auto-recovers if the files return. Fixed along the way (still valuable if upstream returns): WH environment stub, custom-item probe fallback, real error surfacing, model placed inside the gear window. |
+| ⚠️ | **3D model with a custom-displayid item (F1)** | Superseded by the external limitation above — the item-probe fallback is built and unit-tested, pending upstream files existing at all. |
 | ⬜ | Talents card (G) | Talent icons fill in (chunk-at-a-time on first view — batches of 25, NOT broken); hover a maxed multi-rank talent → correct rank tooltip; Dual spec badge on a dual-spec char; only active-spec talents. |
 | ⬜ | Achievements card (G) | Total + 10 recent with icons/names/dates; hover → achievement tooltip. |
 

@@ -383,6 +383,28 @@ async function fetchProbe(url: string): Promise<boolean | null> {
   }
 }
 
+// Pre-flight: is the character's GEOMETRY actually downloadable? Live smoke
+// 2026-07-19 found wow.zamimg.com no longer hosts ANY `mo3/` (or `bone/`)
+// files -- for characters and items alike, in every content tree -- while
+// meta/textures still resolve. (WotLK Classic ended; the geometry store was
+// evidently pruned.) The engine constructs fine and then renders an empty
+// grey canvas, so without this check the failure is silent. Probing the
+// real file through the proxy keeps this self-healing: if Wowhead ever
+// restores the files, the viewer starts working again with no code change
+// (and the probe's GET pre-warms the cache).
+export async function geometryAvailable(modelId: number): Promise<boolean> {
+  try {
+    const meta = await fetch(`${CONTENT_PATH}meta/character/${modelId}.json`);
+    if (!meta.ok) return false;
+    const j = (await meta.json()) as { Model?: number };
+    if (!j.Model) return false;
+    const geo = await fetch(`${CONTENT_PATH}mo3/${j.Model}.mo3`);
+    return geo.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Recon §1.1: the final options object ZamModelViewer receives for a
 // playable character (env='live'-shaped, which is what the wrath tree
 // wants too) -- `type: 2, contentPath, container: jQuery(selector), aspect,
@@ -400,6 +422,11 @@ export async function createCharacterViewer(
   doll: PaperdollData,
 ): Promise<unknown> {
   const modelId = buildCharacterModelId(doll.race, acGenderToViewer(doll.gender));
+  if (!(await geometryAvailable(modelId))) {
+    throw new Error(
+      "Wowhead no longer hosts the WotLK 3D model files — showing gear without a model. (Auto-recovers if they return.)",
+    );
+  }
   let charCustomization: { options: { optionId: number; choiceId: number }[] } | undefined;
   try {
     charCustomization = await buildCharCustomization(doll, modelId);
