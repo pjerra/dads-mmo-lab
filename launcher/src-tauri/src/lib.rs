@@ -13,9 +13,14 @@ pub struct InstallSession {
     pub pid: u32,
 }
 
+pub enum InstallSlot {
+    Starting,
+    Running(InstallSession),
+}
+
 pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
-    pub install: Arc<Mutex<Option<InstallSession>>>,
+    pub install: Arc<Mutex<Option<InstallSlot>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -554,7 +559,7 @@ async fn games_install(
 ) -> Result<(), CmdError> {
     let runner = state.runner.clone();
     {
-        let guard = state.install.lock().unwrap();
+        let mut guard = state.install.lock().unwrap();
         if guard.is_some() {
             return Err(CmdError {
                 code: "BUSY".into(),
@@ -562,6 +567,7 @@ async fn games_install(
                 hint: "Finish or cancel it first.".into(),
             });
         }
+        *guard = Some(InstallSlot::Starting);
     }
     let state_arc = state.install.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -569,6 +575,7 @@ async fn games_install(
         let mut child = match runner.spawn_interactive(&["games", "install", &id]) {
             Ok(c) => c,
             Err(e) => {
+                *state_arc.lock().unwrap() = None;
                 let _ = on_event.send(serde_json::json!({"event":"chunk","text": format!("failed to start: {e}\n")}));
                 let _ = on_event.send(serde_json::json!({"event":"exit","code": -1}));
                 return;
@@ -576,7 +583,7 @@ async fn games_install(
         };
         let stdin = child.stdin.take().expect("stdin piped");
         let pid = child.id();
-        *state_arc.lock().unwrap() = Some(InstallSession { stdin, pid });
+        *state_arc.lock().unwrap() = Some(InstallSlot::Running(InstallSession { stdin, pid }));
         let mut stdout = child.stdout.take().expect("stdout piped");
         let mut buf = [0u8; 4096];
         loop {
@@ -603,11 +610,11 @@ async fn games_install_input(text: String, state: State<'_, AppState>) -> Result
     use std::io::Write;
     let mut guard = state.install.lock().unwrap();
     match guard.as_mut() {
-        Some(sess) => sess
+        Some(InstallSlot::Running(sess)) => sess
             .stdin
             .write_all(format!("{text}\n").as_bytes())
             .map_err(|e| CmdError { code: "STDIN".into(), message: e.to_string(), hint: String::new() }),
-        None => Err(CmdError {
+        Some(InstallSlot::Starting) | None => Err(CmdError {
             code: "NO_SESSION".into(),
             message: "No install is running".into(),
             hint: String::new(),
@@ -620,8 +627,8 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
     let pid = {
         let guard = state.install.lock().unwrap();
         match guard.as_ref() {
-            Some(s) => s.pid,
-            None => {
+            Some(InstallSlot::Running(s)) => s.pid,
+            Some(InstallSlot::Starting) | None => {
                 return Err(CmdError {
                     code: "NO_SESSION".into(),
                     message: "No install is running".into(),

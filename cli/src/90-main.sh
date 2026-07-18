@@ -1018,16 +1018,16 @@ case "$cmd" in
         fi
         trow="$(_title_row "$gid")"
         if [[ -z "$trow" ]]; then
-          echo "[dml] ERROR: unknown title: $gid" >&2; exit 1
+          echo "[dml] ERROR: unknown title: $gid"; exit 1
         fi
         if _title_installed "$gid"; then
-          echo "[dml] ERROR: $gid is already installed" >&2; exit 1
+          echo "[dml] ERROR: $gid is already installed"; exit 1
         fi
         tscript="$(printf '%s' "$trow" | cut -d'|' -f3)"
         tkind="$(printf '%s' "$trow" | cut -d'|' -f4)"
         tfile="$(_installers_dir)/$tscript"
         if [[ ! -f "$tfile" ]]; then
-          echo "[dml] ERROR: installer script not found: $tfile (re-run cli/dev-install.ps1)" >&2; exit 1
+          echo "[dml] ERROR: installer script not found: $tfile (re-run cli/dev-install.ps1)"; exit 1
         fi
         rc=0
         bash "$tfile" 2>&1 || rc=$?
