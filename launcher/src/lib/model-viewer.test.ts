@@ -4,7 +4,65 @@ import {
   acGenderToViewer,
   buildCharacterModelId,
   buildViewerItems,
+  probeRenderableItems,
+  viewerFallbackSlot,
 } from "./model-viewer";
+
+describe("viewerFallbackSlot", () => {
+  it("maps only the recon's three 404-fallback slots", () => {
+    expect(viewerFallbackSlot(5)).toBe(20); // chest -> robe
+    expect(viewerFallbackSlot(16)).toBe(21); // mainhand
+    expect(viewerFallbackSlot(17)).toBe(22); // offhand
+    for (const slot of [1, 3, 6, 15, 19]) {
+      expect(viewerFallbackSlot(slot)).toBeNull();
+    }
+  });
+});
+
+describe("probeRenderableItems", () => {
+  const probeFrom = (answers: Record<string, boolean | null>) => {
+    const asked: string[] = [];
+    const probe = async (url: string) => {
+      asked.push(url);
+      // `in`-check, not `??`: a stored null (probe-failed) must survive.
+      return url in answers ? answers[url] : false;
+    };
+    return { probe, asked };
+  };
+
+  it("keeps items whose primary meta exists and drops confirmed-missing ones", async () => {
+    const { probe } = probeFrom({
+      "http://zam.localhost/modelviewer/wrath/meta/armor/1/100.json": true,
+      "http://zam.localhost/modelviewer/wrath/meta/armor/7/9999.json": false,
+    });
+    const kept = await probeRenderableItems(
+      [
+        [1, 100],
+        [7, 9999],
+      ],
+      probe,
+    );
+    expect(kept).toEqual([[1, 100]]);
+  });
+
+  it("retries the fallback slot before dropping chest/mainhand/offhand items", async () => {
+    const { probe, asked } = probeFrom({
+      "http://zam.localhost/modelviewer/wrath/meta/armor/16/200.json": false,
+      "http://zam.localhost/modelviewer/wrath/meta/armor/21/200.json": true,
+    });
+    const kept = await probeRenderableItems([[16, 200]], probe);
+    expect(kept).toEqual([[16, 200]]);
+    expect(asked).toHaveLength(2);
+  });
+
+  it("keeps items when the probe itself fails (null) -- never strips gear on a network hiccup", async () => {
+    const { probe } = probeFrom({
+      "http://zam.localhost/modelviewer/wrath/meta/armor/1/300.json": null,
+    });
+    const kept = await probeRenderableItems([[1, 300]], probe);
+    expect(kept).toEqual([[1, 300]]);
+  });
+});
 
 describe("AC_TO_VIEWER_SLOT", () => {
   it("maps every rendered AC slot to the recon's viewer slot (acSlot + 1)", () => {

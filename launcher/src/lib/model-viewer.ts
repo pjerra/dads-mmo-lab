@@ -282,6 +282,51 @@ async function buildCharCustomization(
   return options.length > 0 ? { options } : undefined;
 }
 
+// Recon §1.2/1.3 (`getDisplaySlot`): the viewer's own internal 404-fallback
+// remaps three slots to "new"-style meta locations -- chest -> 20 (robe),
+// mainhand -> 21, offhand -> 22. Mirrored here so the pre-flight probe below
+// checks the same alternate location the viewer itself would try.
+export function viewerFallbackSlot(slot: number): number | null {
+  if (slot === 5) return 20;
+  if (slot === 16) return 21;
+  if (slot === 17) return 22;
+  return null;
+}
+
+// Drop items whose display meta doesn't exist on the CDN: custom/GM
+// displayids (server-side items wowhead never had) 404, and ONE missing
+// meta rejects the viewer's entire construction -- the F1 failure mode.
+// probe returns true (meta exists), false (confirmed missing), or null
+// (probe itself failed -- network); unknowns are KEPT so a transient
+// hiccup can't silently strip gear.
+export async function probeRenderableItems(
+  items: [number, number][],
+  probe: (url: string) => Promise<boolean | null>,
+): Promise<[number, number][]> {
+  const kept: [number, number][] = [];
+  for (const [slot, id] of items) {
+    const primary = await probe(`${CONTENT_PATH}meta/armor/${slot}/${id}.json`);
+    if (primary !== false) {
+      kept.push([slot, id]);
+      continue;
+    }
+    const fb = viewerFallbackSlot(slot);
+    if (fb !== null && (await probe(`${CONTENT_PATH}meta/armor/${fb}/${id}.json`)) !== false) {
+      kept.push([slot, id]);
+    }
+  }
+  return kept;
+}
+
+async function fetchProbe(url: string): Promise<boolean | null> {
+  try {
+    const res = await fetch(url);
+    return res.ok;
+  } catch {
+    return null;
+  }
+}
+
 // Recon §1.1: the final options object ZamModelViewer receives for a
 // playable character (env='live'-shaped, which is what the wrath tree
 // wants too) -- `type: 2, contentPath, container: jQuery(selector), aspect,
@@ -289,24 +334,19 @@ async function buildCharCustomization(
 // omitted entirely when unavailable, matching `model.noCharCustomization`).
 // Returns the viewer instance as `unknown` (recon has no documented
 // destroy/teardown API -- see CharacterModel.svelte's guarded call site).
+//
+// Construction runs up to three attempts: full gear first; if that rejects,
+// probe out CDN-missing items (custom/GM gear) and retry; finally retry
+// naked -- a base model beats no model. The container is cleared between
+// attempts so a half-constructed canvas can't stack under the retry.
 export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
 ): Promise<unknown> {
   const modelId = buildCharacterModelId(doll.race, acGenderToViewer(doll.gender));
-  const options: Record<string, unknown> = {
-    type: 2,
-    contentPath: CONTENT_PATH,
-    container: window.$(`#${containerId}`),
-    aspect: VIEWER_ASPECT,
-    hd: true,
-    models: { type: 16, id: modelId },
-    items: buildViewerItems(doll.equipped),
-  };
-
+  let charCustomization: { options: { optionId: number; choiceId: number }[] } | undefined;
   try {
-    const charCustomization = await buildCharCustomization(doll, modelId);
-    if (charCustomization) options.charCustomization = charCustomization;
+    charCustomization = await buildCharCustomization(doll, modelId);
   } catch {
     // Best-effort only -- recon §1.1 shows the constructor happily accepts
     // a character with `charCustomization` simply omitted, rendering the
@@ -315,5 +355,35 @@ export async function createCharacterViewer(
 
   const Viewer = window.ZamModelViewer;
   if (!Viewer) throw new Error("ZamModelViewer script not loaded");
-  return await new Viewer(options);
+
+  const construct = async (items: [number, number][]) => {
+    const options: Record<string, unknown> = {
+      type: 2,
+      contentPath: CONTENT_PATH,
+      container: window.$(`#${containerId}`),
+      aspect: VIEWER_ASPECT,
+      hd: true,
+      models: { type: 16, id: modelId },
+      items,
+    };
+    if (charCustomization) options.charCustomization = charCustomization;
+    return await new Viewer(options);
+  };
+
+  const allItems = buildViewerItems(doll.equipped);
+  try {
+    return await construct(allItems);
+  } catch (e) {
+    document.getElementById(containerId)?.replaceChildren();
+    const kept = await probeRenderableItems(allItems, fetchProbe);
+    if (kept.length !== allItems.length) {
+      try {
+        return await construct(kept);
+      } catch {
+        document.getElementById(containerId)?.replaceChildren();
+      }
+    }
+    if (allItems.length === 0) throw e;
+    return await construct([]);
+  }
 }
