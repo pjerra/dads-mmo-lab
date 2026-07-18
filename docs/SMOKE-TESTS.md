@@ -30,7 +30,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | Status | Test | Steps / expected |
 |---|---|---|
 | ⬜ | Log tail | Open Console with server running → worldserver log lines appear, auto-refresh follows, no ANSI garbage. Scroll up → autoscroll pauses; scroll down → resumes. |
-| ⬜ | [console-send] Send command | Send `server info` → reply appears in history with real stats. Send `bogus` → the fault text shows inline, not a crash. |
+| ✅ | [console-send] Send command | Send `server info` → reply appears in history with real stats. Send `bogus` → the fault text shows inline, not a crash. (Passed 2026-07-18: real stats + inline fault user-confirmed.) |
 | ⬜ | Stopped-server state | Stop the server → Console shows "No server logs — is the server installed?" (or stale tail) without erroring. |
 
 ## 3. Library / titles (Round D)

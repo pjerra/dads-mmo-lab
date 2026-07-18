@@ -15,7 +15,7 @@ export type FeatureStatus = "tested" | "untested";
 // speculatively.
 export const FEATURES: Record<string, FeatureStatus> = {
   restart: "tested",
-  "console-send": "untested",
+  "console-send": "tested",
   "title-install": "untested",
   "title-remove": "untested",
   "teleport-named": "untested",
