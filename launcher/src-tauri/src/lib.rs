@@ -508,6 +508,11 @@ async fn wow_config_raw_write(
     .and_then(envelope_to_result)
 }
 
+#[tauri::command]
+fn save_text_file(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
 async fn stream_action(
     action: &'static str,
     id: String,
@@ -893,6 +898,7 @@ pub fn run() {
             install: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol("zam", |ctx, request, responder| {
             let cache = ctx
                 .app_handle()
@@ -987,7 +993,8 @@ pub fn run() {
             wow_gm_heal,
             wow_gm_revive,
             wow_gm_summon,
-            wow_gm_at_login
+            wow_gm_at_login,
+            save_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

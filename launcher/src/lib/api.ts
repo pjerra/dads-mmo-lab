@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
 
 export interface DmlErr {
   code: string;
@@ -19,6 +20,14 @@ export type TermEvent =
   | { event: "done"; data: unknown }
   | { event: "error"; error: DmlErr }
   | { event: string; [key: string]: unknown }; // forward-compat: pct etc.
+
+// Save-dialog + write. Returns false when the user cancels the dialog.
+export async function saveTextFile(defaultName: string, content: string): Promise<boolean> {
+  const path = await save({ defaultPath: defaultName });
+  if (!path) return false;
+  await invoke("save_text_file", { path, content });
+  return true;
+}
 
 export async function gamesList(): Promise<Game[]> {
   const data = await invoke<{ games: Game[] }>("games_list");
@@ -88,6 +97,7 @@ export interface ServerDetail {
     soap: string | null;
     db: string | null;
   };
+  bots: { online: number | null; max: number | null };
 }
 export interface ItemRow {
   entry: number;
