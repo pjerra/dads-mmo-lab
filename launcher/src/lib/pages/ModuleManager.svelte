@@ -6,6 +6,8 @@
     wowModuleRemove,
     wowModuleRebuild,
     wowModuleConfActivate,
+    wowModuleTracking,
+    wowModuleRepair,
     wowClientPathGet,
     wowClientPathSet,
     wowClientPathDetect,
@@ -15,6 +17,9 @@
     type SqlModule,
     type ClientPath,
     type TermEvent,
+    type ModuleTracking,
+    type ModuleRepair,
+    type RepairResult,
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -28,6 +33,21 @@
   let backupChecked = $state(true); // "Back up the server first" defaults ON
   let confirmingRemove: string | null = $state(null); // key of the cpp module armed for removal
   let customUrl = $state("");
+
+  // Repair panel (installed cpp rows): key of the module whose panel is open
+  // (one at a time, like confirmingRemove above), its fetched tracking
+  // diagnosis, the db/mode picks, the two-step apply confirm, and the last
+  // apply's per-file results. repairError is the panel's own inline-error
+  // surface -- separate from the page-level `error` so a failed tracking
+  // fetch/apply doesn't blow away an unrelated page error (and vice versa).
+  let repairOpen: string | null = $state(null);
+  let tracking: ModuleTracking | null = $state(null);
+  let repairError: string | null = $state(null);
+  let repairDb: "world" | "characters" | "auth" = $state("world");
+  let repairMode: "mark" | "clear" = $state("mark");
+  let confirmingRepair = $state(false);
+  let repairResult: ModuleRepair | null = $state(null);
+  const DB_ORDER: Array<"world" | "characters" | "auth"> = ["world", "characters", "auth"];
 
   // Lua (ALE) card: per-row "back up first" checkbox (has_sql rows only,
   // default ON) and the key armed for a two-step remove confirm.
@@ -70,6 +90,7 @@
   async function refresh() {
     error = null; confirmingRebuild = false; confirmingRemove = null;
     confirmingLuaRemove = null; confirmingSqlRemove = null;
+    repairOpen = null; confirmingRepair = false;
     try { list = await wowModuleList(); ensureBackupDefaults(); } catch (e) { showErr(e); }
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
   }
@@ -249,6 +270,73 @@
     if (m.pending_rebuild) return "warn";
     return "on";
   }
+
+  function showRepairErr(e: unknown) {
+    const err = e as { message?: string; hint?: string };
+    repairError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+  }
+
+  async function fetchTracking(key: string) {
+    busy = true; repairError = null;
+    try {
+      tracking = await wowModuleTracking(key);
+    } catch (e) {
+      showRepairErr(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function toggleRepair(m: CppModule) {
+    if (repairOpen === m.key) {
+      repairOpen = null;
+      return;
+    }
+    repairOpen = m.key;
+    tracking = null;
+    repairError = null;
+    repairResult = null;
+    confirmingRepair = false;
+    repairDb = "world";
+    repairMode = "mark";
+    return fetchTracking(m.key);
+  }
+
+  function disarmRepair() {
+    confirmingRepair = false;
+  }
+
+  async function applyRepair(m: CppModule) {
+    if (!confirmingRepair) {
+      confirmingRepair = true;
+      return;
+    }
+    confirmingRepair = false;
+    busy = true; repairError = null; repairResult = null;
+    try {
+      repairResult = await wowModuleRepair(m.key, repairDb, repairMode);
+      tracking = await wowModuleTracking(m.key);
+    } catch (e) {
+      showRepairErr(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function humanizeResult(r: RepairResult["result"]): string {
+    switch (r) {
+      case "marked": return "marked";
+      case "cleared": return "cleared";
+      case "not_tracked": return "not tracked";
+      case "file_missing": return "file missing";
+    }
+  }
+
+  function resultClass(r: RepairResult["result"]): "on" | "warn" | "off" {
+    if (r === "marked" || r === "cleared") return "on";
+    if (r === "file_missing") return "warn";
+    return "off";
+  }
 </script>
 
 <section class="content">
@@ -296,11 +384,82 @@
             <button class="primary" onclick={() => install(m.key, null, m.name)} disabled={busy}>Install</button>
           {:else}
             <button onclick={() => install(m.key, null, m.name)} disabled={busy}>Update</button>
+            <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
             <button onclick={() => removeModule(m)} disabled={busy}>
               {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
             </button>
           {/if}
         </div>
+        {#if repairOpen === m.key}
+          <div class="repair-panel">
+            {#if repairError}<p class="inline-error">{repairError}</p>{/if}
+            {#if tracking}
+              {#each DB_ORDER as dbName (dbName)}
+                {@const dbData = tracking.dbs[dbName]}
+                <div class="repair-db">
+                  <strong class="db-name">{dbName}</strong>
+                  {#if dbData.files.length === 0 && dbData.tracked_rows.length === 0}
+                    <p class="muted">nothing found</p>
+                  {:else}
+                    {#if dbData.files.length > 0}
+                      <div class="row">
+                        {#each dbData.files as f (f.name)}
+                          <span class="chip {f.tracked ? 'tracked' : 'untracked'}">{f.name}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                    {#if dbData.tracked_rows.length > 0}
+                      <div class="row">
+                        {#each dbData.tracked_rows as name (name)}
+                          <span class="muted">{name}</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  {/if}
+                </div>
+              {/each}
+
+              <div class="row">
+                <label class="row">
+                  DB
+                  <select bind:value={repairDb} onchange={disarmRepair} disabled={busy}>
+                    <option value="world">world</option>
+                    <option value="characters">characters</option>
+                    <option value="auth">auth</option>
+                  </select>
+                </label>
+                <label class="row">
+                  Mode
+                  <select bind:value={repairMode} onchange={disarmRepair} disabled={busy}>
+                    <option value="mark">Mark as applied — fixes "Table already exists" on start</option>
+                    <option value="clear">Clear tracking — makes the server re-apply the SQL (only safe if the SQL is re-runnable)</option>
+                  </select>
+                </label>
+              </div>
+              <div class="row">
+                {#if !confirmingRepair}
+                  <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Apply</button>
+                {:else}
+                  <span>This edits the database's update-tracking records. Continue?</span>
+                  <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
+                  <button onclick={() => (confirmingRepair = false)} disabled={busy}>Cancel</button>
+                {/if}
+              </div>
+
+              {#if repairResult}
+                <div class="repair-results">
+                  {#each repairResult.results as r (r.file)}
+                    <div class="row">
+                      <span>{r.file}</span>
+                      <span class="badge {resultClass(r.result)}">{humanizeResult(r.result)}</span>
+                    </div>
+                  {/each}
+                  <p class="muted">Restart the server to apply.</p>
+                </div>
+              {/if}
+            {/if}
+          </div>
+        {/if}
       {/each}
     {/if}
   </div>
@@ -468,4 +627,11 @@
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
   .inline-error { color: #f85149; font-size: 13px; margin: 0; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+  .repair-panel { margin: 0 0 6px 0; padding: 10px 12px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; }
+  .repair-db { display: flex; flex-direction: column; gap: 6px; }
+  .db-name { font-size: 13px; }
+  .chip { font-size: 12px; padding: 2px 10px; border-radius: 10px; border: 1px solid #30363d; }
+  .chip.tracked { color: #3fb950; border-color: #3fb950; }
+  .chip.untracked { color: #8b949e; }
+  .repair-results { display: flex; flex-direction: column; gap: 6px; }
 </style>
