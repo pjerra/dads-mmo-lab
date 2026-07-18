@@ -208,6 +208,12 @@ export async function wowConsoleSend(command: string): Promise<{ result: string 
   return await invoke("wow_console_send", { command });
 }
 
+export interface ModCommands {
+  key: string;
+  name: string;
+  text: string;
+}
+
 export interface CppModule {
   key: string;
   name: string;
@@ -237,6 +243,12 @@ export interface ModuleList {
 export async function wowModuleList(): Promise<ModuleList> {
   return await invoke("wow_module_list");
 }
+
+export async function wowCommands(): Promise<ModCommands[]> {
+  const data = await invoke<{ mods: ModCommands[] }>("wow_commands");
+  return data.mods;
+}
+
 export const wowModuleInstall = (
   family: string,
   key: string | null,

@@ -234,6 +234,11 @@ async fn wow_module_list(state: State<'_, AppState>) -> Result<serde_json::Value
 }
 
 #[tauri::command]
+async fn wow_commands(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "commands".into()]).await
+}
+
+#[tauri::command]
 async fn wow_module_install(
     family: String,
     key: Option<String>,
@@ -936,6 +941,7 @@ pub fn run() {
             wow_console_tail,
             wow_console_send,
             wow_module_list,
+            wow_commands,
             wow_module_install,
             wow_module_remove,
             wow_module_rebuild,
