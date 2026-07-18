@@ -60,22 +60,27 @@ _items_rows_to_json() {
     printf '%s' "$out"
 }
 
-# Reads TSV rows (account_id, username, guid, char_name, level) sorted by
-# account_id, emits a JSON array of account objects with nested characters.
-# LEFT JOIN misses arrive as empty guid/name/level fields. Same last-row
-# guard as _items_rows_to_json (see the long comment there).
+# Reads TSV rows (account_id, username, gm_level, guid, char_name, level)
+# sorted by account_id, emits a JSON array of account objects with nested
+# characters. LEFT JOIN misses arrive as empty guid/name/level fields;
+# gm_level is COALESCE'd to 0 in the SQL already but is re-validated here
+# (falls back to 0 if somehow non-numeric) before it's interpolated
+# unquoted into JSON. Same last-row guard as _items_rows_to_json (see the
+# long comment there).
 _accounts_rows_to_json() {
-    local out='[' first=1 cur_id="" cur_name="" chars="" cfirst=1
-    local aid uname guid cname clvl
-    while IFS=$'\t' read -r aid uname guid cname clvl || [[ -n "$aid" ]]; do
+    local out='[' first=1 cur_id="" cur_name="" cur_gm=0 chars="" cfirst=1
+    local aid uname gmlvl guid cname clvl
+    while IFS=$'\t' read -r aid uname gmlvl guid cname clvl || [[ -n "$aid" ]]; do
         [[ -z "$aid" ]] && continue
         if [[ "$aid" != "$cur_id" ]]; then
             if [[ -n "$cur_id" ]]; then
                 [[ $first -eq 0 ]] && out+=','
-                out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+                out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"gm_level\":$cur_gm,\"characters\":[$chars]}"
                 first=0
             fi
-            cur_id="$aid"; cur_name="$uname"; chars=""; cfirst=1
+            cur_id="$aid"; cur_name="$uname"
+            if [[ "$gmlvl" =~ ^[0-9]+$ ]]; then cur_gm="$gmlvl"; else cur_gm=0; fi
+            chars=""; cfirst=1
         fi
         if [[ -n "$guid" ]]; then
             [[ $cfirst -eq 0 ]] && chars+=','
@@ -85,7 +90,7 @@ _accounts_rows_to_json() {
     done
     if [[ -n "$cur_id" ]]; then
         [[ $first -eq 0 ]] && out+=','
-        out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"characters\":[$chars]}"
+        out+="{\"id\":$cur_id,\"username\":\"$(json_escape "$cur_name")\",\"gm_level\":$cur_gm,\"characters\":[$chars]}"
     fi
     out+=']'
     printf '%s' "$out"

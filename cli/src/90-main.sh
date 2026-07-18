@@ -84,6 +84,18 @@ _wow_server_dir() {
 _valid_charname() { [[ "$1" =~ ^[A-Za-z0-9_]{1,12}$ ]]; }
 _valid_item_spec() { [[ "$1" =~ ^[0-9]+:[0-9]+$ ]]; }
 
+# Account username/password validators for `wow account create|set-password|
+# set-gm`. Same rationale as the two above: these values are spliced
+# straight into a SOAP console command string (see soap_exec), so each is
+# checked against a strict allowlist BEFORE any command string is built. The
+# character classes deliberately exclude whitespace, quotes, and XML
+# metacharacters (</>/&) -- an unvalidated value here would be
+# command-injection-equivalent (a space lets an attacker append additional
+# console tokens to `account create`/`account set password`/`account set
+# gmlevel`).
+_valid_account_user() { [[ "$1" =~ ^[A-Za-z0-9_]{3,20}$ ]]; }
+_valid_account_pass() { [[ "$1" =~ ^[A-Za-z0-9_@#%+=!-]{4,16}$ ]]; }
+
 # Arity guard for value-taking flags. Under the global `set -u`, reading $2
 # when a value flag is the LAST token aborts the whole script with a bare
 # "$2: unbound variable" on stderr and NO JSON envelope -- breaking the
@@ -1434,15 +1446,68 @@ case "$cmd" in
         # Read-only list of real player accounts and their characters.
         # The 250 RNDBOT* ambient-bot accounts and AHBOT are noise for the
         # GUI's character picker; SOAP-only accounts (e.g. DMLSOAP) simply
-        # have no characters and are harmless to include.
-        sql="SELECT a.id, a.username, COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
+        # have no characters and are harmless to include. gmlevel is pulled
+        # from account_access (MAX across realms, since a per-realm 0 row
+        # can coexist with a real grant) so the GUI can show GM badges
+        # without a second round trip.
+        sql="SELECT a.id, a.username, COALESCE(g.gmlevel,0), COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
              FROM acore_auth.account a
+             LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM acore_auth.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
              WHERE a.username NOT LIKE 'RNDBOT%' AND a.username <> 'AHBOT'
              ORDER BY a.id, c.level DESC;"
         rows="$(db_chars_query "$sql")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
         json_ok "{\"accounts\":$(printf '%s' "$rows" | _accounts_rows_to_json)}"
+        ;;
+      account)
+        # Account management: create / set-password / set-gm. All three are
+        # mutating and go through SOAP, never a direct database write (same
+        # rule as mail-item/teleport). --user and --pass are allowlist-
+        # validated BEFORE any command string is built -- see
+        # _valid_account_user/_valid_account_pass above for why.
+        asub="${1:-}"; shift || true
+        auser=""; apass=""; alevel=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --user) _need_flag_val "$1" $#; auser="$2"; shift 2 ;;
+            --pass) _need_flag_val "$1" $#; apass="$2"; shift 2 ;;
+            --level) _need_flag_val "$1" $#; alevel="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+          esac
+        done
+        _valid_account_user "$auser" || { json_err BAD_ARG "Invalid username (3-20 letters/digits/_)" ""; exit 1; }
+        case "$asub" in
+          create|set-password)
+            _valid_account_pass "$apass" || { json_err BAD_ARG "Invalid password (4-16 chars, letters/digits/_@#%+=!-)" ""; exit 1; }
+            if [[ "$asub" == create ]]; then acmd="account create $auser $apass"
+            else acmd="account set password $auser $apass $apass"; fi
+            ;;
+          set-gm)
+            [[ "$alevel" =~ ^[0-3]$ ]] || { json_err BAD_ARG "--level must be 0-3" ""; exit 1; }
+            acmd="account set gmlevel $auser $alevel -1"
+            ;;
+          *) json_err UNKNOWN_COMMAND "Unknown account subcommand: $asub" "Try: dml wow account create|set-password|set-gm --json"; exit 1 ;;
+        esac
+        # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
+        # this whole script (same reason as the identical guard on wow
+        # soap-exec/mail-item/teleport above). An unguarded `out="$(soap_exec
+        # "$acmd")"; rc=$?` would make bash abort right here on any non-zero
+        # soap_exec exit (fault, auth failure, unreachable) -- before rc=$?
+        # or the case below ever runs -- so the failure must be captured
+        # inside a conditional.
+        if out="$(soap_exec "$acmd")"; then rc=0; else rc=$?; fi
+        case "$rc" in
+          0)
+            case "$asub" in
+              create) json_ok "{\"created\":true,\"user\":\"$auser\"}" ;;
+              set-password) json_ok "{\"password_set\":true,\"user\":\"$auser\"}" ;;
+              set-gm) json_ok "{\"gm_set\":true,\"user\":\"$auser\",\"level\":$alevel}" ;;
+            esac ;;
+          2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The worldserver rejected the command." ; exit 1 ;;
+          3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+          *) json_err SOAP_UNREACHABLE "Could not reach SOAP at $(soap_url)" "Is the worldserver running?" ; exit 1 ;;
+        esac
         ;;
       characters)
         acct=""
