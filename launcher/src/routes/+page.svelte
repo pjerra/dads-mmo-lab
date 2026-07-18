@@ -3,6 +3,7 @@
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
+  import Accounts from "$lib/pages/Accounts.svelte";
   import ModuleManager from "$lib/pages/ModuleManager.svelte";
   import Dashboard from "$lib/pages/Dashboard.svelte";
   import Items from "$lib/pages/Items.svelte";
@@ -29,6 +30,7 @@
   {#if page === "home"}<Home />{/if}
   {#if page === "library"}<Library />{/if}
   {#if page === "console"}<Console />{/if}
+  {#if page === "accounts"}<Accounts />{/if}
   {#if page === "modmanager"}<ModuleManager />{/if}
   {#if page === "dashboard"}<Dashboard />{/if}
   {#if page === "teleport"}<Teleport />{/if}

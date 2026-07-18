@@ -7,6 +7,7 @@ export const NAV = [
       { id: "home", label: "Home" },
       { id: "library", label: "Library" },
       { id: "console", label: "Console" },
+      { id: "accounts", label: "Accounts" },
       { id: "modmanager", label: "Modules" },
     ],
   },

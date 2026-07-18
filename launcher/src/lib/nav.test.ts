@@ -9,6 +9,7 @@ describe("NAV", () => {
       "home",
       "library",
       "console",
+      "accounts",
       "modmanager",
       "dashboard",
       "teleport",
