@@ -554,8 +554,8 @@ _iteminfo_one() {
             if [[ -n "$icon" ]]; then
                 iconfile="$cache/icons/$icon.jpg"
                 if [[ ! -f "$iconfile" ]]; then
-                    code="$(_iteminfo_fetch "$(_zamimg_base)/images/wow/icons/large/$icon.jpg" "$iconfile.tmp")"
-                    if [[ "$code" == 200 ]]; then mv "$iconfile.tmp" "$iconfile"; else rm -f "$iconfile.tmp"; fi
+                    code="$(_iteminfo_fetch "$(_zamimg_base)/images/wow/icons/large/$icon.jpg" "$iconfile.tmp.$$")"
+                    if [[ "$code" == 200 ]]; then mv "$iconfile.tmp.$$" "$iconfile"; else rm -f "$iconfile.tmp.$$"; fi
                 fi
                 if [[ -f "$iconfile" ]]; then
                     b64json="\"$(base64 -w0 < "$iconfile")\""
@@ -591,8 +591,8 @@ _entity_one() {
             if [[ -n "$icon" ]]; then
                 iconfile="$cache/icons/$icon.jpg"
                 if [[ ! -f "$iconfile" ]]; then
-                    code="$(_iteminfo_fetch "$(_zamimg_base)/images/wow/icons/large/$icon.jpg" "$iconfile.tmp")"
-                    if [[ "$code" == 200 ]]; then mv "$iconfile.tmp" "$iconfile"; else rm -f "$iconfile.tmp"; fi
+                    code="$(_iteminfo_fetch "$(_zamimg_base)/images/wow/icons/large/$icon.jpg" "$iconfile.tmp.$$")"
+                    if [[ "$code" == 200 ]]; then mv "$iconfile.tmp.$$" "$iconfile"; else rm -f "$iconfile.tmp.$$"; fi
                 fi
                 if [[ -f "$iconfile" ]]; then
                     b64json="\"$(base64 -w0 < "$iconfile")\""
