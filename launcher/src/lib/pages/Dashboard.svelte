@@ -1,5 +1,5 @@
 <script module lang="ts">
-  import type { ItemInfo } from "$lib/api";
+  import type { ItemInfo, EntityInfo } from "$lib/api";
 
   // Module-level: persists across Dashboard (re)instantiation -- switching
   // sidebar pages unmounts/remounts this component, and this cache must
@@ -7,6 +7,11 @@
   // never re-fetches item info already seen (the CLI's own disk cache
   // covers cross-session persistence).
   const infoCache = new Map<number, ItemInfo>();
+
+  // Round G: same idea for spell/achievement entity-info, keyed `kind:id`
+  // (a separate map -- items keep their existing by-entry-number key
+  // untouched, so Round E's paperdoll/tooltip behavior is unchanged).
+  const entityCache = new Map<string, EntityInfo>();
 </script>
 
 <script lang="ts">
@@ -15,12 +20,18 @@
     wowServerDetail,
     wowPaperdoll,
     wowItemInfo,
+    wowCharProgress,
+    wowEntityInfo,
     type ServerDetail,
     type PaperdollData,
     type PaperdollItem,
+    type CharProgress,
+    type AchievementEntry,
+    type WowheadTooltip,
   } from "$lib/api";
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
+  import { chunkIds, formatEpochDate } from "$lib/progress";
   import CharPicker from "$lib/CharPicker.svelte";
   import CharacterModel from "$lib/CharacterModel.svelte";
 
@@ -41,6 +52,58 @@
   function itemInfo(entry: number): ItemInfo | undefined {
     infoVersion;
     return infoCache.get(entry);
+  }
+
+  // Same pattern as infoVersion, for the entityCache (Round G: talents +
+  // achievements).
+  let entityVersion = $state(0);
+
+  function entityInfo(kind: "spell" | "achievement", id: number): EntityInfo | undefined {
+    entityVersion;
+    return entityCache.get(`${kind}:${id}`);
+  }
+
+  let progress = $state<CharProgress | null>(null);
+  let progressError: string | null = $state(null);
+  let loadingProgress = $state(false);
+
+  // Progressive load for a batch of spell/achievement ids: skip anything
+  // already cached, split what's left into ≤25-id chunks (entity-info's
+  // server-side cap), and fetch sequentially so partial results stream in
+  // as tiles/rows instead of waiting on one giant call. Entirely
+  // best-effort -- a failed chunk just leaves the remaining tiles as
+  // pending/unavailable placeholders, it never surfaces as a card error.
+  async function loadEntities(kind: "spell" | "achievement", ids: number[]) {
+    const missing = ids.filter((id) => !entityCache.has(`${kind}:${id}`));
+    if (missing.length === 0) return;
+    try {
+      for (const chunk of chunkIds(missing)) {
+        const infos = await wowEntityInfo(kind, chunk);
+        for (const info of infos) entityCache.set(`${kind}:${info.id}`, info);
+        entityVersion++;
+      }
+    } catch {
+      // best-effort: leave whatever didn't land as pending/unavailable
+    }
+  }
+
+  async function loadProgress(name: string) {
+    loadingProgress = true;
+    progressError = null;
+    try {
+      const p = await wowCharProgress(name);
+      progress = p;
+      void loadEntities("spell", p.talents.spells);
+      void loadEntities(
+        "achievement",
+        p.achievements.recent.map((a) => a.id),
+      );
+    } catch {
+      progress = null;
+      progressError = "Couldn't load progress.";
+    } finally {
+      loadingProgress = false;
+    }
   }
 
   async function refreshInfo() {
@@ -78,9 +141,12 @@
     dollError = null;
     doll = null;
     hovered = null;
+    progress = null;
+    progressError = null;
     try {
       doll = await wowPaperdoll(charName);
       fetchItemInfo(doll.equipped);
+      void loadProgress(charName);
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       dollError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -122,8 +188,16 @@
     [17, "Ranged"],
   ];
 
+  // A hover target is either a paperdoll item or a spell/achievement
+  // entity tile -- the tooltip machinery below (positioning/flip, vertical
+  // clamp, sanitized-HTML render) is shared across all three; only the
+  // lookup + fallback text differs, resolved by `resolveHover` below.
+  type HoverSource =
+    | { source: "item"; item: PaperdollItem }
+    | { source: "spell" | "achievement"; id: number };
+
   interface Hovered {
-    item: PaperdollItem;
+    target: HoverSource;
     top: number;
     left: number | null;
     right: number | null;
@@ -131,12 +205,12 @@
   let hovered: Hovered | null = $state(null);
   let tooltipEl: HTMLDivElement | undefined = $state();
 
-  function showTooltip(e: MouseEvent | FocusEvent, item: PaperdollItem) {
-    const target = e.currentTarget as HTMLElement;
-    const rect = target.getBoundingClientRect();
+  function showTooltip(e: MouseEvent | FocusEvent, target: HoverSource) {
+    const el = e.currentTarget as HTMLElement;
+    const rect = el.getBoundingClientRect();
     const flip = rect.right + 340 > window.innerWidth;
     hovered = {
-      item,
+      target,
       top: rect.top,
       left: flip ? null : rect.right + 8,
       right: flip ? window.innerWidth - rect.left + 8 : null,
@@ -144,6 +218,39 @@
   }
   function hideTooltip() {
     hovered = null;
+  }
+
+  // Resolved, render-ready view of whatever `hovered.target` currently
+  // points at. Reads itemInfo()/entityInfo() (both version-gated) so it
+  // stays live: if the tooltip data streams in *after* the hover started,
+  // the tooltip upgrades from the plain-text fallback without needing a
+  // re-hover.
+  interface ResolvedHover {
+    wowhead: WowheadTooltip | null;
+    localHtml: string | null;
+    label: string;
+    color: string;
+    sub: string | null;
+  }
+  function resolveHover(target: HoverSource): ResolvedHover {
+    if (target.source === "item") {
+      const info = itemInfo(target.item.entry);
+      return {
+        wowhead: info?.source === "wowhead" ? (info.wowhead ?? null) : null,
+        localHtml: info?.source === "local" ? (info.tooltip_html ?? null) : null,
+        label: target.item.name,
+        color: QUALITY_COLORS[target.item.quality] ?? "#c9d1d9",
+        sub: `ilvl ${target.item.item_level}`,
+      };
+    }
+    const info = entityInfo(target.source, target.id);
+    return {
+      wowhead: info?.source === "wowhead" ? (info.wowhead ?? null) : null,
+      localHtml: null,
+      label: info?.wowhead?.name ?? `#${target.id}`,
+      color: "#c9d1d9",
+      sub: null,
+    };
   }
 
   // Clamp the tooltip vertically once its real (post-render) height is
@@ -170,9 +277,9 @@
     tabindex={item ? 0 : -1}
     aria-label={item ? item.name : label}
     title={item ? undefined : label}
-    onmouseenter={item ? (e: MouseEvent) => showTooltip(e, item) : undefined}
+    onmouseenter={item ? (e: MouseEvent) => showTooltip(e, { source: "item", item }) : undefined}
     onmouseleave={item ? hideTooltip : undefined}
-    onfocus={item ? (e: FocusEvent) => showTooltip(e, item) : undefined}
+    onfocus={item ? (e: FocusEvent) => showTooltip(e, { source: "item", item }) : undefined}
     onblur={item ? hideTooltip : undefined}
   >
     {#if item}
@@ -184,6 +291,48 @@
         </span>
       {/if}
     {/if}
+  </div>
+{/snippet}
+
+{#snippet talentTile(spellId: number)}
+  {@const info = entityInfo("spell", spellId)}
+  <div
+    class="tile"
+    class:filled={!!info?.icon_b64}
+    role="button"
+    tabindex="0"
+    aria-label={info?.wowhead?.name ?? `Spell #${spellId}`}
+    title={info?.icon_b64 ? undefined : String(spellId)}
+    onmouseenter={(e: MouseEvent) => showTooltip(e, { source: "spell", id: spellId })}
+    onmouseleave={hideTooltip}
+    onfocus={(e: FocusEvent) => showTooltip(e, { source: "spell", id: spellId })}
+    onblur={hideTooltip}
+  >
+    {#if info?.icon_b64}
+      <img class="tile-icon" src="data:image/jpeg;base64,{info.icon_b64}" alt={info.wowhead?.name ?? String(spellId)} />
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet achievementRow(entry: AchievementEntry)}
+  {@const info = entityInfo("achievement", entry.id)}
+  <div
+    class="arow"
+    role="button"
+    tabindex="0"
+    aria-label={info?.wowhead?.name ?? `Achievement #${entry.id}`}
+    onmouseenter={(e: MouseEvent) => showTooltip(e, { source: "achievement", id: entry.id })}
+    onmouseleave={hideTooltip}
+    onfocus={(e: FocusEvent) => showTooltip(e, { source: "achievement", id: entry.id })}
+    onblur={hideTooltip}
+  >
+    <div class="arow-icon" class:filled={!!info?.icon_b64}>
+      {#if info?.icon_b64}
+        <img src="data:image/jpeg;base64,{info.icon_b64}" alt="" />
+      {/if}
+    </div>
+    <span class="arow-name">{info?.wowhead?.name ?? `#${entry.id}`}</span>
+    <span class="arow-date muted">{formatEpochDate(entry.date)}</span>
   </div>
 {/snippet}
 
@@ -267,23 +416,64 @@
         <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
       </div>
     </div>
+
+    <div class="progress-row">
+      <div class="card">
+        <div class="card-head">
+          <h3>Talents</h3>
+          {#if progress && progress.talents.groups_count > 1}
+            <span class="badge">Dual spec</span>
+          {/if}
+        </div>
+        {#if progressError}
+          <p class="muted">{progressError}</p>
+        {:else if loadingProgress && !progress}
+          <p class="muted">Loading…</p>
+        {:else if progress}
+          <p class="muted">{progress.talents.spells.length} talents (active spec)</p>
+          <div class="tile-grid">
+            {#each progress.talents.spells as spellId (spellId)}
+              {@render talentTile(spellId)}
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Achievements</h3>
+        </div>
+        {#if progressError}
+          <p class="muted">{progressError}</p>
+        {:else if loadingProgress && !progress}
+          <p class="muted">Loading…</p>
+        {:else if progress}
+          <p class="muted">{progress.achievements.total} earned</p>
+          <div class="arow-list">
+            {#each progress.achievements.recent.slice(0, 10) as entry (entry.id)}
+              {@render achievementRow(entry)}
+            {/each}
+          </div>
+        {/if}
+      </div>
+    </div>
   {/if}
 </section>
 
 {#if hovered}
-  {@const info = itemInfo(hovered.item.entry)}
+  {@const view = resolveHover(hovered.target)}
   <div
     class="wow-tooltip"
     bind:this={tooltipEl}
     style="top: {hovered.top}px; {hovered.left !== null ? `left: ${hovered.left}px;` : `right: ${hovered.right}px;`}"
   >
-    {#if info?.source === "wowhead" && info.wowhead}
-      {@html sanitizeTooltipHtml(info.wowhead.tooltip)}
-    {:else if info?.source === "local" && info.tooltip_html}
-      {@html sanitizeTooltipHtml(info.tooltip_html)}
+    {#if view.wowhead}
+      {@html sanitizeTooltipHtml(view.wowhead.tooltip)}
+    {:else if view.localHtml}
+      {@html sanitizeTooltipHtml(view.localHtml)}
     {:else}
-      <b style="color: {QUALITY_COLORS[hovered.item.quality] ?? '#c9d1d9'}">{hovered.item.name}</b>
-      <div class="whtt-extra">ilvl {hovered.item.item_level}</div>
+      <b style="color: {view.color}">{view.label}</b>
+      {#if view.sub}<div class="whtt-extra">{view.sub}</div>{/if}
     {/if}
   </div>
 {/if}
@@ -380,4 +570,50 @@
   .wow-tooltip :global(th) { padding: 0; text-align: left; }
   .wow-tooltip :global(th) { text-align: right; color: #9d9d9d; font-weight: normal; }
   .wow-tooltip :global(.whtt-extra) { color: #9d9d9d; }
+
+  /* Talents/Achievements cards, side by side beneath the model+paperdoll
+     row; wraps to stacked on narrow windows like .doll-row. */
+  .progress-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .progress-row .card { flex: 1 1 320px; min-width: 280px; }
+  .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .card-head h3 { margin: 0; font-size: 14px; color: #f0f6fc; }
+  .badge {
+    font-size: 11px;
+    color: #d4af37;
+    border: 1px solid #d4af37;
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  /* Talent tiles: same visual language as paperdoll slots (dashed border
+     placeholder / solid once an icon lands) but smaller, and wrapping
+     instead of a fixed grid since spell counts vary per class/spec. */
+  .tile-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tile {
+    box-sizing: border-box;
+    width: 28px;
+    height: 28px;
+    background: #0d1117;
+    border: 1px dashed #30363d;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .tile.filled { border-style: solid; }
+  .tile-icon { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+
+  .arow-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .arow { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .arow-icon {
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    background: #0d1117;
+    border: 1px dashed #30363d;
+    border-radius: 4px;
+  }
+  .arow-icon.filled { border-style: solid; }
+  .arow-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+  .arow-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .arow-date { flex-shrink: 0; text-align: right; }
 </style>
