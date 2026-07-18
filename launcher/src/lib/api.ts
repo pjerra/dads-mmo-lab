@@ -48,6 +48,7 @@ export interface CharacterSummary {
 export interface Account {
   id: number;
   username: string;
+  gm_level: number;
   characters: CharacterSummary[];
 }
 export interface ServerInfo {
@@ -152,6 +153,15 @@ export type RawFileName =
 export async function wowAccounts(): Promise<Account[]> {
   const data = await invoke<{ accounts: Account[] }>("wow_accounts");
   return data.accounts;
+}
+export async function wowAccountCreate(user: string, pass: string): Promise<{ created: boolean; user: string }> {
+  return await invoke("wow_account_create", { user, pass });
+}
+export async function wowAccountSetPassword(user: string, pass: string): Promise<{ password_set: boolean; user: string }> {
+  return await invoke("wow_account_set_password", { user, pass });
+}
+export async function wowAccountSetGm(user: string, level: number): Promise<{ gm_set: boolean; user: string; level: number }> {
+  return await invoke("wow_account_set_gm", { user, level });
 }
 export async function wowServerInfo(): Promise<ServerInfo> {
   return await invoke("wow_server_info");

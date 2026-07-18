@@ -131,6 +131,45 @@ async fn wow_accounts(state: State<'_, AppState>) -> Result<serde_json::Value, C
 }
 
 #[tauri::command]
+async fn wow_account_create(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "account".into(), "create".into(), "--user".into(), user, "--pass".into(), pass],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_account_set_password(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "account".into(), "set-password".into(), "--user".into(), user, "--pass".into(), pass],
+    )
+    .await
+}
+
+#[tauri::command]
+async fn wow_account_set_gm(
+    user: String,
+    level: u8,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "account".into(), "set-gm".into(), "--user".into(), user, "--level".into(), level.to_string()],
+    )
+    .await
+}
+
+#[tauri::command]
 async fn wow_server_info(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "server-info".into()]).await
 }
@@ -758,6 +797,9 @@ pub fn run() {
             games_stop,
             games_restart,
             wow_accounts,
+            wow_account_create,
+            wow_account_set_password,
+            wow_account_set_gm,
             wow_server_info,
             wow_server_detail,
             wow_console_tail,
