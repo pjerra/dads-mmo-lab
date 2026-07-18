@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowBridgeSetup,
+    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowGmAtLogin, wowBridgeSetup,
     type OnlineChar,
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
@@ -18,7 +18,15 @@
   let level = $state(80);
   let gold = $state(1000);
   let customEntry = $state(990000);
-  let confirming: "level" | "gold" | null = $state(null);
+  let confirming: "level" | "gold" | "atlogin" | null = $state(null);
+
+  const AT_LOGIN_FLAGS: { value: "rename" | "customize" | "changerace" | "changefaction"; label: string }[] = [
+    { value: "rename", label: "Rename" },
+    { value: "customize", label: "Customize appearance" },
+    { value: "changerace", label: "Change race" },
+    { value: "changefaction", label: "Change faction" },
+  ];
+  let atLoginFlag: "rename" | "customize" | "changerace" | "changefaction" = $state("rename");
 
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
@@ -69,6 +77,13 @@
     confirming = null;
     const p = charName; const g = gold;
     act(() => wowGmGold(p, g), `${p} now has ${g} gold.`);
+  }
+  function applyAtLogin() {
+    if (confirming !== "atlogin") { confirming = "atlogin"; return; }
+    confirming = null;
+    const p = charName; const f = atLoginFlag;
+    const label = AT_LOGIN_FLAGS.find((a) => a.value === f)?.label ?? f;
+    act(() => wowGmAtLogin(p, f), `${label} will apply next time ${p} logs in.`);
   }
 
   async function summon(entry: number) {
@@ -147,6 +162,17 @@
     <span class="muted">Sets the total (not adds). Max 214,748 gold.</span>
   </div>
 
+  <div class="card row">
+    <strong>At next login</strong>
+    <select bind:value={atLoginFlag} onchange={() => (confirming = null)} disabled={busy}>
+      {#each AT_LOGIN_FLAGS as f (f.value)}<option value={f.value}>{f.label}</option>{/each}
+    </select>
+    <button onclick={applyAtLogin} disabled={!charName || busy}>
+      {confirming === "atlogin" ? "Applies at that character's next login. Continue?" : "Apply"}
+    </button>
+    <span class="muted">Takes effect the next time this character logs in. Works offline.</span>
+  </div>
+
   <div class="card">
     <div class="row">
       <strong>Summon an NPC</strong>
@@ -188,6 +214,7 @@
   .badge.on { color: #3fb950; border-color: #3fb950; }
   .badge.off { color: #8b949e; }
   input { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; width: 110px; }
+  select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }

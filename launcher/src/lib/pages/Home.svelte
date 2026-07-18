@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowServerDetail, gamesStatus, gamesStart, gamesStop, type ServerDetail } from "$lib/api";
+  import { wowServerDetail, gamesStatus, gamesStart, gamesStop, gamesRestart, type ServerDetail } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
 
@@ -45,12 +45,12 @@
   }
   onMount(refresh);
 
-  async function act(action: "start" | "stop") {
+  async function act(action: "start" | "stop" | "restart") {
     busy = true;
     showTerm = true;
     term = initialTermState();
     try {
-      const run = action === "start" ? gamesStart : gamesStop;
+      const run = action === "start" ? gamesStart : action === "stop" ? gamesStop : gamesRestart;
       await run(WOW_ID, (e) => {
         term = applyEvent(term, e);
       });
@@ -129,6 +129,7 @@
         <div>
           {#if containerState === "running"}
             <button disabled={busy} onclick={() => act("stop")}>Stop</button>
+            <button disabled={busy} onclick={() => act("restart")}>Restart</button>
           {:else}
             <button class="primary" disabled={busy} onclick={() => act("start")}>Start</button>
           {/if}

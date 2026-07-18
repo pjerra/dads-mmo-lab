@@ -3,6 +3,7 @@
   import {
     wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyRelogin, wowPartySetup,
     wowPartyBotcmd, wowPartyPresetSave, wowPartyPresetList, wowPartyPresetDelete, wowPartyPresetLoad,
+    wowPartyPresetShow, wowPartyPresetImport, wowGmLevel,
     type OnlineChar, type PartyMember, type PresetInfo,
   } from "$lib/api";
   import { className } from "$lib/wow";
@@ -28,6 +29,15 @@
   let presetName = $state("");
   let loadingPreset = $state(false);
   let confirmingPreset: { kind: "load" | "delete"; name: string } | null = $state(null);
+
+  let botLevel: Record<string, string> = $state({});
+
+  let exportName: string | null = $state(null);
+  let exportText = $state("");
+
+  let importName = $state("");
+  let importClasses = $state("");
+  let importOverwrite = $state(false);
 
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -85,6 +95,22 @@
     try {
       await wowPartyBotcmd(p, bot, action);
       note = `Told ${bot} to ${BOTCMD_PHRASE[action]} — give it a moment.`;
+    } catch (e) { showErr(e); } finally { busy = false; }
+  }
+  function levelValid(v: string | undefined): boolean {
+    const t = (v ?? "").trim();
+    if (!t) return false;
+    const n = Number(t);
+    return Number.isInteger(n) && n >= 1 && n <= 255;
+  }
+  async function setBotLevel(bot: string) {
+    const p = player;
+    const n = Number(botLevel[bot]);
+    busy = true; error = null; note = null;
+    try {
+      await wowGmLevel(bot, n);
+      note = `${bot} is now level ${n}.`;
+      members = await wowPartyList(p);
     } catch (e) { showErr(e); } finally { busy = false; }
   }
 
@@ -145,6 +171,43 @@
     busy = true; error = null;
     try { await wowPartyPresetDelete(name); await refreshPresets(); }
     catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  async function toggleExport(name: string) {
+    if (exportName === name) { exportName = null; return; }
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowPartyPresetShow(name);
+      exportName = name;
+      exportText = r.classes.join(",");
+    } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  // On a fresh EXISTS, arm a second confirm click instead of surfacing the raw
+  // error -- mirrors the two-step confirm pattern used for load/delete above.
+  // Any edit to name/classes disarms it (inputs' oninput), so a stale confirm
+  // can't silently overwrite a preset the user has since renamed.
+  async function importPreset() {
+    const name = importName.trim();
+    const classes = importClasses.trim();
+    if (!name || !classes) return;
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowPartyPresetImport(name, classes, importOverwrite);
+      note = `Imported preset "${r.name}" (${r.classes.length} bots).`;
+      importOverwrite = false;
+      importName = "";
+      importClasses = "";
+      await refreshPresets();
+    } catch (e) {
+      const err = e as { code?: string; message?: string; hint?: string };
+      if (err.code === "EXISTS" && !importOverwrite) {
+        importOverwrite = true;
+      } else {
+        importOverwrite = false;
+        showErr(e);
+      }
+    } finally { busy = false; }
   }
   async function enableMyParty() {
     if (!confirmSetup) { confirmSetup = true; return; }
@@ -207,7 +270,13 @@
                   <button onclick={() => resummon(m.name)} disabled={busy || loadingPreset}>Re-summon</button>
                   <button onclick={() => botcmd(m.name, "gear")} disabled={busy || loadingPreset}>Gear up</button>
                   <button onclick={() => botcmd(m.name, "talents")} disabled={busy || loadingPreset}>Fix talents</button>
-                  <button onclick={() => botcmd(m.name, "maintain")} disabled={busy || loadingPreset}>Maintain</button>{:else}<span class="muted">you</span>{/if}</td>
+                  <button onclick={() => botcmd(m.name, "maintain")} disabled={busy || loadingPreset}>Maintain</button>
+                  <input type="number" min="1" max="255" class="lvl-input" placeholder="lvl"
+                    value={botLevel[m.name] ?? ""}
+                    oninput={(e) => (botLevel[m.name] = e.currentTarget.value)}
+                    disabled={busy || loadingPreset} />
+                  <button onclick={() => setBotLevel(m.name)} disabled={busy || loadingPreset || !levelValid(botLevel[m.name])}>Set level</button>
+                  {:else}<span class="muted">you</span>{/if}</td>
             </tr>
           {/each}
         </tbody>
@@ -224,6 +293,16 @@
           Save current party
         </button>
       </div>
+      <div class="prow">
+        <input placeholder="import as…" maxlength="32" bind:value={importName}
+          oninput={() => (importOverwrite = false)} disabled={busy || setting || loadingPreset} />
+        <input placeholder="warrior,mage,priest,…" bind:value={importClasses}
+          oninput={() => (importOverwrite = false)} disabled={busy || setting || loadingPreset} />
+        <button onclick={importPreset}
+          disabled={!importName.trim() || !importClasses.trim() || busy || setting || loadingPreset}>
+          {importOverwrite ? `Preset "${importName.trim()}" exists — overwrite?` : "Import"}
+        </button>
+      </div>
       {#if presets.length === 0}
         <p class="muted">No presets saved yet — build a party and save it.</p>
       {:else}
@@ -236,7 +315,15 @@
             <button onclick={() => deletePreset(pr.name)} disabled={busy || setting || loadingPreset}>
               {confirmingPreset?.kind === "delete" && confirmingPreset?.name === pr.name ? `Delete "${pr.name}" — sure?` : "Delete"}
             </button>
+            <button onclick={() => toggleExport(pr.name)} disabled={busy || setting || loadingPreset}>
+              {exportName === pr.name ? "Hide" : "Export"}
+            </button>
           </div>
+          {#if exportName === pr.name}
+            <div class="prow">
+              <textarea class="export-box" rows="2" readonly value={exportText}></textarea>
+            </div>
+          {/if}
         {/each}
       {/if}
     </div>
@@ -253,6 +340,9 @@
   .addrow { display: flex; flex-wrap: wrap; gap: 8px; }
   .prow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 4px 0; }
   .cls { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+  input, textarea { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
+  input.lvl-input { width: 52px; }
+  textarea.export-box { width: 100%; box-sizing: border-box; font-family: Consolas, monospace; font-size: 13px; resize: vertical; }
   table { border-collapse: collapse; }
   td { padding: 4px 12px 4px 0; font-size: 14px; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 5px 12px; cursor: pointer; }

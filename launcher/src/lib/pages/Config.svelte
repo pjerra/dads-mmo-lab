@@ -5,6 +5,7 @@
     wowConfigSet,
     wowConfigRawRead,
     wowConfigRawWrite,
+    wowConsoleSend,
     gamesRestart,
     type ConfigSetting,
     type RawFileName,
@@ -41,6 +42,8 @@
   let term: TermState = $state(initialTermState());
   let showTerm = $state(false);
 
+  let aleNote: string | null = $state(null);
+
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
   const dirty = $derived(dirtyKeys(settings, edits));
   const fileReadonly = $derived(READONLY_FILES.includes(file));
@@ -60,6 +63,7 @@
   async function saveSettings(): Promise<boolean> {
     saving = true;
     error = null;
+    aleNote = null;
     try {
       const toSave = dirty;
       for (const key of toSave) {
@@ -79,6 +83,7 @@
 
   async function loadFile() {
     error = null;
+    aleNote = null;
     fileLoaded = false;
     lastBackup = null;
     loadingFile = true;
@@ -102,6 +107,7 @@
   async function saveFile(): Promise<boolean> {
     saving = true;
     error = null;
+    aleNote = null;
     try {
       const targetFile = file;
       const content = fileContent;
@@ -118,12 +124,28 @@
     }
   }
 
+  async function reloadAle() {
+    saving = true;
+    error = null;
+    aleNote = null;
+    try {
+      const r = await wowConsoleSend("reload ale");
+      aleNote = r.result.trim();
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      saving = false;
+    }
+  }
+
   let confirmingRestart = $state(false);
   // Switching between the Settings and Modules sidebar entries changes `tab`
   // without remounting -- an armed "sure?" confirmation must not survive that.
   $effect(() => {
     void tab;
     confirmingRestart = false;
+    aleNote = null;
   });
   async function saveAndRestart(saveFn: () => Promise<boolean>) {
     if (!confirmingRestart) {
@@ -160,6 +182,7 @@
     fileContent = "";
     lastBackup = null;
     confirmingRestart = false;
+    aleNote = null;
   }
 </script>
 
@@ -252,6 +275,11 @@
       </select>
       <button onclick={loadFile} disabled={saving || restartState.restarting || loadingFile}>Open</button>
     </div>
+    <p class="muted">
+      Edited mod_ale.conf or its Lua scripts on disk?
+      <button onclick={reloadAle} disabled={saving || restartState.restarting || loadingFile}>Reload ALE scripts</button>
+    </p>
+    {#if aleNote}<p class="muted">{aleNote}</p>{/if}
     {#if fileLoaded}
       <textarea
         rows="18"

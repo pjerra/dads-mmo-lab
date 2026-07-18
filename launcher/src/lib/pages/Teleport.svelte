@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowTeleportList, wowTeleport, type TeleLocation } from "$lib/api";
+  import { wowTeleportList, wowTeleport, wowTeleportCoords, type TeleLocation } from "$lib/api";
   import CharPicker from "$lib/CharPicker.svelte";
 
   let search = $state("");
@@ -12,6 +12,29 @@
   let confirming = $state(false);
   let teleporting = $state(false);
   let doneMsg: string | null = $state(null);
+
+  // Client mirrors of the CLI's teleport-coords validators (cli/src/90-main.sh
+  // _valid_coord / the inline map check) so a bad value is caught before the
+  // round trip instead of surfacing as a raw BAD_ARG.
+  const MAP_RE = /^[0-9]{1,3}$/;
+  const COORD_RE = /^-?[0-9]{1,5}(\.[0-9]+)?$/;
+  function validCoord(v: string): boolean {
+    return COORD_RE.test(v) && Math.abs(Number(v)) <= 20000;
+  }
+
+  let showCoords = $state(false);
+  let coordMap = $state("");
+  let coordX = $state("");
+  let coordY = $state("");
+  let coordZ = $state("");
+  const mapValid = $derived(MAP_RE.test(coordMap));
+  const coordsValid = $derived(mapValid && validCoord(coordX) && validCoord(coordY) && validCoord(coordZ));
+
+  function toggleCoords() {
+    showCoords = !showCoords;
+    doneMsg = null;
+    error = null;
+  }
 
   async function load() {
     loading = true;
@@ -54,6 +77,22 @@
       confirming = false;
     }
   }
+
+  async function goCoords() {
+    const who = charName;
+    if (!who || !coordsValid) return;
+    teleporting = true;
+    error = null;
+    try {
+      const r = await wowTeleportCoords(who, Number(coordMap), Number(coordX), Number(coordY), Number(coordZ));
+      doneMsg = `${r.char} sent to map ${r.map} at (${r.x}, ${r.y}, ${r.z}).`;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      teleporting = false;
+    }
+  }
 </script>
 
 <section class="content">
@@ -73,7 +112,23 @@
         {teleporting ? "Teleporting…" : confirming ? `Really send ${charName} to ${picked}?` : "Teleport"}
       </button>
     {/if}
+    <button onclick={toggleCoords} disabled={teleporting}>Coordinates…</button>
   </div>
+
+  {#if showCoords}
+    <div class="card coords-card">
+      <div class="row">
+        <label class="field">Map<input class="coord map" bind:value={coordMap} disabled={teleporting} /></label>
+        <label class="field">X<input class="coord" bind:value={coordX} disabled={teleporting} /></label>
+        <label class="field">Y<input class="coord" bind:value={coordY} disabled={teleporting} /></label>
+        <label class="field">Z<input class="coord" bind:value={coordZ} disabled={teleporting} /></label>
+        <button class="primary" onclick={goCoords} disabled={!charName || !coordsValid || teleporting}>
+          {teleporting ? "Teleporting…" : "Teleport"}
+        </button>
+      </div>
+      <p class="muted">Character must be logged out.</p>
+    </div>
+  {/if}
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if doneMsg}<div class="ok-card"><p>{doneMsg}</p></div>{/if}
@@ -95,6 +150,11 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   input { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; min-width: 240px; }
+  .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+  .coords-card .row { align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #8b949e; }
+  .field input.coord { min-width: 90px; width: 90px; }
+  .field input.coord.map { width: 60px; }
   .loclist { display: flex; flex-wrap: wrap; gap: 6px; }
   .loc { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 5px 10px; color: #c9d1d9; cursor: pointer; font-size: 13px; }
   .loc.sel { border-color: #58a6ff; color: #f0f6fc; }
