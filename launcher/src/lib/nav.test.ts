@@ -16,6 +16,7 @@ describe("NAV", () => {
       "gmtools",
       "items",
       "playerbots",
+      "commands",
       "settings",
       "modules",
       "backups",

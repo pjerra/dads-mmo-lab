@@ -74,6 +74,12 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Item search | Search "hearthstone" → results with quality colors. |
 | ⬜ | [mail-item] Mail items | Mail an item to a char → arrives in-game mailbox. |
 
+## 7b. Commands page (Round M)
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | Commands reference | With mods installed (e.g. transmog, ahbot) → Commands page lists a card per installed mod with its command reference. With none installed → empty state "No installed mods with commands yet — install mods on the Modules page." |
+
 ## 8. Playerbots / My Party (rounds 4 + I)
 
 | Status | Test | Steps / expected |

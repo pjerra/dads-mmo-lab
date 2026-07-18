@@ -11,6 +11,7 @@
   import GMTools from "$lib/pages/GMTools.svelte";
   import Config from "$lib/pages/Config.svelte";
   import Playerbots from "$lib/pages/Playerbots.svelte";
+  import Commands from "$lib/pages/Commands.svelte";
   import Backups from "$lib/pages/Backups.svelte";
 
   let page: PageId = $state(DEFAULT_PAGE);
@@ -37,6 +38,7 @@
   {#if page === "gmtools"}<GMTools />{/if}
   {#if page === "items"}<Items />{/if}
   {#if page === "playerbots"}<Playerbots />{/if}
+  {#if page === "commands"}<Commands />{/if}
   {#if page === "settings" || page === "modules"}
     <Config tab={page === "settings" ? "settings" : "files"} />
   {/if}
