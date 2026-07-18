@@ -67,3 +67,37 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.achievements.recent | length')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.talents.spells | length')" = "0" ]
 }
+
+@test "achievements: full earned list with dates" {
+  printf '7\n' > "$FIXTURE/r1"                       # guid
+  printf '6\t1690000000\n1234\t1700000000\n' > "$FIXTURE/r2"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/r1 $FIXTURE/r2"
+  run bash "$DML" wow achievements --char Testchar --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.earned | length')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.earned[0].id')" = "6" ]
+  [ "$(echo "$output" | jq -r '.data.earned[1].date')" = "1700000000" ]
+}
+
+@test "achievements: character with none earned -> empty array" {
+  printf '7\n' > "$FIXTURE/r1"
+  printf '' > "$FIXTURE/r2"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/r1 $FIXTURE/r2"
+  run bash "$DML" wow achievements --char Testchar --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.earned | length')" = "0" ]
+}
+
+@test "achievements: unknown character -> NOT_FOUND" {
+  printf '' > "$FIXTURE/r1"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/r1"
+  run bash "$DML" wow achievements --char Nobody --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'NOT_FOUND'
+}
+
+@test "achievements: invalid name -> BAD_ARG before any SQL" {
+  run bash "$DML" wow achievements --char 'x;drop' --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'BAD_ARG'
+}

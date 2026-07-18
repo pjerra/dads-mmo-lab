@@ -421,6 +421,12 @@ export interface CharProgress {
 export async function wowCharProgress(charName: string): Promise<CharProgress> {
   return await invoke("wow_char_progress", { charName });
 }
+export interface EarnedAchievements {
+  earned: AchievementEntry[];
+}
+export async function wowAchievements(charName: string): Promise<EarnedAchievements> {
+  return await invoke("wow_achievements", { charName });
+}
 export interface EntityInfo {
   id: number;
   source: "wowhead" | "unavailable";

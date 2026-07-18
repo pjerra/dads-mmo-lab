@@ -1780,6 +1780,28 @@ case "$cmd" in
         tspells+=']'
         json_ok "{\"achievements\":{\"total\":$atotal,\"recent\":$arecent},\"talents\":{\"groups_count\":$gcount,\"active_group\":$agroup,\"spells\":$tspells}}"
         ;;
+      achievements)
+        # Full earned list (id + epoch date) for the achievements browser --
+        # char-progress keeps its recent-10 summary; this is the complete
+        # set (WotLK caps out around 1300 rows, small enough for one JSON).
+        char=""
+        [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
+        _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+          || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
+        [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
+        aearned='['; first=1
+        while IFS=$'\t' read -r aid adate; do
+          [[ -z "$aid" ]] && continue
+          [[ "$aid" =~ ^[0-9]+$ ]] || continue
+          [[ "$adate" =~ ^[0-9]+$ ]] || adate=0
+          [[ $first -eq 0 ]] && aearned+=','
+          aearned+="{\"id\":$aid,\"date\":$adate}"
+          first=0
+        done < <(db_chars_query "SELECT achievement, date FROM character_achievement WHERE guid=$cguid ORDER BY achievement;" || true)
+        aearned+=']'
+        json_ok "{\"earned\":$aearned}"
+        ;;
       item-info)
         entries=""
         while [[ $# -gt 0 ]]; do

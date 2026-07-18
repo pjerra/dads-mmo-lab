@@ -454,6 +454,14 @@ async fn wow_char_progress(
 }
 
 #[tauri::command]
+async fn wow_achievements(
+    char_name: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "achievements".into(), "--char".into(), char_name]).await
+}
+
+#[tauri::command]
 async fn wow_entity_info(
     kind: String,
     ids: Vec<u32>,
@@ -979,6 +987,7 @@ pub fn run() {
             wow_paperdoll,
             wow_item_info,
             wow_char_progress,
+            wow_achievements,
             wow_entity_info,
             wow_config_list,
             wow_config_set,
