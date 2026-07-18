@@ -50,15 +50,31 @@ _wait_db_healthy() {
   return 1
 }
 
+# `docker logs | grep -q` is unusable under `set -o pipefail`: grep's early
+# exit SIGPIPEs docker logs (exit 141) whenever the match isn't near the end
+# of the log, failing the pipeline even though the marker exists. Capture a
+# count instead (`|| true` keeps the substitution's stdout). Logs also
+# survive `docker stop`/`start`, so scope to the container's StartedAt or a
+# previous boot's marker would satisfy the grep immediately.
+_log_marker_seen() {
+  local container="$1" pattern="$2" started hits
+  started="$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null || true)"
+  if [[ -n "$started" ]]; then
+    hits="$(docker logs --since "$started" "$container" 2>&1 | grep -cm1 "$pattern" || true)"
+  else
+    hits="$(docker logs "$container" 2>&1 | grep -cm1 "$pattern" || true)"
+  fi
+  [[ "${hits:-0}" -gt 0 ]]
+}
+
 _wait_ready() {
   local i
   for i in $(seq 1 240); do
     if docker ps --format '{{.Names}}' | grep -qx "$AUTH_CONTAINER" \
        && docker ps --format '{{.Names}}' | grep -qx "$WORLD_CONTAINER"; then
-      if docker logs "$AUTH_CONTAINER" 2>&1 | grep -q "${REALM_ADDRESS}:8085"; then
-        if docker logs "$WORLD_CONTAINER" 2>&1 | grep -q 'ready\.\.\.'; then
-          return 0
-        fi
+      if _log_marker_seen "$AUTH_CONTAINER" "${REALM_ADDRESS}:8085" \
+         && _log_marker_seen "$WORLD_CONTAINER" 'ready\.\.\.'; then
+        return 0
       fi
     fi
     sleep 2
