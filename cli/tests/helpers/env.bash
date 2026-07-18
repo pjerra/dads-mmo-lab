@@ -108,16 +108,33 @@ use_curl_stub() {
   mkdir -p "$STUB_BIN"
   cat > "$STUB_BIN/curl" <<'EOS'
 #!/usr/bin/env bash
-# Canned SOAP responder. Ignores all args; emits the file in DML_STUB_SOAP_RESPONSE
-# to stdout and exits with DML_STUB_CURL_EXIT (default 0). Real `curl -w
-# '\n%{http_code}'` (what soap_exec actually passes) ALWAYS appends a trailing
-# "\n<code>" line -- so this stub always appends one too, defaulting to 200
-# when DML_STUB_HTTP is unset, and honoring an explicit DML_STUB_HTTP value
-# when the caller wants to simulate a non-200 (e.g. 401).
-#
-# soap_exec pipes the request body into curl via `--data-binary @-` (stdin).
-# When DML_STUB_CAPTURE is set, save that stdin verbatim so tests can assert
-# on the exact XML/command text the server would have received.
+# Canned responder. Legacy mode (SOAP): emit DML_STUB_SOAP_RESPONSE then
+# "\n<code>". -o mode (item-info): write the body to the -o target, print a
+# bare code. DML_STUB_CURL_SEQ = space-sep response files consumed one per
+# call (sticky last; state file in DML_STUB_CURL_SEQ_STATE);
+# DML_STUB_HTTP_SEQ = matching space-sep http codes (sticky last).
+# DML_STUB_CURL_LOG captures argv per call.
+outfile=""
+args=("$@")
+for i in "${!args[@]}"; do
+  [[ "${args[$i]}" == "-o" ]] && outfile="${args[$((i+1))]}"
+done
+resp="${DML_STUB_SOAP_RESPONSE:-}"
+code="${DML_STUB_HTTP:-200}"
+if [[ -n "${DML_STUB_CURL_SEQ:-}" ]]; then
+  st="${DML_STUB_CURL_SEQ_STATE:-/tmp/dml_curl_seq.$$}"
+  i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+  files=($DML_STUB_CURL_SEQ)
+  idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
+  resp="${files[$idx]}"
+  if [[ -n "${DML_STUB_HTTP_SEQ:-}" ]]; then
+    codes=($DML_STUB_HTTP_SEQ)
+    cidx=$i; (( cidx >= ${#codes[@]} )) && cidx=$(( ${#codes[@]} - 1 ))
+    code="${codes[$cidx]}"
+  fi
+  echo $(( i + 1 )) > "$st"
+fi
+[[ -n "${DML_STUB_CURL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_CURL_LOG"
 if [[ -n "${DML_STUB_CAPTURE_APPEND:-}" ]]; then
   cat >> "$DML_STUB_CAPTURE_APPEND"
 elif [[ -n "${DML_STUB_CAPTURE:-}" ]]; then
@@ -125,8 +142,13 @@ elif [[ -n "${DML_STUB_CAPTURE:-}" ]]; then
 else
   cat >/dev/null
 fi
-[[ -n "${DML_STUB_SOAP_RESPONSE:-}" ]] && cat "$DML_STUB_SOAP_RESPONSE"
-printf '\n%s' "${DML_STUB_HTTP:-200}"
+if [[ -n "$outfile" ]]; then
+  if [[ -n "$resp" && -f "$resp" ]]; then cat "$resp" > "$outfile"; else : > "$outfile"; fi
+  printf '%s' "$code"
+else
+  [[ -n "$resp" && -f "$resp" ]] && cat "$resp"
+  printf '\n%s' "$code"
+fi
 exit "${DML_STUB_CURL_EXIT:-0}"
 EOS
   chmod +x "$STUB_BIN/curl"

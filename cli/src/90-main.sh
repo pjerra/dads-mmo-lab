@@ -1504,6 +1504,35 @@ case "$cmd" in
         # would need a SOAP .pinfo call (future refinement, not built here).
         json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
         ;;
+      item-info)
+        entries=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --entries) _need_flag_val "$1" $#; entries="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow item-info --entries 1,2,3 --json"; exit 1 ;;
+          esac
+        done
+        if [[ ! "$entries" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+          json_err BAD_ARG "--entries must be comma-separated item ids" ""; exit 1
+        fi
+        IFS=',' read -r -a earr <<< "$entries"
+        if (( ${#earr[@]} > 25 )); then
+          json_err BAD_ARG "--entries max 25 ids per call" ""; exit 1
+        fi
+        mkdir -p "$(_iteminfo_cache)/tooltips" "$(_iteminfo_cache)/icons"
+        declare -A _ii_seen=()
+        iout='['; first=1
+        for ie in "${earr[@]}"; do
+          ie=$((10#$ie))
+          [[ -n "${_ii_seen[$ie]:-}" ]] && continue
+          _ii_seen["$ie"]=1
+          iobj="$(_iteminfo_one "$ie")"
+          [[ $first -eq 0 ]] && iout+=','
+          iout+="$iobj"; first=0
+        done
+        iout+=']'
+        json_ok "{\"items\":$iout}"
+        ;;
       config)
         csub="${1:-}"; shift || true
         case "$csub" in
