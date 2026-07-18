@@ -145,3 +145,4 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 - First view of a high-talent char fills talent icons in batches (~10-15s per 25) — not a hang.
 - Full backups share the keep-10 pool; restoring an older full backup while a module is installed re-applies that module's SQL at next start.
 - Cold Start after a full Stop: the world can crash-retry for ~2 min while MySQL warms up (Docker self-heals — normal). Rarely, the world then wedges mid-load (log frozen + 0% CPU for 3+ min): that's a hang, not slow loading — click Restart to clear it (observed once, 2026-07-18).
+- A cold Start (full Stop first) also re-runs `ac-db-import`, which applies any pending AzerothCore database migrations — the schema can change under features that query it (this broke the character view once, 2026-07-19; fixed schema-adaptively). Restart never does this. If a DB-reading page errors right after a cold start, suspect a migration and report it.
