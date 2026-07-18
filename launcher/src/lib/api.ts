@@ -273,6 +273,26 @@ export async function wowTeleport(
 export async function wowPaperdoll(charName: string): Promise<PaperdollData> {
   return await invoke("wow_paperdoll", { charName });
 }
+export interface WowheadTooltip {
+  name: string;
+  quality: number;
+  icon: string;
+  tooltip: string;
+}
+export interface ItemInfo {
+  entry: number;
+  source: "wowhead" | "local" | "unavailable";
+  icon?: string | null;
+  icon_b64?: string | null;
+  wowhead?: WowheadTooltip;
+  name?: string;
+  quality?: number;
+  tooltip_html?: string;
+}
+export async function wowItemInfo(entries: number[]): Promise<ItemInfo[]> {
+  const d = await invoke<{ items: ItemInfo[] }>("wow_item_info", { entries });
+  return d.items;
+}
 export async function wowConfigList(): Promise<ConfigSetting[]> {
   const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_list");
   return data.settings;

@@ -329,6 +329,15 @@ async fn wow_paperdoll(
 }
 
 #[tauri::command]
+async fn wow_item_info(
+    entries: Vec<u32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let csv = entries.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(",");
+    run_json_cmd(state, vec!["wow".into(), "item-info".into(), "--entries".into(), csv]).await
+}
+
+#[tauri::command]
 async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "config".into(), "list".into()]).await
 }
@@ -723,6 +732,7 @@ pub fn run() {
             wow_teleport_list,
             wow_teleport,
             wow_paperdoll,
+            wow_item_info,
             wow_config_list,
             wow_config_set,
             wow_config_raw_read,
