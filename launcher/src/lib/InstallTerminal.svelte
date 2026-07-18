@@ -33,7 +33,11 @@
   // only follow new output if the user hadn't scrolled up to read back.
   function append(text: string) {
     const nearBottom = !box || box.scrollHeight - box.scrollTop - box.clientHeight < 40;
-    output += text.replace(ANSI_RE, "");
+    // Strip ANSI sequences, then collapse carriage-return progress redraws: per-chunk,
+    // keep only text after the last lone \r on each line (final redraw wins).
+    // Best-effort per chunk; redraws split across chunks may leave occasional stale lines.
+    text = text.replace(ANSI_RE, "").replace(/^.*\r(?!\n)/gm, "");
+    output += text;
     tick().then(() => {
       if (nearBottom && box) box.scrollTop = box.scrollHeight;
     });
