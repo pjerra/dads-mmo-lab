@@ -1,13 +1,17 @@
 # ---------------------------------------------------------------------------
 # Character backups (Lab-parity round 5): whole-server snapshots.
 # mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
-# THREE DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
+# FOUR DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
 # toggle's realmlist UPDATE (90-main.sh `lan`), teleport-coords'
 # characters.position_x/y/z/map/orientation UPDATE (offline characters only
 # -- 90-main.sh `teleport-coords` arm, via `_chars_write_stmt` in
-# 30-db.sh), and RESTORE below -- the project's one sanctioned write path
-# for whole CHARACTER-DB snapshots: only inside `backup restore`, only with
-# world+auth stopped, always behind an automatic pre-restore safety backup.
+# 30-db.sh), module repair's INSERT/DELETE on the `updates` tracking tables
+# ONLY -- never game tables (90-main.sh `module repair` arm, via the
+# generalized `_db_write_stmt` in 30-db.sh; see
+# docs/superpowers/specs/2026-07-18-module-repair-design.md), and RESTORE
+# below -- the project's one sanctioned write path for whole CHARACTER-DB
+# snapshots: only inside `backup restore`, only with world+auth stopped,
+# always behind an automatic pre-restore safety backup.
 # See docs/.../2026-07-17-backups-design.md.
 # ---------------------------------------------------------------------------
 

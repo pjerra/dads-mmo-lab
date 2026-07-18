@@ -551,3 +551,44 @@ _tweak_reverse() {
     ia="$(awk "BEGIN{printf \"%.6f\", 1/$a}")"
     _tweak_apply "$ih" "$id" "$ia"
 }
+
+# --- module repair (Round J): tracking diagnosis + updates-table mark/clear -
+# AzerothCore's db-import tracks every applied module SQL file per DB in
+# that DB's `updates` table (name + SHA1 + state). When tracking desyncs
+# from actual schema state, the next start fails ("Table X already exists")
+# or silently re-applies SQL. Ported from the manager's
+# discover_module_sql_files / show_module_tracking / compute_sql_hash /
+# mark_sql_applied (guides/wow-wotlk/wow-manage.sh 1633-1892) -- the SQL
+# semantics are mirrored exactly; the manager's interactive prompts/echo
+# output are replaced with JSON in the `module tracking`/`module repair`
+# arms (90-main.sh). This helper set never touches actual game tables.
+
+# Discover a module's top-level *.sql files for one DB (space-separated,
+# the manager's own format -- also matches --files' space-separated CLI
+# syntax). Checks data/sql/db-<short>/ first, falls back to sql/<short>/;
+# prints nothing if neither exists. NOT recursive -- subdirs are usually
+# versioned variants (manager comment, ported verbatim).
+_module_discover_sql_files() {
+    local sdir="$1" key="$2" db_short="$3" sql_dir
+    sql_dir="$sdir/modules/$key/data/sql/db-${db_short}"
+    [[ -d "$sql_dir" ]] || sql_dir="$sdir/modules/$key/sql/${db_short}"
+    [[ -d "$sql_dir" ]] || return 0
+    (cd "$sql_dir" && ls *.sql 2>/dev/null | tr '\n' ' ')
+    return 0
+}
+
+# Read-only dispatch to the matching acore_<db> query helper (30-db.sh) for
+# a "world|characters|auth" short name -- used by both `module tracking`
+# and `module repair`'s clear-mode COUNT check.
+_module_db_read() {
+    case "$1" in
+        world)      db_world_query "$2" ;;
+        characters) db_chars_query "$2" ;;
+        auth)       db_auth_query "$2" ;;
+    esac
+}
+
+# Filename validator for repair targets -- no slashes, path-injection-proof
+# (rejects ../evil.sql, x.sql;DROP, etc.). Exit status IS the signal (same
+# pattern as _valid_charname).
+_valid_module_sql_filename() { [[ "$1" =~ ^[A-Za-z0-9._-]+\.sql$ ]]; }

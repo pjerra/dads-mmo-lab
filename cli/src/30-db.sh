@@ -1,12 +1,15 @@
 # ---------------------------------------------------------------------------
 # MySQL access to the AzerothCore DBs via the ac-database container.
 # Search/dashboard queries here are read-only; most mutations go through
-# SOAP, never a direct write. THREE direct MySQL writes are sanctioned
+# SOAP, never a direct write. FOUR direct MySQL writes are sanctioned
 # project-wide (see 60-backup.sh header for the full list): the pre-existing
-# LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore, and (new)
+# LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore,
 # teleport-coords' characters.position_x/y/z/map/orientation UPDATE via
 # _chars_write_stmt below -- OFFLINE characters only, see the
-# `teleport-coords` arm in 90-main.sh.
+# `teleport-coords` arm in 90-main.sh -- and (new) module repair's
+# INSERT/DELETE on the `updates` tracking tables ONLY (never game tables) via
+# the generalized _db_write_stmt below, see the `module repair` arm in
+# 90-main.sh.
 # ---------------------------------------------------------------------------
 _db_pw() { echo "${DML_DB_ROOT_PASSWORD:-password}"; }
 
@@ -17,15 +20,28 @@ db_world_query() { _db_query acore_world "$1"; }
 db_chars_query() { _db_query acore_characters "$1"; }
 db_auth_query() { _db_query acore_auth "$1"; }
 
-# Direct MySQL write into acore_characters -- mirrors the pre-existing LAN
-# toggle's _lan_sql docker-exec invocation (90-main.sh `lan`), using the
-# fixed ac-database container name like the read helpers above (not a
-# docker-compose-resolved id, since callers of this helper don't have a
-# compose context). Currently used only by `teleport-coords` (offline
-# characters only) -- see that helper's header comment for the full
-# sanctioned-write list.
+# Direct MySQL write helper, generalized from the original characters-only
+# version -- mirrors the pre-existing LAN toggle's _lan_sql docker-exec
+# invocation (90-main.sh `lan`), using the fixed ac-database container name
+# like the read helpers above (not a docker-compose-resolved id, since
+# callers of this helper don't have a compose context). <acore_db> is
+# checked against the three acore schema names as defense-in-depth --
+# callers (90-main.sh `teleport-coords` and `module repair`) already
+# validate against a closed set before reaching here, but the helper never
+# trusts that alone.
+_db_write_stmt() {  # _db_write_stmt <acore_db> <stmt>
+    case "$1" in
+        acore_world|acore_characters|acore_auth) ;;
+        *) return 1 ;;
+    esac
+    docker exec ac-database mysql -uroot -p"$(_db_pw)" "$1" -e "$2" 2>/dev/null
+}
+
+# Thin wrapper -- behavior identical to the original characters-only helper
+# (no callers changed). Used by `teleport-coords` (offline characters only)
+# -- see this file's header comment for the full sanctioned-write list.
 _chars_write_stmt() {
-    docker exec ac-database mysql -uroot -p"$(_db_pw)" acore_characters -e "$1" 2>/dev/null
+    _db_write_stmt acore_characters "$1"
 }
 
 sql_escape() {

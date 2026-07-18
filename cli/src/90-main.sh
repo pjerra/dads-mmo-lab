@@ -3027,6 +3027,132 @@ case "$cmd" in
             cp "$dist" "$active"
             json_ok "{\"key\":\"$mkey\",\"activated\":true,\"conf_name\":\"$(json_escape "$cname")\"}"
             ;;
+          tracking)
+            # Read-only diagnosis (Round J) -- see _module_discover_sql_files
+            # / _module_db_read in 70-modules.sh and the design doc
+            # (docs/superpowers/specs/2026-07-18-module-repair-design.md).
+            mkey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_cpp_key "$mkey" || { json_err BAD_ARG "Invalid module key: $mkey" ""; exit 1; }
+            sdir="$(_wow_server_dir)"
+            [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" ""; exit 1; }
+            _cpp_installed "$sdir" "$mkey" || { json_err NOT_FOUND "Module not installed: $mkey" "Install it first."; exit 1; }
+            # Manager's exact matching (show_module_tracking): key minus the
+            # mod- prefix, plus an underscored variant.
+            stripped="${mkey#mod-}"
+            term1="${stripped//-/_}"
+            dbsj='{'; dbfirst=1
+            for db_short in world characters auth; do
+              rows="$(_module_db_read "$db_short" "SELECT name FROM updates WHERE name LIKE '%${stripped}%' OR name LIKE '%${term1}%';")" \
+                || { json_err DB_UNREACHABLE "Could not reach the $db_short database" "Is ac-database running?"; exit 1; }
+              trackedj='['; tfirst=1; tracked_names=()
+              while IFS= read -r trow || [[ -n "$trow" ]]; do
+                [[ -z "$trow" ]] && continue
+                tracked_names+=("$trow")
+                [[ $tfirst -eq 0 ]] && trackedj+=','
+                trackedj+="\"$(json_escape "$trow")\""
+                tfirst=0
+              done <<< "$rows"
+              trackedj+=']'
+              filesj='['; ffirst=1
+              discovered="$(_module_discover_sql_files "$sdir" "$mkey" "$db_short")"
+              for f in $discovered; do
+                [[ -z "$f" ]] && continue
+                istracked=false
+                for tn in "${tracked_names[@]:-}"; do
+                  [[ "$tn" == "$f" ]] && { istracked=true; break; }
+                done
+                [[ $ffirst -eq 0 ]] && filesj+=','
+                filesj+="{\"name\":\"$(json_escape "$f")\",\"tracked\":$istracked}"
+                ffirst=0
+              done
+              filesj+=']'
+              [[ $dbfirst -eq 0 ]] && dbsj+=','
+              dbsj+="\"$db_short\":{\"tracked_rows\":$trackedj,\"files\":$filesj}"
+              dbfirst=0
+            done
+            dbsj+='}'
+            json_ok "{\"key\":\"$mkey\",\"dbs\":$dbsj}"
+            ;;
+          repair)
+            # FOURTH sanctioned direct MySQL write (see 30-db.sh /
+            # 60-backup.sh headers): INSERT/DELETE on the `updates` tracking
+            # tables ONLY -- never game tables -- via the generalized
+            # _db_write_stmt (30-db.sh). mark inserts a file's SHA1 so AC
+            # skips it (fixes "Table X already exists"); clear deletes the
+            # tracking row so AC re-applies the file (safe only for
+            # idempotent SQL). Every filename (given via --files or
+            # discovered) is validated BEFORE any SQL/path use -- rejecting
+            # one filename aborts the whole batch with no SQL run at all.
+            mkey=""; rdb=""; rmode=""; rfiles=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; mkey="$2"; shift 2 ;;
+                --db) _need_flag_val "$1" $#; rdb="$2"; shift 2 ;;
+                --mode) _need_flag_val "$1" $#; rmode="$2"; shift 2 ;;
+                --files) _need_flag_val "$1" $#; rfiles="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_cpp_key "$mkey" || { json_err BAD_ARG "Invalid module key: $mkey" ""; exit 1; }
+            case "$rdb" in
+              world|characters|auth) ;;
+              *) json_err BAD_ARG "Invalid --db: $rdb" "Use world, characters, or auth."; exit 1 ;;
+            esac
+            case "$rmode" in
+              mark|clear) ;;
+              *) json_err BAD_ARG "Invalid --mode: $rmode" "Use mark or clear."; exit 1 ;;
+            esac
+            sdir="$(_wow_server_dir)"
+            [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" ""; exit 1; }
+            _cpp_installed "$sdir" "$mkey" || { json_err NOT_FOUND "Module not installed: $mkey" "Install it first."; exit 1; }
+            db_full="acore_$rdb"
+            if [[ -n "$rfiles" ]]; then
+              rfilelist="$rfiles"
+            else
+              rfilelist="$(_module_discover_sql_files "$sdir" "$mkey" "$rdb")"
+            fi
+            for f in $rfilelist; do
+              [[ -z "$f" ]] && continue
+              _valid_module_sql_filename "$f" || { json_err BAD_ARG "Invalid filename: $f" "Filenames must match ^[A-Za-z0-9._-]+\\.sql\$ (no slashes)."; exit 1; }
+            done
+            resultsj='['; rfirst=1
+            for f in $rfilelist; do
+              [[ -z "$f" ]] && continue
+              [[ $rfirst -eq 0 ]] && resultsj+=','
+              if [[ "$rmode" == mark ]]; then
+                sqlfile="$(find "$sdir/modules/$mkey" -name "$f" 2>/dev/null | head -1)"
+                if [[ -z "$sqlfile" ]]; then
+                  res=file_missing
+                else
+                  hash="$(sha1sum "$sqlfile" | awk '{print toupper($1)}')"
+                  _db_write_stmt "$db_full" "INSERT INTO updates (name, hash, state, timestamp, speed) VALUES ('$f', '$hash', 'RELEASED', NOW(), 0) ON DUPLICATE KEY UPDATE hash='$hash', state='RELEASED';" >/dev/null \
+                    || { json_err DB_UNREACHABLE "Could not write to $db_full.updates" "Is ac-database running?"; exit 1; }
+                  res=marked
+                fi
+              else
+                cnt="$(_module_db_read "$rdb" "SELECT COUNT(*) FROM updates WHERE name='$f';")" \
+                  || { json_err DB_UNREACHABLE "Could not reach the $rdb database" "Is ac-database running?"; exit 1; }
+                cnt="${cnt//[[:space:]]/}"
+                if [[ -z "$cnt" || "$cnt" == "0" ]]; then
+                  res=not_tracked
+                else
+                  _db_write_stmt "$db_full" "DELETE FROM updates WHERE name='$f';" >/dev/null \
+                    || { json_err DB_UNREACHABLE "Could not write to $db_full.updates" "Is ac-database running?"; exit 1; }
+                  res=cleared
+                fi
+              fi
+              resultsj+="{\"file\":\"$(json_escape "$f")\",\"result\":\"$res\"}"
+              rfirst=0
+            done
+            resultsj+=']'
+            json_ok "{\"key\":\"$mkey\",\"db\":\"$rdb\",\"mode\":\"$rmode\",\"results\":$resultsj}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
             exit 1

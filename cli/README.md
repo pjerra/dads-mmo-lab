@@ -80,11 +80,13 @@ overwrite an existing preset without `--force`). `NOT_FOUND` and
   CLI never issues two commands concurrently.
 - Mutations almost always go through a SOAP GM console command, never a
   direct database write. The MySQL access used by `items search`,
-  `teleport-list`, `characters`, and `paperdoll` is **read-only**. Three
+  `teleport-list`, `characters`, and `paperdoll` is **read-only**. Four
   direct MySQL writes are sanctioned project-wide: the pre-existing `lan`
-  toggle's `realmlist` UPDATE, `backup restore`, and (new)
-  `teleport-coords`' `characters.position_x/y/z/map/orientation` UPDATE
-  (OFFLINE characters only — see below).
+  toggle's `realmlist` UPDATE, `backup restore`, `teleport-coords`'
+  `characters.position_x/y/z/map/orientation` UPDATE (OFFLINE characters
+  only — see below), and (new) `module repair`'s INSERT/DELETE on the
+  `updates` tracking tables only — never game tables (see `module repair`
+  below).
 - Any value that ends up spliced into a SOAP console-command string
   (character names, item specs, teleport locations, mail subject/body) is
   allowlist-validated or sanitized first — an unvalidated value would be
@@ -185,7 +187,7 @@ silently ignored (treated as if omitted), rather than rejected.
   → `{"teleported":true,"char":"<char>","map":N,"x":N,"y":N,"z":N}`
   Coordinate teleport for an **OFFLINE** character: writes
   `characters.position_x/y/z/map` (`orientation` reset to `0`) directly via
-  MySQL (`_chars_write_stmt`, `30-db.sh`) — this is one of the three
+  MySQL (`_chars_write_stmt`, `30-db.sh`) — this is one of the four
   sanctioned direct writes (see the security posture note above), used
   instead of SOAP because AC's `teleport` console command only works on an
   online player. `--map` is 1-3 digits; `--x`/`--y`/`--z` are plain numbers
@@ -403,9 +405,10 @@ Errors: `BAD_ARG` (name/range/flag), `NOT_FOUND` (offline character, or unknown 
 `~/.dml/backups/wow-<UTC>.sql.gz`, keeping the newest
 `DML_BACKUP_KEEP` (default 10) and reporting every pruned file.
 `restore` is the project's one sanctioned write path for whole CHARACTER-DB
-snapshots (the LAN toggle's realmlist update and `teleport-coords`'
-position update are the other two sanctioned direct MySQL writes — see the
-security posture note under `wow subcommands` above): it
+snapshots (the LAN toggle's realmlist update, `teleport-coords`' position
+update, and `module repair`'s updates-table INSERT/DELETE are the other
+three sanctioned direct MySQL writes — see the security posture note under
+`wow subcommands` above): it
 stops ac-worldserver+ac-authserver, takes an automatic `-prerestore`
 safety backup, imports the snapshot, and restarts the server. If the
 import fails the server is deliberately LEFT STOPPED and the error names
