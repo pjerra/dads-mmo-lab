@@ -45,9 +45,15 @@
     prevStarted = started;
   });
 
+  let saveErr: string | null = $state(null);
   async function download() {
+    saveErr = null;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    await saveTextFile(`${logName}-${stamp}.log`, termText(termState));
+    try {
+      await saveTextFile(`${logName}-${stamp}.log`, termText(termState));
+    } catch (e) {
+      saveErr = String(e);
+    }
   }
 
   function onScroll() {
@@ -80,6 +86,7 @@
     <button class="head-btn" onclick={download} disabled={termState.totalLines === 0}>
       Download
     </button>
+    {#if saveErr}<span class="err">✖ save: {saveErr}</span>{/if}
   </div>
 
   <div class="term-body" bind:this={box} onscroll={onScroll}>

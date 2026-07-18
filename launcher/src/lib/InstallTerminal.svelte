@@ -64,7 +64,11 @@
 
   async function downloadOutput() {
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-    await saveTextFile(`dml-install-${stamp}.log`, installStore.text);
+    try {
+      await saveTextFile(`dml-install-${stamp}.log`, installStore.text);
+    } catch (e) {
+      showErr(e);
+    }
   }
 
   // Only the mount that actually claims this session's nonce may invoke

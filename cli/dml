@@ -481,7 +481,10 @@ _bots_counts() {
     if [[ "$state" == running ]]; then
         rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || true
         rows="${rows%%$'\n'*}"
-        [[ "$rows" =~ ^[0-9]+$ ]] && online="$rows"
+        # $((10#...)) after the regex gate: strips leading zeros, which would
+        # otherwise emit invalid JSON (e.g. "max":0500) and break the whole
+        # server-detail envelope.
+        [[ "$rows" =~ ^[0-9]+$ ]] && online="$((10#$rows))"
 
         local cfg_sdir="" cfg_ovr=""
         cfg_sdir="$(_wow_server_dir)"
@@ -490,7 +493,7 @@ _bots_counts() {
             cfg_ovr="$cfg_sdir/docker-compose.override.yml"
             val="$(_cfg_env_read AC_AI_PLAYERBOT_MAX_RANDOM_BOTS)"
             if [[ "$val" =~ ^[0-9]+$ ]]; then
-                max="$val"
+                max="$((10#$val))"
             else
                 conf="$cfg_sdir/env/dist/etc/modules/playerbots.conf"
                 if [[ -f "$conf" ]]; then
@@ -499,7 +502,7 @@ _bots_counts() {
                     val="${val//[[:space:]]/}"
                     val="${val//\"/}"
                     val="${val//\'/}"
-                    [[ "$val" =~ ^[0-9]+$ ]] && max="$val"
+                    [[ "$val" =~ ^[0-9]+$ ]] && max="$((10#$val))"
                 fi
             fi
         fi

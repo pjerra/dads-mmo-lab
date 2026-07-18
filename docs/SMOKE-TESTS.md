@@ -46,7 +46,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [title-install] **Cancel kills the distro process?** | Start an install, click Cancel (confirm). **FIRST CHECK:** in the distro run `top` / `docker ps` — did the installer bash/docker actually die? If it survives, report it (guest-side kill is the planned fix). UI must recover (buttons re-enable). |
 | ⬜ | [title-install] Retry same title | After a failed/cancelled install, click Install on the SAME title again → the terminal reopens and runs (regression: used to soft-lock the page). |
 | ⬜ | [title-remove] Remove a title | Remove the test title (typed-id confirm) → server dir + symlink + launcher script gone; `~/.dml` backups untouched. |
-| ⬜ | Install output survives nav (Round N) | During (or after) an install, hop to another page and back to Library → the install transcript text is preserved. KNOWN GAP: if the install is still running, the panel (and its reply input) may not re-show until the install finishes — report what you see. |
+| ⬜ | Install session survives nav (Round N) | During a RUNNING install (ideally while it waits at an interactive prompt), hop to another page and back to Library → the panel re-shows with the full transcript, the reply input still works (answer the prompt), and Cancel still works. After an install finishes while you're away → returning shows the finished transcript with correct ok/err styling. (Known cosmetic quirk: a resumed panel may not auto-scroll to new output.) |
 
 ## 4. Dashboard / character view (Rounds E, F, G)
 

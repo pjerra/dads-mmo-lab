@@ -59,7 +59,11 @@
     try {
       const d = await wowServerDetail();
       botsOnline = d.bots.online;
-    } catch { /* decorative — do not fail refresh() over this */ }
+    } catch {
+      // Decorative — do not fail refresh() over this. Null (not the stale
+      // previous count) so the chip disappears instead of lying.
+      botsOnline = null;
+    }
   }
   async function refreshPresets() {
     try { presets = await wowPartyPresetList(); } catch (e) { showErr(e); }

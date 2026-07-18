@@ -74,13 +74,19 @@
     consoleStore.hist = [];
   }
 
+  let saveErr: string | null = $state(null);
   async function downloadLog() {
+    saveErr = null;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
     const parts: string[] = [lines.join("\n"), ""];
     for (const h of consoleStore.hist) {
       parts.push(`> ${h.command}`, h.error ?? h.result ?? "");
     }
-    await saveTextFile(`dml-console-${stamp}.log`, parts.join("\n"));
+    try {
+      await saveTextFile(`dml-console-${stamp}.log`, parts.join("\n"));
+    } catch (e) {
+      saveErr = String(e);
+    }
   }
 </script>
 
@@ -94,6 +100,7 @@
       <button onclick={refreshLogs} disabled={refreshing}>Refresh</button>
       <button onclick={clearHistory} disabled={sending}>Clear</button>
       <button onclick={downloadLog}>Download</button>
+      {#if saveErr}<span class="save-err">save failed: {saveErr}</span>{/if}
     </div>
   </header>
 
@@ -155,6 +162,7 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .controls { display: flex; gap: 10px; align-items: center; }
   .autolabel { color: #8b949e; font-size: 13px; display: flex; gap: 6px; align-items: center; }
+  .save-err { color: #f85149; font-size: 12.5px; align-self: center; }
   .log { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.45; overflow-y: auto; flex: 1; min-height: 200px; }
   .logline { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
   .sendrow { display: flex; gap: 8px; flex-shrink: 0; }
