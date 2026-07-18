@@ -12,6 +12,7 @@
   let confirming = $state(false);
   let teleporting = $state(false);
   let doneMsg: string | null = $state(null);
+  let confirmingCoords = $state(false);
 
   // Client mirrors of the CLI's teleport-coords validators (cli/src/90-main.sh
   // _valid_coord / the inline map check) so a bad value is caught before the
@@ -32,6 +33,7 @@
 
   function toggleCoords() {
     showCoords = !showCoords;
+    confirmingCoords = false;
     doneMsg = null;
     error = null;
   }
@@ -53,6 +55,7 @@
   function pick(name: string) {
     picked = name;
     confirming = false;
+    confirmingCoords = false;
     doneMsg = null;
   }
 
@@ -81,6 +84,11 @@
   async function goCoords() {
     const who = charName;
     if (!who || !coordsValid) return;
+    if (!confirmingCoords) {
+      confirmingCoords = true;
+      return;
+    }
+    confirmingCoords = false;
     teleporting = true;
     error = null;
     try {
@@ -91,6 +99,7 @@
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
     } finally {
       teleporting = false;
+      confirmingCoords = false;
     }
   }
 </script>
@@ -118,12 +127,12 @@
   {#if showCoords}
     <div class="card coords-card">
       <div class="row">
-        <label class="field">Map<input class="coord map" bind:value={coordMap} disabled={teleporting} /></label>
-        <label class="field">X<input class="coord" bind:value={coordX} disabled={teleporting} /></label>
-        <label class="field">Y<input class="coord" bind:value={coordY} disabled={teleporting} /></label>
-        <label class="field">Z<input class="coord" bind:value={coordZ} disabled={teleporting} /></label>
+        <label class="field">Map<input class="coord map" bind:value={coordMap} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
+        <label class="field">X<input class="coord" bind:value={coordX} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
+        <label class="field">Y<input class="coord" bind:value={coordY} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
+        <label class="field">Z<input class="coord" bind:value={coordZ} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
         <button class="primary" onclick={goCoords} disabled={!charName || !coordsValid || teleporting}>
-          {teleporting ? "Teleporting…" : "Teleport"}
+          {teleporting ? "Teleporting…" : confirmingCoords ? `Overwrite ${charName}'s saved position?` : "Teleport"}
         </button>
       </div>
       <p class="muted">Character must be logged out.</p>
