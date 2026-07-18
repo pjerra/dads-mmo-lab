@@ -20,14 +20,14 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.characters[0].gold')" = "12" ]
 }
 
-# Fixture is 10 tab-separated fields matching the SELECT (and its matching
-# `read -r nm lvl cls money slot entry iname q ilvl disp`): name,level,class,
-# money,slot,entry,item_name,quality,item_level,displayid. item_level (1) is
-# Hearthstone's actual ItemLevel, inserted before displayid to keep
-# SELECT/read/JSON/fixture aligned with the brief's equipped interface
-# (slot,entry,name,quality,item_level,displayid).
+# Fixture is 14 tab-separated fields matching the SELECT (and its matching
+# `read -r nm lvl cls money crace cgender pbytes pbytes2 slot entry iname q
+# ilvl disp`): name,level,class,money,race,gender,playerBytes,playerBytes2,
+# slot,entry,item_name,quality,item_level,displayid. race/gender/playerBytes/
+# playerBytes2 are zeroed here since this test only asserts note/equipped/
+# gold (appearance-field decoding is covered by wow-paperdoll-model.bats).
 @test "paperdoll returns equipped items with note last_saved" {
-  printf 'Priesttest\t80\t5\t123456\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
   export DML_STUB_DB_ROWS="$FIXTURE/pd.tsv"
   run bash "$DML" wow paperdoll --char Priesttest --json
   [ "$status" -eq 0 ]

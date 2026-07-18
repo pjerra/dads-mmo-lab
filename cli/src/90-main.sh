@@ -1480,7 +1480,7 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
-        sql="SELECT c.name,c.level,c.class,c.money,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid
+        sql="SELECT c.name,c.level,c.class,c.money,c.race,c.gender,c.playerBytes,c.playerBytes2,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid
              FROM characters c
              JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18
              JOIN item_instance ii ON ii.guid=ci.item
@@ -1489,10 +1489,12 @@ case "$cmd" in
         rows="$(db_chars_query "$sql")" || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         [[ -n "$rows" ]] || { json_err NOT_FOUND "No such character or no equipped items: $char" ""; exit 1; }
         cname=""; clevel=0; cclass=0; cmoney=0
+        crace_s=0; cgender_s=0; cpb=0; cpb2=0
         first=1; eq='['
-        while IFS=$'\t' read -r nm lvl cls money slot entry iname q ilvl disp; do
+        while IFS=$'\t' read -r nm lvl cls money crace cgender pbytes pbytes2 slot entry iname q ilvl disp; do
           [[ -z "$nm" ]] && continue
           cname="$nm"; clevel="$lvl"; cclass="$cls"; cmoney="$money"
+          crace_s="$crace"; cgender_s="$cgender"; cpb="$pbytes"; cpb2="$pbytes2"
           [[ $first -eq 0 ]] && eq+=','
           eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"item_level\":$ilvl,\"displayid\":$disp}"
           first=0
@@ -1502,7 +1504,10 @@ case "$cmd" in
         # the DB -- for a character currently online, that can lag their true
         # live state until their next auto-save/logout. Live-accurate data
         # would need a SOAP .pinfo call (future refinement, not built here).
-        json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
+        cskin=$(( cpb & 0xFF )); cface=$(( (cpb >> 8) & 0xFF ))
+        chairs=$(( (cpb >> 16) & 0xFF )); chairc=$(( (cpb >> 24) & 0xFF ))
+        cfacial=$(( cpb2 & 0xFF ))
+        json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"race\":$crace_s,\"gender\":$cgender_s,\"skin\":$cskin,\"face\":$cface,\"hair_style\":$chairs,\"hair_color\":$chairc,\"facial_style\":$cfacial,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
         ;;
       item-info)
         entries=""
