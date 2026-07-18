@@ -340,6 +340,24 @@ async fn wow_item_info(
 }
 
 #[tauri::command]
+async fn wow_char_progress(
+    char_name: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "char-progress".into(), "--char".into(), char_name]).await
+}
+
+#[tauri::command]
+async fn wow_entity_info(
+    kind: String,
+    ids: Vec<u32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let csv = ids.iter().map(|e| e.to_string()).collect::<Vec<_>>().join(",");
+    run_json_cmd(state, vec!["wow".into(), "entity-info".into(), "--kind".into(), kind, "--ids".into(), csv]).await
+}
+
+#[tauri::command]
 async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "config".into(), "list".into()]).await
 }
@@ -758,6 +776,8 @@ pub fn run() {
             wow_teleport,
             wow_paperdoll,
             wow_item_info,
+            wow_char_progress,
+            wow_entity_info,
             wow_config_list,
             wow_config_set,
             wow_config_raw_read,

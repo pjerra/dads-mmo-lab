@@ -300,6 +300,28 @@ export async function wowItemInfo(entries: number[]): Promise<ItemInfo[]> {
   const d = await invoke<{ items: ItemInfo[] }>("wow_item_info", { entries });
   return d.items;
 }
+export interface AchievementEntry {
+  id: number;
+  date: number;
+}
+export interface CharProgress {
+  achievements: { total: number; recent: AchievementEntry[] };
+  talents: { groups_count: number; active_group: number; spells: number[] };
+}
+export async function wowCharProgress(charName: string): Promise<CharProgress> {
+  return await invoke("wow_char_progress", { charName });
+}
+export interface EntityInfo {
+  id: number;
+  source: "wowhead" | "unavailable";
+  icon?: string | null;
+  icon_b64?: string | null;
+  wowhead?: WowheadTooltip;
+}
+export async function wowEntityInfo(kind: "spell" | "achievement", ids: number[]): Promise<EntityInfo[]> {
+  const d = await invoke<{ entities: EntityInfo[] }>("wow_entity_info", { kind, ids });
+  return d.entities;
+}
 export async function wowConfigList(): Promise<ConfigSetting[]> {
   const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_list");
   return data.settings;
