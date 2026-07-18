@@ -987,6 +987,101 @@ case "$cmd" in
             echo "[dml] $gid stopped"
         fi
         ;;
+      catalog)
+        tout='['; first=1
+        while IFS='|' read -r tid tname tscript tkind tlauncher; do
+          [[ -z "$tid" ]] && continue
+          tinst=false; _title_installed "$tid" && tinst=true
+          tscriptok=false; [[ -f "$(_installers_dir)/$tscript" ]] && tscriptok=true
+          trun=null
+          if [[ "$tinst" == true ]]; then
+            tdir="$GAMES_DIR/$tid"; [[ -d "$tdir" ]] || tdir="$HOME/$tid"
+            tcompose="$(_resolve_compose_dir "$tdir/")"
+            if [[ -n "$tcompose" ]] && [[ "$(_compose_running "$tcompose")" -gt 0 ]]; then
+              trun='"running"'
+            else
+              trun='"stopped"'
+            fi
+          fi
+          [[ $first -eq 0 ]] && tout+=','
+          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
+          first=0
+        done < <(_title_registry)
+        tout+=']'
+        json_ok "{\"titles\":$tout}"
+        ;;
+      install)
+        gid="${1:-}"
+        if [[ "$DML_JSON" == 1 ]]; then
+          json_err BAD_ARG "games install is interactive" "Run it from the launcher's install terminal or a real terminal (no --json)."
+          exit 1
+        fi
+        trow="$(_title_row "$gid")"
+        if [[ -z "$trow" ]]; then
+          echo "[dml] ERROR: unknown title: $gid" >&2; exit 1
+        fi
+        if _title_installed "$gid"; then
+          echo "[dml] ERROR: $gid is already installed" >&2; exit 1
+        fi
+        tscript="$(printf '%s' "$trow" | cut -d'|' -f3)"
+        tkind="$(printf '%s' "$trow" | cut -d'|' -f4)"
+        tfile="$(_installers_dir)/$tscript"
+        if [[ ! -f "$tfile" ]]; then
+          echo "[dml] ERROR: installer script not found: $tfile (re-run cli/dev-install.ps1)" >&2; exit 1
+        fi
+        rc=0
+        bash "$tfile" 2>&1 || rc=$?
+        if [[ $rc -eq 0 && "$tkind" == home && -d "$HOME/$gid" ]]; then
+          mkdir -p "$GAMES_DIR"
+          ln -sfn "$HOME/$gid" "$GAMES_DIR/$gid"
+          echo "[dml] linked $GAMES_DIR/$gid -> $HOME/$gid"
+        fi
+        exit "$rc"
+        ;;
+      remove)
+        gid="${1:-}"; shift || true
+        confirm=0
+        [[ "${1:-}" == "--yes" ]] && confirm=1
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start games-remove
+        trow="$(_title_row "$gid")"
+        if [[ -z "$trow" ]]; then
+          ndjson_section_end games-remove error
+          ndjson_error BAD_ARG "Unknown title: $gid" ""; exit 1
+        fi
+        tkind="$(printf '%s' "$trow" | cut -d'|' -f4)"
+        tlauncher="$(printf '%s' "$trow" | cut -d'|' -f5)"
+        if ! _title_installed "$gid"; then
+          ndjson_section_end games-remove error
+          ndjson_error NOT_FOUND "$gid is not installed" ""; exit 1
+        fi
+        targets=""
+        [[ -e "$GAMES_DIR/$gid" || -L "$GAMES_DIR/$gid" ]] && targets+="$GAMES_DIR/$gid "
+        [[ -d "$HOME/$gid" && ! -L "$HOME/$gid" ]] && targets+="$HOME/$gid "
+        [[ -n "$tlauncher" && -e "$HOME/$tlauncher" ]] && targets+="$HOME/$tlauncher"
+        if [[ "$confirm" != 1 ]]; then
+          ndjson_section_end games-remove error
+          ndjson_error CONFIRM_REQUIRED "Removing $gid deletes: $targets" "Re-run with --yes. Backups under ~/.dml are kept."
+          exit 1
+        fi
+        tdir="$GAMES_DIR/$gid"; [[ -d "$tdir" ]] || tdir="$HOME/$gid"
+        tcompose="$(_resolve_compose_dir "$tdir/")"
+        if [[ -n "$tcompose" ]]; then
+          ndjson_line info "stopping $gid..."
+          (cd "$tcompose" && docker compose down >/dev/null 2>&1) || true
+        fi
+        if [[ -L "$GAMES_DIR/$gid" ]]; then
+          ttarget="$(readlink -f "$GAMES_DIR/$gid" 2>/dev/null || true)"
+          rm -f "$GAMES_DIR/$gid"
+          [[ -n "$ttarget" && -d "$ttarget" ]] && rm -rf "$ttarget"
+        elif [[ -d "$GAMES_DIR/$gid" ]]; then
+          rm -rf "$GAMES_DIR/$gid"
+        fi
+        [[ -d "$HOME/$gid" ]] && rm -rf "$HOME/$gid"
+        [[ -n "$tlauncher" ]] && rm -f "$HOME/$tlauncher"
+        ndjson_line info "removed (backups under ~/.dml are kept)"
+        ndjson_section_end games-remove ok
+        ndjson_done "{\"id\":\"$(json_escape "$gid")\",\"removed\":true}"
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown games subcommand: $sub" "Try: dml games list --json"
         exit 1

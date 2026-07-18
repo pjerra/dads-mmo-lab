@@ -1,0 +1,123 @@
+#!/usr/bin/env bats
+load helpers/env.bash
+
+setup() {
+  DML="$BATS_TEST_DIRNAME/../dml"
+  bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
+  make_fixture
+  use_docker_stub
+  export HOME="$FIXTURE"
+  export DML_INSTALLERS_DIR="$FIXTURE/installers"
+  mkdir -p "$DML_INSTALLERS_DIR"
+}
+teardown() { teardown_fixture; }
+
+fake_installer() {  # fake_installer <script-name> <server-dir-to-create>
+  cat > "$DML_INSTALLERS_DIR/$1" <<EOF
+#!/usr/bin/env bash
+read -r answer
+echo "you said: \$answer"
+echo "\$answer" > "$FIXTURE/got-stdin"
+mkdir -p "$2"
+exit 0
+EOF
+}
+
+@test "games catalog: registry rows with installed/script_available" {
+  mkdir -p "$FIXTURE/maplestory-server"
+  fake_installer install-maplestory.sh "$FIXTURE/maplestory-server"
+  run bash "$DML" games catalog --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.titles | length')" = "6" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="maplestory-server") | .installed')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="maplestory-server") | .script_available')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .installed')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .script_available')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .running')" = "null" ]
+}
+
+@test "games install: --json rejected, unknown id rejected, EXISTS when installed" {
+  run bash "$DML" games install maplestory-server --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'BAD_ARG'
+  run bash "$DML" games install not-a-title
+  [ "$status" -eq 1 ]
+  mkdir -p "$FIXTURE/maplestory-server"
+  run bash "$DML" games install maplestory-server
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qi 'already installed'
+}
+
+@test "games install: missing script -> NO_SCRIPT-style error" {
+  run bash "$DML" games install maplestory-server
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -qi 'installer script'
+}
+
+@test "games install: runs the script with stdin passthrough, symlinks home-kind" {
+  fake_installer install-maplestory.sh "$FIXTURE/maplestory-server"
+  run bash -c 'echo hello | bash "'"$DML"'" games install maplestory-server'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FIXTURE/got-stdin")" = "hello" ]
+  echo "$output" | grep -q 'you said: hello'
+  [ -L "$FIXTURE/games/maplestory-server" ]
+  [ "$(readlink "$FIXTURE/games/maplestory-server")" = "$FIXTURE/maplestory-server" ]
+}
+
+@test "games install: installer failure -> exit code passes through, no symlink" {
+  cat > "$DML_INSTALLERS_DIR/install-maplestory.sh" <<'EOF'
+#!/usr/bin/env bash
+echo boom
+exit 7
+EOF
+  run bash "$DML" games install maplestory-server
+  [ "$status" -eq 7 ]
+  [ ! -e "$FIXTURE/games/maplestory-server" ]
+}
+
+@test "games install: declined install (exit 0, no dir) -> no phantom symlink" {
+  cat > "$DML_INSTALLERS_DIR/install-maplestory.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "aborted by user"
+exit 0
+EOF
+  run bash "$DML" games install maplestory-server
+  [ "$status" -eq 0 ]
+  [ ! -e "$FIXTURE/games/maplestory-server" ]
+}
+
+@test "games remove: unknown id / not installed / no --yes" {
+  run bash "$DML" games remove not-a-title --json
+  [ "$status" -eq 1 ]
+  run bash "$DML" games remove maplestory-server --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'NOT_FOUND'
+  mkdir -p "$FIXTURE/maplestory-server"
+  run bash "$DML" games remove maplestory-server --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'CONFIRM_REQUIRED'
+  echo "$output" | grep -q 'maplestory-server'
+  [ -d "$FIXTURE/maplestory-server" ]
+}
+
+@test "games remove --yes: deletes dir + symlink + launcher file, keeps ~/.dml" {
+  mkdir -p "$FIXTURE/maplestory-server" "$FIXTURE/games" "$FIXTURE/.dml/backups"
+  touch "$FIXTURE/maplestory-server/docker-compose.yml"
+  ln -s "$FIXTURE/maplestory-server" "$FIXTURE/games/maplestory-server"
+  touch "$FIXTURE/maplestory-launcher.sh" "$FIXTURE/.dml/backups/keepme"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"event":"done"'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+  [ ! -e "$FIXTURE/games/maplestory-server" ]
+  [ ! -e "$FIXTURE/maplestory-launcher.sh" ]
+  [ -f "$FIXTURE/.dml/backups/keepme" ]
+}
+
+@test "games remove --yes: compose down attempted when compose exists" {
+  mkdir -p "$FIXTURE/maplestory-server"
+  touch "$FIXTURE/maplestory-server/docker-compose.yml"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qi 'stopping'
+}
