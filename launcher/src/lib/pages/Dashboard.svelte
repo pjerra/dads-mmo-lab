@@ -22,6 +22,7 @@
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
   import CharPicker from "$lib/CharPicker.svelte";
+  import CharacterModel from "$lib/CharacterModel.svelte";
 
   let detail: ServerDetail | null = $state(null);
   let infoError: string | null = $state(null);
@@ -238,30 +239,33 @@
   {#if dollError}
     <div class="error-card"><strong>Couldn't load character gear.</strong><p>{dollError}</p></div>
   {:else if doll}
-    <div class="card doll">
-      <div class="paperdoll">
-        <div class="col">
-          {#each LEFT_SLOTS as [slotNum, label] (slotNum)}
-            {@render slotBox(slotNum, label)}
-          {/each}
+    <div class="doll-row">
+      <CharacterModel {doll} />
+      <div class="card doll">
+        <div class="paperdoll">
+          <div class="col">
+            {#each LEFT_SLOTS as [slotNum, label] (slotNum)}
+              {@render slotBox(slotNum, label)}
+            {/each}
+          </div>
+          <div class="summary">
+            <div class="charname">{doll.name}</div>
+            <div class="muted">Level {doll.level} {className(doll.class)}</div>
+            <div class="gold">{doll.gold} gold</div>
+          </div>
+          <div class="col">
+            {#each RIGHT_SLOTS as [slotNum, label] (slotNum)}
+              {@render slotBox(slotNum, label)}
+            {/each}
+          </div>
+          <div class="bottom-row">
+            {#each BOTTOM_SLOTS as [slotNum, label] (slotNum)}
+              {@render slotBox(slotNum, label)}
+            {/each}
+          </div>
         </div>
-        <div class="summary">
-          <div class="charname">{doll.name}</div>
-          <div class="muted">Level {doll.level} {className(doll.class)}</div>
-          <div class="gold">{doll.gold} gold</div>
-        </div>
-        <div class="col">
-          {#each RIGHT_SLOTS as [slotNum, label] (slotNum)}
-            {@render slotBox(slotNum, label)}
-          {/each}
-        </div>
-        <div class="bottom-row">
-          {#each BOTTOM_SLOTS as [slotNum, label] (slotNum)}
-            {@render slotBox(slotNum, label)}
-          {/each}
-        </div>
+        <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
       </div>
-      <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
     </div>
   {/if}
 </section>
@@ -301,6 +305,10 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+
+  /* Model card + paperdoll grid side by side; wraps to stacked on narrow
+     windows since the model card has a fixed 300x380 size. */
+  .doll-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 
   /* Paperdoll grid: left slot column / summary / right slot column, bottom
      weapon row spans underneath -- no visible per-slot text labels, matching

@@ -118,6 +118,13 @@ export interface PaperdollData {
   name: string;
   level: number;
   class: number;
+  race: number;
+  gender: number;
+  skin: number;
+  face: number;
+  hair_style: number;
+  hair_color: number;
+  facial_style: number;
   gold: number;
   note: string;
   equipped: PaperdollItem[];
