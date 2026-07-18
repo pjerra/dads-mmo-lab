@@ -1,8 +1,10 @@
 pub mod dml;
+mod zam;
 
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::ipc::Channel;
+use tauri::Manager;
 use tauri::State;
 
 use crate::dml::envelope::Envelope;
@@ -702,6 +704,29 @@ pub fn run() {
             install: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_opener::init())
+        .register_asynchronous_uri_scheme_protocol("zam", |ctx, request, responder| {
+            let cache = ctx
+                .app_handle()
+                .path()
+                .app_cache_dir()
+                .unwrap_or_else(|_| std::env::temp_dir());
+            let path = request.uri().path().to_string();
+            std::thread::spawn(move || {
+                let resp = match crate::zam::zam_serve(&cache, &path) {
+                    Some((bytes, ct)) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("content-type", ct)
+                        .header("access-control-allow-origin", "*")
+                        .body(bytes)
+                        .unwrap(),
+                    None => tauri::http::Response::builder()
+                        .status(404)
+                        .body(Vec::new())
+                        .unwrap(),
+                };
+                responder.respond(resp);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             dml_version,
             games_list,
