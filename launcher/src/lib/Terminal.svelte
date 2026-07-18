@@ -1,12 +1,18 @@
 <script lang="ts">
   import type { TermState } from "./terminal-state";
+  import { termText } from "./term-store.svelte";
+  import { saveTextFile } from "./api";
 
   // Destructured to `termState` (not `state`): a local binding literally
   // named `state` collides with the `$state` rune (Svelte's legacy `$store`
   // auto-subscription syntax treats `$state(...)` as "subscribe to store
   // `state`" whenever a same-named variable is in scope), which svelte-check
   // flags as 3 hard errors. The external prop name (`state`) is unchanged.
-  let { state: termState }: { state: TermState } = $props();
+  let {
+    state: termState,
+    onclear,
+    logName = "dml",
+  }: { state: TermState; onclear?: () => void; logName?: string } = $props();
 
   let box: HTMLDivElement | undefined = $state();
   let autoScroll = $state(true);
@@ -27,6 +33,22 @@
     void termState.totalLines;
     if (autoScroll && box) box.scrollTop = box.scrollHeight;
   });
+
+  // Bring the terminal into view when a new run starts. `prevStarted` is a
+  // plain (non-reactive) closure variable used purely as a previous-value
+  // guard, so this fires once on the null->set transition rather than on
+  // every subsequent line (which would fight the autoscroll effect above).
+  let prevStarted: number | null = null;
+  $effect(() => {
+    const started = termState.startedAt;
+    if (started !== null && prevStarted === null) box?.scrollIntoView({ block: "end" });
+    prevStarted = started;
+  });
+
+  async function download() {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    await saveTextFile(`${logName}-${stamp}.log`, termText(termState));
+  }
 
   function onScroll() {
     if (!box) return;
@@ -52,6 +74,12 @@
     {:else if termState.finished?.kind === "error"}
       <span class="err">✖ {termState.finished.error.code}</span>
     {/if}
+    {#if onclear}
+      <button class="head-btn" onclick={onclear} disabled={running}>Clear</button>
+    {/if}
+    <button class="head-btn" onclick={download} disabled={termState.totalLines === 0}>
+      Download
+    </button>
   </div>
 
   <div class="term-body" bind:this={box} onscroll={onScroll}>
@@ -88,7 +116,7 @@
     border: 1px solid #30363d;
     border-radius: 8px;
     min-height: 220px;
-    max-height: 45vh;
+    max-height: calc(100vh - 220px);
     overflow: hidden;
     font-family: ui-monospace, Consolas, monospace;
     font-size: 12px;
@@ -118,6 +146,18 @@
   .ok { color: #3fb950; }
   .err { color: #f85149; }
   .runtime { font-variant-numeric: tabular-nums; }
+  .head-btn {
+    background: transparent;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  .head-btn:hover:not(:disabled) { color: #c9d1d9; border-color: #8b949e; }
+  .head-btn:disabled { opacity: 0.5; cursor: default; }
   .jump {
     position: absolute;
     bottom: 10px;
