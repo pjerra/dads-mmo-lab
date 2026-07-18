@@ -14,7 +14,7 @@ export type FeatureStatus = "tested" | "untested";
 // ONLY when the user reports that row's smoke test passed -- do not flip
 // speculatively.
 export const FEATURES: Record<string, FeatureStatus> = {
-  restart: "untested",
+  restart: "tested",
   "console-send": "untested",
   "title-install": "untested",
   "title-remove": "untested",
