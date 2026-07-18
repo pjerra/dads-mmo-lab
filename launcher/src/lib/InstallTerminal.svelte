@@ -2,7 +2,7 @@
   import { tick, onMount } from "svelte";
   import { gamesInstall, gamesInstallInput, gamesInstallCancel, saveTextFile, type InstallEvent } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { installStore } from "$lib/term-store.svelte";
+  import { installStore, claimInstallInvoke } from "$lib/term-store.svelte";
 
   let { id, onExit }: { id: string; onExit: (code: number) => void } = $props();
 
@@ -12,9 +12,23 @@
   // piped.
   const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
-  let exited = $state(false);
-  let exitCode: number | null = $state(null);
-  let note: string | null = $state(null);
+  // `exited` used to be local $state, reset to false on every mount -- fine
+  // while the panel and its backing gamesInstall() call shared one component
+  // instance, but nav-away-and-back destroys and recreates this component
+  // while the interactive install session (and the backend's single global
+  // install slot) keeps going. Deriving straight off installStore.running
+  // means a remounted instance immediately reflects the session's true
+  // state instead of starting falsely "exited" -- which would hide Cancel
+  // and disable the reply input for a session that's actually still alive.
+  const exited = $derived(!installStore.running);
+  const note = $derived(
+    exited && installStore.exitCode !== null
+      ? installStore.exitCode === 0
+        ? "Installer finished (exit 0)."
+        : `Installer failed (exit ${installStore.exitCode}).`
+      : null,
+  );
+
   let error: string | null = $state(null);
 
   let command = $state("");
@@ -53,23 +67,30 @@
     await saveTextFile(`dml-install-${stamp}.log`, installStore.text);
   }
 
+  // Only the mount that actually claims this session's nonce may invoke
+  // games_install -- a nav-away-and-back remount reuses the SAME nonce (see
+  // installStore.nonce / claimInstallInvoke in term-store.svelte.ts), and
+  // the backend allows exactly one concurrent install. A second invoke
+  // there would hit its BUSY error and (pre-fix) falsely flip a still-
+  // running session to "exited", hiding Cancel for good. A remount that
+  // loses the claim just renders installStore reactively instead.
   async function run() {
+    if (!claimInstallInvoke(installStore.nonce)) return;
     try {
       await gamesInstall(id, (e: InstallEvent) => {
         if (e.event === "chunk") {
           append(e.text ?? "");
         } else if (e.event === "exit") {
           const code = e.code ?? -1;
-          exitCode = code;
-          exited = true;
-          note = code === 0 ? "Installer finished (exit 0)." : `Installer failed (exit ${code}).`;
+          installStore.exitCode = code;
+          installStore.running = false;
           onExit(code);
         }
       });
     } catch (e) {
       showErr(e);
-      exited = true;
-      exitCode = -1;
+      installStore.exitCode = -1;
+      installStore.running = false;
       onExit(-1);
     }
   }
@@ -127,7 +148,7 @@
   <div class="scrollback" bind:this={box}>{installStore.text}</div>
 
   {#if note}
-    <div class="exit-note {exitCode === 0 ? 'ok' : 'err'}">{note}</div>
+    <div class="exit-note {installStore.exitCode === 0 ? 'ok' : 'err'}">{note}</div>
   {/if}
 
   <form

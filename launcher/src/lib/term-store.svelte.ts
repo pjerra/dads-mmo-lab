@@ -59,4 +59,45 @@ export function termText(t: TermState): string {
 }
 
 export const consoleStore = $state({ hist: [] as ConsoleHistEntry[] });
-export const installStore = $state({ text: "" });
+
+// Home for an in-flight/finished games_install session -- see Library.svelte
+// and InstallTerminal.svelte. `id`/`running`/`nonce` gate whether the panel
+// renders at all (Library.svelte gated on local $state before, which nav-away
+// destroyed even though the backend's install session was still alive).
+// `exitCode` isn't part of the panel's *gating* but is needed so a remounted
+// InstallTerminal (nav-away-and-back after the session already finished) can
+// still render the correct ok/err exit styling instead of guessing.
+export interface InstallStoreState {
+  text: string;
+  id: string | null;
+  running: boolean;
+  nonce: number;
+  exitCode: number | null;
+}
+
+export const installStore = $state<InstallStoreState>({
+  text: "",
+  id: null,
+  running: false,
+  nonce: 0,
+  exitCode: null,
+});
+
+// The backend (src-tauri/src/lib.rs games_install) tracks exactly ONE global
+// install slot and rejects a second concurrent invoke with a BUSY error.
+// installStore.nonce is bumped once per fresh install (Library's
+// startInstall()) and used to key InstallTerminal's {#key} block, so
+// nav-away-and-back remounts a fresh component instance against the SAME
+// nonce -- if that remounted instance invoked games_install again it would
+// hit BUSY and (pre-fix) falsely flip a still-running session to "exited".
+// claimInstallInvoke lets only the FIRST instance to see a given nonce
+// actually call games_install; later remounts against that nonce just
+// observe installStore reactively. Plain module state (not $state -- nothing
+// renders it directly), so it survives InstallTerminal's destroy/recreate
+// the same way installStore does.
+let invokedNonce: number | null = null;
+export function claimInstallInvoke(nonce: number): boolean {
+  if (invokedNonce === nonce) return false;
+  invokedNonce = nonce;
+  return true;
+}

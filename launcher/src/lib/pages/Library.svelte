@@ -22,20 +22,26 @@
   let removeInput = $state("");
   let removeBusy = $state(false);
 
-  // Install: which title's panel is shown, and whether its session is
-  // still active (drives the cross-action busy gate below).
-  let installId: string | null = $state(null);
-  let installRunning = $state(false);
-  // Bumped on every startInstall() so the {#key} block below always remounts
-  // InstallTerminal, even when re-installing the same title id after a
-  // failed/cancelled run (installId alone wouldn't change -> no remount ->
-  // onMount(run) never re-fires -> no exit event -> installRunning stuck
-  // true -> every control disabled forever until nav-away).
-  let installNonce = $state(0);
+  // Install: which title's panel is shown, and whether its session is still
+  // active. This lives in installStore (term-store.svelte.ts), NOT local
+  // $state -- Library.svelte is destroyed on nav-away, but a RUNNING
+  // interactive install (and the backend's single global install slot) keeps
+  // going regardless, and the transcript already lived in installStore.text.
+  // Gating the panel on local state meant nav-away-and-back left the panel
+  // gone, the reply input (the only channel for gamesInstallInput) and
+  // Cancel unreachable, with no way back short of an app restart. Reading
+  // installStore.id/.running/.nonce here instead means the panel, reply
+  // input and Cancel all survive nav intact.
+  // installStore.nonce is bumped on every startInstall() so the {#key} block
+  // below always remounts InstallTerminal, even when re-installing the same
+  // title id after a failed/cancelled run (installStore.id alone wouldn't
+  // change -> no remount -> onMount(run) never re-fires -> no exit event ->
+  // installStore.running stuck true -> every control disabled forever until
+  // nav-away).
 
   // Install session OR a remove stream blocks the other mutating actions
   // (start/stop, arm/confirm remove, open a new install).
-  const busy = $derived(busyId !== null || removeBusy || installRunning);
+  const busy = $derived(busyId !== null || removeBusy || installStore.running);
 
   const installed = $derived(catalog.filter((t) => t.installed));
   const available = $derived(catalog.filter((t) => !t.installed));
@@ -131,16 +137,26 @@
   }
 
   function startInstall(id: string) {
-    installId = id;
-    installNonce += 1;
-    installRunning = true;
+    // Always a FRESH session (the Install button that calls this is only
+    // rendered while !busy, i.e. no session is already running -- see the
+    // {#if !busy} guard around it below), so resetting the transcript here
+    // is safe: resuming an already-running session never re-enters this
+    // function, it just reads the store's existing state on remount.
+    installStore.id = id;
+    installStore.nonce += 1;
+    installStore.running = true;
+    installStore.exitCode = null;
     actionError = null;
     note = null;
     installStore.text = "";
   }
 
+  // installStore.running is flipped false directly by InstallTerminal's own
+  // exit/error handling (so it stays truthful even if the instance that
+  // witnesses the exit event is an orphaned one from before a nav-away) --
+  // this callback's only remaining job is refreshing the catalog so the
+  // "installed" flag updates promptly while this page is mounted.
   function onInstallExit(_code: number) {
-    installRunning = false;
     void refresh();
   }
 </script>
@@ -237,9 +253,9 @@
     {/each}
   </div>
 
-  {#if installId}
-    {#key installNonce}
-      <InstallTerminal id={installId} onExit={onInstallExit} />
+  {#if installStore.id}
+    {#key installStore.nonce}
+      <InstallTerminal id={installStore.id} onExit={onInstallExit} />
     {/key}
   {/if}
 
