@@ -164,8 +164,14 @@ _games_start_impl() {
     _games_resolve_or_fail "$1"
     [[ "$DML_JSON" == 1 ]] && ndjson_section_start "$mode"
     cd "$compose_dir"
-    local _pc
-    _pc="$(_check_port_conflicts || true)"
+    # Cold starts only: during a restart the ports are (expectedly) held by
+    # this server's own still-running containers, so the conflict check would
+    # cry wolf on every healthy restart. (The 3306 remap inside it is also
+    # moot on restart -- `docker start` reuses the existing port bindings.)
+    local _pc=""
+    if [[ "$mode" == "start" ]]; then
+        _pc="$(_check_port_conflicts || true)"
+    fi
     if [[ -n "$_pc" ]]; then
         if [[ "$DML_JSON" == 1 ]]; then
             while IFS= read -r _l; do ndjson_line warn "$_l"; done <<< "$_pc"

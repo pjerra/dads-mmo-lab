@@ -139,6 +139,32 @@ EOS
   [ "$(echo "$last" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
 
+@test "games restart skips port-conflict warnings (own server holds the ports)" {
+  add_game wow compose
+  cat > "$STUB_BIN/ss" <<'EOS'
+#!/usr/bin/env bash
+printf 'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:*\n'
+EOS
+  chmod +x "$STUB_BIN/ss"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games restart wow --json
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"already in use"* ]]
+}
+
+@test "games start still warns on a real port conflict" {
+  add_game wow compose
+  cat > "$STUB_BIN/ss" <<'EOS'
+#!/usr/bin/env bash
+printf 'LISTEN 0 4096 0.0.0.0:8085 0.0.0.0:*\n'
+EOS
+  chmod +x "$STUB_BIN/ss"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already in use"* ]]
+}
+
 @test "games restart in text mode prints restarted" {
   add_game wow compose
   export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
