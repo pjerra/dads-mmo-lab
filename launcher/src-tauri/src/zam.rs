@@ -1,18 +1,52 @@
 use std::io::Read;
 use std::sync::OnceLock;
 
+/// Percent-decodes `%XX` hex-pair escapes in `s` to their raw bytes.
+/// Invalid/incomplete escapes are left as literal characters. The result
+/// is built from the decoded bytes lossily (invalid UTF-8 -> replacement).
+fn percent_decode_lossy(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() && b[i + 1].is_ascii_hexdigit() && b[i + 2].is_ascii_hexdigit() {
+            let hi = (b[i + 1] as char).to_digit(16).unwrap();
+            let lo = (b[i + 2] as char).to_digit(16).unwrap();
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Returns true if `path` fails any of the traversal/allowlist checks.
+fn zam_path_is_rejected(path: &str) -> bool {
+    if path.is_empty() || path.contains('\\') || path.contains("://") {
+        return true;
+    }
+    if !(path.starts_with("modelviewer/") || path.starts_with("images/")) {
+        return true;
+    }
+    if path.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+        return true;
+    }
+    false
+}
+
 /// Maps a zam-scheme request path to (upstream URL, cache-relative path).
 /// Security: fixed host, prefix allowlist, no traversal, no embedded schemes.
+/// Checks run against both the original (still-encoded) path and its
+/// percent-decoded form, so a percent-encoded traversal segment (e.g.
+/// `%2e%2e`) is rejected even though the raw string contains no literal
+/// `..`. The returned URL/cache path are built from the ORIGINAL path.
 pub fn zam_map_path(raw: &str) -> Option<(String, String)> {
     let path = raw.trim_start_matches('/');
     let path = path.split('?').next().unwrap_or("");
-    if path.is_empty() || path.contains('\\') || path.contains("://") {
-        return None;
-    }
-    if !(path.starts_with("modelviewer/") || path.starts_with("images/")) {
-        return None;
-    }
-    if path.split('/').any(|seg| seg == ".." || seg.is_empty()) {
+    let decoded = percent_decode_lossy(path);
+    if zam_path_is_rejected(path) || zam_path_is_rejected(&decoded) {
         return None;
     }
     Some((format!("https://wow.zamimg.com/{path}"), path.to_string()))
@@ -34,6 +68,7 @@ fn client() -> &'static reqwest::blocking::Client {
     CLIENT.get_or_init(|| {
         reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client")
     })
@@ -115,5 +150,22 @@ mod tests {
         assert_eq!(bytes, b"{\"cached\":true}");
         assert_eq!(ct, "application/json");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_percent_encoded_traversal() {
+        assert!(zam_map_path("/modelviewer/%2e%2e/images/x.png").is_none());
+        assert!(zam_map_path("/modelviewer/.%2e/x").is_none());
+        assert!(zam_map_path("/modelviewer/%2E%2E/x").is_none());
+        assert!(zam_map_path("/images/a%5cb.png").is_none());
+        // benign encodings still pass
+        assert!(zam_map_path("/modelviewer/wrath/meta/a%20b.json").is_some());
+    }
+
+    #[test]
+    fn percent_decode_lossy_basics() {
+        assert_eq!(percent_decode_lossy("a%2eb"), "a.b");
+        assert_eq!(percent_decode_lossy("a%2"), "a%2");
+        assert_eq!(percent_decode_lossy("a%zz"), "a%zz");
     }
 }
