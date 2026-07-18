@@ -1692,33 +1692,57 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
-        sql="SELECT c.name,c.level,c.class,c.money,c.race,c.gender,c.playerBytes,c.playerBytes2,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid
-             FROM characters c
+        # AC's ac-db-import (re-run on any cold `compose up`) applies core
+        # migrations, one of which replaced the packed playerBytes/
+        # playerBytes2 appearance columns with discrete skin/face/hairStyle/
+        # hairColor/facialStyle columns. Try the migrated schema first and
+        # fall back to the packed columns for pre-migration DBs -- both
+        # paths emit identical JSON.
+        pd_join="FROM characters c
              JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18
              JOIN item_instance ii ON ii.guid=ci.item
              JOIN acore_world.item_template it ON it.entry=ii.itemEntry
              WHERE c.name='$(sql_escape "$char")' ORDER BY ci.slot;"
-        rows="$(db_chars_query "$sql")" || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
+        pd_schema=new
+        sql="SELECT c.name,c.level,c.class,c.money,c.race,c.gender,c.skin,c.face,c.hairStyle,c.hairColor,c.facialStyle,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid $pd_join"
+        if rows="$(db_chars_query "$sql")"; then :; else
+          pd_schema=old
+          sql="SELECT c.name,c.level,c.class,c.money,c.race,c.gender,c.playerBytes,c.playerBytes2,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid $pd_join"
+          rows="$(db_chars_query "$sql")" || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
+        fi
         [[ -n "$rows" ]] || { json_err NOT_FOUND "No such character or no equipped items: $char" ""; exit 1; }
         cname=""; clevel=0; cclass=0; cmoney=0
         crace_s=0; cgender_s=0; cpb=0; cpb2=0
+        cskin=0; cface=0; chairs=0; chairc=0; cfacial=0
         first=1; eq='['
-        while IFS=$'\t' read -r nm lvl cls money crace cgender pbytes pbytes2 slot entry iname q ilvl disp; do
-          [[ -z "$nm" ]] && continue
-          cname="$nm"; clevel="$lvl"; cclass="$cls"; cmoney="$money"
-          crace_s="$crace"; cgender_s="$cgender"; cpb="$pbytes"; cpb2="$pbytes2"
-          [[ $first -eq 0 ]] && eq+=','
-          eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"item_level\":$ilvl,\"displayid\":$disp}"
-          first=0
-        done <<< "$rows"
+        if [[ "$pd_schema" == new ]]; then
+          while IFS=$'\t' read -r nm lvl cls money crace cgender skin face hstyle hcolor facial slot entry iname q ilvl disp; do
+            [[ -z "$nm" ]] && continue
+            cname="$nm"; clevel="$lvl"; cclass="$cls"; cmoney="$money"
+            crace_s="$crace"; cgender_s="$cgender"
+            cskin="$skin"; cface="$face"; chairs="$hstyle"; chairc="$hcolor"; cfacial="$facial"
+            [[ $first -eq 0 ]] && eq+=','
+            eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"item_level\":$ilvl,\"displayid\":$disp}"
+            first=0
+          done <<< "$rows"
+        else
+          while IFS=$'\t' read -r nm lvl cls money crace cgender pbytes pbytes2 slot entry iname q ilvl disp; do
+            [[ -z "$nm" ]] && continue
+            cname="$nm"; clevel="$lvl"; cclass="$cls"; cmoney="$money"
+            crace_s="$crace"; cgender_s="$cgender"; cpb="$pbytes"; cpb2="$pbytes2"
+            [[ $first -eq 0 ]] && eq+=','
+            eq+="{\"slot\":$slot,\"entry\":$entry,\"name\":\"$(json_escape "$iname")\",\"quality\":$q,\"item_level\":$ilvl,\"displayid\":$disp}"
+            first=0
+          done <<< "$rows"
+          cskin=$(( cpb & 0xFF )); cface=$(( (cpb >> 8) & 0xFF ))
+          chairs=$(( (cpb >> 16) & 0xFF )); chairc=$(( (cpb >> 24) & 0xFF ))
+          cfacial=$(( cpb2 & 0xFF ))
+        fi
         eq+=']'
         # last_saved: rows reflect the character table as of its last save to
         # the DB -- for a character currently online, that can lag their true
         # live state until their next auto-save/logout. Live-accurate data
         # would need a SOAP .pinfo call (future refinement, not built here).
-        cskin=$(( cpb & 0xFF )); cface=$(( (cpb >> 8) & 0xFF ))
-        chairs=$(( (cpb >> 16) & 0xFF )); chairc=$(( (cpb >> 24) & 0xFF ))
-        cfacial=$(( cpb2 & 0xFF ))
         json_ok "{\"name\":\"$(json_escape "$cname")\",\"level\":$clevel,\"class\":$cclass,\"race\":$crace_s,\"gender\":$cgender_s,\"skin\":$cskin,\"face\":$cface,\"hair_style\":$chairs,\"hair_color\":$chairc,\"facial_style\":$cfacial,\"gold\":$((cmoney/10000)),\"note\":\"last_saved\",\"equipped\":$eq}"
         ;;
       char-progress)

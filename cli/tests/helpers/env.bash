@@ -97,6 +97,14 @@ if [[ "${1:-}" == "exec" ]]; then
     idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
     [[ -f "${files[$idx]}" ]] && cat "${files[$idx]}"
     echo $(( i + 1 )) > "$st"
+    # DML_STUB_DB_EXIT_SEQ: optional space-separated exit codes parallel to
+    # ROWS_SEQ (clamped to last) -- lets one query fail and the next succeed
+    # (the paperdoll schema-fallback tests need exactly that).
+    if [[ -n "${DML_STUB_DB_EXIT_SEQ:-}" ]]; then
+      exits=($DML_STUB_DB_EXIT_SEQ)
+      eidx=$i; (( eidx >= ${#exits[@]} )) && eidx=$(( ${#exits[@]} - 1 ))
+      exit "${exits[$eidx]}"
+    fi
     exit "${DML_STUB_DB_EXIT:-0}"
   fi
   [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
@@ -192,6 +200,13 @@ if [[ "${1:-}" == "exec" ]]; then
     idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
     [[ -f "${files[$idx]}" ]] && cat "${files[$idx]}"
     echo $(( i + 1 )) > "$st"
+    # Per-call exit codes (parallel to ROWS_SEQ, clamped) -- same seam as the
+    # combined docker stub's exec arm above.
+    if [[ -n "${DML_STUB_DB_EXIT_SEQ:-}" ]]; then
+      exits=($DML_STUB_DB_EXIT_SEQ)
+      eidx=$i; (( eidx >= ${#exits[@]} )) && eidx=$(( ${#exits[@]} - 1 ))
+      exit "${exits[$eidx]}"
+    fi
     exit "${DML_STUB_DB_EXIT:-0}"
   fi
   [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
