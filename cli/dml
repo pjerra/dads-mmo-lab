@@ -2736,6 +2736,98 @@ case "$cmd" in
         detail_pd="$(_host_port_json ac-database 3306)"
         json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
         ;;
+      docker-usage)
+        # Read-only: raw `docker system df` lines, one JSON envelope. No
+        # server-dir requirement -- this reports host-wide Docker disk use.
+        if ! docker info >/dev/null 2>&1; then
+          json_err DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+          exit 1
+        fi
+        dfout=""
+        dfout="$(docker system df 2>&1)" || true
+        dfarr='['; dffirst=1
+        while IFS= read -r dfl || [[ -n "$dfl" ]]; do
+          [[ -z "$dfl" ]] && continue
+          [[ $dffirst -eq 0 ]] && dfarr+=','
+          dfarr+="\"$(json_escape "$dfl")\""
+          dffirst=0
+        done <<< "$dfout"
+        dfarr+=']'
+        json_ok "{\"lines\":$dfarr}"
+        ;;
+      docker-clean)
+        # Port of the manager's cleanup_docker (guides/wow-wotlk/wow-manage.sh
+        # ~6688-6769): reclaims disk space from stale build cache / CMake
+        # volumes / dangling images. Best-effort throughout -- once past
+        # validation/docker-down/no-server, every failure degrades to a warn
+        # line rather than aborting (a partial clean is still useful).
+        dclevel=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --level) _need_flag_val "$1" $#; dclevel="$2"; shift 2 ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow docker-clean --level 1|2|3 --json"; exit 1 ;;
+          esac
+        done
+        if [[ ! "$dclevel" =~ ^[1-3]$ ]]; then
+          json_err BAD_ARG "Level must be 1, 2, or 3" "Usage: dml wow docker-clean --level 1|2|3 --json"
+          exit 1
+        fi
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start docker-clean
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          ndjson_section_end docker-clean error
+          ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+          exit 1
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          ndjson_section_end docker-clean error
+          ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+          exit 1
+        fi
+        ndjson_line info "protecting the database volume..."
+        (cd "$sdir" && docker compose up -d ac-database >/dev/null 2>&1) || ndjson_line warn "could not start ac-database -- continuing"
+        ndjson_line info "stopping worldserver..."
+        (cd "$sdir" && docker compose stop ac-worldserver >/dev/null 2>&1) || ndjson_line warn "could not stop worldserver -- continuing"
+        ndjson_line info "pruning build cache..."
+        dcbrc=0
+        if dcbout="$(cd "$sdir" && docker builder prune -af 2>&1)"; then :; else dcbrc=$?; fi
+        if [[ -n "$dcbout" ]]; then
+          while IFS= read -r dcl || [[ -n "$dcl" ]]; do
+            [[ -n "$dcl" ]] && ndjson_line info "$dcl"
+          done <<< "$dcbout"
+        fi
+        [[ "$dcbrc" -ne 0 ]] && ndjson_line warn "build cache prune exited $dcbrc -- may already be empty"
+        if [[ "$dclevel" -ge 2 ]]; then
+          ndjson_line info "identifying build volume..."
+          dcproject="$(basename "$sdir" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')"
+          dcvol=""
+          dcvol="$(docker volume ls --format '{{.Name}}' 2>/dev/null | grep -E "^${dcproject}.*(ac.build|build)" | head -1)" || true
+          if [[ -n "$dcvol" ]]; then
+            ndjson_line info "removing build volume: $dcvol"
+            if docker volume rm "$dcvol" >/dev/null 2>&1; then
+              ndjson_line info "build volume removed -- CMake cache cleared."
+            else
+              ndjson_line warn "could not remove $dcvol (may still be in use)"
+            fi
+          else
+            ndjson_line info "no build volume found matching '${dcproject}*build' -- nothing to remove"
+          fi
+        fi
+        if [[ "$dclevel" -ge 3 ]]; then
+          ndjson_line info "pruning unused images..."
+          dcirc=0
+          if dciout="$(docker image prune -af 2>&1)"; then :; else dcirc=$?; fi
+          if [[ -n "$dciout" ]]; then
+            while IFS= read -r dcl || [[ -n "$dcl" ]]; do
+              [[ -n "$dcl" ]] && ndjson_line info "$dcl"
+            done <<< "$dciout"
+          fi
+          [[ "$dcirc" -ne 0 ]] && ndjson_line warn "image prune exited $dcirc"
+        fi
+        ndjson_line info "Next rebuild will be a full recompile (30-90 min)."
+        ndjson_section_end docker-clean ok
+        ndjson_done "{\"level\":$dclevel,\"cleaned\":true}"
+        ;;
       console-tail)
         # Read-only worldserver log tail for the Console page. Down is an
         # answer: docker/container unavailable -> available:false, exit 0.

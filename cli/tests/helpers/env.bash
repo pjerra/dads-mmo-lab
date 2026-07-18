@@ -232,6 +232,43 @@ if [[ "${1:-}" == "compose" ]]; then
   log "compose $*"
   exit "${DML_STUB_COMPOSE_EXIT:-0}"
 fi
+# docker-clean seams (`wow docker-usage`/`wow docker-clean`): builder/image/
+# system prune-style commands share one shape -- log argv, emit canned
+# output from DML_STUB_DOCKER_OUT (a file, same convention as
+# DML_STUB_PS_ROWS/DML_STUB_LOGS_FILE elsewhere), fail when
+# DML_STUB_DOCKER_FAIL_ARM matches the arm name.
+if [[ "${1:-}" == "builder" || "${1:-}" == "image" || "${1:-}" == "system" ]]; then
+  arm="$1"
+  log "$*"
+  if [[ "${DML_STUB_DOCKER_FAIL_ARM:-}" == "$arm" ]]; then
+    echo "stub $arm failure" >&2
+    exit "${DML_STUB_DOCKER_FAIL_EXIT:-1}"
+  fi
+  if [[ -n "${DML_STUB_DOCKER_OUT:-}" && -f "${DML_STUB_DOCKER_OUT}" ]]; then
+    cat "${DML_STUB_DOCKER_OUT}"
+  fi
+  exit 0
+fi
+# `volume ls --format ...` lists DML_STUB_VOLUME_NAMES (newline-separated,
+# may include non-matching noise so tests can prove the caller's grep
+# filters correctly); `volume rm <name>` fails when DML_STUB_DOCKER_FAIL_ARM
+# is "volume" (models a volume still in use -- the in-use warn path).
+if [[ "${1:-}" == "volume" ]]; then
+  sub="${2:-}"
+  log "$*"
+  if [[ "$sub" == "ls" ]]; then
+    [[ -n "${DML_STUB_VOLUME_NAMES:-}" ]] && printf '%s\n' "${DML_STUB_VOLUME_NAMES}"
+    exit 0
+  fi
+  if [[ "$sub" == "rm" ]]; then
+    if [[ "${DML_STUB_DOCKER_FAIL_ARM:-}" == "volume" ]]; then
+      echo "stub volume rm failure (in use)" >&2
+      exit "${DML_STUB_DOCKER_FAIL_EXIT:-1}"
+    fi
+    exit 0
+  fi
+  exit 0
+fi
 exit 0
 EOS
   chmod +x "$STUB_BIN/docker"
