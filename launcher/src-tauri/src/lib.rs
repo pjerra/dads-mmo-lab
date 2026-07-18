@@ -194,6 +194,21 @@ async fn wow_docker_clean(
 }
 
 #[tauri::command]
+async fn wow_update_check(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "update-check".into()]).await
+}
+
+#[tauri::command]
+async fn wow_server_update(
+    backup: bool,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let flag = if backup { "--backup" } else { "--no-backup" };
+    stream_args(vec!["wow".into(), "update".into(), flag.into()], on_event, state).await
+}
+
+#[tauri::command]
 async fn wow_console_tail(
     lines: Option<u32>,
     state: State<'_, AppState>,
@@ -916,6 +931,8 @@ pub fn run() {
             wow_server_detail,
             wow_docker_usage,
             wow_docker_clean,
+            wow_update_check,
+            wow_server_update,
             wow_console_tail,
             wow_console_send,
             wow_module_list,

@@ -177,6 +177,26 @@ export const wowDockerClean = (level: number, onEvent: (e: TermEvent) => void): 
   ch.onmessage = onEvent;
   return invoke("wow_docker_clean", { level, onEvent: ch });
 };
+export interface UpdateRepo {
+  label: "AzerothCore" | "mod-playerbots";
+  url: string;
+  branch: string;
+  head: string;
+  dirty: number;
+  behind: number | null;
+}
+export interface UpdateCheck {
+  repos: UpdateRepo[];
+  note?: string;
+}
+export async function wowUpdateCheck(): Promise<UpdateCheck> {
+  return await invoke("wow_update_check");
+}
+export const wowServerUpdate = (backup: boolean, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_server_update", { backup, onEvent: ch });
+};
 export interface ConsoleTail {
   available: boolean;
   lines: string[];
