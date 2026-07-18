@@ -67,15 +67,25 @@ _log_marker_seen() {
   [[ "${hits:-0}" -gt 0 ]]
 }
 
+# Cold boots (fresh containers after a full stop, cold DB cache) with a
+# large playerbots roster can take 15+ minutes to reach ready -- a warm
+# restart only takes ~2. Budget wall-clock, not iterations, and emit a
+# keepalive line each minute so the streamed output shows life. Override
+# the budget with DML_READY_TIMEOUT_SECS.
 _wait_ready() {
-  local i
-  for i in $(seq 1 240); do
+  local timeout="${DML_READY_TIMEOUT_SECS:-1800}" t0=$SECONDS elapsed last_note=0
+  while (( SECONDS - t0 < timeout )); do
     if docker ps --format '{{.Names}}' | grep -qx "$AUTH_CONTAINER" \
        && docker ps --format '{{.Names}}' | grep -qx "$WORLD_CONTAINER"; then
       if _log_marker_seen "$AUTH_CONTAINER" "${REALM_ADDRESS}:8085" \
          && _log_marker_seen "$WORLD_CONTAINER" 'ready\.\.\.'; then
         return 0
       fi
+    fi
+    elapsed=$(( SECONDS - t0 ))
+    if (( elapsed - last_note >= 60 )); then
+      last_note=$elapsed
+      _log "still waiting (~$(( elapsed / 60 ))m) — world is loading (cold starts with many bots can take 15+ minutes)..."
     fi
     sleep 2
   done

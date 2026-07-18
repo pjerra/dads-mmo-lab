@@ -20,7 +20,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ✅ | Boot states (Round A) | With server stopped, open Home → "Server is stopped". Start → card flips to "Starting up…" (amber) during the ~2-min boot, then "World is up" + players/uptime/latency. Buttons and card never contradict. (Passed 2026-07-18: stop + start cycle user-confirmed.) |
+| ⬜ | Boot states (Round A) | With server stopped, open Home → "Server is stopped". Start → card flips to "Starting up…" (amber) during boot (~2 min warm; 10-20 min after a full Stop — cold DB + bot spawn), then "World is up" + players/uptime/latency. Buttons and card never contradict. (2026-07-18: early pass reverted — cold start was still mid-boot; awaiting a seen "World is up".) |
 | ⬜ | Health panel (Round A) | Click the server card → panel shows world/auth/DB rows ("Up … (healthy)"), version, uptime, players, latency, ports (game 8085 / auth 3724 / SOAP 7878 / DB — expect 13306), SOAP "reachable". |
 | ✅ | [restart] Restart button (Round I) | Click Restart → streams stop+start into the terminal; card returns to "World is up" after boot. (Passed 2026-07-18 — surfaced+fixed two bugs first: dml-start.sh pipefail/grep -q readiness wait, false port-conflict warns on restart.) |
 | ⬜ | soap_unreachable diagnostic (Round A) | Next time Docker networking breaks (or force by `sudo iptables`-breaking the forward): card shows "World is running, but the launcher can't reach it" + the restart-Docker hint. |
