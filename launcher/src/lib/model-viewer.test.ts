@@ -9,11 +9,11 @@ import {
 } from "./model-viewer";
 
 describe("viewerFallbackSlot", () => {
-  it("maps only the recon's three 404-fallback slots", () => {
+  it("matches the reference retSlot map { 5: 20, 16: 21, 18: 22 } exactly", () => {
     expect(viewerFallbackSlot(5)).toBe(20); // chest -> robe
-    expect(viewerFallbackSlot(16)).toBe(21); // mainhand
-    expect(viewerFallbackSlot(17)).toBe(22); // offhand
-    for (const slot of [1, 3, 6, 15, 19]) {
+    expect(viewerFallbackSlot(16)).toBe(21); // mainhand(new)
+    expect(viewerFallbackSlot(18)).toBe(22); // offhand(new)
+    for (const slot of [1, 3, 6, 15, 17, 19]) {
       expect(viewerFallbackSlot(slot)).toBeNull();
     }
   });

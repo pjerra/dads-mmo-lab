@@ -52,6 +52,12 @@ declare global {
     // -- must be set BEFORE viewer.min.js executes (its customization
     // table branches on this at load time, not per-call).
     WOTLK_TO_RETAIL_DISPLAY_ID_API: string | undefined;
+    // Wowhead's site-global environment that viewer.min.js assumes exists
+    // (it does on wowhead.com). Without it the engine dies with a
+    // ReferenceError ("WH is not defined") before its first asset fetch --
+    // found live 2026-07-19; the stub below is the reference package's
+    // setup.js ported verbatim.
+    WH?: Record<string, unknown>;
     ZamModelViewer?: ZamModelViewerConstructor;
   }
 }
@@ -165,6 +171,55 @@ async function doLoadViewerScripts(): Promise<void> {
   window.$ = jq;
   window.jQuery = jq;
   window.WOTLK_TO_RETAIL_DISPLAY_ID_API = undefined;
+
+  // The reference package's setup.js, ported verbatim (minus its
+  // CONTENT_PATH/retail-API defaults, which we override above/below):
+  // viewer.min.js references window.WH at load/construct time and throws
+  // "WH is not defined" without it. WH.WebP.getImageExtension() picks the
+  // texture extension; WH.Wow.Item is the client inventory-type enum the
+  // engine's slot handling reads. debug is a no-op here (the reference
+  // console.logs) -- the engine calls it routinely.
+  if (!window.WH) {
+    window.WH = {
+      debug: () => {},
+      defaultAnimation: "Stand",
+      WebP: { getImageExtension: () => ".webp" },
+      Wow: {
+        Item: {
+          INVENTORY_TYPE_HEAD: 1,
+          INVENTORY_TYPE_NECK: 2,
+          INVENTORY_TYPE_SHOULDERS: 3,
+          INVENTORY_TYPE_SHIRT: 4,
+          INVENTORY_TYPE_CHEST: 5,
+          INVENTORY_TYPE_WAIST: 6,
+          INVENTORY_TYPE_LEGS: 7,
+          INVENTORY_TYPE_FEET: 8,
+          INVENTORY_TYPE_WRISTS: 9,
+          INVENTORY_TYPE_HANDS: 10,
+          INVENTORY_TYPE_FINGER: 11,
+          INVENTORY_TYPE_TRINKET: 12,
+          INVENTORY_TYPE_ONE_HAND: 13,
+          INVENTORY_TYPE_SHIELD: 14,
+          INVENTORY_TYPE_RANGED: 15,
+          INVENTORY_TYPE_BACK: 16,
+          INVENTORY_TYPE_TWO_HAND: 17,
+          INVENTORY_TYPE_BAG: 18,
+          INVENTORY_TYPE_TABARD: 19,
+          INVENTORY_TYPE_ROBE: 20,
+          INVENTORY_TYPE_MAIN_HAND: 21,
+          INVENTORY_TYPE_OFF_HAND: 22,
+          INVENTORY_TYPE_HELD_IN_OFF_HAND: 23,
+          INVENTORY_TYPE_PROJECTILE: 24,
+          INVENTORY_TYPE_THROWN: 25,
+          INVENTORY_TYPE_RANGED_RIGHT: 26,
+          INVENTORY_TYPE_QUIVER: 27,
+          INVENTORY_TYPE_RELIC: 28,
+          INVENTORY_TYPE_PROFESSION_TOOL: 29,
+          INVENTORY_TYPE_PROFESSION_ACCESSORY: 30,
+        },
+      },
+    };
+  }
 
   if (window.ZamModelViewer) return;
 
@@ -282,14 +337,15 @@ async function buildCharCustomization(
   return options.length > 0 ? { options } : undefined;
 }
 
-// Recon §1.2/1.3 (`getDisplaySlot`): the viewer's own internal 404-fallback
-// remaps three slots to "new"-style meta locations -- chest -> 20 (robe),
-// mainhand -> 21, offhand -> 22. Mirrored here so the pre-flight probe below
+// Recon §1.2 (`getDisplaySlot`, captured source verbatim): the viewer's own
+// internal 404-fallback remaps three slots to "new"-style meta locations --
+// `{ 5: 20, 16: 21, 18: 22 }` (chest -> robe-chest, mainhand -> mainhand(new),
+// offhand -> offhand(new)). Mirrored exactly so the pre-flight probe below
 // checks the same alternate location the viewer itself would try.
 export function viewerFallbackSlot(slot: number): number | null {
   if (slot === 5) return 20;
   if (slot === 16) return 21;
-  if (slot === 17) return 22;
+  if (slot === 18) return 22;
   return null;
 }
 
