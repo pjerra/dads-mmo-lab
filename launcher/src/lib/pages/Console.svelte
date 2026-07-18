@@ -1,13 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { wowConsoleTail, wowConsoleSend } from "$lib/api";
+  import { wowConsoleTail, wowConsoleSend, saveTextFile } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-
-  interface HistoryEntry {
-    command: string;
-    result: string | null;
-    error: string | null;
-  }
+  import { consoleStore } from "$lib/term-store.svelte";
 
   let available = $state(true);
   let lines: string[] = $state([]);
@@ -17,7 +12,6 @@
 
   let command = $state("");
   let sending = $state(false);
-  let history: HistoryEntry[] = $state([]);
 
   let logEl: HTMLDivElement | undefined = $state();
 
@@ -58,12 +52,12 @@
     sending = true;
     try {
       const r = await wowConsoleSend(cmd);
-      history = [...history, { command: cmd, result: r.result, error: null }];
+      consoleStore.hist = [...consoleStore.hist, { command: cmd, result: r.result, error: null }];
       command = "";
     } catch (e) {
       const err = e as { message?: string; hint?: string };
-      history = [
-        ...history,
+      consoleStore.hist = [
+        ...consoleStore.hist,
         {
           command: cmd,
           result: null,
@@ -75,6 +69,19 @@
       await refreshLogs();
     }
   }
+
+  function clearHistory() {
+    consoleStore.hist = [];
+  }
+
+  async function downloadLog() {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    const parts: string[] = [lines.join("\n"), ""];
+    for (const h of consoleStore.hist) {
+      parts.push(`> ${h.command}`, h.error ?? h.result ?? "");
+    }
+    await saveTextFile(`dml-console-${stamp}.log`, parts.join("\n"));
+  }
 </script>
 
 <section class="content">
@@ -85,6 +92,8 @@
         <input type="checkbox" bind:checked={auto} /> Auto-refresh
       </label>
       <button onclick={refreshLogs} disabled={refreshing}>Refresh</button>
+      <button onclick={clearHistory} disabled={sending}>Clear</button>
+      <button onclick={downloadLog}>Download</button>
     </div>
   </header>
 
@@ -96,6 +105,21 @@
     <div class="log" bind:this={logEl}>
       {#each lines as line, i (i)}
         <div class="logline">{line}</div>
+      {/each}
+    </div>
+  {/if}
+
+  {#if consoleStore.hist.length > 0}
+    <div class="history">
+      {#each consoleStore.hist as h, i (i)}
+        <div class="entry">
+          <div class="cmd">&gt; {h.command}</div>
+          {#if h.error}
+            <pre class="reply err">{h.error}</pre>
+          {:else}
+            <pre class="reply">{h.result}</pre>
+          {/if}
+        </div>
       {/each}
     </div>
   {/if}
@@ -123,34 +147,19 @@
       Send
     </button>
   </form>
-
-  {#if history.length > 0}
-    <div class="history">
-      {#each history as h, i (i)}
-        <div class="entry">
-          <div class="cmd">&gt; {h.command}</div>
-          {#if h.error}
-            <pre class="reply err">{h.error}</pre>
-          {:else}
-            <pre class="reply">{h.result}</pre>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {/if}
 </section>
 
 <style>
-  .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; box-sizing: border-box; }
+  .content { padding: 20px 24px; overflow: hidden; display: flex; flex-direction: column; gap: 14px; box-sizing: border-box; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
   .controls { display: flex; gap: 10px; align-items: center; }
   .autolabel { color: #8b949e; font-size: 13px; display: flex; gap: 6px; align-items: center; }
-  .log { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.45; overflow-y: auto; min-height: 200px; max-height: 48vh; }
+  .log { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.45; overflow-y: auto; flex: 1; min-height: 200px; }
   .logline { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
-  .sendrow { display: flex; gap: 8px; }
+  .sendrow { display: flex; gap: 8px; flex-shrink: 0; }
   .sendrow input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; font-family: Consolas, monospace; font-size: 13px; }
-  .history { display: flex; flex-direction: column; gap: 10px; }
+  .history { display: flex; flex-direction: column; gap: 10px; max-height: 22vh; overflow-y: auto; flex-shrink: 0; }
   .entry { border-left: 2px solid #30363d; padding-left: 10px; }
   .cmd { color: #58a6ff; font-family: Consolas, monospace; font-size: 13px; }
   .reply { margin: 4px 0 0; color: #c9d1d9; font-family: Consolas, monospace; font-size: 12.5px; white-space: pre-wrap; word-break: break-word; }

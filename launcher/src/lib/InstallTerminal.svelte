@@ -1,7 +1,8 @@
 <script lang="ts">
   import { tick, onMount } from "svelte";
-  import { gamesInstall, gamesInstallInput, gamesInstallCancel, type InstallEvent } from "$lib/api";
+  import { gamesInstall, gamesInstallInput, gamesInstallCancel, saveTextFile, type InstallEvent } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { installStore } from "$lib/term-store.svelte";
 
   let { id, onExit }: { id: string; onExit: (code: number) => void } = $props();
 
@@ -11,7 +12,6 @@
   // piped.
   const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]/g;
 
-  let output = $state("");
   let exited = $state(false);
   let exitCode: number | null = $state(null);
   let note: string | null = $state(null);
@@ -38,10 +38,19 @@
     // keep only text after the last lone \r on each line (final redraw wins).
     // Best-effort per chunk; redraws split across chunks may leave occasional stale lines.
     text = text.replace(ANSI_RE, "").replace(/^.*\r(?!\n)/gm, "");
-    output += text;
+    installStore.text += text;
     tick().then(() => {
       if (nearBottom && box) box.scrollTop = box.scrollHeight;
     });
+  }
+
+  function clearOutput() {
+    installStore.text = "";
+  }
+
+  async function downloadOutput() {
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+    await saveTextFile(`dml-install-${stamp}.log`, installStore.text);
   }
 
   async function run() {
@@ -104,11 +113,18 @@
 </script>
 
 <div class="install-term">
+  <div class="term-head">
+    <button class="head-btn" onclick={clearOutput} disabled={!exited}>Clear</button>
+    <button class="head-btn" onclick={downloadOutput} disabled={installStore.text === ""}>
+      Download
+    </button>
+  </div>
+
   {#if error}
     <div class="error-card"><p>{error}</p></div>
   {/if}
 
-  <div class="scrollback" bind:this={box}>{output}</div>
+  <div class="scrollback" bind:this={box}>{installStore.text}</div>
 
   {#if note}
     <div class="exit-note {exitCode === 0 ? 'ok' : 'err'}">{note}</div>
@@ -176,8 +192,26 @@
     word-break: break-word;
     overflow-y: auto;
     min-height: 160px;
-    max-height: 40vh;
+    max-height: calc(100vh - 260px);
   }
+  .term-head {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+  }
+  .head-btn {
+    background: transparent;
+    color: #8b949e;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+  .head-btn:hover:not(:disabled) { color: #c9d1d9; border-color: #8b949e; }
+  .head-btn:disabled { opacity: 0.5; cursor: default; }
   .exit-note { font-size: 13px; font-weight: 600; }
   .exit-note.ok { color: #3fb950; }
   .exit-note.err { color: #f85149; }

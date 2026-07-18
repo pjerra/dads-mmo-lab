@@ -4,7 +4,7 @@
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
-  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
+  import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let catalog: TitleInfo[] = $state([]);
@@ -136,6 +136,7 @@
     installRunning = true;
     actionError = null;
     note = null;
+    installStore.text = "";
   }
 
   function onInstallExit(_code: number) {
