@@ -11,6 +11,9 @@
   const containerId = `character-model-${crypto.randomUUID()}`;
 
   let status: "loading" | "ready" | "error" = $state("loading");
+  // The real rejection reason -- surfaced in the UI because "needs internet"
+  // turned out to cover at least three unrelated failure modes in practice.
+  let errDetail = $state("");
 
   // Teardown has no documented API in the recon (ZamModelViewer's own
   // destroy/dispose method was never captured in the source extracts) --
@@ -45,8 +48,10 @@
         created = viewer;
         status = "ready";
       })
-      .catch(() => {
+      .catch((e: unknown) => {
         if (cancelled) return;
+        const err = e as { message?: string };
+        errDetail = err?.message ?? String(e);
         status = "error";
       });
 
@@ -71,7 +76,9 @@
   {#if status === "loading"}
     <p class="muted">Loading model…</p>
   {:else if status === "error"}
-    <p class="muted">3D model unavailable (needs internet on first view)</p>
+    <p class="muted">
+      3D model unavailable{#if errDetail}<br /><span class="errdetail">{errDetail}</span>{/if}
+    </p>
   {/if}
 </div>
 
@@ -101,5 +108,10 @@
     text-align: center;
     padding: 0 16px;
     pointer-events: none;
+  }
+  .errdetail {
+    color: #f85149;
+    font-size: 11.5px;
+    word-break: break-word;
   }
 </style>
