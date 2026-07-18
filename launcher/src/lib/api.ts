@@ -1,5 +1,4 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { save } from "@tauri-apps/plugin-dialog";
 
 export interface DmlErr {
   code: string;
@@ -21,12 +20,10 @@ export type TermEvent =
   | { event: "error"; error: DmlErr }
   | { event: string; [key: string]: unknown }; // forward-compat: pct etc.
 
-// Save-dialog + write. Returns false when the user cancels the dialog.
+// Native save dialog + write, both on the rust side -- returns false when
+// the user cancels. The webview never chooses the path.
 export async function saveTextFile(defaultName: string, content: string): Promise<boolean> {
-  const path = await save({ defaultPath: defaultName });
-  if (!path) return false;
-  await invoke("save_text_file", { path, content });
-  return true;
+  return invoke("save_text_file", { defaultName, content });
 }
 
 export async function gamesList(): Promise<Game[]> {

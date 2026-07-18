@@ -508,9 +508,23 @@ async fn wow_config_raw_write(
     .and_then(envelope_to_result)
 }
 
+// Save-dialog + write in one command: the webview supplies only a suggested
+// file name and the content -- the path comes exclusively from the native
+// dialog, so a compromised webview cannot write to arbitrary locations.
+// Sync command on purpose: Tauri runs it off the main thread, which
+// blocking_save_file requires (it blocks until the main-thread dialog closes).
 #[tauri::command]
-fn save_text_file(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+fn save_text_file(app: tauri::AppHandle, default_name: String, content: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_file_name(&default_name).blocking_save_file();
+    match picked {
+        Some(p) => {
+            let path = p.into_path().map_err(|e| e.to_string())?;
+            std::fs::write(&path, content).map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 async fn stream_action(
