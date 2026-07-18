@@ -25,13 +25,16 @@ const store = $state({ bufs: {} as Record<string, TermBuf> });
 
 // Lazily create the buffer for `key`; repeat calls with the same key return
 // the same object (so callers can hold onto it across renders).
+// MUST return by re-reading store.bufs[key]: Svelte's $state set trap stores
+// a NEW proxy around the assigned object, so returning the local pre-proxy
+// variable on the creation path would hand the first caller a non-reactive
+// plain object -- its template reads would never subscribe, and the terminal
+// would silently never appear on that key's first use.
 export function termBuf(key: string): TermBuf {
-  let buf = store.bufs[key];
-  if (!buf) {
-    buf = { term: initialTermState(), show: false };
-    store.bufs[key] = buf;
+  if (!store.bufs[key]) {
+    store.bufs[key] = { term: initialTermState(), show: false };
   }
-  return buf;
+  return store.bufs[key];
 }
 
 export function beginRun(key: string): TermBuf {
