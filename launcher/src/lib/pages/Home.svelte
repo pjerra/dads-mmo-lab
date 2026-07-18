@@ -101,6 +101,7 @@
           <span>Players online: <strong>{detail.soap.players ?? "?"}</strong></span>
           <span>Uptime: <strong>{detail.soap.uptime ?? "?"}</strong></span>
           <span>Update time: <strong>{detail.soap.mean_ms ?? "?"} ms avg</strong></span>
+          <span>Bots: <strong>{detail.bots.online ?? "?"} / {detail.bots.max ?? "?"}</strong></span>
         </div>
       {:else if detail.verdict === "starting"}
         <p class="muted">The world is still loading — this takes a couple of minutes while bots spawn.</p>
@@ -155,6 +156,7 @@
               <div class="hrow"><span class="hname">Version</span><span class="hval">{detail.soap.version ?? "?"}</span></div>
               <div class="hrow"><span class="hname">Uptime</span><span class="hval">{detail.soap.uptime ?? "?"}</span></div>
               <div class="hrow"><span class="hname">Players online</span><span class="hval">{detail.soap.players ?? "?"}</span></div>
+              <div class="hrow"><span class="hname">Bots online</span><span class="hval">{detail.bots.online ?? "?"} of {detail.bots.max ?? "?"} max</span></div>
               <div class="hrow">
                 <span class="hname">World update time</span>
                 <span class="hval">{detail.soap.mean_ms ?? "?"} ms mean · {detail.soap.median_ms ?? "?"} ms median</span>

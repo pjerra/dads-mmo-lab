@@ -3,7 +3,7 @@
   import {
     wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyRelogin, wowPartySetup,
     wowPartyBotcmd, wowPartyPresetSave, wowPartyPresetList, wowPartyPresetDelete, wowPartyPresetLoad,
-    wowPartyPresetShow, wowPartyPresetImport, wowGmLevel,
+    wowPartyPresetShow, wowPartyPresetImport, wowGmLevel, wowServerDetail,
     type OnlineChar, type PartyMember, type PresetInfo,
   } from "$lib/api";
   import { className } from "$lib/wow";
@@ -21,6 +21,7 @@
   let error: string | null = $state(null);
   let busy = $state(false);
   let note: string | null = $state(null);
+  let botsOnline: number | null = $state(null);
 
   const buf = termBuf("playerbots");
   let setting = $state(false);
@@ -55,6 +56,10 @@
       if (!online.find((o) => o.name === player)) player = online[0]?.name ?? "";
       if (player) members = await wowPartyList(player); else members = [];
     } catch (e) { showErr(e); }
+    try {
+      const d = await wowServerDetail();
+      botsOnline = d.bots.online;
+    } catch { /* decorative — do not fail refresh() over this */ }
   }
   async function refreshPresets() {
     try { presets = await wowPartyPresetList(); } catch (e) { showErr(e); }
@@ -229,7 +234,7 @@
 </script>
 
 <section class="content">
-  <header class="bar"><h2>My Party</h2><button onclick={refresh} disabled={busy || setting || loadingPreset}>Refresh</button></header>
+  <header class="bar"><h2>My Party</h2>{#if botsOnline !== null}<span class="chip">Bots online: {botsOnline}</span>{/if}<button onclick={refresh} disabled={busy || setting || loadingPreset}>Refresh</button></header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
 
@@ -404,5 +409,6 @@
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 5px 12px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; }
+  .chip { font-size: .85em; color: #8b949e; border: 1px solid #30363d; border-radius: 999px; padding: 2px 10px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
 </style>
