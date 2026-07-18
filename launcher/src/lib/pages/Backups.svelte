@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { wowBackupCreate, wowBackupList, wowBackupDelete, wowBackupRestore, type BackupInfo } from "$lib/api";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
@@ -14,8 +15,7 @@
   let confirming: { kind: "restore" | "delete"; file: string } | null = $state(null);
   let includeWorld = $state(false);
 
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("backups");
 
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -37,13 +37,13 @@
   // Streaming outcomes derive from done/error EVENTS, never promise
   // resolution -- streaming promises resolve even when the CLI fails.
   async function backupNow() {
-    streaming = true; error = null; note = null; showTerm = true; term = initialTermState();
+    streaming = true; error = null; note = null; beginRun("backups");
     let doneFile: string | null = null; let doneSize = 0;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await wowBackupCreate((e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           const d = e.data as { file?: string; size?: number } | undefined;
           doneFile = d?.file ?? null; doneSize = d?.size ?? 0;
@@ -67,13 +67,13 @@
       return;
     }
     confirming = null;
-    streaming = true; restartState.restarting = true; error = null; note = null; showTerm = true; term = initialTermState();
+    streaming = true; restartState.restarting = true; error = null; note = null; beginRun("backups");
     let safety: string | null = null; let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await wowBackupRestore(file, (e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           sawDone = true;
           const d = e.data as { safety_backup?: string } | undefined;
@@ -161,8 +161,8 @@
     </div>
   {/if}
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("backups")} logName="dml-backups" />
   {/if}
 </section>
 

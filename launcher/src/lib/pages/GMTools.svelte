@@ -4,8 +4,9 @@
     wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowGmAtLogin, wowBridgeSetup,
     type OnlineChar,
   } from "$lib/api";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -29,8 +30,7 @@
   ];
   let atLoginFlag: "rename" | "customize" | "changerace" | "changefaction" = $state("rename");
 
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("gmtools");
   let deploying = $state(false);
   let confirmDeploy = $state(false);
 
@@ -98,10 +98,10 @@
 
   async function deployBridges() {
     if (!confirmDeploy) { confirmDeploy = true; return; }
-    confirmDeploy = false; deploying = true; error = null; note = null; showTerm = true; term = initialTermState();
+    confirmDeploy = false; deploying = true; error = null; note = null; beginRun("gmtools");
     try {
       await wowBridgeSetup((e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           const d = e.data as { restart_required?: boolean } | undefined;
           if (d?.restart_required) restartState.needed = true;
@@ -109,7 +109,7 @@
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      term = applyEvent(term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
+      buf.term = applyEvent(buf.term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
     } finally { deploying = false; }
   }
 </script>
@@ -237,8 +237,8 @@
     — then stop and start the server (Home or Library) to load them.
   </p>
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("gmtools")} logName="dml-gmtools" />
   {/if}
 </section>
 

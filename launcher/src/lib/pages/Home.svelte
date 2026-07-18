@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { wowServerDetail, gamesStatus, gamesStart, gamesStop, gamesRestart, type ServerDetail } from "$lib/api";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   const WOW_ID = "wow-server-playerbots";
@@ -20,8 +21,7 @@
   let expanded = $state(false);
 
   let busy = $state(false);
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("home");
 
   async function refresh() {
     refreshing = true;
@@ -48,16 +48,15 @@
 
   async function act(action: "start" | "stop" | "restart") {
     busy = true;
-    showTerm = true;
-    term = initialTermState();
+    beginRun("home");
     try {
       const run = action === "start" ? gamesStart : action === "stop" ? gamesStop : gamesRestart;
       await run(WOW_ID, (e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      term = applyEvent(term, {
+      buf.term = applyEvent(buf.term, {
         event: "error",
         error: {
           code: err.code ?? "IPC",
@@ -183,8 +182,8 @@
     </div>
   {/if}
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("home")} logName="dml-home" />
   {/if}
 </section>
 

@@ -11,9 +11,10 @@
     type RawFileName,
   } from "$lib/api";
   import { dirtyKeys } from "$lib/config-diff";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT, testingModeOn, setTestingMode } from "$lib/features.svelte";
 
@@ -40,8 +41,7 @@
   let loadingFile = $state(false);
   let lastBackup: string | null = $state(null);
 
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("config");
 
   let aleNote: string | null = $state(null);
 
@@ -156,16 +156,15 @@
     confirmingRestart = false;
     if (!(await saveFn())) return;
     restartState.restarting = true;
-    showTerm = true;
-    term = initialTermState();
+    beginRun("config");
     try {
       await gamesRestart(WOW_ID, (e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
       });
       restartState.needed = false;
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      term = applyEvent(term, {
+      buf.term = applyEvent(buf.term, {
         event: "error",
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
@@ -338,8 +337,8 @@
     {/if}
   {/if}
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("config")} logName="dml-config" />
   {/if}
 </section>
 

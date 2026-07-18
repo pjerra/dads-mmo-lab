@@ -7,8 +7,9 @@
     type OnlineChar, type PartyMember, type PresetInfo,
   } from "$lib/api";
   import { className } from "$lib/wow";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
@@ -21,8 +22,7 @@
   let busy = $state(false);
   let note: string | null = $state(null);
 
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("playerbots");
   let setting = $state(false);
   let confirmSetup = $state(false);
 
@@ -133,14 +133,14 @@
     }
     confirmingPreset = null;
     const p = player;
-    loadingPreset = true; error = null; note = null; showTerm = true; term = initialTermState();
+    loadingPreset = true; error = null; note = null; beginRun("playerbots");
     let requested = 0, joined = 0;
     let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await wowPartyPresetLoad(p, name, (e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           sawDone = true;
           const d = e.data as { requested?: number; joined?: number } | undefined;
@@ -212,10 +212,10 @@
   }
   async function enableMyParty() {
     if (!confirmSetup) { confirmSetup = true; return; }
-    confirmSetup = false; setting = true; showTerm = true; term = initialTermState();
+    confirmSetup = false; setting = true; beginRun("playerbots");
     try {
       await wowPartySetup((e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           const d = e.data as { restart_required?: boolean } | undefined;
           if (d?.restart_required) restartState.needed = true;
@@ -223,7 +223,7 @@
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      term = applyEvent(term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
+      buf.term = applyEvent(buf.term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
     } finally { setting = false; }
   }
 </script>
@@ -385,7 +385,7 @@
     </div>
   {/if}
 
-  {#if showTerm}<Terminal state={term} />{/if}
+  {#if buf.show}<Terminal state={buf.term} onclear={() => clearBuf("playerbots")} logName="dml-playerbots" />{/if}
 </section>
 
 <style>

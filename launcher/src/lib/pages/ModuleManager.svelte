@@ -26,8 +26,9 @@
     type RepairResult,
     type UpdateCheck,
   } from "$lib/api";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let list: ModuleList | null = $state(null);
@@ -93,8 +94,7 @@
   let cleanLevel = $state(1);
   let confirmingClean = $state(false);
 
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("modules");
 
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -133,14 +133,14 @@
     run: (onEvent: (e: TermEvent) => void) => Promise<void>,
     onDone: (doneData: unknown) => void,
   ) {
-    busy = true; error = null; note = null; showTerm = true; term = initialTermState();
+    busy = true; error = null; note = null; beginRun("modules");
     let sawDone = false;
     let doneData: unknown;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await run((e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           sawDone = true;
           doneData = (e as { data?: unknown }).data;
@@ -837,8 +837,8 @@
     </div>
   </div>
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("modules")} logName="dml-modules" />
   {/if}
 </section>
 

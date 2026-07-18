@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { gamesCatalog, gamesStart, gamesStop, gamesRemove, type TitleInfo, type TermEvent } from "$lib/api";
-  import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
+  import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
+  import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let catalog: TitleInfo[] = $state([]);
@@ -13,8 +14,7 @@
 
   // Start/stop, in flight for this id (existing pattern).
   let busyId: string | null = $state(null);
-  let term: TermState = $state(initialTermState());
-  let showTerm = $state(false);
+  const buf = termBuf("library");
 
   // Typed-confirm remove: which row is armed, its input, and whether the
   // gamesRemove stream is actually running.
@@ -60,16 +60,15 @@
     busyId = id;
     actionError = null;
     note = null;
-    showTerm = true;
-    term = initialTermState();
+    beginRun("library");
     try {
       const run = action === "start" ? gamesStart : gamesStop;
       await run(id, (e) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      term = applyEvent(term, {
+      buf.term = applyEvent(buf.term, {
         event: "error",
         error: {
           code: err.code ?? "IPC",
@@ -107,14 +106,13 @@
     removeBusy = true;
     actionError = null;
     note = null;
-    showTerm = true;
-    term = initialTermState();
+    beginRun("library");
     let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
       await gamesRemove(id, (e: TermEvent) => {
-        term = applyEvent(term, e);
+        buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
           sawDone = true;
         } else if (e.event === "error") {
@@ -244,8 +242,8 @@
     {/key}
   {/if}
 
-  {#if showTerm}
-    <Terminal state={term} />
+  {#if buf.show}
+    <Terminal state={buf.term} onclear={() => clearBuf("library")} logName="dml-library" />
   {/if}
 </section>
 
