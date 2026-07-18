@@ -82,6 +82,26 @@ if [[ "${1:-}" == "port" ]]; then
   fi
   exit 0
 fi
+if [[ "${1:-}" == "exec" ]]; then
+  # server-detail's bots block: `docker exec -i ac-database mysql ...`. Same
+  # env-var-driven canned-output convention as use_mysql_stub's exec arm
+  # below (DML_STUB_DB_ROWS[_SEQ]/DML_STUB_DB_EXIT/DML_STUB_DB_QUERY_LOG),
+  # kept here too so server-detail tests can stub mysql without losing the
+  # ps/inspect/logs/port arms above (use_mysql_stub replaces this whole file).
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  [[ -n "${DML_STUB_DB_QUERY_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_DB_QUERY_LOG"
+  if [[ -n "${DML_STUB_DB_ROWS_SEQ:-}" ]]; then
+    st="${DML_STUB_DB_SEQ_STATE:-/tmp/dml_seq_state.$$}"
+    i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+    files=($DML_STUB_DB_ROWS_SEQ)
+    idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
+    [[ -f "${files[$idx]}" ]] && cat "${files[$idx]}"
+    echo $(( i + 1 )) > "$st"
+    exit "${DML_STUB_DB_EXIT:-0}"
+  fi
+  [[ -n "${DML_STUB_DB_ROWS:-}" ]] && cat "$DML_STUB_DB_ROWS"
+  exit "${DML_STUB_DB_EXIT:-0}"
+fi
 exit 0
 EOS
   chmod +x "$STUB_BIN/docker"

@@ -184,6 +184,66 @@ EOF
   [ "$(echo "$output" | jq -r '.data.containers[2].state')" = "running" ]
 }
 
+# ---------- bots block (N1) ----------
+
+@test "server-detail: bots block reports online count + env-override max when running" {
+  all_running_rows
+  ready_log
+  soap_live_response
+  add_game wow-server-playerbots compose
+  cat > "$DML_GAMES_DIR/wow-server-playerbots/docker-compose.override.yml" <<'EOF'
+services:
+  ac-worldserver:
+    environment:
+      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "600"
+EOF
+  printf '42\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/bots.tsv"
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.bots.online')" = "42" ]
+  [ "$(echo "$output" | jq -r '.data.bots.max')" = "600" ]
+}
+
+@test "server-detail: bots.online is null when the mysql lookup fails, rest of the envelope unaffected" {
+  all_running_rows
+  ready_log
+  soap_live_response
+  export DML_STUB_DB_EXIT=1
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.bots.online')" = "null" ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "online" ]
+  [ "$(echo "$output" | jq -r '.data.soap.players')" = "1" ]
+}
+
+@test "server-detail: bots block stays null and mysql is never queried when the world isn't running" {
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/dbq.log"
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "stopped" ]
+  [ "$(echo "$output" | jq -r '.data.bots.online')" = "null" ]
+  [ "$(echo "$output" | jq -r '.data.bots.max')" = "null" ]
+  [ ! -f "$FIXTURE/dbq.log" ]
+}
+
+@test "server-detail: bots.max falls back to playerbots.conf when no env override is set" {
+  all_running_rows
+  ready_log
+  soap_live_response
+  add_game wow-server-playerbots compose
+  mkdir -p "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules"
+  cat > "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules/playerbots.conf" <<'EOF'
+AiPlayerbot.MaxRandomBots = 777
+EOF
+  printf '5\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/bots.tsv"
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.bots.max')" = "777" ]
+}
+
 @test "server-info still behaves exactly as before (regression canary)" {
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
   run bash "$DML" wow server-info --json

@@ -1257,7 +1257,8 @@ case "$cmd" in
         detail_pa="$(_host_port_json ac-authserver 3724)"
         detail_psp="$(_host_port_json ac-worldserver 7878)"
         detail_pd="$(_host_port_json ac-database 3306)"
-        json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
+        detail_bots="$(_bots_counts "$detail_world_state")"
+        json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},$detail_bots,\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
         ;;
       docker-usage)
         # Read-only: raw `docker system df` lines, one JSON envelope. No

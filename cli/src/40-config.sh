@@ -159,6 +159,55 @@ _world_ready() {
     [[ "${hits:-0}" -gt 0 ]]
 }
 
+# _bots_counts <world_state>: echoes the complete server-detail bots JSON
+# fragment `"bots":{"online":<int|null>,"max":<int|null>}`. Computed ONLY
+# when <world_state> is "running" -- otherwise both fields stay null and NO
+# mysql call is made (a stopped/booting world has no live bot count and the
+# max lookup isn't worth a docker exec either).
+#
+# online: exact COUNT(*) via db_chars_query, the same cross-schema idiom as
+# `party online` (see that arm in 90-main.sh) but inverted -- INCLUDES bot
+# accounts instead of excluding them. A query failure/timeout, empty result,
+# or non-numeric garbage all degrade to null; this verb never errors on a
+# read-only lookup.
+#
+# max: env override first (_cfg_env_read, the same helper `wow config` uses),
+# falling back to a raw grep of playerbots.conf. Both steps need the same
+# context _cfg_preamble would set up (cfg_ovr/DML_YQ_BIN), but unlike
+# _cfg_preamble this never exits on a missing yq or missing server dir --
+# server-detail must keep answering even when WoW isn't installed yet.
+_bots_counts() {
+    local state="$1" online=null max=null rows val conf
+    if [[ "$state" == running ]]; then
+        rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || true
+        rows="${rows%%$'\n'*}"
+        [[ "$rows" =~ ^[0-9]+$ ]] && online="$rows"
+
+        local cfg_sdir="" cfg_ovr=""
+        cfg_sdir="$(_wow_server_dir)"
+        DML_YQ_BIN="${DML_YQ_BIN:-yq}"
+        if [[ -n "$cfg_sdir" ]]; then
+            cfg_ovr="$cfg_sdir/docker-compose.override.yml"
+            val="$(_cfg_env_read AC_AI_PLAYERBOT_MAX_RANDOM_BOTS)"
+            if [[ "$val" =~ ^[0-9]+$ ]]; then
+                max="$val"
+            else
+                conf="$cfg_sdir/env/dist/etc/modules/playerbots.conf"
+                if [[ -f "$conf" ]]; then
+                    val="$(grep -E '^[[:space:]]*AiPlayerbot\.MaxRandomBots' "$conf" 2>/dev/null | tail -n1)" || true
+                    val="${val#*=}"
+                    val="${val//[[:space:]]/}"
+                    val="${val//\"/}"
+                    val="${val//\'/}"
+                    [[ "$val" =~ ^[0-9]+$ ]] && max="$val"
+                fi
+            fi
+        fi
+    fi
+    printf '"bots":{"online":%s,"max":%s}' "$online" "$max"
+    return 0
+}
+
 # Host port for a container's internal port as a JSON string, or `null`.
 # `docker port` prints one "0.0.0.0:8085"-style line per bind; take the first.
 _host_port_json() {
