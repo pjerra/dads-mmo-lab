@@ -55,6 +55,13 @@
     return () => {
       cancelled = true;
       destroyViewer(created);
+      // destroyViewer is best-effort (no documented destroy API upstream --
+      // see above), so it can silently no-op and leave the old canvas/WebGL
+      // context sitting in the DOM. Forcibly clearing the container's
+      // children guarantees the next createCharacterViewer() call starts
+      // from an empty container instead of stacking a new canvas on top of
+      // a leaked one across character switches.
+      document.getElementById(containerId)?.replaceChildren();
     };
   });
 </script>

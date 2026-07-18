@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { AC_TO_VIEWER_SLOT, buildCharacterModelId, buildViewerItems } from "./model-viewer";
+import {
+  AC_TO_VIEWER_SLOT,
+  acGenderToViewer,
+  buildCharacterModelId,
+  buildViewerItems,
+} from "./model-viewer";
 
 describe("AC_TO_VIEWER_SLOT", () => {
   it("maps every rendered AC slot to the recon's viewer slot (acSlot + 1)", () => {
@@ -50,5 +55,12 @@ describe("buildCharacterModelId", () => {
     expect(buildCharacterModelId(7, 1)).toBe(14); // gnome male -- recon's own worked example (id=14)
     expect(buildCharacterModelId(1, 0)).toBe(1); // human female
     expect(buildCharacterModelId(2, 1)).toBe(4); // orc male
+  });
+});
+
+describe("acGenderToViewer", () => {
+  it("pins the AC (0=male/1=female) <-> viewer (0=female/1=male) convention boundary", () => {
+    expect(acGenderToViewer(0)).toBe(1); // AC male -> viewer male
+    expect(acGenderToViewer(1)).toBe(0); // AC female -> viewer female
   });
 });

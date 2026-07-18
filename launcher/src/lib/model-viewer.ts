@@ -26,7 +26,7 @@
 
 import type { PaperdollData } from "./api";
 
-// jquery (v4.x) ships no bundled TypeScript types and this repo doesn't carry
+// jquery (v3.x) ships no bundled TypeScript types and this repo doesn't carry
 // @types/jquery. viewer.min.js only touches a jQuery-wrapped container's own
 // internals (recon §3) -- our own code never inspects one, it just builds one
 // and hands it to the untyped ZamModelViewer constructor, so a minimal
@@ -107,6 +107,15 @@ export function buildCharacterModelId(race: number, gender: number): number {
   return race * 2 - 1 + gender;
 }
 
+// Convention boundary: AzerothCore's `characters.gender` column is 0=male /
+// 1=female, but the viewer's own model-id convention (see
+// buildCharacterModelId above) is the opposite -- 0=female / 1=male. Callers
+// must run AC's raw `doll.gender` through this before it ever reaches
+// buildCharacterModelId.
+export function acGenderToViewer(g: number): number {
+  return g === 0 ? 1 : 0;
+}
+
 const CONTENT_PATH = "http://zam.localhost/modelviewer/wrath/";
 const VIEWER_SCRIPT_URL = "http://zam.localhost/modelviewer/wrath/viewer/viewer.min.js";
 
@@ -126,19 +135,32 @@ let viewerScriptsPromise: Promise<void> | null = null;
 export function loadViewerScripts(): Promise<void> {
   if (!viewerScriptsPromise) {
     viewerScriptsPromise = doLoadViewerScripts();
+    // A rejected load must not stay memoized forever -- clear it so the next
+    // character switch's call retries from scratch instead of replaying the
+    // same stale failure. A successful load stays memoized (no `.then()`
+    // clears it), keeping the "inject the script tag once per session"
+    // behavior intact.
+    viewerScriptsPromise.catch(() => {
+      viewerScriptsPromise = null;
+    });
   }
   return viewerScriptsPromise;
 }
 
 async function doLoadViewerScripts(): Promise<void> {
-  // Dynamic import: jQuery's CJS build throws immediately at module-eval
-  // time in any context without a real `window.document` (confirmed by
-  // reading node_modules/jquery/dist/jquery.js -- it's an unconditional
-  // `module.exports = factory(global, true)` call, and the factory's first
-  // line is `if (!window.document) throw ...`). A static top-level import
-  // would drag that eval into every consumer of this module, including the
-  // pure-helper vitest run; deferring it into this function keeps jQuery
-  // out of any code path that doesn't actually need a live webview.
+  // Dynamic import: jQuery 3.7.1 ships plain `main: "dist/jquery.js"` (no
+  // `module`/`exports` field), so this resolves to the same UMD CJS build
+  // under both Vite/vitest and the app's own bundler. That build's wrapper
+  // (confirmed by reading node_modules/jquery/dist/jquery.js) only invokes
+  // the real jQuery factory when `global.document` is already present at
+  // eval time; otherwise it exports a lazy `function(w) {...}` stand-in that
+  // itself throws only once actually *called* without a document. Either
+  // way, a static top-level import here would still hand every consumer of
+  // this module -- including the pure-helper vitest run, which has no real
+  // `window.document` -- the wrong shape (that lazy stand-in instead of a
+  // callable jQuery). Deferring the import into this function, only ever
+  // invoked from a live webview with a real document, keeps jQuery out of
+  // any code path that doesn't actually need one.
   const jq = (await import("jquery")).default;
   window.$ = jq;
   window.jQuery = jq;
@@ -271,7 +293,7 @@ export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
 ): Promise<unknown> {
-  const modelId = buildCharacterModelId(doll.race, doll.gender);
+  const modelId = buildCharacterModelId(doll.race, acGenderToViewer(doll.gender));
   const options: Record<string, unknown> = {
     type: 2,
     contentPath: CONTENT_PATH,
