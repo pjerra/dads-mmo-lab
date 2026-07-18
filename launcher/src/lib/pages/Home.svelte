@@ -3,6 +3,7 @@
   import { wowServerDetail, gamesStatus, gamesStart, gamesStop, gamesRestart, type ServerDetail } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   const WOW_ID = "wow-server-playerbots";
   const ROLE_LABELS: Record<string, string> = {
@@ -129,7 +130,13 @@
         <div>
           {#if containerState === "running"}
             <button disabled={busy} onclick={() => act("stop")}>Stop</button>
-            <button disabled={busy} onclick={() => act("restart")}>Restart</button>
+            <button
+              disabled={busy || featureLocked("restart")}
+              title={featureLocked("restart") ? LOCKED_HINT : undefined}
+              onclick={() => act("restart")}
+            >
+              Restart
+            </button>
           {:else}
             <button class="primary" disabled={busy} onclick={() => act("start")}>Start</button>
           {/if}

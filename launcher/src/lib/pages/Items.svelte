@@ -2,6 +2,7 @@
   import { wowItemsSearch, wowMailItem, type ItemRow } from "$lib/api";
   import { qualityName, QUALITY_COLORS } from "$lib/wow";
   import CharPicker from "$lib/CharPicker.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let name = $state("");
   let quality = $state<string>("");
@@ -113,7 +114,14 @@
       </div>
       <input placeholder="Mail subject (optional)" bind:value={sendSubject} />
       <div class="row">
-        <button class="primary" onclick={send} disabled={!sendTo || sending}>Send mail</button>
+        <button
+          class="primary"
+          onclick={send}
+          disabled={!sendTo || sending || featureLocked("mail-item")}
+          title={featureLocked("mail-item") ? LOCKED_HINT : undefined}
+        >
+          Send mail
+        </button>
         <button onclick={() => (sendItem = null)} disabled={sending}>Cancel</button>
       </div>
     </div>

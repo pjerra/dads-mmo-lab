@@ -15,6 +15,7 @@
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
+  import { featureLocked, LOCKED_HINT, testingModeOn, setTestingMode } from "$lib/features.svelte";
 
   const WOW_ID = "wow-server-playerbots";
   const FILES: RawFileName[] = [
@@ -257,16 +258,33 @@
       <button
         class="primary"
         onclick={saveSettings}
-        disabled={dirty.length === 0 || saving || restartState.restarting}
+        disabled={dirty.length === 0 || saving || restartState.restarting || featureLocked("settings-save")}
+        title={featureLocked("settings-save") ? LOCKED_HINT : undefined}
       >
         Save {dirty.length > 0 ? `(${dirty.length})` : ""}
       </button>
       <button
         onclick={() => saveAndRestart(saveSettings)}
-        disabled={dirty.length === 0 || saving || restartState.restarting}
+        disabled={dirty.length === 0 || saving || restartState.restarting || featureLocked("settings-save")}
+        title={featureLocked("settings-save") ? LOCKED_HINT : undefined}
       >
         {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
       </button>
+    </div>
+
+    <div class="card testing-card">
+      <label class="row">
+        <input
+          type="checkbox"
+          checked={testingModeOn()}
+          onchange={(e) => setTestingMode(e.currentTarget.checked)}
+        />
+        Enable untested features (for smoke testing)
+      </label>
+      <p class="muted">
+        Untested features stay disabled until their smoke test passes. The checklist lives in
+        docs/SMOKE-TESTS.md.
+      </p>
     </div>
   {:else}
     <div class="row">
@@ -277,7 +295,13 @@
     </div>
     <p class="muted">
       Edited mod_ale.conf or its Lua scripts on disk?
-      <button onclick={reloadAle} disabled={saving || restartState.restarting || loadingFile}>Reload ALE scripts</button>
+      <button
+        onclick={reloadAle}
+        disabled={saving || restartState.restarting || loadingFile || featureLocked("ale-reload")}
+        title={featureLocked("ale-reload") ? LOCKED_HINT : undefined}
+      >
+        Reload ALE scripts
+      </button>
     </p>
     {#if aleNote}<p class="muted">{aleNote}</p>{/if}
     {#if fileLoaded}
@@ -294,8 +318,19 @@
       {:else}
         {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
         <div class="row">
-          <button class="primary" onclick={saveFile} disabled={saving || restartState.restarting}>Save</button>
-          <button onclick={() => saveAndRestart(saveFile)} disabled={saving || restartState.restarting}>
+          <button
+            class="primary"
+            onclick={saveFile}
+            disabled={saving || restartState.restarting || featureLocked("config-edit")}
+            title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
+          >
+            Save
+          </button>
+          <button
+            onclick={() => saveAndRestart(saveFile)}
+            disabled={saving || restartState.restarting || featureLocked("config-edit")}
+            title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
+          >
             {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
           </button>
         </div>
@@ -315,6 +350,8 @@
   h3 { margin: 10px 0 0; font-size: 15px; color: #58a6ff; }
   .setting { display: flex; justify-content: space-between; align-items: center; gap: 16px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
   .setting.dirty { border-color: #d29922; }
+  .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
+  .testing-card { margin-top: 6px; }
   .meta { display: flex; flex-direction: column; gap: 2px; }
   .charwrap { display: flex; gap: 8px; align-items: center; }
   input, select, textarea { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }

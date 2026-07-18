@@ -7,6 +7,7 @@
     wowAccountSetGm,
     type Account,
   } from "$lib/api";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   const USER_RE = /^[A-Za-z0-9_]{3,20}$/;
   const PASS_RE = /^[A-Za-z0-9_@#%+=!-]{4,16}$/;
@@ -129,7 +130,14 @@
         <input type="password" placeholder="Password" bind:value={newPass} disabled={busy} />
         <span class="muted">4-16 chars; no spaces</span>
       </div>
-      <button class="primary" onclick={createAccount} disabled={busy || !userValid || !passValid}>Create</button>
+      <button
+        class="primary"
+        onclick={createAccount}
+        disabled={busy || !userValid || !passValid || featureLocked("accounts")}
+        title={featureLocked("accounts") ? LOCKED_HINT : undefined}
+      >
+        Create
+      </button>
     </div>
     {#if createError}<p class="inline-error">{createError}</p>{/if}
   </div>
@@ -162,7 +170,8 @@
                 <button
                   class="primary"
                   onclick={() => applyPassword(a.username)}
-                  disabled={busy || !PASS_RE.test(passwordInputs[a.username] ?? "")}
+                  disabled={busy || !PASS_RE.test(passwordInputs[a.username] ?? "") || featureLocked("accounts")}
+                  title={featureLocked("accounts") ? LOCKED_HINT : undefined}
                 >
                   Apply
                 </button>
@@ -182,7 +191,11 @@
                   <option value="3">3</option>
                 </select>
               </label>
-              <button onclick={() => applyGm(a.username)} disabled={busy}>
+              <button
+                onclick={() => applyGm(a.username)}
+                disabled={busy || featureLocked("accounts")}
+                title={featureLocked("accounts") ? LOCKED_HINT : undefined}
+              >
                 {confirmingGm === a.username ? "Level 3 grants full admin including SOAP. Continue?" : "Apply"}
               </button>
             </div>

@@ -23,6 +23,7 @@
   } from "$lib/api";
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let list: ModuleList | null = $state(null);
   let error: string | null = $state(null);
@@ -357,7 +358,14 @@
       </label>
       <div class="row">
         {#if !confirmingRebuild}
-          <button class="primary" onclick={rebuild} disabled={busy}>Rebuild now</button>
+          <button
+            class="primary"
+            onclick={rebuild}
+            disabled={busy || featureLocked("modules-rebuild")}
+            title={featureLocked("modules-rebuild") ? LOCKED_HINT : undefined}
+          >
+            Rebuild now
+          </button>
         {:else}
           <span>Rebuild takes 30–90 minutes and stops the world while building. Continue?</span>
           <button class="primary" onclick={rebuild} disabled={busy}>Confirm</button>
@@ -375,17 +383,40 @@
           <strong class="mname">{m.name}</strong>
           <span class="badge {statusClass(m)}">{statusText(m)}</span>
           {#if m.conf === "ready"}
-            <button onclick={() => activateConf(m.key)} disabled={busy}>Activate conf</button>
+            <button
+              onclick={() => activateConf(m.key)}
+              disabled={busy || featureLocked("modules-conf")}
+              title={featureLocked("modules-conf") ? LOCKED_HINT : undefined}
+            >
+              Activate conf
+            </button>
           {:else if m.conf === "active"}
             <span class="muted">conf active</span>
           {/if}
           <span class="spacer"></span>
           {#if !m.installed}
-            <button class="primary" onclick={() => install(m.key, null, m.name)} disabled={busy}>Install</button>
+            <button
+              class="primary"
+              onclick={() => install(m.key, null, m.name)}
+              disabled={busy || featureLocked("modules-cpp")}
+              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
+            >
+              Install
+            </button>
           {:else}
-            <button onclick={() => install(m.key, null, m.name)} disabled={busy}>Update</button>
+            <button
+              onclick={() => install(m.key, null, m.name)}
+              disabled={busy || featureLocked("modules-cpp")}
+              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
+            >
+              Update
+            </button>
             <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
-            <button onclick={() => removeModule(m)} disabled={busy}>
+            <button
+              onclick={() => removeModule(m)}
+              disabled={busy || featureLocked("modules-cpp")}
+              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
+            >
               {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
             </button>
           {/if}
@@ -438,7 +469,14 @@
               </div>
               <div class="row">
                 {#if !confirmingRepair}
-                  <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Apply</button>
+                  <button
+                    class="primary"
+                    onclick={() => applyRepair(m)}
+                    disabled={busy || featureLocked("module-repair")}
+                    title={featureLocked("module-repair") ? LOCKED_HINT : undefined}
+                  >
+                    Apply
+                  </button>
                 {:else}
                   <span>This edits the database's update-tracking records. Continue?</span>
                   <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
@@ -482,8 +520,19 @@
                 Back up first (recommended)
               </label>
             {/if}
-            <button class="primary" onclick={() => installLua(m)} disabled={busy}>Install</button>
-            <button onclick={() => removeLua(m)} disabled={busy}>
+            <button
+              class="primary"
+              onclick={() => installLua(m)}
+              disabled={busy || featureLocked("modules-lua")}
+              title={featureLocked("modules-lua") ? LOCKED_HINT : undefined}
+            >
+              Install
+            </button>
+            <button
+              onclick={() => removeLua(m)}
+              disabled={busy || featureLocked("modules-lua")}
+              title={featureLocked("modules-lua") ? LOCKED_HINT : undefined}
+            >
               {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
             </button>
           </div>
@@ -521,11 +570,22 @@
             <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
             Back up first (recommended)
           </label>
-          <button class="primary" onclick={() => installSql(m)} disabled={busy}>Install</button>
+          <button
+            class="primary"
+            onclick={() => installSql(m)}
+            disabled={busy || featureLocked("modules-sql")}
+            title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
+          >
+            Install
+          </button>
           {#if m.key === "rare-drops"}
             <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
           {:else}
-            <button onclick={() => removeSql(m)} disabled={busy}>
+            <button
+              onclick={() => removeSql(m)}
+              disabled={busy || featureLocked("modules-sql")}
+              title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
+            >
               {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
             </button>
           {/if}
@@ -549,7 +609,8 @@
       <button
         class="primary"
         onclick={() => install(null, customUrl, customUrl)}
-        disabled={busy || !customUrl.trim()}
+        disabled={busy || !customUrl.trim() || featureLocked("modules-cpp")}
+        title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
       >
         Install
       </button>
@@ -578,8 +639,21 @@
         bind:value={clientPathInput}
         disabled={busy}
       />
-      <button class="primary" onclick={saveClientPath} disabled={busy || !clientPathInput.trim()}>Save</button>
-      <button onclick={detectClientPath} disabled={busy}>Detect</button>
+      <button
+        class="primary"
+        onclick={saveClientPath}
+        disabled={busy || !clientPathInput.trim() || featureLocked("client-path")}
+        title={featureLocked("client-path") ? LOCKED_HINT : undefined}
+      >
+        Save
+      </button>
+      <button
+        onclick={detectClientPath}
+        disabled={busy || featureLocked("client-path")}
+        title={featureLocked("client-path") ? LOCKED_HINT : undefined}
+      >
+        Detect
+      </button>
     </div>
     {#if clientCandidates}
       {#if clientCandidates.length === 0}
@@ -587,7 +661,13 @@
       {:else}
         <div class="row">
           {#each clientCandidates as c (c)}
-            <button onclick={() => pickClientCandidate(c)} disabled={busy}>{c}</button>
+            <button
+              onclick={() => pickClientCandidate(c)}
+              disabled={busy || featureLocked("client-path")}
+              title={featureLocked("client-path") ? LOCKED_HINT : undefined}
+            >
+              {c}
+            </button>
           {/each}
         </div>
       {/if}

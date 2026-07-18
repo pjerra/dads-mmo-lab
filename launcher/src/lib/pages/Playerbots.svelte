@@ -10,6 +10,7 @@
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   const CLASSES = ["warrior","paladin","hunter","rogue","priest","shaman","mage","warlock","druid"];
 
@@ -235,7 +236,11 @@
   {#if online.length === 0}
     <div class="card">
       <p class="muted">No character is logged into the game. Log one in, then Refresh.</p>
-      <p class="muted">First time? <button onclick={enableMyParty} disabled={setting}>
+      <p class="muted">First time? <button
+        onclick={enableMyParty}
+        disabled={setting || featureLocked("party-ops")}
+        title={featureLocked("party-ops") ? LOCKED_HINT : undefined}
+      >
         {confirmSetup ? "Deploy the bot bridge scripts?" : "Enable My Party"}</button>
         <span class="muted">— one-time setup; afterward stop and start the server (Home or Library) to load the scripts.</span></p>
     </div>
@@ -252,7 +257,14 @@
 
     <div class="addrow">
       {#each CLASSES as c (c)}
-        <button class="cls" onclick={() => add(c)} disabled={busy || setting || loadingPreset}>{c[0].toUpperCase() + c.slice(1)}</button>
+        <button
+          class="cls"
+          onclick={() => add(c)}
+          disabled={busy || setting || loadingPreset || featureLocked("party-ops")}
+          title={featureLocked("party-ops") ? LOCKED_HINT : undefined}
+        >
+          {c[0].toUpperCase() + c.slice(1)}
+        </button>
       {/each}
     </div>
     {#if note}<p class="muted">{note}</p>{/if}
@@ -266,16 +278,52 @@
           {#each members as m (m.guid)}
             <tr>
               <td>{m.name}</td><td class="muted">{className(m.class)} · lvl {m.level}</td>
-              <td>{#if m.is_bot}<button onclick={() => kick(m.name)} disabled={busy || loadingPreset}>Kick</button>
-                  <button onclick={() => resummon(m.name)} disabled={busy || loadingPreset}>Re-summon</button>
-                  <button onclick={() => botcmd(m.name, "gear")} disabled={busy || loadingPreset}>Gear up</button>
-                  <button onclick={() => botcmd(m.name, "talents")} disabled={busy || loadingPreset}>Fix talents</button>
-                  <button onclick={() => botcmd(m.name, "maintain")} disabled={busy || loadingPreset}>Maintain</button>
+              <td>{#if m.is_bot}<button
+                    onclick={() => kick(m.name)}
+                    disabled={busy || loadingPreset || featureLocked("party-ops")}
+                    title={featureLocked("party-ops") ? LOCKED_HINT : undefined}
+                  >
+                    Kick
+                  </button>
+                  <button
+                    onclick={() => resummon(m.name)}
+                    disabled={busy || loadingPreset || featureLocked("party-ops")}
+                    title={featureLocked("party-ops") ? LOCKED_HINT : undefined}
+                  >
+                    Re-summon
+                  </button>
+                  <button
+                    onclick={() => botcmd(m.name, "gear")}
+                    disabled={busy || loadingPreset || featureLocked("party-botcmd")}
+                    title={featureLocked("party-botcmd") ? LOCKED_HINT : undefined}
+                  >
+                    Gear up
+                  </button>
+                  <button
+                    onclick={() => botcmd(m.name, "talents")}
+                    disabled={busy || loadingPreset || featureLocked("party-botcmd")}
+                    title={featureLocked("party-botcmd") ? LOCKED_HINT : undefined}
+                  >
+                    Fix talents
+                  </button>
+                  <button
+                    onclick={() => botcmd(m.name, "maintain")}
+                    disabled={busy || loadingPreset || featureLocked("party-botcmd")}
+                    title={featureLocked("party-botcmd") ? LOCKED_HINT : undefined}
+                  >
+                    Maintain
+                  </button>
                   <input type="number" min="1" max="255" class="lvl-input" placeholder="lvl"
                     value={botLevel[m.name] ?? ""}
                     oninput={(e) => (botLevel[m.name] = e.currentTarget.value)}
                     disabled={busy || loadingPreset} />
-                  <button onclick={() => setBotLevel(m.name)} disabled={busy || loadingPreset || !levelValid(botLevel[m.name])}>Set level</button>
+                  <button
+                    onclick={() => setBotLevel(m.name)}
+                    disabled={busy || loadingPreset || !levelValid(botLevel[m.name]) || featureLocked("bot-level")}
+                    title={featureLocked("bot-level") ? LOCKED_HINT : undefined}
+                  >
+                    Set level
+                  </button>
                   {:else}<span class="muted">you</span>{/if}</td>
             </tr>
           {/each}
@@ -289,7 +337,8 @@
         <input placeholder="preset name" maxlength="32" bind:value={presetName}
           disabled={busy || setting || loadingPreset} />
         <button onclick={savePreset}
-          disabled={!presetName.trim() || busy || setting || loadingPreset || members.filter((m) => m.is_bot).length === 0}>
+          disabled={!presetName.trim() || busy || setting || loadingPreset || members.filter((m) => m.is_bot).length === 0 || featureLocked("party-presets")}
+          title={featureLocked("party-presets") ? LOCKED_HINT : undefined}>
           Save current party
         </button>
       </div>
@@ -299,7 +348,8 @@
         <input placeholder="warrior,mage,priest,…" bind:value={importClasses}
           oninput={() => (importOverwrite = false)} disabled={busy || setting || loadingPreset} />
         <button onclick={importPreset}
-          disabled={!importName.trim() || !importClasses.trim() || busy || setting || loadingPreset}>
+          disabled={!importName.trim() || !importClasses.trim() || busy || setting || loadingPreset || featureLocked("preset-io")}
+          title={featureLocked("preset-io") ? LOCKED_HINT : undefined}>
           {importOverwrite ? `Preset "${importName.trim()}" exists — overwrite?` : "Import"}
         </button>
       </div>
@@ -309,13 +359,19 @@
         {#each presets as pr (pr.name)}
           <div class="prow">
             <span>{pr.name} <span class="muted">({pr.bots} bots)</span></span>
-            <button onclick={() => loadPreset(pr.name)} disabled={busy || setting || loadingPreset}>
+            <button onclick={() => loadPreset(pr.name)}
+              disabled={busy || setting || loadingPreset || featureLocked("party-presets")}
+              title={featureLocked("party-presets") ? LOCKED_HINT : undefined}>
               {confirmingPreset?.kind === "load" && confirmingPreset?.name === pr.name ? "Replaces your current bots — sure?" : "Load"}
             </button>
-            <button onclick={() => deletePreset(pr.name)} disabled={busy || setting || loadingPreset}>
+            <button onclick={() => deletePreset(pr.name)}
+              disabled={busy || setting || loadingPreset || featureLocked("party-presets")}
+              title={featureLocked("party-presets") ? LOCKED_HINT : undefined}>
               {confirmingPreset?.kind === "delete" && confirmingPreset?.name === pr.name ? `Delete "${pr.name}" — sure?` : "Delete"}
             </button>
-            <button onclick={() => toggleExport(pr.name)} disabled={busy || setting || loadingPreset}>
+            <button onclick={() => toggleExport(pr.name)}
+              disabled={busy || setting || loadingPreset || featureLocked("preset-io")}
+              title={featureLocked("preset-io") ? LOCKED_HINT : undefined}>
               {exportName === pr.name ? "Hide" : "Export"}
             </button>
           </div>

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { wowConsoleTail, wowConsoleSend } from "$lib/api";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   interface HistoryEntry {
     command: string;
@@ -110,9 +111,17 @@
       type="text"
       placeholder="Console command, e.g. server info"
       bind:value={command}
-      disabled={sending}
+      disabled={sending || featureLocked("console-send")}
+      title={featureLocked("console-send") ? LOCKED_HINT : undefined}
     />
-    <button class="primary" type="submit" disabled={sending || command.trim() === ""}>Send</button>
+    <button
+      class="primary"
+      type="submit"
+      disabled={sending || command.trim() === "" || featureLocked("console-send")}
+      title={featureLocked("console-send") ? LOCKED_HINT : undefined}
+    >
+      Send
+    </button>
   </form>
 
   {#if history.length > 0}

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { wowTeleportList, wowTeleport, wowTeleportCoords, type TeleLocation } from "$lib/api";
   import CharPicker from "$lib/CharPicker.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let search = $state("");
   let locations: TeleLocation[] = $state([]);
@@ -117,7 +118,12 @@
     <CharPicker bind:selected={charName} onpick={() => { confirming = false; doneMsg = null; }} />
     {#if picked}
       <span class="muted">→ {picked}</span>
-      <button class="primary" onclick={go} disabled={!charName || teleporting}>
+      <button
+        class="primary"
+        onclick={go}
+        disabled={!charName || teleporting || featureLocked("teleport-named")}
+        title={featureLocked("teleport-named") ? LOCKED_HINT : undefined}
+      >
         {teleporting ? "Teleporting…" : confirming ? `Really send ${charName} to ${picked}?` : "Teleport"}
       </button>
     {/if}
@@ -131,7 +137,12 @@
         <label class="field">X<input class="coord" bind:value={coordX} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
         <label class="field">Y<input class="coord" bind:value={coordY} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
         <label class="field">Z<input class="coord" bind:value={coordZ} oninput={() => (confirmingCoords = false)} disabled={teleporting} /></label>
-        <button class="primary" onclick={goCoords} disabled={!charName || !coordsValid || teleporting}>
+        <button
+          class="primary"
+          onclick={goCoords}
+          disabled={!charName || !coordsValid || teleporting || featureLocked("teleport-coords")}
+          title={featureLocked("teleport-coords") ? LOCKED_HINT : undefined}
+        >
           {teleporting ? "Teleporting…" : confirmingCoords ? `Overwrite ${charName}'s saved position?` : "Teleport"}
         </button>
       </div>

@@ -4,6 +4,7 @@
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let backups: BackupInfo[] = $state([]);
   let error: string | null = $state(null);
@@ -116,7 +117,12 @@
   {#if note}<p class="muted">{note}</p>{/if}
 
   <div class="row">
-    <button class="primary" onclick={backupNow} disabled={busy || streaming || restartState.restarting}>
+    <button
+      class="primary"
+      onclick={backupNow}
+      disabled={busy || streaming || restartState.restarting || featureLocked("backup-create")}
+      title={featureLocked("backup-create") ? LOCKED_HINT : undefined}
+    >
       Back up now
     </button>
     <span class="muted">Works while the server is running.</span>
@@ -134,12 +140,20 @@
       {#each backups as b (b.file)}
         <div class="row brow">
           <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span></span>
-          <button onclick={() => restoreBackup(b.file)} disabled={busy || streaming || restartState.restarting}>
+          <button
+            onclick={() => restoreBackup(b.file)}
+            disabled={busy || streaming || restartState.restarting || featureLocked("backup-restore")}
+            title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
+          >
             {confirming?.kind === "restore" && confirming?.file === b.file
               ? `This rolls EVERY character back to ${b.created} and restarts the server — sure?`
               : "Restore"}
           </button>
-          <button onclick={() => deleteBackup(b.file)} disabled={busy || streaming}>
+          <button
+            onclick={() => deleteBackup(b.file)}
+            disabled={busy || streaming || featureLocked("backup-restore")}
+            title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
+          >
             {confirming?.kind === "delete" && confirming?.file === b.file ? "Delete this backup — sure?" : "Delete"}
           </button>
         </div>

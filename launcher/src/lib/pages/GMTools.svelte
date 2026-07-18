@@ -8,6 +8,7 @@
   import Terminal from "$lib/Terminal.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let charName = $state("");
   let online: OnlineChar[] = $state([]);
@@ -138,15 +139,31 @@
 
   <div class="card row">
     <strong>Rescue</strong>
-    <button onclick={revive} disabled={!charName || !isOnline || busy}>Revive</button>
-    <button onclick={heal} disabled={!charName || !isOnline || busy}>Full heal</button>
+    <button
+      onclick={revive}
+      disabled={!charName || !isOnline || busy || featureLocked("gm-actions")}
+      title={featureLocked("gm-actions") ? LOCKED_HINT : undefined}
+    >
+      Revive
+    </button>
+    <button
+      onclick={heal}
+      disabled={!charName || !isOnline || busy || featureLocked("gm-actions")}
+      title={featureLocked("gm-actions") ? LOCKED_HINT : undefined}
+    >
+      Full heal
+    </button>
   </div>
 
   <div class="card row">
     <strong>Set level</strong>
     <input type="number" min="1" max="255" bind:value={level}
       oninput={() => (confirming = null)} disabled={busy} />
-    <button onclick={applyLevel} disabled={!charName || busy || !Number.isInteger(level) || level < 1 || level > 255}>
+    <button
+      onclick={applyLevel}
+      disabled={!charName || busy || !Number.isInteger(level) || level < 1 || level > 255 || featureLocked("gm-actions")}
+      title={featureLocked("gm-actions") ? LOCKED_HINT : undefined}
+    >
       {confirming === "level" ? "This can lower the level — sure?" : "Apply"}
     </button>
     <span class="muted">1–255; your server's max level applies. Works offline.</span>
@@ -156,7 +173,11 @@
     <strong>Set gold</strong>
     <input type="number" min="0" max="214748" bind:value={gold}
       oninput={() => (confirming = null)} disabled={busy} />
-    <button onclick={applyGold} disabled={!charName || !isOnline || busy || !Number.isInteger(gold) || gold < 0 || gold > 214748}>
+    <button
+      onclick={applyGold}
+      disabled={!charName || !isOnline || busy || !Number.isInteger(gold) || gold < 0 || gold > 214748 || featureLocked("gm-actions")}
+      title={featureLocked("gm-actions") ? LOCKED_HINT : undefined}
+    >
       {confirming === "gold" ? "This replaces their current money — sure?" : "Apply"}
     </button>
     <span class="muted">Sets the total (not adds). Max 214,748 gold.</span>
@@ -167,7 +188,11 @@
     <select bind:value={atLoginFlag} onchange={() => (confirming = null)} disabled={busy}>
       {#each AT_LOGIN_FLAGS as f (f.value)}<option value={f.value}>{f.label}</option>{/each}
     </select>
-    <button onclick={applyAtLogin} disabled={!charName || busy}>
+    <button
+      onclick={applyAtLogin}
+      disabled={!charName || busy || featureLocked("gm-atlogin")}
+      title={featureLocked("gm-atlogin") ? LOCKED_HINT : undefined}
+    >
       {confirming === "atlogin" ? "Applies at that character's next login. Continue?" : "Apply"}
     </button>
     <span class="muted">Takes effect the next time this character logs in. Works offline.</span>
@@ -177,14 +202,23 @@
     <div class="row">
       <strong>Summon an NPC</strong>
       {#each NPCS as n (n.entry)}
-        <button onclick={() => summon(n.entry)} disabled={!charName || !isOnline || busy}>{n.label}</button>
+        <button
+          onclick={() => summon(n.entry)}
+          disabled={!charName || !isOnline || busy || featureLocked("gm-summon")}
+          title={featureLocked("gm-summon") ? LOCKED_HINT : undefined}
+        >
+          {n.label}
+        </button>
       {/each}
     </div>
     <div class="row" style="margin-top: 8px;">
       <span class="muted">Custom entry id:</span>
       <input type="number" min="1" max="999999" bind:value={customEntry} disabled={busy} />
-      <button onclick={() => summon(customEntry)}
-        disabled={!charName || !isOnline || busy || !Number.isInteger(customEntry) || customEntry < 1 || customEntry > 999999}>
+      <button
+        onclick={() => summon(customEntry)}
+        disabled={!charName || !isOnline || busy || !Number.isInteger(customEntry) || customEntry < 1 || customEntry > 999999 || featureLocked("gm-summon")}
+        title={featureLocked("gm-summon") ? LOCKED_HINT : undefined}
+      >
         Summon
       </button>
     </div>
@@ -193,7 +227,11 @@
 
   <p class="muted">
     Bridge scripts missing or outdated?
-    <button onclick={deployBridges} disabled={deploying}>
+    <button
+      onclick={deployBridges}
+      disabled={deploying || featureLocked("bridge-setup")}
+      title={featureLocked("bridge-setup") ? LOCKED_HINT : undefined}
+    >
       {confirmDeploy ? "Deploy the server bridge scripts?" : "Deploy server bridges"}
     </button>
     — then stop and start the server (Home or Library) to load them.

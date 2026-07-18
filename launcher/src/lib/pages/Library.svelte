@@ -4,6 +4,7 @@
   import { applyEvent, initialTermState, type TermState } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let catalog: TitleInfo[] = $state([]);
   let loadError: string | null = $state(null);
@@ -183,7 +184,13 @@
               <button class="primary" disabled={busy} onclick={() => act(t.id, "start")}>Start</button>
             {/if}
             {#if removingId !== t.id}
-              <button disabled={busy} onclick={() => armRemove(t.id)}>Remove</button>
+              <button
+                disabled={busy || featureLocked("title-remove")}
+                title={featureLocked("title-remove") ? LOCKED_HINT : undefined}
+                onclick={() => armRemove(t.id)}
+              >
+                Remove
+              </button>
             {/if}
           </div>
         </div>
@@ -213,7 +220,14 @@
           <div class="card-actions">
             {#if !busy}
               {#if t.script_available}
-                <button class="primary" onclick={() => startInstall(t.id)}>Install</button>
+                <button
+                  class="primary"
+                  disabled={featureLocked("title-install")}
+                  title={featureLocked("title-install") ? LOCKED_HINT : undefined}
+                  onclick={() => startInstall(t.id)}
+                >
+                  Install
+                </button>
               {:else}
                 <button disabled title="Re-run cli/dev-install.ps1 to ship installer scripts">Install</button>
               {/if}

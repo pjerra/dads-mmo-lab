@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick, onMount } from "svelte";
   import { gamesInstall, gamesInstallInput, gamesInstallCancel, type InstallEvent } from "$lib/api";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   let { id, onExit }: { id: string; onExit: (code: number) => void } = $props();
 
@@ -124,9 +125,15 @@
       type="text"
       placeholder="Reply to the installer…"
       bind:value={command}
-      disabled={sending || exited}
+      disabled={sending || exited || featureLocked("title-install")}
+      title={featureLocked("title-install") ? LOCKED_HINT : undefined}
     />
-    <button class="primary" type="submit" disabled={sending || exited || command.trim() === ""}>
+    <button
+      class="primary"
+      type="submit"
+      disabled={sending || exited || command.trim() === "" || featureLocked("title-install")}
+      title={featureLocked("title-install") ? LOCKED_HINT : undefined}
+    >
       Send
     </button>
   </form>
@@ -134,7 +141,13 @@
   {#if !exited}
     <div class="row">
       {#if !confirmingCancel}
-        <button onclick={cancel} disabled={cancelling}>Cancel install</button>
+        <button
+          onclick={cancel}
+          disabled={cancelling || featureLocked("title-install")}
+          title={featureLocked("title-install") ? LOCKED_HINT : undefined}
+        >
+          Cancel install
+        </button>
       {:else}
         <span class="warn-text">Cancelling mid-install can leave a partial install behind. Cancel anyway?</span>
         <button onclick={cancel} disabled={cancelling}>Confirm</button>
