@@ -246,6 +246,50 @@ export async function wowModuleConfActivate(
   return await invoke("wow_module_conf_activate", { key, force });
 }
 
+export interface TrackingFile {
+  name: string;
+  tracked: boolean;
+}
+
+export interface TrackingDb {
+  tracked_rows: string[];
+  files: TrackingFile[];
+}
+
+export interface ModuleTracking {
+  key: string;
+  dbs: {
+    world: TrackingDb;
+    characters: TrackingDb;
+    auth: TrackingDb;
+  };
+}
+
+export async function wowModuleTracking(key: string): Promise<ModuleTracking> {
+  return await invoke("wow_module_tracking", { key });
+}
+
+export interface RepairResult {
+  file: string;
+  result: "marked" | "file_missing" | "cleared" | "not_tracked";
+}
+
+export interface ModuleRepair {
+  key: string;
+  db: string;
+  mode: string;
+  results: RepairResult[];
+}
+
+export async function wowModuleRepair(
+  key: string,
+  db: "world" | "characters" | "auth",
+  mode: "mark" | "clear",
+  files?: string,
+): Promise<ModuleRepair> {
+  return await invoke("wow_module_repair", { key, db, mode, files });
+}
+
 export interface ClientPath {
   path: string | null;
   valid: boolean;

@@ -274,6 +274,39 @@ async fn wow_module_conf_activate(
 }
 
 #[tauri::command]
+async fn wow_module_tracking(
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "module".into(), "tracking".into(), "--key".into(), key]).await
+}
+
+#[tauri::command]
+async fn wow_module_repair(
+    key: String,
+    db: String,
+    mode: String,
+    files: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec![
+        "wow".into(),
+        "module".into(),
+        "repair".into(),
+        "--key".into(),
+        key,
+        "--db".into(),
+        db,
+        "--mode".into(),
+        mode,
+    ];
+    if let Some(f) = files {
+        args.extend(["--files".into(), f]);
+    }
+    run_json_cmd(state, args).await
+}
+
+#[tauri::command]
 async fn wow_client_path_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "client-path".into(), "get".into()]).await
 }
@@ -874,6 +907,8 @@ pub fn run() {
             wow_module_remove,
             wow_module_rebuild,
             wow_module_conf_activate,
+            wow_module_tracking,
+            wow_module_repair,
             wow_client_path_get,
             wow_client_path_set,
             wow_client_path_detect,
