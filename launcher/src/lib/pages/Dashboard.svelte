@@ -623,7 +623,9 @@
   .progress-row .card { flex: 1 1 320px; min-width: 280px; }
   /* Three 4-col/40px tree panels need more room than the achievements
      card's single icon+text list -- give it a bigger share of the row. */
-  .progress-row .talents-card { flex: 2 1 560px; min-width: 560px; }
+  /* 590px = three 172px tree grids + two 20px gaps + 32px card padding --
+     the floor at which all three trees genuinely fit side by side. */
+  .progress-row .talents-card { flex: 2 1 590px; min-width: 590px; }
   .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .card-head h3 { margin: 0; font-size: 14px; color: #f0f6fc; }
   .badge {
