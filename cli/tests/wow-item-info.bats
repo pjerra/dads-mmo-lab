@@ -93,3 +93,25 @@ teardown() { teardown_fixture; }
   echo "$html" | grep -q 'Speed 2.60'
   echo "$html" | grep -q 'Requires Level 15'
 }
+
+@test "item-info: fractional weapon damage renders (float columns)" {
+  export DML_STUB_HTTP=404
+  printf 'Blade\t2\t20\t0\t15\t10.5\t20.5\t2600\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n' > "$FIXTURE/rows"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows"
+  run bash "$DML" wow item-info --entries 778 --json
+  [ "$status" -eq 0 ]
+  html="$(echo "$output" | jq -r '.data.items[0].tooltip_html')"
+  echo "$html" | grep -q '10.5 - 20.5 Damage'
+  echo "$html" | grep -q 'Speed 2.60'
+}
+
+@test "item-info: brace-wrapped junk without wowhead fields is treated as poisoned" {
+  printf '{"error":"nope"}' > "$FIXTURE/wh_junk.json"
+  export DML_STUB_CURL_SEQ="$FIXTURE/wh_junk.json"
+  printf 'X\t1\t1\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\t0\n' > "$FIXTURE/rows"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows"
+  run bash "$DML" wow item-info --entries 8888 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.items[0].source')" = "local" ]
+  [ ! -f "$FIXTURE/.dml/wowhead-cache/tooltips/8888.json" ]
+}

@@ -519,7 +519,7 @@ _iteminfo_local() {
     hname="$(_xml_escape "$name")"
     html="<b class=\"q$q\">$hname</b><br><span class=\"q\">Item Level $ilvl</span>"
     [[ "$armor" -gt 0 ]] 2>/dev/null && html+="<br><span class=\"q1\">$armor Armor</span>"
-    if [[ "$dmax" -gt 0 ]] 2>/dev/null; then
+    if awk "BEGIN{exit !($dmax > 0)}" 2>/dev/null; then
         spd="$(awk "BEGIN{printf \"%.2f\", $delay/1000}")"
         html+="<br><span class=\"q1\">$dmin - $dmax Damage</span> <span class=\"q1\">Speed $spd</span>"
     fi
@@ -545,7 +545,11 @@ _iteminfo_one() {
     fi
     if [[ -f "$tj" ]]; then
         raw="$(cat "$tj")"
-        if [[ "$raw" == \{*\} ]]; then
+        # wowhead's tooltip contract always carries both "name" and "tooltip";
+        # brace-wrapped junk lacking them (e.g. an error body) falls through
+        # to the poisoned-cache drop below instead of being embedded verbatim
+        # and permanently corrupting the batch envelope for every future call.
+        if [[ "$raw" == \{*\} && "$raw" == *'"name":"'* && "$raw" == *'"tooltip":"'* ]]; then
             if [[ "$raw" =~ \"icon\":\"([A-Za-z0-9_.-]+)\" ]]; then icon="${BASH_REMATCH[1]}"; fi
             if [[ -n "$icon" ]]; then
                 iconfile="$cache/icons/$icon.jpg"
