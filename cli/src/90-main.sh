@@ -3073,6 +3073,73 @@ case "$cmd" in
       bots)
         btsub="${1:-}"; shift || true
         case "$btsub" in
+          list)
+            # Batch 5 F1 (Bot Browser): read-only paged browse of the random
+            # bot population. Bot identification is the playerbots table
+            # (authoritative), NOT the RNDBOT% username shortcut the accounts
+            # arm uses -- cross-schema subselect is established practice
+            # (see `players online` above).
+            btname=""; btclass=""; btminl=""; btmaxl=""; btonline=0; btlimit=50; btoffset=0
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --name) _need_flag_val "$1" $#; btname="$2"; shift 2 ;;
+                --class) _need_flag_val "$1" $#; btclass="$2"; shift 2 ;;
+                --min-level) _need_flag_val "$1" $#; btminl="$2"; shift 2 ;;
+                --max-level) _need_flag_val "$1" $#; btmaxl="$2"; shift 2 ;;
+                --online) btonline=1; shift ;;
+                --limit) _need_flag_val "$1" $#; btlimit="$2"; shift 2 ;;
+                --offset) _need_flag_val "$1" $#; btoffset="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Try: dml wow bots list --name <prefix> --class <n> --min-level <n> --max-level <n> --online --limit <n> --offset <n> --json"; exit 1 ;;
+              esac
+            done
+            # --name is a prefix spliced into a LIKE: charname-allowlisted
+            # FIRST (sql_escape alone would still let % and _ act as
+            # wildcards mid-pattern), then escaped anyway (defense in depth).
+            if [[ -n "$btname" ]] && ! _valid_charname "$btname"; then
+              json_err BAD_ARG "Invalid name prefix: $btname" "1-12 letters/digits/underscore."; exit 1
+            fi
+            if [[ -n "$btclass" ]]; then
+              case "$btclass" in
+                1|2|3|4|5|6|7|8|9|11) ;;
+                *) json_err BAD_ARG "Invalid class id: $btclass" "1-9 or 11."; exit 1 ;;
+              esac
+            fi
+            # Every numeric is ^[0-9]+$-gated BEFORE it is spliced unquoted
+            # into SQL (same doctrine as items search above).
+            for v in "$btminl" "$btmaxl" "$btlimit" "$btoffset"; do
+              [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
+            done
+            btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
+            (( btlimit > 200 )) && btlimit=200
+            (( btlimit < 1 )) && btlimit=1
+            btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+            [[ -n "$btname" ]] && btwhere+=" AND c.name LIKE '$(sql_escape "$btname")%'"
+            [[ -n "$btclass" ]] && btwhere+=" AND c.class = $((10#$btclass))"
+            if [[ -n "$btminl" && -n "$btmaxl" ]]; then
+              btwhere+=" AND c.level BETWEEN $((10#$btminl)) AND $((10#$btmaxl))"
+            elif [[ -n "$btminl" ]]; then
+              btwhere+=" AND c.level >= $((10#$btminl))"
+            elif [[ -n "$btmaxl" ]]; then
+              btwhere+=" AND c.level <= $((10#$btmaxl))"
+            fi
+            [[ "$btonline" == 1 ]] && btwhere+=" AND c.online = 1"
+            bttotal="$(db_chars_query "SELECT COUNT(*) FROM characters c WHERE $btwhere;")" \
+              || { json_err DB_UNREACHABLE "Could not query the bot list" "Is ac-database running?"; exit 1; }
+            [[ "$bttotal" =~ ^[0-9]+$ ]] || bttotal=0
+            rows="$(db_chars_query "SELECT c.guid, c.name, c.class, c.race, c.gender, c.level, c.online, c.zone FROM characters c WHERE $btwhere ORDER BY c.name LIMIT $btlimit OFFSET $btoffset;")" \
+              || { json_err DB_UNREACHABLE "Could not query the bot list" "Is ac-database running?"; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r guid name cls race gen lvl onl zone || [[ -n "$guid" ]]; do
+              [[ -z "$guid" ]] && continue
+              [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
+              onlb=false; [[ "$onl" == "1" ]] && onlb=true
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"race\":$race,\"gender\":$gen,\"level\":$lvl,\"online\":$onlb,\"zone\":$zone}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"total\":$bttotal,\"limit\":$btlimit,\"offset\":$btoffset,\"bots\":$out}"
+            ;;
           flush)
             # Flush & rebuild the ambient bot population (Batch 1 F4).
             # Streaming NDJSON like games restart: (1) character backup
@@ -3203,7 +3270,7 @@ case "$cmd" in
             fi
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots flush --yes --ack flush --json"
+            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots list --json  |  dml wow bots flush --yes --ack flush --json"
             exit 1
             ;;
         esac

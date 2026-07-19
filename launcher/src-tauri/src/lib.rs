@@ -902,6 +902,46 @@ async fn wow_players_online(state: State<'_, AppState>) -> Result<serde_json::Va
     run_json_cmd(state, vec!["wow".into(), "players".into(), "online".into()]).await
 }
 
+// Batch 5 F1 (Bot Browser): read-only paged browse of the random bot
+// population. Fixed argv skeleton; every optional filter appends a flag with
+// its value as a separate argv entry (never string-interpolated) -- the CLI
+// re-validates each one independently.
+#[tauri::command]
+async fn wow_bots_list(
+    name: Option<String>,
+    class: Option<u32>,
+    min_level: Option<u32>,
+    max_level: Option<u32>,
+    online: Option<bool>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec!["wow".into(), "bots".into(), "list".into()];
+    if let Some(n) = name {
+        args.extend(["--name".into(), n]);
+    }
+    if let Some(c) = class {
+        args.extend(["--class".into(), c.to_string()]);
+    }
+    if let Some(l) = min_level {
+        args.extend(["--min-level".into(), l.to_string()]);
+    }
+    if let Some(l) = max_level {
+        args.extend(["--max-level".into(), l.to_string()]);
+    }
+    if online.unwrap_or(false) {
+        args.push("--online".into());
+    }
+    if let Some(l) = limit {
+        args.extend(["--limit".into(), l.to_string()]);
+    }
+    if let Some(o) = offset {
+        args.extend(["--offset".into(), o.to_string()]);
+    }
+    run_json_cmd(state, args).await
+}
+
 // Batch 3 F11f: fast world-only restart (does NOT apply settings changes --
 // the CLI stream carries that caveat).
 #[tauri::command]
@@ -1755,6 +1795,7 @@ pub fn run() {
             wow_party_setup,
             wow_party_online,
             wow_players_online,
+            wow_bots_list,
             wow_world_restart,
             wow_party_add,
             wow_party_list,

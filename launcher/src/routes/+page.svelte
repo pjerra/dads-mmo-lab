@@ -25,6 +25,7 @@
   import GMTools from "$lib/pages/GMTools.svelte";
   import Config from "$lib/pages/Config.svelte";
   import Playerbots from "$lib/pages/Playerbots.svelte";
+  import BotBrowser from "$lib/pages/BotBrowser.svelte";
   import Commands from "$lib/pages/Commands.svelte";
   import Backups from "$lib/pages/Backups.svelte";
   import Help from "$lib/pages/Help.svelte";
@@ -170,6 +171,7 @@
   {#if page === "gmtools"}<GMTools />{/if}
   {#if page === "items"}<Items />{/if}
   {#if page === "playerbots"}<Playerbots />{/if}
+  {#if page === "botbrowser"}<BotBrowser />{/if}
   {#if page === "commands"}<Commands />{/if}
   {#if page === "settings" || page === "modules" || page === "botworld" || page === "ahbot"}
     <Config

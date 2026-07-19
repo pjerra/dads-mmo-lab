@@ -538,6 +538,37 @@ export async function wowPlayersOnline(): Promise<PlayerOnline[]> {
   const d = await invoke<{ players: PlayerOnline[] }>("wow_players_online");
   return d.players;
 }
+// Batch 5 F1 (Bot Browser): one page of the random-bot population.
+export interface BotRow {
+  guid: number;
+  name: string;
+  class: number;
+  race: number;
+  gender: number;
+  level: number;
+  online: boolean;
+  zone: number;
+}
+export interface BotsPage {
+  total: number;
+  limit: number;
+  offset: number;
+  bots: BotRow[];
+}
+// A type alias (not an interface) on purpose: aliases get TS's implicit
+// index signature, so this stays assignable to invoke()'s InvokeArgs.
+export type BotFilters = {
+  name?: string;
+  class?: number;
+  minLevel?: number;
+  maxLevel?: number;
+  online?: boolean;
+  limit?: number;
+  offset?: number;
+};
+export async function wowBotsList(f: BotFilters): Promise<BotsPage> {
+  return await invoke("wow_bots_list", f);
+}
 export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }
 export interface PartyAddResult { added: boolean; joined: boolean; bot: string | null; note: string | null; }
 

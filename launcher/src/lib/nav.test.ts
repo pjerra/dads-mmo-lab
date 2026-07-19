@@ -17,6 +17,7 @@ describe("NAV", () => {
       "gmtools",
       "items",
       "playerbots",
+      "botbrowser",
       "commands",
       "settings",
       "botworld",

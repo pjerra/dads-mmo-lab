@@ -25,6 +25,7 @@ export const NAV = [
     pages: [
       { id: "items", label: "Item Database" },
       { id: "playerbots", label: "Playerbots" },
+      { id: "botbrowser", label: "Bot Browser" },
       { id: "commands", label: "Commands" },
     ],
   },

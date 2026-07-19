@@ -63,6 +63,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "internet-play": "untested",
   "title-url-install": "untested",
   "disk-tools": "untested",
+  "bot-browser": "untested",
 };
 
 export const LOCKED_HINT =

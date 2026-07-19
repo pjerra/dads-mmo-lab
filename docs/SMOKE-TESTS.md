@@ -215,6 +215,13 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [disk-tools] Shrink disk script | Stop the server → "Create the shrink script" → Explorer opens at Downloads\dml-shrink-wsl-disk.ps1; right-click → Run with PowerShell AS ADMIN → script finds ext4.vhdx via the registry, fstrims, shuts WSL down, diskpart-compacts, prints before/after GB. Verify the file size actually dropped (grows back over time — normal). |
 | ⬜ | Defender exclusion (read-only) | The card shows a copyable `Add-MpPreference -ExclusionPath "<dml-arch disk folder>"` for the real vhdx folder; Copy works; run it in an admin PowerShell → `Get-MpPreference | select -Expand ExclusionPath` lists it. (Optional; undo with Remove-MpPreference.) |
 
+## 19. Batch 5 — stretch batch
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | Bot Browser (read-only) | Items & Bots → Bot Browser: Search with no filters → ~2500 bots total, 50 per page, Prev/Next page through; name prefix / class / level range / online-only filters narrow the list; star a few bots → they pin to the top and survive an app restart; Details on a geared bot shows gear names (quality-colored) + talent point split + achievement count; Details on a naked bot shows "No gear saved yet" (NOT an error). |
+| ⬜ | [bot-browser] Invite + set level | With a character logged in and the bridge deployed: Details → Invite to party → the named bot logs in and joins that player's group (same as My Party's Re-summon). Set level 1-255 on an OFFLINE bot → succeeds; the list/detail shows the new level after the bot's next save. Without the bridge → the invite error mentions bridge-setup. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.
