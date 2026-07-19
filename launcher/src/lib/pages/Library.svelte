@@ -40,8 +40,14 @@
   // nav-away).
 
   // Install session OR a remove stream blocks the other mutating actions
-  // (start/stop, arm/confirm remove, open a new install).
-  const busy = $derived(busyId !== null || removeBusy || installStore.running);
+  // (start/stop, arm/confirm remove, open a new install). installStore is
+  // also the backing store for Tools.svelte's tool:-prefixed sessions
+  // (Round Q) -- a running Unbound install must not soft-lock Library's own
+  // controls for its 30-90 minute duration, so only a Library-owned
+  // (non "tool:"-prefixed) install session counts here.
+  const busy = $derived(
+    busyId !== null || removeBusy || (installStore.running && !installStore.id?.startsWith("tool:")),
+  );
 
   const installed = $derived(catalog.filter((t) => t.installed));
   const available = $derived(catalog.filter((t) => !t.installed));
@@ -253,7 +259,7 @@
     {/each}
   </div>
 
-  {#if installStore.id}
+  {#if installStore.id && !installStore.id.startsWith("tool:")}
     {#key installStore.nonce}
       <InstallTerminal id={installStore.id} onExit={onInstallExit} />
     {/key}

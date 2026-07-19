@@ -45,6 +45,8 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "bridge-setup": "tested",
   "docker-clean": "untested",
   "server-update": "untested",
+  "lan-play": "untested",
+  "unbound-addon": "untested",
 };
 
 export const LOCKED_HINT =

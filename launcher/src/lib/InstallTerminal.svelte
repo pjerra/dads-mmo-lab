@@ -4,7 +4,21 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { installStore, claimInstallInvoke } from "$lib/term-store.svelte";
 
-  let { id, onExit }: { id: string; onExit: (code: number) => void } = $props();
+  // `runner` defaults to gamesInstall (Library's game installs) but can be
+  // swapped for another Channel-streamed InstallEvent call with the same
+  // shape -- e.g. Tools.svelte passes a closure around toolInstall() for
+  // `tool:`-prefixed installStore.ids (Round Q). Everything else here
+  // (claimInstallInvoke, cancel/reply wiring, exit handling) is shared
+  // unchanged between callers.
+  let {
+    id,
+    onExit,
+    runner = gamesInstall,
+  }: {
+    id: string;
+    onExit: (code: number) => void;
+    runner?: (id: string, onEvent: (e: InstallEvent) => void) => Promise<void>;
+  } = $props();
 
   // Strip ANSI escape sequences (cursor moves, colors) out of installer
   // output before it lands in the scrollback -- the CLI runs an interactive
@@ -81,7 +95,7 @@
   async function run() {
     if (!claimInstallInvoke(installStore.nonce)) return;
     try {
-      await gamesInstall(id, (e: InstallEvent) => {
+      await runner(id, (e: InstallEvent) => {
         if (e.event === "chunk") {
           append(e.text ?? "");
         } else if (e.event === "exit") {

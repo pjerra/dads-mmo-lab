@@ -140,6 +140,18 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 |---|---|---|
 | ✅ | [bridge-setup] Deploy server bridges | GM Tools → Deploy server bridges → restart → GM/party/summon features work (they depend on these Lua bridges). Do this BEFORE sections 6/8. |
 
+## 14. Tools (Round Q)
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | [lan-play] Status | Tools → LAN play card shows the current address on mount and via Refresh. |
+| ⬜ | [lan-play] Enable | Fill in this PC's LAN IP → Enable (two-step confirm) → another device on the LAN can reach the realm at that address (or at minimum status reflects the LAN IP — full two-PC check optional). |
+| ⬜ | [lan-play] Disable | Disable (two-step confirm) → status reflects localhost again. |
+| ⬜ | [unbound-addon] Install / Update | Install (two-step is the interactive session itself) → wizard runs to completion + force-rebuild (30-90 min) → addon active in-game. LONG — batch with the Modules rebuild tests while sitting. |
+| ⬜ | [unbound-addon] Uninstall | Uninstall → typed "unbound" confirm → wizard prompts run to completion, tables dropped + rebuild (30-90 min) → addon gone. |
+| ⬜ | Doctor | Run → all checks report (Docker, disk, network, WSL). |
+| ⬜ | Shell | Open shell → a Windows terminal opens inside the dml-arch distro. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.

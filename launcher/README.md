@@ -18,6 +18,11 @@ as they ship.
   stats, bots online / max loadable) plus Start/Stop for the WoW server with
   live terminal output.
 - **Library** — install status per game, Start/Stop with live terminal output.
+- **Tools** — LAN play (enable/disable/status the realmlist's LAN address,
+  incl. the Windows firewall/portproxy setup), the Wrath Unbound multi-class
+  addon (install/update or uninstall, each force-rebuilds the worldserver —
+  30-90 min), DML doctor (environment checks), and Open shell (a terminal
+  inside the WSL distro).
 
 Every terminal panel keeps its transcript when you switch pages (streams keep
 writing while you're away), and has Clear + Download buttons — Download opens
