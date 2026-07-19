@@ -1,4 +1,5 @@
 pub mod dml;
+pub mod watch;
 mod zam;
 
 use serde::Serialize;
@@ -20,9 +21,19 @@ pub enum InstallSlot {
     Running(InstallSession),
 }
 
+/// Auto-shutdown watcher control block (Batch 2 F5). `generation` is bumped
+/// on every set_auto_shutdown call; a watcher thread captures the generation
+/// it was born with and exits as soon as the stored one differs (or enabled
+/// drops), so rapid toggle flips can never leave two live watchers racing.
+pub struct AutoShutdownCtl {
+    pub generation: u64,
+    pub enabled: bool,
+}
+
 pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
     pub install: Arc<Mutex<Option<InstallSlot>>>,
+    pub auto_shutdown: Arc<Mutex<AutoShutdownCtl>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,6 +133,115 @@ pub fn validate_ip(ip: &str) -> bool {
 
 fn bad_arg(message: impl Into<String>) -> CmdError {
     CmdError { code: "BAD_ARG".into(), message: message.into(), hint: "Check the value and try again.".into() }
+}
+
+// --- Auto-shutdown watcher (Batch 2 F5) -------------------------------------
+//
+// Every ~5s the watcher thread asks tasklist whether Wow.exe is running and
+// feeds the answer to the pure WatchMachine (src/watch.rs). When the machine
+// fires (client gone for 2 consecutive polls), the thread runs the same CLI
+// stop the Home Stop button uses -- captured, not streamed, because there is
+// no terminal to stream into -- guarded by a fresh server-detail check so a
+// server that is already down is never "stopped" again. Events go to the
+// webview on the "auto-shutdown" channel: {kind:"state",state:"waiting"|"armed"}
+// and {kind:"fired",stopped:bool}.
+
+/// True when tasklist reports a live Wow.exe process. Probe failures count
+/// as "not running" -- with the 2-poll debounce, one flaky probe can never
+/// fire a stop on its own.
+fn wow_client_running() -> bool {
+    let mut cmd = std::process::Command::new("tasklist");
+    cmd.args(["/FI", "IMAGENAME eq Wow.exe", "/FO", "CSV", "/NH"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, as elsewhere
+    }
+    match cmd.output() {
+        Ok(out) => watch::tasklist_shows_wow(&String::from_utf8_lossy(&out.stdout)),
+        Err(_) => false,
+    }
+}
+
+fn auto_shutdown_watcher(
+    my_gen: u64,
+    ctl: Arc<Mutex<AutoShutdownCtl>>,
+    runner: Arc<DmlRunner>,
+    app: tauri::AppHandle,
+) {
+    use tauri::Emitter;
+    let mut machine = watch::WatchMachine::new();
+    let _ = app.emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "waiting"}));
+    loop {
+        {
+            let c = ctl.lock().unwrap();
+            if c.generation != my_gen || !c.enabled {
+                return;
+            }
+        }
+        match machine.step(wow_client_running()) {
+            watch::WatchAction::Armed => {
+                let _ = app
+                    .emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "armed"}));
+            }
+            watch::WatchAction::Fire => {
+                // Guard: never fire when the server isn't up. A failed or
+                // ok=false detail read counts as "not up" -- skipping a stop
+                // is always safe, stopping blind is not.
+                let up = runner
+                    .run_json(&["wow", "server-detail"])
+                    .ok()
+                    .filter(|env| env.ok)
+                    .map(|env| {
+                        matches!(
+                            env.data["verdict"].as_str(),
+                            Some("online") | Some("starting") | Some("soap_unreachable")
+                        )
+                    })
+                    .unwrap_or(false);
+                let stopped = if up {
+                    // Same CLI verb as the Home Stop button (games stop is
+                    // itself bounded: saveall + compose stop -t 180).
+                    runner.run_captured(&["games", "stop", LAN_TITLE]).is_ok()
+                } else {
+                    false
+                };
+                let _ = app.emit(
+                    "auto-shutdown",
+                    serde_json::json!({"kind": "fired", "stopped": stopped}),
+                );
+                let _ = app
+                    .emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "waiting"}));
+            }
+            watch::WatchAction::None => {}
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+}
+
+/// Enable/disable the auto-shutdown watcher. Enabling spawns a fresh watcher
+/// thread (fresh = DISARMED until Wow.exe is seen); disabling just bumps the
+/// generation so the running thread exits on its next wake. Idempotent from
+/// the webview's perspective -- re-enabling while enabled restarts the
+/// watcher cleanly.
+#[tauri::command]
+fn set_auto_shutdown(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let my_gen = {
+        let mut ctl = state.auto_shutdown.lock().unwrap();
+        ctl.generation += 1;
+        ctl.enabled = enabled;
+        ctl.generation
+    };
+    if enabled {
+        let ctl = state.auto_shutdown.clone();
+        let runner = state.runner.clone();
+        std::thread::spawn(move || auto_shutdown_watcher(my_gen, ctl, runner, app));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1132,6 +1252,7 @@ pub fn run() {
         .manage(AppState {
             runner: std::sync::Arc::new(DmlRunner::default()),
             install: Arc::new(Mutex::new(None)),
+            auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1241,7 +1362,8 @@ pub fn run() {
             tool_install,
             open_shell,
             detect_lan_ip,
-            save_text_file
+            save_text_file,
+            set_auto_shutdown
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

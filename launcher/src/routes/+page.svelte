@@ -3,6 +3,7 @@
   import { NAV, DEFAULT_PAGE, type PageId } from "$lib/nav";
   import { serverStatus, startStatusPolling, statusLabel } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
@@ -25,6 +26,9 @@
   // the status chip below must be live even when Home is never visited.
   onMount(() => {
     startStatusPolling();
+    // Re-asserts the persisted auto-shutdown toggle to the Rust watcher and
+    // hooks its event channel -- idempotent, like startStatusPolling.
+    initAutoShutdown();
   });
 
   let status = $derived(statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting));

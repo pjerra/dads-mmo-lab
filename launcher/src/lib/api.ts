@@ -682,3 +682,11 @@ export async function openShell(): Promise<void> {
 export async function detectLanIp(): Promise<string | null> {
   return await invoke("detect_lan_ip");
 }
+
+// --- Auto-shutdown watcher (Batch 2 F5) ------------------------------------
+
+// Progress arrives separately via the "auto-shutdown" tauri event channel
+// (see auto-shutdown.svelte.ts); this just flips the backend watcher.
+export async function setAutoShutdown(enabled: boolean): Promise<void> {
+  return await invoke("set_auto_shutdown", { enabled });
+}

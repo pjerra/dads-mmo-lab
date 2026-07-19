@@ -12,6 +12,11 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { installStore } from "$lib/term-store.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
+  import {
+    autoShutdown,
+    autoShutdownLabel,
+    setAutoShutdownEnabled,
+  } from "$lib/auto-shutdown.svelte";
 
   function fmtErr(e: unknown): string {
     const err = e as { message?: string; hint?: string };
@@ -206,6 +211,32 @@
   </div>
 
   <div class="card">
+    <h3>Auto-shutdown</h3>
+    <p class="muted">
+      Stops the server automatically (characters saved, graceful stop) a few seconds after
+      you close the WoW game window — so the PC isn't left running a world nobody is in.
+      It arms itself when WoW starts and does nothing while WoW was never opened.
+    </p>
+    {#if autoShutdown.error}<p class="inline-error">{autoShutdown.error}</p>{/if}
+    <div class="row">
+      <label
+        class="toggle"
+        title={featureLocked("auto-shutdown") ? LOCKED_HINT : undefined}
+      >
+        <input
+          type="checkbox"
+          checked={autoShutdown.enabled}
+          disabled={featureLocked("auto-shutdown")}
+          onchange={(e) => setAutoShutdownEnabled(e.currentTarget.checked)}
+        />
+        Stop the server when WoW closes
+      </label>
+      <span class="muted">{autoShutdownLabel(autoShutdown.enabled, autoShutdown.state)}</span>
+    </div>
+    {#if autoShutdown.notice}<p class="notice">{autoShutdown.notice}</p>{/if}
+  </div>
+
+  <div class="card">
     <h3>Wrath Unbound addon</h3>
     <p class="muted">
       Layers the Wrath Unbound multi-class addon onto this server and force-rebuilds the
@@ -311,6 +342,9 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }
   .inline-error { color: #f85149; font-size: 13px; margin: 0; }
+  .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
+  .toggle input { accent-color: #238636; }
+  .notice { color: #3fb950; font-size: 13px; margin: 0; }
   .usage {
     background: #161b22;
     border: 1px solid #21262d;

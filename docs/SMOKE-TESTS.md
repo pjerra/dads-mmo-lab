@@ -170,6 +170,13 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [bots-flush] Flush & rebuild bots | Bot World → Danger zone → type "flush" → button runs: terminal streams backup → delete-flag restart → restore → rebuild restart → done. Takes MINUTES (two boots, bot recreation). After: bot count rebuilds to the configured population, YOUR characters untouched, `AiPlayerbot.DeleteRandomBotAccounts = 0` in playerbots.conf, a new backup in Backups. |
 | ⬜ | [bots-flush] Flush abort safety | (Optional, pairs with the row above) If the flush errors mid-run (e.g. stop the distro's docker): the error shows in the terminal AND playerbots.conf still ends with `AiPlayerbot.DeleteRandomBotAccounts = 0` — a later manual start must NOT wipe bots again. |
 
+## 16. Batch 2 — Windows integration
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | [auto-shutdown] Stop when WoW closes | Server running: Tools → enable "Stop the server when WoW closes" → status says "Waiting for WoW…". Launch Wow.exe → status flips to "Armed". Close WoW → within ~15s the server stops gracefully (chip → Stopped) and the card shows "Server stopped automatically because WoW was closed." Toggle survives a launcher restart (re-arms on app start). |
+| ⬜ | [auto-shutdown] Never fires when server already down | With the toggle on and the server STOPPED: launch + close WoW → nothing stops/breaks; card notes there was nothing to stop. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.

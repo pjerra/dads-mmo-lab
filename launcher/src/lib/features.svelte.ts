@@ -52,6 +52,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "bots-world": "untested",
   "config-reset": "untested",
   "bots-flush": "untested",
+  "auto-shutdown": "untested",
 };
 
 export const LOCKED_HINT =
