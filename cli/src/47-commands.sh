@@ -409,3 +409,25 @@ _cmd_block_for() {
             ;;
     esac
 }
+
+# Batch 2 (overnight): parses the "npc add <entry> <map> <x> <y> <z> <o>"
+# spawn lines out of a _cmd_block_for block, emitting one pipe-delimited
+# "<map>|<entry>|<x>|<y>|<z>|<o>" line per FULLY specified spawn. Lines with
+# fewer fields (e.g. mod-dungeon-master's bare "npc add 500000") or any
+# non-numeric field are skipped, so callers can treat a non-empty result as
+# "this mod ships ready-made capital coordinates". This is the single source
+# of truth for `wow module place-npc` -- the cheat-sheet blocks above are the
+# only place these coordinates live.
+_npc_coord_specs() {
+    local key="$1"
+    _cmd_block_for "$key" | awk '
+        $1 == "npc" && $2 == "add" && NF >= 8 {
+            entry = $3; map = $4; x = $5; y = $6; z = $7; o = $8
+            if (entry ~ /^[0-9]+$/ && map ~ /^[0-9]+$/ &&
+                x ~ /^-?[0-9]+(\.[0-9]+)?$/ && y ~ /^-?[0-9]+(\.[0-9]+)?$/ &&
+                z ~ /^-?[0-9]+(\.[0-9]+)?$/ && o ~ /^-?[0-9]+(\.[0-9]+)?$/)
+                print map "|" entry "|" x "|" y "|" z "|" o
+        }
+    '
+    return 0
+}

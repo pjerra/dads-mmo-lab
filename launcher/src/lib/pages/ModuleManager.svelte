@@ -10,6 +10,8 @@
     wowModuleTracking,
     wowModuleRepair,
     wowModuleFixit,
+    wowModulePlaceNpc,
+    type PlaceNpcKey,
     wowClientPathGet,
     wowClientPathSet,
     wowClientPathDetect,
@@ -137,6 +139,34 @@
       note = r.already_placed
         ? "The Battle Pass NPC is already placed in the world."
         : "Battle Pass NPC placed in Stormwind + Orgrimmar. Restart the world server (Home) for it to appear, then talk to the Battle Pass Vendor.";
+    } catch (e) {
+      showErr(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // Batch 2 (overnight): NPC-mods that ship a ready-made capital coord block
+  // in the CLI's cheat-sheet (mirrors the CLI/Rust allowlist). Each gets a
+  // "Place NPC in capitals" button once installed. Battlepass is NOT here --
+  // its NPC needs a creature_template created too, handled by its own fixit.
+  const PLACE_NPC_KEYS = new Set<string>([
+    "mod-1v1-arena",
+    "mod-transmog",
+    "mod-npc-beastmaster",
+    "bmah",
+  ]);
+
+  // Spawns an installed NPC-mod's creature in Stormwind + Orgrimmar. Idempotent
+  // per map CLI-side; the NPC only appears after a world restart (the note
+  // passes that on). Non-streamed, same shape as fixitBattlepassNpc above.
+  async function placeNpc(key: string, label: string) {
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowModulePlaceNpc(key as PlaceNpcKey);
+      note = r.already_placed
+        ? `${label} is already placed in Stormwind + Orgrimmar.`
+        : `Placed ${label} in ${r.spawns_placed} capital(s). Restart the world server (Home) for it to appear.`;
     } catch (e) {
       showErr(e);
     } finally {
@@ -556,6 +586,17 @@
                 Apply client patch
               </button>
             {/if}
+            {#if PLACE_NPC_KEYS.has(m.key)}
+              <button
+                onclick={() => placeNpc(m.key, m.name)}
+                disabled={busy || featureLocked("place-npc")}
+                title={featureLocked("place-npc")
+                  ? LOCKED_HINT
+                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+              >
+                Place NPC in capitals
+              </button>
+            {/if}
             <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
             <button
               onclick={() => removeModule(m)}
@@ -682,6 +723,19 @@
                   : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
               >
                 Fix missing NPC
+              </button>
+            {/if}
+            {#if PLACE_NPC_KEYS.has(m.key) && m.deployed}
+              <!-- Batch 2 (overnight): spawn the mod's NPC (e.g. BMAH
+                   Auctioneer) in both capitals from its coord block. -->
+              <button
+                onclick={() => placeNpc(m.key, m.name)}
+                disabled={busy || featureLocked("place-npc")}
+                title={featureLocked("place-npc")
+                  ? LOCKED_HINT
+                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+              >
+                Place NPC in capitals
               </button>
             {/if}
             <button

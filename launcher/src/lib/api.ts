@@ -380,6 +380,24 @@ export async function wowModuleFixit(key: "battlepass-npc"): Promise<ModuleFixit
   return await invoke("wow_module_fixit", { key });
 }
 
+// Batch 2 (overnight): spawn an installed NPC-mod's creature in both capitals
+// (Stormwind + Orgrimmar) from its ready-made coord block. Idempotent per map
+// CLI-side; the key is allowlisted on both sides. The NPC only appears after a
+// world restart (restart_required tells the UI to nudge one).
+export type PlaceNpcKey = "mod-1v1-arena" | "mod-transmog" | "mod-npc-beastmaster" | "bmah";
+export interface ModulePlaceNpc {
+  key: string;
+  entry: number;
+  maps: { map: number; placed: boolean }[];
+  spawns_placed: number;
+  already_placed: boolean;
+  restart_required: boolean;
+  note: string;
+}
+export async function wowModulePlaceNpc(key: PlaceNpcKey): Promise<ModulePlaceNpc> {
+  return await invoke("wow_module_place_npc", { key });
+}
+
 export interface ClientPath {
   path: string | null;
   valid: boolean;

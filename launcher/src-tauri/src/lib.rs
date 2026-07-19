@@ -680,6 +680,26 @@ async fn wow_module_fixit(key: String, state: State<'_, AppState>) -> Result<ser
     run_json_cmd(state, vec!["wow".into(), "module".into(), "fixit".into(), key]).await
 }
 
+// Batch 2 (overnight): spawn an installed NPC-mod's creature in both capitals
+// from its ready-made coord block (CLI arm `module place-npc`). Closed
+// allowlist -- the CLI re-validates against the same set, but never forward an
+// arbitrary string as an argv token.
+#[tauri::command]
+async fn wow_module_place_npc(
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    match key.as_str() {
+        "mod-1v1-arena" | "mod-transmog" | "mod-npc-beastmaster" | "bmah" => {}
+        _ => return Err(bad_arg(format!("unknown place-npc key: {key:?}"))),
+    }
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "module".into(), "place-npc".into(), "--key".into(), key],
+    )
+    .await
+}
+
 #[tauri::command]
 async fn wow_client_path_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "client-path".into(), "get".into()]).await
@@ -1897,6 +1917,7 @@ pub fn run() {
             wow_module_tracking,
             wow_module_repair,
             wow_module_fixit,
+            wow_module_place_npc,
             wow_client_path_get,
             wow_client_path_set,
             wow_client_path_detect,

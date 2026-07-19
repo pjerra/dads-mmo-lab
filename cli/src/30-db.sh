@@ -1,17 +1,21 @@
 # ---------------------------------------------------------------------------
 # MySQL access to the AzerothCore DBs via the ac-database container.
 # Search/dashboard queries here are read-only; most mutations go through
-# SOAP, never a direct write. FIVE direct MySQL writes are sanctioned
+# SOAP, never a direct write. SIX direct MySQL writes are sanctioned
 # project-wide (see 60-backup.sh header for the full list): the pre-existing
 # LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore,
 # teleport-coords' characters.position_x/y/z/map/orientation UPDATE via
 # _chars_write_stmt below -- OFFLINE characters only, see the
 # `teleport-coords` arm in 90-main.sh -- module repair's INSERT/DELETE on
-# the `updates` tracking tables ONLY (never game tables), and (Batch 3
+# the `updates` tracking tables ONLY (never game tables), (Batch 3
 # F13b) `module fixit battlepass-npc`'s fixed-literal INSERTs of
 # creature_template/creature entry 90100 (idempotence-checked, no user
-# input in the statements) -- both via the generalized _db_write_stmt
-# below, see the `module repair` / `module fixit` arms in 90-main.sh.
+# input in the statements), and (Batch 2 overnight) `module place-npc`'s
+# fixed-literal `creature` spawn INSERTs for allowlisted NPC mods -- coords
+# parsed from the 47-commands.sh cheat-sheet + re-validated numeric, entry
+# from a closed key allowlist, per-map idempotence-checked -- all via the
+# generalized _db_write_stmt below, see the `module repair` / `module
+# fixit` / `module place-npc` arms in 90-main.sh.
 # ---------------------------------------------------------------------------
 _db_pw() { echo "${DML_DB_ROOT_PASSWORD:-password}"; }
 
