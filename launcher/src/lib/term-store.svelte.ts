@@ -58,7 +58,36 @@ export function termText(t: TermState): string {
     .join("\n\n");
 }
 
-export const consoleStore = $state({ hist: [] as ConsoleHistEntry[] });
+// `clearAnchor`: the last few log lines visible when the user hit Clear.
+// The Console's log view is a server-side tail snapshot that refills every
+// poll, so "clear" is implemented as "only show lines newer than this
+// anchor" (see tailAfterAnchor) -- kept in the store so a cleared console
+// stays cleared across page switches.
+export const consoleStore = $state({
+  hist: [] as ConsoleHistEntry[],
+  clearAnchor: null as string[] | null,
+});
+
+// Pure: the portion of a freshly-fetched tail that comes AFTER the last
+// occurrence of the anchor line-sequence. [] means "anchor found, nothing
+// new yet"; null means "anchor no longer in the window" (enough new output
+// scrolled it away -- the caller should show everything and drop the
+// anchor). Multi-line anchors exist because single log lines repeat (AHBot
+// spams identical cycle lines).
+export function tailAfterAnchor(fetched: string[], anchor: string[]): string[] | null {
+  if (anchor.length === 0) return null;
+  for (let start = fetched.length - anchor.length; start >= 0; start--) {
+    let match = true;
+    for (let j = 0; j < anchor.length; j++) {
+      if (fetched[start + j] !== anchor[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return fetched.slice(start + anchor.length);
+  }
+  return null;
+}
 
 // Home for an in-flight/finished games_install session -- see Library.svelte
 // and InstallTerminal.svelte. `id`/`running`/`nonce` gate whether the panel

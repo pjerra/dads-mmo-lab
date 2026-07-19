@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { wowConsoleTail, wowConsoleSend, saveTextFile } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { consoleStore } from "$lib/term-store.svelte";
+  import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
 
   let available = $state(true);
   let lines: string[] = $state([]);
@@ -23,7 +23,19 @@
     try {
       const t = await wowConsoleTail();
       available = t.available;
-      lines = t.lines;
+      if (consoleStore.clearAnchor) {
+        const after = tailAfterAnchor(t.lines, consoleStore.clearAnchor);
+        if (after === null) {
+          // Anchor scrolled out of the tail window -- everything fetched is
+          // newer than the clear point.
+          consoleStore.clearAnchor = null;
+          lines = t.lines;
+        } else {
+          lines = after;
+        }
+      } else {
+        lines = t.lines;
+      }
       tailError = null;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
@@ -70,8 +82,13 @@
     }
   }
 
-  function clearHistory() {
+  function clearConsole() {
+    // "Clear" clears what the user SEES: the log view (via the anchor --
+    // the tail refills from the server every poll, so an anchor marks the
+    // clear point and only newer lines render) plus the command history.
     consoleStore.hist = [];
+    consoleStore.clearAnchor = lines.slice(-3);
+    lines = [];
   }
 
   let saveErr: string | null = $state(null);
@@ -98,7 +115,7 @@
         <input type="checkbox" bind:checked={auto} /> Auto-refresh
       </label>
       <button onclick={refreshLogs} disabled={refreshing}>Refresh</button>
-      <button onclick={clearHistory} disabled={sending}>Clear</button>
+      <button onclick={clearConsole} disabled={sending}>Clear</button>
       <button onclick={downloadLog}>Download</button>
       {#if saveErr}<span class="save-err">save failed: {saveErr}</span>{/if}
     </div>

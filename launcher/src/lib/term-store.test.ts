@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { beginRun, claimInstallInvoke, clearBuf, termBuf, termText } from "./term-store.svelte";
+import {
+  beginRun,
+  claimInstallInvoke,
+  clearBuf,
+  tailAfterAnchor,
+  termBuf,
+  termText,
+} from "./term-store.svelte";
 import { initialTermState, type TermState } from "./terminal-state";
 
 describe("termBuf", () => {
@@ -69,6 +76,31 @@ describe("claimInstallInvoke", () => {
     // and the old nonce stays spent even after a newer one was claimed
     expect(claimInstallInvoke(102)).toBe(false);
     expect(claimInstallInvoke(103)).toBe(true);
+  });
+});
+
+describe("tailAfterAnchor", () => {
+  it("returns lines after the LAST occurrence of the anchor sequence", () => {
+    expect(tailAfterAnchor(["a", "b", "a", "b", "c", "d"], ["a", "b"])).toEqual(["c", "d"]);
+  });
+
+  it("returns [] when the anchor sits at the very end (nothing new yet)", () => {
+    expect(tailAfterAnchor(["x", "y", "z"], ["y", "z"])).toEqual([]);
+  });
+
+  it("returns null when the anchor is no longer in the window", () => {
+    expect(tailAfterAnchor(["p", "q", "r"], ["gone", "lines"])).toBeNull();
+  });
+
+  it("returns null for an empty anchor (nothing was ever cleared)", () => {
+    expect(tailAfterAnchor(["a"], [])).toBeNull();
+  });
+
+  it("anchors on repeated lines by matching the full sequence", () => {
+    // Single "spam" lines repeat; the 2-line sequence disambiguates.
+    expect(tailAfterAnchor(["spam", "spam", "end", "spam", "new"], ["end", "spam"])).toEqual([
+      "new",
+    ]);
   });
 });
 
