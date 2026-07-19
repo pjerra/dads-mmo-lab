@@ -6,9 +6,14 @@
     toolInstall,
     openShell,
     detectLanIp,
+    realmlistStatus,
+    realmlistFix,
+    realmlistLock,
     type LanAction,
     type ToolName,
+    type RealmlistStatus,
   } from "$lib/api";
+  import { parseLanStatus } from "$lib/transitions";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { installStore } from "$lib/term-store.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
@@ -49,7 +54,9 @@
   }
 
   onMount(() => {
-    lanStatus();
+    // Realmlist status wants the LAN address in its expected-set, so it
+    // loads after the LAN status answer has landed.
+    lanStatus().then(loadRealmlist);
     // Prefill only -- the field stays editable, and a failed detect just
     // leaves it blank rather than erroring the card.
     detectLanIp()
@@ -77,6 +84,56 @@
       lanError = fmtErr(e);
     } finally {
       lanBusy = false;
+    }
+  }
+
+  // --- Game realmlist (Batch 2 F7) ----------------------------------------
+  let rl: RealmlistStatus | null = $state(null);
+  let rlError: string | null = $state(null);
+  let rlBusy = $state(false);
+
+  // The LAN address, when LAN play is on, extends the set of addresses the
+  // realmlist may legitimately point at. Parsed from the same status text
+  // the LAN card shows.
+  const lanInfo = $derived(parseLanStatus(lanOutput ?? ""));
+  const lanFixIp = $derived(lanInfo.on && lanInfo.ip && lanInfo.ip !== "127.0.0.1" ? lanInfo.ip : null);
+  // $derived.by: inside a closure TS uses rl's declared type -- the inline
+  // form gets narrowed to the initial null by straight-line control flow.
+  const rlEffective = $derived.by(() => (rl ? (rl.current ?? rl.config_wtf) : null));
+
+  async function loadRealmlist() {
+    rlBusy = true;
+    rlError = null;
+    try {
+      rl = await realmlistStatus(lanFixIp ?? undefined);
+    } catch (e) {
+      rlError = fmtErr(e);
+    } finally {
+      rlBusy = false;
+    }
+  }
+
+  async function fixRealmlist(target: string) {
+    rlBusy = true;
+    rlError = null;
+    try {
+      rl = await realmlistFix(target, lanFixIp ?? undefined);
+    } catch (e) {
+      rlError = fmtErr(e);
+    } finally {
+      rlBusy = false;
+    }
+  }
+
+  async function lockRealmlist(locked: boolean) {
+    rlBusy = true;
+    rlError = null;
+    try {
+      rl = await realmlistLock(locked, lanFixIp ?? undefined);
+    } catch (e) {
+      rlError = fmtErr(e);
+    } finally {
+      rlBusy = false;
     }
   }
 
@@ -257,6 +314,73 @@
   </div>
 
   <div class="card">
+    <h3>Game realmlist</h3>
+    <p class="muted">
+      Checks which server address your WoW client logs in to (its "realmlist") and fixes
+      it with one click. Changes take effect the next time you start the game.
+    </p>
+    {#if rlError}<p class="inline-error">{rlError}</p>{/if}
+    {#if rl}
+      {#if !rl.windows_path}
+        <p class="muted">
+          {rl.client_path
+            ? `The stored client folder (${rl.client_path}) isn't on a Windows drive — its realmlist can't be reached from here.`
+            : "No client path set — set your WoW client folder on the Modules page first."}
+        </p>
+      {:else}
+        <p class="rl-state" class:good={rl.matches} class:warn={!rl.matches}>
+          {#if rl.matches}
+            Points at your server ({rlEffective}).
+            {#if !rl.current && rl.config_wtf}
+              <span class="muted">(via the game's saved settings — realmlist.wtf itself is empty)</span>
+            {/if}
+          {:else if rlEffective}
+            Points at "{rlEffective}" — not your server.
+          {:else}
+            No realmlist entry found — the game won't know where your server is.
+          {/if}
+        </p>
+        {#if rl.path}
+          <p class="muted">File: {rl.path}{rl.readonly ? " (protected, read-only)" : ""}</p>
+        {/if}
+        <div class="row">
+          <button
+            class="primary"
+            onclick={() => fixRealmlist("127.0.0.1")}
+            disabled={rlBusy || featureLocked("realmlist-fix")}
+            title={featureLocked("realmlist-fix") ? LOCKED_HINT : undefined}
+          >
+            Point at this PC (127.0.0.1)
+          </button>
+          {#if lanFixIp}
+            <button
+              onclick={() => lanFixIp && fixRealmlist(lanFixIp)}
+              disabled={rlBusy || featureLocked("realmlist-fix")}
+              title={featureLocked("realmlist-fix") ? LOCKED_HINT : undefined}
+            >
+              Point at the LAN address ({lanFixIp})
+            </button>
+          {/if}
+          <button onclick={loadRealmlist} disabled={rlBusy}>Re-check</button>
+        </div>
+        {#if rl.exists}
+          <label class="toggle" title={featureLocked("realmlist-fix") ? LOCKED_HINT : undefined}>
+            <input
+              type="checkbox"
+              checked={rl.readonly}
+              disabled={rlBusy || featureLocked("realmlist-fix")}
+              onchange={(e) => lockRealmlist(e.currentTarget.checked)}
+            />
+            Protect the file (read-only — stops other launchers from overwriting it)
+          </label>
+        {/if}
+      {/if}
+    {:else if rlBusy}
+      <p class="muted">Checking…</p>
+    {/if}
+  </div>
+
+  <div class="card">
     <h3>Auto-shutdown</h3>
     <p class="muted">
       Stops the server automatically (characters saved, graceful stop) a few seconds after
@@ -392,6 +516,9 @@
   .toggle input { accent-color: #238636; }
   .notice { color: #3fb950; font-size: 13px; margin: 0; }
   .pref-rows { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .rl-state { margin: 0; font-size: 14px; }
+  .rl-state.good { color: #3fb950; }
+  .rl-state.warn { color: #d29922; }
   .usage {
     background: #161b22;
     border: 1px solid #21262d;

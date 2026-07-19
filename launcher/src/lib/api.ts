@@ -686,6 +686,35 @@ export async function detectLanIp(): Promise<string | null> {
   return await invoke("detect_lan_ip");
 }
 
+// --- Realmlist check + one-click fix (Batch 2 F7) --------------------------
+
+export interface RealmlistStatus {
+  client_path: string | null;
+  windows_path: string | null;
+  path: string | null;
+  exists: boolean;
+  readonly: boolean;
+  content: string;
+  current: string | null;
+  config_wtf: string | null;
+  expected: string[];
+  matches: boolean;
+}
+
+// lanIp is comparison data only (adds the LAN address to `expected`); the
+// backend validates it and derives every path from the stored client folder.
+export async function realmlistStatus(lanIp?: string): Promise<RealmlistStatus> {
+  return await invoke("realmlist_status", { lanIp });
+}
+
+export async function realmlistFix(target: string, lanIp?: string): Promise<RealmlistStatus> {
+  return await invoke("realmlist_fix", { target, lanIp });
+}
+
+export async function realmlistLock(locked: boolean, lanIp?: string): Promise<RealmlistStatus> {
+  return await invoke("realmlist_lock", { locked, lanIp });
+}
+
 // --- Keep-awake sleep block (Batch 2 F6) -----------------------------------
 
 export async function setKeepAwake(on: boolean): Promise<void> {

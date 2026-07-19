@@ -1,5 +1,6 @@
 pub mod dml;
 pub mod power;
+pub mod realmlist;
 pub mod watch;
 mod zam;
 
@@ -218,6 +219,72 @@ fn auto_shutdown_watcher(
         }
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
+}
+
+// --- Realmlist check + one-click fix (Batch 2 F7) ---------------------------
+//
+// No paths cross IPC: all three commands resolve the realmlist location from
+// the client path the module manager already stores (via the CLI's
+// `wow client-path get`). The optional lan_ip is comparison/status data
+// supplied by the frontend from its own `wow_lan status` parse -- validated
+// here like every webview input, and deliberately NOT fetched CLI-side:
+// `dml lan ... status` can block for minutes while the realm DB warms up,
+// which would wedge run_captured (callers must self-bound, see runner.rs).
+
+fn validated_lan_ip(lan_ip: Option<String>) -> Result<Option<String>, CmdError> {
+    match lan_ip {
+        None => Ok(None),
+        Some(ip) => {
+            if validate_ip(&ip) {
+                Ok(Some(ip))
+            } else {
+                Err(bad_arg(format!("invalid IPv4 address: {ip:?}")))
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn realmlist_status(
+    lan_ip: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<realmlist::RealmlistStatus, CmdError> {
+    let lan = validated_lan_ip(lan_ip)?;
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || realmlist::status(&runner, lan))
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+#[tauri::command]
+async fn realmlist_fix(
+    target: String,
+    lan_ip: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<realmlist::RealmlistStatus, CmdError> {
+    if !realmlist::validate_realmlist_target(&target) {
+        return Err(bad_arg(format!(
+            "invalid realmlist target: {target:?} (allowed: 127.0.0.1, a private LAN address, or a hostname)"
+        )));
+    }
+    let lan = validated_lan_ip(lan_ip)?;
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || realmlist::fix(&runner, &target, lan))
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+#[tauri::command]
+async fn realmlist_lock(
+    locked: bool,
+    lan_ip: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<realmlist::RealmlistStatus, CmdError> {
+    let lan = validated_lan_ip(lan_ip)?;
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || realmlist::lock(&runner, locked, lan))
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
 /// Keep-awake toggle (Batch 2 F6): see power.rs for the per-thread semantics.
@@ -1374,7 +1441,10 @@ pub fn run() {
             detect_lan_ip,
             save_text_file,
             set_auto_shutdown,
-            set_keep_awake
+            set_keep_awake,
+            realmlist_status,
+            realmlist_fix,
+            realmlist_lock
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
