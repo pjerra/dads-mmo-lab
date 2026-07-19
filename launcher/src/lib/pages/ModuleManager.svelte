@@ -6,6 +6,7 @@
     wowModuleRemove,
     wowModuleRebuild,
     wowModuleConfActivate,
+    wowModuleClientPatch,
     wowModuleTracking,
     wowModuleRepair,
     wowModuleFixit,
@@ -195,6 +196,21 @@
       () => {
         note = `Installed ${label}.`;
         if (url) customUrl = "";
+      },
+    );
+  }
+
+  // Batch 5 F2: ARAC's server-DBC + client-MPQ step, streamed into the same
+  // terminal as install/remove/rebuild. The done payload's client_patched
+  // tells us whether the MPQ landed (false = no client folder saved yet).
+  function applyClientPatch(m: CppModule) {
+    return runStream(
+      (onEvent) => wowModuleClientPatch(m.key, onEvent),
+      (doneData) => {
+        const d = doneData as { client_patched?: boolean } | undefined;
+        note = d?.client_patched
+          ? "ARAC patch applied (server DBCs + client Patch-A.MPQ). Restart the server to load it."
+          : "ARAC server DBCs installed — set your WoW client folder below, then Apply client patch again for Patch-A.MPQ. Restart the server to load it.";
       },
     );
   }
@@ -527,6 +543,19 @@
             >
               Update
             </button>
+            {#if m.key === "mod-arac"}
+              <button
+                onclick={() => applyClientPatch(m)}
+                disabled={busy || featureLocked("arac-client-patch")}
+                title={featureLocked("arac-client-patch")
+                  ? LOCKED_HINT
+                  : clientPath?.path
+                    ? "Copies ARAC's server DBC files into the data volume and Patch-A.MPQ into your WoW client"
+                    : "Copies the server DBC files now — set your WoW client folder (card below) first to also install Patch-A.MPQ"}
+              >
+                Apply client patch
+              </button>
+            {/if}
             <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
             <button
               onclick={() => removeModule(m)}

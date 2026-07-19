@@ -12,6 +12,11 @@
 # DO NOT edit the text content here. If the manager's copy changes (new
 # mod, wording fix, new command), re-sync this file from the source
 # function rather than hand-editing -- the two are meant to stay identical.
+#
+# ONE deliberate divergence (Batch 5 F2): the mod-arac block's install steps
+# now point at the launcher's "Apply client patch" button (the CLI's `wow
+# module client-patch --key mod-arac` arm) instead of the manager's manual
+# three-step text -- keep that edit when re-syncing.
 # ---------------------------------------------------------------------------
 
 _cmd_block_for() {
@@ -36,12 +41,12 @@ _cmd_block_for() {
                 'All Races All Classes (ARAC)' \
                 'Unlocks all race/class combinations not normally available — Night Elf Warrior, Undead Paladin, etc. DATA-ONLY: no worldserver rebuild required. Requires a world DB SQL import and updated DBC files on both server and client.' \
                 '' \
-                'Install requires three steps (configure handles all automatically):' \
-                '  1. Apply arac.sql to acore_world database' \
-                '  2. Copy DBFilesContent DBC files to server data/dbc/ directory' \
-                '  3. Copy Patch-A.MPQ to WoW client Data/ directory' \
+                'Install: click Install on the Modules page (arac.sql is applied automatically' \
+                'by the server on its next cold start), then "Apply client patch" on the same' \
+                'row — it copies the server DBC files into the data volume and Patch-A.MPQ' \
+                'into your WoW client Data/ folder. Restart the server afterwards.' \
                 '' \
-                'WARNING: Back up your database before applying ARAC SQL.' \
+                'Manual fallback: copy modules/mod-arac/Patch-A.MPQ into <client>/Data/.' \
                 'Commands: (none — all race/class combos unlocked at character creation)'
             ;;
         mod-dungeon-master)

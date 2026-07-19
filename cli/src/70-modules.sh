@@ -83,7 +83,7 @@ _module_desc() {
       mod-learn-spells) echo "Class spells are learned automatically on level-up -- no class-trainer visits." ;;
       mod-npc-beastmaster) echo "A Beastmaster NPC that lets ANY class tame, stable and use hunter pets." ;;
       mod-quest-loot-party) echo "Quest items drop for every eligible party member at once instead of one at a time." ;;
-      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. NOTE: needs manual client-side patch files (see the Commands page) -- the server part alone is not enough." ;;
+      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. After install, click 'Apply client patch' on this row (server DBCs + client Patch-A.MPQ), then restart -- the server part alone is not enough." ;;
       mod-dungeon-master) echo "Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards." ;;
       mod-solocraft) echo "Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable." ;;
       mod-talentbutton) echo "Dual spec from level 10 and a talent-reset button usable anywhere." ;;

@@ -3557,10 +3557,21 @@ case "$cmd" in
                     ndjson_error GIT_FAILED "git clone failed for $mkey" ""; exit 1
                   fi
                 fi
-                _rebuild_pending_add "$sdir" "$mkey"
+                # mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- a
+                # rebuild would be a 30-90 minute no-op, so it never joins
+                # the rebuild-pending list (Batch 5 F2, sanctioned deviation
+                # from the generic cpp path). Its follow-up step is the
+                # client-patch arm + a plain restart instead.
+                rebreq=true
+                if [[ "$mkey" == mod-arac ]]; then
+                  rebreq=false
+                  ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
+                else
+                  _rebuild_pending_add "$sdir" "$mkey"
+                fi
                 ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
                 ndjson_section_end module-install ok
-                ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":true}"
+                ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":$rebreq}"
                 ;;
               lua)
                 lrow="$(_module_registry_lua | grep -m1 -F "$mkey|" || true)"
@@ -4123,6 +4134,94 @@ case "$cmd" in
             _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
               || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
             json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            ;;
+          client-patch)
+            # Batch 5 F2: port of the manager's configure_mod_arac steps 2+3
+            # (guides/wow-wotlk/wow-manage.sh:2668-2705) onto the CLI's
+            # client-path machinery. Step 1 (arac.sql) is deliberately NOT
+            # here: cpp-family SQL is auto-applied by ac-db-import on the
+            # next cold compose up (CLI doctrine, 70-modules.sh:4-7) --
+            # hand-applying would desync the `updates` tracking.
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start client-patch
+            ckey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; ckey="$2"; shift 2 ;;
+                *) ndjson_section_end client-patch error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            case "$ckey" in
+              mod-arac) ;;
+              *)
+                ndjson_section_end client-patch error
+                ndjson_error BAD_ARG "client-patch supports only --key mod-arac" "Other modules ship no client patch step."; exit 1 ;;
+            esac
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            mdir="$sdir/modules/mod-arac"
+            if ! _cpp_installed "$sdir" mod-arac; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_INSTALLED "mod-arac is not installed" "Install it on the Modules page first."; exit 1
+            fi
+            dbcsrc="$mdir/patch-contents/DBFilesContent"
+            if [[ ! -d "$dbcsrc" ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "DBC files not found in the mod-arac clone" "Expected $dbcsrc -- try Update on the Modules page to refresh the clone."; exit 1
+            fi
+            # The data volume is mounted :ro inside the worldserver, so the
+            # copy goes through a throwaway container against the VOLUME.
+            # Resolution by mount destination is primary; the bare
+            # fallback is the dml-arch deploy's real name (live-verified
+            # 2026-07-19) -- the manager's `ac-client-data` fallback is
+            # WRONG on this deploy.
+            vol="$(docker inspect ac-worldserver --format '{{range .Mounts}}{{if eq .Destination "/azerothcore/env/dist/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)" || vol=""
+            if [[ -z "$vol" ]]; then
+              vol="wow-server-playerbots_ac-client-data"
+              ndjson_line warn "could not resolve the data volume from the worldserver container -- using the default name $vol"
+            fi
+            dbc_n=0
+            for f in "$dbcsrc"/*.dbc; do
+              [[ -f "$f" ]] || continue
+              bn="$(basename "$f")"
+              ndjson_line info "copying $bn into the server data volume..."
+              if ! docker run --rm -v "$vol:/data" -v "$f:/src/$bn:ro" alpine cp "/src/$bn" "/data/dbc/$bn" >/dev/null 2>&1; then
+                ndjson_section_end client-patch error
+                ndjson_error COPY_FAILED "Could not copy $bn into the data volume" "Is Docker running?"; exit 1
+              fi
+              dbc_n=$(( dbc_n + 1 ))
+            done
+            if [[ "$dbc_n" -eq 0 ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "No .dbc files found in $dbcsrc" "Try Update on the Modules page to refresh the clone."; exit 1
+            fi
+            ndjson_line info "$dbc_n server DBC files installed"
+            # Client MPQ: Data/ ROOT, never a locale subfolder (ARAC does
+            # not touch Data/enUS). Soft-skips when no client folder is
+            # saved -- the server half above still counts.
+            cpath="$(_client_path)"
+            client_done=false
+            if [[ -z "$cpath" ]]; then
+              ndjson_line warn "no client folder set — skipped Patch-A.MPQ (set it on the Modules page, then re-run this)"
+            elif [[ ! -f "$mdir/Patch-A.MPQ" ]]; then
+              ndjson_line warn "Patch-A.MPQ not found in the mod-arac clone — try Update on the Modules page, or copy it manually into <client>/Data/"
+            else
+              ndjson_line info "installing Patch-A.MPQ into the client Data folder..."
+              if cp "$mdir/Patch-A.MPQ" "$cpath/Data/Patch-A.MPQ" 2>/dev/null; then
+                client_done=true
+                ndjson_line info "Patch-A.MPQ installed"
+              else
+                ndjson_line warn "could not copy Patch-A.MPQ — copy $mdir/Patch-A.MPQ into <client>/Data/ manually"
+              fi
+            fi
+            # mod-arac is data-only: a RESTART loads the new DBCs -- no
+            # worldserver rebuild is ever needed (matches the install
+            # path's skip of the rebuild-pending mark for this key).
+            ndjson_line info "restart the server (Home) to load the new race/class combinations — no rebuild needed"
+            ndjson_section_end client-patch ok
+            ndjson_done "{\"key\":\"mod-arac\",\"dbc_files\":$dbc_n,\"client_patched\":$client_done,\"restart_required\":true}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"

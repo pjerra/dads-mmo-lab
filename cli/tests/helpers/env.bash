@@ -77,6 +77,13 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf '%s\n' "${DML_STUB_EXIT_CODE:-0}"
     exit 0
   fi
+  # module client-patch (Batch 5 F2): the data-volume resolution inspects
+  # the worldserver's Mounts -- serve DML_STUB_MOUNT_VOLUME (empty when
+  # unset, which exercises the caller's fallback-name path).
+  if [[ "$*" == *Mounts* ]]; then
+    printf '%s\n' "${DML_STUB_MOUNT_VOLUME:-}"
+    exit "${DML_STUB_INSPECT_EXIT:-0}"
+  fi
   printf '%s\n' "${DML_STUB_STARTED_AT:-2026-07-17T10:00:00.000000000Z}"
   exit 0
 fi

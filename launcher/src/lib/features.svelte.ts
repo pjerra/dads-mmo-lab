@@ -64,6 +64,8 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "title-url-install": "untested",
   "disk-tools": "untested",
   "bot-browser": "untested",
+  "arac-client-patch": "untested",
+  "gear-sets": "untested",
 };
 
 export const LOCKED_HINT =

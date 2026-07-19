@@ -304,6 +304,16 @@ export const wowModuleRebuild = (
   ch.onmessage = onEvent;
   return invoke("wow_module_rebuild", { backup, onEvent: ch });
 };
+// Batch 5 F2: ARAC server-DBC + client-MPQ patch stream (key is allowlisted
+// CLI-side to mod-arac).
+export const wowModuleClientPatch = (
+  key: string,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_module_client_patch", { key, onEvent: ch });
+};
 export async function wowModuleConfActivate(
   key: string,
   force?: boolean,

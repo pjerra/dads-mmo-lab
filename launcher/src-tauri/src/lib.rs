@@ -563,6 +563,22 @@ async fn wow_module_rebuild(
     stream_args(vec!["wow".into(), "module".into(), "rebuild".into(), flag.into()], on_event, state).await
 }
 
+// Batch 5 F2: ARAC's server-DBC + client-MPQ patch step (CLI allowlists the
+// key to mod-arac; passed through as a plain argv value).
+#[tauri::command]
+async fn wow_module_client_patch(
+    key: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "module".into(), "client-patch".into(), "--key".into(), key],
+        on_event,
+        state,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn wow_module_conf_activate(
     key: String,
@@ -1767,6 +1783,7 @@ pub fn run() {
             wow_module_remove,
             wow_module_rebuild,
             wow_module_conf_activate,
+            wow_module_client_patch,
             wow_module_tracking,
             wow_module_repair,
             wow_module_fixit,
