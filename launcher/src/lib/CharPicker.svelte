@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
+  import { charStore, findStoredChar, setSelectedChar } from "$lib/char-store.svelte";
 
   let {
     selected = $bindable(""),
@@ -26,6 +27,16 @@
   onMount(async () => {
     try {
       accounts = await wowAccounts();
+      // Persistent selection (Batch 3 F12): prefer the stored character when
+      // it still exists (and is actionable); otherwise the old first-account
+      // default. Neither path calls onpick -- mount-time staging must not
+      // commit itself (see the comment below).
+      const stored = findStoredChar(accounts, charStore.selected);
+      if (stored && ACTIONABLE_NAME.test(stored.char.name)) {
+        accountName = stored.account;
+        selected = stored.char.name;
+        return;
+      }
       const first = accounts.find((a) => actionable(a.characters).length > 0);
       if (first) {
         accountName = first.username;
@@ -42,12 +53,36 @@
     }
   });
 
+  // Sidebar "playing as" dropdown (Batch 3 F12): when the shared store
+  // changes while this picker is mounted, adopt the new selection so pages
+  // follow. Adoption does NOT fire onpick (same commit-itself rationale as
+  // mount staging) -- the bound `selected` still updates for consumers.
+  $effect(() => {
+    const sel = charStore.selected;
+    if (!sel || accounts.length === 0) return;
+    if (sel.name === selected && sel.account === accountName) return;
+    const hit = findStoredChar(accounts, sel);
+    if (hit && ACTIONABLE_NAME.test(hit.char.name)) {
+      accountName = hit.account;
+      selected = hit.char.name;
+    }
+  });
+
+  // Write-back on a USER change in this picker (never on mount staging):
+  // the store then drives the sidebar chip and every other CharPicker.
+  function persistPick() {
+    const c = currentChars.find((ch) => ch.name === selected);
+    if (c) setSelectedChar({ guid: c.guid, name: c.name, account: accountName });
+  }
+
   function onAccountChange() {
     selected = currentChars[0]?.name ?? "";
+    if (selected) persistPick();
     onpick?.(selected);
   }
 
   function onCharChange() {
+    persistPick();
     onpick?.(selected);
   }
 </script>

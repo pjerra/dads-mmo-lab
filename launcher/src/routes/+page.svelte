@@ -11,6 +11,8 @@
   import { restartState } from "$lib/restart-state.svelte";
   import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { charStore, setSelectedChar } from "$lib/char-store.svelte";
+  import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
@@ -51,6 +53,33 @@
   function requestChipStart() {
     chipStart.requested = true;
     page = "home";
+  }
+
+  // Sidebar "playing as" switcher (Batch 3 F12): minimal footer chip; the
+  // dropdown fetches the same accounts/chars data CharPicker uses, on open.
+  // Selecting writes the shared char store -- every mounted CharPicker then
+  // follows (see CharPicker's store-adoption $effect).
+  const ACTIONABLE_NAME = /^[A-Za-z0-9_]{1,12}$/;
+  let charMenuOpen = $state(false);
+  let charAccounts: Account[] = $state([]);
+  let charMenuErr: string | null = $state(null);
+  function actionableChars(chars: CharacterSummary[]): CharacterSummary[] {
+    return chars.filter((c) => ACTIONABLE_NAME.test(c.name));
+  }
+  async function toggleCharMenu() {
+    charMenuOpen = !charMenuOpen;
+    if (!charMenuOpen) return;
+    try {
+      charAccounts = await wowAccounts();
+      charMenuErr = null;
+    } catch (e) {
+      const err = e as { message?: string };
+      charMenuErr = err.message ?? String(e);
+    }
+  }
+  function pickChar(account: string, c: CharacterSummary) {
+    setSelectedChar({ guid: c.guid, name: c.name, account });
+    charMenuOpen = false;
   }
 </script>
 
@@ -97,6 +126,37 @@
         <button class:active={page === p.id} onclick={() => (page = p.id)}>{p.label}</button>
       {/each}
     {/each}
+
+    <!-- Persistent character switcher (Batch 3 F12): name + dropdown only. -->
+    <div class="side-footer">
+      {#if charMenuOpen}
+        <div class="char-menu">
+          {#if charMenuErr}
+            <span class="char-err">Couldn't load characters: {charMenuErr}</span>
+          {:else}
+            {#each charAccounts as a (a.id)}
+              {#each actionableChars(a.characters) as c (c.guid)}
+                <button
+                  class="char-row"
+                  class:cursel={charStore.selected?.guid === c.guid}
+                  onclick={() => pickChar(a.username, c)}
+                >
+                  {c.name} <span class="char-sub">lvl {c.level} · {a.username}</span>
+                </button>
+              {/each}
+            {/each}
+          {/if}
+        </div>
+      {/if}
+      <button class="playing-chip" onclick={toggleCharMenu} title="Switch character">
+        {#if charStore.selected}
+          playing as <strong>{charStore.selected.name}</strong>
+        {:else}
+          pick a character
+        {/if}
+        <span class="caret">{charMenuOpen ? "▴" : "▾"}</span>
+      </button>
+    </div>
   </nav>
 
   {#if page === "home"}<Home />{/if}
@@ -201,4 +261,26 @@
   @keyframes ready-pop { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
   .sidebar button { padding: 8px 16px; color: #8b949e; font-size: 14px; background: none; border: none; text-align: left; cursor: pointer; border-left: 2px solid transparent; }
   .sidebar button.active { color: #f0f6fc; background: #161b22; border-left-color: #58a6ff; }
+  /* "playing as" footer (Batch 3 F12): pinned to the sidebar bottom. */
+  .side-footer { margin-top: auto; padding: 8px 12px 0; display: flex; flex-direction: column; gap: 6px; }
+  .sidebar .playing-chip {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 12.5px;
+    color: #8b949e;
+    display: flex;
+    gap: 5px;
+    align-items: baseline;
+  }
+  .sidebar .playing-chip strong { color: #f0f6fc; }
+  .sidebar .playing-chip:hover { border-color: #58a6ff; }
+  .caret { margin-left: auto; }
+  .char-menu { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 4px; }
+  .sidebar .char-menu .char-row { padding: 5px 8px; border-radius: 4px; font-size: 13px; color: #c9d1d9; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+  .sidebar .char-menu .char-row:hover { background: #21262d; }
+  .sidebar .char-menu .char-row.cursel { color: #58a6ff; }
+  .char-sub { font-size: 11px; color: #6e7681; }
+  .char-err { font-size: 11.5px; color: #f85149; padding: 4px 6px; }
 </style>
