@@ -707,8 +707,15 @@ export type LanAction = "on" | "off" | "status" | "refresh";
 // Text-mode CLI output (dml lan / dml doctor print plain status lines, not
 // a JSON envelope) -- both return the raw combined stdout+stderr as a string
 // for display in a <pre>, same shape either way.
-export async function wowLan(action: LanAction, ip?: string): Promise<string> {
-  return await invoke("wow_lan", { action, ip });
+export async function wowLan(action: LanAction, ip?: string, internet?: boolean): Promise<string> {
+  return await invoke("wow_lan", { action, ip, internet });
+}
+
+// Best-effort public IPv4 (Batch 4 F15) -- null means "couldn't tell",
+// never an error.
+export async function wowLanPublicIp(): Promise<string | null> {
+  const d = await invoke<{ public_ip: string | null }>("wow_lan_public_ip");
+  return d.public_ip;
 }
 
 export async function dmlDoctor(): Promise<string> {

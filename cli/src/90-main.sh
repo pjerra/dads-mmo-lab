@@ -788,7 +788,7 @@ case "$cmd" in
     ;;
 
   lan)
-    # dml lan <title> on <ip> | off | status | refresh <ip>
+    # dml lan <title> [--internet] on <address> | off | status | refresh <ip>
     #
     # LAN play = point the realm's advertised address at the Windows host's
     # LAN IP so other PCs on the home network can reach the world server.
@@ -796,19 +796,46 @@ case "$cmd" in
     # carries LAN traffic to 127.0.0.1; this command only flips the address
     # the auth server hands to clients (acore_auth.realmlist).
     #
+    # --internet (Batch 4 F15, the Tools "Play over the internet" stepper):
+    # `on` additionally accepts a PUBLIC IPv4 or a hostname (DuckDNS etc.).
+    # Without the flag only loopback/private IPv4 is accepted -- the tray
+    # and GUI only ever pass those, and a typo'd public address would
+    # otherwise silently expose the realm address to the world.
+    #
     # Messages go to STDOUT even on failure -- the DML Launcher tray only
     # captures stdout, and these are user-facing results, not diagnostics.
     title="${1:-}"
-    action="${2:-}"
-    lan_usage="[dml] Usage: dml lan <title> on <lan-ip> | off | status | refresh <lan-ip>"
+    shift || true
+    lan_inet=0
+    if [[ "${1:-}" == "--internet" ]]; then lan_inet=1; shift; fi
+    action="${1:-}"
+    ip="${2:-}"
+    lan_usage="[dml] Usage: dml lan <title> [--internet] on <address> | off | status | refresh <lan-ip>"
     if [[ -z "$title" || -z "$action" ]]; then echo "$lan_usage"; exit 1; fi
 
     # Validate arguments up front -- the database wait below can take a
-    # while, and a usage mistake should fail instantly, not after it.
-    ip="${3:-}"
+    # while, and a usage/address mistake should fail instantly, not after
+    # it. (Address validation moved here from _lan_set so it happens before
+    # any docker/database work at all.)
     case "$action" in
       on|refresh)
-        if [[ -z "$ip" ]]; then echo "$lan_usage"; exit 1; fi ;;
+        if [[ -z "$ip" ]]; then echo "$lan_usage"; exit 1; fi
+        if [[ "$lan_inet" == 1 ]]; then
+          if [[ ! "$ip" =~ ^[A-Za-z0-9.-]{1,253}$ ]]; then
+            echo "[dml] ERROR: '$ip' is not a valid public address or hostname."
+            echo "[dml]   Letters, digits, dots and hyphens only (e.g. 84.210.13.37 or myserver.duckdns.org)."
+            exit 1
+          fi
+        else
+          if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            echo "[dml] ERROR: '$ip' does not look like an IPv4 address."; exit 1
+          fi
+          if [[ ! "$ip" =~ ^(127\.|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+            echo "[dml] ERROR: '$ip' is not a private LAN address."
+            echo "[dml]   For internet play use the Tools page stepper (or: dml lan $title --internet on $ip)."
+            exit 1
+          fi
+        fi ;;
       off|status) ;;
       *) echo "$lan_usage"; exit 1 ;;
     esac
@@ -880,8 +907,12 @@ case "$cmd" in
 
     _lan_set() {
         local ip="$1" newaddr
-        if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-            echo "[dml] ERROR: '$ip' does not look like an IPv4 address."; exit 1
+        # Mode-specific validation (private-only vs public/hostname) already
+        # ran up front; this is defense-in-depth shape-checking only. The
+        # charset [A-Za-z0-9.-] contains no SQL metacharacters, so the
+        # interpolation into the UPDATE below cannot break out of its quotes.
+        if [[ ! "$ip" =~ ^[A-Za-z0-9.-]{1,253}$ ]]; then
+            echo "[dml] ERROR: '$ip' is not a valid realm address."; exit 1
         fi
         if ! _lan_sql "UPDATE realmlist SET address='$ip' WHERE id=1;"; then
             echo "[dml] ERROR: Could not update the realm address."; exit 1
@@ -4075,6 +4106,30 @@ case "$cmd" in
             json_err UNKNOWN_COMMAND "Unknown client-path subcommand: $cpsub" "Try: dml wow client-path get|set|detect --json"; exit 1 ;;
         esac
         ;;
+      lan)
+        lsub="${1:-}"; shift || true
+        case "$lsub" in
+          public-ip)
+            # Batch 4 F15: best-effort public IPv4 discovery for the
+            # internet-play stepper. NEVER an error: no connectivity, a
+            # captive portal, or a weird answer all degrade to null (the
+            # GUI shows "unknown"). First line only + shape-validated, so
+            # a portal's HTML can never land in the envelope.
+            pubip="$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+            pubip="${pubip%%$'\n'*}"
+            pubip="${pubip//$'\r'/}"
+            if [[ "$pubip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+              json_ok "{\"public_ip\":\"$pubip\"}"
+            else
+              json_ok '{"public_ip":null}'
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown lan subcommand: $lsub" "Try: dml wow lan public-ip --json"
+            exit 1
+            ;;
+        esac
+        ;;
       update-check)
         # Read-only-ish: does a `git fetch --quiet origin` per repo to
         # compute behind-counts, but never mutates the worktree (no pull,
@@ -4277,7 +4332,7 @@ case "$cmd" in
     echo "  status [<title>]      show running/stopped status (all titles if no arg)"
     echo "  start <title>         start a title's Docker server"
     echo "  stop <title>          stop a title's Docker server"
-    echo "  lan <title> <action>  LAN play: on <lan-ip> | off | status | refresh <lan-ip>"
+    echo "  lan <title> <action>  LAN play: [--internet] on <address> | off | status | refresh <lan-ip>"
     echo "  scan                  show all running containers and which game ports they hold"
     echo "  kill <name|--all>     force-stop by project name (no directory needed)"
     echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"

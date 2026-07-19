@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import {
     wowLan,
+    wowLanPublicIp,
     dmlDoctor,
     toolInstall,
     openShell,
@@ -84,6 +85,73 @@
       lanError = fmtErr(e);
     } finally {
       lanBusy = false;
+    }
+  }
+
+  // --- Play over the internet (Batch 4 F15) --------------------------------
+  // Guided stepper, option b (no paid services): detected addresses ->
+  // manual router port-forwarding checklist -> optional DuckDNS -> apply
+  // (realmlist rewrite via `lan --internet on`) -> what-friends-do -> revert.
+  // No automatic router configuration (UPnP) on purpose.
+  let inetPublicIp: string | null = $state(null);
+  let inetPublicIpLoaded = $state(false);
+  let inetAddr = $state("");
+  let inetBusy = $state(false);
+  let inetError: string | null = $state(null);
+  let inetOutput: string | null = $state(null);
+  let inetConfirm: "apply" | "revert" | null = $state(null);
+  let inetApplied: string | null = $state(null);
+  let inetCopied = $state(false);
+
+  onMount(() => {
+    wowLanPublicIp()
+      .then((ip) => {
+        inetPublicIp = ip;
+        inetPublicIpLoaded = true;
+        // Prefill the address field only if the user hasn't typed one.
+        if (ip && !inetAddr) inetAddr = ip;
+      })
+      .catch(() => {
+        inetPublicIpLoaded = true;
+      });
+  });
+
+  function armInet(action: "apply" | "revert") {
+    if (inetConfirm !== action) {
+      inetConfirm = action;
+      return;
+    }
+    inetConfirm = null;
+    void runInet(action);
+  }
+
+  async function runInet(action: "apply" | "revert") {
+    inetBusy = true;
+    inetError = null;
+    try {
+      if (action === "apply") {
+        inetOutput = await wowLan("on", inetAddr.trim(), true);
+        inetApplied = inetAddr.trim();
+      } else {
+        inetOutput = await wowLan("off");
+        inetApplied = null;
+      }
+      // The LAN card's status shares the same realm address -- refresh it.
+      void lanStatus();
+    } catch (e) {
+      inetError = fmtErr(e);
+    } finally {
+      inetBusy = false;
+    }
+  }
+
+  async function copyRealmlistLine() {
+    try {
+      await navigator.clipboard.writeText(`set realmlist ${inetApplied ?? inetAddr.trim()}`);
+      inetCopied = true;
+      setTimeout(() => (inetCopied = false), 1500);
+    } catch {
+      // Clipboard unavailable -- the line is still shown for manual copy.
     }
   }
 
@@ -314,6 +382,102 @@
   </div>
 
   <div class="card">
+    <h3>Play over the internet</h3>
+    <p class="muted">
+      Lets friends OUTSIDE your home network connect to your server. No paid services
+      needed — you forward two ports on your router and share your address.
+    </p>
+    {#if inetError}<p class="inline-error">{inetError}</p>{/if}
+
+    <div class="step">
+      <strong>1. Your addresses</strong>
+      <p class="muted">
+        Public address (what friends connect to):
+        <code>{inetPublicIpLoaded ? (inetPublicIp ?? "unknown — are you online?") : "detecting…"}</code>
+        &nbsp;·&nbsp; LAN address (for the router rule): <code>{lanIp || "unknown"}</code>
+      </p>
+    </div>
+
+    <div class="step">
+      <strong>2. Forward two ports on your router</strong>
+      <p class="muted">
+        In your router's admin page, forward <strong>TCP 3724</strong> (login) and
+        <strong>TCP 8085</strong> (game world) to <code>{lanIp || "this PC's LAN address"}</code>.
+        Every router is different — search the web for "<em>your router model</em> port
+        forwarding" for the exact clicks.
+      </p>
+      <p class="warn-text">
+        NEVER forward port 3306 (the database) — that would expose your server's data to the
+        whole internet. And only share your address with people you trust.
+      </p>
+    </div>
+
+    <div class="step">
+      <strong>3. Optional: a free DuckDNS name</strong>
+      <p class="muted">
+        Home internet addresses change now and then. A free name from duckdns.org stays the
+        same: create an account there, pick a name (e.g. <code>ourfamilywow</code>), and set it
+        to your public address. Then use <code>yourname.duckdns.org</code> below instead of the
+        raw address.
+      </p>
+    </div>
+
+    <div class="step">
+      <strong>4. Point the realm at your public address</strong>
+      <div class="row">
+        <input
+          type="text"
+          placeholder="84.210.13.37 or yourname.duckdns.org"
+          bind:value={inetAddr}
+          oninput={() => (inetConfirm = null)}
+          disabled={inetBusy}
+        />
+        <button
+          class="primary"
+          onclick={() => armInet("apply")}
+          disabled={inetBusy || !inetAddr.trim() || featureLocked("internet-play")}
+          title={featureLocked("internet-play") ? LOCKED_HINT : undefined}
+        >
+          {inetConfirm === "apply" ? "Share the realm at this address — sure?" : "Apply"}
+        </button>
+      </div>
+    </div>
+
+    <div class="step">
+      <strong>5. What your friends do</strong>
+      <p class="muted">
+        In their WoW client folder, they put this line in
+        <code>Data\enUS\realmlist.wtf</code>:
+      </p>
+      <div class="row">
+        <code class="copyline">set realmlist {inetApplied ?? (inetAddr.trim() || "<your address>")}</code>
+        <button onclick={copyRealmlistLine} disabled={!(inetApplied ?? inetAddr.trim())}>
+          {inetCopied ? "Copied!" : "Copy"}
+        </button>
+      </div>
+      <p class="muted">
+        Each friend also needs their own account on your server — create those on the
+        Accounts page.
+      </p>
+    </div>
+
+    <div class="step">
+      <strong>6. Done playing over the internet?</strong>
+      <div class="row">
+        <button
+          onclick={() => armInet("revert")}
+          disabled={inetBusy || featureLocked("internet-play")}
+          title={featureLocked("internet-play") ? LOCKED_HINT : undefined}
+        >
+          {inetConfirm === "revert" ? "Back to this-PC-only — sure?" : "Revert to local play"}
+        </button>
+      </div>
+    </div>
+
+    {#if inetOutput}<pre class="usage">{inetOutput}</pre>{/if}
+  </div>
+
+  <div class="card">
     <h3>Game realmlist</h3>
     <p class="muted">
       Checks which server address your WoW client logs in to (its "realmlist") and fixes
@@ -499,6 +663,11 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .confirm-row { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
+  .step { border-top: 1px solid #21262d; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .step strong { font-size: 13.5px; color: #f0f6fc; }
+  .step .warn-text { color: #f85149; font-weight: 600; }
+  code { background: #161b22; border: 1px solid #21262d; border-radius: 4px; padding: 1px 5px; font-size: 12.5px; }
+  .copyline { padding: 6px 10px; font-size: 13px; }
   input[type="text"] {
     background: #21262d;
     color: #c9d1d9;

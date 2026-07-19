@@ -133,6 +133,17 @@ pub fn validate_ip(ip: &str) -> bool {
             .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Internet-play address check (Batch 4 F15): a public IPv4 or hostname,
+/// `^[A-Za-z0-9.-]{1,253}$` -- mirrors the CLI's own `--internet` guard
+/// (which re-validates independently). Like validate_ip this only needs to
+/// keep shell/SQL-shaped garbage out of an argv slot; DNS decides whether
+/// the name actually resolves.
+pub fn validate_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 fn bad_arg(message: impl Into<String>) -> CmdError {
     CmdError { code: "BAD_ARG".into(), message: message.into(), hint: "Check the value and try again.".into() }
 }
@@ -1096,21 +1107,35 @@ async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, 
 async fn wow_lan(
     action: String,
     ip: Option<String>,
+    internet: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<String, CmdError> {
     if !LAN_ACTIONS.contains(&action.as_str()) {
         return Err(bad_arg(format!("invalid lan action: {action:?}")));
     }
+    // Batch 4 F15: the internet-play stepper passes internet=true with
+    // action "on" and a public IPv4 or hostname; every other combination
+    // keeps the strict IPv4 shape check (and the CLI additionally enforces
+    // private-only without --internet).
+    let inet = internet.unwrap_or(false) && action == "on";
     let ip_arg = if action == "on" || action == "refresh" {
         let ip = ip.ok_or_else(|| bad_arg("ip is required for the on/refresh actions"))?;
-        if !validate_ip(&ip) {
+        if inet {
+            if !validate_host(&ip) {
+                return Err(bad_arg(format!("invalid address or hostname: {ip:?}")));
+            }
+        } else if !validate_ip(&ip) {
             return Err(bad_arg(format!("invalid IPv4 address: {ip:?}")));
         }
         Some(ip)
     } else {
         None
     };
-    let mut args: Vec<String> = vec!["lan".into(), LAN_TITLE.into(), action];
+    let mut args: Vec<String> = vec!["lan".into(), LAN_TITLE.into()];
+    if inet {
+        args.push("--internet".into());
+    }
+    args.push(action);
     if let Some(ip) = ip_arg {
         args.push(ip);
     }
@@ -1122,6 +1147,13 @@ async fn wow_lan(
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
     .map_err(CmdError::from)
+}
+
+/// Batch 4 F15: best-effort public-IP lookup (`wow lan public-ip`). The CLI
+/// answers null instead of erroring when it can't tell.
+#[tauri::command]
+async fn wow_lan_public_ip(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "lan".into(), "public-ip".into()]).await
 }
 
 #[tauri::command]
@@ -1491,6 +1523,7 @@ pub fn run() {
             wow_gm_summon,
             wow_gm_at_login,
             wow_lan,
+            wow_lan_public_ip,
             dml_doctor,
             tool_install,
             open_shell,
@@ -1557,6 +1590,26 @@ mod tests {
         assert!(!validate_ip("$(rm -rf /)"));
         assert!(!validate_ip("1.2.3.4`id`"));
         assert!(!validate_ip("../../etc/passwd"));
+    }
+
+    #[test]
+    fn host_validation_accepts_public_ips_and_hostnames() {
+        assert!(validate_host("84.210.13.37"));
+        assert!(validate_host("myserver.duckdns.org"));
+        assert!(validate_host("my-name.example-host.net"));
+        assert!(validate_host("localhost"));
+    }
+
+    #[test]
+    fn host_validation_rejects_garbage_and_injection_shapes() {
+        assert!(!validate_host(""));
+        assert!(!validate_host("foo bar"));
+        assert!(!validate_host("evil;drop"));
+        assert!(!validate_host("a`id`"));
+        assert!(!validate_host("$(reboot)"));
+        assert!(!validate_host("host\nname"));
+        assert!(!validate_host("x'y"));
+        assert!(!validate_host(&"a".repeat(254)));
     }
 
     #[test]
