@@ -12,6 +12,7 @@
     gamesRestart,
     wowBotsFlush,
     wowAhbotRepair,
+    wowModuleList,
     wowAccountwideGet,
     wowAccountwideSet,
     type ConfFile,
@@ -171,6 +172,32 @@
   let ahRepairChar = $state("");
   let ahRepairConfirm = $state(false);
   let ahRepairing = $state(false);
+
+  // Batch 2 (overnight): detect which AH fork is installed from the module
+  // list so the card labels itself + the repair targets the right one. Both
+  // forks write mod_ahbot.conf, so the curated conf rows/reads are unchanged
+  // -- only the display label depends on this. Neither installed -> the
+  // standard "Auction House Bot" label + the existing setup hint.
+  let ahModuleKey = $state<"mod-ah-bot-plus" | "mod-ah-bot" | null>(null);
+  let ahModuleLoaded = $state(false);
+  const ahModuleLabel = $derived(
+    ahModuleKey === "mod-ah-bot-plus" ? "Auction House Bot Plus" : "Auction House Bot",
+  );
+
+  async function loadAhModule() {
+    try {
+      const cpp = (await wowModuleList()).families.cpp;
+      if (cpp.some((m) => m.key === "mod-ah-bot-plus" && m.installed)) ahModuleKey = "mod-ah-bot-plus";
+      else if (cpp.some((m) => m.key === "mod-ah-bot" && m.installed)) ahModuleKey = "mod-ah-bot";
+      else ahModuleKey = null;
+      ahModuleLoaded = true;
+    } catch {
+      // Keep the standard label -- detection is a nicety, not a gate.
+    }
+  }
+  $effect(() => {
+    if (tab === "ahbot" && !ahModuleLoaded) void loadAhModule();
+  });
 
   async function runAhRepair() {
     if (!ahRepairConfirm) {
@@ -582,8 +609,21 @@
     </div>
 
     {#if tab === "ahbot"}
-      <h3>Repair AH Bot</h3>
+      <h3>Repair {ahModuleLabel}</h3>
       <div class="card">
+        {#if ahModuleLoaded && ahModuleKey === "mod-ah-bot-plus"}
+          <p class="muted">
+            Detected the <strong>Auction House Bot Plus</strong> fork (blizzlike pricing).
+            Repair and the conf settings both target it — both forks use the same
+            mod_ahbot.conf, so nothing below changes.
+          </p>
+        {:else if ahModuleLoaded && ahModuleKey === null}
+          <p class="muted">
+            No Auction House Bot module is installed yet — install
+            <strong>Auction House Bot</strong> (or <strong>Auction House Bot Plus</strong>)
+            from the Modules page first.
+          </p>
+        {/if}
         <p class="muted">
           The auction bot lists and bids as a real character. Give it its own dedicated
           account so <strong>you</strong> can buy the bot's auctions — auctions from your own
@@ -615,7 +655,7 @@
             disabled={!ahRepairChar || ahRepairing || restartState.restarting || featureLocked("ahbot-page")}
             title={featureLocked("ahbot-page") ? LOCKED_HINT : undefined}
           >
-            {ahRepairConfirm ? `Make ${ahRepairChar} the auction bot — sure?` : "Repair AH Bot"}
+            {ahRepairConfirm ? `Make ${ahRepairChar} the auction bot — sure?` : `Repair ${ahModuleLabel}`}
           </button>
         </div>
       </div>

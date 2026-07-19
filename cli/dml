@@ -171,17 +171,21 @@ soap_exec() {
 # ---------------------------------------------------------------------------
 # MySQL access to the AzerothCore DBs via the ac-database container.
 # Search/dashboard queries here are read-only; most mutations go through
-# SOAP, never a direct write. FIVE direct MySQL writes are sanctioned
+# SOAP, never a direct write. SIX direct MySQL writes are sanctioned
 # project-wide (see 60-backup.sh header for the full list): the pre-existing
 # LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore,
 # teleport-coords' characters.position_x/y/z/map/orientation UPDATE via
 # _chars_write_stmt below -- OFFLINE characters only, see the
 # `teleport-coords` arm in 90-main.sh -- module repair's INSERT/DELETE on
-# the `updates` tracking tables ONLY (never game tables), and (Batch 3
+# the `updates` tracking tables ONLY (never game tables), (Batch 3
 # F13b) `module fixit battlepass-npc`'s fixed-literal INSERTs of
 # creature_template/creature entry 90100 (idempotence-checked, no user
-# input in the statements) -- both via the generalized _db_write_stmt
-# below, see the `module repair` / `module fixit` arms in 90-main.sh.
+# input in the statements), and (Batch 2 overnight) `module place-npc`'s
+# fixed-literal `creature` spawn INSERTs for allowlisted NPC mods -- coords
+# parsed from the 47-commands.sh cheat-sheet + re-validated numeric, entry
+# from a closed key allowlist, per-map idempotence-checked -- all via the
+# generalized _db_write_stmt below, see the `module repair` / `module
+# fixit` / `module place-npc` arms in 90-main.sh.
 # ---------------------------------------------------------------------------
 _db_pw() { echo "${DML_DB_ROOT_PASSWORD:-password}"; }
 
@@ -1478,6 +1482,28 @@ _cmd_block_for() {
             ;;
     esac
 }
+
+# Batch 2 (overnight): parses the "npc add <entry> <map> <x> <y> <z> <o>"
+# spawn lines out of a _cmd_block_for block, emitting one pipe-delimited
+# "<map>|<entry>|<x>|<y>|<z>|<o>" line per FULLY specified spawn. Lines with
+# fewer fields (e.g. mod-dungeon-master's bare "npc add 500000") or any
+# non-numeric field are skipped, so callers can treat a non-empty result as
+# "this mod ships ready-made capital coordinates". This is the single source
+# of truth for `wow module place-npc` -- the cheat-sheet blocks above are the
+# only place these coordinates live.
+_npc_coord_specs() {
+    local key="$1"
+    _cmd_block_for "$key" | awk '
+        $1 == "npc" && $2 == "add" && NF >= 8 {
+            entry = $3; map = $4; x = $5; y = $6; z = $7; o = $8
+            if (entry ~ /^[0-9]+$/ && map ~ /^[0-9]+$/ &&
+                x ~ /^-?[0-9]+(\.[0-9]+)?$/ && y ~ /^-?[0-9]+(\.[0-9]+)?$/ &&
+                z ~ /^-?[0-9]+(\.[0-9]+)?$/ && o ~ /^-?[0-9]+(\.[0-9]+)?$/)
+                print map "|" entry "|" x "|" y "|" z "|" o
+        }
+    '
+    return 0
+}
 # ---------------------------------------------------------------------------
 # My Party (Plan 4): Eluna bridge deployment + group-join confirmation.
 # Bridge scripts run playerbot commands in the online player's own session
@@ -1652,7 +1678,7 @@ _gm_require_online() {
 # ---------------------------------------------------------------------------
 # Character backups (Lab-parity round 5): whole-server snapshots.
 # mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
-# FIVE DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
+# SIX DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
 # toggle's realmlist UPDATE (90-main.sh `lan`), teleport-coords'
 # characters.position_x/y/z/map/orientation UPDATE (offline characters only
 # -- 90-main.sh `teleport-coords` arm, via `_chars_write_stmt` in
@@ -1662,9 +1688,12 @@ _gm_require_online() {
 # docs/superpowers/specs/2026-07-18-module-repair-design.md), `module fixit
 # battlepass-npc`'s fixed-literal creature_template/creature INSERTs for
 # entry 90100 (Batch 3 F13b -- idempotence-checked, zero user input in the
-# statements), and RESTORE below -- the project's one sanctioned write path
-# for whole CHARACTER-DB snapshots: only inside `backup restore`, only with
-# world+auth stopped, always behind an automatic pre-restore safety backup.
+# statements), `module place-npc`'s fixed-literal `creature` spawn INSERTs
+# for allowlisted NPC mods (Batch 2 overnight -- coords from the cheat-sheet,
+# per-map idempotence-checked, entry from a closed allowlist), and RESTORE
+# below -- the project's one sanctioned write path for whole CHARACTER-DB
+# snapshots: only inside `backup restore`, only with world+auth stopped,
+# always behind an automatic pre-restore safety backup.
 # See docs/.../2026-07-17-backups-design.md.
 # ---------------------------------------------------------------------------
 
@@ -6219,11 +6248,21 @@ case "$cmd" in
               else echo "[dml] ERROR: wow server not installed" >&2; fi
               exit 1
             fi
-            if [[ ! -d "$sdir/modules/mod-ah-bot" ]]; then
+            # Batch 2 (overnight): accept either AH fork. mod-ah-bot-plus is a
+            # drop-in replacement for mod-ah-bot -- both write mod_ahbot.conf,
+            # so the rest of the repair flow is fork-agnostic. Presence check
+            # mirrors the original plain-dir test (NOT _cpp_installed, whose
+            # .git requirement the existing fixtures don't set up). The plus
+            # fork wins if somehow both are present ("install one or the
+            # other, not both").
+            ahmod=""
+            if [[ -d "$sdir/modules/mod-ah-bot-plus" ]]; then ahmod="mod-ah-bot-plus"
+            elif [[ -d "$sdir/modules/mod-ah-bot" ]]; then ahmod="mod-ah-bot"; fi
+            if [[ -z "$ahmod" ]]; then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end ahbot-repair error
-                ndjson_error NOT_INSTALLED "mod-ah-bot is not installed" "Install the Auction House Bot module from the Modules page first."
-              else echo "[dml] ERROR: mod-ah-bot not installed" >&2; fi
+                ndjson_error NOT_INSTALLED "No Auction House Bot module is installed" "Install Auction House Bot (or Auction House Bot Plus) from the Modules page first."
+              else echo "[dml] ERROR: no AH bot module installed" >&2; fi
               exit 1
             fi
             ahconf="$sdir/env/dist/etc/modules/mod_ahbot.conf"
@@ -6313,7 +6352,7 @@ case "$cmd" in
             fi
             if [[ "$DML_JSON" == 1 ]]; then
               ndjson_section_end ahbot-repair ok
-              ndjson_done "{\"repaired\":true,\"already\":$ahalready,\"char\":\"$(json_escape "$ahchar")\",\"guid\":$ahguid,\"account\":$ahacct,\"applied\":\"$ahapplied\",\"restart_required\":$ahrreq,\"manual_steps\":\"$(json_escape "$ah_manual")\"}"
+              ndjson_done "{\"repaired\":true,\"already\":$ahalready,\"char\":\"$(json_escape "$ahchar")\",\"guid\":$ahguid,\"account\":$ahacct,\"applied\":\"$ahapplied\",\"restart_required\":$ahrreq,\"module\":\"$ahmod\",\"manual_steps\":\"$(json_escape "$ah_manual")\"}"
             else
               echo "[dml] AH bot configured: $ahchar (guid $ahguid, account $ahacct), applied: $ahapplied"
             fi
@@ -7035,6 +7074,98 @@ case "$cmd" in
             _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
               || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
             json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            ;;
+          place-npc)
+            # Batch 2 (overnight): generalizes the battlepass-npc-fixit per-map
+            # pattern to any installed NPC-mod that ships a ready-made coord
+            # block in _cmd_block_for (47-commands.sh, Round M). Unlike fixit it
+            # never creates a creature_template -- these mods install their own
+            # template via the module's SQL -- it only SPAWNS the NPC in both
+            # capitals (Stormwind map 0 / Orgrimmar map 1), IDEMPOTENT PER MAP:
+            # a map that already has a spawn of that entry is left untouched.
+            # SIXTH sanctioned direct MySQL write (see 30-db.sh / 60-backup.sh
+            # headers): coords are fixed literals parsed from the cheat-sheet
+            # and re-validated numeric, entry comes from a closed key allowlist
+            # -- zero free-form user input reaches a statement. The NPC only
+            # appears after a worldserver restart (said in the envelope).
+            pkey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; pkey="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow module place-npc --key <mod> --json"; exit 1 ;;
+              esac
+            done
+            case "$pkey" in
+              mod-1v1-arena|mod-transmog|mod-npc-beastmaster|bmah) ;;
+              "") json_err BAD_ARG "place-npc needs --key <mod>" "Eligible: mod-1v1-arena, mod-transmog, mod-npc-beastmaster, bmah"; exit 1 ;;
+              battlepass) json_err BAD_ARG "Use module fixit for the Battle Pass NPC" "The Battle Pass vendor also needs its creature_template created: dml wow module fixit battlepass-npc"; exit 1 ;;
+              *) json_err BAD_ARG "place-npc does not support: $pkey" "Eligible: mod-1v1-arena, mod-transmog, mod-npc-beastmaster, bmah"; exit 1 ;;
+            esac
+            sdir="$(_wow_server_dir)"
+            [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1; }
+            # Installed check spans families: bmah is an ALE Lua script, the
+            # other three are cpp modules.
+            if [[ "$pkey" == "bmah" ]]; then
+              _lua_deployed "$sdir" bmah || { json_err NOT_INSTALLED "$pkey is not installed" "Install it on the Modules page first."; exit 1; }
+            else
+              [[ -d "$sdir/modules/$pkey" ]] || { json_err NOT_INSTALLED "$pkey is not installed" "Install it on the Modules page first."; exit 1; }
+            fi
+            # Coords from the single cheat-sheet source of truth.
+            specs="$(_npc_coord_specs "$pkey")" || specs=""
+            if [[ -z "$specs" ]]; then
+              json_err NO_COORDS "No capital coordinates defined for $pkey" "This module has no ready-made spawn block."; exit 1
+            fi
+            pn_specs=()
+            while IFS= read -r pn_line || [[ -n "$pn_line" ]]; do
+              [[ -z "$pn_line" ]] && continue
+              pn_specs+=("$pn_line")
+            done <<< "$specs"
+            # entry is shared across maps (format: map|entry|x|y|z|o).
+            IFS='|' read -r pn_m0 pn_entry pn_junk <<< "${pn_specs[0]}"
+            # Template guard: never leave an orphan spawn pointing at a missing
+            # creature_template (that is exactly what fixit exists to create for
+            # battlepass). This is query #1 -- the per-map counts follow.
+            tcnt="$(db_world_query "SELECT COUNT(*) FROM creature_template WHERE entry=$pn_entry;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            tcnt="${tcnt//[[:space:]]/}"
+            if [[ ! "$tcnt" =~ ^[0-9]+$ ]] || [[ "$tcnt" -eq 0 ]]; then
+              json_err NO_TEMPLATE "The NPC template (entry $pn_entry) does not exist yet" "Install and rebuild the module (cpp) or deploy it (Lua) so its NPC exists, then try again."; exit 1
+            fi
+            # Phase 1: read every map's current spawn count FIRST (deterministic
+            # query order, independent of whether an insert follows).
+            pn_need=()
+            for pn_s in "${pn_specs[@]}"; do
+              IFS='|' read -r pn_sm pn_se pn_sx pn_sy pn_sz pn_so <<< "$pn_s"
+              scnt="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=$pn_se AND map=$pn_sm;")" \
+                || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+              scnt="${scnt//[[:space:]]/}"
+              if [[ "$scnt" =~ ^[0-9]+$ ]] && [[ "$scnt" -gt 0 ]]; then pn_need+=("0"); else pn_need+=("1"); fi
+            done
+            # Phase 2: insert only the maps that lacked a spawn.
+            pn_placed=0
+            pn_maps='['; pn_first=1; pn_i=0
+            for pn_s in "${pn_specs[@]}"; do
+              IFS='|' read -r pn_sm pn_se pn_sx pn_sy pn_sz pn_so <<< "$pn_s"
+              pn_did=false
+              if [[ "${pn_need[$pn_i]}" == "1" ]]; then
+                _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES ($pn_se, $pn_sm, $pn_sx, $pn_sy, $pn_sz, $pn_so, 300);" >/dev/null \
+                  || { json_err SQL_FAILED "Could not insert the spawn for map $pn_sm" "Is ac-database running?"; exit 1; }
+                pn_did=true
+                pn_placed=$(( pn_placed + 1 ))
+              fi
+              [[ $pn_first -eq 0 ]] && pn_maps+=','
+              pn_maps+="{\"map\":$pn_sm,\"placed\":$pn_did}"
+              pn_first=0; pn_i=$(( pn_i + 1 ))
+            done
+            pn_maps+=']'
+            pn_already=false; [[ "$pn_placed" -eq 0 ]] && pn_already=true
+            pn_restart=false; [[ "$pn_placed" -gt 0 ]] && pn_restart=true
+            if [[ "$pn_placed" -gt 0 ]]; then
+              pn_note="Placed the NPC in $pn_placed capital(s). Restart the world server (Home) for it to appear."
+            else
+              pn_note="The NPC is already placed in both capitals."
+            fi
+            json_ok "{\"key\":\"$pkey\",\"entry\":$pn_entry,\"maps\":$pn_maps,\"spawns_placed\":$pn_placed,\"already_placed\":$pn_already,\"restart_required\":$pn_restart,\"note\":\"$(json_escape "$pn_note")\"}"
             ;;
           client-patch)
             # Batch 5 F2: port of the manager's configure_mod_arac steps 2+3

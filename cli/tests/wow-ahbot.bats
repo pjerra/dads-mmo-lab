@@ -65,6 +65,7 @@ _done_line() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ "$(echo "$d" | jq -r '.data.already')" = "false" ]
   [ "$(echo "$d" | jq -r '.data.guid')" = "7" ]
   [ "$(echo "$d" | jq -r '.data.account')" = "42" ]
+  [ "$(echo "$d" | jq -r '.data.module')" = "mod-ah-bot" ]
   [ "$(echo "$d" | jq -r '.data.applied')" = "live" ]
   [ "$(echo "$d" | jq -r '.data.restart_required')" = "false" ]
   # the manual account/character step is surfaced, never automated
@@ -95,6 +96,28 @@ _done_line() { echo "$1" | grep '"event":"done"' | tail -1; }
   run bash "$DML" wow ahbot repair --char Gasino --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q '"code":"NOT_INSTALLED"'
+}
+
+@test "ahbot repair works with the plus fork installed instead (mod-ah-bot-plus)" {
+  # Batch 2 (overnight): only mod-ah-bot-plus present -- repair must detect it,
+  # write the same mod_ahbot.conf keys, and report module=mod-ah-bot-plus.
+  rm -rf "$GDIR/modules/mod-ah-bot"
+  mkdir -p "$GDIR/modules/mod-ah-bot-plus"
+  run bash "$DML" wow ahbot repair --char Gasino --json
+  [ "$status" -eq 0 ]
+  d="$(_done_line "$output")"
+  [ "$(echo "$d" | jq -r '.data.repaired')" = "true" ]
+  [ "$(echo "$d" | jq -r '.data.module')" = "mod-ah-bot-plus" ]
+  grep -q '^AuctionHouseBot.Account = 42$' "$AHCONF"
+  grep -q '^AuctionHouseBot.EnableSeller = 1$' "$AHCONF"
+}
+
+@test "ahbot repair prefers the plus fork when both are somehow present" {
+  mkdir -p "$GDIR/modules/mod-ah-bot-plus"
+  run bash "$DML" wow ahbot repair --char Gasino --json
+  [ "$status" -eq 0 ]
+  d="$(_done_line "$output")"
+  [ "$(echo "$d" | jq -r '.data.module')" = "mod-ah-bot-plus" ]
 }
 
 @test "ahbot repair with an unknown character -> NOT_FOUND carrying the manual steps" {
