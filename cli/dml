@@ -361,14 +361,22 @@ _parse_server_info() {
 # HOST conf file (bind-mounted into the container) instead of the compose
 # override. Rationale: a running container's env is frozen at creation AND
 # AC's env bridge beats conf values, so env-set keys can never live-apply --
-# conf rows CAN (worldserver.conf ones via SOAP `reload config`). On save,
+# conf rows CAN (worldserver.conf ones via SOAP `reload config`; ditto
+# mod_ahbot.conf ones, Batch 4 F14 -- AzerothCore's `reload config`
+# re-parses module confs too and mod-ah-bot's own
+# AHBot_WorldScript::OnBeforeConfigLoad(reload=true) re-reads Account/GUID
+# and restarts its bots with the new values, verified against the deployed
+# module source AuctionHouseBotWorldScript.cpp 2026-07-19). On save,
 # any matching legacy AC_* env key (derived mechanically from the conf key,
 # see _cfg_env_name_for) is removed from the override so the conf value is
 # authoritative after the next recreate; while the frozen env is still in
 # the running container the save reports `"applied":"restart"`. The three
 # rates rows below were MIGRATED from env rows to conf rows (their legacy
 # env keys are cleaned up on save by the same derivation), and so were
-# bots.population / bots.autologin (playerbots.conf). playerbots.conf rows
+# bots.population / bots.autologin (playerbots.conf) and the three AHBot
+# rows (mod_ahbot.conf, Batch 4 -- ahbot.character stays special-cased in
+# `config set`: it resolves a name to GUID + Account and writes BOTH conf
+# keys, cleaning both legacy env keys). playerbots.conf rows
 # NEVER live-apply (the module reads its conf at startup) -- their set
 # always answers `"applied":"restart"`. `config set` additionally accepts a
 # DIRECT route key `conf:playerbots.conf:<Key>` for the Bot World all-keys
@@ -430,9 +438,17 @@ bots.smart_scale|Bot Performance|Auto-reduce bots under load|bool|||conf:playerb
 bots.force_radius|Bot Performance|Always-active radius in yards|int|0|1000|conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInRadius|150|Bots within this many yards of a real player are always active. 0 disables.
 bots.force_zone|Bot Performance|Always active in your zone|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInZone|1|When on, bots in the same zone as a real player are always active.
 bots.force_guild|Bot Performance|Always active in your guild|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInGuild|1|When on, bots that share a guild with a real player are always active.
-ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
-ahbot.buyer|AHBot|Auction buyer bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_BUYER|0|When on, the bot occasionally buys player auctions.
-ahbot.character|AHBot|Seller character|char|||AC_AUCTION_HOUSE_BOT_GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
+ahbot.seller|Auction House|Auction seller bot|bool|||conf:mod_ahbot.conf:AuctionHouseBot.EnableSeller|0|When on, the auction house is stocked with items for sale.
+ahbot.buyer|Auction House|Auction buyer bot|bool|||conf:mod_ahbot.conf:AuctionHouseBot.EnableBuyer|0|When on, the bot bids on auctions that players list.
+ahbot.character|Auction House|Seller character|char|||conf:mod_ahbot.conf:AuctionHouseBot.GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
+ahbot.items_per_cycle|Auction House|Listings added per cycle|int|1|1000|conf:mod_ahbot.conf:AuctionHouseBot.ItemsPerCycle|200|How many auctions the bot adds or removes per pass. Higher fills the auction house faster.
+ahbot.duplicates|Auction House|Max duplicate stacks|int|0|100|conf:mod_ahbot.conf:AuctionHouseBot.DuplicatesCount|0|Most stacks of the same item the bot may sell at once. 0 means no limit.
+ahbot.duration|Auction House|Auction duration class|int|0|2|conf:mod_ahbot.conf:AuctionHouseBot.ElapsingTimeClass|1|How long bot auctions last. 0 = 1 to 3 days, 1 = 1 to 24 hours, 2 = 10 to 60 minutes.
+ahbot.vendor_items|Auction House|Sell vendor items|bool|||conf:mod_ahbot.conf:AuctionHouseBot.VendorItems|0|When on, the bot also lists items you could simply buy from vendors.
+ahbot.loot_items|Auction House|Sell loot items|bool|||conf:mod_ahbot.conf:AuctionHouseBot.LootItems|1|When on, the bot lists items that drop as loot or from fishing.
+ahbot.loot_trade_goods|Auction House|Sell loot trade goods|bool|||conf:mod_ahbot.conf:AuctionHouseBot.LootTradeGoods|1|When on, the bot lists trade goods like ore, herbs, leather and cloth.
+ahbot.boe_items|Auction House|Sell bind-on-equip gear|bool|||conf:mod_ahbot.conf:AuctionHouseBot.Bind_When_Equipped|1|When on, the bot lists gear that binds when equipped - most green and blue items.
+ahbot.max_item_level|Auction House|Highest item level sold|int|0|300|conf:mod_ahbot.conf:AuctionHouseBot.DisableItemsAboveLevel|0|The bot skips items above this item level. 0 means no cap.
 server.motd|Server|Message of the day|text|||-|Welcome to Dad's MMO Lab!|Shown to every player at login. Applies instantly while the server runs - no restart needed. Quotes and line breaks are removed.
 EOF
 }
@@ -3173,7 +3189,7 @@ case "$cmd" in
     ;;
 
   lan)
-    # dml lan <title> on <ip> | off | status | refresh <ip>
+    # dml lan <title> [--internet] on <address> | off | status | refresh <ip>
     #
     # LAN play = point the realm's advertised address at the Windows host's
     # LAN IP so other PCs on the home network can reach the world server.
@@ -3181,19 +3197,46 @@ case "$cmd" in
     # carries LAN traffic to 127.0.0.1; this command only flips the address
     # the auth server hands to clients (acore_auth.realmlist).
     #
+    # --internet (Batch 4 F15, the Tools "Play over the internet" stepper):
+    # `on` additionally accepts a PUBLIC IPv4 or a hostname (DuckDNS etc.).
+    # Without the flag only loopback/private IPv4 is accepted -- the tray
+    # and GUI only ever pass those, and a typo'd public address would
+    # otherwise silently expose the realm address to the world.
+    #
     # Messages go to STDOUT even on failure -- the DML Launcher tray only
     # captures stdout, and these are user-facing results, not diagnostics.
     title="${1:-}"
-    action="${2:-}"
-    lan_usage="[dml] Usage: dml lan <title> on <lan-ip> | off | status | refresh <lan-ip>"
+    shift || true
+    lan_inet=0
+    if [[ "${1:-}" == "--internet" ]]; then lan_inet=1; shift; fi
+    action="${1:-}"
+    ip="${2:-}"
+    lan_usage="[dml] Usage: dml lan <title> [--internet] on <address> | off | status | refresh <lan-ip>"
     if [[ -z "$title" || -z "$action" ]]; then echo "$lan_usage"; exit 1; fi
 
     # Validate arguments up front -- the database wait below can take a
-    # while, and a usage mistake should fail instantly, not after it.
-    ip="${3:-}"
+    # while, and a usage/address mistake should fail instantly, not after
+    # it. (Address validation moved here from _lan_set so it happens before
+    # any docker/database work at all.)
     case "$action" in
       on|refresh)
-        if [[ -z "$ip" ]]; then echo "$lan_usage"; exit 1; fi ;;
+        if [[ -z "$ip" ]]; then echo "$lan_usage"; exit 1; fi
+        if [[ "$lan_inet" == 1 ]]; then
+          if [[ ! "$ip" =~ ^[A-Za-z0-9.-]{1,253}$ ]]; then
+            echo "[dml] ERROR: '$ip' is not a valid public address or hostname."
+            echo "[dml]   Letters, digits, dots and hyphens only (e.g. 84.210.13.37 or myserver.duckdns.org)."
+            exit 1
+          fi
+        else
+          if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            echo "[dml] ERROR: '$ip' does not look like an IPv4 address."; exit 1
+          fi
+          if [[ ! "$ip" =~ ^(127\.|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+            echo "[dml] ERROR: '$ip' is not a private LAN address."
+            echo "[dml]   For internet play use the Tools page stepper (or: dml lan $title --internet on $ip)."
+            exit 1
+          fi
+        fi ;;
       off|status) ;;
       *) echo "$lan_usage"; exit 1 ;;
     esac
@@ -3265,8 +3308,12 @@ case "$cmd" in
 
     _lan_set() {
         local ip="$1" newaddr
-        if [[ ! "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-            echo "[dml] ERROR: '$ip' does not look like an IPv4 address."; exit 1
+        # Mode-specific validation (private-only vs public/hostname) already
+        # ran up front; this is defense-in-depth shape-checking only. The
+        # charset [A-Za-z0-9.-] contains no SQL metacharacters, so the
+        # interpolation into the UPDATE below cannot break out of its quotes.
+        if [[ ! "$ip" =~ ^[A-Za-z0-9.-]{1,253}$ ]]; then
+            echo "[dml] ERROR: '$ip' is not a valid realm address."; exit 1
         fi
         if ! _lan_sql "UPDATE realmlist SET address='$ip' WHERE id=1;"; then
             echo "[dml] ERROR: Could not update the realm address."; exit 1
@@ -4518,15 +4565,34 @@ case "$cmd" in
               # bind-mounted conf, clean any legacy AC_* env override (env
               # beats conf, so leaving it would make this save a silent
               # no-op), then try to live-apply. Live only works for
-              # worldserver.conf keys (SOAP `reload config`) AND only when
-              # no frozen legacy env was still present in the override --
-              # the running container keeps its creation-time env either
-              # way, so that case must report restart.
+              # worldserver.conf and mod_ahbot.conf keys (SOAP `reload
+              # config` -- the AH module re-reads its conf on reload, see
+              # the registry block) AND only when no frozen legacy env was
+              # still present in the override -- the running container keeps
+              # its creation-time env either way, so that case must report
+              # restart.
+              if [[ "$key" == "ahbot.character" ]]; then
+                # The validated --value is a character NAME; the conf wants
+                # its GUID (this row's key) plus the matching Account id
+                # (companion write below) -- same resolution the old env
+                # route did, now landing in mod_ahbot.conf.
+                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
+                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
+                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
+                IFS=$'\t' read -r cguid cacct <<< "$crow"
+                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
+                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+                value="$cguid"
+              fi
               cpath="$(_cfg_conf_path "$conf_file")"
               _cfg_conf_ensure "$cpath" \
                 || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
               _cfg_conf_write "$cpath" "$conf_key" "$value" \
                 || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              if [[ "$key" == "ahbot.character" ]]; then
+                _cfg_conf_write "$cpath" "AuctionHouseBot.Account" "$cacct" \
+                  || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              fi
               if [[ "$key" == "bots.population" ]]; then
                 # One number drives BOTH population bounds (the row's conf
                 # key is MaxRandomBots; Min follows it here).
@@ -4548,10 +4614,20 @@ case "$cmd" in
                   CFG_CHANGED=true
                 fi
               fi
+              if [[ "$key" == "ahbot.character" ]]; then
+                # Companion cleanup for the Account write above -- the row's
+                # own key (GUID) was already handled by the generic block.
+                ename="$(_cfg_env_name_for AuctionHouseBot.Account)"
+                if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                  _cfg_env_remove "$ename"
+                  envwas=true
+                  CFG_CHANGED=true
+                fi
+              fi
               applied="none"; rreq=false
               if [[ "$CFG_CHANGED" == true ]]; then
                 applied="restart"; rreq=true
-                if [[ "$conf_file" == "worldserver.conf" && "$envwas" == false ]]; then
+                if [[ ( "$conf_file" == "worldserver.conf" || "$conf_file" == "mod_ahbot.conf" ) && "$envwas" == false ]]; then
                   if soap_exec "reload config" >/dev/null 2>&1; then
                     applied="live"; rreq=false
                   fi
@@ -4559,18 +4635,7 @@ case "$cmd" in
               fi
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
             else
-              if [[ "$key" == "ahbot.character" ]]; then
-                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
-                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
-                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
-                IFS=$'\t' read -r cguid cacct <<< "$crow"
-                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
-                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
-                _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
-                _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
-              else
-                _cfg_env_write "$env" "$value"
-              fi
+              _cfg_env_write "$env" "$value"
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
             fi
             ;;
@@ -5544,6 +5609,154 @@ case "$cmd" in
             ;;
         esac
         ;;
+      ahbot)
+        ahsub="${1:-}"; shift || true
+        case "$ahsub" in
+          repair)
+            # Batch 4 F14: faithful port of wow-manage.sh configure_ahbot
+            # (guides/wow-wotlk, read 2026-07-19). The manager (1) requires
+            # mod-ah-bot to be installed, (2) tells the user to create a
+            # dedicated account + ONE character MANUALLY (console + game
+            # client -- nothing can create characters server-side), (3) has
+            # the user pick that character from the DB list, (4) writes
+            # Account/GUID/EnableSeller=1/EnableBuyer=1 into mod_ahbot.conf,
+            # (5) says restart. Deliberate differences: (a) the conf is
+            # created from its dist only when absent and edited IN PLACE --
+            # wow-manage re-copies the whole dist every run, which would wipe
+            # the Auction House tab's curated values; (b) wow-manage also
+            # seds AuctionHouseBot.GUIDs and AHBot.enabled for OTHER mod
+            # forks -- neither key exists in this fork's conf (verified
+            # against the deployed dist) and our writer would APPEND unknown
+            # keys, so they are skipped; (c) instead of always demanding a
+            # restart we attempt the verified live path (SOAP `reload
+            # config` re-runs the module's OnBeforeConfigLoad, which
+            # re-reads Account/GUID and restarts its bots) and report
+            # restart truthfully when that isn't possible.
+            ahchar=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --char) _need_flag_val "$1" $#; ahchar="$2"; shift 2 ;;
+                *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml wow ahbot repair --char <name> --json"; exit 1 ;;
+              esac
+            done
+            # The one step that stays manual (surfaced here AND in the done
+            # payload so the GUI can show it verbatim).
+            ah_manual="Create a separate account for the bot (Accounts page), log into the game with it once, create ONE character, log out, then pick that character here."
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start ahbot-repair
+            if [[ -z "$ahchar" ]] || ! _valid_charname "$ahchar"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error BAD_ARG "ahbot repair needs --char <the bot character's name>" "$ah_manual"
+              else echo "[dml] ERROR: ahbot repair needs --char <name>" >&2; fi
+              exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+              else echo "[dml] ERROR: wow server not installed" >&2; fi
+              exit 1
+            fi
+            if [[ ! -d "$sdir/modules/mod-ah-bot" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_INSTALLED "mod-ah-bot is not installed" "Install the Auction House Bot module from the Modules page first."
+              else echo "[dml] ERROR: mod-ah-bot not installed" >&2; fi
+              exit 1
+            fi
+            ahconf="$sdir/env/dist/etc/modules/mod_ahbot.conf"
+            if ! _cfg_conf_ensure "$ahconf"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "mod_ahbot.conf not found (nor its .dist)" "Is the module fully installed? Try a rebuild from the Modules page."
+              else echo "[dml] ERROR: mod_ahbot.conf missing" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "looking up character $ahchar..."
+            if ahrow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$ahchar")' LIMIT 1;")"; then :; else
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error DB_UNREACHABLE "Could not look up the character" "Is the server (ac-database) running?"
+              else echo "[dml] ERROR: character lookup failed" >&2; fi
+              exit 1
+            fi
+            if [[ -z "$ahrow" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "No character named $ahchar exists yet" "$ah_manual"
+              else echo "[dml] ERROR: no such character: $ahchar" >&2; fi
+              exit 1
+            fi
+            IFS=$'\t' read -r ahguid ahacct <<< "$ahrow"
+            if [[ ! "$ahguid" =~ ^[0-9]+$ || ! "$ahacct" =~ ^[0-9]+$ ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error DB_UNREACHABLE "Unexpected character lookup result" ""
+              else echo "[dml] ERROR: bad lookup result" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "selected: $ahchar (guid $ahguid, account $ahacct)"
+            CFG_CHANGED=false
+            ahfail=0
+            _cfg_conf_write "$ahconf" "AuctionHouseBot.Account" "$ahacct" || ahfail=1
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.GUID" "$ahguid" || ahfail=1; }
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableSeller" "1" || ahfail=1; }
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableBuyer" "1" || ahfail=1; }
+            if [[ "$ahfail" != 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error WRITE_FAILED "Could not write mod_ahbot.conf" ""
+              else echo "[dml] ERROR: conf write failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "wrote mod_ahbot.conf (account $ahacct, character $ahguid, seller + buyer on)"
+            # Legacy env cleanup, same derivation the conf rows use. Needs
+            # the _cfg_env_* context that _cfg_preamble would set up, minus
+            # its exit-on-missing-yq behavior (a streaming arm must not die
+            # over an env-cleanup nicety: _cfg_env_read degrades to "" when
+            # yq is absent, which just skips the removal).
+            cfg_ovr="$sdir/docker-compose.override.yml"
+            DML_YQ_BIN="${DML_YQ_BIN:-yq}"
+            envwas=false
+            for ahk in AuctionHouseBot.Account AuctionHouseBot.GUID AuctionHouseBot.EnableSeller AuctionHouseBot.EnableBuyer; do
+              ename="$(_cfg_env_name_for "$ahk")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                envwas=true
+                CFG_CHANGED=true
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "removed old override $ename (the running server still has it until a restart)"
+              fi
+            done
+            ahapplied="none"; ahrreq=false; ahalready=true
+            if [[ "$CFG_CHANGED" == true ]]; then
+              ahalready=false
+              ahapplied="restart"; ahrreq=true
+              if [[ "$envwas" == false ]]; then
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "asking the running server to reload its config..."
+                if soap_exec "reload config" >/dev/null 2>&1; then
+                  ahapplied="live"; ahrreq=false
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "reloaded - the auction bot switches to $ahchar without a restart"
+                else
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "server not reachable - the change applies on the next start"
+                fi
+              fi
+            else
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "already configured for $ahchar - nothing to change"
+            fi
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end ahbot-repair ok
+              ndjson_done "{\"repaired\":true,\"already\":$ahalready,\"char\":\"$(json_escape "$ahchar")\",\"guid\":$ahguid,\"account\":$ahacct,\"applied\":\"$ahapplied\",\"restart_required\":$ahrreq,\"manual_steps\":\"$(json_escape "$ah_manual")\"}"
+            else
+              echo "[dml] AH bot configured: $ahchar (guid $ahguid, account $ahacct), applied: $ahapplied"
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown ahbot subcommand: $ahsub" "Try: dml wow ahbot repair --char <name> --json"
+            exit 1
+            ;;
+        esac
+        ;;
       module)
         msub="${1:-}"; shift || true
         case "$msub" in
@@ -6294,6 +6507,30 @@ case "$cmd" in
             json_err UNKNOWN_COMMAND "Unknown client-path subcommand: $cpsub" "Try: dml wow client-path get|set|detect --json"; exit 1 ;;
         esac
         ;;
+      lan)
+        lsub="${1:-}"; shift || true
+        case "$lsub" in
+          public-ip)
+            # Batch 4 F15: best-effort public IPv4 discovery for the
+            # internet-play stepper. NEVER an error: no connectivity, a
+            # captive portal, or a weird answer all degrade to null (the
+            # GUI shows "unknown"). First line only + shape-validated, so
+            # a portal's HTML can never land in the envelope.
+            pubip="$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+            pubip="${pubip%%$'\n'*}"
+            pubip="${pubip//$'\r'/}"
+            if [[ "$pubip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+              json_ok "{\"public_ip\":\"$pubip\"}"
+            else
+              json_ok '{"public_ip":null}'
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown lan subcommand: $lsub" "Try: dml wow lan public-ip --json"
+            exit 1
+            ;;
+        esac
+        ;;
       update-check)
         # Read-only-ish: does a `git fetch --quiet origin` per repo to
         # compute behind-counts, but never mutates the worktree (no pull,
@@ -6496,7 +6733,7 @@ case "$cmd" in
     echo "  status [<title>]      show running/stopped status (all titles if no arg)"
     echo "  start <title>         start a title's Docker server"
     echo "  stop <title>          stop a title's Docker server"
-    echo "  lan <title> <action>  LAN play: on <lan-ip> | off | status | refresh <lan-ip>"
+    echo "  lan <title> <action>  LAN play: [--internet] on <address> | off | status | refresh <lan-ip>"
     echo "  scan                  show all running containers and which game ports they hold"
     echo "  kill <name|--all>     force-stop by project name (no directory needed)"
     echo "  clean [--yes]         stop stuck containers, remove incomplete installs, prune Docker"
