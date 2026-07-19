@@ -500,6 +500,13 @@ export const gamesRestart = (id: string, onEvent: (e: TermEvent) => void): Promi
   ch.onmessage = onEvent;
   return invoke("games_restart", { id, onEvent: ch });
 };
+// Batch 3 F11f: world-only restart -- faster, but does NOT apply settings
+// changes (docker restart keeps creation-time env; full Restart owns that).
+export const wowWorldRestart = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_world_restart", { onEvent: ch });
+};
 // Flush & rebuild the ambient bot population (Batch 1 F4). The CLI enforces
 // --yes plus the typed ack itself; the GUI's typed-confirm gates calling this.
 export const wowBotsFlush = (onEvent: (e: TermEvent) => void): Promise<void> => {

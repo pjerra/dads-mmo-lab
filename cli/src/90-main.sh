@@ -1403,6 +1403,51 @@ case "$cmd" in
           json_ok '{"available":false,"lines":[]}'
         fi
         ;;
+      world-restart)
+        # Batch 3 F11f: fast world-only restart. `docker restart` keeps the
+        # container's CREATION-time env frozen (the documented env-freeze
+        # behavior that bit full restarts before they moved to compose
+        # recreate) -- so settings/conf-env changes do NOT apply here. That
+        # caveat is surfaced in the stream AND the done payload; the full
+        # Restart (compose down+up) owns applying settings. Flow: saveall
+        # best-effort -> docker restart -t 300 of ONLY ac-worldserver ->
+        # readiness wait on the boot-complete marker (_world_ready, which is
+        # StartedAt-scoped so the pre-restart marker can't lie).
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start world-restart
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          ndjson_section_end world-restart error
+          ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          ndjson_section_end world-restart error
+          ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
+        fi
+        ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
+        ndjson_line info "saving all characters (best effort)..."
+        soap_exec 'saveall' >/dev/null 2>&1 || true
+        ndjson_line info "restarting the world server (graceful stop, up to 300s)..."
+        if ! _stream_cmd docker restart -t 300 ac-worldserver; then
+          ndjson_section_end world-restart error
+          ndjson_error RESTART_FAILED "docker restart failed for ac-worldserver" "Is the server installed and started? Check: dml doctor"; exit 1
+        fi
+        ndjson_line info "waiting for the world to come back..."
+        wr_timeout="${DML_READY_TIMEOUT_SECS:-1800}"; wr_t0=$SECONDS; wr_note=0
+        until _world_ready; do
+          wr_elapsed=$(( SECONDS - wr_t0 ))
+          if (( wr_elapsed >= wr_timeout )); then
+            ndjson_section_end world-restart error
+            ndjson_error READY_TIMEOUT "The world did not come back within ${wr_timeout}s" "Check the Console logs; a full Restart may be needed."; exit 1
+          fi
+          if (( wr_elapsed - wr_note >= 60 )); then
+            wr_note=$wr_elapsed
+            ndjson_line info "still waiting (~$(( wr_elapsed / 60 ))m) - bots respawning takes a while..."
+          fi
+          sleep 2
+        done
+        ndjson_section_end world-restart ok
+        ndjson_done '{"restarted":"world-only","note":"settings changes were NOT applied -- use full Restart for that"}'
+        ;;
       console-send)
         # The manual GM console: free text is DELIBERATE here (same
         # capability as the public `wow soap-exec`; the closed-allowlist

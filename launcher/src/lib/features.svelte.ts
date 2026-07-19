@@ -57,6 +57,8 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "lan-auto-refresh": "untested",
   "realmlist-fix": "untested",
   "chip-start": "untested",
+  "world-restart": "untested",
+  "module-fixit": "untested",
 };
 
 export const LOCKED_HINT =

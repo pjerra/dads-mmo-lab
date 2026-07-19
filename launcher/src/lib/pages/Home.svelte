@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, type PlayerOnline } from "$lib/api";
+  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, type PlayerOnline } from "$lib/api";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -107,6 +107,35 @@
       });
     } finally {
       if (action === "restart") restartState.restarting = false;
+      busy = false;
+      await refresh();
+    }
+  }
+
+  // Fast world-only restart (Batch 3 F11f): restarts ONLY the worldserver
+  // container. Faster than a full Restart, but docker restart keeps
+  // creation-time env -- settings changes do NOT apply (the stream repeats
+  // that caveat). Shares the restarting flag so the chip/card show amber.
+  async function worldRestart() {
+    busy = true;
+    beginRun("home");
+    restartState.restarting = true;
+    try {
+      await wowWorldRestart((e) => {
+        buf.term = applyEvent(buf.term, e);
+      });
+    } catch (e) {
+      const err = e as { code?: string; message?: string; hint?: string };
+      buf.term = applyEvent(buf.term, {
+        event: "error",
+        error: {
+          code: err.code ?? "IPC",
+          message: err.message ?? String(e),
+          hint: err.hint ?? "",
+        },
+      });
+    } finally {
+      restartState.restarting = false;
       busy = false;
       await refresh();
     }
@@ -218,6 +247,15 @@
               onclick={() => act("restart")}
             >
               Restart
+            </button>
+            <button
+              disabled={busy || featureLocked("world-restart")}
+              title={featureLocked("world-restart")
+                ? LOCKED_HINT
+                : "Faster: restarts only the world server. Does NOT apply settings changes — use Restart for that."}
+              onclick={worldRestart}
+            >
+              Restart world only
             </button>
           {:else}
             <button class="primary" disabled={busy} onclick={() => act("start")}>Start</button>

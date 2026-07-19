@@ -21,8 +21,16 @@ use_docker_stub() {
   mkdir -p "$STUB_BIN"
   cat > "$STUB_BIN/docker" <<'EOS'
 #!/usr/bin/env bash
+# Optional argv capture (backup-stub convention): one line per docker call,
+# so tests can assert exactly which commands ran (world-restart/keep-data).
+[[ -n "${DML_STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_CALL_LOG"
 if [[ "${1:-}" == "info" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1 || exit 0
+fi
+if [[ "${1:-}" == "restart" ]]; then
+  # world-restart (Batch 3 F11f): `docker restart -t 300 ac-worldserver`.
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  exit "${DML_STUB_RESTART_EXIT:-0}"
 fi
 if [[ "${1:-}" == "compose" ]]; then
   # find -f <file>

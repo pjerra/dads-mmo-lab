@@ -864,6 +864,16 @@ async fn wow_players_online(state: State<'_, AppState>) -> Result<serde_json::Va
     run_json_cmd(state, vec!["wow".into(), "players".into(), "online".into()]).await
 }
 
+// Batch 3 F11f: fast world-only restart (does NOT apply settings changes --
+// the CLI stream carries that caveat).
+#[tauri::command]
+async fn wow_world_restart(
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(vec!["wow".into(), "world-restart".into()], on_event, state).await
+}
+
 #[tauri::command]
 async fn wow_party_add(player: String, class: String, gender: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let mut a: Vec<String> = vec!["wow".into(),"party".into(),"add".into(),"--player".into(),player,"--class".into(),class];
@@ -1422,6 +1432,7 @@ pub fn run() {
             wow_party_setup,
             wow_party_online,
             wow_players_online,
+            wow_world_restart,
             wow_party_add,
             wow_party_list,
             wow_party_kick,
