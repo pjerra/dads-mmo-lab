@@ -8,6 +8,7 @@
     wowModuleConfActivate,
     wowModuleTracking,
     wowModuleRepair,
+    wowModuleFixit,
     wowClientPathGet,
     wowClientPathSet,
     wowClientPathDetect,
@@ -122,6 +123,23 @@
     }
     for (const m of list.families.sql) {
       if (!(m.key in sqlBackup)) sqlBackup[m.key] = true;
+    }
+  }
+
+  // Batch 3 F13b: place the missing Battle Pass vendor NPC (entry 90100).
+  // Idempotent CLI-side; the NPC only appears after a world restart, which
+  // the note passes on.
+  async function fixitBattlepassNpc() {
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowModuleFixit("battlepass-npc");
+      note = r.already_placed
+        ? "The Battle Pass NPC is already placed in the world."
+        : "Battle Pass NPC placed in Stormwind + Orgrimmar. Restart the world server (Home) for it to appear, then talk to the Battle Pass Vendor.";
+    } catch (e) {
+      showErr(e);
+    } finally {
+      busy = false;
     }
   }
 
@@ -623,6 +641,19 @@
                 <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
                 Back up first (recommended)
               </label>
+            {/if}
+            {#if m.key === "battlepass" && m.deployed}
+              <!-- Batch 3 F13b: the upstream battlepass SQL ships no vendor
+                   NPC -- this places entry 90100 in both capitals. -->
+              <button
+                onclick={fixitBattlepassNpc}
+                disabled={busy || featureLocked("module-fixit")}
+                title={featureLocked("module-fixit")
+                  ? LOCKED_HINT
+                  : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+              >
+                Fix missing NPC
+              </button>
             {/if}
             <button
               class="primary"

@@ -3762,6 +3762,59 @@ case "$cmd" in
             resultsj+=']'
             json_ok "{\"key\":\"$mkey\",\"db\":\"$rdb\",\"mode\":\"$rmode\",\"results\":$resultsj}"
             ;;
+          fixit)
+            # Batch 3 F13b: canned one-shot fixes for known module gaps.
+            # battlepass-npc: the Battle Pass vendor (entry 90100) is NOT in
+            # the upstream lua-battlepass SQL (the manager creates it by hand
+            # -- wow-manage.sh fix_battlepass_npc), so after a launcher
+            # install there is no NPC to talk to. This fix ensures the
+            # creature_template exists (ported from the manager, incl. its
+            # schema-adaptive model statements as best-effort) and INSERTs
+            # spawn rows at the manager's documented capital coordinates
+            # (Stormwind map 0 / Orgrimmar map 1 -- the cheat-sheet block in
+            # 47-commands.sh). FIFTH sanctioned direct MySQL write (see
+            # 30-db.sh / 60-backup.sh headers): every statement is a fixed
+            # literal, zero user input. Idempotent: an existing spawn of
+            # entry 90100 short-circuits to already_placed. The NPC only
+            # appears after a worldserver restart -- said in the envelope.
+            fkey="${1:-}"; shift || true
+            case "$fkey" in
+              battlepass-npc) ;;
+              *) json_err BAD_ARG "Unknown fixit: ${fkey:-<none>}" "Available: battlepass-npc"; exit 1 ;;
+            esac
+            cnt="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            cnt="${cnt//[[:space:]]/}"
+            if [[ "$cnt" =~ ^[0-9]+$ && "$cnt" -gt 0 ]]; then
+              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in the world."}'
+              exit 0
+            fi
+            tcnt="$(db_world_query "SELECT COUNT(*) FROM creature_template WHERE entry=90100;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            tcnt="${tcnt//[[:space:]]/}"
+            template=exists
+            if [[ ! "$tcnt" =~ ^[0-9]+$ ]] || [[ "$tcnt" -eq 0 ]]; then
+              # Template INSERT ported verbatim from the manager's fix
+              # (values incl. npcflag=1 gossip, faction 35, level 80).
+              _db_write_stmt acore_world "SET foreign_key_checks=0; SET sql_mode=''; INSERT INTO creature_template (\`entry\`,\`name\`,\`subname\`,\`gossip_menu_id\`,\`minlevel\`,\`maxlevel\`,\`exp\`,\`faction\`,\`npcflag\`,\`speed_walk\`,\`speed_run\`,\`rank\`,\`dmgschool\`,\`DamageModifier\`,\`BaseAttackTime\`,\`RangeAttackTime\`,\`BaseVariance\`,\`RangeVariance\`,\`unit_class\`,\`unit_flags\`,\`unit_flags2\`,\`dynamicflags\`,\`type\`,\`AIName\`,\`MovementType\`,\`HoverHeight\`,\`HealthModifier\`,\`ManaModifier\`,\`ArmorModifier\`,\`RegenHealth\`,\`flags_extra\`,\`VerifiedBuild\`) VALUES (90100,'Battle Pass Vendor','Seasonal Rewards',0,80,80,0,35,1,1.0,1.14286,0,0,1.0,2000,2000,1.0,1.0,1,33536,2048,0,7,'',0,1.0,1.0,1.0,1.0,1,2,0); SET foreign_key_checks=1;" >/dev/null \
+                || { json_err SQL_FAILED "Could not create the Battle Pass NPC template" "Is ac-database running?"; exit 1; }
+              # Schema-adaptive model/scale statements (manager parity,
+              # best-effort -- older/newer schemas differ here).
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='scale'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET scale=1.0 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'DELETE FROM acore_world.creature_template_model WHERE CreatureID=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'INSERT INTO acore_world.creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (90100,0,25478,1.0,1.0,0)','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='modelid1'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET modelid1=25478 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              template=created
+            fi
+            # Spawn rows at the manager's documented capital coordinates
+            # (see the battlepass cheat-sheet in 47-commands.sh):
+            #   Stormwind (map 0): -8819.3 636.2 94.1, facing 3.7
+            #   Orgrimmar (map 1): 1609.2 -4407.7 17.5, facing 4.5
+            # guid is AUTO_INCREMENT; remaining columns have sane defaults.
+            _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
+              || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
+            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
             exit 1

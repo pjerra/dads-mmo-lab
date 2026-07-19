@@ -355,6 +355,21 @@ export async function wowModuleRepair(
   return await invoke("wow_module_repair", { key, db, mode, files });
 }
 
+// Batch 3 F13b: canned one-shot module fixes (currently only the missing
+// Battle Pass vendor NPC). Idempotent CLI-side.
+export interface ModuleFixit {
+  key: string;
+  already_placed: boolean;
+  template: "created" | "exists";
+  spawns_placed: number;
+  restart_required: boolean;
+  note: string;
+}
+
+export async function wowModuleFixit(key: "battlepass-npc"): Promise<ModuleFixit> {
+  return await invoke("wow_module_fixit", { key });
+}
+
 export interface ClientPath {
   path: string | null;
   valid: boolean;

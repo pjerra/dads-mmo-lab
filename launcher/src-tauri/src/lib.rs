@@ -581,6 +581,16 @@ async fn wow_module_repair(
     run_json_cmd(state, args).await
 }
 
+// Batch 3 F13b: canned one-shot module fixes. Closed allowlist -- the CLI
+// re-validates, but never forward an arbitrary string as an argv token.
+#[tauri::command]
+async fn wow_module_fixit(key: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    if key != "battlepass-npc" {
+        return Err(bad_arg(format!("unknown fixit key: {key:?}")));
+    }
+    run_json_cmd(state, vec!["wow".into(), "module".into(), "fixit".into(), key]).await
+}
+
 #[tauri::command]
 async fn wow_client_path_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "client-path".into(), "get".into()]).await
@@ -1408,6 +1418,7 @@ pub fn run() {
             wow_module_conf_activate,
             wow_module_tracking,
             wow_module_repair,
+            wow_module_fixit,
             wow_client_path_get,
             wow_client_path_set,
             wow_client_path_detect,
