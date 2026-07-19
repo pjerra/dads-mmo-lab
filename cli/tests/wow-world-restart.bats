@@ -46,6 +46,18 @@ teardown() { teardown_fixture; }
   grep -q '7878' "$FIXTURE/curl.log"
 }
 
+@test "world-restart --no-saveall: skips the pre-stop saveall, still restarts" {
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow world-restart --no-saveall --json
+  [ "$status" -eq 0 ]
+  # Assert on the stream FIRST -- a later `run` would clobber $output.
+  echo "$output" | grep -q 'skipping pre-stop saveall'
+  [ "$(echo "$output" | tail -1 | jq -r '.data.restarted')" = "world-only" ]
+  # No SOAP saveall attempted (curl never hit :7878 -- log absent or no match).
+  run grep -q '7878' "$FIXTURE/curl.log"
+  [ "$status" -ne 0 ]
+}
+
 @test "world-restart: a failed SOAP saveall does not block the restart (best effort)" {
   export DML_STUB_CURL_EXIT=7
   run bash "$DML" wow world-restart --json

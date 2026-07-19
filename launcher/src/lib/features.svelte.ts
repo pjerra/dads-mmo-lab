@@ -67,6 +67,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "arac-client-patch": "untested",
   "gear-sets": "untested",
   "party-spec": "untested",
+  "skip-saveall": "untested",
 };
 
 export const LOCKED_HINT =

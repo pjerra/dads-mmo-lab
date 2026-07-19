@@ -232,6 +232,13 @@ unchanged and is separate from the **Module files** tab (for editing conf files)
 | ⬜ | [gear-sets] Save + mail a gear set | Dashboard → load a geared character → name it + "Save gear set" (unlocked — local save only). Item Database → Gear sets card lists it (source char, item count) → Mail to… → pick a recipient → Mail N items → mailbox has the items as FRESH copies (count 1 each, two mails when >12 items); enchants/gems are NOT carried; a cross-class recipient still receives everything. Delete removes the set (two-step). Sets survive an app restart. |
 | ⬜ | [party-spec] Role picker + change spec | Bots → My Party tab (bridge deployed, character online): Role → Class → Spec (e.g. Ranged → Mage → frost pve) → Add bot → the bot joins with that spec's talents AND autogears (check its trees in-game or via Bot Browser details). "Any spec" add behaves exactly like the old class buttons. Per-bot "spec… → Change spec" respecs an existing bot (then Gear up). NB: spec names come from playerbots.conf — a wrong/edited name fails SILENTLY (in-game whisper reply only); no DK offered anywhere. |
 
+## 20. Restart save option
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | [skip-saveall] Faster restart toggle | Home (server running): the "Save characters before restart (safer; off = faster)" checkbox sits under the Stop/Restart buttons, ON by default. UNTICK it (needs untested features enabled) → Restart → the stream shows `Skipping pre-stop saveall (faster restart)…` instead of `Saving all characters (saveall)…`, and the restart is noticeably quicker. Re-tick → Restart → the `Saving all characters…` line is back. Same behavior applies to **Restart world only**. Setting survives an app restart. |
+| ⬜ | Characters still safe with saveall off | With the box UNTICKED: play a bit (gain XP/gold), Restart, log back in → your progress is INTACT — the graceful stop still saved you on shutdown. (This is the whole point: off is faster, not lossy, in normal operation.) |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installing the module is server-side only. The client DBC/MPQ patch is now a separate **Apply client patch** step on the module's Modules row (Batch 5, locked behind [arac-client-patch] until row §19 passes) — so a bare install still won't show new race/class combos until you run that patch and cold-start once. Not a bug; it's the two-step design.

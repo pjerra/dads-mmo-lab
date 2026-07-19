@@ -354,7 +354,10 @@
     restartState.restarting = true;
     beginRun("config");
     try {
-      await gamesRestart(WOW_ID, (e) => {
+      // Applying settings is a deliberate, infrequent restart -- always save
+      // characters first (false = don't skip). The "faster restart" option
+      // lives on Home for the routine restart button.
+      await gamesRestart(WOW_ID, false, (e) => {
         buf.term = applyEvent(buf.term, e);
       });
       restartState.needed = false;

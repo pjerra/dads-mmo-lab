@@ -24,6 +24,34 @@
   let busy = $state(false);
   const buf = termBuf("home");
 
+  // "Save characters before restart" preference (persisted). Default ON =
+  // safe. The pre-stop saveall is a redundant FIRST save -- the graceful
+  // `docker stop -t 300` also saves everyone on shutdown -- so turning this
+  // OFF just skips the redundant save for a faster restart. Gated by
+  // [skip-saveall]: while that feature is locked we never skip, and the box
+  // shows checked+disabled so the display matches the forced-save behavior.
+  let saveBeforeRestart = $state(readSavePref());
+  function readSavePref(): boolean {
+    try {
+      return localStorage.getItem("dml.saveBeforeRestart") !== "0";
+    } catch {
+      return true;
+    }
+  }
+  function setSavePref(on: boolean): void {
+    saveBeforeRestart = on;
+    try {
+      localStorage.setItem("dml.saveBeforeRestart", on ? "1" : "0");
+    } catch {
+      /* storage blocked -- in-memory value still applies this session */
+    }
+  }
+  // Effective skip: only when the feature is unlocked AND the user turned
+  // saving off. Locked -> always save.
+  function skipSaveallNow(): boolean {
+    return !featureLocked("skip-saveall") && !saveBeforeRestart;
+  }
+
   // `detail`/`detailError` now live in the server-status store (server-status.svelte.ts)
   // so the sidebar chip and Console see the same last-known data instantly on
   // remount instead of going blank until this page's own fetch lands.
@@ -91,10 +119,16 @@
     // the polled verdict, so only restart needs the explicit flag).
     if (action === "restart") restartState.restarting = true;
     try {
-      const run = action === "start" ? gamesStart : action === "stop" ? gamesStop : gamesRestart;
-      await run(WOW_ID, (e) => {
-        buf.term = applyEvent(buf.term, e);
-      });
+      if (action === "restart") {
+        await gamesRestart(WOW_ID, skipSaveallNow(), (e) => {
+          buf.term = applyEvent(buf.term, e);
+        });
+      } else {
+        const run = action === "start" ? gamesStart : gamesStop;
+        await run(WOW_ID, (e) => {
+          buf.term = applyEvent(buf.term, e);
+        });
+      }
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {
@@ -121,7 +155,7 @@
     beginRun("home");
     restartState.restarting = true;
     try {
-      await wowWorldRestart((e) => {
+      await wowWorldRestart(skipSaveallNow(), (e) => {
         buf.term = applyEvent(buf.term, e);
       });
     } catch (e) {
@@ -262,6 +296,22 @@
           {/if}
         </div>
       </div>
+      {#if containerState === "running"}
+        <label
+          class="saveall-opt"
+          title={featureLocked("skip-saveall")
+            ? LOCKED_HINT
+            : "On (safe): saves every character before restarting. Off: skips that extra save for a faster restart — the graceful stop still saves your characters on shutdown, so only turn this off if restarts feel slow."}
+        >
+          <input
+            type="checkbox"
+            checked={saveBeforeRestart || featureLocked("skip-saveall")}
+            disabled={busy || featureLocked("skip-saveall")}
+            onchange={(e) => setSavePref(e.currentTarget.checked)}
+          />
+          Save characters before restart <span class="opt-sub">(safer; off = faster)</span>
+        </label>
+      {/if}
       {#if expanded}
         <div class="health">
           {#if serverStatus.detail}
@@ -321,6 +371,11 @@
   .crash-text { color: #f85149; }
   .recover-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .server-card { flex-direction: column; align-items: stretch; }
+  /* "Save characters before restart" option, under the lifecycle buttons. */
+  .saveall-opt { display: flex; align-items: center; gap: 7px; margin: 10px 2px 0; font-size: 12.5px; color: #8b949e; cursor: pointer; user-select: none; }
+  .saveall-opt input { cursor: pointer; margin: 0; }
+  .saveall-opt input:disabled { cursor: default; }
+  .saveall-opt .opt-sub { color: #6e7681; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
   .card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
   .expander { background: none; border: none; padding: 0; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: inherit; color: inherit; cursor: pointer; }

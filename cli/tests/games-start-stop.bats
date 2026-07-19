@@ -81,6 +81,32 @@ EOS
   echo "$output" | grep -q 'staged start: mode=restart'
 }
 
+@test "games restart --no-saveall exports DML_SKIP_SAVEALL=1 to the hook, title still resolved" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] staged start: mode=$1 skip=${DML_SKIP_SAVEALL:-0}"
+EOS
+  chmod +x "$DML_GAMES_DIR/wow/dml-start.sh"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games restart wow --no-saveall --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'staged start: mode=restart skip=1'
+}
+
+@test "games restart without --no-saveall leaves DML_SKIP_SAVEALL unset (0)" {
+  add_game wow compose
+  cat > "$DML_GAMES_DIR/wow/dml-start.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "[dml] staged start: mode=$1 skip=${DML_SKIP_SAVEALL:-0}"
+EOS
+  chmod +x "$DML_GAMES_DIR/wow/dml-start.sh"
+  export DML_STUB_RUNNING="$DML_GAMES_DIR/wow/docker-compose.yml"
+  run bash "$DML" games restart wow --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'staged start: mode=restart skip=0'
+}
+
 @test "games start unknown title returns NOT_FOUND" {
   run bash "$DML" games start nope --json
   [ "$status" -eq 1 ]

@@ -1036,7 +1036,20 @@ case "$cmd" in
         _games_start_impl "${1:-}" start
         ;;
       restart)
-        _games_start_impl "${1:-}" restart
+        # --no-saveall (the GUI's "faster restart" option): skip the
+        # redundant pre-stop SOAP saveall. The graceful `docker stop -t 300`
+        # in dml-start.sh still saves every character on shutdown, so this is
+        # safe in normal operation -- it only drops the extra safety net for
+        # the rare case the shutdown save can't finish in time. Threaded to
+        # dml-start.sh via the DML_SKIP_SAVEALL env (exported below so the
+        # child bash inherits it). Any position accepted; first non-flag arg
+        # is the title.
+        rtitle=""
+        for _ra in "$@"; do
+          if [[ "$_ra" == "--no-saveall" ]]; then export DML_SKIP_SAVEALL=1
+          elif [[ -z "$rtitle" ]]; then rtitle="$_ra"; fi
+        done
+        _games_start_impl "$rtitle" restart
         ;;
       stop)
         _games_resolve_or_fail "${1:-}"
@@ -1540,8 +1553,18 @@ case "$cmd" in
           ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
         fi
         ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
-        ndjson_line info "saving all characters (best effort)..."
-        soap_exec 'saveall' >/dev/null 2>&1 || true
+        # --no-saveall (GUI "faster" option): skip the redundant pre-stop
+        # saveall. `docker restart -t 300` below stops gracefully first, so the
+        # worldserver still saves every character on shutdown -- safe in normal
+        # operation. Present iff the flag is the first arg after world-restart.
+        wr_skip_saveall=0
+        for _wra in "$@"; do [[ "$_wra" == "--no-saveall" ]] && wr_skip_saveall=1; done
+        if [[ "$wr_skip_saveall" == 1 ]]; then
+          ndjson_line info "skipping pre-stop saveall (faster) -- the graceful stop still saves characters on shutdown"
+        else
+          ndjson_line info "saving all characters (best effort)..."
+          soap_exec 'saveall' >/dev/null 2>&1 || true
+        fi
         ndjson_line info "restarting the world server (graceful stop, up to 300s)..."
         if ! _stream_cmd docker restart -t 300 ac-worldserver; then
           ndjson_section_end world-restart error

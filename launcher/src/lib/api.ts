@@ -520,17 +520,26 @@ export async function wowConfigRawWrite(
 ): Promise<{ written: boolean; backup: string | null }> {
   return await invoke("wow_config_raw_write", { file, content });
 }
-export const gamesRestart = (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+// skipSaveall = the "faster restart" option: skip the redundant pre-stop
+// saveall (the graceful stop still saves characters on shutdown).
+export const gamesRestart = (
+  id: string,
+  skipSaveall: boolean,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("games_restart", { id, onEvent: ch });
+  return invoke("games_restart", { id, skipSaveall, onEvent: ch });
 };
 // Batch 3 F11f: world-only restart -- faster, but does NOT apply settings
 // changes (docker restart keeps creation-time env; full Restart owns that).
-export const wowWorldRestart = (onEvent: (e: TermEvent) => void): Promise<void> => {
+export const wowWorldRestart = (
+  skipSaveall: boolean,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_world_restart", { onEvent: ch });
+  return invoke("wow_world_restart", { skipSaveall, onEvent: ch });
 };
 // Flush & rebuild the ambient bot population (Batch 1 F4). The CLI enforces
 // --yes plus the typed ack itself; the GUI's typed-confirm gates calling this.

@@ -135,7 +135,16 @@ _saveall_best_effort() {
 
 if [[ "$MODE" == "restart" ]]; then
   _log "Restarting WoW server (staged)..."
-  _saveall_best_effort
+  # The pre-stop saveall is a redundant FIRST save: the graceful
+  # `docker stop -t 300` below saves every character on shutdown too. The
+  # launcher's "faster restart" option sets DML_SKIP_SAVEALL=1 to skip the
+  # redundant save -- safe in normal operation, only dropping the extra
+  # safety net for the rare case the shutdown save can't finish in 300s.
+  if [[ "${DML_SKIP_SAVEALL:-0}" == 1 ]]; then
+    _log "Skipping pre-stop saveall (faster restart) -- the graceful stop still saves characters on shutdown."
+  else
+    _saveall_best_effort
+  fi
   docker stop -t 300 "$AUTH_CONTAINER" "$WORLD_CONTAINER" 2>/dev/null || true
 else
   _log "Starting WoW server (staged)..."

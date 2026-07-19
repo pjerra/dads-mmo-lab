@@ -1007,10 +1007,15 @@ async fn wow_bots_list(
 // the CLI stream carries that caveat).
 #[tauri::command]
 async fn wow_world_restart(
+    skip_saveall: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    stream_args(vec!["wow".into(), "world-restart".into()], on_event, state).await
+    let mut args: Vec<String> = vec!["wow".into(), "world-restart".into()];
+    if skip_saveall.unwrap_or(false) {
+        args.push("--no-saveall".into());
+    }
+    stream_args(args, on_event, state).await
 }
 
 #[tauri::command]
@@ -1771,10 +1776,20 @@ async fn games_stop(
 #[tauri::command]
 async fn games_restart(
     id: String,
+    skip_saveall: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    stream_action("restart", id, on_event, state).await
+    if !validate_game_id(&id) {
+        return Err(bad_id(&id));
+    }
+    // --no-saveall = the GUI's "faster restart" option (skip the redundant
+    // pre-stop saveall; the graceful stop still saves on shutdown).
+    let mut args: Vec<String> = vec!["games".into(), "restart".into(), id];
+    if skip_saveall.unwrap_or(false) {
+        args.push("--no-saveall".into());
+    }
+    stream_args(args, on_event, state).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
