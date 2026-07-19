@@ -46,29 +46,27 @@ _flag_line() { grep '^AiPlayerbot.DeleteRandomBotAccounts' "$PB"; }
   printf '# pb conf\nAiPlayerbot.DeleteRandomBotAccounts = 0\n' > "$PB"
   run bash "$DML" wow bots flush --yes --ack flush --json
   [ "$status" -eq 0 ]
-  d="$(echo "$output" | grep '"event":"done"' | tail -1)"
+  # NB: keep a copy -- any later `run` would clobber $output
+  flushout="$output"
+  d="$(echo "$flushout" | grep '"event":"done"' | tail -1)"
   [ "$(echo "$d" | jq -r '.data.flushed')" = "true" ]
   bfile="$(echo "$d" | jq -r '.data.backup')"
   [[ "$bfile" =~ ^wow-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]
   [ -f "$BDIR/$bfile" ]
   # docker call ORDER: dump first (nothing destroyed on a failed dump), then
   # stop/up twice (deletion boot + rebuild boot)
-  run grep -c '^compose stop -t 180 ac-worldserver ac-authserver$' "$DML_STUB_CALL_LOG"
-  [ "$output" = "2" ]
-  run grep -c '^compose up -d --no-deps ac-authserver ac-worldserver$' "$DML_STUB_CALL_LOG"
-  [ "$output" = "2" ]
+  [ "$(grep -c '^compose stop -t 180 ac-worldserver ac-authserver$' "$DML_STUB_CALL_LOG")" = "2" ]
+  [ "$(grep -c -- '^compose up -d --no-deps ac-authserver ac-worldserver$' "$DML_STUB_CALL_LOG")" = "2" ]
   head -1 "$DML_STUB_CALL_LOG" | grep -q '^mysqldump'
   # the flag is back at 0 (armed to 1 in between, restored in step 5)
   [ "$(_flag_line)" = "AiPlayerbot.DeleteRandomBotAccounts = 0" ]
   # comment preserved by the in-place edits
   grep -q '^# pb conf$' "$PB"
-  # saveall went out (best-effort) before each stop
-  grep -q 'saveall' "$FIXTURE/captured.xml" 2>/dev/null || true
   # narrative order: backup -> armed -> deleted/restoring -> rebuild
-  echo "$output" | grep -q 'backing up characters'
-  echo "$output" | grep -q 'delete flag armed'
-  echo "$output" | grep -q 'restoring the setting'
-  echo "$output" | grep -q 'rebuild the bot population'
+  echo "$flushout" | grep -q 'backing up characters'
+  echo "$flushout" | grep -q 'delete flag armed'
+  echo "$flushout" | grep -q 'restoring the setting'
+  echo "$flushout" | grep -q 'rebuild the bot population'
 }
 
 @test "bots flush aborts on a failed backup BEFORE touching the conf" {
