@@ -25,7 +25,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow module rebuild --backup --json
   [ "$status" -eq 0 ]
   grep -n 'mysqldump' "$FIXTURE/calls.log" | head -1 | grep -q '^1:'
-  grep -q 'compose stop ac-worldserver' "$FIXTURE/calls.log"
+  grep -q 'compose stop -t 180 ac-worldserver' "$FIXTURE/calls.log"
   grep -q 'compose up -d --build' "$FIXTURE/calls.log"
   [ ! -f "$SDIR/.dml-rebuild-pending" ]
   echo "$output" | grep -q '"event":"done"'

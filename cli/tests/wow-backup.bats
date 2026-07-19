@@ -112,7 +112,7 @@ _seed_backup() {
   safety="$(echo "$d" | jq -r '.data.safety_backup')"
   [[ "$safety" =~ -prerestore\.sql\.gz$ ]]
   [ -f "$BDIR/$safety" ]
-  stop_line=$(grep -n 'compose stop ac-worldserver ac-authserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  stop_line=$(grep -n 'compose stop -t 180 ac-worldserver ac-authserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
   dump_line=$(grep -n 'mysqldump' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
   import_line=$(grep -n 'mysql-import' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
   start_line=$(grep -n 'compose start ac-worldserver ac-authserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)

@@ -47,7 +47,7 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   run bash "$DML" wow docker-clean --level 1 --json
   [ "$status" -eq 0 ]
   db_line=$(grep -n 'compose up -d ac-database' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
-  stop_line=$(grep -n 'compose stop ac-worldserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
+  stop_line=$(grep -n 'compose stop -t 180 ac-worldserver' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
   builder_line=$(grep -n '^builder prune -af$' "$DML_STUB_CALL_LOG" | head -1 | cut -d: -f1)
   [ -n "$db_line" ]
   [ -n "$stop_line" ]

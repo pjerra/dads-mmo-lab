@@ -184,7 +184,11 @@ _games_start_impl() {
         _stream_cmd bash ./dml-start.sh "$mode" || rc=$?
     else
         if [[ "$mode" == "restart" ]]; then
-            _stream_cmd docker compose down || rc=$?
+            # -t 180: game servers (AC saves characters during graceful
+            # shutdown) need far more than docker's 10s default before the
+            # force-kill -- an early SIGKILL loses everything since the
+            # last periodic save.
+            _stream_cmd docker compose down -t 180 || rc=$?
         fi
         [[ $rc -eq 0 ]] && { _stream_cmd docker compose up -d || rc=$?; }
     fi
@@ -432,7 +436,7 @@ case "$cmd" in
     _require_docker
     cd "$compose_dir"
     echo "[dml] Stopping $title..."
-    docker compose down
+    docker compose down -t 180
     echo "[dml] $title stopped"
     ;;
 
@@ -997,7 +1001,7 @@ case "$cmd" in
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start stop
         cd "$compose_dir"
         rc=0
-        _stream_cmd docker compose down || rc=$?
+        _stream_cmd docker compose down -t 180 || rc=$?
         if [[ $rc -ne 0 ]]; then
             if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end stop error
@@ -1311,7 +1315,7 @@ case "$cmd" in
         ndjson_line info "protecting the database volume..."
         (cd "$sdir" && docker compose up -d ac-database >/dev/null 2>&1) || ndjson_line warn "could not start ac-database -- continuing"
         ndjson_line info "stopping worldserver..."
-        (cd "$sdir" && docker compose stop ac-worldserver >/dev/null 2>&1) || ndjson_line warn "could not stop worldserver -- continuing"
+        (cd "$sdir" && docker compose stop -t 180 ac-worldserver >/dev/null 2>&1) || ndjson_line warn "could not stop worldserver -- continuing"
         ndjson_line info "pruning build cache..."
         dcbrc=0
         if dcbout="$(cd "$sdir" && docker builder prune -af 2>&1)"; then :; else dcbrc=$?; fi
@@ -2618,7 +2622,11 @@ case "$cmd" in
               exit 1
             fi
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "stopping the game server..."
-            if ! (cd "$sdir" && docker compose stop ac-worldserver ac-authserver >/dev/null 2>&1); then
+            # Flush characters before the stop so the pre-restore safety
+            # dump contains everyone's latest state (best-effort), and give
+            # the world time to finish its own shutdown save.
+            soap_exec 'saveall' >/dev/null 2>&1 || true
+            if ! (cd "$sdir" && docker compose stop -t 180 ac-worldserver ac-authserver >/dev/null 2>&1); then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end backup-restore error
                 ndjson_error BACKUP_FAILED "Could not stop the server" "Nothing was changed."
@@ -3117,7 +3125,7 @@ case "$cmd" in
               fi
             fi
             ndjson_line info "stopping worldserver..."
-            (cd "$sdir" && docker compose stop ac-worldserver >/dev/null 2>&1) || true
+            (cd "$sdir" && docker compose stop -t 180 ac-worldserver >/dev/null 2>&1) || true
             ndjson_line info "building (this can take 30-90 minutes; full log: $sdir/rebuild.log)..."
             rc=0
             (cd "$sdir" && docker compose up -d --build 2>&1 | tee rebuild.log | while IFS= read -r _l; do ndjson_line info "$_l"; done; exit "${PIPESTATUS[0]}") || rc=$?

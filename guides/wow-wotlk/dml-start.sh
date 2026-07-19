@@ -117,9 +117,26 @@ _start_auth_world() {
 
 _ensure_playerbots_conf
 
+# Flush every character to the DB before stopping -- AC's periodic save is
+# 15-minutely, so anything newer lives only in memory and dies with an
+# ungraceful stop. Best-effort: an unreachable SOAP (world still booting,
+# networking broken) must never block the restart; the long `docker stop`
+# timeout below is the second line of defense (worldserver runs as PID 1,
+# receives SIGTERM directly, and saves everyone during graceful shutdown --
+# it just needs far more than docker's 10s default with a big bot roster).
+_saveall_best_effort() {
+  local user="${DML_SOAP_USER:-admin}" pass="${DML_SOAP_PASS:-admin}"
+  _log "Saving all characters (saveall)..."
+  curl -s -m 30 -u "$user:$pass" -H 'Content-Type: text/xml' \
+    -d '<?xml version="1.0" encoding="utf-8"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:AC"><SOAP-ENV:Body><ns1:executeCommand><command>saveall</command></ns1:executeCommand></SOAP-ENV:Body></SOAP-ENV:Envelope>' \
+    "http://127.0.0.1:7878/" >/dev/null 2>&1 || true
+  return 0
+}
+
 if [[ "$MODE" == "restart" ]]; then
   _log "Restarting WoW server (staged)..."
-  docker stop "$AUTH_CONTAINER" "$WORLD_CONTAINER" 2>/dev/null || true
+  _saveall_best_effort
+  docker stop -t 300 "$AUTH_CONTAINER" "$WORLD_CONTAINER" 2>/dev/null || true
 else
   _log "Starting WoW server (staged)..."
 fi

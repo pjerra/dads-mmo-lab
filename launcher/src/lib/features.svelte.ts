@@ -29,7 +29,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "bot-level": "tested",
   "party-presets": "tested",
   "preset-io": "tested",
-  "settings-save": "untested",
+  "settings-save": "tested",
   "config-edit": "untested",
   "ale-reload": "untested",
   "modules-cpp": "untested",
