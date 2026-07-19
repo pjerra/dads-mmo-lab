@@ -2878,6 +2878,144 @@ case "$cmd" in
             ;;
         esac
         ;;
+      bots)
+        btsub="${1:-}"; shift || true
+        case "$btsub" in
+          flush)
+            # Flush & rebuild the ambient bot population (Batch 1 F4).
+            # Streaming NDJSON like games restart: (1) character backup
+            # (backup-create internals, NOT a subprocess), (2) arm
+            # AiPlayerbot.DeleteRandomBotAccounts = 1 + an EXIT trap that
+            # ALWAYS puts it back to 0, (3) staged restart -- deletion runs
+            # during boot, (4/5) restore the flag, (6) second restart to
+            # rebuild the population from the current settings, (7) done.
+            # Destructive: requires BOTH --yes and the typed ack --ack flush.
+            btconfirm=0; btack=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --yes) btconfirm=1; shift ;;
+                --ack) _need_flag_val "$1" $#; btack="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start bots-flush
+            if [[ "$btconfirm" != 1 || "$btack" != "flush" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error CONFIRM_REQUIRED "Flushing deletes ALL random bots' characters, auctions and mail, then rebuilds them from your settings" "Re-run with --yes --ack flush. Your own characters are untouched."
+              else echo "[dml] ERROR: re-run with --yes --ack flush" >&2; fi
+              exit 1
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+              else echo "[dml] ERROR: docker down" >&2; fi
+              exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+              else echo "[dml] ERROR: wow server not installed" >&2; fi
+              exit 1
+            fi
+            pbflush="$sdir/env/dist/etc/modules/playerbots.conf"
+            if ! _cfg_conf_ensure "$pbflush"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error NOT_FOUND "playerbots.conf not found (nor its .dist)" "Is the WoW server fully installed?"
+              else echo "[dml] ERROR: playerbots.conf missing" >&2; fi
+              exit 1
+            fi
+            flush_t0=$SECONDS
+            # (1) safety backup FIRST -- a failed dump aborts before any
+            # destructive step, nothing has changed yet.
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts first..."
+            bdir="$(_backup_dir)"; mkdir -p "$bdir"
+            bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            if ! _backup_dump_to "$bdir/$bfile" 0; then
+              errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
+              rm -f "$bdir/$bfile.err"
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error BACKUP_FAILED "The safety backup failed - nothing was changed" "$errtail"
+              else echo "[dml] ERROR: safety backup failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backup created: $bfile"
+            while IFS= read -r p || [[ -n "$p" ]]; do
+              [[ -z "$p" ]] && continue
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "pruned old backup: $p"
+            done < <(_backup_prune)
+            # (2) arm the delete flag; from here on the trap guarantees the
+            # flag is restored no matter how this arm dies.
+            CFG_CHANGED=false
+            FLUSH_RESTORE_CONF="$pbflush"
+            trap '_flush_restore_flag' EXIT
+            if ! _cfg_conf_write "$pbflush" "AiPlayerbot.DeleteRandomBotAccounts" "1"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error WRITE_FAILED "Could not write playerbots.conf" ""
+              else echo "[dml] ERROR: conf write failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "delete flag armed - restarting so the server wipes the random bots..."
+            # (3) restart #1: the wipe happens during this boot
+            if _flush_restart_authworld "$sdir" "bot deletion"; then frc=0; else frc=$?; fi
+            if [[ "$frc" -ne 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                if [[ "$frc" -eq 2 ]]; then
+                  ndjson_error TIMEOUT "Timed out waiting for the world during bot deletion" "The delete flag was restored to 0. Check the server from Home, then try again."
+                else
+                  ndjson_error RESTART_FAILED "Could not restart the server for bot deletion" "The delete flag was restored to 0. Check the server from Home."
+                fi
+              else echo "[dml] ERROR: restart failed (flag restored)" >&2; fi
+              exit 1
+            fi
+            # (4)+(5) bots are gone -- put the flag back BEFORE the rebuild
+            # restart, or the next boot would wipe them again.
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "bots deleted - restoring the setting..."
+            if ! _cfg_conf_write "$pbflush" "AiPlayerbot.DeleteRandomBotAccounts" "0"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error WRITE_FAILED "Could not restore playerbots.conf - fix AiPlayerbot.DeleteRandomBotAccounts back to 0 by hand before the next restart" ""
+              else echo "[dml] ERROR: conf restore failed" >&2; fi
+              exit 1
+            fi
+            FLUSH_RESTORE_CONF=""
+            # (6) restart #2: the server recreates the population from the
+            # current Bot World settings during this boot
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "restarting again to rebuild the bot population (this is the long part)..."
+            if _flush_restart_authworld "$sdir" "bot rebuild"; then frc=0; else frc=$?; fi
+            if [[ "$frc" -ne 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                if [[ "$frc" -eq 2 ]]; then
+                  ndjson_error TIMEOUT "Timed out waiting for the world during the rebuild" "The bots may still be logging in - check Home before retrying."
+                else
+                  ndjson_error RESTART_FAILED "Could not restart the server for the rebuild" "Start it from Home - the delete flag is already back at 0."
+                fi
+              else echo "[dml] ERROR: rebuild restart failed" >&2; fi
+              exit 1
+            fi
+            # (7) done
+            flush_elapsed=$(( SECONDS - flush_t0 ))
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end bots-flush ok
+              ndjson_done "{\"flushed\":true,\"backup\":\"$(json_escape "$bfile")\",\"elapsed_secs\":$flush_elapsed}"
+            else
+              echo "[dml] bot population flushed and rebuilt (backup: $bfile, ${flush_elapsed}s)"
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots flush --yes --ack flush --json"
+            exit 1
+            ;;
+        esac
+        ;;
       module)
         msub="${1:-}"; shift || true
         case "$msub" in

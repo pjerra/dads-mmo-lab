@@ -543,6 +543,23 @@ async fn wow_config_files(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "config".into(), "files".into()]).await
 }
 
+// Flush & rebuild the ambient bot population. The typed "flush" ack is
+// enforced CLI-side too -- this command always passes it, so the webview's
+// own typed-confirm is the user-facing gate while the CLI contract keeps
+// scripts honest.
+#[tauri::command]
+async fn wow_bots_flush(
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "bots".into(), "flush".into(), "--yes".into(), "--ack".into(), "flush".into()],
+        on_event,
+        state,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn wow_config_raw_reset(
     file: String,
@@ -1194,6 +1211,7 @@ pub fn run() {
             wow_config_files,
             wow_config_raw_reset,
             wow_config_raw_write,
+            wow_bots_flush,
             wow_party_setup,
             wow_party_online,
             wow_party_add,

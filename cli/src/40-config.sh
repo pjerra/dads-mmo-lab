@@ -397,6 +397,48 @@ _world_ready() {
     [[ "${hits:-0}" -gt 0 ]]
 }
 
+# --- `wow bots flush` helpers (Batch 1 F4) ---------------------------------
+
+# _flush_restart_authworld <sdir> <label>: one staged auth+world restart,
+# reusing the exact `games restart` internals (guides/wow-wotlk/dml-start.sh
+# semantics): saveall best-effort -> compose stop -t 180 (graceful, chars
+# saved) -> compose up -d --no-deps (recreate so conf/env changes apply,
+# WITHOUT re-running the one-shot db-import/client-data init) -> readiness
+# wait on the boot-complete marker (_world_ready). Streams progress lines in
+# --json mode. Returns 0 ready / 1 compose failed / 2 readiness timeout
+# (budget DML_READY_TIMEOUT_SECS, default 1800s -- bot deletion/creation
+# happens DURING boot and can take many minutes).
+_flush_restart_authworld() {
+    local sdir="$1" label="$2" timeout="${DML_READY_TIMEOUT_SECS:-1800}" t0=$SECONDS last_note=0 elapsed
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "saving all characters (best effort)..."
+    soap_exec 'saveall' >/dev/null 2>&1 || true
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "stopping auth + world ($label)..."
+    (cd "$sdir" && docker compose stop -t 180 ac-worldserver ac-authserver >/dev/null 2>&1) || return 1
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "starting auth + world (compose, no deps)..."
+    (cd "$sdir" && docker compose up -d --no-deps ac-authserver ac-worldserver >/dev/null 2>&1) || return 1
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "waiting for the world ($label)..."
+    while :; do
+        _world_ready && return 0
+        elapsed=$(( SECONDS - t0 ))
+        (( elapsed >= timeout )) && return 2
+        if (( elapsed - last_note >= 60 )); then
+            last_note=$elapsed
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "still waiting (~$(( elapsed / 60 ))m) - deleting/creating thousands of bots takes a while..."
+        fi
+        sleep 2
+    done
+}
+
+# EXIT-trap hook for `wow bots flush`: however the flow dies after the
+# delete flag was armed, the flag goes back to 0 -- otherwise EVERY later
+# boot would silently wipe the bots again. The arm clears
+# FLUSH_RESTORE_CONF once it restores the flag itself.
+_flush_restore_flag() {
+    [[ -n "${FLUSH_RESTORE_CONF:-}" ]] || return 0
+    _cfg_conf_write "$FLUSH_RESTORE_CONF" "AiPlayerbot.DeleteRandomBotAccounts" "0" || true
+    return 0
+}
+
 # _bots_counts <world_state>: echoes the complete server-detail bots JSON
 # fragment `"bots":{"online":<int|null>,"max":<int|null>}`. Computed ONLY
 # when <world_state> is "running" -- otherwise both fields stay null and NO

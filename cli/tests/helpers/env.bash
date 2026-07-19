@@ -267,6 +267,18 @@ if [[ "${1:-}" == "compose" ]]; then
   log "compose $*"
   exit "${DML_STUB_COMPOSE_EXIT:-0}"
 fi
+# bots-flush readiness (_world_ready): inspect serves a canned StartedAt,
+# logs serves DML_STUB_LOGS_FILE (same conventions as use_docker_stub above;
+# --since filtering is docker's job, the canned file already IS the
+# current-run view).
+if [[ "${1:-}" == "inspect" ]]; then
+  printf '%s\n' "${DML_STUB_STARTED_AT:-2026-07-17T10:00:00.000000000Z}"
+  exit 0
+fi
+if [[ "${1:-}" == "logs" ]]; then
+  [[ -n "${DML_STUB_LOGS_FILE:-}" && -f "${DML_STUB_LOGS_FILE}" ]] && cat "${DML_STUB_LOGS_FILE}"
+  exit 0
+fi
 # docker-clean seams (`wow docker-usage`/`wow docker-clean`): builder/image/
 # system prune-style commands share one shape -- log argv, emit canned
 # output from DML_STUB_DOCKER_OUT (a file, same convention as

@@ -494,6 +494,13 @@ export const gamesRestart = (id: string, onEvent: (e: TermEvent) => void): Promi
   ch.onmessage = onEvent;
   return invoke("games_restart", { id, onEvent: ch });
 };
+// Flush & rebuild the ambient bot population (Batch 1 F4). The CLI enforces
+// --yes plus the typed ack itself; the GUI's typed-confirm gates calling this.
+export const wowBotsFlush = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_bots_flush", { onEvent: ch });
+};
 
 export interface OnlineChar { guid: number; name: string; class: number; level: number; }
 export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }

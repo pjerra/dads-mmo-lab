@@ -10,6 +10,7 @@
     wowConfigRawReset,
     wowConsoleSend,
     gamesRestart,
+    wowBotsFlush,
     type ConfFile,
     type ConfigSetting,
     type PbKey,
@@ -119,6 +120,33 @@
   $effect(() => {
     if (tab === "botworld" && !pbLoaded) void loadPbKeys();
   });
+
+  // --- Flush & rebuild bot population (Batch 1 F4) -------------------------
+  let flushConfirm = $state("");
+  let flushing = $state(false);
+
+  async function runFlush() {
+    if (flushConfirm !== "flush") return;
+    flushConfirm = "";
+    flushing = true;
+    restartState.restarting = true; // the flush restarts the server twice
+    error = null;
+    beginRun("config");
+    try {
+      await wowBotsFlush((e) => {
+        buf.term = applyEvent(buf.term, e);
+      });
+    } catch (e) {
+      const err = e as { code?: string; message?: string; hint?: string };
+      buf.term = applyEvent(buf.term, {
+        event: "error",
+        error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
+      });
+    } finally {
+      flushing = false;
+      restartState.restarting = false;
+    }
+  }
 
   async function savePbChanges() {
     pbSaving = true;
@@ -447,6 +475,32 @@
           <p class="muted">Loading keys…</p>
         {/if}
       </div>
+
+      <h3>Danger zone</h3>
+      <div class="card danger-card">
+        <strong>Flush &amp; rebuild the bot population</strong>
+        <p class="muted">
+          Deletes ALL ~{settings.find((s) => s.key === "bots.population")?.value ?? "2000"} random
+          bots' characters, auctions and mail, then rebuilds the population from your settings above.
+          Your own characters and party bots on real accounts are untouched. A character backup is
+          taken first. The server restarts twice — this takes several minutes.
+        </p>
+        <div class="row">
+          <input
+            placeholder={'Type "flush" to confirm'}
+            bind:value={flushConfirm}
+            disabled={flushing || restartState.restarting}
+          />
+          <button
+            class="danger"
+            onclick={runFlush}
+            disabled={flushConfirm !== "flush" || flushing || restartState.restarting || featureLocked("bots-flush")}
+            title={featureLocked("bots-flush") ? LOCKED_HINT : undefined}
+          >
+            Flush &amp; rebuild
+          </button>
+        </div>
+      </div>
     {/if}
 
   {:else}
@@ -548,6 +602,7 @@
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
   .live-card { background: #161b22; border: 1px solid #2ea043; border-radius: 8px; padding: 12px 16px; }
+  .danger-card { border-color: #f85149; }
   .pb-list { display: flex; flex-direction: column; gap: 4px; max-height: 420px; overflow-y: auto; }
   .pbrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 3px 6px; border-radius: 6px; }
   .pbrow.dirty { background: #1c1a10; outline: 1px solid #d29922; }
