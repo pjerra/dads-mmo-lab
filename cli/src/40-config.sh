@@ -44,7 +44,9 @@ _parse_server_info() {
 # type: float | int | bool | text | char. bool values are "1"/"0" strings
 # (that is what the AC env bridge expects). ahbot.character is special-cased
 # in `config set` (resolves a character name to GUID+ACCOUNT, writes both).
-# bots.population is special-cased (one number written to MIN and MAX).
+# bots.population is special-cased (one number written to BOTH
+# AiPlayerbot.MinRandomBots and .MaxRandomBots in playerbots.conf, and both
+# legacy MIN/MAX env overrides removed).
 # server.motd is special-cased end to end: this AC build has NO Motd conf key
 # (verified against worldserver.conf.dist 2026-07-15) -- motd lives in
 # acore_auth.motd, is loaded by MotdMgr, and is applied LIVE by the console
@@ -63,7 +65,13 @@ _parse_server_info() {
 # authoritative after the next recreate; while the frozen env is still in
 # the running container the save reports `"applied":"restart"`. The three
 # rates rows below were MIGRATED from env rows to conf rows (their legacy
-# env keys are cleaned up on save by the same derivation).
+# env keys are cleaned up on save by the same derivation), and so were
+# bots.population / bots.autologin (playerbots.conf). playerbots.conf rows
+# NEVER live-apply (the module reads its conf at startup) -- their set
+# always answers `"applied":"restart"`. `config set` additionally accepts a
+# DIRECT route key `conf:playerbots.conf:<Key>` for the Bot World all-keys
+# browser (playerbots.conf ONLY -- worldserver keys stay curated-rows-only
+# on purpose), validated as ^[A-Za-z0-9_.]+$ with a newline-free value.
 _cfg_rows() {
 cat <<'EOF'
 rates.xp_kill|Rates|XP from kills|float|0.5|20|conf:Rate.XP.Kill|1|Multiplies XP earned from kills. 3 = level three times as fast.
@@ -83,8 +91,43 @@ crossfaction.guild|Cross-faction|Guilds across factions|bool|||conf:AllowTwoSide
 crossfaction.chat|Cross-faction|Chat across factions|bool|||conf:AllowTwoSide.Interaction.Chat|0|When on, both factions understand each other in chat.
 crossfaction.auction|Cross-faction|Shared auction house|bool|||conf:AllowTwoSide.Interaction.Auction|0|When on, both factions use one shared auction house.
 crossfaction.calendar|Cross-faction|Calendar across factions|bool|||conf:AllowTwoSide.Interaction.Calendar|0|When on, calendar invites work across factions.
-bots.population|Playerbots|World bot population|int|0|3000|AC_AI_PLAYERBOT_MAX_RANDOM_BOTS|500|How many ambient bots populate the world. Saving writes min and max to this one number.
-bots.autologin|Playerbots|Bots log in at server start|bool|||AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN|1|When on, ambient bots log in automatically after the server starts.
+bots.population|Bot Population|World bot population|int|0|3000|conf:playerbots.conf:AiPlayerbot.MaxRandomBots|500|How many ambient bots populate the world. Saving writes min and max to this one number.
+bots.autologin|Bot Population|Bots log in at server start|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotAutologin|1|When on, ambient bots log in automatically after the server starts.
+bots.per_interval|Bot Population|Bot logins per cycle|int|1|500|conf:playerbots.conf:AiPlayerbot.RandomBotsPerInterval|60|How many bots are processed per update cycle. Higher fills the world faster after a restart.
+bots.periodic_online|Bot Population|Bots rotate online and offline|bool|||conf:playerbots.conf:AiPlayerbot.EnablePeriodicOnlineOffline|0|When on, bots log in and out over time like real players instead of staying a fixed set.
+bots.alliance_ratio|Bot Balance|Alliance share|int|0|100|conf:playerbots.conf:AiPlayerbot.RandomBotAllianceRatio|50|Weighting for how many bots are Alliance. 50 and 50 with Horde share means an even split.
+bots.horde_ratio|Bot Balance|Horde share|int|0|100|conf:playerbots.conf:AiPlayerbot.RandomBotHordeRatio|50|Weighting for how many bots are Horde.
+bots.min_level|Bot Balance|Lowest bot level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandomBotMinLevel|1|New bots are created no lower than this level.
+bots.max_level|Bot Balance|Highest bot level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandomBotMaxLevel|80|New bots are created no higher than this level.
+bots.sync_level|Bot Balance|Match player levels|bool|||conf:playerbots.conf:AiPlayerbot.SyncLevelWithPlayers|0|When on, the highest bot level follows the highest real player's level.
+bots.disable_random_levels|Bot Balance|Same starting level for all bots|bool|||conf:playerbots.conf:AiPlayerbot.DisableRandomLevels|0|When on, every new bot starts at the fixed starting level below instead of a random level.
+bots.starting_level|Bot Balance|Bot starting level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandombotStartingLevel|1|The level new bots start at when random levels are off.
+bots.min_level_chance|Bot Balance|Chance of a lowest-level bot|float|0|1|conf:playerbots.conf:AiPlayerbot.RandomBotMinLevelChance|0.1|Chance a new bot is created at the lowest level. 0.1 means 10 percent.
+bots.max_level_chance|Bot Balance|Chance of a highest-level bot|float|0|1|conf:playerbots.conf:AiPlayerbot.RandomBotMaxLevelChance|0.1|Chance a new bot is created at the highest level. 0.1 means 10 percent.
+bots.fixed_level|Bot Balance|Freeze bot levels|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotFixedLevel|0|When on, bots keep their level forever and never level up.
+bots.xp_rate|Bot Balance|Bot leveling speed|float|0.5|20|conf:playerbots.conf:AiPlayerbot.RandomBotXPRate|1.0|Multiplies how fast bots level, on top of the server XP rate.
+bots.join_lfg|Bot Behavior|Bots queue for dungeons|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotJoinLfg|1|When on, bots use the dungeon finder and fill group slots.
+bots.join_bg|Bot Behavior|Bots join battlegrounds|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotJoinBG|1|When on, bots queue for battlegrounds and arenas so PvP fights happen.
+bots.auto_quests|Bot Behavior|Bots do quests|bool|||conf:playerbots.conf:AiPlayerbot.AutoDoQuests|1|When on, bots pick up and complete quests on their own.
+bots.auto_equip_loot|Bot Behavior|Bots equip looted upgrades|bool|||conf:playerbots.conf:AiPlayerbot.AutoEquipUpgradeLoot|1|When on, bots put on items they loot when those are upgrades.
+bots.auto_gear|Bot Behavior|Bots get gear on level-up|bool|||conf:playerbots.conf:AiPlayerbot.AutoUpgradeEquip|1|When on, bots automatically receive level-appropriate equipment upgrades.
+bots.auto_talents|Bot Behavior|Bots pick talents|bool|||conf:playerbots.conf:AiPlayerbot.AutoPickTalents|1|When on, bots spend their talent points automatically on level-up.
+bots.auto_trainer_spells|Bot Behavior|Bots learn trainer spells|bool|||conf:playerbots.conf:AiPlayerbot.AutoLearnTrainerSpells|1|When on, bots learn their class spells automatically on level-up.
+bots.auto_quest_spells|Bot Behavior|Bots learn quest spells|bool|||conf:playerbots.conf:AiPlayerbot.AutoLearnQuestSpells|1|When on, bots learn class quest reward spells automatically.
+bots.trading|Bot Behavior|Bot trading|int|0|3|conf:playerbots.conf:AiPlayerbot.EnableRandomBotTrading|1|0 off, 1 buy and sell, 2 only buy, 3 only sell.
+bots.mail|Bot Behavior|Bots can send mail|bool|||conf:playerbots.conf:AiPlayerbot.BotSendMailEnabled|1|When on, bots can mail items or money when asked in chat.
+bots.talk|Bot Chat|Bots chat|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotTalk|1|When on, bots talk in say, yell and general chat.
+bots.emote|Bot Chat|Bots use emotes|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotEmote|0|When on, bots wave, dance and cheer now and then.
+bots.suggest_dungeons|Bot Chat|Bots suggest dungeons|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotSuggestDungeons|1|When on, bots suggest dungeon runs in chat.
+bots.greet|Bot Chat|Bots greet on invite|bool|||conf:playerbots.conf:AiPlayerbot.EnableGreet|0|When on, bots say hello when invited to a group.
+bots.broadcasts|Bot Chat|Bot world chatter|bool|||conf:playerbots.conf:AiPlayerbot.EnableBroadcasts|1|When on, bots announce loot, levels and events in the world channels.
+bots.guild_chat|Bot Chat|Bots chat in guilds|bool|||conf:playerbots.conf:AIPlayerbot.GuildFeedback|1|When on, guild member bots comment on guild events. Note the key really is spelled AIPlayerbot in playerbots.conf.
+bots.active_alone|Bot Performance|Active bots with no players nearby|int|0|100|conf:playerbots.conf:AiPlayerbot.BotActiveAlone|10|Roughly what percent of bots stay active when no real player is around. Higher feels livelier but uses more CPU.
+bots.active_rotation|Bot Performance|Active bot rotation seconds|int|5|3600|conf:playerbots.conf:AiPlayerbot.BotActiveAloneDurationSeconds|30|How often a different set of bots takes its active turn.
+bots.smart_scale|Bot Performance|Auto-reduce bots under load|bool|||conf:playerbots.conf:AiPlayerbot.botActiveAloneSmartScale|1|When on, the server quietly idles bots when it is struggling to keep up.
+bots.force_radius|Bot Performance|Always-active radius in yards|int|0|1000|conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInRadius|150|Bots within this many yards of a real player are always active. 0 disables.
+bots.force_zone|Bot Performance|Always active in your zone|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInZone|1|When on, bots in the same zone as a real player are always active.
+bots.force_guild|Bot Performance|Always active in your guild|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInGuild|1|When on, bots that share a guild with a real player are always active.
 ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
 ahbot.buyer|AHBot|Auction buyer bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_BUYER|0|When on, the bot occasionally buys player auctions.
 ahbot.character|AHBot|Seller character|char|||AC_AUCTION_HOUSE_BOT_GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
@@ -243,6 +286,24 @@ _cfg_conf_write() {
     ' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
     mv "$tmp" "$1"
     CFG_CHANGED=true
+    return 0
+}
+
+# _pb_kv_lines <file>: every active `Key = value` line as
+# key<US>value<US>lineno rows (US = 0x1f, never appears in conf values).
+# Comments and non-assignment lines are skipped; the caller dedupes.
+_pb_kv_lines() {
+    awk '
+        {
+            s = $0; sub(/\r$/, "", s)
+            if (s !~ /^[ \t]*[A-Za-z0-9_.]+[ \t]*=/) next
+            sub(/^[ \t]+/, "", s)
+            eq = index(s, "=")
+            k = substr(s, 1, eq - 1); sub(/[ \t]+$/, "", k)
+            v = substr(s, eq + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+            printf "%s\x1f%s\x1f%d\n", k, v, NR
+        }
+    ' "$1" 2>/dev/null || true
     return 0
 }
 

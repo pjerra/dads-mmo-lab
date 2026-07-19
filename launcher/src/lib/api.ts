@@ -457,6 +457,15 @@ export async function wowConfigSet(
 ): Promise<{ changed: boolean; restart_required: boolean; applied?: "live" | "restart" | "none" }> {
   return await invoke("wow_config_set", { key, value });
 }
+export interface PbKey {
+  key: string;
+  value: string;
+  default: string | null;
+  line: number;
+}
+export async function wowConfigPbKeys(): Promise<{ source: string; keys: PbKey[] }> {
+  return await invoke("wow_config_pb_keys");
+}
 export async function wowConfigRawRead(
   file: RawFileName,
 ): Promise<{ file: string; content: string }> {

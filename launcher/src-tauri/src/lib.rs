@@ -534,6 +534,11 @@ async fn wow_config_set(
 }
 
 #[tauri::command]
+async fn wow_config_pb_keys(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "config".into(), "pb-keys".into()]).await
+}
+
+#[tauri::command]
 async fn wow_config_raw_read(
     file: String,
     state: State<'_, AppState>,
@@ -1172,6 +1177,7 @@ pub fn run() {
             wow_config_list,
             wow_config_set,
             wow_config_raw_read,
+            wow_config_pb_keys,
             wow_config_raw_write,
             wow_party_setup,
             wow_party_online,

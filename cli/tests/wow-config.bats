@@ -28,7 +28,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow config list --json
   [ "$status" -eq 0 ]
   # bots.population reads the MAX env (2000); rates fall back to default "1"
-  [ "$(echo "$output" | jq -r '.data.settings | length')" = "23" ]
+  [ "$(echo "$output" | jq -r '.data.settings | length')" = "58" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="bots.population") | .value')" = "2000" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .value')" = "1" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .default')" = "1" ]
@@ -63,10 +63,16 @@ teardown() { teardown_fixture; }
 }
 
 @test "config set bots.population writes BOTH min and max" {
-  run bash "$DML" wow config set --key bots.population --value 500 --json
+  # Migrated to a playerbots.conf row (Batch 1 F2) -- the full env-removal
+  # matrix lives in wow-config-pb.bats; this keeps the one-number-two-keys
+  # contract pinned.
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  printf 'AiPlayerbot.MinRandomBots = 500\nAiPlayerbot.MaxRandomBots = 500\n' \
+    > "$GDIR/env/dist/etc/modules/playerbots.conf"
+  run bash "$DML" wow config set --key bots.population --value 900 --json
   [ "$status" -eq 0 ]
-  yq -e '.services.ac-worldserver.environment.AC_AI_PLAYERBOT_MIN_RANDOM_BOTS == "500"' "$OVR"
-  yq -e '.services.ac-worldserver.environment.AC_AI_PLAYERBOT_MAX_RANDOM_BOTS == "500"' "$OVR"
+  grep -q '^AiPlayerbot.MinRandomBots = 900$' "$GDIR/env/dist/etc/modules/playerbots.conf"
+  grep -q '^AiPlayerbot.MaxRandomBots = 900$' "$GDIR/env/dist/etc/modules/playerbots.conf"
 }
 
 @test "config set rejects out-of-range and wrong-type values as BAD_ARG" {

@@ -3,13 +3,16 @@
   import {
     wowConfigList,
     wowConfigSet,
+    wowConfigPbKeys,
     wowConfigRawRead,
     wowConfigRawWrite,
     wowConsoleSend,
     gamesRestart,
     type ConfigSetting,
+    type PbKey,
     type RawFileName,
   } from "$lib/api";
+  import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
@@ -29,7 +32,7 @@
   // UI mirror of the CLI's raw-write lock (cli rejects these two names).
   const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
 
-  let { tab = "settings" }: { tab?: "settings" | "files" } = $props();
+  let { tab = "settings" }: { tab?: "settings" | "files" | "botworld" } = $props();
   let settings: ConfigSetting[] = $state([]);
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
@@ -45,7 +48,55 @@
 
   let aleNote: string | null = $state(null);
 
+  // --- Bot World all-keys browser (Batch 1 F2) -----------------------------
+  const PB_RENDER_CAP = 200;
+  let pbKeys: PbKey[] = $state([]);
+  let pbLoaded = $state(false);
+  let pbQuery = $state("");
+  let pbEdits: Record<string, string> = $state({});
+  let pbSaving = $state(false);
+  const pbFiltered = $derived(filterPbKeys(pbKeys, pbQuery));
+  const pbShown = $derived(pbFiltered.slice(0, PB_RENDER_CAP));
+  const pbStaged = $derived(stagedPbChanges(pbKeys, pbEdits));
+
+  async function loadPbKeys() {
+    try {
+      const r = await wowConfigPbKeys();
+      pbKeys = r.keys;
+      pbEdits = {};
+      pbLoaded = true;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    }
+  }
+  $effect(() => {
+    if (tab === "botworld" && !pbLoaded) void loadPbKeys();
+  });
+
+  async function savePbChanges() {
+    pbSaving = true;
+    error = null;
+    try {
+      for (const c of pbStaged) {
+        const r = await wowConfigSet(`conf:playerbots.conf:${c.key}`, c.value);
+        if (r.restart_required) restartState.needed = true;
+      }
+      await loadPbKeys();
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      pbSaving = false;
+    }
+  }
+
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
+  // "Bot ..."-prefixed groups render on the Bot World tab, everything else
+  // on Settings (AHBot deliberately does NOT match the "Bot " prefix).
+  const visibleGroups = $derived(
+    tab === "botworld" ? groups.filter((g) => g.startsWith("Bot ")) : groups.filter((g) => !g.startsWith("Bot ")),
+  );
   const dirty = $derived(dirtyKeys(settings, edits));
   const fileReadonly = $derived(READONLY_FILES.includes(file));
   // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
@@ -205,7 +256,7 @@
 
 <section class="content" class:fill={tab === "files" && fileLoaded}>
   <header class="bar">
-    <h2>{tab === "settings" ? "Settings" : "Modules"}</h2>
+    <h2>{tab === "settings" ? "Settings" : tab === "botworld" ? "Bot World" : "Modules"}</h2>
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
@@ -215,22 +266,24 @@
     <div class="live-card"><p>Applied live ✓ — the running server picked the change up, no restart needed.</p></div>
   {/if}
 
-  {#if tab === "settings"}
-    <div class="card testing-card">
-      <label class="row">
-        <input
-          type="checkbox"
-          checked={testingModeOn()}
-          onchange={(e) => setTestingMode(e.currentTarget.checked)}
-        />
-        Enable untested features (for smoke testing)
-      </label>
-      <p class="muted">
-        Untested features stay disabled until their smoke test passes. The checklist lives in
-        docs/SMOKE-TESTS.md.
-      </p>
-    </div>
-    {#each groups as g (g)}
+  {#if tab === "settings" || tab === "botworld"}
+    {#if tab === "settings"}
+      <div class="card testing-card">
+        <label class="row">
+          <input
+            type="checkbox"
+            checked={testingModeOn()}
+            onchange={(e) => setTestingMode(e.currentTarget.checked)}
+          />
+          Enable untested features (for smoke testing)
+        </label>
+        <p class="muted">
+          Untested features stay disabled until their smoke test passes. The checklist lives in
+          docs/SMOKE-TESTS.md.
+        </p>
+      </div>
+    {/if}
+    {#each visibleGroups as g (g)}
       <h3>{g}</h3>
       {#each settings.filter((s) => s.group === g) as s (s.key)}
         <div class="setting" class:dirty={dirty.includes(s.key)}>
@@ -303,6 +356,49 @@
         {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
       </button>
     </div>
+
+    {#if tab === "botworld"}
+      <h3>All playerbots.conf keys</h3>
+      <div class="card">
+        <p class="muted">
+          Every setting the bots module knows, straight from playerbots.conf. Changes apply after a
+          server restart. Hover a key for its default value.
+        </p>
+        <input placeholder="Search keys… (e.g. broadcast, teleport, revive)" bind:value={pbQuery} />
+        {#if pbLoaded}
+          <div class="pb-list">
+            {#each pbShown as k (k.key)}
+              <div class="pbrow" class:dirty={pbEdits[k.key] !== undefined && pbEdits[k.key] !== k.value}>
+                <span class="pbkey" title={k.default !== null ? `Default: ${k.default}` : "No default recorded"}>{k.key}</span>
+                <input
+                  class="pbval"
+                  value={pbEdits[k.key] ?? k.value}
+                  disabled={pbSaving || restartState.restarting}
+                  oninput={(e) => (pbEdits[k.key] = e.currentTarget.value)}
+                />
+              </div>
+            {/each}
+          </div>
+          {#if pbFiltered.length > PB_RENDER_CAP}
+            <p class="muted">Showing the first {PB_RENDER_CAP} of {pbFiltered.length} matches — narrow the search.</p>
+          {:else if pbFiltered.length === 0}
+            <p class="muted">No keys match.</p>
+          {/if}
+          <div class="row">
+            <button
+              class="primary"
+              onclick={savePbChanges}
+              disabled={pbStaged.length === 0 || pbSaving || restartState.restarting || featureLocked("bots-world")}
+              title={featureLocked("bots-world") ? LOCKED_HINT : undefined}
+            >
+              Save {pbStaged.length} change{pbStaged.length === 1 ? "" : "s"}
+            </button>
+          </div>
+        {:else}
+          <p class="muted">Loading keys…</p>
+        {/if}
+      </div>
+    {/if}
 
   {:else}
     <div class="row">
@@ -387,4 +483,9 @@
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
   .live-card { background: #161b22; border: 1px solid #2ea043; border-radius: 8px; padding: 12px 16px; }
+  .pb-list { display: flex; flex-direction: column; gap: 4px; max-height: 420px; overflow-y: auto; }
+  .pbrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 3px 6px; border-radius: 6px; }
+  .pbrow.dirty { background: #1c1a10; outline: 1px solid #d29922; }
+  .pbkey { font-family: Consolas, monospace; font-size: 12.5px; color: #c9d1d9; overflow-wrap: anywhere; }
+  .pbval { width: 220px; flex-shrink: 0; font-family: Consolas, monospace; font-size: 12.5px; }
 </style>

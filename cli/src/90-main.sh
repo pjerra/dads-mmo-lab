@@ -1905,9 +1905,15 @@ case "$cmd" in
                 rreq=false
                 val="$motd_live"
               elif _cfg_conf_route "$env"; then
-                cpath="$(_cfg_conf_path "$conf_file")"
-                val="$(_cfg_conf_read "$cpath" "$conf_key")"
-                [[ -n "$val" ]] || val="$(_cfg_conf_read "$cpath.dist" "$conf_key")"
+                # Truthful pre-migration read: while a legacy AC_* override
+                # is still in override.yml it BEATS the conf (env bridge),
+                # so show that value until a save cleans it up.
+                val="$(_cfg_env_read "$(_cfg_env_name_for "$conf_key")")"
+                if [[ -z "$val" ]]; then
+                  cpath="$(_cfg_conf_path "$conf_file")"
+                  val="$(_cfg_conf_read "$cpath" "$conf_key")"
+                  [[ -n "$val" ]] || val="$(_cfg_conf_read "$cpath.dist" "$conf_key")"
+                fi
               else
                 val="$(_cfg_env_read "$env")"
               fi
@@ -1930,6 +1936,47 @@ case "$cmd" in
               esac
             done
             [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config list --json"; exit 1; }
+            if [[ "$key" == conf:* ]]; then
+              # DIRECT conf route (Bot World all-keys browser): the key IS a
+              # `conf:playerbots.conf:<Key>` spec, no registry row involved.
+              # Restricted to playerbots.conf on purpose -- worldserver.conf
+              # stays curated-rows-only. No registry type means no range
+              # check, so the value is shape-validated instead: single line,
+              # bounded length (playerbots values are short), written
+              # verbatim. Always restart-to-apply (playerbots reads its conf
+              # at startup).
+              _cfg_conf_route "$key" || { json_err BAD_ARG "Bad conf key: $key" ""; exit 1; }
+              if [[ "$conf_file" != "playerbots.conf" ]]; then
+                json_err BAD_ARG "Direct conf keys are limited to playerbots.conf" "Other settings live in the curated list: dml wow config list --json"
+                exit 1
+              fi
+              [[ "$conf_key" =~ ^[A-Za-z0-9_.]+$ ]] \
+                || { json_err BAD_ARG "Invalid conf key: $conf_key" "Letters, digits, dots and underscores only."; exit 1; }
+              case "$value" in
+                *$'\n'*|*$'\r'*) json_err BAD_ARG "The value must be a single line" ""; exit 1 ;;
+              esac
+              if (( ${#value} > 200 )); then
+                json_err BAD_ARG "Value too long (max 200 characters)" ""; exit 1
+              fi
+              _cfg_preamble
+              CFG_CHANGED=false
+              cpath="$(_cfg_conf_path "$conf_file")"
+              _cfg_conf_ensure "$cpath" \
+                || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
+              _cfg_conf_write "$cpath" "$conf_key" "$value" \
+                || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              ename="$(_cfg_env_name_for "$conf_key")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                CFG_CHANGED=true
+              fi
+              if [[ "$CFG_CHANGED" == true ]]; then
+                json_ok '{"changed":true,"restart_required":true,"applied":"restart"}'
+              else
+                json_ok '{"changed":false,"restart_required":false,"applied":"none"}'
+              fi
+              exit 0
+            fi
             row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
             [[ "$row" == "$key|"* ]] || { json_err NOT_FOUND "Unknown setting: $key" "See: dml wow config list --json"; exit 1; }
             IFS='|' read -r _ group label type minv maxv env def explain <<< "$row"
@@ -1986,12 +2033,26 @@ case "$cmd" in
                 || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
               _cfg_conf_write "$cpath" "$conf_key" "$value" \
                 || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              if [[ "$key" == "bots.population" ]]; then
+                # One number drives BOTH population bounds (the row's conf
+                # key is MaxRandomBots; Min follows it here).
+                _cfg_conf_write "$cpath" "AiPlayerbot.MinRandomBots" "$value" \
+                  || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              fi
               envwas=false
               ename="$(_cfg_env_name_for "$conf_key")"
               if [[ -n "$(_cfg_env_read "$ename")" ]]; then
                 _cfg_env_remove "$ename"
                 envwas=true
                 CFG_CHANGED=true
+              fi
+              if [[ "$key" == "bots.population" ]]; then
+                ename="$(_cfg_env_name_for AiPlayerbot.MinRandomBots)"
+                if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                  _cfg_env_remove "$ename"
+                  envwas=true
+                  CFG_CHANGED=true
+                fi
               fi
               applied="none"; rreq=false
               if [[ "$CFG_CHANGED" == true ]]; then
@@ -2013,14 +2074,56 @@ case "$cmd" in
                   || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
                 _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
                 _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
-              elif [[ "$key" == "bots.population" ]]; then
-                _cfg_env_write AC_AI_PLAYERBOT_MIN_RANDOM_BOTS "$value"
-                _cfg_env_write AC_AI_PLAYERBOT_MAX_RANDOM_BOTS "$value"
               else
                 _cfg_env_write "$env" "$value"
               fi
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
             fi
+            ;;
+          pb-keys)
+            # Bot World all-keys browser: every active `Key = value` line of
+            # playerbots.conf (falling back to the .dist when the conf does
+            # not exist yet), plus each key's .dist default when both files
+            # exist. Duplicate keys keep their FIRST position but the LAST
+            # value/line wins (AC read semantics). Values are the raw right-
+            # hand side, trimmed -- quotes preserved so an edit round-trips
+            # verbatim through `config set conf:playerbots.conf:<Key>`.
+            _cfg_preamble
+            pbconf="$cfg_sdir/env/dist/etc/modules/playerbots.conf"
+            pbdist="$pbconf.dist"
+            pbsrc="$pbconf"
+            [[ -f "$pbsrc" ]] || pbsrc="$pbdist"
+            if [[ ! -f "$pbsrc" ]]; then
+              json_err NOT_FOUND "playerbots.conf not found (nor its .dist)" "Is the WoW server fully installed?"
+              exit 1
+            fi
+            declare -A _pb_val=() _pb_line=() _pb_def=()
+            _pb_order=()
+            while IFS=$'\x1f' read -r k v ln; do
+              [[ -n "${_pb_val[$k]+x}" ]] || _pb_order+=("$k")
+              _pb_val["$k"]="$v"; _pb_line["$k"]="$ln"
+            done < <(_pb_kv_lines "$pbsrc")
+            if [[ "$pbsrc" != "$pbdist" && -f "$pbdist" ]]; then
+              while IFS=$'\x1f' read -r k v ln; do
+                _pb_def["$k"]="$v"
+              done < <(_pb_kv_lines "$pbdist")
+            fi
+            first=1; out='['
+            for k in ${_pb_order[@]+"${_pb_order[@]}"}; do
+              dv=null
+              if [[ "$pbsrc" == "$pbdist" ]]; then
+                dv="\"$(json_escape "${_pb_val[$k]}")\""
+              elif [[ -n "${_pb_def[$k]+x}" ]]; then
+                dv="\"$(json_escape "${_pb_def[$k]}")\""
+              fi
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$(json_escape "$k")\",\"value\":\"$(json_escape "${_pb_val[$k]}")\",\"default\":$dv,\"line\":${_pb_line[$k]}}"
+              first=0
+            done
+            out+=']'
+            pbsrc_name="playerbots.conf"
+            [[ "$pbsrc" == "$pbdist" ]] && pbsrc_name="playerbots.conf.dist"
+            json_ok "{\"source\":\"$pbsrc_name\",\"keys\":$out}"
             ;;
           raw-read)
             fname=""

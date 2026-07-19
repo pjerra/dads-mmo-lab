@@ -49,6 +49,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "lan-play": "untested",
   "unbound-addon": "untested",
   "rates-live": "untested",
+  "bots-world": "untested",
 };
 
 export const LOCKED_HINT =

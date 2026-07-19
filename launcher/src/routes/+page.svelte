@@ -67,8 +67,8 @@
   {#if page === "items"}<Items />{/if}
   {#if page === "playerbots"}<Playerbots />{/if}
   {#if page === "commands"}<Commands />{/if}
-  {#if page === "settings" || page === "modules"}
-    <Config tab={page === "settings" ? "settings" : "files"} />
+  {#if page === "settings" || page === "modules" || page === "botworld"}
+    <Config tab={page === "settings" ? "settings" : page === "botworld" ? "botworld" : "files"} />
   {/if}
   {#if page === "backups"}<Backups />{/if}
 </main>
