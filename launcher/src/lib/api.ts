@@ -88,6 +88,9 @@ export interface SoapState {
 }
 export interface ServerDetail {
   verdict: ServerVerdict;
+  // Last exit code of the world container when it exists but isn't running
+  // (drives crashed-vs-stopped); null while running / when absent.
+  exit_code: number | null;
   containers: ContainerRow[];
   world_ready: boolean;
   soap: SoapState;

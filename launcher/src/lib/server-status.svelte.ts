@@ -114,7 +114,9 @@ export function startStatusPolling(): void {
 // render identically.
 export type StatusLabel = {
   label: string;
-  dot: "on" | "mid" | "bad" | "off";
+  // "crash" (Batch 2 F8) renders as a distinct pulsing red -- a crash must
+  // not look like an ordinary stop.
+  dot: "on" | "mid" | "bad" | "off" | "crash";
 };
 
 export function statusLabel(
@@ -129,12 +131,33 @@ export function statusLabel(
       return { label: "Starting…", dot: "mid" };
     case "soap_unreachable":
       return { label: "Unreachable", dot: "bad" };
+    case "crashed":
+      return { label: "Server crashed", dot: "crash" };
     case "stopped":
       return { label: "Stopped", dot: "off" };
     default:
       return { label: "Stopped", dot: "off" };
   }
 }
+
+// --- Sidebar chip quick-start (Batch 2 F8) ---------------------------------
+
+// Pure visibility rule for the chip's inline Start button: only when the
+// server could actually be started (stopped or crashed) and no restart is in
+// flight. A null verdict (never polled / backend unreachable) shows nothing
+// -- offering Start with zero knowledge would just produce error noise.
+export function chipStartVisible(
+  verdict: ServerDetail["verdict"] | null,
+  restarting: boolean,
+): boolean {
+  return !restarting && (verdict === "stopped" || verdict === "crashed");
+}
+
+// Cross-page signal: the sidebar chip's Start button navigates to Home and
+// asks it to run its own start flow (so streaming lands in Home's terminal
+// exactly as if the user clicked Start there). Home consumes the request in
+// an $effect.
+export const chipStart = $state({ requested: false });
 
 // Pure: distinguishes "installed but currently stopped" (containers were
 // created at some point -- compose up ran, they may be exited now) from

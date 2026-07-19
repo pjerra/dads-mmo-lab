@@ -1253,7 +1253,26 @@ case "$cmd" in
             *) detail_reach=false ;;
           esac
         fi
-        if [[ "$detail_world_state" != running ]]; then detail_verdict=stopped
+        detail_exit_code=null
+        if [[ "$detail_world_state" != running ]]; then
+          detail_verdict=stopped
+          # Crashed vs stopped (Batch 2 F8): a world container that exists
+          # but is not running carries its last exit code. 0 (clean) and 143
+          # (128+SIGTERM, i.e. a normal compose stop) read as stopped;
+          # anything else means the world DIED rather than being stopped ->
+          # crashed. Absent containers and a down docker daemon stay plain
+          # "stopped" with exit_code null -- there is nothing to inspect.
+          if [[ "$detail_world_state" != absent ]]; then
+            detail_ec="$(docker inspect -f '{{.State.ExitCode}}' ac-worldserver 2>/dev/null || true)"
+            detail_ec="${detail_ec%%$'\n'*}"
+            if [[ "$detail_ec" =~ ^[0-9]+$ ]]; then
+              detail_exit_code="$((10#$detail_ec))"
+              case "$detail_exit_code" in
+                0|143) ;;
+                *) detail_verdict=crashed ;;
+              esac
+            fi
+          fi
         elif [[ "$detail_reach" == true ]]; then detail_verdict=online
         elif [[ "$detail_ready" == true ]]; then detail_verdict=soap_unreachable
         else detail_verdict=starting; fi
@@ -1262,7 +1281,7 @@ case "$cmd" in
         detail_psp="$(_host_port_json ac-worldserver 7878)"
         detail_pd="$(_host_port_json ac-database 3306)"
         detail_bots="$(_bots_counts "$detail_world_state")"
-        json_ok "{\"verdict\":\"$detail_verdict\",\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},$detail_bots,\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
+        json_ok "{\"verdict\":\"$detail_verdict\",\"exit_code\":$detail_exit_code,\"containers\":[$detail_containers],\"world_ready\":$detail_ready,\"soap\":{\"reachable\":$detail_reach,\"auth_ok\":$detail_auth,$detail_stats},$detail_bots,\"ports\":{\"world\":$detail_pw,\"auth\":$detail_pa,\"soap\":$detail_psp,\"db\":$detail_pd}}"
         ;;
       docker-usage)
         # Read-only: raw `docker system df` lines, one JSON envelope. No

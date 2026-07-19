@@ -1,9 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { NAV, DEFAULT_PAGE, type PageId } from "$lib/nav";
-  import { serverStatus, startStatusPolling, statusLabel } from "$lib/server-status.svelte";
+  import {
+    chipStart,
+    chipStartVisible,
+    serverStatus,
+    startStatusPolling,
+    statusLabel,
+  } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
+  import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
@@ -32,25 +39,51 @@
   });
 
   let status = $derived(statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting));
+  let showChipStart = $derived(
+    chipStartVisible(serverStatus.detail?.verdict ?? null, restartState.restarting),
+  );
+
+  // Chip quick-start (Batch 2 F8): navigate to Home and hand it the start
+  // request -- Home runs its own start flow so streaming lands in its
+  // terminal exactly like a normal Start click. Deliberately NO stop
+  // counterpart on the chip (accidental-click risk).
+  function requestChipStart() {
+    chipStart.requested = true;
+    page = "home";
+  }
 </script>
 
 <main class="shell">
   <nav class="sidebar">
     <h1>DML<span>Launcher</span></h1>
-    <button
-      class="status-chip"
-      onclick={() => (page = "home")}
-      title="Go to Home"
-    >
-      <span
-        class="dot"
-        class:on={status.dot === "on"}
-        class:mid={status.dot === "mid"}
-        class:bad={status.dot === "bad"}
-        class:off={status.dot === "off"}
-      ></span>
-      {status.label}
-    </button>
+    <div class="chip-row">
+      <button
+        class="status-chip"
+        class:crashed={status.dot === "crash"}
+        onclick={() => (page = "home")}
+        title="Go to Home"
+      >
+        <span
+          class="dot"
+          class:on={status.dot === "on"}
+          class:mid={status.dot === "mid"}
+          class:bad={status.dot === "bad"}
+          class:off={status.dot === "off"}
+          class:crash={status.dot === "crash"}
+        ></span>
+        {status.label}
+      </button>
+      {#if showChipStart}
+        <button
+          class="chip-start"
+          onclick={requestChipStart}
+          disabled={featureLocked("chip-start")}
+          title={featureLocked("chip-start") ? LOCKED_HINT : "Start the server"}
+        >
+          ▶
+        </button>
+      {/if}
+    </div>
     {#if serverStatus.keepAwakeActive}
       <span class="chip-note" title="Windows sleep is blocked while the server is online (Tools → LAN play card to turn this off)">keeping PC awake</span>
     {/if}
@@ -91,11 +124,12 @@
   .sidebar h1 span { color: #c9d1d9; font-weight: 300; margin-left: 4px; }
   /* Always-visible live status chip (Round Q) -- sits above the nav so it's
      visible from every page, not just Home. */
+  .chip-row { display: flex; gap: 6px; margin: 0 12px 12px; align-items: stretch; }
   .sidebar button.status-chip {
     display: flex;
+    flex: 1;
     align-items: center;
     gap: 8px;
-    margin: 0 12px 12px;
     padding: 8px 10px;
     background: #161b22;
     border: 1px solid #30363d;
@@ -105,11 +139,26 @@
     font-size: 13px;
   }
   .sidebar button.status-chip:hover { border-color: #58a6ff; }
+  /* Distinct crash styling (Batch 2 F8): a crash must not read like a
+     normal stop. */
+  .sidebar button.status-chip.crashed { border-color: #f85149; color: #f85149; }
+  /* Inline quick-start next to the chip -- start only, never stop (an
+     accidental stop is costly; an accidental start is harmless). */
+  .sidebar button.chip-start {
+    padding: 8px 10px;
+    background: #238636;
+    border: 1px solid #2ea043;
+    border-radius: 6px;
+    color: white;
+    font-size: 12px;
+  }
+  .sidebar button.chip-start:disabled { opacity: 0.5; cursor: default; }
   .status-chip .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .status-chip .dot.on { background: #3fb950; }
   .status-chip .dot.mid { background: #d29922; animation: chip-dot-pulse 1.4s ease-in-out infinite; }
   .status-chip .dot.off { background: #f85149; }
   .status-chip .dot.bad { background: #ffa657; }
+  .status-chip .dot.crash { background: #f85149; animation: chip-dot-pulse 0.9s ease-in-out infinite; }
   @keyframes chip-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   /* Small hints under the chip (keep-awake indicator, LAN refresh toast). */
   .chip-note { margin: -8px 12px 8px; padding: 0 10px; font-size: 11px; color: #6e7681; }

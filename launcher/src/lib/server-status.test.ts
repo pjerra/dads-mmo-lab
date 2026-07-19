@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { containersExist, statusLabel } from "./server-status.svelte";
+import { chipStartVisible, containersExist, statusLabel } from "./server-status.svelte";
 import type { ServerDetail } from "./api";
 
 function detailWith(containers: ServerDetail["containers"]): ServerDetail {
   return {
     verdict: "stopped",
+    exit_code: null,
     containers,
     world_ready: false,
     soap: {
@@ -49,8 +50,38 @@ describe("statusLabel", () => {
     expect(statusLabel("stopped", false)).toEqual({ label: "Stopped", dot: "off" });
   });
 
+  it("maps crashed to Server crashed with its own distinct dot kind", () => {
+    expect(statusLabel("crashed", false)).toEqual({ label: "Server crashed", dot: "crash" });
+    // Restarting still wins -- recovering FROM a crash shows the restart.
+    expect(statusLabel("crashed", true)).toEqual({ label: "Restarting…", dot: "mid" });
+  });
+
   it("falls back to Stopped for an unpolled/null verdict, not restarting", () => {
     expect(statusLabel(null, false)).toEqual({ label: "Stopped", dot: "off" });
+  });
+});
+
+// Chip quick-start visibility (Batch 2 F8): only startable states, never
+// mid-restart, never without data.
+describe("chipStartVisible", () => {
+  it("shows for stopped and crashed", () => {
+    expect(chipStartVisible("stopped", false)).toBe(true);
+    expect(chipStartVisible("crashed", false)).toBe(true);
+  });
+
+  it("hides for running-ish verdicts", () => {
+    expect(chipStartVisible("online", false)).toBe(false);
+    expect(chipStartVisible("starting", false)).toBe(false);
+    expect(chipStartVisible("soap_unreachable", false)).toBe(false);
+  });
+
+  it("hides while restarting, whatever the polled verdict says", () => {
+    expect(chipStartVisible("stopped", true)).toBe(false);
+    expect(chipStartVisible("crashed", true)).toBe(false);
+  });
+
+  it("hides when there is no verdict at all", () => {
+    expect(chipStartVisible(null, false)).toBe(false);
   });
 });
 

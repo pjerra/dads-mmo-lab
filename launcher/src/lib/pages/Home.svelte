@@ -5,7 +5,7 @@
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
+  import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
 
   const WOW_ID = "wow-server-playerbots";
@@ -40,6 +40,17 @@
     refreshing = false;
   }
   onMount(refresh);
+
+  // Chip quick-start consumer (Batch 2 F8): the sidebar ▶ sets the request
+  // and navigates here; this effect runs on mount AND when the request flips
+  // while Home is already the active page. Consumed before starting so a
+  // re-render can't double-fire.
+  $effect(() => {
+    if (chipStart.requested && !busy) {
+      chipStart.requested = false;
+      act("start");
+    }
+  });
 
   async function act(action: "start" | "stop" | "restart") {
     busy = true;
@@ -81,7 +92,11 @@
 
   {#if serverStatus.detail}
     {@const d = serverStatus.detail}
-    <div class="card status-card" class:warn={!restartState.restarting && d.verdict === "soap_unreachable"}>
+    <div
+      class="card status-card"
+      class:warn={!restartState.restarting && d.verdict === "soap_unreachable"}
+      class:crash={!restartState.restarting && d.verdict === "crashed"}
+    >
       <div class="card-title">
         <span
           class="dot status-dot"
@@ -89,12 +104,14 @@
           class:mid={restartState.restarting || d.verdict === "starting"}
           class:bad={!restartState.restarting && d.verdict === "soap_unreachable"}
           class:off={!restartState.restarting && d.verdict === "stopped"}
+          class:crash={!restartState.restarting && d.verdict === "crashed"}
         ></span>
-        <strong>
+        <strong class:crash-text={!restartState.restarting && d.verdict === "crashed"}>
           {#if restartState.restarting}Restarting…
           {:else if d.verdict === "online"}World is up
           {:else if d.verdict === "starting"}Starting up…
           {:else if d.verdict === "soap_unreachable"}World is running, but the launcher can't reach it
+          {:else if d.verdict === "crashed"}Server crashed
           {:else}Server is stopped{/if}
         </strong>
       </div>
@@ -114,6 +131,15 @@
           If this persists for more than a minute, Docker's networking in the distro is likely stuck —
           restarting Docker inside dml-arch usually fixes it.
         </p>
+      {:else if d.verdict === "crashed"}
+        <div class="recover-row">
+          <p class="muted">
+            The world server stopped unexpectedly{d.exit_code !== null ? ` (exit code ${d.exit_code})` : ""}.
+            Recover starts the server again; the crash usually leaves no damage — characters
+            save every 15 minutes.
+          </p>
+          <button class="primary" disabled={busy} onclick={() => act("start")}>Recover</button>
+        </div>
       {:else}
         <p class="muted">Start the server below.</p>
       {/if}
@@ -205,6 +231,10 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
   .card.warn { border-color: #f85149; }
+  /* Distinct crash styling (Batch 2 F8): red border + red title, pulsing dot. */
+  .card.crash { border-color: #f85149; background: #160b0e; }
+  .crash-text { color: #f85149; }
+  .recover-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .server-card { flex-direction: column; align-items: stretch; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
   .card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
@@ -223,6 +253,7 @@
   .dot.status-dot.mid { background: #d29922; animation: dot-pulse 1.4s ease-in-out infinite; }
   .dot.status-dot.off { background: #f85149; }
   .dot.status-dot.bad { background: #ffa657; }
+  .dot.status-dot.crash { background: #f85149; animation: dot-pulse 0.9s ease-in-out infinite; }
   @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   .stats { display: flex; gap: 18px; flex-wrap: wrap; }
   .health { margin-top: 12px; border-top: 1px solid #30363d; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }

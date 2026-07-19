@@ -181,6 +181,8 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Realmlist status (read-only) | Tools → Game realmlist: with the client path set, the card reads the real `Data\<locale>\realmlist.wtf` — green "Points at your server" when it (or the game's Config.wtf fallback) says 127.0.0.1/LAN IP, yellow with the actual address otherwise, grey "no client path" hint when unset. |
 | ⬜ | [realmlist-fix] One-click fix | Edit realmlist.wtf to a bogus host (e.g. `set realmlist logon.example.com`) → card goes yellow → "Point at this PC" → file now contains `set realmlist 127.0.0.1`, card green. With LAN play ON, the LAN button writes the LAN IP instead. Game logs in fine afterwards. |
 | ⬜ | [realmlist-fix] Protect toggle | Enable "Protect the file" → file becomes read-only (check in Explorer → Properties) and OTHER tools can't overwrite it; the card's own Fix still works (clears + restores the flag). Untick → read-only attribute gone. |
+| ⬜ | Crashed verdict (read-only) | With the server running: kill the world hard (`wsl -d dml-arch -u dml -- docker kill ac-worldserver`) → within ~7s chip + Home card show "Server crashed" (pulsing red, distinct from a normal Stop) with the exit code and a Recover button; Recover = normal Start, world comes back. A normal Stop must still read plain "Stopped". |
+| ⬜ | [chip-start] Chip ▶ quick-start | With the server stopped (or crashed), a small green ▶ shows next to the sidebar chip on EVERY page → click → lands on Home with the start streaming into Home's terminal. No stop button on the chip, ever. |
 
 ## Known caveats (not tests — expectations)
 

@@ -244,6 +244,74 @@ EOF
   [ "$(echo "$output" | jq -r '.data.bots.max')" = "777" ]
 }
 
+# ---------- crashed vs stopped (Batch 2 F8) ----------
+
+world_exited_rows() {  # $1 = docker status text for the world row
+  cat > "$FIXTURE/ps.rows" <<EOF
+ac-database|running|Up 2 hours (healthy)
+ac-worldserver|exited|$1
+ac-authserver|exited|Exited (0) 5 minutes ago
+EOF
+  export DML_STUB_PS_ROWS="$FIXTURE/ps.rows"
+}
+
+@test "server-detail: world exit code 0 -> stopped (clean exit), exit_code in envelope" {
+  world_exited_rows "Exited (0) 5 minutes ago"
+  export DML_STUB_EXIT_CODE=0
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "stopped" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "0" ]
+}
+
+@test "server-detail: world exit code 143 (SIGTERM = normal stop) -> stopped" {
+  world_exited_rows "Exited (143) 5 minutes ago"
+  export DML_STUB_EXIT_CODE=143
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "stopped" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "143" ]
+}
+
+@test "server-detail: world exit code 137 (SIGKILL) -> crashed" {
+  world_exited_rows "Exited (137) 5 minutes ago"
+  export DML_STUB_EXIT_CODE=137
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "crashed" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "137" ]
+}
+
+@test "server-detail: world exit code 1 -> crashed" {
+  world_exited_rows "Exited (1) 5 minutes ago"
+  export DML_STUB_EXIT_CODE=1
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "crashed" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "1" ]
+}
+
+@test "server-detail: absent world -> stopped with exit_code null (nothing to inspect)" {
+  # No PS rows at all: every container is absent. Even a poisoned stub exit
+  # code must not leak through -- the absent guard skips the inspect.
+  export DML_STUB_EXIT_CODE=137
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "stopped" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "null" ]
+}
+
+@test "server-detail: running world keeps exit_code null and its verdict" {
+  all_running_rows
+  ready_log
+  soap_live_response
+  export DML_STUB_EXIT_CODE=137
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "online" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "null" ]
+}
+
 @test "server-info still behaves exactly as before (regression canary)" {
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
   run bash "$DML" wow server-info --json

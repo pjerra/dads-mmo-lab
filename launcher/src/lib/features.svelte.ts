@@ -56,6 +56,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "keep-awake": "untested",
   "lan-auto-refresh": "untested",
   "realmlist-fix": "untested",
+  "chip-start": "untested",
 };
 
 export const LOCKED_HINT =
