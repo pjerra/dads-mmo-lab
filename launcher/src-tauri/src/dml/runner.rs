@@ -89,6 +89,13 @@ impl DmlRunner {
     /// these commands don't need it. Unlike `run_json`, a non-zero exit is
     /// NOT an error: the CLI's own failure text is the payload the caller
     /// wants to display, not a signal to synthesize a different message.
+    ///
+    /// SECURITY/ROBUSTNESS NOTE (review-mandated): there is no Rust-side
+    /// timeout or output cap here. Callers MUST self-bound: only wire
+    /// fixed, allowlisted CLI subcommands that are themselves fast and
+    /// bounded (lan is quick; doctor's network probe self-caps at 5s). A
+    /// future unbounded command wired through this seam would hang its IPC
+    /// promise and grow memory without limit.
     pub fn run_captured(&self, args: &[&str]) -> Result<String, RunnerError> {
         let out = self
             .command_raw(args)
