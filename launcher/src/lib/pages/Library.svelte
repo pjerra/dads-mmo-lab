@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesCatalog, gamesStart, gamesStop, gamesRemove, type TitleInfo, type TermEvent } from "$lib/api";
+  import {
+    gamesCatalog,
+    gamesStart,
+    gamesStop,
+    gamesRemove,
+    urlInstall,
+    type TitleInfo,
+    type TermEvent,
+  } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
@@ -171,6 +179,30 @@
     installStore.text = "";
   }
 
+  // --- Install from URL (Batch 4 F16) --------------------------------------
+  // Streams the EXISTING interactive `dml run <url>` CLI arm through the
+  // same InstallTerminal/install-slot machinery as regular game installs.
+  // The id carries the URL ("url:<https link>") so the runner closure and a
+  // nav-away remount both know what to (re)connect to.
+  let urlValue = $state("");
+  let urlArmed = $state(false);
+  let urlConfirmInput = $state("");
+
+  function armUrlInstall() {
+    urlArmed = true;
+    urlConfirmInput = "";
+  }
+  function cancelUrlArm() {
+    urlArmed = false;
+    urlConfirmInput = "";
+  }
+  function confirmUrlInstall() {
+    if (urlConfirmInput !== "install") return;
+    urlArmed = false;
+    urlConfirmInput = "";
+    startInstall(`url:${urlValue.trim()}`);
+  }
+
   // installStore.running is flipped false directly by InstallTerminal's own
   // exit/error handling (so it stays truthful even if the instance that
   // witnesses the exit event is an orphaned one from before a nav-away) --
@@ -277,9 +309,64 @@
     {/each}
   </div>
 
+  <h3>Install from URL / community titles</h3>
+  <div class="card url-card">
+    <p class="muted">
+      Paste a project's git link (https) to install a community-made server that follows the
+      DML layout (an install.sh at the repo root).
+    </p>
+    <p class="url-warn">
+      This runs the project's own install script on your machine — only use sources you
+      trust.
+    </p>
+    <div class="row">
+      <input
+        type="text"
+        placeholder="https://github.com/user/some-game-server.git"
+        bind:value={urlValue}
+        oninput={cancelUrlArm}
+        disabled={installBlocked}
+      />
+      {#if !urlArmed}
+        <button
+          class="primary"
+          disabled={installBlocked || !urlValue.trim().startsWith("https://") || featureLocked("title-url-install")}
+          title={featureLocked("title-url-install") ? LOCKED_HINT : undefined}
+          onclick={armUrlInstall}
+        >
+          Install
+        </button>
+      {/if}
+    </div>
+    {#if urlArmed}
+      <div class="remove-confirm">
+        <p>About to run the installer from {urlValue.trim()}. Type "install" to confirm:</p>
+        <div class="row">
+          <input type="text" placeholder="install" bind:value={urlConfirmInput} />
+          <button
+            class="primary"
+            disabled={urlConfirmInput !== "install" || installBlocked}
+            onclick={confirmUrlInstall}
+          >
+            Run installer
+          </button>
+          <button onclick={cancelUrlArm}>Cancel</button>
+        </div>
+      </div>
+    {/if}
+  </div>
+
   {#if installStore.id && !installStore.id.startsWith("tool:")}
     {#key installStore.nonce}
-      <InstallTerminal id={installStore.id} onExit={onInstallExit} />
+      {#if installStore.id.startsWith("url:")}
+        <InstallTerminal
+          id={installStore.id}
+          runner={(id, onEvent) => urlInstall(id.slice("url:".length), onEvent)}
+          onExit={onInstallExit}
+        />
+      {:else}
+        <InstallTerminal id={installStore.id} onExit={onInstallExit} />
+      {/if}
     {/key}
   {/if}
 
@@ -312,6 +399,8 @@
   .dot.off { background: #6e7681; }
   .remove-confirm { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .remove-confirm p { margin: 0; font-size: 13px; color: #d29922; }
+  .url-card { max-width: 640px; }
+  .url-warn { margin: 0; font-size: 13px; font-weight: 600; color: #f85149; }
   .keep-data { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #8b949e; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row input[type="text"] {

@@ -133,6 +133,22 @@ pub fn validate_ip(ip: &str) -> bool {
             .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Install-from-URL check (Batch 4 F16): a plain https git URL --
+/// `^https://[A-Za-z0-9./_-]+$`, bounded length. Deliberately closed (no
+/// ssh/scp forms, no query strings, no credentials-in-URL) -- the value
+/// becomes an argv token for `dml run <url>`, which git-clones it and runs
+/// the repo's own install script; the typed-confirm + warning in the GUI
+/// carry the trust decision, this only keeps shell-shaped garbage out.
+pub fn validate_git_url(url: &str) -> bool {
+    const PREFIX: &str = "https://";
+    url.len() <= 300
+        && url.len() > PREFIX.len()
+        && url.starts_with(PREFIX)
+        && url[PREFIX.len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '_' | '-'))
+}
+
 /// Internet-play address check (Batch 4 F15): a public IPv4 or hostname,
 /// `^[A-Za-z0-9.-]{1,253}$` -- mirrors the CLI's own `--internet` guard
 /// (which re-validates independently). Like validate_ip this only needs to
@@ -1259,6 +1275,71 @@ async fn tool_install(
     Ok(())
 }
 
+/// Batch 4 F16: install a community title from a pasted git URL -- streams
+/// the EXISTING interactive `dml run <url>` arm (clone + run the repo's own
+/// install script). Same single global InstallSlot as games_install /
+/// tool_install (deliberately the same body shape as those two): the
+/// BUSY guard, stdin handoff for games_install_input, and
+/// games_install_cancel's pid kill all work against this session unchanged.
+#[tauri::command]
+async fn url_install(
+    url: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    if !validate_git_url(&url) {
+        return Err(bad_arg(format!(
+            "invalid install URL: {url:?} (a plain https git link, e.g. https://github.com/user/repo.git)"
+        )));
+    }
+    let runner = state.runner.clone();
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Starting);
+    }
+    let state_arc = state.install.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let mut child = match runner.spawn_interactive(&["run", url.as_str()]) {
+            Ok(c) => c,
+            Err(e) => {
+                *state_arc.lock().unwrap() = None;
+                let _ = on_event.send(serde_json::json!({"event":"chunk","text": format!("failed to start: {e}\n")}));
+                let _ = on_event.send(serde_json::json!({"event":"exit","code": -1}));
+                return;
+            }
+        };
+        let stdin = child.stdin.take().expect("stdin piped");
+        let pid = child.id();
+        *state_arc.lock().unwrap() = Some(InstallSlot::Running(InstallSession { stdin, pid }));
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
+                }
+                Err(_) => break,
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        *state_arc.lock().unwrap() = None;
+        let _ = on_event.send(serde_json::json!({"event":"exit","code": code}));
+    })
+    .await
+    .map_err(|e| CmdError { code: "IPC".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn games_catalog(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["games".into(), "catalog".into()]).await
@@ -1446,6 +1527,7 @@ pub fn run() {
             games_status,
             games_catalog,
             games_install,
+            url_install,
             games_install_input,
             games_install_cancel,
             games_remove,
@@ -1590,6 +1672,26 @@ mod tests {
         assert!(!validate_ip("$(rm -rf /)"));
         assert!(!validate_ip("1.2.3.4`id`"));
         assert!(!validate_ip("../../etc/passwd"));
+    }
+
+    #[test]
+    fn git_url_validation_accepts_plain_https_repo_links() {
+        assert!(validate_git_url("https://github.com/user/repo.git"));
+        assert!(validate_git_url("https://github.com/user/repo"));
+        assert!(validate_git_url("https://gitlab.com/group/sub_group/my-game.git"));
+    }
+
+    #[test]
+    fn git_url_validation_rejects_non_https_and_shell_shapes() {
+        assert!(!validate_git_url(""));
+        assert!(!validate_git_url("https://"));
+        assert!(!validate_git_url("http://github.com/user/repo.git"));
+        assert!(!validate_git_url("git@github.com:user/repo.git"));
+        assert!(!validate_git_url("https://github.com/user/repo.git; rm -rf /"));
+        assert!(!validate_git_url("https://github.com/user/repo.git && whoami"));
+        assert!(!validate_git_url("https://evil.com/$(id)"));
+        assert!(!validate_git_url("https://user:pass@github.com/user/repo.git"));
+        assert!(!validate_git_url(&format!("https://x.com/{}", "a".repeat(300))));
     }
 
     #[test]

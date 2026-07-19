@@ -682,6 +682,14 @@ export const gamesInstall = (id: string, onEvent: (e: InstallEvent) => void): Pr
   ch.onmessage = onEvent;
   return invoke("games_install", { id, onEvent: ch });
 };
+// Batch 4 F16: install a community title from a pasted https git URL --
+// streams the interactive `dml run <url>` through the same single global
+// install session (reply input + Cancel work unchanged).
+export const urlInstall = (url: string, onEvent: (e: InstallEvent) => void): Promise<void> => {
+  const ch = new Channel<InstallEvent>();
+  ch.onmessage = onEvent;
+  return invoke("url_install", { url, onEvent: ch });
+};
 export async function gamesInstallInput(text: string): Promise<void> {
   return await invoke("games_install_input", { text });
 }
