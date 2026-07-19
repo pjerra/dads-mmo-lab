@@ -1071,8 +1071,16 @@ case "$cmd" in
         ;;
       remove)
         gid="${1:-}"; shift || true
-        confirm=0
-        [[ "${1:-}" == "--yes" ]] && confirm=1
+        confirm=0; keepdata=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --yes) confirm=1; shift ;;
+            # Batch 3 F13c: preserve the client-data docker volume (the ~6 GB
+            # maps/DBC download) so a later reinstall skips re-fetching it.
+            --keep-data) keepdata=1; shift ;;
+            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data]"; exit 1 ;;
+          esac
+        done
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start games-remove
         trow="$(_title_row "$gid")"
         if [[ -z "$trow" ]]; then
@@ -1104,6 +1112,43 @@ case "$cmd" in
           ndjson_line info "stopping $gid..."
           (cd "$tcompose" && docker compose down >/dev/null 2>&1) || true
         fi
+        # --- client-data volume (Batch 3 F13c) -------------------------------
+        # `compose down` (no -v) never removes named volumes, so the ~6 GB
+        # maps/DBC volume used to be left behind forever. If the title's
+        # compose file declares the AzerothCore client-data volume, remove it
+        # here by default (a removed title shouldn't keep 6 GB of disk) --
+        # unless --keep-data asked to preserve it for a faster reinstall.
+        # Volume name: compose prefixes the declared name with the project
+        # (compose-dir basename, lowercased/sanitized); the declared name
+        # itself defaults to ac-client-data but the base file reads it from
+        # DOCKER_VOL_DATA in the project .env, so honor that override.
+        vol_base=""
+        if [[ -n "$tcompose" ]]; then
+          for _c in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+            if [[ -f "$tcompose/$_c" ]] && grep -qE '^[[:space:]]*ac-client-data:' "$tcompose/$_c"; then
+              vol_base="ac-client-data"
+              break
+            fi
+          done
+          if [[ -n "$vol_base" ]]; then
+            _ovr="$(grep -m1 '^DOCKER_VOL_DATA=' "$tcompose/.env" 2>/dev/null | cut -d= -f2- || true)"
+            [[ -n "$_ovr" ]] && vol_base="$_ovr"
+          fi
+        fi
+        if [[ -n "$vol_base" ]]; then
+          vproj="$(basename "$tcompose" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+          tvol="${vproj}_${vol_base}"
+          if [[ "$keepdata" == 1 ]]; then
+            ndjson_line info "keeping the downloaded game data volume ($tvol, ~6 GB) for a faster reinstall"
+          else
+            if docker volume rm "$tvol" >/dev/null 2>&1; then
+              ndjson_line info "removed game data volume $tvol"
+            else
+              ndjson_line warn "could not remove game data volume $tvol (may not exist or still in use)"
+            fi
+          fi
+        fi
+        # ---------------------------------------------------------------------
         if [[ -L "$GAMES_DIR/$gid" ]]; then
           ttarget="$(readlink -f "$GAMES_DIR/$gid" 2>/dev/null || true)"
           rm -f "$GAMES_DIR/$gid"

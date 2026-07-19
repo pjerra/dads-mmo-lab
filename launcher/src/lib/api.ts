@@ -678,10 +678,16 @@ export async function gamesInstallInput(text: string): Promise<void> {
 export async function gamesInstallCancel(): Promise<void> {
   return await invoke("games_install_cancel");
 }
-export const gamesRemove = (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+// keepData (Batch 3 F13c): preserve the ~6 GB client-data docker volume so a
+// later reinstall skips the big download.
+export const gamesRemove = (
+  id: string,
+  onEvent: (e: TermEvent) => void,
+  keepData?: boolean,
+): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("games_remove", { id, onEvent: ch });
+  return invoke("games_remove", { id, keepData, onEvent: ch });
 };
 
 // --- LAN / doctor / tool-install / shell (Round Q Tools page) --------------

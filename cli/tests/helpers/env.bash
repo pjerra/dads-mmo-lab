@@ -32,6 +32,14 @@ if [[ "${1:-}" == "restart" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
   exit "${DML_STUB_RESTART_EXIT:-0}"
 fi
+if [[ "${1:-}" == "volume" ]]; then
+  # games remove keep-data (Batch 3 F13c): `docker volume rm <name>`.
+  if [[ "${2:-}" == "rm" && "${DML_STUB_VOLUME_RM_EXIT:-0}" != 0 ]]; then
+    echo "stub volume rm failure (in use)" >&2
+    exit "${DML_STUB_VOLUME_RM_EXIT}"
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "compose" ]]; then
   # find -f <file>
   file=""

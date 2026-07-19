@@ -21,6 +21,8 @@
   let removingId: string | null = $state(null);
   let removeInput = $state("");
   let removeBusy = $state(false);
+  // Batch 3 F13c: keep the ~6 GB client-data volume for a faster reinstall.
+  let removeKeepData = $state(false);
 
   // Install: which title's panel is shown, and whether its session is still
   // active. This lives in installStore (term-store.svelte.ts), NOT local
@@ -104,6 +106,7 @@
   function armRemove(id: string) {
     removingId = id;
     removeInput = "";
+    removeKeepData = false;
   }
   function cancelRemoveArm() {
     removingId = null;
@@ -130,14 +133,18 @@
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
     try {
-      await gamesRemove(id, (e: TermEvent) => {
-        buf.term = applyEvent(buf.term, e);
-        if (e.event === "done") {
-          sawDone = true;
-        } else if (e.event === "error") {
-          streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
-        }
-      });
+      await gamesRemove(
+        id,
+        (e: TermEvent) => {
+          buf.term = applyEvent(buf.term, e);
+          if (e.event === "done") {
+            sawDone = true;
+          } else if (e.event === "error") {
+            streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
+          }
+        },
+        removeKeepData,
+      );
     } catch (e) {
       outcomeErr = e;
     } finally {
@@ -225,6 +232,10 @@
         {#if removingId === t.id}
           <div class="remove-confirm">
             <p>Removing deletes the server and its data. Backups under ~/.dml are kept. Type the title id to confirm:</p>
+            <label class="keep-data">
+              <input type="checkbox" bind:checked={removeKeepData} disabled={busy} />
+              Keep downloaded game data (~6 GB) for faster reinstall
+            </label>
             <div class="row">
               <input type="text" placeholder={t.id} bind:value={removeInput} />
               <button disabled={removeInput !== t.id || busy} onclick={() => confirmRemove(t.id)}>Remove</button>
@@ -301,6 +312,7 @@
   .dot.off { background: #6e7681; }
   .remove-confirm { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .remove-confirm p { margin: 0; font-size: 13px; color: #d29922; }
+  .keep-data { display: flex; gap: 6px; align-items: center; font-size: 13px; color: #8b949e; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row input[type="text"] {
     background: #21262d;

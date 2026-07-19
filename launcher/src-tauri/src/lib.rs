@@ -1316,10 +1316,16 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
 #[tauri::command]
 async fn games_remove(
     id: String,
+    keep_data: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    stream_args(vec!["games".into(), "remove".into(), id, "--yes".into()], on_event, state).await
+    let mut args: Vec<String> = vec!["games".into(), "remove".into(), id, "--yes".into()];
+    // Batch 3 F13c: preserve the ~6 GB client-data volume for reinstalls.
+    if keep_data.unwrap_or(false) {
+        args.push("--keep-data".into());
+    }
+    stream_args(args, on_event, state).await
 }
 
 #[tauri::command]

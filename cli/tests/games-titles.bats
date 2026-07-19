@@ -121,3 +121,83 @@ EOF
   [ "$status" -eq 0 ]
   echo "$output" | grep -qi 'stopping'
 }
+
+# --- keep-data (Batch 3 F13c) ----------------------------------------------
+# A compose file declaring the AzerothCore client-data volume gets that
+# volume removed by default (compose down never removes named volumes) --
+# unless --keep-data preserves it for a faster reinstall.
+
+_setup_wow_removable() {  # creates an installed title whose compose declares ac-client-data
+  mkdir -p "$FIXTURE/maplestory-server"
+  cat > "$FIXTURE/maplestory-server/docker-compose.yml" <<'EOF'
+services:
+  ac-worldserver:
+    image: x
+volumes:
+  ac-database:
+  ac-client-data:
+EOF
+}
+
+@test "games remove --yes: client-data volume rm runs, project-prefixed" {
+  _setup_wow_removable
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  grep -q '^volume rm maplestory-server_ac-client-data$' "$FIXTURE/calls.log"
+  echo "$output" | grep -q 'removed game data volume'
+}
+
+@test "games remove --yes --keep-data: volume rm absent, keep note emitted" {
+  _setup_wow_removable
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --keep-data --json
+  [ "$status" -eq 0 ]
+  run grep 'volume rm' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "games remove --yes --keep-data: keep note names the volume, dir still deleted" {
+  _setup_wow_removable
+  run bash "$DML" games remove maplestory-server --yes --keep-data --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'keeping the downloaded game data volume (maplestory-server_ac-client-data'
+  echo "$output" | grep -q '"event":"done"'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+}
+
+@test "games remove --yes: DOCKER_VOL_DATA override in .env wins over the default name" {
+  _setup_wow_removable
+  printf 'DOCKER_VOL_DATA=my-custom-data\n' > "$FIXTURE/maplestory-server/.env"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  grep -q '^volume rm maplestory-server_my-custom-data$' "$FIXTURE/calls.log"
+}
+
+@test "games remove --yes: no client-data volume declared -> no volume rm at all" {
+  mkdir -p "$FIXTURE/maplestory-server"
+  printf 'services:\n  app:\n    image: x\n' > "$FIXTURE/maplestory-server/docker-compose.yml"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  run grep 'volume rm' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "games remove --yes: failed volume rm is a warn, removal still completes" {
+  _setup_wow_removable
+  export DML_STUB_VOLUME_RM_EXIT=1
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'could not remove game data volume'
+  echo "$output" | grep -q '"event":"done"'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+}
+
+@test "games remove: unknown flag -> BAD_ARG" {
+  mkdir -p "$FIXTURE/maplestory-server"
+  run bash "$DML" games remove maplestory-server --yes --nuke-it --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'BAD_ARG'
+}
