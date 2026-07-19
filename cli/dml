@@ -344,19 +344,90 @@ _parse_server_info() {
 # type: float | int | bool | text | char. bool values are "1"/"0" strings
 # (that is what the AC env bridge expects). ahbot.character is special-cased
 # in `config set` (resolves a character name to GUID+ACCOUNT, writes both).
-# bots.population is special-cased (one number written to MIN and MAX).
+# bots.population is special-cased (one number written to BOTH
+# AiPlayerbot.MinRandomBots and .MaxRandomBots in playerbots.conf, and both
+# legacy MIN/MAX env overrides removed).
 # server.motd is special-cased end to end: this AC build has NO Motd conf key
 # (verified against worldserver.conf.dist 2026-07-15) -- motd lives in
 # acore_auth.motd, is loaded by MotdMgr, and is applied LIVE by the console
 # command `.server set motd`. So its env column is a "-" sentinel, `list`
 # reads it from the DB, and `set` goes over SOAP instead of the override.
+#
+# CONF-FILE ROWS (Batch 1): an env column of `conf:<Key>` (worldserver.conf)
+# or `conf:<file>.conf:<Key>` (a conf under env/dist/etc/modules/) routes
+# `config list`/`config set` to a comment-preserving in-place edit of the
+# HOST conf file (bind-mounted into the container) instead of the compose
+# override. Rationale: a running container's env is frozen at creation AND
+# AC's env bridge beats conf values, so env-set keys can never live-apply --
+# conf rows CAN (worldserver.conf ones via SOAP `reload config`). On save,
+# any matching legacy AC_* env key (derived mechanically from the conf key,
+# see _cfg_env_name_for) is removed from the override so the conf value is
+# authoritative after the next recreate; while the frozen env is still in
+# the running container the save reports `"applied":"restart"`. The three
+# rates rows below were MIGRATED from env rows to conf rows (their legacy
+# env keys are cleaned up on save by the same derivation), and so were
+# bots.population / bots.autologin (playerbots.conf). playerbots.conf rows
+# NEVER live-apply (the module reads its conf at startup) -- their set
+# always answers `"applied":"restart"`. `config set` additionally accepts a
+# DIRECT route key `conf:playerbots.conf:<Key>` for the Bot World all-keys
+# browser (playerbots.conf ONLY -- worldserver keys stay curated-rows-only
+# on purpose), validated as ^[A-Za-z0-9_.]+$ with a newline-free value.
 _cfg_rows() {
 cat <<'EOF'
-rates.xp_kill|Rates|XP from kills|float|0.5|20|AC_RATE_XP_KILL|1|Multiplies XP earned from kills. 3 = level three times as fast.
-rates.xp_quest|Rates|XP from quests|float|0.5|20|AC_RATE_XP_QUEST|1|Multiplies XP from quest turn-ins.
-rates.gold|Rates|Gold drops|float|0.5|20|AC_RATE_DROP_MONEY|1|Multiplies money dropped by creatures.
-bots.population|Playerbots|World bot population|int|0|3000|AC_AI_PLAYERBOT_MAX_RANDOM_BOTS|500|How many ambient bots populate the world. Saving writes min and max to this one number.
-bots.autologin|Playerbots|Bots log in at server start|bool|||AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN|1|When on, ambient bots log in automatically after the server starts.
+rates.xp_kill|Rates|XP from kills|float|0.5|20|conf:Rate.XP.Kill|1|Multiplies XP earned from kills. 3 = level three times as fast.
+rates.xp_quest|Rates|XP from quests|float|0.5|20|conf:Rate.XP.Quest|1|Multiplies XP from quest turn-ins.
+rates.xp_explore|Rates|XP from exploring|float|0.5|20|conf:Rate.XP.Explore|1|Multiplies XP for discovering new areas.
+rates.gold|Rates|Gold drops|float|0.5|20|conf:Rate.Drop.Money|1|Multiplies money dropped by creatures.
+rates.honor|Rates|Honor gains|float|0.5|20|conf:Rate.Honor|1|Multiplies honor points from PvP kills and battlegrounds.
+rates.reputation|Rates|Reputation gains|float|0.5|20|conf:Rate.Reputation.Gain|1|Multiplies reputation earned with factions.
+rates.rested|Rates|Rested XP build-up|float|0.5|20|conf:Rate.Rest.InGame|1|How fast rested XP builds while logged in at an inn or city.
+rates.loot|Rates|Common item drops|float|0.5|20|conf:Rate.Drop.Item.Normal|1|Multiplies how often creatures drop common (white) items.
+rates.creature_damage|Rates|Monster damage|float|0.1|10|conf:Rate.Creature.Normal.Damage|1|Multiplies damage normal monsters deal. Below 1 makes fights easier.
+rates.creature_hp|Rates|Monster health|float|0.1|10|conf:Rate.Creature.Normal.HP|1|Multiplies normal monsters' health. Below 1 makes fights faster.
+rates.movespeed|Rates|Player movement speed|float|0.5|10|conf:Rate.MoveSpeed.Player|1|Multiplies how fast characters run. Applies on login.
+crossfaction.accounts|Cross-faction|Both factions on one account|bool|||conf:AllowTwoSide.Accounts|1|When on, one account can have both Alliance and Horde characters.
+crossfaction.group|Cross-faction|Group across factions|bool|||conf:AllowTwoSide.Interaction.Group|0|When on, Alliance and Horde players can group up together.
+crossfaction.guild|Cross-faction|Guilds across factions|bool|||conf:AllowTwoSide.Interaction.Guild|0|When on, guilds can have members from both factions.
+crossfaction.chat|Cross-faction|Chat across factions|bool|||conf:AllowTwoSide.Interaction.Chat|0|When on, both factions understand each other in chat.
+crossfaction.auction|Cross-faction|Shared auction house|bool|||conf:AllowTwoSide.Interaction.Auction|0|When on, both factions use one shared auction house.
+crossfaction.calendar|Cross-faction|Calendar across factions|bool|||conf:AllowTwoSide.Interaction.Calendar|0|When on, calendar invites work across factions.
+bots.population|Bot Population|World bot population|int|0|3000|conf:playerbots.conf:AiPlayerbot.MaxRandomBots|500|How many ambient bots populate the world. Saving writes min and max to this one number.
+bots.autologin|Bot Population|Bots log in at server start|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotAutologin|1|When on, ambient bots log in automatically after the server starts.
+bots.per_interval|Bot Population|Bot logins per cycle|int|1|500|conf:playerbots.conf:AiPlayerbot.RandomBotsPerInterval|60|How many bots are processed per update cycle. Higher fills the world faster after a restart.
+bots.periodic_online|Bot Population|Bots rotate online and offline|bool|||conf:playerbots.conf:AiPlayerbot.EnablePeriodicOnlineOffline|0|When on, bots log in and out over time like real players instead of staying a fixed set.
+bots.alliance_ratio|Bot Balance|Alliance share|int|0|100|conf:playerbots.conf:AiPlayerbot.RandomBotAllianceRatio|50|Weighting for how many bots are Alliance. 50 and 50 with Horde share means an even split.
+bots.horde_ratio|Bot Balance|Horde share|int|0|100|conf:playerbots.conf:AiPlayerbot.RandomBotHordeRatio|50|Weighting for how many bots are Horde.
+bots.min_level|Bot Balance|Lowest bot level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandomBotMinLevel|1|New bots are created no lower than this level.
+bots.max_level|Bot Balance|Highest bot level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandomBotMaxLevel|80|New bots are created no higher than this level.
+bots.sync_level|Bot Balance|Match player levels|bool|||conf:playerbots.conf:AiPlayerbot.SyncLevelWithPlayers|0|When on, the highest bot level follows the highest real player's level.
+bots.disable_random_levels|Bot Balance|Same starting level for all bots|bool|||conf:playerbots.conf:AiPlayerbot.DisableRandomLevels|0|When on, every new bot starts at the fixed starting level below instead of a random level.
+bots.starting_level|Bot Balance|Bot starting level|int|1|80|conf:playerbots.conf:AiPlayerbot.RandombotStartingLevel|1|The level new bots start at when random levels are off.
+bots.min_level_chance|Bot Balance|Chance of a lowest-level bot|float|0|1|conf:playerbots.conf:AiPlayerbot.RandomBotMinLevelChance|0.1|Chance a new bot is created at the lowest level. 0.1 means 10 percent.
+bots.max_level_chance|Bot Balance|Chance of a highest-level bot|float|0|1|conf:playerbots.conf:AiPlayerbot.RandomBotMaxLevelChance|0.1|Chance a new bot is created at the highest level. 0.1 means 10 percent.
+bots.fixed_level|Bot Balance|Freeze bot levels|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotFixedLevel|0|When on, bots keep their level forever and never level up.
+bots.xp_rate|Bot Balance|Bot leveling speed|float|0.5|20|conf:playerbots.conf:AiPlayerbot.RandomBotXPRate|1.0|Multiplies how fast bots level, on top of the server XP rate.
+bots.join_lfg|Bot Behavior|Bots queue for dungeons|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotJoinLfg|1|When on, bots use the dungeon finder and fill group slots.
+bots.join_bg|Bot Behavior|Bots join battlegrounds|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotJoinBG|1|When on, bots queue for battlegrounds and arenas so PvP fights happen.
+bots.auto_quests|Bot Behavior|Bots do quests|bool|||conf:playerbots.conf:AiPlayerbot.AutoDoQuests|1|When on, bots pick up and complete quests on their own.
+bots.auto_equip_loot|Bot Behavior|Bots equip looted upgrades|bool|||conf:playerbots.conf:AiPlayerbot.AutoEquipUpgradeLoot|1|When on, bots put on items they loot when those are upgrades.
+bots.auto_gear|Bot Behavior|Bots get gear on level-up|bool|||conf:playerbots.conf:AiPlayerbot.AutoUpgradeEquip|1|When on, bots automatically receive level-appropriate equipment upgrades.
+bots.auto_talents|Bot Behavior|Bots pick talents|bool|||conf:playerbots.conf:AiPlayerbot.AutoPickTalents|1|When on, bots spend their talent points automatically on level-up.
+bots.auto_trainer_spells|Bot Behavior|Bots learn trainer spells|bool|||conf:playerbots.conf:AiPlayerbot.AutoLearnTrainerSpells|1|When on, bots learn their class spells automatically on level-up.
+bots.auto_quest_spells|Bot Behavior|Bots learn quest spells|bool|||conf:playerbots.conf:AiPlayerbot.AutoLearnQuestSpells|1|When on, bots learn class quest reward spells automatically.
+bots.trading|Bot Behavior|Bot trading|int|0|3|conf:playerbots.conf:AiPlayerbot.EnableRandomBotTrading|1|0 off, 1 buy and sell, 2 only buy, 3 only sell.
+bots.mail|Bot Behavior|Bots can send mail|bool|||conf:playerbots.conf:AiPlayerbot.BotSendMailEnabled|1|When on, bots can mail items or money when asked in chat.
+bots.talk|Bot Chat|Bots chat|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotTalk|1|When on, bots talk in say, yell and general chat.
+bots.emote|Bot Chat|Bots use emotes|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotEmote|0|When on, bots wave, dance and cheer now and then.
+bots.suggest_dungeons|Bot Chat|Bots suggest dungeons|bool|||conf:playerbots.conf:AiPlayerbot.RandomBotSuggestDungeons|1|When on, bots suggest dungeon runs in chat.
+bots.greet|Bot Chat|Bots greet on invite|bool|||conf:playerbots.conf:AiPlayerbot.EnableGreet|0|When on, bots say hello when invited to a group.
+bots.broadcasts|Bot Chat|Bot world chatter|bool|||conf:playerbots.conf:AiPlayerbot.EnableBroadcasts|1|When on, bots announce loot, levels and events in the world channels.
+bots.guild_chat|Bot Chat|Bots chat in guilds|bool|||conf:playerbots.conf:AIPlayerbot.GuildFeedback|1|When on, guild member bots comment on guild events. Note the key really is spelled AIPlayerbot in playerbots.conf.
+bots.active_alone|Bot Performance|Active bots with no players nearby|int|0|100|conf:playerbots.conf:AiPlayerbot.BotActiveAlone|10|Roughly what percent of bots stay active when no real player is around. Higher feels livelier but uses more CPU.
+bots.active_rotation|Bot Performance|Active bot rotation seconds|int|5|3600|conf:playerbots.conf:AiPlayerbot.BotActiveAloneDurationSeconds|30|How often a different set of bots takes its active turn.
+bots.smart_scale|Bot Performance|Auto-reduce bots under load|bool|||conf:playerbots.conf:AiPlayerbot.botActiveAloneSmartScale|1|When on, the server quietly idles bots when it is struggling to keep up.
+bots.force_radius|Bot Performance|Always-active radius in yards|int|0|1000|conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInRadius|150|Bots within this many yards of a real player are always active. 0 disables.
+bots.force_zone|Bot Performance|Always active in your zone|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInZone|1|When on, bots in the same zone as a real player are always active.
+bots.force_guild|Bot Performance|Always active in your guild|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInGuild|1|When on, bots that share a guild with a real player are always active.
 ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
 ahbot.buyer|AHBot|Auction buyer bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_BUYER|0|When on, the bot occasionally buys player auctions.
 ahbot.character|AHBot|Seller character|char|||AC_AUCTION_HOUSE_BOT_GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
@@ -403,23 +474,190 @@ _cfg_env_write() {
     return 0
 }
 
+# _cfg_env_remove <ENV>: deletes the key from the override's environment map
+# (no-op when the override or key is absent). Callers use _cfg_env_read first
+# to learn whether it WAS present (frozen-env restart signal).
+_cfg_env_remove() {
+    [[ -f "$cfg_ovr" ]] || return 0
+    E="$1" "$DML_YQ_BIN" -i \
+        'del(.services.ac-worldserver.environment[strenv(E)])' "$cfg_ovr" 2>/dev/null || true
+    return 0
+}
+
+# --- conf-file rows (Batch 1) ----------------------------------------------
+# See the registry comment block: `conf:` env-column values route config
+# list/set to the bind-mounted conf files instead of the compose override.
+
+# _cfg_conf_route <envcol>: parses a `conf:[<file>.conf:]<Key>` spec. Sets
+# conf_file (defaults to worldserver.conf when the file part is omitted) and
+# conf_key for the caller (top-level dispatch -- deliberately not local).
+# Returns 1 when the value is not a conf: spec at all.
+_cfg_conf_route() {
+    local spec
+    [[ "$1" == conf:* ]] || return 1
+    spec="${1#conf:}"
+    conf_file="worldserver.conf"
+    if [[ "$spec" == *.conf:* ]]; then
+        conf_file="${spec%%:*}"
+        spec="${spec#*:}"
+    fi
+    conf_key="$spec"
+    return 0
+}
+
+# _cfg_conf_path <file>: host path of a conf. worldserver/authserver live in
+# env/dist/etc/, every other conf under env/dist/etc/modules/. The callers'
+# specs come from the registry (or a validated direct route), never a raw
+# user path.
+_cfg_conf_path() {
+    case "$1" in
+        worldserver.conf|authserver.conf) printf '%s' "$cfg_sdir/env/dist/etc/$1" ;;
+        *) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
+    esac
+    return 0
+}
+
+# _cfg_conf_ensure <path>: makes sure the conf exists, creating it from its
+# .dist ONCE when only the dist is present (the AC docker layout ships dists;
+# the conf appears on first edit). Returns 1 when neither exists.
+_cfg_conf_ensure() {
+    [[ -f "$1" ]] && return 0
+    [[ -f "$1.dist" ]] || return 1
+    cp "$1.dist" "$1"
+    return 0
+}
+
+# _cfg_conf_read <path> <Key>: echoes the conf's value for Key ("" when the
+# file or key is absent). Exact-key match (prefix + '='), comments skipped,
+# LAST occurrence wins (AC semantics), surrounding quotes stripped. The key
+# travels via the environment (K=), never awk -v, so dots/backslashes are
+# never escape-processed.
+_cfg_conf_read() {
+    local val=""
+    [[ -f "$1" ]] || { printf ''; return 0; }
+    val="$(K="$2" awk '
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            k = ENVIRON["K"]
+            if (index(s, k) == 1) {
+                rest = substr(s, length(k) + 1)
+                sub(/^[ \t]*/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    v = substr(rest, 2)
+                    sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                    val = v; found = 1
+                }
+            }
+        }
+        END { if (found) print val }
+    ' "$1" 2>/dev/null)" || val=""
+    val="${val%\"}"; val="${val#\"}"
+    printf '%s' "$val"
+    return 0
+}
+
+# _cfg_conf_write <path> <Key> <value>: comment-preserving in-place edit --
+# replaces every active `Key = ...` line (duplicates collapse to the same
+# value; AC reads the last anyway) or appends `Key = value` when absent.
+# tmp-file + mv like raw-write, so a failure never truncates the conf.
+# Sets CFG_CHANGED=true when the effective value actually changed.
+_cfg_conf_write() {
+    local cur tmp
+    cur="$(_cfg_conf_read "$1" "$2")"
+    [[ "$cur" == "$3" ]] && return 0
+    tmp="$1.tmp.$$"
+    K="$2" V="$3" awk '
+        BEGIN { done = 0 }
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            k = ENVIRON["K"]
+            if (index(s, k) == 1) {
+                rest = substr(s, length(k) + 1)
+                sub(/^[ \t]*/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    print k " = " ENVIRON["V"]
+                    done = 1
+                    next
+                }
+            }
+            print
+        }
+        END { if (!done) print ENVIRON["K"] " = " ENVIRON["V"] }
+    ' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$1"
+    CFG_CHANGED=true
+    return 0
+}
+
+# _pb_kv_lines <file>: every active `Key = value` line as
+# key<US>value<US>lineno rows (US = 0x1f, never appears in conf values).
+# Comments and non-assignment lines are skipped; the caller dedupes.
+_pb_kv_lines() {
+    awk '
+        {
+            s = $0; sub(/\r$/, "", s)
+            if (s !~ /^[ \t]*[A-Za-z0-9_.]+[ \t]*=/) next
+            sub(/^[ \t]+/, "", s)
+            eq = index(s, "=")
+            k = substr(s, 1, eq - 1); sub(/[ \t]+$/, "", k)
+            v = substr(s, eq + 1); sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+            printf "%s\x1f%s\x1f%d\n", k, v, NR
+        }
+    ' "$1" 2>/dev/null || true
+    return 0
+}
+
+# _cfg_env_name_for <ConfKey>: the AC docker env-bridge name for a conf key
+# (AC_ + camelCase split on lower/digit->UPPER boundaries + dots as _, all
+# uppercased): AiPlayerbot.MaxRandomBots -> AC_AI_PLAYERBOT_MAX_RANDOM_BOTS,
+# Rate.XP.Kill -> AC_RATE_XP_KILL. Used to clean a legacy env override off
+# override.yml when its conf row is saved (env would otherwise beat the conf
+# forever). A derivation miss is harmless -- the removal is just a no-op.
+_cfg_env_name_for() {
+    local key="$1" out="" i c prev=""
+    for (( i = 0; i < ${#key}; i++ )); do
+        c="${key:$i:1}"
+        if [[ "$c" == "." ]]; then
+            out+="_"
+        elif [[ "$c" == [A-Z] && "$prev" == [a-z0-9] ]]; then
+            out+="_$c"
+        else
+            out+="$c"
+        fi
+        prev="$c"
+    done
+    printf 'AC_%s' "${out^^}"
+    return 0
+}
+
 # _float_in_range <val> <min> <max>: 0 iff val is a decimal in [min,max].
 _float_in_range() {
     [[ "$1" =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
     awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'
 }
 
-# _cfg_file_path <name>: maps an allowlisted file name to its host path
-# under $cfg_sdir (the base compose bind-mounts ./env/dist/etc into the
-# container, so module confs are ordinary host files). Unknown name -> rc 1.
-# The allowlist is the traversal guard: names are matched literally, never
-# used as path fragments.
+# _cfg_file_path <name>: maps an editable file name to its host path under
+# $cfg_sdir (the base compose bind-mounts ./env/dist/etc into the container,
+# so module confs are ordinary host files). Unknown name -> rc 1.
+# Batch 1 F3 replaced the hardcoded 3-conf allowlist with a dynamic one:
+# ANY <name>.conf whose basename-shape regex passes (the regex IS the
+# traversal guard -- no slashes can match, so the name can never leave the
+# modules dir) AND whose conf or .dist already exists under
+# env/dist/etc/modules/, plus worldserver.conf/authserver.conf one dir up
+# (fixed names, same literal-match safety as before). .env and the compose
+# override stay read-only in raw-write (guarded there, not here).
 _cfg_file_path() {
+    local p
     case "$1" in
         .env) printf '%s' "$cfg_sdir/.env" ;;
         docker-compose.override.yml) printf '%s' "$cfg_sdir/docker-compose.override.yml" ;;
-        playerbots.conf|mod_ahbot.conf|mod_ale.conf) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
-        *) return 1 ;;
+        worldserver.conf|authserver.conf) printf '%s' "$cfg_sdir/env/dist/etc/$1" ;;
+        *)
+            [[ "$1" =~ ^[A-Za-z0-9_.-]+\.conf$ ]] || return 1
+            p="$cfg_sdir/env/dist/etc/modules/$1"
+            [[ -f "$p" || -f "$p.dist" ]] || return 1
+            printf '%s' "$p"
+            ;;
     esac
     return 0
 }
@@ -457,6 +695,48 @@ _world_ready() {
     [[ -z "$started" ]] && return 1
     hits="$(docker logs --since "$started" ac-worldserver 2>&1 | grep -icm1 'World Initialized In' || true)"
     [[ "${hits:-0}" -gt 0 ]]
+}
+
+# --- `wow bots flush` helpers (Batch 1 F4) ---------------------------------
+
+# _flush_restart_authworld <sdir> <label>: one staged auth+world restart,
+# reusing the exact `games restart` internals (guides/wow-wotlk/dml-start.sh
+# semantics): saveall best-effort -> compose stop -t 180 (graceful, chars
+# saved) -> compose up -d --no-deps (recreate so conf/env changes apply,
+# WITHOUT re-running the one-shot db-import/client-data init) -> readiness
+# wait on the boot-complete marker (_world_ready). Streams progress lines in
+# --json mode. Returns 0 ready / 1 compose failed / 2 readiness timeout
+# (budget DML_READY_TIMEOUT_SECS, default 1800s -- bot deletion/creation
+# happens DURING boot and can take many minutes).
+_flush_restart_authworld() {
+    local sdir="$1" label="$2" timeout="${DML_READY_TIMEOUT_SECS:-1800}" t0=$SECONDS last_note=0 elapsed
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "saving all characters (best effort)..."
+    soap_exec 'saveall' >/dev/null 2>&1 || true
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "stopping auth + world ($label)..."
+    (cd "$sdir" && docker compose stop -t 180 ac-worldserver ac-authserver >/dev/null 2>&1) || return 1
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "starting auth + world (compose, no deps)..."
+    (cd "$sdir" && docker compose up -d --no-deps ac-authserver ac-worldserver >/dev/null 2>&1) || return 1
+    [[ "$DML_JSON" == 1 ]] && ndjson_line info "waiting for the world ($label)..."
+    while :; do
+        _world_ready && return 0
+        elapsed=$(( SECONDS - t0 ))
+        (( elapsed >= timeout )) && return 2
+        if (( elapsed - last_note >= 60 )); then
+            last_note=$elapsed
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "still waiting (~$(( elapsed / 60 ))m) - deleting/creating thousands of bots takes a while..."
+        fi
+        sleep 2
+    done
+}
+
+# EXIT-trap hook for `wow bots flush`: however the flow dies after the
+# delete flag was armed, the flag goes back to 0 -- otherwise EVERY later
+# boot would silently wipe the bots again. The arm clears
+# FLUSH_RESTORE_CONF once it restores the flag itself.
+_flush_restore_flag() {
+    [[ -n "${FLUSH_RESTORE_CONF:-}" ]] || return 0
+    _cfg_conf_write "$FLUSH_RESTORE_CONF" "AiPlayerbot.DeleteRandomBotAccounts" "0" || true
+    return 0
 }
 
 # _bots_counts <world_state>: echoes the complete server-detail bots JSON
@@ -3996,10 +4276,25 @@ case "$cmd" in
               [[ -z "$key" ]] && continue
               # Every row is restart-to-apply EXCEPT server.motd, which the
               # worldserver applies live (MotdMgr) when `set` runs over SOAP.
+              # Conf rows read conf -> .dist -> registry default; their
+              # restart_required stays true here (conservative) -- the SET
+              # result's `applied` field is the authoritative live/restart
+              # answer, since live-apply depends on SOAP being up and no
+              # frozen legacy env.
               rreq=true
               if [[ "$key" == "server.motd" ]]; then
                 rreq=false
                 val="$motd_live"
+              elif _cfg_conf_route "$env"; then
+                # Truthful pre-migration read: while a legacy AC_* override
+                # is still in override.yml it BEATS the conf (env bridge),
+                # so show that value until a save cleans it up.
+                val="$(_cfg_env_read "$(_cfg_env_name_for "$conf_key")")"
+                if [[ -z "$val" ]]; then
+                  cpath="$(_cfg_conf_path "$conf_file")"
+                  val="$(_cfg_conf_read "$cpath" "$conf_key")"
+                  [[ -n "$val" ]] || val="$(_cfg_conf_read "$cpath.dist" "$conf_key")"
+                fi
               else
                 val="$(_cfg_env_read "$env")"
               fi
@@ -4022,6 +4317,47 @@ case "$cmd" in
               esac
             done
             [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config list --json"; exit 1; }
+            if [[ "$key" == conf:* ]]; then
+              # DIRECT conf route (Bot World all-keys browser): the key IS a
+              # `conf:playerbots.conf:<Key>` spec, no registry row involved.
+              # Restricted to playerbots.conf on purpose -- worldserver.conf
+              # stays curated-rows-only. No registry type means no range
+              # check, so the value is shape-validated instead: single line,
+              # bounded length (playerbots values are short), written
+              # verbatim. Always restart-to-apply (playerbots reads its conf
+              # at startup).
+              _cfg_conf_route "$key" || { json_err BAD_ARG "Bad conf key: $key" ""; exit 1; }
+              if [[ "$conf_file" != "playerbots.conf" ]]; then
+                json_err BAD_ARG "Direct conf keys are limited to playerbots.conf" "Other settings live in the curated list: dml wow config list --json"
+                exit 1
+              fi
+              [[ "$conf_key" =~ ^[A-Za-z0-9_.]+$ ]] \
+                || { json_err BAD_ARG "Invalid conf key: $conf_key" "Letters, digits, dots and underscores only."; exit 1; }
+              case "$value" in
+                *$'\n'*|*$'\r'*) json_err BAD_ARG "The value must be a single line" ""; exit 1 ;;
+              esac
+              if (( ${#value} > 200 )); then
+                json_err BAD_ARG "Value too long (max 200 characters)" ""; exit 1
+              fi
+              _cfg_preamble
+              CFG_CHANGED=false
+              cpath="$(_cfg_conf_path "$conf_file")"
+              _cfg_conf_ensure "$cpath" \
+                || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
+              _cfg_conf_write "$cpath" "$conf_key" "$value" \
+                || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              ename="$(_cfg_env_name_for "$conf_key")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                CFG_CHANGED=true
+              fi
+              if [[ "$CFG_CHANGED" == true ]]; then
+                json_ok '{"changed":true,"restart_required":true,"applied":"restart"}'
+              else
+                json_ok '{"changed":false,"restart_required":false,"applied":"none"}'
+              fi
+              exit 0
+            fi
             row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
             [[ "$row" == "$key|"* ]] || { json_err NOT_FOUND "Unknown setting: $key" "See: dml wow config list --json"; exit 1; }
             IFS='|' read -r _ group label type minv maxv env def explain <<< "$row"
@@ -4064,6 +4400,51 @@ case "$cmd" in
                 2) json_err SOAP_FAULT "$out" "The server rejected the motd command."; exit 1 ;;
                 *) json_err SOAP_UNREACHABLE "Could not reach the server" "The server must be running to change the message of the day - start it first."; exit 1 ;;
               esac
+            elif _cfg_conf_route "$env"; then
+              # Conf-file row (see 40-config.sh registry block): write the
+              # bind-mounted conf, clean any legacy AC_* env override (env
+              # beats conf, so leaving it would make this save a silent
+              # no-op), then try to live-apply. Live only works for
+              # worldserver.conf keys (SOAP `reload config`) AND only when
+              # no frozen legacy env was still present in the override --
+              # the running container keeps its creation-time env either
+              # way, so that case must report restart.
+              cpath="$(_cfg_conf_path "$conf_file")"
+              _cfg_conf_ensure "$cpath" \
+                || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
+              _cfg_conf_write "$cpath" "$conf_key" "$value" \
+                || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              if [[ "$key" == "bots.population" ]]; then
+                # One number drives BOTH population bounds (the row's conf
+                # key is MaxRandomBots; Min follows it here).
+                _cfg_conf_write "$cpath" "AiPlayerbot.MinRandomBots" "$value" \
+                  || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              fi
+              envwas=false
+              ename="$(_cfg_env_name_for "$conf_key")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                envwas=true
+                CFG_CHANGED=true
+              fi
+              if [[ "$key" == "bots.population" ]]; then
+                ename="$(_cfg_env_name_for AiPlayerbot.MinRandomBots)"
+                if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                  _cfg_env_remove "$ename"
+                  envwas=true
+                  CFG_CHANGED=true
+                fi
+              fi
+              applied="none"; rreq=false
+              if [[ "$CFG_CHANGED" == true ]]; then
+                applied="restart"; rreq=true
+                if [[ "$conf_file" == "worldserver.conf" && "$envwas" == false ]]; then
+                  if soap_exec "reload config" >/dev/null 2>&1; then
+                    applied="live"; rreq=false
+                  fi
+                fi
+              fi
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
             else
               if [[ "$key" == "ahbot.character" ]]; then
                 crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
@@ -4074,14 +4455,78 @@ case "$cmd" in
                   || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
                 _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
                 _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
-              elif [[ "$key" == "bots.population" ]]; then
-                _cfg_env_write AC_AI_PLAYERBOT_MIN_RANDOM_BOTS "$value"
-                _cfg_env_write AC_AI_PLAYERBOT_MAX_RANDOM_BOTS "$value"
               else
                 _cfg_env_write "$env" "$value"
               fi
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
             fi
+            ;;
+          pb-keys)
+            # Bot World all-keys browser: every active `Key = value` line of
+            # playerbots.conf (falling back to the .dist when the conf does
+            # not exist yet), plus each key's .dist default when both files
+            # exist. Duplicate keys keep their FIRST position but the LAST
+            # value/line wins (AC read semantics). Values are the raw right-
+            # hand side, trimmed -- quotes preserved so an edit round-trips
+            # verbatim through `config set conf:playerbots.conf:<Key>`.
+            _cfg_preamble
+            pbconf="$cfg_sdir/env/dist/etc/modules/playerbots.conf"
+            pbdist="$pbconf.dist"
+            pbsrc="$pbconf"
+            [[ -f "$pbsrc" ]] || pbsrc="$pbdist"
+            if [[ ! -f "$pbsrc" ]]; then
+              json_err NOT_FOUND "playerbots.conf not found (nor its .dist)" "Is the WoW server fully installed?"
+              exit 1
+            fi
+            declare -A _pb_val=() _pb_line=() _pb_def=()
+            _pb_order=()
+            while IFS=$'\x1f' read -r k v ln; do
+              [[ -n "${_pb_val[$k]+x}" ]] || _pb_order+=("$k")
+              _pb_val["$k"]="$v"; _pb_line["$k"]="$ln"
+            done < <(_pb_kv_lines "$pbsrc")
+            if [[ "$pbsrc" != "$pbdist" && -f "$pbdist" ]]; then
+              while IFS=$'\x1f' read -r k v ln; do
+                _pb_def["$k"]="$v"
+              done < <(_pb_kv_lines "$pbdist")
+            fi
+            first=1; out='['
+            for k in ${_pb_order[@]+"${_pb_order[@]}"}; do
+              dv=null
+              if [[ "$pbsrc" == "$pbdist" ]]; then
+                dv="\"$(json_escape "${_pb_val[$k]}")\""
+              elif [[ -n "${_pb_def[$k]+x}" ]]; then
+                dv="\"$(json_escape "${_pb_def[$k]}")\""
+              fi
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$(json_escape "$k")\",\"value\":\"$(json_escape "${_pb_val[$k]}")\",\"default\":$dv,\"line\":${_pb_line[$k]}}"
+              first=0
+            done
+            out+=']'
+            pbsrc_name="playerbots.conf"
+            [[ "$pbsrc" == "$pbdist" ]] && pbsrc_name="playerbots.conf.dist"
+            json_ok "{\"source\":\"$pbsrc_name\",\"keys\":$out}"
+            ;;
+          files)
+            # Dynamic editable-conf list (Batch 1 F3): the fixed four plus
+            # every *.conf / *.conf.dist basename found under modules/
+            # (deduped; the fixed names win if a module conf shadows them).
+            # Powers the GUI file picker instead of its old hardcoded list.
+            _cfg_preamble
+            moddir="$cfg_sdir/env/dist/etc/modules"
+            dynnames="$(ls -1 "$moddir" 2>/dev/null | sed 's/\.dist$//' | grep -E '^[A-Za-z0-9_.-]+\.conf$' | grep -vE '^(worldserver|authserver)\.conf$' | sort -u)" || dynnames=""
+            first=1; out='['
+            for fname in .env docker-compose.override.yml worldserver.conf authserver.conf $dynnames; do
+              fpath="$(_cfg_file_path "$fname")" || continue
+              fex=false; fdist=false; fro=false
+              [[ -f "$fpath" ]] && fex=true
+              [[ -f "$fpath.dist" ]] && fdist=true
+              case "$fname" in .env|docker-compose.override.yml) fro=true ;; esac
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"name\":\"$(json_escape "$fname")\",\"exists\":$fex,\"dist\":$fdist,\"readonly\":$fro}"
+              first=0
+            done
+            out+=']'
+            json_ok "{\"files\":$out}"
             ;;
           raw-read)
             fname=""
@@ -4089,9 +4534,40 @@ case "$cmd" in
             [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
             _cfg_preamble
             fpath="$(_cfg_file_path "$fname")" \
-              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
+            # A conf that only exists as its .dist yet reads as the dist --
+            # the first save then creates the real conf (raw-write).
+            if [[ ! -f "$fpath" && -f "$fpath.dist" ]]; then
+              json_ok "{\"file\":\"$(json_escape "$fname")\",\"source\":\"dist\",\"content\":\"$(json_escape "$(cat "$fpath.dist")")\"}"
+              exit 0
+            fi
             [[ -f "$fpath" ]] || { json_err NOT_FOUND "File does not exist yet: $fname" ""; exit 1; }
-            json_ok "{\"file\":\"$(json_escape "$fname")\",\"content\":\"$(json_escape "$(cat "$fpath")")\"}"
+            json_ok "{\"file\":\"$(json_escape "$fname")\",\"source\":\"conf\",\"content\":\"$(json_escape "$(cat "$fpath")")\"}"
+            ;;
+          raw-reset)
+            # Reset-from-.dist (Batch 1 F3): copy <name>.conf.dist over the
+            # conf, with the same automatic .bak the raw editor takes before
+            # writes. .env/override have no dist and stay untouchable here.
+            fname=""
+            [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; fname="$2"; shift 2; }
+            [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
+            _cfg_preamble
+            fpath="$(_cfg_file_path "$fname")" \
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
+            case "$fname" in
+              .env|docker-compose.override.yml)
+                json_err BAD_ARG "That file has no defaults to reset to" ""
+                exit 1
+                ;;
+            esac
+            [[ -f "$fpath.dist" ]] || { json_err NOT_FOUND "No $fname.dist to reset from" ""; exit 1; }
+            bakjson=null
+            if [[ -f "$fpath" ]]; then
+              cp -p "$fpath" "$fpath.bak"
+              bakjson="\"$(json_escape "$fname.bak")\""
+            fi
+            cp "$fpath.dist" "$fpath"
+            json_ok "{\"reset\":true,\"file\":\"$(json_escape "$fname")\",\"backup\":$bakjson}"
             ;;
           raw-write)
             fname=""
@@ -4099,7 +4575,7 @@ case "$cmd" in
             [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
             _cfg_preamble
             fpath="$(_cfg_file_path "$fname")" \
-              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
             mkdir -p "$(dirname "$fpath")"
             tmp="$fpath.tmp.$$"
             cat > "$tmp"
@@ -4779,6 +5255,144 @@ case "$cmd" in
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
+            exit 1
+            ;;
+        esac
+        ;;
+      bots)
+        btsub="${1:-}"; shift || true
+        case "$btsub" in
+          flush)
+            # Flush & rebuild the ambient bot population (Batch 1 F4).
+            # Streaming NDJSON like games restart: (1) character backup
+            # (backup-create internals, NOT a subprocess), (2) arm
+            # AiPlayerbot.DeleteRandomBotAccounts = 1 + an EXIT trap that
+            # ALWAYS puts it back to 0, (3) staged restart -- deletion runs
+            # during boot, (4/5) restore the flag, (6) second restart to
+            # rebuild the population from the current settings, (7) done.
+            # Destructive: requires BOTH --yes and the typed ack --ack flush.
+            btconfirm=0; btack=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --yes) btconfirm=1; shift ;;
+                --ack) _need_flag_val "$1" $#; btack="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start bots-flush
+            if [[ "$btconfirm" != 1 || "$btack" != "flush" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error CONFIRM_REQUIRED "Flushing deletes ALL random bots' characters, auctions and mail, then rebuilds them from your settings" "Re-run with --yes --ack flush. Your own characters are untouched."
+              else echo "[dml] ERROR: re-run with --yes --ack flush" >&2; fi
+              exit 1
+            fi
+            if ! docker info >/dev/null 2>&1; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."
+              else echo "[dml] ERROR: docker down" >&2; fi
+              exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+              else echo "[dml] ERROR: wow server not installed" >&2; fi
+              exit 1
+            fi
+            pbflush="$sdir/env/dist/etc/modules/playerbots.conf"
+            if ! _cfg_conf_ensure "$pbflush"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error NOT_FOUND "playerbots.conf not found (nor its .dist)" "Is the WoW server fully installed?"
+              else echo "[dml] ERROR: playerbots.conf missing" >&2; fi
+              exit 1
+            fi
+            flush_t0=$SECONDS
+            # (1) safety backup FIRST -- a failed dump aborts before any
+            # destructive step, nothing has changed yet.
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts first..."
+            bdir="$(_backup_dir)"; mkdir -p "$bdir"
+            bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
+            if ! _backup_dump_to "$bdir/$bfile" 0; then
+              errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
+              rm -f "$bdir/$bfile.err"
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error BACKUP_FAILED "The safety backup failed - nothing was changed" "$errtail"
+              else echo "[dml] ERROR: safety backup failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backup created: $bfile"
+            while IFS= read -r p || [[ -n "$p" ]]; do
+              [[ -z "$p" ]] && continue
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "pruned old backup: $p"
+            done < <(_backup_prune)
+            # (2) arm the delete flag; from here on the trap guarantees the
+            # flag is restored no matter how this arm dies.
+            CFG_CHANGED=false
+            FLUSH_RESTORE_CONF="$pbflush"
+            trap '_flush_restore_flag' EXIT
+            if ! _cfg_conf_write "$pbflush" "AiPlayerbot.DeleteRandomBotAccounts" "1"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error WRITE_FAILED "Could not write playerbots.conf" ""
+              else echo "[dml] ERROR: conf write failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "delete flag armed - restarting so the server wipes the random bots..."
+            # (3) restart #1: the wipe happens during this boot
+            if _flush_restart_authworld "$sdir" "bot deletion"; then frc=0; else frc=$?; fi
+            if [[ "$frc" -ne 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                if [[ "$frc" -eq 2 ]]; then
+                  ndjson_error TIMEOUT "Timed out waiting for the world during bot deletion" "The delete flag was restored to 0. Check the server from Home, then try again."
+                else
+                  ndjson_error RESTART_FAILED "Could not restart the server for bot deletion" "The delete flag was restored to 0. Check the server from Home."
+                fi
+              else echo "[dml] ERROR: restart failed (flag restored)" >&2; fi
+              exit 1
+            fi
+            # (4)+(5) bots are gone -- put the flag back BEFORE the rebuild
+            # restart, or the next boot would wipe them again.
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "bots deleted - restoring the setting..."
+            if ! _cfg_conf_write "$pbflush" "AiPlayerbot.DeleteRandomBotAccounts" "0"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                ndjson_error WRITE_FAILED "Could not restore playerbots.conf - fix AiPlayerbot.DeleteRandomBotAccounts back to 0 by hand before the next restart" ""
+              else echo "[dml] ERROR: conf restore failed" >&2; fi
+              exit 1
+            fi
+            FLUSH_RESTORE_CONF=""
+            # (6) restart #2: the server recreates the population from the
+            # current Bot World settings during this boot
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "restarting again to rebuild the bot population (this is the long part)..."
+            if _flush_restart_authworld "$sdir" "bot rebuild"; then frc=0; else frc=$?; fi
+            if [[ "$frc" -ne 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end bots-flush error
+                if [[ "$frc" -eq 2 ]]; then
+                  ndjson_error TIMEOUT "Timed out waiting for the world during the rebuild" "The bots may still be logging in - check Home before retrying."
+                else
+                  ndjson_error RESTART_FAILED "Could not restart the server for the rebuild" "Start it from Home - the delete flag is already back at 0."
+                fi
+              else echo "[dml] ERROR: rebuild restart failed" >&2; fi
+              exit 1
+            fi
+            # (7) done
+            flush_elapsed=$(( SECONDS - flush_t0 ))
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end bots-flush ok
+              ndjson_done "{\"flushed\":true,\"backup\":\"$(json_escape "$bfile")\",\"elapsed_secs\":$flush_elapsed}"
+            else
+              echo "[dml] bot population flushed and rebuilt (backup: $bfile, ${flush_elapsed}s)"
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots flush --yes --ack flush --json"
             exit 1
             ;;
         esac

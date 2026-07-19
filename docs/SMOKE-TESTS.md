@@ -154,6 +154,22 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Doctor | Run → all checks report (Docker, disk, network, WSL). |
 | ⬜ | Shell | Open shell → a Windows terminal opens inside the dml-arch distro. |
 
+## 15. Batch 1 — config cluster
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | [rates-live] Rates rows live-apply | Server RUNNING: Settings → change Honor gains (or any new Rates/Cross-faction row) → Save → green "Applied live ✓" note (no restart banner); verify in-game (kill a mob / check honor) that the rate changed WITHOUT a restart. `env/dist/etc/worldserver.conf` on the host shows the new `Rate.… = value` line. |
+| ⬜ | [rates-live] Legacy env migration | With an old save still in docker-compose.override.yml (e.g. AC_RATE_XP_KILL): change XP from kills → Save → the AMBER restart banner shows (not "applied live"), the AC_… key is GONE from override.yml, and after one restart the conf value is what the server uses. |
+| ⬜ | Server stopped: rates save falls back to restart | With the server stopped, save a Rates row → banner says restart needed (SOAP unreachable is not an error); value shows after the next start. |
+| ⬜ | [bots-world] Curated Bot World save | Bot World page → change e.g. "Bots chat" or bot population → Save → restart banner → Restart → the change is live (population count / chat behavior). playerbots.conf on the host shows the key. |
+| ⬜ | Bot World browser (read) | Bot World → the all-keys list loads (~hundreds of keys); search "broadcast" filters; hovering a key shows its default. Browsing works while LOCKED (only saving is gated). |
+| ⬜ | [bots-world] Browser staged save | Edit 2-3 keys in the browser (e.g. BroadcastChance…) → "Save N changes" → restart banner; keys land in playerbots.conf verbatim. |
+| ⬜ | Module Configs dynamic list | Module Configs → the file picker lists worldserver.conf, authserver.conf and EVERY installed module conf (incl. transmog.conf, which has no .dist) — not just the old 5. A dist-only conf shows "(new — starts from defaults)" and opens read of its dist. |
+| ⬜ | [config-edit] Edit worldserver.conf raw | Open worldserver.conf in Module Configs → edit a harmless value → Save → .bak kept → restart applies it. (.env/override still read-only.) |
+| ⬜ | [config-reset] Reset to defaults | Open playerbots.conf → Reset to defaults (two-step confirm) → file equals its .dist, previous version kept as .bak, restart banner shows. |
+| ⬜ | [bots-flush] Flush & rebuild bots | Bot World → Danger zone → type "flush" → button runs: terminal streams backup → delete-flag restart → restore → rebuild restart → done. Takes MINUTES (two boots, bot recreation). After: bot count rebuilds to the configured population, YOUR characters untouched, `AiPlayerbot.DeleteRandomBotAccounts = 0` in playerbots.conf, a new backup in Backups. |
+| ⬜ | [bots-flush] Flush abort safety | (Optional, pairs with the row above) If the flush errors mid-run (e.g. stop the distro's docker): the error shows in the terminal AND playerbots.conf still ends with `AiPlayerbot.DeleteRandomBotAccounts = 0` — a later manual start must NOT wipe bots again. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.
