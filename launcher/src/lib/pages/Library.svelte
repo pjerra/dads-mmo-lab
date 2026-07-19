@@ -40,14 +40,21 @@
   // nav-away).
 
   // Install session OR a remove stream blocks the other mutating actions
-  // (start/stop, arm/confirm remove, open a new install). installStore is
-  // also the backing store for Tools.svelte's tool:-prefixed sessions
-  // (Round Q) -- a running Unbound install must not soft-lock Library's own
-  // controls for its 30-90 minute duration, so only a Library-owned
-  // (non "tool:"-prefixed) install session counts here.
+  // (start/stop, arm/confirm remove). installStore is also the backing
+  // store for Tools.svelte's tool:-prefixed sessions (Round Q) -- a running
+  // Unbound install must not soft-lock Library's start/stop/remove for its
+  // 30-90 minute duration (those never touch the install slot), so only a
+  // Library-owned (non "tool:"-prefixed) install session counts here.
   const busy = $derived(
     busyId !== null || removeBusy || (installStore.running && !installStore.id?.startsWith("tool:")),
   );
+  // STARTING a new install is different: games_install and tool_install
+  // share the backend's single InstallSlot, so the Install button must be
+  // blocked by ANY running session -- tool-owned included. Review-caught:
+  // gating it on the filtered `busy` above would let a mid-Unbound Install
+  // click clobber installStore out from under the live session (orphaning
+  // its reply/Cancel UI) and then BUSY-fail anyway.
+  const installBlocked = $derived(busy || installStore.running);
 
   const installed = $derived(catalog.filter((t) => t.installed));
   const available = $derived(catalog.filter((t) => !t.installed));
@@ -239,7 +246,7 @@
         <div class="card-row">
           <div class="card-title">{t.name}</div>
           <div class="card-actions">
-            {#if !busy}
+            {#if !installBlocked}
               {#if t.script_available}
                 <button
                   class="primary"
