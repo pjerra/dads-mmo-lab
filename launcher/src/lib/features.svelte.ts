@@ -59,6 +59,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "chip-start": "untested",
   "world-restart": "untested",
   "module-fixit": "untested",
+  "ahbot-page": "untested",
 };
 
 export const LOCKED_HINT =

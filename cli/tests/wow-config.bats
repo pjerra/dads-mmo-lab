@@ -28,7 +28,8 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow config list --json
   [ "$status" -eq 0 ]
   # bots.population reads the MAX env (2000); rates fall back to default "1"
-  [ "$(echo "$output" | jq -r '.data.settings | length')" = "58" ]
+  # (66 = 58 + the 8 Auction House rows Batch 4 F14 added)
+  [ "$(echo "$output" | jq -r '.data.settings | length')" = "66" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="bots.population") | .value')" = "2000" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .value')" = "1" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .default')" = "1" ]
@@ -47,14 +48,25 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="server.motd") | .value')" = "Welcome to Dad's MMO Lab!" ]
 }
 
-@test "config set writes the env var and is idempotent (non-rate env rows unchanged)" {
-  # The rates rows migrated to conf-file rows (see wow-config-conf.bats);
-  # ahbot.seller proves the ORIGINAL env mechanism still works untouched.
+@test "config set ahbot.seller writes the conf, never the env, and preserves unrelated env keys" {
+  # Batch 4 F14 migrated the last env rows (AHBot) to conf:mod_ahbot.conf:
+  # rows -- ahbot.seller now lands in the conf and must NOT add an env key,
+  # while pre-existing unrelated env keys survive untouched (the
+  # duplicate-services-key regression guard, now exercised via the
+  # env-REMOVAL path the conf rows share). Full AH matrix: wow-ahbot.bats.
+  use_curl_stub
+  export DML_STUB_CURL_EXIT=7
+  export HOME="$FIXTURE"
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  printf 'AuctionHouseBot.EnableSeller = 0\n' \
+    > "$GDIR/env/dist/etc/modules/mod_ahbot.conf.dist"
   run bash "$DML" wow config set --key ahbot.seller --value 1 --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
-  yq -e '.services.ac-worldserver.environment.AC_AUCTION_HOUSE_BOT_ENABLE_SELLER == "1"' "$OVR"
+  grep -q '^AuctionHouseBot.EnableSeller = 1$' "$GDIR/env/dist/etc/modules/mod_ahbot.conf"
+  run yq -e '.services.ac-worldserver.environment | has("AC_AUCTION_HOUSE_BOT_ENABLE_SELLER")' "$OVR"
+  [ "$status" -ne 0 ]
   # pre-existing env preserved (the duplicate-services-key regression guard)
   yq -e '.services.ac-worldserver.environment.AC_AI_PLAYERBOT_MIN_RANDOM_BOTS == "1600"' "$OVR"
   run bash "$DML" wow config set --key ahbot.seller --value 1 --json
@@ -124,13 +136,23 @@ teardown() { teardown_fixture; }
 }
 
 @test "config set ahbot.character resolves the char and writes GUID+ACCOUNT" {
+  # Batch 4 F14 migrated this row from the compose-override env route to a
+  # conf:mod_ahbot.conf: row -- the resolved GUID + Account now land in
+  # mod_ahbot.conf (see wow-ahbot.bats for the full Auction House matrix).
   use_mysql_stub
+  # conf rows attempt a live `reload config` -- keep it off the real SOAP
+  use_curl_stub
+  export DML_STUB_CURL_EXIT=7
+  export HOME="$FIXTURE"
+  mkdir -p "$GDIR/env/dist/etc/modules"
+  printf 'AuctionHouseBot.GUID = 0\nAuctionHouseBot.Account = 0\n' \
+    > "$GDIR/env/dist/etc/modules/mod_ahbot.conf.dist"
   printf '2503\t253\n' > "$FIXTURE/char.tsv"
   export DML_STUB_DB_ROWS="$FIXTURE/char.tsv"
   run bash "$DML" wow config set --key ahbot.character --value Testen --json
   [ "$status" -eq 0 ]
-  yq -e '.services.ac-worldserver.environment.AC_AUCTION_HOUSE_BOT_GUID == "2503"' "$OVR"
-  yq -e '.services.ac-worldserver.environment.AC_AUCTION_HOUSE_BOT_ACCOUNT == "253"' "$OVR"
+  grep -q '^AuctionHouseBot.GUID = 2503$' "$GDIR/env/dist/etc/modules/mod_ahbot.conf"
+  grep -q '^AuctionHouseBot.Account = 253$' "$GDIR/env/dist/etc/modules/mod_ahbot.conf"
 }
 
 @test "config set ahbot.character with unknown char is NOT_FOUND" {

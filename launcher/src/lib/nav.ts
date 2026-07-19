@@ -33,6 +33,7 @@ export const NAV = [
     pages: [
       { id: "settings", label: "Settings" },
       { id: "botworld", label: "Bot World" },
+      { id: "ahbot", label: "Auction House" },
       { id: "modules", label: "Module Configs" },
       { id: "backups", label: "Backups" },
     ],

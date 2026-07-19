@@ -59,14 +59,22 @@ _parse_server_info() {
 # HOST conf file (bind-mounted into the container) instead of the compose
 # override. Rationale: a running container's env is frozen at creation AND
 # AC's env bridge beats conf values, so env-set keys can never live-apply --
-# conf rows CAN (worldserver.conf ones via SOAP `reload config`). On save,
+# conf rows CAN (worldserver.conf ones via SOAP `reload config`; ditto
+# mod_ahbot.conf ones, Batch 4 F14 -- AzerothCore's `reload config`
+# re-parses module confs too and mod-ah-bot's own
+# AHBot_WorldScript::OnBeforeConfigLoad(reload=true) re-reads Account/GUID
+# and restarts its bots with the new values, verified against the deployed
+# module source AuctionHouseBotWorldScript.cpp 2026-07-19). On save,
 # any matching legacy AC_* env key (derived mechanically from the conf key,
 # see _cfg_env_name_for) is removed from the override so the conf value is
 # authoritative after the next recreate; while the frozen env is still in
 # the running container the save reports `"applied":"restart"`. The three
 # rates rows below were MIGRATED from env rows to conf rows (their legacy
 # env keys are cleaned up on save by the same derivation), and so were
-# bots.population / bots.autologin (playerbots.conf). playerbots.conf rows
+# bots.population / bots.autologin (playerbots.conf) and the three AHBot
+# rows (mod_ahbot.conf, Batch 4 -- ahbot.character stays special-cased in
+# `config set`: it resolves a name to GUID + Account and writes BOTH conf
+# keys, cleaning both legacy env keys). playerbots.conf rows
 # NEVER live-apply (the module reads its conf at startup) -- their set
 # always answers `"applied":"restart"`. `config set` additionally accepts a
 # DIRECT route key `conf:playerbots.conf:<Key>` for the Bot World all-keys
@@ -128,9 +136,17 @@ bots.smart_scale|Bot Performance|Auto-reduce bots under load|bool|||conf:playerb
 bots.force_radius|Bot Performance|Always-active radius in yards|int|0|1000|conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInRadius|150|Bots within this many yards of a real player are always active. 0 disables.
 bots.force_zone|Bot Performance|Always active in your zone|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInZone|1|When on, bots in the same zone as a real player are always active.
 bots.force_guild|Bot Performance|Always active in your guild|bool|||conf:playerbots.conf:AiPlayerbot.BotActiveAloneForceWhenInGuild|1|When on, bots that share a guild with a real player are always active.
-ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
-ahbot.buyer|AHBot|Auction buyer bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_BUYER|0|When on, the bot occasionally buys player auctions.
-ahbot.character|AHBot|Seller character|char|||AC_AUCTION_HOUSE_BOT_GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
+ahbot.seller|Auction House|Auction seller bot|bool|||conf:mod_ahbot.conf:AuctionHouseBot.EnableSeller|0|When on, the auction house is stocked with items for sale.
+ahbot.buyer|Auction House|Auction buyer bot|bool|||conf:mod_ahbot.conf:AuctionHouseBot.EnableBuyer|0|When on, the bot bids on auctions that players list.
+ahbot.character|Auction House|Seller character|char|||conf:mod_ahbot.conf:AuctionHouseBot.GUID|0|Which character appears as the auction seller. Saving also writes the matching account id. Shown as the stored character id.
+ahbot.items_per_cycle|Auction House|Listings added per cycle|int|1|1000|conf:mod_ahbot.conf:AuctionHouseBot.ItemsPerCycle|200|How many auctions the bot adds or removes per pass. Higher fills the auction house faster.
+ahbot.duplicates|Auction House|Max duplicate stacks|int|0|100|conf:mod_ahbot.conf:AuctionHouseBot.DuplicatesCount|0|Most stacks of the same item the bot may sell at once. 0 means no limit.
+ahbot.duration|Auction House|Auction duration class|int|0|2|conf:mod_ahbot.conf:AuctionHouseBot.ElapsingTimeClass|1|How long bot auctions last. 0 = 1 to 3 days, 1 = 1 to 24 hours, 2 = 10 to 60 minutes.
+ahbot.vendor_items|Auction House|Sell vendor items|bool|||conf:mod_ahbot.conf:AuctionHouseBot.VendorItems|0|When on, the bot also lists items you could simply buy from vendors.
+ahbot.loot_items|Auction House|Sell loot items|bool|||conf:mod_ahbot.conf:AuctionHouseBot.LootItems|1|When on, the bot lists items that drop as loot or from fishing.
+ahbot.loot_trade_goods|Auction House|Sell loot trade goods|bool|||conf:mod_ahbot.conf:AuctionHouseBot.LootTradeGoods|1|When on, the bot lists trade goods like ore, herbs, leather and cloth.
+ahbot.boe_items|Auction House|Sell bind-on-equip gear|bool|||conf:mod_ahbot.conf:AuctionHouseBot.Bind_When_Equipped|1|When on, the bot lists gear that binds when equipped - most green and blue items.
+ahbot.max_item_level|Auction House|Highest item level sold|int|0|300|conf:mod_ahbot.conf:AuctionHouseBot.DisableItemsAboveLevel|0|The bot skips items above this item level. 0 means no cap.
 server.motd|Server|Message of the day|text|||-|Welcome to Dad's MMO Lab!|Shown to every player at login. Applies instantly while the server runs - no restart needed. Quotes and line breaks are removed.
 EOF
 }

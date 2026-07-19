@@ -11,6 +11,7 @@ export function dirtyKeys(
 // Conf-file rows (env column "conf:...") are a NEW save mechanism, gated
 // separately from the long-tested env rows:
 //   conf: rows targeting playerbots.conf  -> "bots-world"
+//   conf: rows targeting mod_ahbot.conf   -> "ahbot-page" (Batch 4 F14)
 //   every other conf: row (worldserver)   -> "rates-live"
 //   env rows / motd (original mechanism)  -> "settings-save"
 export function requiredSaveFlags(
@@ -22,8 +23,12 @@ export function requiredSaveFlags(
   for (const k of dirty) {
     const env = byKey.get(k);
     if (env === undefined) continue;
-    if (env.startsWith("conf:")) {
-      flags.add(env.startsWith("conf:playerbots.conf:") ? "bots-world" : "rates-live");
+    if (env.startsWith("conf:playerbots.conf:")) {
+      flags.add("bots-world");
+    } else if (env.startsWith("conf:mod_ahbot.conf:")) {
+      flags.add("ahbot-page");
+    } else if (env.startsWith("conf:")) {
+      flags.add("rates-live");
     } else {
       flags.add("settings-save");
     }

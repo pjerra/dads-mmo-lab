@@ -23,14 +23,15 @@ describe("dirtyKeys", () => {
 
 describe("requiredSaveFlags", () => {
   const rows = [
-    { key: "ahbot.seller", env: "AC_AUCTION_HOUSE_BOT_ENABLE_SELLER" },
+    { key: "legacy.env_row", env: "AC_SOME_FUTURE_ENV_ROW" },
     { key: "server.motd", env: "-" },
     { key: "rates.honor", env: "conf:Rate.Honor" },
     { key: "bots.talk", env: "conf:playerbots.conf:AiPlayerbot.RandomBotTalk" },
+    { key: "ahbot.seller", env: "conf:mod_ahbot.conf:AuctionHouseBot.EnableSeller" },
   ];
 
   it("maps env rows and motd to settings-save", () => {
-    expect(requiredSaveFlags(rows, ["ahbot.seller", "server.motd"])).toEqual(["settings-save"]);
+    expect(requiredSaveFlags(rows, ["legacy.env_row", "server.motd"])).toEqual(["settings-save"]);
   });
 
   it("maps worldserver conf rows to rates-live", () => {
@@ -41,10 +42,14 @@ describe("requiredSaveFlags", () => {
     expect(requiredSaveFlags(rows, ["bots.talk"])).toEqual(["bots-world"]);
   });
 
+  it("maps mod_ahbot conf rows to ahbot-page (Batch 4 F14)", () => {
+    expect(requiredSaveFlags(rows, ["ahbot.seller"])).toEqual(["ahbot-page"]);
+  });
+
   it("a mixed dirty set needs every mechanism's flag; unknown keys ignored", () => {
-    expect(requiredSaveFlags(rows, ["ahbot.seller", "rates.honor", "bots.talk", "ghost"]).sort()).toEqual(
-      ["bots-world", "rates-live", "settings-save"],
-    );
+    expect(
+      requiredSaveFlags(rows, ["legacy.env_row", "rates.honor", "bots.talk", "ahbot.seller", "ghost"]).sort(),
+    ).toEqual(["ahbot-page", "bots-world", "rates-live", "settings-save"]);
     expect(requiredSaveFlags(rows, [])).toEqual([]);
   });
 });

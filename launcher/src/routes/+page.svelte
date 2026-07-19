@@ -171,8 +171,16 @@
   {#if page === "items"}<Items />{/if}
   {#if page === "playerbots"}<Playerbots />{/if}
   {#if page === "commands"}<Commands />{/if}
-  {#if page === "settings" || page === "modules" || page === "botworld"}
-    <Config tab={page === "settings" ? "settings" : page === "botworld" ? "botworld" : "files"} />
+  {#if page === "settings" || page === "modules" || page === "botworld" || page === "ahbot"}
+    <Config
+      tab={page === "settings"
+        ? "settings"
+        : page === "botworld"
+          ? "botworld"
+          : page === "ahbot"
+            ? "ahbot"
+            : "files"}
+    />
   {/if}
   {#if page === "backups"}<Backups />{/if}
   {#if page === "help"}<Help onnav={(p) => (page = p)} />{/if}

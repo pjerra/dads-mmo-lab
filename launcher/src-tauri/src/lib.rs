@@ -1051,6 +1051,23 @@ async fn wow_party_preset_load(player: String, name: String, on_event: Channel<s
     .await
 }
 
+// Batch 4 F14: guided Auction House repair -- streams `wow ahbot repair`.
+// The char name is re-validated CLI-side (^[A-Za-z0-9_]{1,12}$); it still
+// travels as its own argv token, never through a shell.
+#[tauri::command]
+async fn wow_ahbot_repair(
+    char_name: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "ahbot".into(), "repair".into(), "--char".into(), char_name],
+        on_event,
+        state,
+    )
+    .await
+}
+
 #[tauri::command]
 async fn wow_backup_create(include_world: Option<bool>, on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
     let mut args: Vec<String> = vec!["wow".into(), "backup".into(), "create".into()];
@@ -1446,6 +1463,7 @@ pub fn run() {
             wow_config_raw_reset,
             wow_config_raw_write,
             wow_bots_flush,
+            wow_ahbot_repair,
             wow_party_setup,
             wow_party_online,
             wow_players_online,

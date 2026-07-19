@@ -11,6 +11,7 @@
     wowConsoleSend,
     gamesRestart,
     wowBotsFlush,
+    wowAhbotRepair,
     type ConfFile,
     type ConfigSetting,
     type PbKey,
@@ -36,7 +37,7 @@
   // UI mirror of the CLI's raw-write lock (cli rejects these two names).
   const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
 
-  let { tab = "settings" }: { tab?: "settings" | "files" | "botworld" } = $props();
+  let { tab = "settings" }: { tab?: "settings" | "files" | "botworld" | "ahbot" } = $props();
   let settings: ConfigSetting[] = $state([]);
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
@@ -148,6 +149,41 @@
     }
   }
 
+  // --- Auction House repair (Batch 4 F14) ----------------------------------
+  // Streams `wow ahbot repair` -- character lookup + mod_ahbot.conf writes.
+  // Creating the bot's account/character is a MANUAL step (the CLI's port of
+  // wow-manage.sh keeps it manual on purpose); the card explains it.
+  let ahRepairChar = $state("");
+  let ahRepairConfirm = $state(false);
+  let ahRepairing = $state(false);
+
+  async function runAhRepair() {
+    if (!ahRepairConfirm) {
+      ahRepairConfirm = true;
+      return;
+    }
+    ahRepairConfirm = false;
+    if (!ahRepairChar) return;
+    ahRepairing = true;
+    error = null;
+    beginRun("config");
+    try {
+      await wowAhbotRepair(ahRepairChar, (e) => {
+        buf.term = applyEvent(buf.term, e);
+        const ev = e as { event?: string; data?: { restart_required?: boolean } };
+        if (ev.event === "done" && ev.data?.restart_required) restartState.needed = true;
+      });
+    } catch (e) {
+      const err = e as { code?: string; message?: string; hint?: string };
+      buf.term = applyEvent(buf.term, {
+        event: "error",
+        error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
+      });
+    } finally {
+      ahRepairing = false;
+    }
+  }
+
   async function savePbChanges() {
     pbSaving = true;
     error = null;
@@ -166,10 +202,15 @@
   }
 
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
-  // "Bot ..."-prefixed groups render on the Bot World tab, everything else
-  // on Settings (AHBot deliberately does NOT match the "Bot " prefix).
+  // "Bot ..."-prefixed groups render on the Bot World tab, "Auction..."
+  // groups on the Auction House tab (Batch 4 F14), everything else on
+  // Settings.
   const visibleGroups = $derived(
-    tab === "botworld" ? groups.filter((g) => g.startsWith("Bot ")) : groups.filter((g) => !g.startsWith("Bot ")),
+    tab === "botworld"
+      ? groups.filter((g) => g.startsWith("Bot "))
+      : tab === "ahbot"
+        ? groups.filter((g) => g.startsWith("Auction"))
+        : groups.filter((g) => !g.startsWith("Bot ") && !g.startsWith("Auction")),
   );
   const dirty = $derived(dirtyKeys(settings, edits));
   const fileReadonly = $derived(
@@ -289,6 +330,7 @@
   $effect(() => {
     void tab;
     confirmingRestart = false;
+    ahRepairConfirm = false;
     aleNote = null;
     liveNote = false;
   });
@@ -333,7 +375,15 @@
 
 <section class="content" class:fill={tab === "files" && fileLoaded}>
   <header class="bar">
-    <h2>{tab === "settings" ? "Settings" : tab === "botworld" ? "Bot World" : "Modules"}</h2>
+    <h2>
+      {tab === "settings"
+        ? "Settings"
+        : tab === "botworld"
+          ? "Bot World"
+          : tab === "ahbot"
+            ? "Auction House"
+            : "Modules"}
+    </h2>
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
@@ -343,7 +393,7 @@
     <div class="live-card"><p>Applied live ✓ — the running server picked the change up, no restart needed.</p></div>
   {/if}
 
-  {#if tab === "settings" || tab === "botworld"}
+  {#if tab === "settings" || tab === "botworld" || tab === "ahbot"}
     {#if tab === "settings"}
       <div class="card testing-card">
         <label class="row">
@@ -433,6 +483,46 @@
         {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
       </button>
     </div>
+
+    {#if tab === "ahbot"}
+      <h3>Repair AH Bot</h3>
+      <div class="card">
+        <p class="muted">
+          The auction bot lists and bids as a real character. Give it its own dedicated
+          account so <strong>you</strong> can buy the bot's auctions — auctions from your own
+          account would be invisible to you in-game.
+        </p>
+        <ol class="ah-steps">
+          <li>Create a separate account for the bot on the <strong>Accounts</strong> page.</li>
+          <li>Log into the game with that account once and create <strong>one</strong> character
+            (race and class don't matter — it will never be played).</li>
+          <li>Log out of the game completely.</li>
+          <li>Pick that character below and click Repair.</li>
+        </ol>
+        <p class="muted">
+          The bot character should not be used for play — it is busy running the auction
+          house around the clock.
+        </p>
+        <div class="row">
+          <CharPicker
+            selected={ahRepairChar}
+            disabled={ahRepairing || restartState.restarting}
+            onpick={(v: string) => {
+              ahRepairChar = v;
+              ahRepairConfirm = false;
+            }}
+          />
+          <button
+            class="primary"
+            onclick={runAhRepair}
+            disabled={!ahRepairChar || ahRepairing || restartState.restarting || featureLocked("ahbot-page")}
+            title={featureLocked("ahbot-page") ? LOCKED_HINT : undefined}
+          >
+            {ahRepairConfirm ? `Make ${ahRepairChar} the auction bot — sure?` : "Repair AH Bot"}
+          </button>
+        </div>
+      </div>
+    {/if}
 
     {#if tab === "botworld"}
       <h3>All playerbots.conf keys</h3>
@@ -608,4 +698,5 @@
   .pbrow.dirty { background: #1c1a10; outline: 1px solid #d29922; }
   .pbkey { font-family: Consolas, monospace; font-size: 12.5px; color: #c9d1d9; overflow-wrap: anywhere; }
   .pbval { width: 220px; flex-shrink: 0; font-family: Consolas, monospace; font-size: 12.5px; }
+  .ah-steps { margin: 0; padding-left: 20px; color: #c9d1d9; font-size: 13.5px; display: flex; flex-direction: column; gap: 4px; }
 </style>

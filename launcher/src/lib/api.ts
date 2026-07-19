@@ -651,6 +651,16 @@ export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void):
   return invoke("wow_backup_restore", { file, onEvent: ch });
 };
 
+// --- Auction House repair (Batch 4 F14) ------------------------------------
+// Streams the `wow ahbot repair` NDJSON flow (character lookup + conf writes;
+// creating the bot's account/character stays a manual user step, surfaced in
+// the stream's done payload).
+export const wowAhbotRepair = (charName: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_ahbot_repair", { charName, onEvent: ch });
+};
+
 export interface TitleInfo {
   id: string;
   name: string;

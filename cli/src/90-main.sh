@@ -2133,15 +2133,34 @@ case "$cmd" in
               # bind-mounted conf, clean any legacy AC_* env override (env
               # beats conf, so leaving it would make this save a silent
               # no-op), then try to live-apply. Live only works for
-              # worldserver.conf keys (SOAP `reload config`) AND only when
-              # no frozen legacy env was still present in the override --
-              # the running container keeps its creation-time env either
-              # way, so that case must report restart.
+              # worldserver.conf and mod_ahbot.conf keys (SOAP `reload
+              # config` -- the AH module re-reads its conf on reload, see
+              # the registry block) AND only when no frozen legacy env was
+              # still present in the override -- the running container keeps
+              # its creation-time env either way, so that case must report
+              # restart.
+              if [[ "$key" == "ahbot.character" ]]; then
+                # The validated --value is a character NAME; the conf wants
+                # its GUID (this row's key) plus the matching Account id
+                # (companion write below) -- same resolution the old env
+                # route did, now landing in mod_ahbot.conf.
+                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
+                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
+                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
+                IFS=$'\t' read -r cguid cacct <<< "$crow"
+                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
+                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+                value="$cguid"
+              fi
               cpath="$(_cfg_conf_path "$conf_file")"
               _cfg_conf_ensure "$cpath" \
                 || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
               _cfg_conf_write "$cpath" "$conf_key" "$value" \
                 || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              if [[ "$key" == "ahbot.character" ]]; then
+                _cfg_conf_write "$cpath" "AuctionHouseBot.Account" "$cacct" \
+                  || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              fi
               if [[ "$key" == "bots.population" ]]; then
                 # One number drives BOTH population bounds (the row's conf
                 # key is MaxRandomBots; Min follows it here).
@@ -2163,10 +2182,20 @@ case "$cmd" in
                   CFG_CHANGED=true
                 fi
               fi
+              if [[ "$key" == "ahbot.character" ]]; then
+                # Companion cleanup for the Account write above -- the row's
+                # own key (GUID) was already handled by the generic block.
+                ename="$(_cfg_env_name_for AuctionHouseBot.Account)"
+                if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                  _cfg_env_remove "$ename"
+                  envwas=true
+                  CFG_CHANGED=true
+                fi
+              fi
               applied="none"; rreq=false
               if [[ "$CFG_CHANGED" == true ]]; then
                 applied="restart"; rreq=true
-                if [[ "$conf_file" == "worldserver.conf" && "$envwas" == false ]]; then
+                if [[ ( "$conf_file" == "worldserver.conf" || "$conf_file" == "mod_ahbot.conf" ) && "$envwas" == false ]]; then
                   if soap_exec "reload config" >/dev/null 2>&1; then
                     applied="live"; rreq=false
                   fi
@@ -2174,18 +2203,7 @@ case "$cmd" in
               fi
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
             else
-              if [[ "$key" == "ahbot.character" ]]; then
-                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
-                  || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
-                [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
-                IFS=$'\t' read -r cguid cacct <<< "$crow"
-                [[ "$cguid" =~ ^[0-9]+$ && "$cacct" =~ ^[0-9]+$ ]] \
-                  || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
-                _cfg_env_write AC_AUCTION_HOUSE_BOT_GUID "$cguid"
-                _cfg_env_write AC_AUCTION_HOUSE_BOT_ACCOUNT "$cacct"
-              else
-                _cfg_env_write "$env" "$value"
-              fi
+              _cfg_env_write "$env" "$value"
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
             fi
             ;;
@@ -3155,6 +3173,154 @@ case "$cmd" in
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots flush --yes --ack flush --json"
+            exit 1
+            ;;
+        esac
+        ;;
+      ahbot)
+        ahsub="${1:-}"; shift || true
+        case "$ahsub" in
+          repair)
+            # Batch 4 F14: faithful port of wow-manage.sh configure_ahbot
+            # (guides/wow-wotlk, read 2026-07-19). The manager (1) requires
+            # mod-ah-bot to be installed, (2) tells the user to create a
+            # dedicated account + ONE character MANUALLY (console + game
+            # client -- nothing can create characters server-side), (3) has
+            # the user pick that character from the DB list, (4) writes
+            # Account/GUID/EnableSeller=1/EnableBuyer=1 into mod_ahbot.conf,
+            # (5) says restart. Deliberate differences: (a) the conf is
+            # created from its dist only when absent and edited IN PLACE --
+            # wow-manage re-copies the whole dist every run, which would wipe
+            # the Auction House tab's curated values; (b) wow-manage also
+            # seds AuctionHouseBot.GUIDs and AHBot.enabled for OTHER mod
+            # forks -- neither key exists in this fork's conf (verified
+            # against the deployed dist) and our writer would APPEND unknown
+            # keys, so they are skipped; (c) instead of always demanding a
+            # restart we attempt the verified live path (SOAP `reload
+            # config` re-runs the module's OnBeforeConfigLoad, which
+            # re-reads Account/GUID and restarts its bots) and report
+            # restart truthfully when that isn't possible.
+            ahchar=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --char) _need_flag_val "$1" $#; ahchar="$2"; shift 2 ;;
+                *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml wow ahbot repair --char <name> --json"; exit 1 ;;
+              esac
+            done
+            # The one step that stays manual (surfaced here AND in the done
+            # payload so the GUI can show it verbatim).
+            ah_manual="Create a separate account for the bot (Accounts page), log into the game with it once, create ONE character, log out, then pick that character here."
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start ahbot-repair
+            if [[ -z "$ahchar" ]] || ! _valid_charname "$ahchar"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error BAD_ARG "ahbot repair needs --char <the bot character's name>" "$ah_manual"
+              else echo "[dml] ERROR: ahbot repair needs --char <name>" >&2; fi
+              exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."
+              else echo "[dml] ERROR: wow server not installed" >&2; fi
+              exit 1
+            fi
+            if [[ ! -d "$sdir/modules/mod-ah-bot" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_INSTALLED "mod-ah-bot is not installed" "Install the Auction House Bot module from the Modules page first."
+              else echo "[dml] ERROR: mod-ah-bot not installed" >&2; fi
+              exit 1
+            fi
+            ahconf="$sdir/env/dist/etc/modules/mod_ahbot.conf"
+            if ! _cfg_conf_ensure "$ahconf"; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "mod_ahbot.conf not found (nor its .dist)" "Is the module fully installed? Try a rebuild from the Modules page."
+              else echo "[dml] ERROR: mod_ahbot.conf missing" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "looking up character $ahchar..."
+            if ahrow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$ahchar")' LIMIT 1;")"; then :; else
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error DB_UNREACHABLE "Could not look up the character" "Is the server (ac-database) running?"
+              else echo "[dml] ERROR: character lookup failed" >&2; fi
+              exit 1
+            fi
+            if [[ -z "$ahrow" ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error NOT_FOUND "No character named $ahchar exists yet" "$ah_manual"
+              else echo "[dml] ERROR: no such character: $ahchar" >&2; fi
+              exit 1
+            fi
+            IFS=$'\t' read -r ahguid ahacct <<< "$ahrow"
+            if [[ ! "$ahguid" =~ ^[0-9]+$ || ! "$ahacct" =~ ^[0-9]+$ ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error DB_UNREACHABLE "Unexpected character lookup result" ""
+              else echo "[dml] ERROR: bad lookup result" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "selected: $ahchar (guid $ahguid, account $ahacct)"
+            CFG_CHANGED=false
+            ahfail=0
+            _cfg_conf_write "$ahconf" "AuctionHouseBot.Account" "$ahacct" || ahfail=1
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.GUID" "$ahguid" || ahfail=1; }
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableSeller" "1" || ahfail=1; }
+            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableBuyer" "1" || ahfail=1; }
+            if [[ "$ahfail" != 0 ]]; then
+              if [[ "$DML_JSON" == 1 ]]; then
+                ndjson_section_end ahbot-repair error
+                ndjson_error WRITE_FAILED "Could not write mod_ahbot.conf" ""
+              else echo "[dml] ERROR: conf write failed" >&2; fi
+              exit 1
+            fi
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "wrote mod_ahbot.conf (account $ahacct, character $ahguid, seller + buyer on)"
+            # Legacy env cleanup, same derivation the conf rows use. Needs
+            # the _cfg_env_* context that _cfg_preamble would set up, minus
+            # its exit-on-missing-yq behavior (a streaming arm must not die
+            # over an env-cleanup nicety: _cfg_env_read degrades to "" when
+            # yq is absent, which just skips the removal).
+            cfg_ovr="$sdir/docker-compose.override.yml"
+            DML_YQ_BIN="${DML_YQ_BIN:-yq}"
+            envwas=false
+            for ahk in AuctionHouseBot.Account AuctionHouseBot.GUID AuctionHouseBot.EnableSeller AuctionHouseBot.EnableBuyer; do
+              ename="$(_cfg_env_name_for "$ahk")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                envwas=true
+                CFG_CHANGED=true
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "removed old override $ename (the running server still has it until a restart)"
+              fi
+            done
+            ahapplied="none"; ahrreq=false; ahalready=true
+            if [[ "$CFG_CHANGED" == true ]]; then
+              ahalready=false
+              ahapplied="restart"; ahrreq=true
+              if [[ "$envwas" == false ]]; then
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "asking the running server to reload its config..."
+                if soap_exec "reload config" >/dev/null 2>&1; then
+                  ahapplied="live"; ahrreq=false
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "reloaded - the auction bot switches to $ahchar without a restart"
+                else
+                  [[ "$DML_JSON" == 1 ]] && ndjson_line info "server not reachable - the change applies on the next start"
+                fi
+              fi
+            else
+              [[ "$DML_JSON" == 1 ]] && ndjson_line info "already configured for $ahchar - nothing to change"
+            fi
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_section_end ahbot-repair ok
+              ndjson_done "{\"repaired\":true,\"already\":$ahalready,\"char\":\"$(json_escape "$ahchar")\",\"guid\":$ahguid,\"account\":$ahacct,\"applied\":\"$ahapplied\",\"restart_required\":$ahrreq,\"manual_steps\":\"$(json_escape "$ah_manual")\"}"
+            else
+              echo "[dml] AH bot configured: $ahchar (guid $ahguid, account $ahacct), applied: $ahapplied"
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown ahbot subcommand: $ahsub" "Try: dml wow ahbot repair --char <name> --json"
             exit 1
             ;;
         esac

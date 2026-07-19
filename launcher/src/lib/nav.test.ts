@@ -20,6 +20,7 @@ describe("NAV", () => {
       "commands",
       "settings",
       "botworld",
+      "ahbot",
       "modules",
       "backups",
       "help",
