@@ -37,6 +37,12 @@ export const NAV = [
       { id: "backups", label: "Backups" },
     ],
   },
+  {
+    // Batch 3 F9: bottom of the sidebar, near Commands -- the "something is
+    // wrong" entry point for a non-technical parent.
+    section: "Help",
+    pages: [{ id: "help", label: "Help & FAQ" }],
+  },
 ] as const;
 
 export type PageId = (typeof NAV)[number]["pages"][number]["id"];

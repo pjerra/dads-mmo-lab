@@ -25,6 +25,7 @@
   import Playerbots from "$lib/pages/Playerbots.svelte";
   import Commands from "$lib/pages/Commands.svelte";
   import Backups from "$lib/pages/Backups.svelte";
+  import Help from "$lib/pages/Help.svelte";
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -114,6 +115,7 @@
     <Config tab={page === "settings" ? "settings" : page === "botworld" ? "botworld" : "files"} />
   {/if}
   {#if page === "backups"}<Backups />{/if}
+  {#if page === "help"}<Help onnav={(p) => (page = p)} />{/if}
 </main>
 
 <style>

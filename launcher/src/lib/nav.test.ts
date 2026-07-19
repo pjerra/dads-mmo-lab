@@ -22,6 +22,7 @@ describe("NAV", () => {
       "botworld",
       "modules",
       "backups",
+      "help",
     ]);
   });
 
@@ -35,6 +36,7 @@ describe("NAV", () => {
       "Characters",
       "Items & Bots",
       "Config",
+      "Help",
     ]);
   });
 
