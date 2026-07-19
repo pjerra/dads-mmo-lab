@@ -580,14 +580,27 @@ export async function wowBotsList(f: BotFilters): Promise<BotsPage> {
   return await invoke("wow_bots_list", f);
 }
 export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }
-export interface PartyAddResult { added: boolean; joined: boolean; bot: string | null; note: string | null; }
+// spec/spec_applied only present when the add carried a --spec (Batch 5 F5).
+export interface PartyAddResult {
+  added: boolean;
+  joined: boolean;
+  bot: string | null;
+  note: string | null;
+  spec?: string;
+  spec_applied?: boolean;
+}
 
 export async function wowPartyOnline(): Promise<OnlineChar[]> {
   const d = await invoke<{ online: OnlineChar[] }>("wow_party_online");
   return d.online;
 }
-export async function wowPartyAdd(player: string, className: string, gender?: string): Promise<PartyAddResult> {
-  return await invoke("wow_party_add", { player, class: className, gender });
+export async function wowPartyAdd(
+  player: string,
+  className: string,
+  gender?: string,
+  spec?: string,
+): Promise<PartyAddResult> {
+  return await invoke("wow_party_add", { player, class: className, gender, spec });
 }
 export async function wowPartyList(player: string): Promise<PartyMember[]> {
   const d = await invoke<{ members: PartyMember[] }>("wow_party_list", { player });
@@ -637,8 +650,13 @@ export interface BotcmdResult { sent: boolean; player: string; bot: string; acti
 export interface PresetInfo { name: string; bots: number; }
 export interface PresetSaveResult { saved: boolean; name: string; bots: string[]; overwrote: boolean; }
 
-export async function wowPartyBotcmd(player: string, bot: string, action: "gear" | "talents" | "maintain"): Promise<BotcmdResult> {
-  return await invoke("wow_party_botcmd", { player, bot, action });
+export async function wowPartyBotcmd(
+  player: string,
+  bot: string,
+  action: "gear" | "talents" | "maintain" | "spec",
+  spec?: string,
+): Promise<BotcmdResult> {
+  return await invoke("wow_party_botcmd", { player, bot, action, spec });
 }
 export async function wowPartyPresetSave(player: string, name: string): Promise<PresetSaveResult> {
   return await invoke("wow_party_preset_save", { player, name });

@@ -127,3 +127,31 @@ _valid_bot_class() {
       *) return 1 ;;
     esac
 }
+
+# Premade-spec names `party add --spec` / `party botcmd --action spec`
+# accept (Batch 5 F5). CLOSED allowlist of the EXACT live spec names
+# (AiPlayerbot.PremadeSpecName.* -- verified against the deployed
+# playerbots.conf 2026-07-19): the playerbots `talents spec <name>` command
+# exact-matches these, and a wrong name replies only IN-GAME ("Spec <x> not
+# found" -- invisible to SOAP), so the CLI must reject anything else up
+# front. Chars are only [a-z ] -- injection-safe in the whisper tail; the
+# no-free-text-whisper rule holds because this is still a fixed allowlist.
+# DK (class 6) specs are deliberately absent (no DK in the wizard, matching
+# _valid_bot_class). NB per the live conf: "bear pvp" and "frostfire pvp"
+# DO NOT EXIST -- do not "complete the symmetry" here. CAVEAT: these names
+# are conf-driven; if the user edits PremadeSpecName.* this list drifts and
+# failures become silent (in-game whisper reply only).
+_valid_bot_spec() {
+    case "$1" in
+      "arms pve"|"arms pvp"|"fury pve"|"fury pvp"|"prot pve"|"prot pvp") return 0 ;;
+      "holy pve"|"holy pvp"|"ret pve"|"ret pvp") return 0 ;;
+      "bm pve"|"bm pvp"|"mm pve"|"mm pvp"|"surv pve"|"surv pvp") return 0 ;;
+      "as pve"|"as pvp"|"combat pve"|"combat pvp"|"subtlety pve"|"subtlety pvp") return 0 ;;
+      "disc pve"|"disc pvp"|"shadow pve"|"shadow pvp") return 0 ;;
+      "ele pve"|"ele pvp"|"enh pve"|"enh pvp"|"resto pve"|"resto pvp") return 0 ;;
+      "arcane pve"|"arcane pvp"|"fire pve"|"fire pvp"|"frost pve"|"frost pvp"|"frostfire pve") return 0 ;;
+      "affli pve"|"affli pvp"|"demo pve"|"demo pvp"|"destro pve"|"destro pvp") return 0 ;;
+      "balance pve"|"balance pvp"|"bear pve"|"cat pve"|"cat pvp") return 0 ;;
+      *) return 1 ;;
+    esac
+}

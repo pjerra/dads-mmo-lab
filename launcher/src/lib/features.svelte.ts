@@ -66,6 +66,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "bot-browser": "untested",
   "arac-client-patch": "untested",
   "gear-sets": "untested",
+  "party-spec": "untested",
 };
 
 export const LOCKED_HINT =

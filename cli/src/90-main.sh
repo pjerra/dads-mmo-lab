@@ -2491,18 +2491,22 @@ case "$cmd" in
             json_ok "{\"online\":$out}"
             ;;
           add)
-            player=""; class=""; gender=""
+            player=""; class=""; gender=""; spec=""
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
                 --class) _need_flag_val "$1" $#; class="$2"; shift 2 ;;
                 --gender) _need_flag_val "$1" $#; gender="$2"; shift 2 ;;
+                --spec) _need_flag_val "$1" $#; spec="$2"; shift 2 ;;
                 *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
             _valid_bot_class "$class" || { json_err BAD_ARG "Invalid class: $class" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1; }
             case "$gender" in ""|male|female) : ;; *) json_err BAD_ARG "Invalid gender: $gender" "male or female"; exit 1 ;; esac
+            if [[ -n "$spec" ]] && ! _valid_bot_spec "$spec"; then
+              json_err BAD_ARG "Unknown spec: $spec" "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list."; exit 1
+            fi
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first, then try again."; exit 1; }
             # Snapshot the group's members BEFORE firing so we can spot the new one.
@@ -2524,12 +2528,30 @@ case "$cmd" in
                 botname="$(db_chars_query "SELECT name FROM characters WHERE guid=$newguid LIMIT 1;" 2>/dev/null)" || botname=""
               fi
               if [[ -n "$botname" ]]; then
-                json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+                # Batch 5 F5: optional premade spec -- whispered AFTER the
+                # join is confirmed and the bot's name is known; autogear
+                # follows the spec (gear must match the new talents). No
+                # --spec keeps this branch byte-identical to before.
+                if [[ -n "$spec" ]]; then
+                  _party_fire "dml_whisper $player $botname talents spec $spec" "spec"
+                  _party_fire "dml_whisper $player $botname autogear" "spec"
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null,\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":true}"
+                else
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+                fi
               else
-                json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":null}"
+                if [[ -n "$spec" ]]; then
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":\"Added but spec not applied -- bot not attached in time\",\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":false}"
+                else
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":null}"
+                fi
               fi
             else
-              json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
+              if [[ -n "$spec" ]]; then
+                json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Added but spec not applied -- bot not attached in time\",\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":false}"
+              else
+                json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
+              fi
             fi
             ;;
           list)
@@ -2579,24 +2601,31 @@ case "$cmd" in
             json_ok "{\"relogged\":true}"
             ;;
           botcmd)
-            player=""; bot=""; action=""
+            player=""; bot=""; action=""; spec=""
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
                 --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
                 --action) _need_flag_val "$1" $#; action="$2"; shift 2 ;;
+                --spec) _need_flag_val "$1" $#; spec="$2"; shift 2 ;;
                 *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
             _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
             # Closed allowlist -> fixed whisper strings. This is the whole
-            # whisper surface: no free-text path exists.
+            # whisper surface: no free-text path exists -- the spec action's
+            # tail is itself allowlisted by _valid_bot_spec (Batch 5 F5).
             case "$action" in
               gear) wmsg="autogear" ;;
               talents) wmsg="talents autopick" ;;
               maintain) wmsg="maintenance" ;;
-              *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain"; exit 1 ;;
+              spec)
+                [[ -n "$spec" ]] || { json_err BAD_ARG "Action spec requires --spec <name>" "e.g. --spec 'frost pve'"; exit 1; }
+                _valid_bot_spec "$spec" || { json_err BAD_ARG "Unknown spec: $spec" "A premade spec name like 'frost pve'."; exit 1; }
+                wmsg="talents spec $spec"
+                ;;
+              *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain spec"; exit 1 ;;
             esac
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }

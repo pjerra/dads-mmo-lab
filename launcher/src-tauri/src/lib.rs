@@ -969,9 +969,12 @@ async fn wow_world_restart(
 }
 
 #[tauri::command]
-async fn wow_party_add(player: String, class: String, gender: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+async fn wow_party_add(player: String, class: String, gender: Option<String>, spec: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let mut a: Vec<String> = vec!["wow".into(),"party".into(),"add".into(),"--player".into(),player,"--class".into(),class];
     if let Some(g) = gender { a.extend(["--gender".into(), g]); }
+    // Batch 5 F5: premade spec, passed as a plain argv value -- the CLI
+    // closed-allowlists it (_valid_bot_spec).
+    if let Some(s) = spec { a.extend(["--spec".into(), s]); }
     run_json_cmd(state, a).await
 }
 
@@ -1098,12 +1101,11 @@ async fn wow_party_preset_import(
 }
 
 #[tauri::command]
-async fn wow_party_botcmd(player: String, bot: String, action: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
-    run_json_cmd(
-        state,
-        vec!["wow".into(), "party".into(), "botcmd".into(), "--player".into(), player, "--bot".into(), bot, "--action".into(), action],
-    )
-    .await
+async fn wow_party_botcmd(player: String, bot: String, action: String, spec: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let mut a: Vec<String> = vec!["wow".into(), "party".into(), "botcmd".into(), "--player".into(), player, "--bot".into(), bot, "--action".into(), action];
+    // Batch 5 F5: required by the CLI when action == "spec", allowlisted there.
+    if let Some(s) = spec { a.extend(["--spec".into(), s]); }
+    run_json_cmd(state, a).await
 }
 
 #[tauri::command]

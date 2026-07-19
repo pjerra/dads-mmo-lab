@@ -12,8 +12,13 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-
-  const CLASSES = ["warrior","paladin","hunter","rogue","priest","shaman","mage","warlock","druid"];
+  import {
+    ROLES,
+    ROLE_MAP,
+    PVE_SPECS_BY_CLASS_ID,
+    VALID_BOT_CLASSES,
+    type Role,
+  } from "$lib/party-specs";
 
   let online: OnlineChar[] = $state([]);
   let player = $state("");           // the chosen online player's name
@@ -70,20 +75,62 @@
   }
   onMount(() => { refresh(); refreshPresets(); });
 
+  // Batch 5 F5: role -> class -> spec picker state. "Any role" shows all 9
+  // classes; "Any spec" ("" here) keeps today's no---spec behavior exactly.
+  let pickRole = $state<Role | "">("");
+  let pickClass = $state("");
+  let pickSpec = $state("");
+  const roleClasses = $derived(
+    pickRole === ""
+      ? VALID_BOT_CLASSES.map((c) => ({ class: c, spec: "" }))
+      : ROLE_MAP[pickRole].map((p) => ({ class: p.class, spec: p.spec })),
+  );
+  function onRoleChange() {
+    pickClass = "";
+    pickSpec = "";
+  }
+  function onClassChange() {
+    // Default the spec to the role's pick for that class; Any-role -> any.
+    pickSpec = roleClasses.find((c) => c.class === pickClass)?.spec ?? "";
+  }
+  const addLocked = $derived(
+    featureLocked("party-ops") || (pickSpec !== "" && featureLocked("party-spec")),
+  );
+
+  // Per-bot Change-spec picks (Batch 5 F5), keyed by bot name.
+  let botSpec: Record<string, string> = $state({});
+
   // add/kick/resummon snapshot `player` into a local before their first await.
   // The player <select> is also disabled while busy/setting (below), but the
   // snapshot means these handlers stay correct even if that guard is ever
   // loosened -- a live re-read of `player` after an await could otherwise
   // send a follow-up call (or a "note" message) to the wrong character if the
   // selection changed mid-flight.
-  async function add(cls: string) {
+  async function add(cls: string, spec?: string) {
     const p = player;
     if (!p) return;
     busy = true; error = null; note = null;
     try {
-      const r = await wowPartyAdd(p, cls);
-      note = r.joined ? `Added a ${cls} to your party.` : (r.note ?? "Adding…");
+      const r = await wowPartyAdd(p, cls, undefined, spec);
+      if (r.joined && spec) {
+        note = r.spec_applied
+          ? `Added a ${spec} ${cls} to your party (talents + gear applied).`
+          : (r.note ?? `Added a ${cls} — spec not applied.`);
+      } else {
+        note = r.joined ? `Added a ${cls} to your party.` : (r.note ?? "Adding…");
+      }
       members = await wowPartyList(p);
+    } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  async function changeSpec(bot: string) {
+    const p = player;
+    const s = botSpec[bot];
+    if (!s) return;
+    busy = true; error = null; note = null;
+    try {
+      await wowPartyBotcmd(p, bot, "spec", s);
+      note = `Told ${bot} to respec to ${s} — give it a moment, then Gear up.`;
     } catch (e) { showErr(e); } finally { busy = false; }
   }
   async function kick(bot: string) {
@@ -264,17 +311,36 @@
       </strong>
     </div>
 
+    <!-- Batch 5 F5: role -> class -> spec picker (replaces the old class
+         button row). "Any spec" = today's behavior (no spec whisper). -->
     <div class="addrow">
-      {#each CLASSES as c (c)}
-        <button
-          class="cls"
-          onclick={() => add(c)}
-          disabled={busy || setting || loadingPreset || featureLocked("party-ops")}
-          title={featureLocked("party-ops") ? LOCKED_HINT : undefined}
-        >
-          {c[0].toUpperCase() + c.slice(1)}
-        </button>
-      {/each}
+      <select bind:value={pickRole} onchange={onRoleChange} disabled={busy || setting || loadingPreset}>
+        <option value="">Any role</option>
+        {#each ROLES as r (r)}<option value={r}>{r}</option>{/each}
+      </select>
+      <select bind:value={pickClass} onchange={onClassChange} disabled={busy || setting || loadingPreset}>
+        <option value="">Pick a class…</option>
+        {#each roleClasses as c (c.class)}
+          <option value={c.class}>{c.class[0].toUpperCase() + c.class.slice(1)}</option>
+        {/each}
+      </select>
+      <select bind:value={pickSpec} disabled={busy || setting || loadingPreset || !pickClass}>
+        <option value="">Any spec</option>
+        {#if pickClass}
+          {@const roleSpec = roleClasses.find((c) => c.class === pickClass)?.spec}
+          {#if roleSpec}
+            <option value={roleSpec}>{roleSpec}</option>
+          {/if}
+        {/if}
+      </select>
+      <button
+        class="cls"
+        onclick={() => add(pickClass, pickSpec || undefined)}
+        disabled={!pickClass || busy || setting || loadingPreset || addLocked}
+        title={addLocked ? LOCKED_HINT : undefined}
+      >
+        Add bot
+      </button>
     </div>
     {#if note}<p class="muted">{note}</p>{/if}
 
@@ -333,6 +399,25 @@
                   >
                     Set level
                   </button>
+                  {#if PVE_SPECS_BY_CLASS_ID[m.class]}
+                    <select
+                      value={botSpec[m.name] ?? ""}
+                      onchange={(e) => (botSpec[m.name] = e.currentTarget.value)}
+                      disabled={busy || loadingPreset}
+                    >
+                      <option value="">spec…</option>
+                      {#each PVE_SPECS_BY_CLASS_ID[m.class] as s (s)}
+                        <option value={s}>{s}</option>
+                      {/each}
+                    </select>
+                    <button
+                      onclick={() => changeSpec(m.name)}
+                      disabled={busy || loadingPreset || !botSpec[m.name] || featureLocked("party-spec")}
+                      title={featureLocked("party-spec") ? LOCKED_HINT : undefined}
+                    >
+                      Change spec
+                    </button>
+                  {/if}
                   {:else}<span class="muted">you</span>{/if}</td>
             </tr>
           {/each}

@@ -318,3 +318,97 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
   echo "$output" | grep -q 'bridge-setup'
 }
+
+# ---------- --spec (Batch 5 F5: party wizard light) ----------
+
+# Stubbed confirmed join: guid lookup -> pre-fire snapshot -> post-fire poll
+# (new bot 9001) -> bot-name lookup, same SEQ pattern as the add tests above.
+seed_confirmed_join() {
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n' > "$FIXTURE/before.tsv"
+  printf '2503\n9001\n' > "$FIXTURE/after.tsv"
+  printf 'Botmage\n' > "$FIXTURE/botname.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/before.tsv $FIXTURE/after.tsv $FIXTURE/botname.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=3 DML_PARTY_POLL_SLEEP=0
+}
+
+@test "party add --spec whispers the exact spec then autogear after a confirmed join" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  use_mysql_stub
+  seed_confirmed_join
+  run bash "$DML" wow party add --player Testen --class mage --spec "frost pve" --json
+  [ "$status" -eq 0 ]
+  grep -q 'dml_whisper Testen Botmage talents spec frost pve' "$FIXTURE/cap.txt"
+  grep -q 'dml_whisper Testen Botmage autogear' "$FIXTURE/cap.txt"
+  # order: spec BEFORE autogear (gear must follow the new talents)
+  [ "$(grep -n 'talents spec frost pve' "$FIXTURE/cap.txt" | cut -d: -f1)" -lt \
+    "$(grep -n 'Botmage autogear' "$FIXTURE/cap.txt" | cut -d: -f1)" ]
+  [ "$(echo "$output" | jq -r '.data.spec')" = "frost pve" ]
+  [ "$(echo "$output" | jq -r '.data.spec_applied')" = "true" ]
+}
+
+@test "party add rejects a spec outside the allowlist before any SOAP call" {
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow party add --player Testen --class mage --spec "frost pve; .server shutdown" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ ! -f "$FIXTURE/curl.log" ]
+  # names absent from the live conf are rejected too (no invented symmetry)
+  run bash "$DML" wow party add --player Testen --class druid --spec "bear pvp" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "party add without --spec has no spec keys in the payload (regression net)" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  use_mysql_stub
+  seed_confirmed_join
+  run bash "$DML" wow party add --player Testen --class mage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data | has("spec")')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data | has("spec_applied")')" = "false" ]
+}
+
+@test "party add --spec with an unconfirmed join skips the whispers and reports spec_applied:false" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '2503\n' > "$FIXTURE/solo.tsv"   # never grows
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/solo.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=2 DML_PARTY_POLL_SLEEP=0
+  run bash "$DML" wow party add --player Testen --class mage --spec "frost pve" --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.joined')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.spec_applied')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.note')" != "null" ]
+  ! grep -q 'dml_whisper' "$FIXTURE/cap.txt"
+}
+
+@test "party botcmd action spec whispers talents spec <name>" {
+  printf '2503\n' > "$FIXTURE/guid.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/guid.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action spec --spec "resto pve" --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.action')" = "spec" ]
+  grep -q 'dml_whisper Testen Botmage talents spec resto pve' "$FIXTURE/cap.txt"
+}
+
+@test "party botcmd action spec without --spec (or with a bad one) is BAD_ARG" {
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action spec --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  run bash "$DML" wow party botcmd --player Testen --bot Botmage --action spec --spec "necro pve" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
