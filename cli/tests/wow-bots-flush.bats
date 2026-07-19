@@ -114,3 +114,55 @@ _flag_line() { grep '^AiPlayerbot.DeleteRandomBotAccounts' "$PB"; }
   [ "$status" -eq 1 ]
   echo "$output" | grep -q '"code":"UNKNOWN_COMMAND"'
 }
+
+# --- surviving an untrappable death (review fix) ----------------------------
+# The EXIT trap covers normal/`exit`/set -e deaths and the signal traps cover
+# HUP/INT/TERM/PIPE, but SIGKILL and power loss are not trappable at all. The
+# on-disk marker is what makes the flag recoverable in those cases: the next
+# start/restart heals it BEFORE the server boots and wipes the bots.
+
+@test "bots flush leaves no arm marker behind on the happy path" {
+  printf 'AiPlayerbot.DeleteRandomBotAccounts = 0\n' > "$PB"
+  run bash "$DML" wow bots flush --yes --ack flush --json
+  [ "$status" -eq 0 ]
+  [ ! -e "$GDIR/.dml-bot-flush-armed" ]
+}
+
+@test "bots flush clears the arm marker when the restart fails mid-flow" {
+  printf '# pb conf without the delete key\n' > "$PB"
+  export DML_STUB_COMPOSE_EXIT=1
+  run bash "$DML" wow bots flush --yes --ack flush --json
+  [ "$status" -eq 1 ]
+  [ ! -e "$GDIR/.dml-bot-flush-armed" ]
+}
+
+@test "games start heals a delete flag left armed by a killed flush" {
+  # Simulate the SIGKILL aftermath: flag still 1, marker still present.
+  printf '# pb conf\nAiPlayerbot.DeleteRandomBotAccounts = 1\n' > "$PB"
+  : > "$GDIR/.dml-bot-flush-armed"
+  run bash "$DML" games start wow-server-playerbots --json
+  [ "$status" -eq 0 ]
+  [ "$(_flag_line)" = "AiPlayerbot.DeleteRandomBotAccounts = 0" ]
+  [ ! -e "$GDIR/.dml-bot-flush-armed" ]
+  echo "$output" | grep -q 'interrupted bot flush'
+  grep -q '^# pb conf$' "$PB"
+}
+
+@test "games restart heals a delete flag left armed by a killed flush" {
+  printf 'AiPlayerbot.DeleteRandomBotAccounts = 1\n' > "$PB"
+  : > "$GDIR/.dml-bot-flush-armed"
+  run bash "$DML" games restart wow-server-playerbots --json
+  [ "$status" -eq 0 ]
+  [ "$(_flag_line)" = "AiPlayerbot.DeleteRandomBotAccounts = 0" ]
+  [ ! -e "$GDIR/.dml-bot-flush-armed" ]
+}
+
+@test "games start without a marker never touches playerbots.conf or warns" {
+  printf 'AiPlayerbot.DeleteRandomBotAccounts = 1\n' > "$PB"
+  run bash "$DML" games start wow-server-playerbots --json
+  [ "$status" -eq 0 ]
+  # No marker -> no heal: the value stands exactly as the user left it.
+  [ "$(_flag_line)" = "AiPlayerbot.DeleteRandomBotAccounts = 1" ]
+  run grep -c 'interrupted bot flush' <<< "$output"
+  [ "$status" -ne 0 ]
+}

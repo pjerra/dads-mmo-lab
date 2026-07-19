@@ -190,6 +190,28 @@ _cfg_env_write() {
     return 0
 }
 
+# _cfg_env_frozen <ENV>: 0 when the RUNNING ac-worldserver container carries
+# this legacy AC_* variable in its creation-time environment.
+#
+# The override.yml read above answers "is the override still on disk", which
+# is NOT the same question as "will a `reload config` actually take effect".
+# A container keeps the environment it was CREATED with: cleaning the key out
+# of override.yml does nothing to the running process, and AC's env bridge
+# beats conf values, so the world keeps serving the frozen number until a
+# compose recreate. Save #1 removes the key and correctly says "restart";
+# save #2 would otherwise see a clean file, report applied:"live" and lie --
+# the effective rate never moved. Asking docker closes that gap.
+#
+# Degrades to 1 (not frozen) when docker is down or the container is absent:
+# with no container there is no frozen env to beat the conf, and the SOAP
+# reload that gates the live claim cannot succeed then either.
+_cfg_env_frozen() {
+    local envs
+    envs="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' ac-worldserver 2>/dev/null)" || return 1
+    printf '%s\n' "$envs" | grep -q "^$1=" || return 1
+    return 0
+}
+
 # _cfg_env_remove <ENV>: deletes the key from the override's environment map
 # (no-op when the override or key is absent). Callers use _cfg_env_read first
 # to learn whether it WAS present (frozen-env restart signal).
@@ -445,13 +467,62 @@ _flush_restart_authworld() {
     done
 }
 
-# EXIT-trap hook for `wow bots flush`: however the flow dies after the
-# delete flag was armed, the flag goes back to 0 -- otherwise EVERY later
-# boot would silently wipe the bots again. The arm clears
-# FLUSH_RESTORE_CONF once it restores the flag itself.
+# Trap hook for `wow bots flush`: however the flow dies after the delete
+# flag was armed, the flag goes back to 0 -- otherwise EVERY later boot
+# would silently wipe the bots again. The arm clears FLUSH_RESTORE_CONF
+# once it restores the flag itself.
+#
+# Wired to EXIT *and* HUP/INT/TERM/PIPE (see the flush arm): bash runs the
+# EXIT trap on a normal/`exit`/set -e death but NOT when an untrapped fatal
+# signal kills the shell -- and that is exactly how this dies in the field
+# (the launcher closing kills the wsl.exe child tree, a stream consumer
+# going away raises SIGPIPE on stdout). The armed window spans a whole
+# bot-deletion boot, up to DML_READY_TIMEOUT_SECS.
 _flush_restore_flag() {
     [[ -n "${FLUSH_RESTORE_CONF:-}" ]] || return 0
     _cfg_conf_write "$FLUSH_RESTORE_CONF" "AiPlayerbot.DeleteRandomBotAccounts" "0" || true
+    rm -f "$(_flush_marker_for "$FLUSH_RESTORE_CONF")" 2>/dev/null || true
+    return 0
+}
+
+# Signal variant: restore, then re-raise with the default handler so the
+# exit status still reflects the signal (128+n) for whoever is watching.
+_flush_restore_flag_signal() {
+    local sig="$1"
+    _flush_restore_flag
+    trap - "$sig"
+    kill -s "$sig" $$ 2>/dev/null || true
+    return 0
+}
+
+# On-disk breadcrumb next to the server dir, written BEFORE the flag is
+# armed and removed only once it is back to 0. SIGKILL and power loss are
+# not trappable at all, so the trap above cannot be the last line of
+# defence: the marker lets the next start/restart/flush notice a flag that
+# survived and heal it before the server boots and wipes the bots again.
+# <conf> is the playerbots.conf path; the marker lives at the server-dir
+# root (conf is always <sdir>/env/dist/etc/modules/playerbots.conf).
+_flush_marker_for() {
+    local conf="$1" sdir
+    sdir="${conf%/env/dist/etc/modules/playerbots.conf}"
+    [[ "$sdir" != "$conf" ]] || return 0
+    printf '%s\n' "$sdir/.dml-bot-flush-armed"
+    return 0
+}
+
+# Self-heal: if <sdir> carries an arm marker, a previous flush died before
+# it could restore the flag. Force it back to 0 and drop the marker. Echoes
+# a one-line note when it healed something, nothing otherwise; never fails.
+_flush_heal_flag() {
+    local sdir="$1" conf marker
+    conf="$sdir/env/dist/etc/modules/playerbots.conf"
+    marker="$sdir/.dml-bot-flush-armed"
+    [[ -f "$marker" ]] || return 0
+    if [[ -f "$conf" ]]; then
+        _cfg_conf_write "$conf" "AiPlayerbot.DeleteRandomBotAccounts" "0" || true
+    fi
+    rm -f "$marker" 2>/dev/null || true
+    printf '%s\n' "an interrupted bot flush had left the bot-delete flag armed - reset to 0 so this boot keeps your bots"
     return 0
 }
 

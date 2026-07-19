@@ -77,6 +77,13 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf '%s\n' "${DML_STUB_EXIT_CODE:-0}"
     exit 0
   fi
+  # config set's frozen-env check (_cfg_env_frozen): the RUNNING container's
+  # creation-time environment, one NAME=value per line. DML_STUB_CONTAINER_ENV
+  # is a newline list; unset = no frozen env, which is the common case.
+  if [[ "$*" == *Config.Env* ]]; then
+    [[ -n "${DML_STUB_CONTAINER_ENV:-}" ]] && printf '%s\n' "${DML_STUB_CONTAINER_ENV}"
+    exit 0
+  fi
   # module client-patch (Batch 5 F2): the data-volume resolution inspects
   # the worldserver's Mounts -- serve DML_STUB_MOUNT_VOLUME (empty when
   # unset, which exercises the caller's fallback-name path).

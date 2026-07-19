@@ -163,6 +163,17 @@ _games_start_impl() {
     local mode="$2"
     _games_resolve_or_fail "$1"
     [[ "$DML_JSON" == 1 ]] && ndjson_section_start "$mode"
+    # Self-heal an interrupted `wow bots flush` (Batch 1 F4 review): if that
+    # flow was SIGKILLed / power-cut while AiPlayerbot.DeleteRandomBotAccounts
+    # was armed, the flag is still 1 and THIS boot would wipe every random
+    # bot. Marker-gated, so it is a no-op (one stat) for every other title
+    # and every normal start.
+    local _fheal=""
+    _fheal="$(_flush_heal_flag "$compose_dir")" || true
+    if [[ -n "$_fheal" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_line warn "$_fheal"
+        else echo "[dml] WARN: $_fheal" >&2; fi
+    fi
     cd "$compose_dir"
     # Cold starts only: during a restart the ports are (expectedly) held by
     # this server's own still-running containers, so the conflict check would
@@ -1149,10 +1160,21 @@ case "$cmd" in
         # compose file declares the AzerothCore client-data volume, remove it
         # here by default (a removed title shouldn't keep 6 GB of disk) --
         # unless --keep-data asked to preserve it for a faster reinstall.
-        # Volume name: compose prefixes the declared name with the project
-        # (compose-dir basename, lowercased/sanitized); the declared name
-        # itself defaults to ac-client-data but the base file reads it from
-        # DOCKER_VOL_DATA in the project .env, so honor that override.
+        # Volume name: compose prefixes the DECLARED name (the top-level
+        # `volumes:` key) with the project -- the compose-dir basename,
+        # lowercased/sanitized.
+        #
+        # DOCKER_VOL_DATA is deliberately NOT honored here. In the shipped
+        # compose it only substitutes the service MOUNT source
+        # (`${DOCKER_VOL_DATA:-ac-client-data}:/azerothcore/...`); the
+        # top-level key stays the literal `ac-client-data`, so the volume
+        # docker actually creates is `<project>_ac-client-data` whatever
+        # the variable says. Honoring it built a name that cannot exist:
+        # the usual override is a bind path, so `docker volume rm
+        # <project>_/some/path` failed with a spurious warning while the
+        # real ~6 GB volume leaked -- and a bare-name override could
+        # resolve onto a DIFFERENT declared volume (`ac-database`) and
+        # delete the accounts/characters database instead.
         vol_base=""
         if [[ -n "$tcompose" ]]; then
           for _c in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
@@ -1161,10 +1183,6 @@ case "$cmd" in
               break
             fi
           done
-          if [[ -n "$vol_base" ]]; then
-            _ovr="$(grep -m1 '^DOCKER_VOL_DATA=' "$tcompose/.env" 2>/dev/null | cut -d= -f2- || true)"
-            [[ -n "$_ovr" ]] && vol_base="$_ovr"
-          fi
         fi
         if [[ -n "$vol_base" ]]; then
           vproj="$(basename "$tcompose" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
@@ -1302,7 +1320,7 @@ case "$cmd" in
         # Container state first, SOAP second -- the four-state verdict.
         # Read-only; down/booting are answers, so this verb never errors.
         detail_rows="$(_detail_container_rows)"
-        detail_world_state=""; detail_containers=""
+        detail_world_state=""; detail_containers=""; detail_others_up=false
         while IFS='|' read -r dc_name dc_state dc_status; do
           case "$dc_name" in
             ac-worldserver) dc_role=world ;;
@@ -1310,6 +1328,10 @@ case "$cmd" in
             *) dc_role=database ;;
           esac
           [[ "$dc_name" == ac-worldserver ]] && detail_world_state="$dc_state"
+          # Is anything OTHER than the world still up? Distinguishes "the
+          # world alone died" from "the whole stack was taken down", which
+          # is what tells a crash apart from a deliberate stop below.
+          [[ "$dc_name" != ac-worldserver && "$dc_state" == running ]] && detail_others_up=true
           dc_entry="$(printf '{"name":"%s","role":"%s","state":"%s","status":"%s"}' \
             "$(json_escape "$dc_name")" "$dc_role" "$(json_escape "$dc_state")" "$(json_escape "$dc_status")")"
           if [[ -z "$detail_containers" ]]; then detail_containers="$dc_entry"
@@ -1345,10 +1367,28 @@ case "$cmd" in
               detail_exit_code="$((10#$detail_ec))"
               case "$detail_exit_code" in
                 0|143) ;;
+                137)
+                  # 128+SIGKILL. Two very different causes: `compose stop
+                  # -t 180` running out of patience on a slow graceful
+                  # shutdown (deliberate -- the whole stack goes down with
+                  # it), or the world alone being killed (OOM) while auth
+                  # and the database keep running. Only the second is a
+                  # crash; calling a slow-but-normal Stop "crashed" would
+                  # be a scary lie right after the user pressed Stop.
+                  [[ "$detail_others_up" == true ]] && detail_verdict=crashed
+                  ;;
                 *) detail_verdict=crashed ;;
               esac
             fi
           fi
+          # Docker's own restart backoff. A cold start legitimately loops
+          # here for ~2 minutes while MySQL warms up (documented in
+          # docs/SMOKE-TESTS.md: "Docker self-heals -- normal"), and each
+          # backoff shows a nonzero last exit code. That is a boot in
+          # progress, not a dead server -- reporting "crashed" here put a
+          # pulsing-red card and a Recover button in front of the user
+          # during every normal start.
+          [[ "$detail_world_state" == restarting ]] && detail_verdict=starting
         elif [[ "$detail_reach" == true ]]; then detail_verdict=online
         elif [[ "$detail_ready" == true ]]; then detail_verdict=soap_unreachable
         else detail_verdict=starting; fi
@@ -2092,6 +2132,20 @@ case "$cmd" in
               fi
               [[ "$conf_key" =~ ^[A-Za-z0-9_.]+$ ]] \
                 || { json_err BAD_ARG "Invalid conf key: $conf_key" "Letters, digits, dots and underscores only."; exit 1; }
+              # Denylist: keys `wow bots flush` owns. Setting this one by
+              # hand arms a PERSISTENT boot-time wipe -- every subsequent
+              # start deletes all random bots' characters, auctions and mail
+              # and nothing ever puts it back. The flush verb does the same
+              # job safely (typed ack + automatic character backup + a
+              # restore that survives signals and crashes), so route the
+              # user there instead of writing the latch verbatim.
+              case "$conf_key" in
+                AiPlayerbot.DeleteRandomBotAccounts)
+                  json_err BAD_ARG "$conf_key is managed by the bot flush tool" \
+                    "Use: dml wow bots flush --yes --ack flush (backs your characters up first and always disarms the flag afterwards)."
+                  exit 1
+                  ;;
+              esac
               case "$value" in
                 *$'\n'*|*$'\r'*) json_err BAD_ARG "The value must be a single line" ""; exit 1 ;;
               esac
@@ -2198,30 +2252,31 @@ case "$cmd" in
                 _cfg_conf_write "$cpath" "AiPlayerbot.MinRandomBots" "$value" \
                   || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
               fi
+              # Every legacy AC_* name this save migrates. Collected (not just
+              # flagged) because the live/restart decision below has to ask
+              # the RUNNING container about each of them, not only the ones
+              # that still happened to be in override.yml this time round.
+              envnames=("$(_cfg_env_name_for "$conf_key")")
+              [[ "$key" == "bots.population" ]] && envnames+=("$(_cfg_env_name_for AiPlayerbot.MinRandomBots)")
+              # Companion cleanup for the Account write above -- the row's
+              # own key (GUID) was already handled by the generic block.
+              [[ "$key" == "ahbot.character" ]] && envnames+=("$(_cfg_env_name_for AuctionHouseBot.Account)")
               envwas=false
-              ename="$(_cfg_env_name_for "$conf_key")"
-              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
-                _cfg_env_remove "$ename"
-                envwas=true
-                CFG_CHANGED=true
-              fi
-              if [[ "$key" == "bots.population" ]]; then
-                ename="$(_cfg_env_name_for AiPlayerbot.MinRandomBots)"
+              for ename in "${envnames[@]}"; do
                 if [[ -n "$(_cfg_env_read "$ename")" ]]; then
                   _cfg_env_remove "$ename"
                   envwas=true
                   CFG_CHANGED=true
                 fi
-              fi
-              if [[ "$key" == "ahbot.character" ]]; then
-                # Companion cleanup for the Account write above -- the row's
-                # own key (GUID) was already handled by the generic block.
-                ename="$(_cfg_env_name_for AuctionHouseBot.Account)"
-                if [[ -n "$(_cfg_env_read "$ename")" ]]; then
-                  _cfg_env_remove "$ename"
-                  envwas=true
-                  CFG_CHANGED=true
-                fi
+              done
+              # A legacy override that is gone from override.yml but still
+              # baked into the running container beats the conf on `reload
+              # config` (AC's env bridge), so the live claim would be a lie
+              # until one compose recreate. Ask docker, not just the file.
+              if [[ "$envwas" == false ]]; then
+                for ename in "${envnames[@]}"; do
+                  if _cfg_env_frozen "$ename"; then envwas=true; break; fi
+                done
               fi
               applied="none"; rreq=false
               if [[ "$CFG_CHANGED" == true ]]; then
@@ -3237,11 +3292,21 @@ case "$cmd" in
               [[ -z "$p" ]] && continue
               [[ "$DML_JSON" == 1 ]] && ndjson_line info "pruned old backup: $p"
             done < <(_backup_prune)
-            # (2) arm the delete flag; from here on the trap guarantees the
-            # flag is restored no matter how this arm dies.
+            # (2) arm the delete flag. Three layers keep it from surviving:
+            # the EXIT trap (normal/`exit`/set -e deaths), the signal traps
+            # (HUP/INT/TERM/PIPE -- how this actually dies when the launcher
+            # is closed mid-flush), and the on-disk marker, which the next
+            # start/restart/flush heals after an untrappable SIGKILL or a
+            # power cut. The marker is written FIRST: a crash between the
+            # marker and the conf write only costs a redundant reset to 0.
             CFG_CHANGED=false
             FLUSH_RESTORE_CONF="$pbflush"
+            : > "$(_flush_marker_for "$pbflush")" 2>/dev/null || true
             trap '_flush_restore_flag' EXIT
+            for _fsig in HUP INT TERM PIPE; do
+              # shellcheck disable=SC2064 -- $_fsig must expand at trap time
+              trap "_flush_restore_flag_signal $_fsig" "$_fsig"
+            done
             if ! _cfg_conf_write "$pbflush" "AiPlayerbot.DeleteRandomBotAccounts" "1"; then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end bots-flush error
@@ -3273,7 +3338,12 @@ case "$cmd" in
               else echo "[dml] ERROR: conf restore failed" >&2; fi
               exit 1
             fi
+            # Disarmed: drop the marker and the signal traps together with
+            # FLUSH_RESTORE_CONF, so the long rebuild restart below is no
+            # longer covered by (or paying for) the restore machinery.
+            rm -f "$(_flush_marker_for "$pbflush")" 2>/dev/null || true
             FLUSH_RESTORE_CONF=""
+            trap - HUP INT TERM PIPE
             # (6) restart #2: the server recreates the population from the
             # current Bot World settings during this boot
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "restarting again to rebuild the bot population (this is the long part)..."
@@ -3421,6 +3491,12 @@ case "$cmd" in
                 envwas=true
                 CFG_CHANGED=true
                 [[ "$DML_JSON" == 1 ]] && ndjson_line info "removed old override $ename (the running server still has it until a restart)"
+              elif _cfg_env_frozen "$ename"; then
+                # Cleaned from override.yml by an earlier run but still baked
+                # into the running container -- the env bridge beats the conf
+                # on reload, so this is a restart, not a live apply.
+                envwas=true
+                [[ "$DML_JSON" == 1 ]] && ndjson_line info "the running server still carries $ename from when it started - a restart is needed"
               fi
             done
             ahapplied="none"; ahrreq=false; ahalready=true

@@ -166,13 +166,33 @@ EOF
   [ ! -e "$FIXTURE/maplestory-server" ]
 }
 
-@test "games remove --yes: DOCKER_VOL_DATA override in .env wins over the default name" {
+# DOCKER_VOL_DATA substitutes the service MOUNT source only; the top-level
+# `volumes:` key stays `ac-client-data`, so that is the volume compose
+# actually creates. Honoring the variable built a name docker never had --
+# harmless-looking, but it meant the real ~6 GB volume silently leaked.
+@test "games remove --yes: DOCKER_VOL_DATA in .env does NOT rename the removed volume" {
   _setup_wow_removable
   printf 'DOCKER_VOL_DATA=my-custom-data\n' > "$FIXTURE/maplestory-server/.env"
   export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
   run bash "$DML" games remove maplestory-server --yes --json
   [ "$status" -eq 0 ]
-  grep -q '^volume rm maplestory-server_my-custom-data$' "$FIXTURE/calls.log"
+  grep -q '^volume rm maplestory-server_ac-client-data$' "$FIXTURE/calls.log"
+  run grep 'my-custom-data' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+# A bare-name override that happens to match another DECLARED volume was the
+# dangerous case: the old code would have removed the accounts/characters
+# database volume right after compose down freed it.
+@test "games remove --yes: DOCKER_VOL_DATA=ac-database never removes the database volume" {
+  _setup_wow_removable
+  printf 'DOCKER_VOL_DATA=ac-database\n' > "$FIXTURE/maplestory-server/.env"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  grep -q '^volume rm maplestory-server_ac-client-data$' "$FIXTURE/calls.log"
+  run grep '^volume rm maplestory-server_ac-database$' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
 }
 
 @test "games remove --yes: no client-data volume declared -> no volume rm at all" {

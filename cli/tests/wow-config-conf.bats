@@ -109,6 +109,46 @@ EOF
   yq -e '.services.ac-worldserver.environment.AC_AI_PLAYERBOT_MAX_RANDOM_BOTS == "2000"' "$OVR"
 }
 
+# The override.yml read answers "is the override still on disk", NOT "will a
+# reload actually take effect". After save #1 migrated the key away, save #2
+# used to find a clean file and report applied:"live" -- while the running
+# container still carried the old value and AC's env bridge beat the conf.
+@test "conf-row set reports restart when the legacy env is gone from the file but frozen in the container" {
+  _seed_worldconf
+  use_docker_stub
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  # No AC_RATE_XP_KILL in override.yml (an earlier save cleaned it) ...
+  cat > "$OVR" <<'EOF'
+services:
+  ac-worldserver:
+    environment:
+      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"
+EOF
+  # ... but the container was created with it and still has it.
+  export DML_STUB_CONTAINER_ENV='PATH=/usr/bin
+AC_RATE_XP_KILL=3'
+  run bash "$DML" wow config set --key rates.xp_kill --value 5 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.applied')" = "restart" ]
+  [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
+  grep -q '^Rate.XP.Kill = 5$' "$ETC/worldserver.conf"
+}
+
+@test "conf-row set still applies live when the container carries no matching legacy env" {
+  _seed_worldconf
+  use_docker_stub
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  # A frozen env for an UNRELATED key must not block this row's live apply.
+  export DML_STUB_CONTAINER_ENV='AC_RATE_HONOR=7'
+  run bash "$DML" wow config set --key rates.xp_kill --value 6 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.applied')" = "live" ]
+  [ "$(echo "$output" | jq -r '.data.restart_required')" = "false" ]
+}
+
 @test "conf-row set reports restart when SOAP is unreachable" {
   _seed_worldconf
   use_curl_stub

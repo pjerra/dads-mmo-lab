@@ -101,6 +101,37 @@ EOF
   ! grep -q 'Evil' "$PB"
 }
 
+# The all-keys browser makes every playerbots key a first-class editable
+# field, including the boot-time bot-wipe latch that `wow bots flush` wraps
+# in a typed ack, a safety backup and a restore that survives signals. Set
+# by hand it stays armed forever: EVERY later boot wipes all random bots'
+# characters, auctions and mail. The direct route refuses it.
+@test "direct conf route refuses the flush-managed bot-wipe key" {
+  _seed_pb
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.DeleteRandomBotAccounts --value 1 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  echo "$output" | grep -q 'bots flush'
+  # not written, not even appended
+  ! grep -q 'DeleteRandomBotAccounts' "$PB"
+}
+
+@test "direct conf route refuses the bot-wipe key even when setting it back to 0" {
+  # No special-case for the "safe" value: the flush verb owns this key, and a
+  # partial exception would just be a second way to reason about it.
+  _seed_pb
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.DeleteRandomBotAccounts --value 0 --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "direct conf route still accepts ordinary playerbots keys" {
+  _seed_pb
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.EnableGreet --value 1 --json
+  [ "$status" -eq 0 ]
+  grep -q '^AiPlayerbot.EnableGreet = 1$' "$PB"
+}
+
 @test "bots.population conf row writes BOTH Min and Max and removes both legacy envs" {
   _seed_pb
   cat > "$OVR" <<'EOF'

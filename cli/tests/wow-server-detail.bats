@@ -312,6 +312,65 @@ EOF
   [ "$(echo "$output" | jq -r '.data.exit_code')" = "null" ]
 }
 
+# ---------- crashed false-positives (review fix) ----------
+# Docker's restart backoff and a slow-but-deliberate stop both used to read
+# as "crashed", putting a pulsing-red card and a Recover button in front of
+# the user during a perfectly normal start/stop.
+
+@test "server-detail: world restarting (docker backoff) -> starting, not crashed" {
+  # A cold start legitimately loops here for ~2 min while MySQL warms up;
+  # each backoff carries the previous nonzero exit code.
+  cat > "$FIXTURE/ps.rows" <<'EOF'
+ac-database|running|Up 30 seconds (health: starting)
+ac-worldserver|restarting|Restarting (1) 3 seconds ago
+ac-authserver|running|Up 30 seconds
+EOF
+  export DML_STUB_PS_ROWS="$FIXTURE/ps.rows"
+  export DML_STUB_EXIT_CODE=1
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "starting" ]
+  # the exit code is still reported for diagnostics
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "1" ]
+}
+
+@test "server-detail: 137 with the whole stack down -> stopped (compose stop -t 180 timeout)" {
+  # A graceful stop that outran its 180s budget: docker SIGKILLs the world,
+  # but the user asked for this and everything else went down with it.
+  cat > "$FIXTURE/ps.rows" <<'EOF'
+ac-database|exited|Exited (0) 1 minute ago
+ac-worldserver|exited|Exited (137) 1 minute ago
+ac-authserver|exited|Exited (0) 1 minute ago
+EOF
+  export DML_STUB_PS_ROWS="$FIXTURE/ps.rows"
+  export DML_STUB_EXIT_CODE=137
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "stopped" ]
+  [ "$(echo "$output" | jq -r '.data.exit_code')" = "137" ]
+}
+
+@test "server-detail: 137 with auth/db still up stays crashed (the world alone was killed)" {
+  world_exited_rows "Exited (137) 5 minutes ago"
+  export DML_STUB_EXIT_CODE=137
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "crashed" ]
+}
+
+@test "server-detail: a non-137 crash code is crashed even with the stack down" {
+  cat > "$FIXTURE/ps.rows" <<'EOF'
+ac-database|exited|Exited (0) 1 minute ago
+ac-worldserver|exited|Exited (1) 1 minute ago
+ac-authserver|exited|Exited (0) 1 minute ago
+EOF
+  export DML_STUB_PS_ROWS="$FIXTURE/ps.rows"
+  export DML_STUB_EXIT_CODE=1
+  run bash "$DML" wow server-detail --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.verdict')" = "crashed" ]
+}
+
 @test "server-info still behaves exactly as before (regression canary)" {
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
   run bash "$DML" wow server-info --json
