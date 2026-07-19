@@ -778,6 +778,39 @@ export async function realmlistLock(locked: boolean, lanIp?: string): Promise<Re
   return await invoke("realmlist_lock", { locked, lanIp });
 }
 
+// --- Windows disk & performance tools (Batch 4 F17) -------------------------
+
+export interface WslConfigState {
+  path: string;
+  exists: boolean;
+  memory: string | null;
+  processors: string | null;
+}
+
+export async function wslconfigRead(): Promise<WslConfigState> {
+  return await invoke("wslconfig_read");
+}
+
+// Only provided fields are written; unrelated .wslconfig lines/sections are
+// preserved. Takes effect after WSL restarts.
+export async function wslconfigWrite(memory?: string, processors?: string): Promise<WslConfigState> {
+  return await invoke("wslconfig_write", { memory, processors });
+}
+
+export async function restartWsl(): Promise<{ shutdown: boolean; stopped_server: boolean }> {
+  return await invoke("restart_wsl");
+}
+
+// Writes the shrink script into Downloads and opens Explorer at it; returns
+// the script path.
+export async function generateCompactScript(): Promise<string> {
+  return await invoke("generate_compact_script");
+}
+
+export async function defenderHint(): Promise<{ vhdx_dir: string | null; command: string | null }> {
+  return await invoke("defender_hint");
+}
+
 // --- Keep-awake sleep block (Batch 2 F6) -----------------------------------
 
 export async function setKeepAwake(on: boolean): Promise<void> {

@@ -62,6 +62,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "ahbot-page": "untested",
   "internet-play": "untested",
   "title-url-install": "untested",
+  "disk-tools": "untested",
 };
 
 export const LOCKED_HINT =

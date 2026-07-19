@@ -2,6 +2,7 @@ pub mod dml;
 pub mod power;
 pub mod realmlist;
 pub mod watch;
+pub mod wslconfig;
 mod zam;
 
 use serde::Serialize;
@@ -1340,6 +1341,179 @@ async fn url_install(
     Ok(())
 }
 
+// --- Windows disk & performance tools (Batch 4 F17) -------------------------
+//
+// All of these run on the WINDOWS side (native fs/registry/process), not
+// through the distro: .wslconfig lives in the Windows user profile, and the
+// shrink/restart flows manage WSL itself. Pure parse/merge logic lives in
+// wslconfig.rs (cargo-tested); these commands only do the I/O.
+
+#[derive(Debug, Serialize)]
+pub struct WslConfigState {
+    pub path: String,
+    pub exists: bool,
+    pub memory: Option<String>,
+    pub processors: Option<String>,
+}
+
+fn wslconfig_path() -> Result<std::path::PathBuf, CmdError> {
+    let profile = std::env::var("USERPROFILE")
+        .map_err(|_| bad_arg("USERPROFILE is not set -- cannot locate .wslconfig"))?;
+    Ok(std::path::PathBuf::from(profile).join(".wslconfig"))
+}
+
+fn read_wslconfig_state() -> Result<WslConfigState, CmdError> {
+    let path = wslconfig_path()?;
+    let exists = path.is_file();
+    // Absent file = empty content (the write side creates it).
+    let content = if exists { std::fs::read_to_string(&path).unwrap_or_default() } else { String::new() };
+    Ok(WslConfigState {
+        path: path.to_string_lossy().into_owned(),
+        exists,
+        memory: wslconfig::read_wsl2_key(&content, "memory"),
+        processors: wslconfig::read_wsl2_key(&content, "processors"),
+    })
+}
+
+#[tauri::command]
+fn wslconfig_read() -> Result<WslConfigState, CmdError> {
+    read_wslconfig_state()
+}
+
+/// Merge memory/processors into [wsl2], preserving every unrelated
+/// line/section. Only provided fields are written. Takes effect after WSL
+/// restarts (the GUI says so).
+#[tauri::command]
+fn wslconfig_write(
+    memory: Option<String>,
+    processors: Option<String>,
+) -> Result<WslConfigState, CmdError> {
+    if memory.is_none() && processors.is_none() {
+        return Err(bad_arg("nothing to write"));
+    }
+    if let Some(m) = &memory {
+        if !wslconfig::valid_memory_spec(m) {
+            return Err(bad_arg(format!("invalid memory value: {m:?} (use e.g. 8GB or 512MB)")));
+        }
+    }
+    if let Some(p) = &processors {
+        if !wslconfig::valid_processors_spec(p) {
+            return Err(bad_arg(format!("invalid processors value: {p:?} (a whole number, e.g. 4)")));
+        }
+    }
+    let path = wslconfig_path()?;
+    let mut content = if path.is_file() {
+        std::fs::read_to_string(&path)
+            .map_err(|e| bad_arg(format!("could not read {}: {e}", path.display())))?
+    } else {
+        String::new()
+    };
+    if let Some(m) = &memory {
+        content = wslconfig::merge_wsl2_key(&content, "memory", m);
+    }
+    if let Some(p) = &processors {
+        content = wslconfig::merge_wsl2_key(&content, "processors", p);
+    }
+    std::fs::write(&path, content)
+        .map_err(|e| bad_arg(format!("could not write {}: {e}", path.display())))?;
+    read_wslconfig_state()
+}
+
+/// Restart WSL: graceful server stop FIRST when the world is up (same CLI
+/// verb as the Home Stop button, captured -- there is no terminal here),
+/// then `wsl --shutdown`. The GUI's typed confirm explains the blast
+/// radius: all WSL stops, next start is a cold start.
+#[tauri::command]
+async fn restart_wsl(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let up = runner
+            .run_json(&["wow", "server-detail"])
+            .ok()
+            .filter(|env| env.ok)
+            .map(|env| {
+                matches!(
+                    env.data["verdict"].as_str(),
+                    Some("online") | Some("starting") | Some("soap_unreachable")
+                )
+            })
+            .unwrap_or(false);
+        let stopped = if up { runner.run_captured(&["games", "stop", LAN_TITLE]).is_ok() } else { false };
+        let mut cmd = std::process::Command::new("wsl");
+        cmd.args(["--shutdown"]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                Ok(serde_json::json!({"shutdown": true, "stopped_server": stopped}))
+            }
+            Ok(out) => Err(bad_arg(format!(
+                "wsl --shutdown failed (exit {:?})",
+                out.status.code()
+            ))),
+            Err(e) => Err(bad_arg(format!("could not run wsl --shutdown: {e}"))),
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Drop the shrink-disk PowerShell script into Downloads and open Explorer
+/// there. NO elevation from the app -- the user right-clicks and runs it as
+/// admin themselves (the script's header says so too).
+#[tauri::command]
+fn generate_compact_script() -> Result<String, CmdError> {
+    use crate::dml::runner::DISTRO;
+    let profile = std::env::var("USERPROFILE")
+        .map_err(|_| bad_arg("USERPROFILE is not set -- cannot locate Downloads"))?;
+    let dir = std::path::PathBuf::from(profile).join("Downloads");
+    let path = dir.join("dml-shrink-wsl-disk.ps1");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| bad_arg(format!("could not create {}: {e}", dir.display())))?;
+    std::fs::write(&path, wslconfig::compact_script(DISTRO))
+        .map_err(|e| bad_arg(format!("could not write {}: {e}", path.display())))?;
+    let select = format!("/select,{}", path.display());
+    let mut cmd = std::process::Command::new("explorer");
+    cmd.arg(&select);
+    let _ = cmd.spawn(); // best-effort -- the returned path is shown either way
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read-only Defender-exclusion hint: locate the distro's disk folder via
+/// the Lxss registry (reg.exe, no elevation needed for HKCU reads) and
+/// build the copyable Add-MpPreference command. Everything degrades to
+/// null -- the card then shows generic instructions instead.
+#[tauri::command]
+fn defender_hint() -> Result<serde_json::Value, CmdError> {
+    use crate::dml::runner::DISTRO;
+    let mut cmd = std::process::Command::new("reg");
+    cmd.args([
+        "query",
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss",
+        "/s",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let base = cmd
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            wslconfig::parse_lxss_base_path(&String::from_utf8_lossy(&o.stdout), DISTRO)
+        })
+        .map(|b| b.trim_start_matches(r"\\?\").to_string());
+    let command = base
+        .as_ref()
+        .map(|b| format!("Add-MpPreference -ExclusionPath \"{b}\""));
+    Ok(serde_json::json!({"vhdx_dir": base, "command": command}))
+}
+
 #[tauri::command]
 async fn games_catalog(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["games".into(), "catalog".into()]).await
@@ -1610,6 +1784,11 @@ pub fn run() {
             tool_install,
             open_shell,
             detect_lan_ip,
+            wslconfig_read,
+            wslconfig_write,
+            restart_wsl,
+            generate_compact_script,
+            defender_hint,
             save_text_file,
             set_auto_shutdown,
             set_keep_awake,

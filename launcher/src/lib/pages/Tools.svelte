@@ -10,9 +10,15 @@
     realmlistStatus,
     realmlistFix,
     realmlistLock,
+    wslconfigRead,
+    wslconfigWrite,
+    restartWsl,
+    generateCompactScript,
+    defenderHint,
     type LanAction,
     type ToolName,
     type RealmlistStatus,
+    type WslConfigState,
   } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -269,6 +275,104 @@
 
   function onToolInstallExit(code: number) {
     unboundNote = code === 0 ? "Finished." : `Exited with code ${code}.`;
+  }
+
+  // --- Disk & performance (Batch 4 F17) --------------------------------
+  // .wslconfig editor + restart WSL + shrink-disk script + Defender hint.
+  // All Windows-side (native Rust commands); mutating cards ride the
+  // disk-tools flag.
+  let wc: WslConfigState | null = $state(null);
+  let wcMemory = $state("");
+  let wcProcessors = $state("");
+  let wcError: string | null = $state(null);
+  let wcNote: string | null = $state(null);
+  let wcBusy = $state(false);
+  const cpuCount = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 0) : 0;
+
+  let wslRestartInput = $state("");
+  let wslRestartBusy = $state(false);
+  let wslRestartNote: string | null = $state(null);
+
+  let shrinkBusy = $state(false);
+  let shrinkPath: string | null = $state(null);
+  let shrinkError: string | null = $state(null);
+
+  let defCmd: string | null = $state(null);
+  let defCopied = $state(false);
+
+  onMount(() => {
+    wslconfigRead()
+      .then((s) => {
+        wc = s;
+        wcMemory = s.memory ?? "";
+        wcProcessors = s.processors ?? "";
+      })
+      .catch((e) => (wcError = fmtErr(e)));
+    defenderHint()
+      .then((d) => (defCmd = d.command))
+      .catch(() => {});
+  });
+
+  async function saveWslconfig() {
+    wcBusy = true;
+    wcError = null;
+    wcNote = null;
+    try {
+      const s = await wslconfigWrite(
+        wcMemory.trim() || undefined,
+        wcProcessors.trim() || undefined,
+      );
+      wc = s;
+      wcMemory = s.memory ?? "";
+      wcProcessors = s.processors ?? "";
+      wcNote = "Saved — takes effect after WSL restarts (use the Restart WSL card below).";
+    } catch (e) {
+      wcError = fmtErr(e);
+    } finally {
+      wcBusy = false;
+    }
+  }
+
+  async function runRestartWsl() {
+    if (wslRestartInput !== "restart-wsl") return;
+    wslRestartInput = "";
+    wslRestartBusy = true;
+    wcError = null;
+    wslRestartNote = null;
+    try {
+      const r = await restartWsl();
+      wslRestartNote = r.stopped_server
+        ? "Server stopped gracefully, WSL shut down. The next Start is a cold start."
+        : "WSL shut down (no server was running). The next Start is a cold start.";
+    } catch (e) {
+      wslRestartNote = fmtErr(e);
+    } finally {
+      wslRestartBusy = false;
+    }
+  }
+
+  async function makeShrinkScript() {
+    shrinkBusy = true;
+    shrinkError = null;
+    shrinkPath = null;
+    try {
+      shrinkPath = await generateCompactScript();
+    } catch (e) {
+      shrinkError = fmtErr(e);
+    } finally {
+      shrinkBusy = false;
+    }
+  }
+
+  async function copyDefenderCmd() {
+    if (!defCmd) return;
+    try {
+      await navigator.clipboard.writeText(defCmd);
+      defCopied = true;
+      setTimeout(() => (defCopied = false), 1500);
+    } catch {
+      // shown for manual copy either way
+    }
   }
 
   // --- Doctor ---------------------------------------------------------
@@ -625,6 +729,118 @@
     {/if}
   </div>
 
+  <h3 class="section-head">Disk &amp; performance</h3>
+
+  <div class="card">
+    <h3>WSL memory &amp; CPU (.wslconfig)</h3>
+    <p class="muted">
+      How much of this PC the server sandbox (WSL) may use. Stored in
+      {wc?.path ?? "%USERPROFILE%\\.wslconfig"} — unrelated settings in that file are left
+      untouched. Takes effect after WSL restarts.
+    </p>
+    {#if wcError}<p class="inline-error">{wcError}</p>{/if}
+    <div class="row">
+      <label class="fld">Memory
+        <input type="text" placeholder="e.g. 8GB" bind:value={wcMemory} disabled={wcBusy} />
+      </label>
+      {#each ["8GB", "12GB", "16GB"] as p (p)}
+        <button onclick={() => (wcMemory = p)} disabled={wcBusy}>{p}</button>
+      {/each}
+    </div>
+    <div class="row">
+      <label class="fld">Processors
+        <input type="text" placeholder="e.g. 4" bind:value={wcProcessors} disabled={wcBusy} />
+      </label>
+      {#if cpuCount > 1}
+        <button onclick={() => (wcProcessors = String(Math.max(1, Math.floor(cpuCount / 2))))} disabled={wcBusy}>
+          Half ({Math.max(1, Math.floor(cpuCount / 2))})
+        </button>
+        <button onclick={() => (wcProcessors = String(cpuCount))} disabled={wcBusy}>
+          All ({cpuCount})
+        </button>
+      {/if}
+    </div>
+    <div class="row">
+      <button
+        class="primary"
+        onclick={saveWslconfig}
+        disabled={wcBusy || (!wcMemory.trim() && !wcProcessors.trim()) || featureLocked("disk-tools")}
+        title={featureLocked("disk-tools") ? LOCKED_HINT : undefined}
+      >
+        Save
+      </button>
+      {#if wcNote}<span class="notice">{wcNote}</span>{/if}
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Restart WSL</h3>
+    <p class="muted">
+      Stops the server (characters saved, graceful stop) and shuts down ALL of WSL — the next
+      server start is a cold start. Needed for .wslconfig changes to take effect, and a good
+      "turn it off and on again" when WSL misbehaves.
+    </p>
+    <div class="row">
+      <input
+        type="text"
+        placeholder={'Type "restart-wsl" to confirm'}
+        bind:value={wslRestartInput}
+        disabled={wslRestartBusy}
+      />
+      <button
+        onclick={runRestartWsl}
+        disabled={wslRestartInput !== "restart-wsl" || wslRestartBusy || featureLocked("disk-tools")}
+        title={featureLocked("disk-tools") ? LOCKED_HINT : undefined}
+      >
+        {wslRestartBusy ? "Restarting…" : "Restart WSL"}
+      </button>
+    </div>
+    {#if wslRestartNote}<p class="notice">{wslRestartNote}</p>{/if}
+  </div>
+
+  <div class="card">
+    <h3>Shrink the server disk</h3>
+    <p class="muted">
+      The WSL virtual disk grows but never shrinks on its own. This writes a PowerShell
+      script into your Downloads folder and opens Explorer at it — then YOU right-click the
+      script and pick "Run with PowerShell" <strong>as Administrator</strong>. Stop the server
+      first; compacting can take many minutes.
+    </p>
+    {#if shrinkError}<p class="inline-error">{shrinkError}</p>{/if}
+    <div class="row">
+      <button
+        onclick={makeShrinkScript}
+        disabled={shrinkBusy || featureLocked("disk-tools")}
+        title={featureLocked("disk-tools") ? LOCKED_HINT : undefined}
+      >
+        Create the shrink script
+      </button>
+    </div>
+    {#if shrinkPath}
+      <p class="notice">Script created: {shrinkPath} — right-click it → Run with PowerShell (as admin).</p>
+    {/if}
+  </div>
+
+  <div class="card">
+    <h3>Windows Defender exclusion (optional)</h3>
+    <p class="muted">
+      Excluding the server's disk folder from Defender's real-time scanning makes builds and
+      disk-heavy work noticeably faster. Run this one line in an <strong>admin</strong>
+      PowerShell — it is entirely optional and easy to undo (Remove-MpPreference).
+    </p>
+    {#if defCmd}
+      <div class="row">
+        <code class="copyline">{defCmd}</code>
+        <button onclick={copyDefenderCmd}>{defCopied ? "Copied!" : "Copy"}</button>
+      </div>
+    {:else}
+      <p class="muted">
+        Couldn't locate the server disk automatically — in an admin PowerShell run
+        <code>Add-MpPreference -ExclusionPath "&lt;folder containing dml-arch's ext4.vhdx&gt;"</code>.
+      </p>
+    {/if}
+  </div>
+
   <div class="card">
     <h3>Doctor</h3>
     <p class="muted">
@@ -663,6 +879,9 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .confirm-row { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
+  .section-head { margin: 8px 0 0; font-size: 14px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.06em; }
+  .fld { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #8b949e; }
+  .fld input { min-width: 110px; }
   .step { border-top: 1px solid #21262d; padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
   .step strong { font-size: 13.5px; color: #f0f6fc; }
   .step .warn-text { color: #f85149; font-weight: 600; }
