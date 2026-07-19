@@ -41,6 +41,7 @@
   import talentTreesJson from "$lib/talent-trees-wotlk.json";
   import CharPicker from "$lib/CharPicker.svelte";
   import CharacterModel from "$lib/CharacterModel.svelte";
+  import { saveGearSet } from "$lib/gearsets.svelte";
 
   // Keyed by class id (as a string, matching the JSON's object keys) -- cast
   // once here rather than at every lookup site. The raw JSON's inferred
@@ -274,6 +275,19 @@
     } finally {
       loadingDoll = false;
     }
+  }
+
+  // Gear sets (Batch 5 F4): capture the shown paperdoll as a named local
+  // set (pure localStorage write -- no backend call, so no feature lock on
+  // capture; MAILING a set is the locked half, over on the Item Database
+  // page). Button enabled only when there is gear to save.
+  let gearSetName = $state("");
+  let gearSetNote = $state<string | null>(null);
+  function saveCurrentGearSet() {
+    if (!doll || doll.equipped.length === 0 || !gearSetName.trim()) return;
+    const s = saveGearSet(doll, gearSetName);
+    gearSetNote = `Saved "${s.name}" (${s.items.length} items) — mail it from the Item Database page.`;
+    gearSetName = "";
   }
 
   function bySlotMap(items: PaperdollItem[]): Map<number, PaperdollItem> {
@@ -539,6 +553,22 @@
               </div>
             </div>
             <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
+            <div class="gearset-row">
+              <input
+                placeholder="gear set name"
+                maxlength="32"
+                bind:value={gearSetName}
+                onkeydown={(e) => e.key === "Enter" && saveCurrentGearSet()}
+              />
+              <button
+                onclick={saveCurrentGearSet}
+                disabled={!doll || doll.equipped.length === 0 || !gearSetName.trim()}
+                title="Saves this equipped set locally — mail it to any character from the Item Database page"
+              >
+                Save gear set
+              </button>
+              {#if gearSetNote}<span class="muted">{gearSetNote}</span>{/if}
+            </div>
           </div>
         </div>
       {:else if activeTab === "talents"}
@@ -638,6 +668,8 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; }
   .pickrow { display: flex; gap: 8px; align-items: center; }
+  .gearset-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
+  .gearset-row input { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; }

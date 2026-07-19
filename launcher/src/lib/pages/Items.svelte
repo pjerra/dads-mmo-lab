@@ -1,8 +1,9 @@
 <script lang="ts">
   import { wowItemsSearch, wowMailItem, type ItemRow } from "$lib/api";
-  import { qualityName, QUALITY_COLORS } from "$lib/wow";
+  import { qualityName, QUALITY_COLORS, className } from "$lib/wow";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { listGearSets, deleteGearSet, mailGearSet, type GearSet } from "$lib/gearsets.svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   // Batch 3 F11e: open the item's Wowhead (WotLK) page in the system
@@ -46,6 +47,49 @@
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
     } finally {
       searching = false;
+    }
+  }
+
+  // Gear sets (Batch 5 F4): saved on the Dashboard's Character tab, mailed
+  // from here (mail machinery/CharPicker/featureLocked already live here).
+  // Mailing is sequential, ≤12 items per mail (server cap) -- see
+  // gearsets.svelte.ts for the plan/chunk/failure contract.
+  let mailSetName = $state<string | null>(null);
+  let mailSetTo = $state("");
+  let mailingSet = $state(false);
+  let confirmDeleteSet = $state<string | null>(null);
+
+  function toggleMailSet(name: string) {
+    mailSetName = mailSetName === name ? null : name;
+    confirmDeleteSet = null;
+  }
+
+  function removeSet(name: string) {
+    if (confirmDeleteSet !== name) {
+      confirmDeleteSet = name;
+      return;
+    }
+    confirmDeleteSet = null;
+    if (mailSetName === name) mailSetName = null;
+    deleteGearSet(name);
+  }
+
+  async function sendSet(set: GearSet) {
+    const to = mailSetTo;
+    if (!to) return;
+    mailingSet = true;
+    error = null;
+    sentMsg = null;
+    try {
+      const out = await mailGearSet(to, set);
+      if (out.error) {
+        error = out.error;
+      } else {
+        sentMsg = `Mailed "${set.name}" to ${to} in ${out.total} mail${out.total === 1 ? "" : "s"} (check the mailbox). Items are copies — the receiver may not be able to wear them.`;
+        mailSetName = null;
+      }
+    } finally {
+      mailingSet = false;
     }
   }
 
@@ -115,6 +159,42 @@
       </tbody>
     </table>
   {/if}
+
+  <div class="card">
+    <strong>Gear sets</strong>
+    {#if listGearSets().length === 0}
+      <p class="muted">None saved yet — open a character on the Dashboard and click "Save gear set".</p>
+    {:else}
+      {#each listGearSets() as gs (gs.name)}
+        <div class="row">
+          <span>
+            {gs.name}
+            <span class="muted">— {gs.sourceChar} (lvl {gs.level} {className(gs.class)}), {gs.items.length} items</span>
+          </span>
+          <button onclick={() => toggleMailSet(gs.name)} disabled={mailingSet}>
+            {mailSetName === gs.name ? "Hide" : "Mail to…"}
+          </button>
+          <button onclick={() => removeSet(gs.name)} disabled={mailingSet}>
+            {confirmDeleteSet === gs.name ? `Delete "${gs.name}" — sure?` : "Delete"}
+          </button>
+        </div>
+        {#if mailSetName === gs.name}
+          <div class="row">
+            <CharPicker bind:selected={mailSetTo} />
+            <button
+              class="primary"
+              onclick={() => sendSet(gs)}
+              disabled={!mailSetTo || mailingSet || featureLocked("gear-sets")}
+              title={featureLocked("gear-sets") ? LOCKED_HINT : undefined}
+            >
+              {mailingSet ? "Mailing…" : `Mail ${gs.items.length} items`}
+            </button>
+            <span class="muted">Fresh copies by in-game mail{gs.items.length > 12 ? `, split into 2 mails` : ""} — the receiver may not be able to wear cross-class gear.</span>
+          </div>
+        {/if}
+      {/each}
+    {/if}
+  </div>
 
   {#if sendItem}
     <div class="card sendbox">
