@@ -3,6 +3,7 @@
   import { wowConsoleTail, wowConsoleSend, saveTextFile } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
+  import { serverStatus, containersExist } from "$lib/server-status.svelte";
 
   let available = $state(true);
   let lines: string[] = $state([]);
@@ -124,7 +125,11 @@
   {#if tailError}
     <div class="error-card"><strong>Couldn't read the server log.</strong><p>{tailError}</p></div>
   {:else if !available}
-    <p class="muted">No server logs — is the server installed?</p>
+    {#if containersExist(serverStatus.detail)}
+      <p class="muted">The server looks stopped — start it from Home to see live logs.</p>
+    {:else}
+      <p class="muted">No server logs — is the server installed?</p>
+    {/if}
   {:else}
     <div class="log" bind:this={logEl}>
       {#each lines as line, i (i)}
