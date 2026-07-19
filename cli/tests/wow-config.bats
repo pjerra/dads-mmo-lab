@@ -28,7 +28,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow config list --json
   [ "$status" -eq 0 ]
   # bots.population reads the MAX env (2000); rates fall back to default "1"
-  [ "$(echo "$output" | jq -r '.data.settings | length')" = "9" ]
+  [ "$(echo "$output" | jq -r '.data.settings | length')" = "23" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="bots.population") | .value')" = "2000" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .value')" = "1" ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .default')" = "1" ]
@@ -47,15 +47,17 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="server.motd") | .value')" = "Welcome to Dad's MMO Lab!" ]
 }
 
-@test "config set writes the env var and is idempotent" {
-  run bash "$DML" wow config set --key rates.xp_kill --value 3 --json
+@test "config set writes the env var and is idempotent (non-rate env rows unchanged)" {
+  # The rates rows migrated to conf-file rows (see wow-config-conf.bats);
+  # ahbot.seller proves the ORIGINAL env mechanism still works untouched.
+  run bash "$DML" wow config set --key ahbot.seller --value 1 --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
-  yq -e '.services.ac-worldserver.environment.AC_RATE_XP_KILL == "3"' "$OVR"
+  yq -e '.services.ac-worldserver.environment.AC_AUCTION_HOUSE_BOT_ENABLE_SELLER == "1"' "$OVR"
   # pre-existing env preserved (the duplicate-services-key regression guard)
   yq -e '.services.ac-worldserver.environment.AC_AI_PLAYERBOT_MIN_RANDOM_BOTS == "1600"' "$OVR"
-  run bash "$DML" wow config set --key rates.xp_kill --value 3 --json
+  run bash "$DML" wow config set --key ahbot.seller --value 1 --json
   [ "$(echo "$output" | jq -r '.data.changed')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "false" ]
 }

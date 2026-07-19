@@ -10,7 +10,7 @@
     type ConfigSetting,
     type RawFileName,
   } from "$lib/api";
-  import { dirtyKeys } from "$lib/config-diff";
+  import { dirtyKeys, requiredSaveFlags } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
@@ -48,6 +48,10 @@
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
   const dirty = $derived(dirtyKeys(settings, edits));
   const fileReadonly = $derived(READONLY_FILES.includes(file));
+  // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
+  // flags -- the Save button locks when ANY dirty row's flag is still locked.
+  const saveLocked = $derived(requiredSaveFlags(settings, dirty).some((f) => featureLocked(f)));
+  let liveNote = $state(false);
 
   async function load() {
     error = null;
@@ -65,12 +69,24 @@
     saving = true;
     error = null;
     aleNote = null;
+    liveNote = false;
     try {
       const toSave = dirty;
+      let anyLive = false;
+      let anyRestart = false;
       for (const key of toSave) {
         const r = await wowConfigSet(key, edits[key]);
-        if (r.restart_required) restartState.needed = true;
+        if (r.restart_required) {
+          restartState.needed = true;
+          anyRestart = true;
+        } else if (r.applied === "live") {
+          anyLive = true;
+        }
       }
+      // Conf rows the running server picked up over SOAP -- show the calm
+      // "applied live" note instead of the restart banner (only when NO
+      // saved row still needs a restart).
+      liveNote = anyLive && !anyRestart;
       await load();
       return true;
     } catch (e) {
@@ -147,6 +163,7 @@
     void tab;
     confirmingRestart = false;
     aleNote = null;
+    liveNote = false;
   });
   async function saveAndRestart(saveFn: () => Promise<boolean>) {
     if (!confirmingRestart) {
@@ -194,6 +211,8 @@
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if restartState.needed}
     <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
+  {:else if liveNote}
+    <div class="live-card"><p>Applied live ✓ — the running server picked the change up, no restart needed.</p></div>
   {/if}
 
   {#if tab === "settings"}
@@ -271,15 +290,15 @@
       <button
         class="primary"
         onclick={saveSettings}
-        disabled={dirty.length === 0 || saving || restartState.restarting || featureLocked("settings-save")}
-        title={featureLocked("settings-save") ? LOCKED_HINT : undefined}
+        disabled={dirty.length === 0 || saving || restartState.restarting || saveLocked}
+        title={saveLocked ? LOCKED_HINT : undefined}
       >
         Save {dirty.length > 0 ? `(${dirty.length})` : ""}
       </button>
       <button
         onclick={() => saveAndRestart(saveSettings)}
-        disabled={dirty.length === 0 || saving || restartState.restarting || featureLocked("settings-save")}
-        title={featureLocked("settings-save") ? LOCKED_HINT : undefined}
+        disabled={dirty.length === 0 || saving || restartState.restarting || saveLocked}
+        title={saveLocked ? LOCKED_HINT : undefined}
       >
         {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
       </button>
@@ -367,4 +386,5 @@
   .muted { color: #8b949e; font-size: 13px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
+  .live-card { background: #161b22; border: 1px solid #2ea043; border-radius: 8px; padding: 12px 16px; }
 </style>

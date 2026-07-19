@@ -454,7 +454,7 @@ export async function wowConfigList(): Promise<ConfigSetting[]> {
 export async function wowConfigSet(
   key: string,
   value: string,
-): Promise<{ changed: boolean; restart_required: boolean }> {
+): Promise<{ changed: boolean; restart_required: boolean; applied?: "live" | "restart" | "none" }> {
   return await invoke("wow_config_set", { key, value });
 }
 export async function wowConfigRawRead(

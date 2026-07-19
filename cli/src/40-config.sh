@@ -50,11 +50,39 @@ _parse_server_info() {
 # acore_auth.motd, is loaded by MotdMgr, and is applied LIVE by the console
 # command `.server set motd`. So its env column is a "-" sentinel, `list`
 # reads it from the DB, and `set` goes over SOAP instead of the override.
+#
+# CONF-FILE ROWS (Batch 1): an env column of `conf:<Key>` (worldserver.conf)
+# or `conf:<file>.conf:<Key>` (a conf under env/dist/etc/modules/) routes
+# `config list`/`config set` to a comment-preserving in-place edit of the
+# HOST conf file (bind-mounted into the container) instead of the compose
+# override. Rationale: a running container's env is frozen at creation AND
+# AC's env bridge beats conf values, so env-set keys can never live-apply --
+# conf rows CAN (worldserver.conf ones via SOAP `reload config`). On save,
+# any matching legacy AC_* env key (derived mechanically from the conf key,
+# see _cfg_env_name_for) is removed from the override so the conf value is
+# authoritative after the next recreate; while the frozen env is still in
+# the running container the save reports `"applied":"restart"`. The three
+# rates rows below were MIGRATED from env rows to conf rows (their legacy
+# env keys are cleaned up on save by the same derivation).
 _cfg_rows() {
 cat <<'EOF'
-rates.xp_kill|Rates|XP from kills|float|0.5|20|AC_RATE_XP_KILL|1|Multiplies XP earned from kills. 3 = level three times as fast.
-rates.xp_quest|Rates|XP from quests|float|0.5|20|AC_RATE_XP_QUEST|1|Multiplies XP from quest turn-ins.
-rates.gold|Rates|Gold drops|float|0.5|20|AC_RATE_DROP_MONEY|1|Multiplies money dropped by creatures.
+rates.xp_kill|Rates|XP from kills|float|0.5|20|conf:Rate.XP.Kill|1|Multiplies XP earned from kills. 3 = level three times as fast.
+rates.xp_quest|Rates|XP from quests|float|0.5|20|conf:Rate.XP.Quest|1|Multiplies XP from quest turn-ins.
+rates.xp_explore|Rates|XP from exploring|float|0.5|20|conf:Rate.XP.Explore|1|Multiplies XP for discovering new areas.
+rates.gold|Rates|Gold drops|float|0.5|20|conf:Rate.Drop.Money|1|Multiplies money dropped by creatures.
+rates.honor|Rates|Honor gains|float|0.5|20|conf:Rate.Honor|1|Multiplies honor points from PvP kills and battlegrounds.
+rates.reputation|Rates|Reputation gains|float|0.5|20|conf:Rate.Reputation.Gain|1|Multiplies reputation earned with factions.
+rates.rested|Rates|Rested XP build-up|float|0.5|20|conf:Rate.Rest.InGame|1|How fast rested XP builds while logged in at an inn or city.
+rates.loot|Rates|Common item drops|float|0.5|20|conf:Rate.Drop.Item.Normal|1|Multiplies how often creatures drop common (white) items.
+rates.creature_damage|Rates|Monster damage|float|0.1|10|conf:Rate.Creature.Normal.Damage|1|Multiplies damage normal monsters deal. Below 1 makes fights easier.
+rates.creature_hp|Rates|Monster health|float|0.1|10|conf:Rate.Creature.Normal.HP|1|Multiplies normal monsters' health. Below 1 makes fights faster.
+rates.movespeed|Rates|Player movement speed|float|0.5|10|conf:Rate.MoveSpeed.Player|1|Multiplies how fast characters run. Applies on login.
+crossfaction.accounts|Cross-faction|Both factions on one account|bool|||conf:AllowTwoSide.Accounts|1|When on, one account can have both Alliance and Horde characters.
+crossfaction.group|Cross-faction|Group across factions|bool|||conf:AllowTwoSide.Interaction.Group|0|When on, Alliance and Horde players can group up together.
+crossfaction.guild|Cross-faction|Guilds across factions|bool|||conf:AllowTwoSide.Interaction.Guild|0|When on, guilds can have members from both factions.
+crossfaction.chat|Cross-faction|Chat across factions|bool|||conf:AllowTwoSide.Interaction.Chat|0|When on, both factions understand each other in chat.
+crossfaction.auction|Cross-faction|Shared auction house|bool|||conf:AllowTwoSide.Interaction.Auction|0|When on, both factions use one shared auction house.
+crossfaction.calendar|Cross-faction|Calendar across factions|bool|||conf:AllowTwoSide.Interaction.Calendar|0|When on, calendar invites work across factions.
 bots.population|Playerbots|World bot population|int|0|3000|AC_AI_PLAYERBOT_MAX_RANDOM_BOTS|500|How many ambient bots populate the world. Saving writes min and max to this one number.
 bots.autologin|Playerbots|Bots log in at server start|bool|||AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN|1|When on, ambient bots log in automatically after the server starts.
 ahbot.seller|AHBot|Auction seller bot|bool|||AC_AUCTION_HOUSE_BOT_ENABLE_SELLER|0|When on, the auction house is stocked with items for sale.
@@ -100,6 +128,144 @@ _cfg_env_write() {
     E="$1" V="$2" "$DML_YQ_BIN" -i \
         '.services.ac-worldserver.environment[strenv(E)] = strenv(V)' "$cfg_ovr"
     CFG_CHANGED=true
+    return 0
+}
+
+# _cfg_env_remove <ENV>: deletes the key from the override's environment map
+# (no-op when the override or key is absent). Callers use _cfg_env_read first
+# to learn whether it WAS present (frozen-env restart signal).
+_cfg_env_remove() {
+    [[ -f "$cfg_ovr" ]] || return 0
+    E="$1" "$DML_YQ_BIN" -i \
+        'del(.services.ac-worldserver.environment[strenv(E)])' "$cfg_ovr" 2>/dev/null || true
+    return 0
+}
+
+# --- conf-file rows (Batch 1) ----------------------------------------------
+# See the registry comment block: `conf:` env-column values route config
+# list/set to the bind-mounted conf files instead of the compose override.
+
+# _cfg_conf_route <envcol>: parses a `conf:[<file>.conf:]<Key>` spec. Sets
+# conf_file (defaults to worldserver.conf when the file part is omitted) and
+# conf_key for the caller (top-level dispatch -- deliberately not local).
+# Returns 1 when the value is not a conf: spec at all.
+_cfg_conf_route() {
+    local spec
+    [[ "$1" == conf:* ]] || return 1
+    spec="${1#conf:}"
+    conf_file="worldserver.conf"
+    if [[ "$spec" == *.conf:* ]]; then
+        conf_file="${spec%%:*}"
+        spec="${spec#*:}"
+    fi
+    conf_key="$spec"
+    return 0
+}
+
+# _cfg_conf_path <file>: host path of a conf. worldserver/authserver live in
+# env/dist/etc/, every other conf under env/dist/etc/modules/. The callers'
+# specs come from the registry (or a validated direct route), never a raw
+# user path.
+_cfg_conf_path() {
+    case "$1" in
+        worldserver.conf|authserver.conf) printf '%s' "$cfg_sdir/env/dist/etc/$1" ;;
+        *) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
+    esac
+    return 0
+}
+
+# _cfg_conf_ensure <path>: makes sure the conf exists, creating it from its
+# .dist ONCE when only the dist is present (the AC docker layout ships dists;
+# the conf appears on first edit). Returns 1 when neither exists.
+_cfg_conf_ensure() {
+    [[ -f "$1" ]] && return 0
+    [[ -f "$1.dist" ]] || return 1
+    cp "$1.dist" "$1"
+    return 0
+}
+
+# _cfg_conf_read <path> <Key>: echoes the conf's value for Key ("" when the
+# file or key is absent). Exact-key match (prefix + '='), comments skipped,
+# LAST occurrence wins (AC semantics), surrounding quotes stripped. The key
+# travels via the environment (K=), never awk -v, so dots/backslashes are
+# never escape-processed.
+_cfg_conf_read() {
+    local val=""
+    [[ -f "$1" ]] || { printf ''; return 0; }
+    val="$(K="$2" awk '
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            k = ENVIRON["K"]
+            if (index(s, k) == 1) {
+                rest = substr(s, length(k) + 1)
+                sub(/^[ \t]*/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    v = substr(rest, 2)
+                    sub(/^[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                    val = v; found = 1
+                }
+            }
+        }
+        END { if (found) print val }
+    ' "$1" 2>/dev/null)" || val=""
+    val="${val%\"}"; val="${val#\"}"
+    printf '%s' "$val"
+    return 0
+}
+
+# _cfg_conf_write <path> <Key> <value>: comment-preserving in-place edit --
+# replaces every active `Key = ...` line (duplicates collapse to the same
+# value; AC reads the last anyway) or appends `Key = value` when absent.
+# tmp-file + mv like raw-write, so a failure never truncates the conf.
+# Sets CFG_CHANGED=true when the effective value actually changed.
+_cfg_conf_write() {
+    local cur tmp
+    cur="$(_cfg_conf_read "$1" "$2")"
+    [[ "$cur" == "$3" ]] && return 0
+    tmp="$1.tmp.$$"
+    K="$2" V="$3" awk '
+        BEGIN { done = 0 }
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            k = ENVIRON["K"]
+            if (index(s, k) == 1) {
+                rest = substr(s, length(k) + 1)
+                sub(/^[ \t]*/, "", rest)
+                if (substr(rest, 1, 1) == "=") {
+                    print k " = " ENVIRON["V"]
+                    done = 1
+                    next
+                }
+            }
+            print
+        }
+        END { if (!done) print ENVIRON["K"] " = " ENVIRON["V"] }
+    ' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$1"
+    CFG_CHANGED=true
+    return 0
+}
+
+# _cfg_env_name_for <ConfKey>: the AC docker env-bridge name for a conf key
+# (AC_ + camelCase split on lower/digit->UPPER boundaries + dots as _, all
+# uppercased): AiPlayerbot.MaxRandomBots -> AC_AI_PLAYERBOT_MAX_RANDOM_BOTS,
+# Rate.XP.Kill -> AC_RATE_XP_KILL. Used to clean a legacy env override off
+# override.yml when its conf row is saved (env would otherwise beat the conf
+# forever). A derivation miss is harmless -- the removal is just a no-op.
+_cfg_env_name_for() {
+    local key="$1" out="" i c prev=""
+    for (( i = 0; i < ${#key}; i++ )); do
+        c="${key:$i:1}"
+        if [[ "$c" == "." ]]; then
+            out+="_"
+        elif [[ "$c" == [A-Z] && "$prev" == [a-z0-9] ]]; then
+            out+="_$c"
+        else
+            out+="$c"
+        fi
+        prev="$c"
+    done
+    printf 'AC_%s' "${out^^}"
     return 0
 }
 

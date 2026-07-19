@@ -1895,10 +1895,19 @@ case "$cmd" in
               [[ -z "$key" ]] && continue
               # Every row is restart-to-apply EXCEPT server.motd, which the
               # worldserver applies live (MotdMgr) when `set` runs over SOAP.
+              # Conf rows read conf -> .dist -> registry default; their
+              # restart_required stays true here (conservative) -- the SET
+              # result's `applied` field is the authoritative live/restart
+              # answer, since live-apply depends on SOAP being up and no
+              # frozen legacy env.
               rreq=true
               if [[ "$key" == "server.motd" ]]; then
                 rreq=false
                 val="$motd_live"
+              elif _cfg_conf_route "$env"; then
+                cpath="$(_cfg_conf_path "$conf_file")"
+                val="$(_cfg_conf_read "$cpath" "$conf_key")"
+                [[ -n "$val" ]] || val="$(_cfg_conf_read "$cpath.dist" "$conf_key")"
               else
                 val="$(_cfg_env_read "$env")"
               fi
@@ -1963,6 +1972,37 @@ case "$cmd" in
                 2) json_err SOAP_FAULT "$out" "The server rejected the motd command."; exit 1 ;;
                 *) json_err SOAP_UNREACHABLE "Could not reach the server" "The server must be running to change the message of the day - start it first."; exit 1 ;;
               esac
+            elif _cfg_conf_route "$env"; then
+              # Conf-file row (see 40-config.sh registry block): write the
+              # bind-mounted conf, clean any legacy AC_* env override (env
+              # beats conf, so leaving it would make this save a silent
+              # no-op), then try to live-apply. Live only works for
+              # worldserver.conf keys (SOAP `reload config`) AND only when
+              # no frozen legacy env was still present in the override --
+              # the running container keeps its creation-time env either
+              # way, so that case must report restart.
+              cpath="$(_cfg_conf_path "$conf_file")"
+              _cfg_conf_ensure "$cpath" \
+                || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
+              _cfg_conf_write "$cpath" "$conf_key" "$value" \
+                || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              envwas=false
+              ename="$(_cfg_env_name_for "$conf_key")"
+              if [[ -n "$(_cfg_env_read "$ename")" ]]; then
+                _cfg_env_remove "$ename"
+                envwas=true
+                CFG_CHANGED=true
+              fi
+              applied="none"; rreq=false
+              if [[ "$CFG_CHANGED" == true ]]; then
+                applied="restart"; rreq=true
+                if [[ "$conf_file" == "worldserver.conf" && "$envwas" == false ]]; then
+                  if soap_exec "reload config" >/dev/null 2>&1; then
+                    applied="live"; rreq=false
+                  fi
+                fi
+              fi
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
             else
               if [[ "$key" == "ahbot.character" ]]; then
                 crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
