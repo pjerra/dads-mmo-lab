@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { chipStartVisible, containersExist, statusLabel } from "./server-status.svelte";
+import {
+  azerothReadyTransition,
+  chipStartVisible,
+  containersExist,
+  statusLabel,
+} from "./server-status.svelte";
 import type { ServerDetail } from "./api";
 
 function detailWith(containers: ServerDetail["containers"]): ServerDetail {
@@ -82,6 +87,36 @@ describe("chipStartVisible", () => {
 
   it("hides when there is no verdict at all", () => {
     expect(chipStartVisible(null, false)).toBe(false);
+  });
+});
+
+// "Azeroth is ready" notification trigger (Batch 3 F10): fires only when a
+// poll OBSERVES the world becoming online -- never on the first poll after
+// app launch, never on a SOAP blip recovering.
+describe("azerothReadyTransition", () => {
+  it("fires on starting→online (normal boot tail; restarts pass through this too)", () => {
+    expect(azerothReadyTransition("starting", "online")).toBe(true);
+  });
+
+  it("fires on stopped→online and crashed→online (start completed between polls)", () => {
+    expect(azerothReadyTransition("stopped", "online")).toBe(true);
+    expect(azerothReadyTransition("crashed", "online")).toBe(true);
+  });
+
+  it("does NOT fire on the first poll after app launch (prev null)", () => {
+    expect(azerothReadyTransition(null, "online")).toBe(false);
+  });
+
+  it("does NOT fire on soap_unreachable→online (blip recovery, not a boot)", () => {
+    expect(azerothReadyTransition("soap_unreachable", "online")).toBe(false);
+  });
+
+  it("does NOT fire while staying online, or for any non-online next", () => {
+    expect(azerothReadyTransition("online", "online")).toBe(false);
+    expect(azerothReadyTransition("starting", "starting")).toBe(false);
+    expect(azerothReadyTransition("online", "stopped")).toBe(false);
+    expect(azerothReadyTransition("starting", "crashed")).toBe(false);
+    expect(azerothReadyTransition("stopped", null)).toBe(false);
   });
 });
 

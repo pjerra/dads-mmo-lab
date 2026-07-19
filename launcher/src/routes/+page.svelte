@@ -116,6 +116,15 @@
   {/if}
   {#if page === "backups"}<Backups />{/if}
   {#if page === "help"}<Help onnav={(p) => (page = p)} />{/if}
+
+  {#if serverStatus.readyToast}
+    <!-- Batch 3 F10: in-app "world just came up" toast, visible from any
+         page; mirrors the Windows notification the status store fires. -->
+    <button class="ready-toast" onclick={() => (serverStatus.readyToast = false)} title="Dismiss">
+      ⚔️ AZEROTH IS READY!
+      <span class="ready-sub">The world server is up — time to play.</span>
+    </button>
+  {/if}
 </main>
 
 <style>
@@ -166,6 +175,30 @@
   .chip-note { margin: -8px 12px 8px; padding: 0 10px; font-size: 11px; color: #6e7681; }
   .chip-note.lan { color: #3fb950; }
   .section { padding: 12px 16px 4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #6e7681; user-select: none; }
+  /* "Azeroth is ready" toast (Batch 3 F10): bottom-right, click to dismiss,
+     auto-dismisses via the store's timer. */
+  .ready-toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 50;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    background: #12261a;
+    border: 1px solid #2ea043;
+    border-radius: 10px;
+    padding: 14px 18px;
+    color: #3fb950;
+    font-size: 16px;
+    font-weight: 700;
+    cursor: pointer;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+    animation: ready-pop 0.25s ease-out;
+  }
+  .ready-toast .ready-sub { color: #c9d1d9; font-size: 12.5px; font-weight: 400; }
+  @keyframes ready-pop { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
   .sidebar button { padding: 8px 16px; color: #8b949e; font-size: 14px; background: none; border: none; text-align: left; cursor: pointer; border-left: 2px solid transparent; }
   .sidebar button.active { color: #f0f6fc; background: #161b22; border-left-color: #58a6ff; }
 </style>

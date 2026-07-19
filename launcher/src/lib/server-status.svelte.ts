@@ -25,6 +25,8 @@ export const serverStatus = $state({
   keepAwakeActive: false,
   // Transient note after a LAN auto-refresh actually changed the address.
   lanNotice: null as string | null,
+  // Batch 3 F10: true while the "AZEROTH IS READY!" toast is showing.
+  readyToast: false,
 });
 
 // Single-flight: refreshServerStatus can be called concurrently from the
@@ -69,6 +71,52 @@ function runTransitionActions(prev: ServerDetail["verdict"] | null, next: Server
       .catch(() => {});
   }
   if (actions.lanRefresh) void lanAutoRefresh();
+  if (azerothReadyTransition(prev, next)) fireReadyNotification();
+}
+
+// --- "Azeroth is ready" notification (Batch 3 F10) --------------------------
+
+// Pure: did this poll observe the world BECOMING ready? Fires on
+// starting→online (the normal boot tail, which restarts also pass through)
+// and on stopped/crashed→online (a start that completed between two polls).
+// Deliberately NOT soap_unreachable→online: that's a SOAP blip recovering,
+// not a boot finishing. prev===null is the very first poll after app launch
+// -- the world was (probably) already up before the app started, so no
+// notification.
+export function azerothReadyTransition(
+  prev: ServerDetail["verdict"] | null,
+  next: ServerDetail["verdict"] | null,
+): boolean {
+  if (next !== "online") return false;
+  return prev === "starting" || prev === "stopped" || prev === "crashed";
+}
+
+let readyToastTimer: ReturnType<typeof setTimeout> | undefined;
+
+// In-app toast + Windows notification, both best-effort. The Windows side
+// goes through tauri-plugin-notification's permission dance; any failure
+// (permission denied, plugin missing) must never disturb the status poll.
+function fireReadyNotification(): void {
+  serverStatus.readyToast = true;
+  clearTimeout(readyToastTimer);
+  readyToastTimer = setTimeout(() => (serverStatus.readyToast = false), 12000);
+  void (async () => {
+    try {
+      const { isPermissionGranted, requestPermission, sendNotification } = await import(
+        "@tauri-apps/plugin-notification"
+      );
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (granted) {
+        sendNotification({
+          title: "AZEROTH IS READY!",
+          body: "The world server is up — time to play.",
+        });
+      }
+    } catch {
+      // Best-effort: the in-app toast above already happened.
+    }
+  })();
 }
 
 // After a start finishes (starting→online): if LAN play is on, re-point the

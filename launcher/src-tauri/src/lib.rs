@@ -1333,6 +1333,9 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // Batch 3 F10: Windows toast for the "Azeroth is ready" moment --
+        // JS side sends via @tauri-apps/plugin-notification (best-effort).
+        .plugin(tauri_plugin_notification::init())
         .register_asynchronous_uri_scheme_protocol("zam", |ctx, request, responder| {
             let cache = ctx
                 .app_handle()
