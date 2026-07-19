@@ -63,39 +63,39 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | [teleport-named] Named teleport | Teleport an online char to a named location (two-step confirm) → char moves in-game. |
-| ⬜ | [teleport-coords] Coords teleport (I) | With the char LOGGED OUT: Coordinates… → map/x/y/z → confirm ("Overwrite …'s saved position?") → log in → char is there. With the char ONLINE → the CHAR_ONLINE error shows inline. |
+| ✅ | [teleport-named] Named teleport | Teleport an online char to a named location (two-step confirm) → char moves in-game. |
+| ✅ | [teleport-coords] Coords teleport (I) | With the char LOGGED OUT: Coordinates… → map/x/y/z → confirm ("Overwrite …'s saved position?") → log in → char is there. With the char ONLINE → the CHAR_ONLINE error shows inline. |
 
 ## 6. GM Tools (rounds 2-3 + I)
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | [gm-actions] Level / gold / heal / revive | Online char: gold+heal+revive apply in-game. Offline char: set level → shows on next login. |
-| ⬜ | [gm-summon] Summon NPCs | Summon Banker → appears 2yd in front, despawns ~5 min. Summon Casino (990000) → Gasino appears. Bogus entry → clean NOT_FOUND. |
-| ⬜ | [gm-atlogin] At-login flags (I) | Apply Rename to a char (confirm) → next login prompts a rename. Spot-check Customize. **Verify the SOAP command is accepted at all (no leading dot) — if it faults, report.** |
+| ✅ | [gm-actions] Level / gold / heal / revive | Online char: gold+heal+revive apply in-game. Offline char: set level → shows on next login. |
+| ✅ | [gm-summon] Summon NPCs | Summon Banker → appears 2yd in front, despawns ~5 min. Summon Casino (990000) → Gasino appears. Bogus entry → clean NOT_FOUND. |
+| ✅ | [gm-atlogin] At-login flags (I) | Apply Rename to a char (confirm) → next login prompts a rename. Spot-check Customize. **Verify the SOAP command is accepted at all (no leading dot) — if it faults, report.** |
 
 ## 7. Item Database (rounds 1-5)
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | Item search | Search "hearthstone" → results with quality colors. |
-| ⬜ | [mail-item] Mail items | Mail an item to a char → arrives in-game mailbox. |
+| ✅ | Item search | Search "hearthstone" → results with quality colors. |
+| ✅ | [mail-item] Mail items | Mail an item to a char → arrives in-game mailbox. |
 
 ## 7b. Commands page (Round M)
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | Commands reference | With mods installed (e.g. transmog, ahbot) → Commands page lists a card per installed mod with its command reference. With none installed → empty state "No installed mods with commands yet — install mods on the Modules page." |
+| ✅ | Commands reference | With mods installed (e.g. transmog, ahbot) → Commands page lists a card per installed mod with its command reference. With none installed → empty state "No installed mods with commands yet — install mods on the Modules page." |
 
 ## 8. Playerbots / My Party (rounds 4 + I)
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | [party-ops] Add / kick / relogin | Add a bot by class → joins the party in-game; kick removes; relogin cycles it. |
-| ⬜ | [party-botcmd] Gear up / Fix talents / Maintain | Buttons whisper the bot; gear/talents visibly change. |
-| ⬜ | [bot-level] Set bot level (I) | Set a bot's level → applies (relogin if offline). |
-| ⬜ | [party-presets] Presets save/load | Save current party as preset; kick all; load → party rebuilt (replace semantics). |
-| ⬜ | [preset-io] Export/import (I) | Export a preset (copy text), delete it, Import with the same name+classes → identical; import over an existing name → overwrite confirm fires. |
+| ✅ | [party-ops] Add / kick / relogin | Add a bot by class → joins the party in-game; kick removes; relogin cycles it. |
+| ✅ | [party-botcmd] Gear up / Fix talents / Maintain | Buttons whisper the bot; gear/talents visibly change. |
+| ✅ | [bot-level] Set bot level (I) | Set a bot's level → applies (relogin if offline). |
+| ✅ | [party-presets] Presets save/load | Save current party as preset; kick all; load → party rebuilt (replace semantics). |
+| ✅ | [preset-io] Export/import (I) | Export a preset (copy text), delete it, Import with the same name+classes → identical; import over an existing name → overwrite confirm fires. |
 
 ## 9. Settings / Module Configs (rounds 1-5 + I)
 
@@ -138,7 +138,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | [bridge-setup] Deploy server bridges | GM Tools → Deploy server bridges → restart → GM/party/summon features work (they depend on these Lua bridges). Do this BEFORE sections 6/8. |
+| ✅ | [bridge-setup] Deploy server bridges | GM Tools → Deploy server bridges → restart → GM/party/summon features work (they depend on these Lua bridges). Do this BEFORE sections 6/8. |
 
 ## Known caveats (not tests — expectations)
 
