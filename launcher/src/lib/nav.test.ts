@@ -16,13 +16,9 @@ describe("NAV", () => {
       "teleport",
       "gmtools",
       "items",
-      "playerbots",
-      "botbrowser",
+      "bots",
       "commands",
       "settings",
-      "botworld",
-      "ahbot",
-      "modules",
       "backups",
       "help",
     ]);
@@ -55,8 +51,13 @@ describe("NAV", () => {
     }
   });
 
-  it("config section's modules entry is labeled Module Configs", () => {
+  it("config section is Settings + Backups (Bot World / Auction House / Module files are tabs inside Settings)", () => {
     const cfg = NAV.find((s) => s.section === "Config")!;
-    expect(cfg.pages.find((p) => p.id === "modules")!.label).toBe("Module Configs");
+    expect(cfg.pages.map((p) => p.id)).toEqual(["settings", "backups"]);
+  });
+
+  it("items & bots section has a single merged Bots entry", () => {
+    const ib = NAV.find((s) => s.section === "Items & Bots")!;
+    expect(ib.pages.map((p) => p.id)).toEqual(["items", "bots", "commands"]);
   });
 });

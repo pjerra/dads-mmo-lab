@@ -24,18 +24,18 @@ export const NAV = [
     section: "Items & Bots",
     pages: [
       { id: "items", label: "Item Database" },
-      { id: "playerbots", label: "Playerbots" },
-      { id: "botbrowser", label: "Bot Browser" },
+      // Playerbots (My Party) + Bot Browser live as tabs inside one Bots page.
+      { id: "bots", label: "Bots" },
       { id: "commands", label: "Commands" },
     ],
   },
   {
     section: "Config",
+    // Settings / Bot World / Auction House / Module Configs are all tabs of
+    // the one Config page -- a single sidebar entry opens it with its own
+    // in-page tab bar. Backups is a separate page.
     pages: [
       { id: "settings", label: "Settings" },
-      { id: "botworld", label: "Bot World" },
-      { id: "ahbot", label: "Auction House" },
-      { id: "modules", label: "Module Configs" },
       { id: "backups", label: "Backups" },
     ],
   },

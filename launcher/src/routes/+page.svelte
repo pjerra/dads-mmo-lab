@@ -24,8 +24,7 @@
   import Teleport from "$lib/pages/Teleport.svelte";
   import GMTools from "$lib/pages/GMTools.svelte";
   import Config from "$lib/pages/Config.svelte";
-  import Playerbots from "$lib/pages/Playerbots.svelte";
-  import BotBrowser from "$lib/pages/BotBrowser.svelte";
+  import Bots from "$lib/pages/Bots.svelte";
   import Commands from "$lib/pages/Commands.svelte";
   import Backups from "$lib/pages/Backups.svelte";
   import Help from "$lib/pages/Help.svelte";
@@ -170,20 +169,9 @@
   {#if page === "teleport"}<Teleport />{/if}
   {#if page === "gmtools"}<GMTools />{/if}
   {#if page === "items"}<Items />{/if}
-  {#if page === "playerbots"}<Playerbots />{/if}
-  {#if page === "botbrowser"}<BotBrowser />{/if}
+  {#if page === "bots"}<Bots />{/if}
   {#if page === "commands"}<Commands />{/if}
-  {#if page === "settings" || page === "modules" || page === "botworld" || page === "ahbot"}
-    <Config
-      tab={page === "settings"
-        ? "settings"
-        : page === "botworld"
-          ? "botworld"
-          : page === "ahbot"
-            ? "ahbot"
-            : "files"}
-    />
-  {/if}
+  {#if page === "settings"}<Config />{/if}
   {#if page === "backups"}<Backups />{/if}
   {#if page === "help"}<Help onnav={(p) => (page = p)} />{/if}
 
