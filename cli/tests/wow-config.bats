@@ -181,8 +181,12 @@ teardown() { teardown_fixture; }
 }
 
 @test "config raw-write of a brand-new file reports backup null" {
+  # Since the dynamic allowlist (Batch 1 F3) a conf name is only editable
+  # when the conf OR its .dist exists -- seed the dist, first write creates
+  # the conf.
   mkdir -p "$GDIR/env/dist/etc/modules"
   rm -f "$GDIR/env/dist/etc/modules/mod_ale.conf"
+  printf 'Ale.Enabled = 1\n' > "$GDIR/env/dist/etc/modules/mod_ale.conf.dist"
   run bash -c 'printf "x=1\n" | bash "'"$DML"'" wow config raw-write --file mod_ale.conf --json'
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.backup')" = "null" ]

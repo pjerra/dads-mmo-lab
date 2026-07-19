@@ -336,17 +336,28 @@ _float_in_range() {
     awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v >= lo && v <= hi) }'
 }
 
-# _cfg_file_path <name>: maps an allowlisted file name to its host path
-# under $cfg_sdir (the base compose bind-mounts ./env/dist/etc into the
-# container, so module confs are ordinary host files). Unknown name -> rc 1.
-# The allowlist is the traversal guard: names are matched literally, never
-# used as path fragments.
+# _cfg_file_path <name>: maps an editable file name to its host path under
+# $cfg_sdir (the base compose bind-mounts ./env/dist/etc into the container,
+# so module confs are ordinary host files). Unknown name -> rc 1.
+# Batch 1 F3 replaced the hardcoded 3-conf allowlist with a dynamic one:
+# ANY <name>.conf whose basename-shape regex passes (the regex IS the
+# traversal guard -- no slashes can match, so the name can never leave the
+# modules dir) AND whose conf or .dist already exists under
+# env/dist/etc/modules/, plus worldserver.conf/authserver.conf one dir up
+# (fixed names, same literal-match safety as before). .env and the compose
+# override stay read-only in raw-write (guarded there, not here).
 _cfg_file_path() {
+    local p
     case "$1" in
         .env) printf '%s' "$cfg_sdir/.env" ;;
         docker-compose.override.yml) printf '%s' "$cfg_sdir/docker-compose.override.yml" ;;
-        playerbots.conf|mod_ahbot.conf|mod_ale.conf) printf '%s' "$cfg_sdir/env/dist/etc/modules/$1" ;;
-        *) return 1 ;;
+        worldserver.conf|authserver.conf) printf '%s' "$cfg_sdir/env/dist/etc/$1" ;;
+        *)
+            [[ "$1" =~ ^[A-Za-z0-9_.-]+\.conf$ ]] || return 1
+            p="$cfg_sdir/env/dist/etc/modules/$1"
+            [[ -f "$p" || -f "$p.dist" ]] || return 1
+            printf '%s' "$p"
+            ;;
     esac
     return 0
 }

@@ -4,10 +4,13 @@
     wowConfigList,
     wowConfigSet,
     wowConfigPbKeys,
+    wowConfigFiles,
     wowConfigRawRead,
     wowConfigRawWrite,
+    wowConfigRawReset,
     wowConsoleSend,
     gamesRestart,
+    type ConfFile,
     type ConfigSetting,
     type PbKey,
     type RawFileName,
@@ -22,12 +25,12 @@
   import { featureLocked, LOCKED_HINT, testingModeOn, setTestingMode } from "$lib/features.svelte";
 
   const WOW_ID = "wow-server-playerbots";
-  const FILES: RawFileName[] = [
-    ".env",
-    "docker-compose.override.yml",
-    "playerbots.conf",
-    "mod_ahbot.conf",
-    "mod_ale.conf",
+  // Static fallback shown until (or if) `wow config files` answers -- the
+  // real list is dynamic since Batch 1 F3 (every installed module conf).
+  const FALLBACK_FILES: ConfFile[] = [
+    { name: ".env", exists: true, dist: false, readonly: true },
+    { name: "docker-compose.override.yml", exists: true, dist: false, readonly: true },
+    { name: "playerbots.conf", exists: true, dist: true, readonly: false },
   ];
   // UI mirror of the CLI's raw-write lock (cli rejects these two names).
   const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
@@ -43,6 +46,49 @@
   let fileLoaded = $state(false);
   let loadingFile = $state(false);
   let lastBackup: string | null = $state(null);
+  let confFiles: ConfFile[] = $state(FALLBACK_FILES);
+  let confFilesLoaded = $state(false);
+  let confirmingReset = $state(false);
+  let resetting = $state(false);
+
+  async function loadConfFiles() {
+    try {
+      confFiles = await wowConfigFiles();
+      confFilesLoaded = true;
+      if (!confFiles.some((f) => f.name === file) && confFiles.length > 0) {
+        file = confFiles[0].name;
+      }
+    } catch {
+      // Keep the static fallback -- the picker still works for the basics.
+    }
+  }
+  $effect(() => {
+    if (tab === "files" && !confFilesLoaded) void loadConfFiles();
+  });
+
+  const currentFileMeta = $derived(confFiles.find((f) => f.name === file));
+
+  async function resetFile() {
+    if (!confirmingReset) {
+      confirmingReset = true;
+      return;
+    }
+    confirmingReset = false;
+    resetting = true;
+    error = null;
+    try {
+      const target = file;
+      const r = await wowConfigRawReset(target);
+      restartState.needed = true;
+      if (file === target) await loadFile();
+      lastBackup = r.backup;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      resetting = false;
+    }
+  }
 
   const buf = termBuf("config");
 
@@ -98,7 +144,9 @@
     tab === "botworld" ? groups.filter((g) => g.startsWith("Bot ")) : groups.filter((g) => !g.startsWith("Bot ")),
   );
   const dirty = $derived(dirtyKeys(settings, edits));
-  const fileReadonly = $derived(READONLY_FILES.includes(file));
+  const fileReadonly = $derived(
+    confFiles.find((f) => f.name === file)?.readonly ?? READONLY_FILES.includes(file),
+  );
   // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
   // flags -- the Save button locks when ANY dirty row's flag is still locked.
   const saveLocked = $derived(requiredSaveFlags(settings, dirty).some((f) => featureLocked(f)));
@@ -250,6 +298,7 @@
     fileContent = "";
     lastBackup = null;
     confirmingRestart = false;
+    confirmingReset = false;
     aleNote = null;
   }
 </script>
@@ -403,7 +452,9 @@
   {:else}
     <div class="row">
       <select bind:value={file} onchange={onFileSelect} disabled={saving || restartState.restarting || loadingFile}>
-        {#each FILES as f (f)}<option value={f}>{f}</option>{/each}
+        {#each confFiles as f (f.name)}
+          <option value={f.name}>{f.name}{!f.exists && f.dist ? " (new — starts from defaults)" : ""}</option>
+        {/each}
       </select>
       <button onclick={loadFile} disabled={saving || restartState.restarting || loadingFile}>Open</button>
     </div>
@@ -423,7 +474,10 @@
         rows="18"
         spellcheck="false"
         bind:value={fileContent}
-        oninput={() => (confirmingRestart = false)}
+        oninput={() => {
+          confirmingRestart = false;
+          confirmingReset = false;
+        }}
         readonly={fileReadonly}
         disabled={saving || restartState.restarting}
       ></textarea>
@@ -435,18 +489,28 @@
           <button
             class="primary"
             onclick={saveFile}
-            disabled={saving || restartState.restarting || featureLocked("config-edit")}
+            disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
             title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
           >
             Save
           </button>
           <button
             onclick={() => saveAndRestart(saveFile)}
-            disabled={saving || restartState.restarting || featureLocked("config-edit")}
+            disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
             title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
           >
             {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
           </button>
+          {#if currentFileMeta?.dist}
+            <button
+              class="danger"
+              onclick={resetFile}
+              disabled={saving || restartState.restarting || resetting || featureLocked("config-reset")}
+              title={featureLocked("config-reset") ? LOCKED_HINT : undefined}
+            >
+              {confirmingReset ? `Overwrite ${file} with its defaults — sure?` : "Reset to defaults"}
+            </button>
+          {/if}
         </div>
       {/if}
     {/if}
@@ -478,6 +542,7 @@
   .row { display: flex; gap: 10px; align-items: center; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
+  button.danger { border-color: #f85149; color: #f85149; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }

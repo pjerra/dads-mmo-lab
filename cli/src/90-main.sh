@@ -2125,15 +2125,68 @@ case "$cmd" in
             [[ "$pbsrc" == "$pbdist" ]] && pbsrc_name="playerbots.conf.dist"
             json_ok "{\"source\":\"$pbsrc_name\",\"keys\":$out}"
             ;;
+          files)
+            # Dynamic editable-conf list (Batch 1 F3): the fixed four plus
+            # every *.conf / *.conf.dist basename found under modules/
+            # (deduped; the fixed names win if a module conf shadows them).
+            # Powers the GUI file picker instead of its old hardcoded list.
+            _cfg_preamble
+            moddir="$cfg_sdir/env/dist/etc/modules"
+            dynnames="$(ls -1 "$moddir" 2>/dev/null | sed 's/\.dist$//' | grep -E '^[A-Za-z0-9_.-]+\.conf$' | grep -vE '^(worldserver|authserver)\.conf$' | sort -u)" || dynnames=""
+            first=1; out='['
+            for fname in .env docker-compose.override.yml worldserver.conf authserver.conf $dynnames; do
+              fpath="$(_cfg_file_path "$fname")" || continue
+              fex=false; fdist=false; fro=false
+              [[ -f "$fpath" ]] && fex=true
+              [[ -f "$fpath.dist" ]] && fdist=true
+              case "$fname" in .env|docker-compose.override.yml) fro=true ;; esac
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"name\":\"$(json_escape "$fname")\",\"exists\":$fex,\"dist\":$fdist,\"readonly\":$fro}"
+              first=0
+            done
+            out+=']'
+            json_ok "{\"files\":$out}"
+            ;;
           raw-read)
             fname=""
             [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; fname="$2"; shift 2; }
             [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
             _cfg_preamble
             fpath="$(_cfg_file_path "$fname")" \
-              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
+            # A conf that only exists as its .dist yet reads as the dist --
+            # the first save then creates the real conf (raw-write).
+            if [[ ! -f "$fpath" && -f "$fpath.dist" ]]; then
+              json_ok "{\"file\":\"$(json_escape "$fname")\",\"source\":\"dist\",\"content\":\"$(json_escape "$(cat "$fpath.dist")")\"}"
+              exit 0
+            fi
             [[ -f "$fpath" ]] || { json_err NOT_FOUND "File does not exist yet: $fname" ""; exit 1; }
-            json_ok "{\"file\":\"$(json_escape "$fname")\",\"content\":\"$(json_escape "$(cat "$fpath")")\"}"
+            json_ok "{\"file\":\"$(json_escape "$fname")\",\"source\":\"conf\",\"content\":\"$(json_escape "$(cat "$fpath")")\"}"
+            ;;
+          raw-reset)
+            # Reset-from-.dist (Batch 1 F3): copy <name>.conf.dist over the
+            # conf, with the same automatic .bak the raw editor takes before
+            # writes. .env/override have no dist and stay untouchable here.
+            fname=""
+            [[ "${1:-}" == "--file" ]] && { _need_flag_val "$1" $#; fname="$2"; shift 2; }
+            [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
+            _cfg_preamble
+            fpath="$(_cfg_file_path "$fname")" \
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
+            case "$fname" in
+              .env|docker-compose.override.yml)
+                json_err BAD_ARG "That file has no defaults to reset to" ""
+                exit 1
+                ;;
+            esac
+            [[ -f "$fpath.dist" ]] || { json_err NOT_FOUND "No $fname.dist to reset from" ""; exit 1; }
+            bakjson=null
+            if [[ -f "$fpath" ]]; then
+              cp -p "$fpath" "$fpath.bak"
+              bakjson="\"$(json_escape "$fname.bak")\""
+            fi
+            cp "$fpath.dist" "$fpath"
+            json_ok "{\"reset\":true,\"file\":\"$(json_escape "$fname")\",\"backup\":$bakjson}"
             ;;
           raw-write)
             fname=""
@@ -2141,7 +2194,7 @@ case "$cmd" in
             [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }
             _cfg_preamble
             fpath="$(_cfg_file_path "$fname")" \
-              || { json_err NOT_FOUND "Not an editable file: $fname" "Editable: .env, docker-compose.override.yml, playerbots.conf, mod_ahbot.conf, mod_ale.conf"; exit 1; }
+              || { json_err NOT_FOUND "Not an editable file: $fname" "See: dml wow config files --json"; exit 1; }
             mkdir -p "$(dirname "$fpath")"
             tmp="$fpath.tmp.$$"
             cat > "$tmp"

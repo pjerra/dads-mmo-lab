@@ -50,6 +50,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "unbound-addon": "untested",
   "rates-live": "untested",
   "bots-world": "untested",
+  "config-reset": "untested",
 };
 
 export const LOCKED_HINT =

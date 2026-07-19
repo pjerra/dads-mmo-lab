@@ -150,12 +150,15 @@ export interface ConfigSetting {
   restart_required: boolean;
   env: string;
 }
-export type RawFileName =
-  | ".env"
-  | "docker-compose.override.yml"
-  | "playerbots.conf"
-  | "mod_ahbot.conf"
-  | "mod_ale.conf";
+// Batch 1 F3: the editable-file list is dynamic (wow config files), so
+// names are plain strings validated CLI-side (basename-shape allowlist).
+export type RawFileName = string;
+export interface ConfFile {
+  name: string;
+  exists: boolean;
+  dist: boolean;
+  readonly: boolean;
+}
 
 export async function wowAccounts(): Promise<Account[]> {
   const data = await invoke<{ accounts: Account[] }>("wow_accounts");
@@ -466,10 +469,19 @@ export interface PbKey {
 export async function wowConfigPbKeys(): Promise<{ source: string; keys: PbKey[] }> {
   return await invoke("wow_config_pb_keys");
 }
+export async function wowConfigFiles(): Promise<ConfFile[]> {
+  const data = await invoke<{ files: ConfFile[] }>("wow_config_files");
+  return data.files;
+}
 export async function wowConfigRawRead(
   file: RawFileName,
-): Promise<{ file: string; content: string }> {
+): Promise<{ file: string; source?: "conf" | "dist"; content: string }> {
   return await invoke("wow_config_raw_read", { file });
+}
+export async function wowConfigRawReset(
+  file: RawFileName,
+): Promise<{ reset: boolean; file: string; backup: string | null }> {
+  return await invoke("wow_config_raw_reset", { file });
 }
 export async function wowConfigRawWrite(
   file: RawFileName,
