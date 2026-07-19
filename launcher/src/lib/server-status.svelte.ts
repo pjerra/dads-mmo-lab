@@ -11,12 +11,20 @@
 // export directly -- no termBuf-style "must return through the proxy" trap
 // applies here.
 
-import { wowServerDetail, type ServerDetail } from "./api";
+import { detectLanIp, setKeepAwake, wowLan, wowServerDetail, type ServerDetail } from "./api";
+import { featureLocked } from "./features.svelte";
+import { toolPrefs } from "./tool-prefs.svelte";
+import { parseLanStatus, verdictTransitionActions } from "./transitions";
 
 export const serverStatus = $state({
   detail: null as ServerDetail | null,
   refreshing: false,
   lastError: null as string | null,
+  // Batch 2 F6: true while the Rust-side sleep block is engaged (drives the
+  // "keeping PC awake" hint next to the sidebar chip).
+  keepAwakeActive: false,
+  // Transient note after a LAN auto-refresh actually changed the address.
+  lanNotice: null as string | null,
 });
 
 // Single-flight: refreshServerStatus can be called concurrently from the
@@ -26,8 +34,10 @@ export async function refreshServerStatus(): Promise<void> {
   if (serverStatus.refreshing) return;
   serverStatus.refreshing = true;
   try {
+    const prev = serverStatus.detail?.verdict ?? null;
     serverStatus.detail = await wowServerDetail();
     serverStatus.lastError = null;
+    runTransitionActions(prev, serverStatus.detail.verdict);
   } catch (e) {
     // A failed poll must NOT clobber the last-known detail -- the bar/chip
     // would otherwise blank out on every transient error during a restart.
@@ -38,6 +48,46 @@ export async function refreshServerStatus(): Promise<void> {
     serverStatus.lastError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
   } finally {
     serverStatus.refreshing = false;
+  }
+}
+
+// Impure executor for the pure transition decisions (Batch 2 F6): keep-awake
+// engage/release + LAN address auto-refresh. All best-effort -- a failed side
+// effect must never break the status poll itself.
+function runTransitionActions(prev: ServerDetail["verdict"] | null, next: ServerDetail["verdict"]): void {
+  const actions = verdictTransitionActions(prev, next, {
+    keepAwakeAllowed: !featureLocked("keep-awake") && toolPrefs.keepAwake,
+    lanAutoAllowed: !featureLocked("lan-auto-refresh") && toolPrefs.lanAutoRefresh,
+  });
+  if (actions.keepAwake === "on") {
+    setKeepAwake(true)
+      .then(() => (serverStatus.keepAwakeActive = true))
+      .catch(() => {});
+  } else if (actions.keepAwake === "off") {
+    setKeepAwake(false)
+      .then(() => (serverStatus.keepAwakeActive = false))
+      .catch(() => {});
+  }
+  if (actions.lanRefresh) void lanAutoRefresh();
+}
+
+// After a start finishes (starting→online): if LAN play is on, re-point the
+// realm address at this PC's current IP (DHCP may have moved it between
+// sessions). The CLI's refresh arm is itself a no-op for off/public/current
+// addresses; the toast only shows when the address actually changed.
+async function lanAutoRefresh(): Promise<void> {
+  try {
+    const before = parseLanStatus(await wowLan("status"));
+    if (!before.on) return;
+    const ip = await detectLanIp();
+    if (!ip) return;
+    await wowLan("refresh", ip);
+    if (before.ip && before.ip !== ip) {
+      serverStatus.lanNotice = `LAN address updated: ${before.ip} → ${ip}`;
+      setTimeout(() => (serverStatus.lanNotice = null), 12000);
+    }
+  } catch {
+    // Best-effort: LAN refresh failing must not disturb the status poll.
   }
 }
 

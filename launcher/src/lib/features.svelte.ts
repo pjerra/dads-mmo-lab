@@ -53,6 +53,8 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "config-reset": "untested",
   "bots-flush": "untested",
   "auto-shutdown": "untested",
+  "keep-awake": "untested",
+  "lan-auto-refresh": "untested",
 };
 
 export const LOCKED_HINT =

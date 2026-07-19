@@ -1,4 +1,5 @@
 pub mod dml;
+pub mod power;
 pub mod watch;
 mod zam;
 
@@ -217,6 +218,15 @@ fn auto_shutdown_watcher(
         }
         std::thread::sleep(std::time::Duration::from_secs(5));
     }
+}
+
+/// Keep-awake toggle (Batch 2 F6): see power.rs for the per-thread semantics.
+/// Sync + infallible on purpose -- the call is a channel send to the manager
+/// thread, and there is nothing useful to report on failure (shutdown races
+/// only).
+#[tauri::command]
+fn set_keep_awake(on: bool) {
+    power::keep_awake(on);
 }
 
 /// Enable/disable the auto-shutdown watcher. Enabling spawns a fresh watcher
@@ -1363,10 +1373,19 @@ pub fn run() {
             open_shell,
             detect_lan_ip,
             save_text_file,
-            set_auto_shutdown
+            set_auto_shutdown,
+            set_keep_awake
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|_app, event| {
+            // Belt-and-braces: Windows clears the execution state when the
+            // process dies, but clear it explicitly on the way out too so a
+            // slow teardown never holds the PC awake.
+            if let tauri::RunEvent::Exit = event {
+                power::keep_awake(false);
+            }
+        });
 }
 
 #[cfg(test)]

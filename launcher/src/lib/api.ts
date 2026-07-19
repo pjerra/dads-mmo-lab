@@ -65,7 +65,10 @@ export interface ServerInfo {
   mean_ms: number | null;
   median_ms: number | null;
 }
-export type ServerVerdict = "stopped" | "starting" | "online" | "soap_unreachable";
+// "crashed" (Batch 2 F8): containers exist, world not running, and the world
+// container's exit code is neither 0 nor 143 (SIGTERM) -- i.e. it died rather
+// than being stopped.
+export type ServerVerdict = "stopped" | "starting" | "online" | "soap_unreachable" | "crashed";
 export interface ContainerRow {
   name: string;
   role: "world" | "auth" | "database";
@@ -681,6 +684,12 @@ export async function openShell(): Promise<void> {
 
 export async function detectLanIp(): Promise<string | null> {
   return await invoke("detect_lan_ip");
+}
+
+// --- Keep-awake sleep block (Batch 2 F6) -----------------------------------
+
+export async function setKeepAwake(on: boolean): Promise<void> {
+  return await invoke("set_keep_awake", { on });
 }
 
 // --- Auto-shutdown watcher (Batch 2 F5) ------------------------------------

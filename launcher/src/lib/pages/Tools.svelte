@@ -17,6 +17,9 @@
     autoShutdownLabel,
     setAutoShutdownEnabled,
   } from "$lib/auto-shutdown.svelte";
+  import { toolPrefs, setKeepAwakePref, setLanAutoRefreshPref } from "$lib/tool-prefs.svelte";
+  import { setKeepAwake } from "$lib/api";
+  import { serverStatus } from "$lib/server-status.svelte";
 
   function fmtErr(e: unknown): string {
     const err = e as { message?: string; hint?: string };
@@ -74,6 +77,22 @@
       lanError = fmtErr(e);
     } finally {
       lanBusy = false;
+    }
+  }
+
+  // Keep-awake pref changes take effect immediately when the server is
+  // already online -- transition-driven engagement alone would otherwise wait
+  // for the next stop/start cycle.
+  function onKeepAwakeToggle(on: boolean) {
+    setKeepAwakePref(on);
+    if (!on && serverStatus.keepAwakeActive) {
+      setKeepAwake(false)
+        .then(() => (serverStatus.keepAwakeActive = false))
+        .catch(() => {});
+    } else if (on && !featureLocked("keep-awake") && serverStatus.detail?.verdict === "online") {
+      setKeepAwake(true)
+        .then(() => (serverStatus.keepAwakeActive = true))
+        .catch(() => {});
     }
   }
 
@@ -208,6 +227,33 @@
       <button onclick={lanStatus} disabled={lanBusy}>Refresh</button>
     </div>
     <pre class="usage">{lanOutput ?? "No status yet."}</pre>
+    <div class="pref-rows">
+      <label
+        class="toggle"
+        title={featureLocked("keep-awake") ? LOCKED_HINT : undefined}
+      >
+        <input
+          type="checkbox"
+          checked={toolPrefs.keepAwake}
+          disabled={featureLocked("keep-awake")}
+          onchange={(e) => onKeepAwakeToggle(e.currentTarget.checked)}
+        />
+        Keep this PC awake while the server is online
+      </label>
+      <label
+        class="toggle"
+        title={featureLocked("lan-auto-refresh") ? LOCKED_HINT : undefined}
+      >
+        <input
+          type="checkbox"
+          checked={toolPrefs.lanAutoRefresh}
+          disabled={featureLocked("lan-auto-refresh")}
+          onchange={(e) => setLanAutoRefreshPref(e.currentTarget.checked)}
+        />
+        Re-point the LAN address automatically after every server start
+      </label>
+      {#if serverStatus.lanNotice}<p class="notice">{serverStatus.lanNotice}</p>{/if}
+    </div>
   </div>
 
   <div class="card">
@@ -345,6 +391,7 @@
   .toggle { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; }
   .toggle input { accent-color: #238636; }
   .notice { color: #3fb950; font-size: 13px; margin: 0; }
+  .pref-rows { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .usage {
     background: #161b22;
     border: 1px solid #21262d;

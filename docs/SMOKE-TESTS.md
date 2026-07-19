@@ -176,6 +176,8 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 |---|---|---|
 | ⬜ | [auto-shutdown] Stop when WoW closes | Server running: Tools → enable "Stop the server when WoW closes" → status says "Waiting for WoW…". Launch Wow.exe → status flips to "Armed". Close WoW → within ~15s the server stops gracefully (chip → Stopped) and the card shows "Server stopped automatically because WoW was closed." Toggle survives a launcher restart (re-arms on app start). |
 | ⬜ | [auto-shutdown] Never fires when server already down | With the toggle on and the server STOPPED: launch + close WoW → nothing stops/breaks; card notes there was nothing to stop. |
+| ⬜ | [keep-awake] Sleep block while online | With the toggle on (Tools → LAN play card): start the server → "keeping PC awake" appears under the sidebar chip and `powercfg /requests` (admin prompt) lists the launcher under SYSTEM. Stop the server → hint disappears and powercfg no longer lists it. Quit the launcher while online → the request is released (powercfg again). |
+| ⬜ | [lan-auto-refresh] LAN re-point after start | LAN play ON with a LAN address in the realm DB: restart the server → after boot, `Tools → LAN play → Refresh` (or the DB) shows the realm address is this PC's current IP without clicking anything. Green toast under the chip ONLY if the address actually changed (fake it: `dml lan wow-server-playerbots on <other-private-ip>` first, then restart). |
 
 ## Known caveats (not tests — expectations)
 

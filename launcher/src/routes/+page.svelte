@@ -51,6 +51,12 @@
       ></span>
       {status.label}
     </button>
+    {#if serverStatus.keepAwakeActive}
+      <span class="chip-note" title="Windows sleep is blocked while the server is online (Tools → LAN play card to turn this off)">keeping PC awake</span>
+    {/if}
+    {#if serverStatus.lanNotice}
+      <span class="chip-note lan">{serverStatus.lanNotice}</span>
+    {/if}
     {#each NAV as s (s.section)}
       <span class="section">{s.section}</span>
       {#each s.pages as p (p.id)}
@@ -105,6 +111,9 @@
   .status-chip .dot.off { background: #f85149; }
   .status-chip .dot.bad { background: #ffa657; }
   @keyframes chip-dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  /* Small hints under the chip (keep-awake indicator, LAN refresh toast). */
+  .chip-note { margin: -8px 12px 8px; padding: 0 10px; font-size: 11px; color: #6e7681; }
+  .chip-note.lan { color: #3fb950; }
   .section { padding: 12px 16px 4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #6e7681; user-select: none; }
   .sidebar button { padding: 8px 16px; color: #8b949e; font-size: 14px; background: none; border: none; text-align: left; cursor: pointer; border-left: 2px solid transparent; }
   .sidebar button.active { color: #f0f6fc; background: #161b22; border-left-color: #58a6ff; }
