@@ -227,6 +227,8 @@ export interface ModCommands {
 export interface CppModule {
   key: string;
   name: string;
+  desc: string;
+  url: string | null;
   installed: boolean;
   pending_rebuild: boolean;
   conf: "none" | "needs-rebuild" | "ready" | "active";
@@ -235,6 +237,8 @@ export interface CppModule {
 export interface LuaModule {
   key: string;
   name: string;
+  desc: string;
+  url: string | null;
   cloned: boolean;
   deployed: boolean;
   has_sql: boolean;
@@ -242,6 +246,8 @@ export interface LuaModule {
 export interface SqlModule {
   key: string;
   name: string;
+  desc: string;
+  url: string | null;
   type: string;
   installed: boolean;
 }

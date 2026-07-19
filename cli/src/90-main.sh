@@ -2690,6 +2690,13 @@ case "$cmd" in
             if [[ -z "$sdir" ]]; then
               json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
             fi
+            # Web-page URL from a registry clone URL as a JSON value: strip a
+            # trailing .git; empty -> null.
+            _mod_weburl_json() {
+              local u="${1%.git}"
+              if [[ -n "$u" ]]; then printf '"%s"' "$(json_escape "$u")"; else printf 'null'; fi
+              return 0
+            }
             cpp='['; first=1
             declare -A _mod_seen=()
             while IFS='|' read -r mk mname murl msql; do
@@ -2699,7 +2706,7 @@ case "$cmd" in
               pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
               cstate="$(_module_conf_state "$sdir" "$mk")"
               [[ $first -eq 0 ]] && cpp+=','
-              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
+              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
               first=0
             done < <(_module_registry_cpp)
             if [[ -d "$sdir/modules" ]]; then
@@ -2709,7 +2716,10 @@ case "$cmd" in
                 [[ -n "${_mod_seen[$mk]:-}" ]] && continue
                 _valid_cpp_key "$mk" || continue
                 pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
-                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
+                # Custom clones carry no registry row -- their origin remote
+                # is the best available "project page" link.
+                curl_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
               done
             fi
             cpp+=']'
@@ -2720,7 +2730,7 @@ case "$cmd" in
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
               lsql=false; _lua_has_sql "$mk" && lsql=true
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'
@@ -2729,7 +2739,7 @@ case "$cmd" in
               [[ -z "$mk" ]] && continue
               inst=false; _sql_installed "$sdir" "$mk" && inst=true
               [[ $first -eq 0 ]] && sqlj+=','
-              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"type\":\"$mtype\",\"installed\":$inst}"
+              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"type\":\"$mtype\",\"installed\":$inst}"
               first=0
             done < <(_module_registry_sql)
             sqlj+=']'

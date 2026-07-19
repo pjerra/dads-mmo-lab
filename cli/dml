@@ -1370,6 +1370,55 @@ rare-drops|Rare Drops (450 Classic rares loot)|https://github.com/StraysFromPath
 EOF
 }
 
+# One-line "what does this actually do" info per module key, shown on the
+# Modules page. A separate lookup (NOT a registry column): every registry
+# consumer does a positional `IFS='|' read` whose LAST variable swallows any
+# trailing remainder, so appending a column would silently corrupt the last
+# field at ten call sites. Unknown key -> empty (callers emit "" then).
+_module_desc() {
+    case "$1" in
+      mod-1v1-arena) echo "Adds a 1v1 arena bracket to the arena system -- queue solo duels through the arena NPC." ;;
+      mod-aoe-loot) echo "Loot every nearby corpse with one click, retail-style." ;;
+      mod-ah-bot) echo "Keeps the Auction House stocked and buying: a bot lists and purchases items so the economy works on a solo server." ;;
+      mod-autobalance) echo "Scales dungeon/raid mob health and damage to your party size, so any group size can run any instance." ;;
+      mod-ale) echo "The Lua scripting engine (Eluna fork) that powers every script in the Lua/ALE family below -- install this first." ;;
+      mod-player-bot-level-brackets) echo "Spreads the random playerbot population across level ranges you configure, instead of everyone clustering at cap." ;;
+      mod-challenge-modes) echo "Opt-in challenge rulesets per character: Hardcore (death is final), Iron Man, slow-XP and friends, with rewards." ;;
+      mod-custom-login) echo "Gives freshly created characters configurable starter gear, items, and reputation on first login." ;;
+      mod-individual-progression) echo "Each character progresses through Vanilla -> TBC -> WotLK content gates individually, like a personal timeline." ;;
+      mod-junk-to-gold) echo "Automatically sells gray junk for gold the moment you loot it." ;;
+      mod-learn-spells) echo "Class spells are learned automatically on level-up -- no class-trainer visits." ;;
+      mod-npc-beastmaster) echo "A Beastmaster NPC that lets ANY class tame, stable and use hunter pets." ;;
+      mod-quest-loot-party) echo "Quest items drop for every eligible party member at once instead of one at a time." ;;
+      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. NOTE: needs manual client-side patch files (see the Commands page) -- the server part alone is not enough." ;;
+      mod-dungeon-master) echo "Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards." ;;
+      mod-solocraft) echo "Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable." ;;
+      mod-talentbutton) echo "Dual spec from level 10 and a talent-reset button usable anywhere." ;;
+      mod-transmog) echo "Transmogrification NPC: reskin your gear's appearance while keeping its stats." ;;
+      accountwide) echo "Shares achievements, currency, mounts and pets across every character on the same account." ;;
+      activechat) echo "Ambient lore-flavored NPC chatter around the world, so cities feel alive." ;;
+      battlepass) echo "A battle-pass style XP track with tiered rewards for playing." ;;
+      bmah) echo "MoP-style Black Market Auction House with rare/unobtainable items (server script + client addon)." ;;
+      lootpet) echo "Your vanity pet trots around auto-looting nearby corpses for you." ;;
+      paragon) echo "Endless post-80 'paragon' stat progression with client-side UI files." ;;
+      sitmeanrest) echo "Sitting down grants a rest/regen buff; standing or moving strips it." ;;
+      sod) echo "Season-of-Discovery-style phased XP rate bonuses while leveling." ;;
+      unlimitedammo) echo "Hunters never run out: arrows and bullets auto-refill." ;;
+      all-stackables) echo "Raises stack sizes to 200 for everything stackable." ;;
+      baby-mobs) echo "World tweak: all mobs at quarter health/damage/armor -- easy mode." ;;
+      buff-mobs) echo "World tweak: mobs at 2x health, 1.5x damage/armor -- harder world." ;;
+      xbuff-mobs) echo "World tweak: mobs at 4x health, 2x damage/armor -- much harder world." ;;
+      hearthstone-cd) echo "Pick a shorter Hearthstone cooldown (several variants to choose from)." ;;
+      lvl1-mounts) echo "Mount training and riding available from level 1." ;;
+      nerf-mobs) echo "World tweak: mobs at half health, 0.75x damage/armor -- gentler world." ;;
+      npc-teleporter) echo "Adds teleporter NPCs in capitals and starting zones." ;;
+      portals-capitals) echo "Two-way portals connecting all capital cities." ;;
+      rare-drops) echo "About 450 Classic rare-spawn loot tables restored/enriched." ;;
+      *) echo "" ;;
+    esac
+    return 0
+}
+
 # --- validators (exit status IS the signal, like _valid_charname) ----------
 _valid_module_key() { [[ "$1" =~ ^[a-z0-9-]{1,64}$ ]]; }
 _valid_cpp_key()    { [[ "$1" =~ ^mod-[a-z0-9-]{1,64}$ ]]; }
@@ -4742,6 +4791,13 @@ case "$cmd" in
             if [[ -z "$sdir" ]]; then
               json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
             fi
+            # Web-page URL from a registry clone URL as a JSON value: strip a
+            # trailing .git; empty -> null.
+            _mod_weburl_json() {
+              local u="${1%.git}"
+              if [[ -n "$u" ]]; then printf '"%s"' "$(json_escape "$u")"; else printf 'null'; fi
+              return 0
+            }
             cpp='['; first=1
             declare -A _mod_seen=()
             while IFS='|' read -r mk mname murl msql; do
@@ -4751,7 +4807,7 @@ case "$cmd" in
               pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
               cstate="$(_module_conf_state "$sdir" "$mk")"
               [[ $first -eq 0 ]] && cpp+=','
-              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
+              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
               first=0
             done < <(_module_registry_cpp)
             if [[ -d "$sdir/modules" ]]; then
@@ -4761,7 +4817,10 @@ case "$cmd" in
                 [[ -n "${_mod_seen[$mk]:-}" ]] && continue
                 _valid_cpp_key "$mk" || continue
                 pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
-                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
+                # Custom clones carry no registry row -- their origin remote
+                # is the best available "project page" link.
+                curl_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
               done
             fi
             cpp+=']'
@@ -4772,7 +4831,7 @@ case "$cmd" in
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
               lsql=false; _lua_has_sql "$mk" && lsql=true
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'
@@ -4781,7 +4840,7 @@ case "$cmd" in
               [[ -z "$mk" ]] && continue
               inst=false; _sql_installed "$sdir" "$mk" && inst=true
               [[ $first -eq 0 ]] && sqlj+=','
-              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"type\":\"$mtype\",\"installed\":$inst}"
+              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"type\":\"$mtype\",\"installed\":$inst}"
               first=0
             done < <(_module_registry_sql)
             sqlj+=']'

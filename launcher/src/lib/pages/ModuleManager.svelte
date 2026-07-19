@@ -28,6 +28,18 @@
   } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+
+  // Opens the module's project page in the system browser (Round R). The
+  // opener plugin + its default capability were already granted for this
+  // app; url is registry-sourced (https-only by the CLI's own validator),
+  // never user input.
+  function openModUrl(url: string | null) {
+    if (!url) return;
+    openUrl(url).catch(() => {
+      // Best-effort -- a failed browser launch shouldn't break the page.
+    });
+  }
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
@@ -460,7 +472,13 @@
     {#if list}
       {#each list.families.cpp as m (m.key)}
         <div class="row mrow">
-          <strong class="mname">{m.name}</strong>
+          <div class="mhead">
+            <span class="mtitle">
+              <strong class="mname">{m.name}</strong>
+              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+            </span>
+            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+          </div>
           <span class="badge {statusClass(m)}">{statusText(m)}</span>
           {#if m.conf === "ready"}
             <button
@@ -590,7 +608,13 @@
       {:else}
         {#each list.families.lua as m (m.key)}
           <div class="row mrow">
-            <strong class="mname">{m.name}</strong>
+            <div class="mhead">
+              <span class="mtitle">
+                <strong class="mname">{m.name}</strong>
+                {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+              </span>
+              {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+            </div>
             <span class="badge {m.cloned ? 'on' : 'off'}">Cloned</span>
             <span class="badge {m.deployed ? 'on' : 'off'}">Deployed</span>
             <span class="spacer"></span>
@@ -626,7 +650,13 @@
     {#if list}
       {#each list.families.sql as m (m.key)}
         <div class="row mrow">
-          <strong class="mname">{m.name}</strong>
+          <div class="mhead">
+            <span class="mtitle">
+              <strong class="mname">{m.name}</strong>
+              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+            </span>
+            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+          </div>
           <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
           {#if m.key === "hearthstone-cd"}
             <label class="row">
@@ -853,7 +883,19 @@
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .mrow { padding: 6px 0; border-top: 1px solid #21262d; }
   .mrow:first-of-type { border-top: none; }
-  .mname { min-width: 220px; }
+  .mhead { display: flex; flex-direction: column; gap: 2px; min-width: 260px; max-width: 460px; }
+  .mtitle { display: flex; gap: 8px; align-items: baseline; }
+  .mname { min-width: 0; }
+  .mdesc { color: #8b949e; font-size: 12px; line-height: 1.35; }
+  .ghlink {
+    background: none;
+    border: none;
+    color: #58a6ff;
+    font-size: 12px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .ghlink:hover { text-decoration: underline; }
   .spacer { flex: 1; }
   .badge { font-size: 12px; padding: 2px 10px; border-radius: 10px; border: 1px solid #30363d; }
   .badge.on { color: #3fb950; border-color: #3fb950; }

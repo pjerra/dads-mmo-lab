@@ -109,6 +109,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
+| ⬜ | Module info + GitHub links (Round R, read-only) | Every registry module shows a one-line description under its name; modules with a repo show a "GitHub ↗" link that opens the project page in the browser (tweak-type SQL mods have no link — expected). |
 | ⬜ | [modules-cpp] C++ install + banner | Install mod-aoe-loot → "rebuild required" banner lists it. |
 | ⬜ | [modules-rebuild] REAL rebuild | Rebuild (backup checkbox ON) → streams 30-90 min build → success clears the banner → in-game AoE loot works. |
 | ⬜ | [modules-conf] Conf activate | After rebuild, Activate conf on the module → file appears in env/dist/etc/modules. |

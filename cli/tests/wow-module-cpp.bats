@@ -61,6 +61,15 @@ src() {
   [ "$(echo "$output" | jq -r '.data.families.sql | length')" = "10" ]
   [ "$(echo "$output" | jq -r '.data.ale_ready')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.rebuild_pending | length')" = "1" ]
+  # Round R: every registry module carries a non-empty desc + a web url
+  # (clone url minus .git) across all three families.
+  [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-transmog") | .url')" = "https://github.com/azerothcore/mod-transmog" ]
+  [ -n "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-transmog") | .desc')" ]
+  [ "$(echo "$output" | jq -r '[.data.families.cpp[] | select(.custom==false) | .desc] | map(length > 0) | all')" = "true" ]
+  [ "$(echo "$output" | jq -r '[.data.families.lua[] | .desc] | map(length > 0) | all')" = "true" ]
+  [ "$(echo "$output" | jq -r '[.data.families.sql[] | .desc] | map(length > 0) | all')" = "true" ]
+  # tweak_world sql mods have no repo -> url null
+  [ "$(echo "$output" | jq -r '.data.families.sql[] | select(.key=="buff-mobs") | .url')" = "null" ]
 }
 
 @test "module list: custom clone appears with custom:true" {
