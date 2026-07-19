@@ -186,7 +186,7 @@
   }
 </script>
 
-<section class="content">
+<section class="content" class:fill={tab === "files" && fileLoaded}>
   <header class="bar">
     <h2>{tab === "settings" ? "Settings" : "Modules"}</h2>
   </header>
@@ -344,6 +344,11 @@
 
 <style>
   .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  /* Module Configs editor fills the window (user request): with a file
+     open, the page stops scrolling and the textarea takes all free height
+     -- the save/restart rows below it stay pinned and visible. */
+  .content.fill { overflow: hidden; box-sizing: border-box; }
+  .content.fill textarea { flex: 1; min-height: 240px; resize: none; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
   h3 { margin: 10px 0 0; font-size: 15px; color: #58a6ff; }
