@@ -15,15 +15,12 @@
 </script>
 
 <script lang="ts">
-  import { onMount } from "svelte";
   import {
-    wowServerDetail,
     wowPaperdoll,
     wowItemInfo,
     wowCharProgress,
     wowEntityInfo,
     wowAchievements,
-    type ServerDetail,
     type PaperdollData,
     type PaperdollItem,
     type CharProgress,
@@ -53,10 +50,6 @@
   function talentTreesForClass(classId: number): Tree[] {
     return talentTreesByClass[String(classId)] ?? [];
   }
-
-  let detail: ServerDetail | null = $state(null);
-  let infoError: string | null = $state(null);
-  let loadingInfo = $state(false);
 
   let charName = $state("");
   let doll = $state<PaperdollData | null>(null);
@@ -237,20 +230,6 @@
       selectCategory(catTree[0].root.id);
     }
   });
-
-  async function refreshInfo() {
-    loadingInfo = true;
-    infoError = null;
-    try {
-      detail = await wowServerDetail();
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      infoError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    } finally {
-      loadingInfo = false;
-    }
-  }
-  onMount(refreshInfo);
 
   function fetchItemInfo(items: PaperdollItem[]) {
     const missing = items.map((it) => it.entry).filter((entry) => !infoCache.has(entry));
@@ -515,49 +494,9 @@
 {/snippet}
 
 <section class="content">
-  <header class="bar">
-    <h2>Dashboard</h2>
-    <button onclick={refreshInfo} disabled={loadingInfo}>Refresh</button>
-  </header>
-
-  {#if infoError}
-    <div class="error-card"><strong>Couldn't read server status.</strong><p>{infoError}</p></div>
-  {:else if detail}
-    <div class="card status" class:warn={detail.verdict === "soap_unreachable"}>
-      <div>
-        <span
-          class="dot"
-          class:on={detail.verdict === "online"}
-          class:mid={detail.verdict === "starting"}
-          class:bad={detail.verdict === "soap_unreachable"}
-          class:off={detail.verdict === "stopped"}
-        ></span>
-        <strong>
-          {#if detail.verdict === "online"}World is up
-          {:else if detail.verdict === "starting"}Starting up…
-          {:else if detail.verdict === "soap_unreachable"}World is running, but the launcher can't reach it
-          {:else}Server is stopped{/if}
-        </strong>
-      </div>
-      {#if detail.verdict === "online"}
-        <div class="stats">
-          <span>Players online: <strong>{detail.soap.players ?? "?"}</strong></span>
-          <span>Uptime: <strong>{detail.soap.uptime ?? "?"}</strong></span>
-          <span>Update time: <strong>{detail.soap.mean_ms ?? "?"} ms avg</strong></span>
-        </div>
-      {:else if detail.verdict === "starting"}
-        <p class="muted">The world is still loading — this takes a couple of minutes while bots spawn.</p>
-      {:else if detail.verdict === "soap_unreachable"}
-        <p class="muted">
-          If this persists for more than a minute, Docker's networking in the distro is likely stuck —
-          restarting Docker inside dml-arch usually fixes it.
-        </p>
-      {:else}
-        <p class="muted">Start it from the Library page.</p>
-      {/if}
-    </div>
-  {/if}
-
+  <!-- The server-status card that used to sit here moved to the global
+       sidebar chip + Home card (Round Q) -- duplicating it on every page
+       was noise, per user feedback. -->
   <header class="bar"><h2>Character viewer</h2></header>
   <div class="pickrow">
     <CharPicker bind:selected={charName} />
@@ -698,13 +637,6 @@
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; }
-  .status .stats { display: flex; gap: 24px; margin-top: 8px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-  .dot.on { background: #3fb950; }
-  .dot.off { background: #6e7681; }
-  .dot.mid { background: #d29922; }
-  .dot.bad { background: #f85149; }
-  .card.warn { border-color: #f85149; }
   .pickrow { display: flex; gap: 8px; align-items: center; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }

@@ -202,6 +202,18 @@ async fn wow_account_set_gm(
 }
 
 #[tauri::command]
+async fn wow_account_delete(
+    user: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "account".into(), "delete".into(), "--user".into(), user],
+    )
+    .await
+}
+
+#[tauri::command]
 async fn wow_server_info(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "server-info".into()]).await
 }
@@ -1127,6 +1139,7 @@ pub fn run() {
             wow_account_create,
             wow_account_set_password,
             wow_account_set_gm,
+            wow_account_delete,
             wow_server_info,
             wow_server_detail,
             wow_docker_usage,

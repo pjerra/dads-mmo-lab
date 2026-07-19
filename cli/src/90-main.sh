@@ -1612,8 +1612,8 @@ case "$cmd" in
         json_ok "{\"accounts\":$(printf '%s' "$rows" | _accounts_rows_to_json)}"
         ;;
       account)
-        # Account management: create / set-password / set-gm. All three are
-        # mutating and go through SOAP, never a direct database write (same
+        # Account management: create / set-password / set-gm / delete. All
+        # mutating and all through SOAP, never a direct database write (same
         # rule as mail-item/teleport). --user and --pass are allowlist-
         # validated BEFORE any command string is built -- see
         # _valid_account_user/_valid_account_pass above for why.
@@ -1638,7 +1638,17 @@ case "$cmd" in
             [[ "$alevel" =~ ^[0-3]$ ]] || { json_err BAD_ARG "--level must be 0-3" ""; exit 1; }
             acmd="account set gmlevel $auser $alevel -1"
             ;;
-          *) json_err UNKNOWN_COMMAND "Unknown account subcommand: $asub" "Try: dml wow account create|set-password|set-gm --json"; exit 1 ;;
+          delete)
+            # Deleting an account also deletes every character on it, and
+            # deleting the SOAP admin account would cut the launcher's own
+            # server access -- refuse that one outright.
+            if [[ "${auser,,}" == "admin" ]]; then
+              json_err BAD_ARG "Refusing to delete the admin account" "The launcher uses it for server access (SOAP)."
+              exit 1
+            fi
+            acmd="account delete $auser"
+            ;;
+          *) json_err UNKNOWN_COMMAND "Unknown account subcommand: $asub" "Try: dml wow account create|set-password|set-gm|delete --json"; exit 1 ;;
         esac
         # Guarded assignment: 00-head.sh has `set -euo pipefail` active for
         # this whole script (same reason as the identical guard on wow
@@ -1654,6 +1664,7 @@ case "$cmd" in
               create) json_ok "{\"created\":true,\"user\":\"$auser\"}" ;;
               set-password) json_ok "{\"password_set\":true,\"user\":\"$auser\"}" ;;
               set-gm) json_ok "{\"gm_set\":true,\"user\":\"$auser\",\"level\":$alevel}" ;;
+              delete) json_ok "{\"deleted\":true,\"user\":\"$auser\"}" ;;
             esac ;;
           2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The worldserver rejected the command." ; exit 1 ;;
           3) json_err SOAP_AUTH "SOAP authentication failed" "Check ~/.dml/soap.env" ; exit 1 ;;

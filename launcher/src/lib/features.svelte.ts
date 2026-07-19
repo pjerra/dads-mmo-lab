@@ -42,6 +42,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "backup-create": "untested",
   "backup-restore": "untested",
   accounts: "untested",
+  "account-delete": "untested",
   "bridge-setup": "tested",
   "docker-clean": "untested",
   "server-update": "untested",

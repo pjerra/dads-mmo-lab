@@ -112,3 +112,38 @@ EOF
   [ "$(echo "$output" | jq -r '.data.accounts[1].characters[0].name')" = "Hypeer" ]
   [ "$(echo "$output" | jq -r '.data.accounts[1].characters[0].level')" = "80" ]
 }
+
+@test "account delete: happy path sends exact console command" {
+  cat > "$FIXTURE/resp.xml" <<'XEOF'
+<?xml version="1.0"?><SOAP-ENV:Envelope><SOAP-ENV:Body><ns1:executeCommandResponse><result>ok</result></ns1:executeCommandResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
+XEOF
+  export DML_STUB_SOAP_RESPONSE="$FIXTURE/resp.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/sent.xml"
+  run bash "$DML" wow account delete --user Kiddo --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.deleted')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.user')" = "Kiddo" ]
+  grep -q 'account delete Kiddo' "$FIXTURE/sent.xml"
+}
+
+@test "account delete: refuses the admin account before SOAP (any case)" {
+  export DML_STUB_CAPTURE="$FIXTURE/sent.xml"
+  for u in admin ADMIN Admin; do
+    run bash "$DML" wow account delete --user "$u" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+    [ ! -f "$FIXTURE/sent.xml" ]
+  done
+}
+
+@test "account delete: SOAP fault surfaces as SOAP_FAULT" {
+  cat > "$FIXTURE/fault.xml" <<'XEOF'
+<?xml version="1.0"?><SOAP-ENV:Envelope><SOAP-ENV:Body><SOAP-ENV:Fault><faultstring>Account not exist: NOBODY</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+XEOF
+  export DML_STUB_SOAP_RESPONSE="$FIXTURE/fault.xml"
+  export DML_STUB_HTTP=500
+  run bash "$DML" wow account delete --user Nobody --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+  echo "$output" | grep -qi 'not exist'
+}

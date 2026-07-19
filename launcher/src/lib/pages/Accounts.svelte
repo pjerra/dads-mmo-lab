@@ -5,6 +5,7 @@
     wowAccountCreate,
     wowAccountSetPassword,
     wowAccountSetGm,
+    wowAccountDelete,
     type Account,
   } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -108,6 +109,31 @@
       await refresh();
     } catch (e) { rowError[username] = fmtErr(e); } finally { busy = false; }
   }
+
+  // Delete: typed-confirm (retype the username) because it takes every
+  // character on the account with it. The CLI refuses the admin account
+  // outright; the UI mirrors that by not offering Delete on it at all.
+  let deletingUser: string | null = $state(null); // username with the confirm field open
+  let deleteInput = $state("");
+  function armDelete(username: string) {
+    if (deletingUser === username) {
+      deletingUser = null;
+      return;
+    }
+    deletingUser = username;
+    deleteInput = "";
+    rowError[username] = "";
+  }
+  async function confirmDelete(username: string) {
+    if (deleteInput !== username) return;
+    busy = true; rowError[username] = ""; note = null;
+    try {
+      const r = await wowAccountDelete(username);
+      note = `Account ${r.user} deleted (with all its characters).`;
+      deletingUser = null;
+      await refresh();
+    } catch (e) { rowError[username] = fmtErr(e); } finally { busy = false; }
+  }
 </script>
 
 <section class="content">
@@ -198,7 +224,33 @@
               >
                 {confirmingGm === a.username ? "Level 3 grants full admin including SOAP. Continue?" : "Apply"}
               </button>
+
+              {#if a.username.toLowerCase() !== "admin"}
+                <button
+                  class="danger"
+                  onclick={() => armDelete(a.username)}
+                  disabled={busy || featureLocked("account-delete")}
+                  title={featureLocked("account-delete") ? LOCKED_HINT : undefined}
+                >
+                  {deletingUser === a.username ? "Cancel" : "Delete"}
+                </button>
+              {/if}
             </div>
+            {#if deletingUser === a.username}
+              <div class="row">
+                <span class="inline-error">
+                  Deletes the account AND all its characters permanently. Type the account name to confirm:
+                </span>
+                <input type="text" placeholder={a.username} bind:value={deleteInput} disabled={busy} />
+                <button
+                  class="danger"
+                  onclick={() => confirmDelete(a.username)}
+                  disabled={busy || deleteInput !== a.username || featureLocked("account-delete")}
+                >
+                  Delete forever
+                </button>
+              </div>
+            {/if}
             {#if rowError[a.username]}<p class="inline-error">{rowError[a.username]}</p>{/if}
           </div>
         {/each}
@@ -223,6 +275,7 @@
   select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
+  button.danger { border-color: #f85149; color: #f85149; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }
   .inline-error { color: #f85149; font-size: 13px; margin: 0; }

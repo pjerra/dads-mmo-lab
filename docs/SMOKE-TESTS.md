@@ -133,6 +133,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | Status | Test | Steps / expected |
 |---|---|---|
 | ⬜ | [accounts] Create + login | Create an account in the launcher → **log into the game client with it**. Duplicate name → "already exist" inline. Set GM 1 → badge shows; GM 3 asks the SOAP warning confirm. |
+| ⬜ | [account-delete] Delete an account (Round Q+) | Delete a THROWAWAY account (typed-name confirm) → gone from the list and its characters gone from the DB; the admin account shows NO delete button; deleting a nonexistent name → inline SOAP fault. |
 
 ## 13. Bridges (rounds 2-4)
 

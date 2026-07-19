@@ -170,6 +170,9 @@ export async function wowAccountSetPassword(user: string, pass: string): Promise
 export async function wowAccountSetGm(user: string, level: number): Promise<{ gm_set: boolean; user: string; level: number }> {
   return await invoke("wow_account_set_gm", { user, level });
 }
+export async function wowAccountDelete(user: string): Promise<{ deleted: boolean; user: string }> {
+  return await invoke("wow_account_delete", { user });
+}
 export async function wowServerInfo(): Promise<ServerInfo> {
   return await invoke("wow_server_info");
 }
