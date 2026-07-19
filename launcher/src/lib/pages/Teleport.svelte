@@ -29,6 +29,39 @@
   let coordX = $state("");
   let coordY = $state("");
   let coordZ = $state("");
+
+  // Location favorites (Batch 3 F11d): starred location names, persisted in
+  // localStorage, pinned at the top of the list. Same guarded-storage idiom
+  // as the Console favorites / features.svelte.ts.
+  const FAVS_KEY = "dml.teleFavs";
+  function readFavs(): string[] {
+    try {
+      if (typeof localStorage === "undefined") return [];
+      const raw = localStorage.getItem(FAVS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  function writeFavs(favs: string[]): void {
+    try {
+      if (typeof localStorage !== "undefined") localStorage.setItem(FAVS_KEY, JSON.stringify(favs));
+    } catch {
+      // In-memory list still applies this session.
+    }
+  }
+  let favs: string[] = $state(readFavs());
+  function toggleFav(name: string) {
+    favs = favs.includes(name) ? favs.filter((f) => f !== name) : [...favs, name];
+    writeFavs(favs);
+  }
+  // Favorites float to the top of whatever the current filter returned;
+  // within each group the CLI's own ordering is kept.
+  const sortedLocations = $derived(
+    [...locations].sort((a, b) => Number(favs.includes(b.name)) - Number(favs.includes(a.name))),
+  );
   const mapValid = $derived(MAP_RE.test(coordMap));
   const coordsValid = $derived(mapValid && validCoord(coordX) && validCoord(coordY) && validCoord(coordZ));
 
@@ -157,10 +190,20 @@
   {/if}
 
   <div class="loclist">
-    {#each locations as l (l.name)}
-      <button class="loc" class:sel={picked === l.name} onclick={() => pick(l.name)} disabled={teleporting}>
-        {l.name} <span class="muted">map {l.map}</span>
-      </button>
+    {#each sortedLocations as l (l.name)}
+      <span class="locrow" class:sel={picked === l.name}>
+        <button class="loc" onclick={() => pick(l.name)} disabled={teleporting}>
+          {l.name} <span class="muted">map {l.map}</span>
+        </button>
+        <button
+          class="star"
+          class:faved={favs.includes(l.name)}
+          onclick={() => toggleFav(l.name)}
+          title={favs.includes(l.name) ? "Remove from favorites" : "Pin to the top as a favorite"}
+        >
+          {favs.includes(l.name) ? "★" : "☆"}
+        </button>
+      </span>
     {/each}
   </div>
 </section>
@@ -176,8 +219,13 @@
   .field input.coord { min-width: 90px; width: 90px; }
   .field input.coord.map { width: 60px; }
   .loclist { display: flex; flex-wrap: wrap; gap: 6px; }
-  .loc { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 5px 10px; color: #c9d1d9; cursor: pointer; font-size: 13px; }
-  .loc.sel { border-color: #58a6ff; color: #f0f6fc; }
+  .locrow { display: inline-flex; align-items: stretch; border: 1px solid #30363d; border-radius: 6px; background: #0d1117; overflow: hidden; }
+  .locrow.sel { border-color: #58a6ff; }
+  .loc { background: none; border: none; padding: 5px 4px 5px 10px; color: #c9d1d9; cursor: pointer; font-size: 13px; }
+  .locrow.sel .loc { color: #f0f6fc; }
+  .star { background: none; border: none; padding: 0 8px 0 2px; color: #6e7681; cursor: pointer; font-size: 13px; }
+  .star.faved { color: #d29922; }
+  .star:hover { color: #d29922; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }
