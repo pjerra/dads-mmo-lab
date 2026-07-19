@@ -121,16 +121,30 @@ function fireReadyNotification(): void {
 
 // After a start finishes (starting→online): if LAN play is on, re-point the
 // realm address at this PC's current IP (DHCP may have moved it between
-// sessions). The CLI's refresh arm is itself a no-op for off/public/current
-// addresses; the toast only shows when the address actually changed.
+// sessions). The CLI's refresh arm is a deliberate no-op for public/current
+// addresses (it refuses to rewrite an internet host's realm) and can also
+// fail if the realm DB is unreachable -- and `wow lan` prints its own status
+// text rather than erroring the IPC. So the toast must be driven by the
+// CLI's own "[ok] LAN address refreshed" success line, NOT by an
+// address-changed guess: awaiting the call is not evidence it did anything.
+// Pure: did the CLI actually rewrite the realm address? `wow lan refresh`
+// prints "[ok] LAN address refreshed: <old> -> <new>" ONLY on a real change;
+// it prints "Realm address X is not a LAN address -- leaving it alone" for an
+// internet host (exit 0, no change) and "[dml] ERROR: ..." on a DB failure.
+// Since wow_lan surfaces all of these as plain text (never an IPC error), the
+// success line is the only trustworthy signal that a toast is warranted.
+export function lanRefreshApplied(output: string): boolean {
+  return /^\[ok\] LAN address refreshed/m.test(output);
+}
+
 async function lanAutoRefresh(): Promise<void> {
   try {
     const before = parseLanStatus(await wowLan("status"));
     if (!before.on) return;
     const ip = await detectLanIp();
     if (!ip) return;
-    await wowLan("refresh", ip);
-    if (before.ip && before.ip !== ip) {
+    const out = await wowLan("refresh", ip);
+    if (lanRefreshApplied(out) && before.ip && before.ip !== ip) {
       serverStatus.lanNotice = `LAN address updated: ${before.ip} → ${ip}`;
       setTimeout(() => (serverStatus.lanNotice = null), 12000);
     }

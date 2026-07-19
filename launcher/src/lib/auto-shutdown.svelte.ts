@@ -38,9 +38,29 @@ function writeStored(on: boolean): void {
   }
 }
 
+export type AutoShutdownOutcome = "stopped" | "stop_failed" | "not_running" | "unknown";
+
 type AutoShutdownEvent =
   | { kind: "state"; state: "waiting" | "armed" }
-  | { kind: "fired"; stopped: boolean };
+  | { kind: "fired"; outcome: AutoShutdownOutcome };
+
+// Pure copy helper (unit-testable): the notice shown after the watcher fires.
+// Each outcome tells the honest truth -- crucially "stop_failed" no longer
+// masquerades as "nothing to stop", so the user isn't told the world is off
+// while it keeps running.
+export function firedNotice(outcome: AutoShutdownOutcome): string {
+  switch (outcome) {
+    case "stopped":
+      return "Server stopped automatically because WoW was closed.";
+    case "stop_failed":
+      return "WoW was closed, but the server could not be stopped automatically — please stop it from Home.";
+    case "unknown":
+      return "WoW was closed, but the server's state couldn't be checked — please check it from Home.";
+    case "not_running":
+    default:
+      return "WoW was closed, but the server wasn't running — nothing to stop.";
+  }
+}
 
 let initStarted = false;
 
@@ -57,9 +77,7 @@ export function initAutoShutdown(): void {
     if (p.kind === "state") {
       autoShutdown.state = p.state;
     } else if (p.kind === "fired") {
-      autoShutdown.notice = p.stopped
-        ? "Server stopped automatically because WoW was closed."
-        : "WoW was closed, but the server wasn't running — nothing to stop.";
+      autoShutdown.notice = firedNotice(p.outcome);
       // The chip/Home card should reflect the stop right away, not on the
       // next 7s poll tick.
       refreshServerStatus();

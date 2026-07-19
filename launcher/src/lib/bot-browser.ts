@@ -65,6 +65,31 @@ export function pageInfo(total: number, limit: number, offset: number): PageInfo
   return { page, pages, hasPrev: offset > 0, hasNext: offset + safeLimit < total };
 }
 
+// A `type="number"` input bound with `bind:value` hands back "" (pristine),
+// null (Svelte's numberlike read-back once the field is CLEARED), a number,
+// or a numeric string. Only a real finite value becomes a search bound;
+// every "no value" shape returns undefined so the CLI gets no filter at all.
+// This is the fix for a cleared Max field turning into `<= 0` (zero results):
+// `null === ""` is false, so the old pristine-only guard let null fall
+// through to Math.max(0, ...) = 0.
+export function levelFilter(v: unknown): number | undefined {
+  if (v === "" || v === null || v === undefined) return undefined;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.max(0, Math.floor(n));
+}
+
+// Set-level validity: a whole number in the server's 1..255 band. Tolerates
+// the number | string | null the numberlike input hands back -- the old
+// string-only helper called v.trim() and threw `v.trim is not a function`
+// the moment a digit was typed, because bind:value had already coerced the
+// value to a JS number.
+export function levelValid(v: unknown): boolean {
+  if (v === "" || v === null || v === undefined) return false;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 1 && n <= 255;
+}
+
 // --- storage-touching wrappers ---------------------------------------------
 
 export function loadFavs(): string[] {

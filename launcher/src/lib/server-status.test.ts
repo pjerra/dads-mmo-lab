@@ -3,6 +3,7 @@ import {
   azerothReadyTransition,
   chipStartVisible,
   containersExist,
+  lanRefreshApplied,
   statusLabel,
 } from "./server-status.svelte";
 import type { ServerDetail } from "./api";
@@ -117,6 +118,26 @@ describe("azerothReadyTransition", () => {
     expect(azerothReadyTransition("online", "stopped")).toBe(false);
     expect(azerothReadyTransition("starting", "crashed")).toBe(false);
     expect(azerothReadyTransition("stopped", null)).toBe(false);
+  });
+});
+
+// LAN auto-refresh toast gating (Batch 2 F6 review): the toast must follow
+// the CLI's own success line, not a "did the IP change" guess -- wow_lan
+// surfaces refusals and failures as plain text, never an IPC error.
+describe("lanRefreshApplied", () => {
+  it("is true only on the CLI's success line", () => {
+    expect(lanRefreshApplied("[ok] LAN address refreshed: 192.168.1.5 -> 192.168.1.9\n")).toBe(true);
+  });
+  it("is false when the CLI refused a public/internet realm address", () => {
+    expect(
+      lanRefreshApplied("[dml] Realm address 203.0.113.7 is not a LAN address -- leaving it alone.\n"),
+    ).toBe(false);
+  });
+  it("is false on a DB-write failure", () => {
+    expect(lanRefreshApplied("[dml] ERROR: Could not update the realm address.\n")).toBe(false);
+  });
+  it("is false on empty output", () => {
+    expect(lanRefreshApplied("")).toBe(false);
   });
 });
 

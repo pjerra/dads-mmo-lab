@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { parseFavs, toggleFav, sortWithFavs, pageInfo, zoneName } from "./bot-browser";
+import {
+  parseFavs,
+  toggleFav,
+  sortWithFavs,
+  pageInfo,
+  zoneName,
+  levelFilter,
+  levelValid,
+} from "./bot-browser";
 import type { BotRow } from "./api";
 
 function row(name: string): BotRow {
@@ -69,5 +77,50 @@ describe("zoneName", () => {
   it("maps known ids and falls back for unknown", () => {
     expect(zoneName(1637)).toBe("Orgrimmar");
     expect(zoneName(999999)).toBe("zone 999999");
+  });
+});
+
+describe("levelFilter", () => {
+  it("treats every empty shape as no filter (undefined)", () => {
+    // "" pristine, null = cleared numberlike input, undefined = never set.
+    expect(levelFilter("")).toBeUndefined();
+    expect(levelFilter(null)).toBeUndefined();
+    expect(levelFilter(undefined)).toBeUndefined();
+  });
+  it("a cleared Max field does NOT become 0 (the zero-results bug)", () => {
+    // Regression: `null === ""` is false, so null used to fall through to 0.
+    expect(levelFilter(null)).not.toBe(0);
+  });
+  it("keeps a real numeric bound, floored and non-negative", () => {
+    expect(levelFilter(60)).toBe(60);
+    expect(levelFilter("42")).toBe(42);
+    expect(levelFilter(12.9)).toBe(12);
+  });
+  it("garbage degrades to undefined, not NaN", () => {
+    expect(levelFilter("abc")).toBeUndefined();
+    expect(levelFilter(NaN)).toBeUndefined();
+  });
+});
+
+describe("levelValid", () => {
+  it("accepts whole numbers in 1..255 regardless of number/string form", () => {
+    // The number case is the crash the string-only .trim() helper hit.
+    expect(levelValid(80)).toBe(true);
+    expect(levelValid("80")).toBe(true);
+    expect(levelValid(1)).toBe(true);
+    expect(levelValid(255)).toBe(true);
+  });
+  it("does not throw when handed the numberlike bind read-back", () => {
+    expect(() => levelValid(80)).not.toThrow();
+    expect(() => levelValid(null)).not.toThrow();
+  });
+  it("rejects empty, out-of-range and non-integer values", () => {
+    expect(levelValid("")).toBe(false);
+    expect(levelValid(null)).toBe(false);
+    expect(levelValid(undefined)).toBe(false);
+    expect(levelValid(0)).toBe(false);
+    expect(levelValid(256)).toBe(false);
+    expect(levelValid(12.5)).toBe(false);
+    expect(levelValid("abc")).toBe(false);
   });
 });

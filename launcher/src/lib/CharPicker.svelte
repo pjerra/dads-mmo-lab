@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
-  import { charStore, findStoredChar, setSelectedChar } from "$lib/char-store.svelte";
+  import {
+    charStore,
+    findStoredChar,
+    setSelectedChar,
+    type SelectedChar,
+  } from "$lib/char-store.svelte";
 
   let {
     selected = $bindable(""),
@@ -54,13 +59,26 @@
   });
 
   // Sidebar "playing as" dropdown (Batch 3 F12): when the shared store
-  // changes while this picker is mounted, adopt the new selection so pages
-  // follow. Adoption does NOT fire onpick (same commit-itself rationale as
-  // mount staging) -- the bound `selected` still updates for consumers.
+  // changes EXTERNALLY (the sidebar chip or another CharPicker) while this
+  // picker is mounted, adopt the new selection so pages follow. Adoption does
+  // NOT fire onpick (same commit-itself rationale as mount staging) -- the
+  // bound `selected` still updates for consumers.
+  //
+  // Gate on a real store change, NOT on local `selected`/`accountName` drift.
+  // Selecting an account with no actionable characters sets selected="" and
+  // deliberately does NOT persist (the store keeps the previous char); an
+  // effect that also tracked the local vars would then re-find that stored
+  // char and snap the dropdown back to the old account, making empty accounts
+  // unselectable. Reference-comparing against the last store value we saw
+  // means only an external store mutation (always a fresh object) triggers
+  // adoption; local interaction that leaves the store alone is ignored.
+  let lastStoreObserved: SelectedChar | null = charStore.selected;
   $effect(() => {
     const sel = charStore.selected;
-    if (!sel || accounts.length === 0) return;
-    if (sel.name === selected && sel.account === accountName) return;
+    if (accounts.length === 0) return; // wait for accounts; don't record yet
+    if (sel === lastStoreObserved) return; // no external change
+    lastStoreObserved = sel;
+    if (!sel) return;
     const hit = findStoredChar(accounts, sel);
     if (hit && ACTIONABLE_NAME.test(hit.char.name)) {
       accountName = hit.account;

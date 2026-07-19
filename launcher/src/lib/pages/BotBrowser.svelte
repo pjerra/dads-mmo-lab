@@ -23,6 +23,8 @@
     sortWithFavs,
     pageInfo,
     zoneName,
+    levelFilter,
+    levelValid,
   } from "$lib/bot-browser";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
@@ -76,8 +78,8 @@
       page = await wowBotsList({
         name: name.trim() || undefined,
         class: classId === "" ? undefined : Number(classId),
-        minLevel: minLevel === "" ? undefined : Math.max(0, Math.floor(Number(minLevel)) || 0),
-        maxLevel: maxLevel === "" ? undefined : Math.max(0, Math.floor(Number(maxLevel)) || 0),
+        minLevel: levelFilter(minLevel),
+        maxLevel: levelFilter(maxLevel),
         online: onlineOnly || undefined,
         limit: PAGE_SIZE,
         offset: newOffset,
@@ -168,13 +170,6 @@
     } finally {
       busy = false;
     }
-  }
-
-  function levelValid(v: string): boolean {
-    const t = v.trim();
-    if (!t) return false;
-    const n = Number(t);
-    return Number.isInteger(n) && n >= 1 && n <= 255;
   }
 
   async function setLevel(bot: BotRow) {

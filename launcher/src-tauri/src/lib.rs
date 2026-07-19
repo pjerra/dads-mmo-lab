@@ -176,10 +176,13 @@ fn bad_arg(message: impl Into<String>) -> CmdError {
 // webview on the "auto-shutdown" channel: {kind:"state",state:"waiting"|"armed"}
 // and {kind:"fired",stopped:bool}.
 
-/// True when tasklist reports a live Wow.exe process. Probe failures count
-/// as "not running" -- with the 2-poll debounce, one flaky probe can never
-/// fire a stop on its own.
-fn wow_client_running() -> bool {
+/// Tri-state Wow.exe probe: `Some(true)` running, `Some(false)` a genuine
+/// "not running" answer, `None` = the probe itself failed (spawn error,
+/// nonzero exit, empty output). The watcher must treat None as "no
+/// observation" and skip the debounce step -- counting a failed probe as
+/// absence would let two correlated failures fire a stop on a live game
+/// (see watch::classify_tasklist).
+fn wow_client_probe() -> Option<bool> {
     let mut cmd = std::process::Command::new("tasklist");
     cmd.args(["/FI", "IMAGENAME eq Wow.exe", "/FO", "CSV", "/NH"]);
     #[cfg(windows)]
@@ -187,9 +190,43 @@ fn wow_client_running() -> bool {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW, as elsewhere
     }
-    match cmd.output() {
-        Ok(out) => watch::tasklist_shows_wow(&String::from_utf8_lossy(&out.stdout)),
-        Err(_) => false,
+    let out = cmd.output().ok()?;
+    watch::classify_tasklist(out.status.success(), &String::from_utf8_lossy(&out.stdout))
+}
+
+/// Verdicts that mean "there are running containers worth a graceful stop":
+/// online/starting/soap_unreachable (world alive) AND crashed (world dead
+/// but auth/db typically still running -- `games stop`'s compose down
+/// cleans those up). Plain stopped / absent / an unreadable state are NOT
+/// here. Shared by the auto-shutdown watcher and restart_wsl so both agree
+/// on when a stop is warranted.
+fn verdict_needs_stop(verdict: Option<&str>) -> bool {
+    matches!(
+        verdict,
+        Some("online") | Some("starting") | Some("soap_unreachable") | Some("crashed")
+    )
+}
+
+/// Read the server verdict once. `Some(v)` when server-detail answered ok;
+/// `None` when the read failed (docker/WSL hiccup) -- callers decide how to
+/// treat "don't know".
+fn read_server_verdict(runner: &DmlRunner) -> Option<String> {
+    runner
+        .run_json(&["wow", "server-detail"])
+        .ok()
+        .filter(|env| env.ok)
+        .and_then(|env| env.data["verdict"].as_str().map(str::to_string))
+}
+
+/// True only when a follow-up server-detail read CONFIRMS the stack is down
+/// (verdict readable and no longer needs-stop). A failed read returns false:
+/// if we cannot confirm the world is down we must not claim a graceful stop
+/// succeeded. Used to judge `games stop` by its effect, not by run_captured's
+/// spawn-only Ok.
+fn stop_confirmed_down(runner: &DmlRunner) -> bool {
+    match read_server_verdict(runner) {
+        Some(v) => !verdict_needs_stop(Some(v.as_str())),
+        None => false,
     }
 }
 
@@ -209,36 +246,44 @@ fn auto_shutdown_watcher(
                 return;
             }
         }
-        match machine.step(wow_client_running()) {
+        // None = no usable probe this tick -> skip the debounce entirely, so
+        // correlated tasklist failures can never advance toward a stop.
+        let action = match wow_client_probe() {
+            Some(running) => machine.step(running),
+            None => watch::WatchAction::None,
+        };
+        match action {
             watch::WatchAction::Armed => {
                 let _ = app
                     .emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "armed"}));
             }
             watch::WatchAction::Fire => {
-                // Guard: never fire when the server isn't up. A failed or
-                // ok=false detail read counts as "not up" -- skipping a stop
-                // is always safe, stopping blind is not.
-                let up = runner
-                    .run_json(&["wow", "server-detail"])
-                    .ok()
-                    .filter(|env| env.ok)
-                    .map(|env| {
-                        matches!(
-                            env.data["verdict"].as_str(),
-                            Some("online") | Some("starting") | Some("soap_unreachable")
-                        )
-                    })
-                    .unwrap_or(false);
-                let stopped = if up {
-                    // Same CLI verb as the Home Stop button (games stop is
-                    // itself bounded: saveall + compose stop -t 180).
-                    runner.run_captured(&["games", "stop", LAN_TITLE]).is_ok()
-                } else {
-                    false
+                // Read the server state once. Three honest outcomes so the
+                // card never claims success on a failed stop or "wasn't
+                // running" when the check itself errored:
+                //   stopped     -- graceful stop ran AND the stack is down
+                //   stop_failed -- server was up, the stop did not take
+                //   not_running -- nothing was up to stop
+                //   unknown     -- server-detail could not be read
+                let verdict = read_server_verdict(&runner);
+                let outcome = match verdict.as_deref() {
+                    Some(v) if verdict_needs_stop(Some(v)) => {
+                        // Same CLI verb as the Home Stop button (bounded:
+                        // saveall + compose stop -t 180). Judge it by effect
+                        // -- run_captured is Ok on any CLI exit code.
+                        let _ = runner.run_captured(&["games", "stop", LAN_TITLE]);
+                        if stop_confirmed_down(&runner) {
+                            "stopped"
+                        } else {
+                            "stop_failed"
+                        }
+                    }
+                    Some(_) => "not_running",
+                    None => "unknown",
                 };
                 let _ = app.emit(
                     "auto-shutdown",
-                    serde_json::json!({"kind": "fired", "stopped": stopped}),
+                    serde_json::json!({"kind": "fired", "outcome": outcome}),
                 );
                 let _ = app
                     .emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "waiting"}));
@@ -1485,18 +1530,27 @@ fn wslconfig_write(
 async fn restart_wsl(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let runner = state.runner.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let up = runner
-            .run_json(&["wow", "server-detail"])
-            .ok()
-            .filter(|env| env.ok)
-            .map(|env| {
-                matches!(
-                    env.data["verdict"].as_str(),
-                    Some("online") | Some("starting") | Some("soap_unreachable")
-                )
-            })
-            .unwrap_or(false);
-        let stopped = if up { runner.run_captured(&["games", "stop", LAN_TITLE]).is_ok() } else { false };
+        // `wsl --shutdown` hard-kills every distro process, so any running
+        // worldserver/mysqld would die WITHOUT a saveall. Run the graceful
+        // stop first whenever the stack might be up. "crashed" counts (auth/
+        // db are still running), and an UNREADABLE state also counts -- here
+        // skipping the stop is fail-DANGEROUS (unlike the watcher, we go on
+        // to power-kill the VM), so we attempt the stop rather than assume
+        // it is safe to shut down.
+        let verdict = read_server_verdict(&runner);
+        let should_stop = match verdict.as_deref() {
+            Some(v) => verdict_needs_stop(Some(v)),
+            None => true, // don't know -> attempt the graceful stop anyway
+        };
+        // stopped_server is TRUE only when we ran the stop AND a follow-up
+        // read confirms the stack is down -- an honest signal for the card's
+        // "stopped gracefully" claim (run_captured alone is Ok on any exit).
+        let stopped = if should_stop {
+            let _ = runner.run_captured(&["games", "stop", LAN_TITLE]);
+            stop_confirmed_down(&runner)
+        } else {
+            false
+        };
         let mut cmd = std::process::Command::new("wsl");
         cmd.args(["--shutdown"]);
         #[cfg(windows)]
@@ -1505,9 +1559,15 @@ async fn restart_wsl(state: State<'_, AppState>) -> Result<serde_json::Value, Cm
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
         match cmd.output() {
-            Ok(out) if out.status.success() => {
-                Ok(serde_json::json!({"shutdown": true, "stopped_server": stopped}))
-            }
+            Ok(out) if out.status.success() => Ok(serde_json::json!({
+                "shutdown": true,
+                "stopped_server": stopped,
+                // Lets the card distinguish "nothing was running" (attempted
+                // false) from "tried to stop but could not confirm it went
+                // down" (attempted true, stopped false) before wsl --shutdown
+                // force-killed whatever was left.
+                "stop_attempted": should_stop,
+            })),
             Ok(out) => Err(bad_arg(format!(
                 "wsl --shutdown failed (exit {:?})",
                 out.status.code()

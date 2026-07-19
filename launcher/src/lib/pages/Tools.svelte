@@ -343,7 +343,9 @@
       const r = await restartWsl();
       wslRestartNote = r.stopped_server
         ? "Server stopped gracefully, WSL shut down. The next Start is a cold start."
-        : "WSL shut down (no server was running). The next Start is a cold start.";
+        : r.stop_attempted
+          ? "WSL shut down. The server was running but couldn't be confirmed stopped first — check it from Home after the next Start. The next Start is a cold start."
+          : "WSL shut down (no server was running). The next Start is a cold start.";
     } catch (e) {
       wslRestartNote = fmtErr(e);
     } finally {
@@ -723,6 +725,7 @@
         <InstallTerminal
           id={toolInstallId}
           runner={(_id, onEvent) => toolInstall(toolFromId(toolInstallId), onEvent)}
+          lockFlag="unbound-addon"
           onExit={onToolInstallExit}
         />
       {/key}

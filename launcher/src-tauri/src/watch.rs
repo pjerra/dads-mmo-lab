@@ -82,6 +82,27 @@ pub fn tasklist_shows_wow(output: &str) -> bool {
         .any(|l| l.trim_start().to_ascii_lowercase().starts_with("\"wow.exe\""))
 }
 
+/// Classify one tasklist invocation into a tri-state observation:
+/// `Some(true)` = Wow.exe seen, `Some(false)` = a genuine "not running"
+/// answer (tasklist's INFO line), `None` = NO usable observation.
+///
+/// The None case matters: a spawn failure, a nonzero exit ("ERROR: The RPC
+/// server is unavailable" under session/load trouble), or empty output are
+/// correlated failure modes -- treating them as "WoW is gone" would let two
+/// such failures 5s apart clear the 2-poll debounce and gracefully stop the
+/// server out from under a player who is still in-game. The watcher skips
+/// the machine step on None (no observation), so only a REAL "gone" answer
+/// (the non-empty INFO line -> Some(false)) can ever count toward a stop.
+pub fn classify_tasklist(exit_ok: bool, stdout: &str) -> Option<bool> {
+    if !exit_ok {
+        return None;
+    }
+    if stdout.trim().is_empty() {
+        return None;
+    }
+    Some(tasklist_shows_wow(stdout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,5 +187,41 @@ mod tests {
         // Another process mentioning wow.exe in a later field must not count.
         assert!(!tasklist_shows_wow("\"cmd.exe\",\"9\",\"Console\",\"1\",\"wow.exe K\""));
         assert!(!tasklist_shows_wow("\"Wowhead.exe\",\"9\",\"Console\",\"1\",\"1 K\""));
+    }
+
+    #[test]
+    fn classify_tasklist_is_a_real_observation_only_on_success_with_output() {
+        // A live game.
+        assert_eq!(
+            classify_tasklist(true, "\"Wow.exe\",\"4242\",\"Console\",\"1\",\"1 K\"\r\n"),
+            Some(true)
+        );
+        // A genuine "gone" answer: tasklist's INFO line.
+        assert_eq!(
+            classify_tasklist(true, "INFO: No tasks are running which match the specified criteria.\r\n"),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn classify_tasklist_returns_none_on_probe_failure() {
+        // Nonzero exit (RPC unavailable etc.) -> no observation, NOT "gone".
+        assert_eq!(classify_tasklist(false, ""), None);
+        assert_eq!(classify_tasklist(false, "ERROR: The RPC server is unavailable."), None);
+        // Success but empty stdout is equally unusable.
+        assert_eq!(classify_tasklist(true, "   \r\n"), None);
+    }
+
+    #[test]
+    fn two_probe_failures_never_fire_a_stop_when_skipped() {
+        // The watcher skips machine.step on None. Model that: an armed
+        // machine that only ever sees real observations must not fire from
+        // probe failures alone.
+        let mut m = WatchMachine::new();
+        assert_eq!(m.step(true), WatchAction::Armed); // WoW seen
+                                                      // ...two probe failures happen here; the loop skips step() for both.
+                                                      // The next REAL observation still shows WoW running:
+        assert_eq!(m.step(true), WatchAction::None);
+        assert!(m.is_armed()); // never fired
     }
 }

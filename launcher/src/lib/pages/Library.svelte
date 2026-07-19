@@ -362,6 +362,7 @@
         <InstallTerminal
           id={installStore.id}
           runner={(id, onEvent) => urlInstall(id.slice("url:".length), onEvent)}
+          lockFlag="title-url-install"
           onExit={onInstallExit}
         />
       {:else}

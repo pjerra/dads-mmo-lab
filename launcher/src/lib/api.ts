@@ -856,7 +856,11 @@ export async function wslconfigWrite(memory?: string, processors?: string): Prom
   return await invoke("wslconfig_write", { memory, processors });
 }
 
-export async function restartWsl(): Promise<{ shutdown: boolean; stopped_server: boolean }> {
+export async function restartWsl(): Promise<{
+  shutdown: boolean;
+  stopped_server: boolean;
+  stop_attempted: boolean;
+}> {
   return await invoke("restart_wsl");
 }
 
