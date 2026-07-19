@@ -150,6 +150,10 @@
   // version (confirmed via isolated repro), the former doesn't.
   let achievementsData = $state<AchievementsData | null>(null);
   let loadingAchData = $state(false);
+  // Review finding: silent failure here made a broken tab indistinguishable
+  // from "no achievements" -- both paths now surface a muted note, matching
+  // this file's dollError/progressError convention.
+  let achError: string | null = $state(null);
   async function ensureAchievementsData() {
     if (achievementsData || loadingAchData) return;
     loadingAchData = true;
@@ -157,8 +161,7 @@
       const mod = await import("$lib/achievements-wotlk.json");
       achievementsData = mod.default as unknown as AchievementsData;
     } catch {
-      // best-effort, like the rest of this file's fetches -- the tab just
-      // shows nothing rather than an error card.
+      achError = "Couldn't load the achievement list.";
     } finally {
       loadingAchData = false;
     }
@@ -172,9 +175,16 @@
   async function loadEarnedAchievements(name: string) {
     try {
       const r = await wowAchievements(name);
+      // Stale-response guard: a slow response for a previous character must
+      // not overwrite the current one's earned set (same pattern as
+      // Config.svelte's loadFile).
+      if (charName !== name) return;
       earnedAchievements = r.earned;
+      achError = null;
     } catch {
+      if (charName !== name) return;
       earnedAchievements = [];
+      achError = "Couldn't load earned achievements — everything may show as unearned.";
     }
   }
   const earnedSet = $derived(new Set(earnedAchievements.map((e) => e.id)));
@@ -273,6 +283,7 @@
     activeTab = "character";
     earnedAchievements = [];
     selectedCatId = null;
+    achError = null;
     try {
       doll = await wowPaperdoll(charName);
       fetchItemInfo(doll.equipped);
@@ -625,6 +636,9 @@
             {:else if achievementsData}
               <p class="muted">{totalAchPoints} points · {earnedAchCount} of {totalAchCount}</p>
             {/if}
+            {#if achError}
+              <p class="muted err-note">{achError}</p>
+            {/if}
           </div>
           {#if achievementsData}
             <div class="ach-body">
@@ -854,6 +868,7 @@
      page doesn't grow unbounded -- the character/talents tabs don't need
      this since they're bounded by their own fixed grids). */
   .ach-header p { margin: 0; }
+  .err-note { color: #f85149; }
   .ach-body { display: flex; gap: 16px; align-items: flex-start; }
   .ach-rail {
     flex: 0 0 200px;
