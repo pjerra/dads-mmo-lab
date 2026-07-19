@@ -21,10 +21,10 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | Status | Test | Steps / expected |
 |---|---|---|
 | ✅ | Boot states (Round A) | With server stopped, open Home → "Server is stopped". Start → card flips to "Starting up…" (amber) during boot (~2 min warm; 10-20 min after a full Stop — cold DB + bot spawn), then "World is up" + players/uptime/latency. Buttons and card never contradict. (Passed 2026-07-18: full stopped→starting→World-is-up cycle user-confirmed.) |
-| ⬜ | Health panel (Round A) | Click the server card → panel shows world/auth/DB rows ("Up … (healthy)"), version, uptime, players, latency, ports (game 8085 / auth 3724 / SOAP 7878 / DB — expect 13306), SOAP "reachable". |
+| ✅ | Health panel (Round A) | Click the server card → panel shows world/auth/DB rows ("Up … (healthy)"), version, uptime, players, latency, ports (game 8085 / auth 3724 / SOAP 7878 / DB — expect 13306), SOAP "reachable". |
 | ✅ | [restart] Restart button (Round I) | Click Restart → streams stop+start into the terminal; card returns to "World is up" after boot. (Passed 2026-07-18 — surfaced+fixed two bugs first: dml-start.sh pipefail/grep -q readiness wait, false port-conflict warns on restart.) |
 | ⬜ | soap_unreachable diagnostic (Round A) | Next time Docker networking breaks (or force by `sudo iptables`-breaking the forward): card shows "World is running, but the launcher can't reach it" + the restart-Docker hint. |
-| ⬜ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Playerbots page header shows the same bots-online chip. |
+| ✅ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Playerbots page header shows the same bots-online chip. |
 
 ## 2. Console (Round B)
 
@@ -33,10 +33,10 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ✅ | Log tail | Open Console with server running → worldserver log lines appear, auto-refresh follows, no ANSI garbage. Scroll up → autoscroll pauses; scroll down → resumes. (Passed 2026-07-18 user-confirmed.) |
 | ✅ | [console-send] Send command | Send `server info` → reply appears in history with real stats. Send `bogus` → the fault text shows inline, not a crash. (Passed 2026-07-18: real stats + inline fault user-confirmed.) |
 | ⬜ | Stopped-server state | Stop the server → Console shows "No server logs — is the server installed?" (or stale tail) without erroring. |
-| ⬜ | Console persistence (Round N) | Start a stream (e.g. a module conf activate or any action with a terminal) on one page, hop to another page and back → the transcript is intact and still streaming. Console page: send a command, leave, return → command history still there. |
+| ✅ | Console persistence (Round N) | Start a stream (e.g. a module conf activate or any action with a terminal) on one page, hop to another page and back → the transcript is intact and still streaming. Console page: send a command, leave, return → command history still there. |
 | ✅ | Clear buttons (Round N) | Terminal Clear (greyed while running) empties + hides the panel; Console Clear empties the LOG VIEW + history — only lines arriving after the clear render (fixed 2026-07-19: was history-only, looked like a no-op; user-confirmed after fix). |
 | ✅ | Download log (Round N) | Terminal/Console Download opens a native save dialog; the saved file contains the transcript (sections as `== name ==` blocks); cancel does nothing. (Passed 2026-07-19.) |
-| ⬜ | Console fill (Round N) | Console page: the log fills the free window height, the page itself never scrolls; only log/history scroll internally. Other pages: starting a run auto-scrolls the terminal into view; it grows tall (viewport-capped) instead of forcing page scrolling. |
+| ✅ | Console fill (Round N) | Console page: the log fills the free window height, the page itself never scrolls; only log/history scroll internally. Other pages: starting a run auto-scrolls the terminal into view; it grows tall (viewport-capped) instead of forcing page scrolling. |
 
 ## 3. Library / titles (Round D)
 
@@ -52,11 +52,11 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | Paperdoll + tooltips (E) | Show gear for a real char → slot grid with icons; hover a standard item → wowhead-style tooltip; hover a CUSTOM item → local tooltip (name/ilvl/stats). Second view of the same char is instant. |
+| ✅ | Paperdoll + tooltips (E) | Show gear for a real char → slot grid with icons; hover a standard item → wowhead-style tooltip; hover a CUSTOM item → local tooltip (name/ilvl/stats). Second view of the same char is instant. |
 | ✅ | 3D model (F) | Model renders in the middle of the gear window, correct SEX and race, wearing renderable gear. Rotate/zoom works. Second view fast. (Passed 2026-07-19 after rebuilding on Wowhead's NEW engine — live-tree viewer + native wrath m2 data; the old mo3 format was retired upstream. Also fixed en route: WH env stub, error surfacing, in-window placement.) |
 | ✅ | **3D model with a custom-displayid item (F1)** | View a char wearing a custom/GM item → model must still render (unrenderable items skipped via the probe fallback; naked model as last resort). (Passed 2026-07-19: GM char renders, admin items shown where the CDN has them, Martin's Fury skipped as designed.) |
-| ⬜ | Talents card (G + Round O trees) | Three in-game-style tree panels side by side (name + points per tree, e.g. "Fury (52)"; summary "NN points — X/Y/Z"): learned talents lit with icons + rank badges (green partial / gold maxed), unlearned as dark empty slots at the right grid positions. Icons fill chunk-at-a-time on first view (NOT broken); hover a maxed multi-rank talent → correct rank tooltip; Dual spec badge on a dual-spec char; only active-spec talents. Check the rank badges don't overlap neighbors. |
-| ⬜ | Achievements browser (G + Round P) | Achievements TAB: header shows "N points · X of 1320"; category rail (9 roots + indented children) selects scopes; earned rows lit with icons + dates, unearned dimmed; hover → achievement tooltip. First click on a big category (Dungeons & Raids = 460) streams icons in chunks (~19 batches — expected, cached after). A fetch failure shows a red note (not silently-all-unearned). |
+| ✅ | Talents card (G + Round O trees) | Three in-game-style tree panels side by side (name + points per tree, e.g. "Fury (52)"; summary "NN points — X/Y/Z"): learned talents lit with icons + rank badges (green partial / gold maxed), unlearned as dark empty slots at the right grid positions. Icons fill chunk-at-a-time on first view (NOT broken); hover a maxed multi-rank talent → correct rank tooltip; Dual spec badge on a dual-spec char; only active-spec talents. Check the rank badges don't overlap neighbors. |
+| ✅ | Achievements browser (G + Round P) | Achievements TAB: header shows "N points · X of 1320"; category rail (9 roots + indented children) selects scopes; earned rows lit with icons + dates, unearned dimmed; hover → achievement tooltip. First click on a big category (Dungeons & Raids = 460) streams icons in chunks (~19 batches — expected, cached after). A fetch failure shows a red note (not silently-all-unearned). |
 | ✅ | Character tabs (Round P) | After loading gear: Character / Talents / Achievements tab strip; switching is instant (no refetch); loading a NEW character lands back on Character. (Passed 2026-07-19 user visual.) |
 
 ## 5. Teleport (rounds 1-5 + I)
