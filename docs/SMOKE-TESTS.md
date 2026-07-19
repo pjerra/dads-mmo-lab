@@ -9,6 +9,13 @@ passes, tell Claude: the feature's flag flips to `tested` (in
 Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 (never locked). Order batches server restarts.
 
+**Sidebar layout note (consolidated 2026-07-19):** the **Settings** entry now has
+four tabs — **Settings · Bot World · Auction House · Module files**; and
+**Playerbots** + **Bot Browser** are the **My Party** and **Browse all bots** tabs
+of one **Bots** entry. Steps below say "Settings → Bot World tab", "Bots → My Party
+tab", etc. The **Modules** entry (Server section, for installing modules) is
+unchanged and is separate from the **Module files** tab (for editing conf files).
+
 ## 0. Setup (once)
 
 | Status | Test | Steps / expected |
@@ -24,7 +31,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ✅ | Health panel (Round A) | Click the server card → panel shows world/auth/DB rows ("Up … (healthy)"), version, uptime, players, latency, ports (game 8085 / auth 3724 / SOAP 7878 / DB — expect 13306), SOAP "reachable". |
 | ✅ | [restart] Restart button (Round I) | Click Restart → streams stop+start into the terminal; card returns to "World is up" after boot. (Passed 2026-07-18 — surfaced+fixed two bugs first: dml-start.sh pipefail/grep -q readiness wait, false port-conflict warns on restart.) |
 | ⬜ | soap_unreachable diagnostic (Round A) | Next time Docker networking breaks (or force by `sudo iptables`-breaking the forward): card shows "World is running, but the launcher can't reach it" + the restart-Docker hint. |
-| ✅ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Playerbots page header shows the same bots-online chip. |
+| ✅ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Bots → My Party header shows the same bots-online chip. |
 
 ## 2. Console (Round B)
 
@@ -87,7 +94,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 |---|---|---|
 | ✅ | Commands reference | With mods installed (e.g. transmog, ahbot) → Commands page lists a card per installed mod with its command reference. With none installed → empty state "No installed mods with commands yet — install mods on the Modules page." |
 
-## 8. Playerbots / My Party (rounds 4 + I)
+## 8. Playerbots / My Party (rounds 4 + I) — now Bots → My Party tab
 
 | Status | Test | Steps / expected |
 |---|---|---|
@@ -97,12 +104,12 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ✅ | [party-presets] Presets save/load | Save current party as preset; kick all; load → party rebuilt (replace semantics). |
 | ✅ | [preset-io] Export/import (I) | Export a preset (copy text), delete it, Import with the same name+classes → identical; import over an existing name → overwrite confirm fires. |
 
-## 9. Settings / Module Configs (rounds 1-5 + I)
+## 9. Settings / Module Configs (rounds 1-5 + I) — now Settings tab + Module files tab
 
 | Status | Test | Steps / expected |
 |---|---|---|
 | ✅ | [settings-save] Curated settings | Change XP rate → save → restart banner → restart → rate active in-game. Motd change applies live (no restart). |
-| ⬜ | [config-edit] Raw conf editor | Edit playerbots.conf, save; `.env` and compose override open READ-ONLY (no Save button). Settings↔Module Configs hop keeps unsaved edits. |
+| ⬜ | [config-edit] Raw conf editor | Edit playerbots.conf, save; `.env` and compose override open READ-ONLY (no Save button). Settings tab ↔ Module files tab hop keeps unsaved edits. |
 | ⬜ | [ale-reload] Reload ALE scripts (I) | Click → reply text appears (note: if mod-ale ISN'T loaded the reply may still show as a success note — eyeball it). |
 
 ## 10. Modules (Round C + J)
@@ -161,13 +168,13 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | [rates-live] Rates rows live-apply | Server RUNNING: Settings → change Honor gains (or any new Rates/Cross-faction row) → Save → green "Applied live ✓" note (no restart banner); verify in-game (kill a mob / check honor) that the rate changed WITHOUT a restart. `env/dist/etc/worldserver.conf` on the host shows the new `Rate.… = value` line. |
 | ⬜ | [rates-live] Legacy env migration | With an old save still in docker-compose.override.yml (e.g. AC_RATE_XP_KILL): change XP from kills → Save → the AMBER restart banner shows (not "applied live"), the AC_… key is GONE from override.yml, and after one restart the conf value is what the server uses. |
 | ⬜ | Server stopped: rates save falls back to restart | With the server stopped, save a Rates row → banner says restart needed (SOAP unreachable is not an error); value shows after the next start. |
-| ⬜ | [bots-world] Curated Bot World save | Bot World page → change e.g. "Bots chat" or bot population → Save → restart banner → Restart → the change is live (population count / chat behavior). playerbots.conf on the host shows the key. |
-| ⬜ | Bot World browser (read) | Bot World → the all-keys list loads (~hundreds of keys); search "broadcast" filters; hovering a key shows its default. Browsing works while LOCKED (only saving is gated). |
+| ⬜ | [bots-world] Curated Bot World save | Settings → Bot World tab → change e.g. "Bots chat" or bot population → Save → restart banner → Restart → the change is live (population count / chat behavior). playerbots.conf on the host shows the key. |
+| ⬜ | Bot World browser (read) | Settings → Bot World tab → the all-keys list loads (~hundreds of keys); search "broadcast" filters; hovering a key shows its default. Browsing works while LOCKED (only saving is gated). |
 | ⬜ | [bots-world] Browser staged save | Edit 2-3 keys in the browser (e.g. BroadcastChance…) → "Save N changes" → restart banner; keys land in playerbots.conf verbatim. |
-| ⬜ | Module Configs dynamic list | Module Configs → the file picker lists worldserver.conf, authserver.conf and EVERY installed module conf (incl. transmog.conf, which has no .dist) — not just the old 5. A dist-only conf shows "(new — starts from defaults)" and opens read of its dist. |
-| ⬜ | [config-edit] Edit worldserver.conf raw | Open worldserver.conf in Module Configs → edit a harmless value → Save → .bak kept → restart applies it. (.env/override still read-only.) |
-| ⬜ | [config-reset] Reset to defaults | Open playerbots.conf → Reset to defaults (two-step confirm) → file equals its .dist, previous version kept as .bak, restart banner shows. |
-| ⬜ | [bots-flush] Flush & rebuild bots | Bot World → Danger zone → type "flush" → button runs: terminal streams backup → delete-flag restart → restore → rebuild restart → done. Takes MINUTES (two boots, bot recreation). After: bot count rebuilds to the configured population, YOUR characters untouched, `AiPlayerbot.DeleteRandomBotAccounts = 0` in playerbots.conf, a new backup in Backups. |
+| ⬜ | Module Configs dynamic list | Settings → Module files tab → the file picker lists worldserver.conf, authserver.conf and EVERY installed module conf (incl. transmog.conf, which has no .dist) — not just the old 5. A dist-only conf shows "(new — starts from defaults)" and opens read of its dist. |
+| ⬜ | [config-edit] Edit worldserver.conf raw | Settings → Module files tab → open worldserver.conf → edit a harmless value → Save → .bak kept → restart applies it. (.env/override still read-only.) |
+| ⬜ | [config-reset] Reset to defaults | Settings → Module files tab → open playerbots.conf → Reset to defaults (two-step confirm) → file equals its .dist, previous version kept as .bak, restart banner shows. |
+| ⬜ | [bots-flush] Flush & rebuild bots | Settings → Bot World tab → Danger zone → type "flush" → button runs: terminal streams backup → delete-flag restart → restore → rebuild restart → done. Takes MINUTES (two boots, bot recreation). After: bot count rebuilds to the configured population, YOUR characters untouched, `AiPlayerbot.DeleteRandomBotAccounts = 0` in playerbots.conf, a new backup in Backups. |
 | ⬜ | [bots-flush] Flush abort safety | (Optional, pairs with the row above) If the flush errors mid-run (e.g. stop the distro's docker): the error shows in the terminal AND playerbots.conf still ends with `AiPlayerbot.DeleteRandomBotAccounts = 0` — a later manual start must NOT wipe bots again. |
 
 ## 16. Batch 2 — Windows integration
@@ -204,9 +211,9 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | Auction House tab (read-only) | Config → Auction House: the curated rows load (seller/buyer, seller character, listings per cycle, duration class, item filters) with values from mod_ahbot.conf(.dist); the Repair card shows the 4 manual steps. Browsing works while locked. |
+| ⬜ | Auction House tab (read-only) | Settings → Auction House tab: the curated rows load (seller/buyer, seller character, listings per cycle, duration class, item filters) with values from mod_ahbot.conf(.dist); the Repair card shows the 4 manual steps. Browsing works while locked. |
 | ⬜ | [ahbot-page] AH settings save + live apply | Server RUNNING with mod-ah-bot installed: change "Listings added per cycle" → Save → green "Applied live ✓" (no restart banner) and `env/dist/etc/modules/mod_ahbot.conf` shows the new value. With a legacy AC_AUCTION_HOUSE_BOT_* env still in override.yml: save shows the amber restart banner instead and the env key is gone from override.yml. |
-| ⬜ | [ahbot-page] Repair AH Bot | Create a throwaway account (Accounts page), log into the game once, create one character, log out. Auction House → pick that character → Repair (two-step confirm) → stream shows lookup + conf write + "reloaded"; mod_ahbot.conf has Account/GUID/EnableSeller=1/EnableBuyer=1; within minutes the AH starts filling (or after the next restart if the stream said restart). Click Repair again → "already configured". Buy one of the bot's auctions from YOUR character to prove the two-account setup works. |
+| ⬜ | [ahbot-page] Repair AH Bot | Create a throwaway account (Accounts page), log into the game once, create one character, log out. Settings → Auction House tab → pick that character → Repair (two-step confirm) → stream shows lookup + conf write + "reloaded"; mod_ahbot.conf has Account/GUID/EnableSeller=1/EnableBuyer=1; within minutes the AH starts filling (or after the next restart if the stream said restart). Click Repair again → "already configured". Buy one of the bot's auctions from YOUR character to prove the two-account setup works. |
 | ⬜ | [internet-play] Apply + friend connects | Tools → Play over the internet: card shows detected public + LAN IPs; forward TCP 3724+8085 on the router per step 2; enter the public IP (or DuckDNS name) → Apply (two-step) → output confirms; realm DB address = that value. A friend OUTSIDE the LAN sets `set realmlist <addr>` and logs in with their own account. Confirm the card NEVER suggests forwarding 3306. |
 | ⬜ | [internet-play] Revert | Revert to local play (two-step) → status back to 127.0.0.1; outside connections stop working. LAN card's Enable must still REJECT a public IP (CLI guard: "not a private LAN address"). |
 | ⬜ | [title-url-install] Install from URL | Library → Install from URL: paste a trusted DML-convention repo (https) → Install → typed "install" confirm + the runs-their-script warning → InstallTerminal streams `dml run <url>` (clone + install.sh), prompts answerable in the reply row, Cancel works. A non-https or garbage URL never enables the button / errors cleanly. |
@@ -219,15 +226,15 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 
 | Status | Test | Steps / expected |
 |---|---|---|
-| ⬜ | Bot Browser (read-only) | Items & Bots → Bot Browser: Search with no filters → ~2500 bots total, 50 per page, Prev/Next page through; name prefix / class / level range / online-only filters narrow the list; star a few bots → they pin to the top and survive an app restart; Details on a geared bot shows gear names (quality-colored) + talent point split + achievement count; Details on a naked bot shows "No gear saved yet" (NOT an error). |
+| ⬜ | Bot Browser (read-only) | Bots → Browse all bots tab: Search with no filters → ~2500 bots total, 50 per page, Prev/Next page through; name prefix / class / level range / online-only filters narrow the list; star a few bots → they pin to the top and survive an app restart; Details on a geared bot shows gear names (quality-colored) + talent point split + achievement count; Details on a naked bot shows "No gear saved yet" (NOT an error). |
 | ⬜ | [bot-browser] Invite + set level | With a character logged in and the bridge deployed: Details → Invite to party → the named bot logs in and joins that player's group (same as My Party's Re-summon). Set level 1-255 on an OFFLINE bot → succeeds; the list/detail shows the new level after the bot's next save. Without the bridge → the invite error mentions bridge-setup. |
 | ⬜ | [arac-client-patch] ARAC full patch | Modules → install mod-arac (note: NO rebuild banner appears — it's data-only) → "Apply client patch" on its row: stream shows 3 DBC copies into the data volume + Patch-A.MPQ into `<client>/Data/` (Data root, NOT Data/enUS). With no client folder set: warns + only the server half runs; set the folder, re-run → MPQ lands. Cold-start the server once (applies arac.sql), then restart → create e.g. a Night Elf Warrior; the patched client shows all combos at character creation. |
 | ⬜ | [gear-sets] Save + mail a gear set | Dashboard → load a geared character → name it + "Save gear set" (unlocked — local save only). Item Database → Gear sets card lists it (source char, item count) → Mail to… → pick a recipient → Mail N items → mailbox has the items as FRESH copies (count 1 each, two mails when >12 items); enchants/gems are NOT carried; a cross-class recipient still receives everything. Delete removes the set (two-step). Sets survive an app restart. |
-| ⬜ | [party-spec] Role picker + change spec | Playerbots (bridge deployed, character online): Role → Class → Spec (e.g. Ranged → Mage → frost pve) → Add bot → the bot joins with that spec's talents AND autogears (check its trees in-game or via Bot Browser details). "Any spec" add behaves exactly like the old class buttons. Per-bot "spec… → Change spec" respecs an existing bot (then Gear up). NB: spec names come from playerbots.conf — a wrong/edited name fails SILENTLY (in-game whisper reply only); no DK offered anywhere. |
+| ⬜ | [party-spec] Role picker + change spec | Bots → My Party tab (bridge deployed, character online): Role → Class → Spec (e.g. Ranged → Mage → frost pve) → Add bot → the bot joins with that spec's talents AND autogears (check its trees in-game or via Bot Browser details). "Any spec" add behaves exactly like the old class buttons. Per-bot "spec… → Change spec" respecs an existing bot (then Gear up). NB: spec names come from playerbots.conf — a wrong/edited name fails SILENTLY (in-game whisper reply only); no DK offered anywhere. |
 
 ## Known caveats (not tests — expectations)
 
-- ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.
+- ARAC (C++ module): installing the module is server-side only. The client DBC/MPQ patch is now a separate **Apply client patch** step on the module's Modules row (Batch 5, locked behind [arac-client-patch] until row §19 passes) — so a bare install still won't show new race/class combos until you run that patch and cold-start once. Not a bug; it's the two-step design.
 - First view of a high-talent char fills talent icons in batches (~10-15s per 25) — not a hang.
 - Full backups share the keep-10 pool; restoring an older full backup while a module is installed re-applies that module's SQL at next start.
 - Cold Start after a full Stop: the world can crash-retry for ~2 min while MySQL warms up (Docker self-heals — normal). Rarely, the world then wedges mid-load (log frozen + 0% CPU for 3+ min): that's a hang, not slow loading — click Restart to clear it (observed once, 2026-07-18).
