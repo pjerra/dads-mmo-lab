@@ -1010,6 +1010,11 @@ _entity_one() {
 # DO NOT edit the text content here. If the manager's copy changes (new
 # mod, wording fix, new command), re-sync this file from the source
 # function rather than hand-editing -- the two are meant to stay identical.
+#
+# ONE deliberate divergence (Batch 5 F2): the mod-arac block's install steps
+# now point at the launcher's "Apply client patch" button (the CLI's `wow
+# module client-patch --key mod-arac` arm) instead of the manager's manual
+# three-step text -- keep that edit when re-syncing.
 # ---------------------------------------------------------------------------
 
 _cmd_block_for() {
@@ -1034,12 +1039,12 @@ _cmd_block_for() {
                 'All Races All Classes (ARAC)' \
                 'Unlocks all race/class combinations not normally available — Night Elf Warrior, Undead Paladin, etc. DATA-ONLY: no worldserver rebuild required. Requires a world DB SQL import and updated DBC files on both server and client.' \
                 '' \
-                'Install requires three steps (configure handles all automatically):' \
-                '  1. Apply arac.sql to acore_world database' \
-                '  2. Copy DBFilesContent DBC files to server data/dbc/ directory' \
-                '  3. Copy Patch-A.MPQ to WoW client Data/ directory' \
+                'Install: click Install on the Modules page (arac.sql is applied automatically' \
+                'by the server on its next cold start), then "Apply client patch" on the same' \
+                'row — it copies the server DBC files into the data volume and Patch-A.MPQ' \
+                'into your WoW client Data/ folder. Restart the server afterwards.' \
                 '' \
-                'WARNING: Back up your database before applying ARAC SQL.' \
+                'Manual fallback: copy modules/mod-arac/Patch-A.MPQ into <client>/Data/.' \
                 'Commands: (none — all race/class combos unlocked at character creation)'
             ;;
         mod-dungeon-master)
@@ -1531,6 +1536,34 @@ _valid_bot_class() {
       *) return 1 ;;
     esac
 }
+
+# Premade-spec names `party add --spec` / `party botcmd --action spec`
+# accept (Batch 5 F5). CLOSED allowlist of the EXACT live spec names
+# (AiPlayerbot.PremadeSpecName.* -- verified against the deployed
+# playerbots.conf 2026-07-19): the playerbots `talents spec <name>` command
+# exact-matches these, and a wrong name replies only IN-GAME ("Spec <x> not
+# found" -- invisible to SOAP), so the CLI must reject anything else up
+# front. Chars are only [a-z ] -- injection-safe in the whisper tail; the
+# no-free-text-whisper rule holds because this is still a fixed allowlist.
+# DK (class 6) specs are deliberately absent (no DK in the wizard, matching
+# _valid_bot_class). NB per the live conf: "bear pvp" and "frostfire pvp"
+# DO NOT EXIST -- do not "complete the symmetry" here. CAVEAT: these names
+# are conf-driven; if the user edits PremadeSpecName.* this list drifts and
+# failures become silent (in-game whisper reply only).
+_valid_bot_spec() {
+    case "$1" in
+      "arms pve"|"arms pvp"|"fury pve"|"fury pvp"|"prot pve"|"prot pvp") return 0 ;;
+      "holy pve"|"holy pvp"|"ret pve"|"ret pvp") return 0 ;;
+      "bm pve"|"bm pvp"|"mm pve"|"mm pvp"|"surv pve"|"surv pvp") return 0 ;;
+      "as pve"|"as pvp"|"combat pve"|"combat pvp"|"subtlety pve"|"subtlety pvp") return 0 ;;
+      "disc pve"|"disc pvp"|"shadow pve"|"shadow pvp") return 0 ;;
+      "ele pve"|"ele pvp"|"enh pve"|"enh pvp"|"resto pve"|"resto pvp") return 0 ;;
+      "arcane pve"|"arcane pvp"|"fire pve"|"fire pvp"|"frost pve"|"frost pvp"|"frostfire pve") return 0 ;;
+      "affli pve"|"affli pvp"|"demo pve"|"demo pvp"|"destro pve"|"destro pvp") return 0 ;;
+      "balance pve"|"balance pvp"|"bear pve"|"cat pve"|"cat pvp") return 0 ;;
+      *) return 1 ;;
+    esac
+}
 # ---------------------------------------------------------------------------
 # GM tools (Lab-parity round 2): shared guard for the bridge-backed gm ops.
 # The gm dispatch arms live in 90-main.sh next to the other wow arms; only
@@ -1690,7 +1723,7 @@ _module_desc() {
       mod-learn-spells) echo "Class spells are learned automatically on level-up -- no class-trainer visits." ;;
       mod-npc-beastmaster) echo "A Beastmaster NPC that lets ANY class tame, stable and use hunter pets." ;;
       mod-quest-loot-party) echo "Quest items drop for every eligible party member at once instead of one at a time." ;;
-      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. NOTE: needs manual client-side patch files (see the Commands page) -- the server part alone is not enough." ;;
+      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. After install, click 'Apply client patch' on this row (server DBCs + client Patch-A.MPQ), then restart -- the server part alone is not enough." ;;
       mod-dungeon-master) echo "Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards." ;;
       mod-solocraft) echo "Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable." ;;
       mod-talentbutton) echo "Dual spec from level 10 and a talent-reset button usable anywhere." ;;
@@ -4892,18 +4925,22 @@ case "$cmd" in
             json_ok "{\"online\":$out}"
             ;;
           add)
-            player=""; class=""; gender=""
+            player=""; class=""; gender=""; spec=""
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
                 --class) _need_flag_val "$1" $#; class="$2"; shift 2 ;;
                 --gender) _need_flag_val "$1" $#; gender="$2"; shift 2 ;;
+                --spec) _need_flag_val "$1" $#; spec="$2"; shift 2 ;;
                 *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
             _valid_bot_class "$class" || { json_err BAD_ARG "Invalid class: $class" "One of: warrior paladin hunter rogue priest shaman mage warlock druid"; exit 1; }
             case "$gender" in ""|male|female) : ;; *) json_err BAD_ARG "Invalid gender: $gender" "male or female"; exit 1 ;; esac
+            if [[ -n "$spec" ]] && ! _valid_bot_spec "$spec"; then
+              json_err BAD_ARG "Unknown spec: $spec" "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list."; exit 1
+            fi
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first, then try again."; exit 1; }
             # Snapshot the group's members BEFORE firing so we can spot the new one.
@@ -4925,12 +4962,30 @@ case "$cmd" in
                 botname="$(db_chars_query "SELECT name FROM characters WHERE guid=$newguid LIMIT 1;" 2>/dev/null)" || botname=""
               fi
               if [[ -n "$botname" ]]; then
-                json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+                # Batch 5 F5: optional premade spec -- whispered AFTER the
+                # join is confirmed and the bot's name is known; autogear
+                # follows the spec (gear must match the new talents). No
+                # --spec keeps this branch byte-identical to before.
+                if [[ -n "$spec" ]]; then
+                  _party_fire "dml_whisper $player $botname talents spec $spec" "spec"
+                  _party_fire "dml_whisper $player $botname autogear" "spec"
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null,\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":true}"
+                else
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":\"$(json_escape "$botname")\",\"note\":null}"
+                fi
               else
-                json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":null}"
+                if [[ -n "$spec" ]]; then
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":\"Added but spec not applied -- bot not attached in time\",\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":false}"
+                else
+                  json_ok "{\"added\":true,\"joined\":true,\"bot\":null,\"note\":null}"
+                fi
               fi
             else
-              json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
+              if [[ -n "$spec" ]]; then
+                json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Added but spec not applied -- bot not attached in time\",\"spec\":\"$(json_escape "$spec")\",\"spec_applied\":false}"
+              else
+                json_ok "{\"added\":true,\"joined\":false,\"bot\":null,\"note\":\"Spawned but not attached yet -- give it a moment and Refresh.\"}"
+              fi
             fi
             ;;
           list)
@@ -4980,24 +5035,31 @@ case "$cmd" in
             json_ok "{\"relogged\":true}"
             ;;
           botcmd)
-            player=""; bot=""; action=""
+            player=""; bot=""; action=""; spec=""
             while [[ $# -gt 0 ]]; do
               case "$1" in
                 --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
                 --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
                 --action) _need_flag_val "$1" $#; action="$2"; shift 2 ;;
+                --spec) _need_flag_val "$1" $#; spec="$2"; shift 2 ;;
                 *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
             _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
             # Closed allowlist -> fixed whisper strings. This is the whole
-            # whisper surface: no free-text path exists.
+            # whisper surface: no free-text path exists -- the spec action's
+            # tail is itself allowlisted by _valid_bot_spec (Batch 5 F5).
             case "$action" in
               gear) wmsg="autogear" ;;
               talents) wmsg="talents autopick" ;;
               maintain) wmsg="maintenance" ;;
-              *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain"; exit 1 ;;
+              spec)
+                [[ -n "$spec" ]] || { json_err BAD_ARG "Action spec requires --spec <name>" "e.g. --spec 'frost pve'"; exit 1; }
+                _valid_bot_spec "$spec" || { json_err BAD_ARG "Unknown spec: $spec" "A premade spec name like 'frost pve'."; exit 1; }
+                wmsg="talents spec $spec"
+                ;;
+              *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain spec"; exit 1 ;;
             esac
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
@@ -5474,6 +5536,73 @@ case "$cmd" in
       bots)
         btsub="${1:-}"; shift || true
         case "$btsub" in
+          list)
+            # Batch 5 F1 (Bot Browser): read-only paged browse of the random
+            # bot population. Bot identification is the playerbots table
+            # (authoritative), NOT the RNDBOT% username shortcut the accounts
+            # arm uses -- cross-schema subselect is established practice
+            # (see `players online` above).
+            btname=""; btclass=""; btminl=""; btmaxl=""; btonline=0; btlimit=50; btoffset=0
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --name) _need_flag_val "$1" $#; btname="$2"; shift 2 ;;
+                --class) _need_flag_val "$1" $#; btclass="$2"; shift 2 ;;
+                --min-level) _need_flag_val "$1" $#; btminl="$2"; shift 2 ;;
+                --max-level) _need_flag_val "$1" $#; btmaxl="$2"; shift 2 ;;
+                --online) btonline=1; shift ;;
+                --limit) _need_flag_val "$1" $#; btlimit="$2"; shift 2 ;;
+                --offset) _need_flag_val "$1" $#; btoffset="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Try: dml wow bots list --name <prefix> --class <n> --min-level <n> --max-level <n> --online --limit <n> --offset <n> --json"; exit 1 ;;
+              esac
+            done
+            # --name is a prefix spliced into a LIKE: charname-allowlisted
+            # FIRST (sql_escape alone would still let % and _ act as
+            # wildcards mid-pattern), then escaped anyway (defense in depth).
+            if [[ -n "$btname" ]] && ! _valid_charname "$btname"; then
+              json_err BAD_ARG "Invalid name prefix: $btname" "1-12 letters/digits/underscore."; exit 1
+            fi
+            if [[ -n "$btclass" ]]; then
+              case "$btclass" in
+                1|2|3|4|5|6|7|8|9|11) ;;
+                *) json_err BAD_ARG "Invalid class id: $btclass" "1-9 or 11."; exit 1 ;;
+              esac
+            fi
+            # Every numeric is ^[0-9]+$-gated BEFORE it is spliced unquoted
+            # into SQL (same doctrine as items search above).
+            for v in "$btminl" "$btmaxl" "$btlimit" "$btoffset"; do
+              [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
+            done
+            btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
+            (( btlimit > 200 )) && btlimit=200
+            (( btlimit < 1 )) && btlimit=1
+            btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+            [[ -n "$btname" ]] && btwhere+=" AND c.name LIKE '$(sql_escape "$btname")%'"
+            [[ -n "$btclass" ]] && btwhere+=" AND c.class = $((10#$btclass))"
+            if [[ -n "$btminl" && -n "$btmaxl" ]]; then
+              btwhere+=" AND c.level BETWEEN $((10#$btminl)) AND $((10#$btmaxl))"
+            elif [[ -n "$btminl" ]]; then
+              btwhere+=" AND c.level >= $((10#$btminl))"
+            elif [[ -n "$btmaxl" ]]; then
+              btwhere+=" AND c.level <= $((10#$btmaxl))"
+            fi
+            [[ "$btonline" == 1 ]] && btwhere+=" AND c.online = 1"
+            bttotal="$(db_chars_query "SELECT COUNT(*) FROM characters c WHERE $btwhere;")" \
+              || { json_err DB_UNREACHABLE "Could not query the bot list" "Is ac-database running?"; exit 1; }
+            [[ "$bttotal" =~ ^[0-9]+$ ]] || bttotal=0
+            rows="$(db_chars_query "SELECT c.guid, c.name, c.class, c.race, c.gender, c.level, c.online, c.zone FROM characters c WHERE $btwhere ORDER BY c.name LIMIT $btlimit OFFSET $btoffset;")" \
+              || { json_err DB_UNREACHABLE "Could not query the bot list" "Is ac-database running?"; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r guid name cls race gen lvl onl zone || [[ -n "$guid" ]]; do
+              [[ -z "$guid" ]] && continue
+              [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
+              onlb=false; [[ "$onl" == "1" ]] && onlb=true
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"race\":$race,\"gender\":$gen,\"level\":$lvl,\"online\":$onlb,\"zone\":$zone}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"total\":$bttotal,\"limit\":$btlimit,\"offset\":$btoffset,\"bots\":$out}"
+            ;;
           flush)
             # Flush & rebuild the ambient bot population (Batch 1 F4).
             # Streaming NDJSON like games restart: (1) character backup
@@ -5604,7 +5733,7 @@ case "$cmd" in
             fi
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots flush --yes --ack flush --json"
+            json_err UNKNOWN_COMMAND "Unknown bots subcommand: $btsub" "Try: dml wow bots list --json  |  dml wow bots flush --yes --ack flush --json"
             exit 1
             ;;
         esac
@@ -5891,10 +6020,21 @@ case "$cmd" in
                     ndjson_error GIT_FAILED "git clone failed for $mkey" ""; exit 1
                   fi
                 fi
-                _rebuild_pending_add "$sdir" "$mkey"
+                # mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- a
+                # rebuild would be a 30-90 minute no-op, so it never joins
+                # the rebuild-pending list (Batch 5 F2, sanctioned deviation
+                # from the generic cpp path). Its follow-up step is the
+                # client-patch arm + a plain restart instead.
+                rebreq=true
+                if [[ "$mkey" == mod-arac ]]; then
+                  rebreq=false
+                  ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
+                else
+                  _rebuild_pending_add "$sdir" "$mkey"
+                fi
                 ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
                 ndjson_section_end module-install ok
-                ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":true}"
+                ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":$rebreq}"
                 ;;
               lua)
                 lrow="$(_module_registry_lua | grep -m1 -F "$mkey|" || true)"
@@ -6457,6 +6597,94 @@ case "$cmd" in
             _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
               || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
             json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            ;;
+          client-patch)
+            # Batch 5 F2: port of the manager's configure_mod_arac steps 2+3
+            # (guides/wow-wotlk/wow-manage.sh:2668-2705) onto the CLI's
+            # client-path machinery. Step 1 (arac.sql) is deliberately NOT
+            # here: cpp-family SQL is auto-applied by ac-db-import on the
+            # next cold compose up (CLI doctrine, 70-modules.sh:4-7) --
+            # hand-applying would desync the `updates` tracking.
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start client-patch
+            ckey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; ckey="$2"; shift 2 ;;
+                *) ndjson_section_end client-patch error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            case "$ckey" in
+              mod-arac) ;;
+              *)
+                ndjson_section_end client-patch error
+                ndjson_error BAD_ARG "client-patch supports only --key mod-arac" "Other modules ship no client patch step."; exit 1 ;;
+            esac
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            mdir="$sdir/modules/mod-arac"
+            if ! _cpp_installed "$sdir" mod-arac; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_INSTALLED "mod-arac is not installed" "Install it on the Modules page first."; exit 1
+            fi
+            dbcsrc="$mdir/patch-contents/DBFilesContent"
+            if [[ ! -d "$dbcsrc" ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "DBC files not found in the mod-arac clone" "Expected $dbcsrc -- try Update on the Modules page to refresh the clone."; exit 1
+            fi
+            # The data volume is mounted :ro inside the worldserver, so the
+            # copy goes through a throwaway container against the VOLUME.
+            # Resolution by mount destination is primary; the bare
+            # fallback is the dml-arch deploy's real name (live-verified
+            # 2026-07-19) -- the manager's `ac-client-data` fallback is
+            # WRONG on this deploy.
+            vol="$(docker inspect ac-worldserver --format '{{range .Mounts}}{{if eq .Destination "/azerothcore/env/dist/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)" || vol=""
+            if [[ -z "$vol" ]]; then
+              vol="wow-server-playerbots_ac-client-data"
+              ndjson_line warn "could not resolve the data volume from the worldserver container -- using the default name $vol"
+            fi
+            dbc_n=0
+            for f in "$dbcsrc"/*.dbc; do
+              [[ -f "$f" ]] || continue
+              bn="$(basename "$f")"
+              ndjson_line info "copying $bn into the server data volume..."
+              if ! docker run --rm -v "$vol:/data" -v "$f:/src/$bn:ro" alpine cp "/src/$bn" "/data/dbc/$bn" >/dev/null 2>&1; then
+                ndjson_section_end client-patch error
+                ndjson_error COPY_FAILED "Could not copy $bn into the data volume" "Is Docker running?"; exit 1
+              fi
+              dbc_n=$(( dbc_n + 1 ))
+            done
+            if [[ "$dbc_n" -eq 0 ]]; then
+              ndjson_section_end client-patch error
+              ndjson_error NOT_FOUND "No .dbc files found in $dbcsrc" "Try Update on the Modules page to refresh the clone."; exit 1
+            fi
+            ndjson_line info "$dbc_n server DBC files installed"
+            # Client MPQ: Data/ ROOT, never a locale subfolder (ARAC does
+            # not touch Data/enUS). Soft-skips when no client folder is
+            # saved -- the server half above still counts.
+            cpath="$(_client_path)"
+            client_done=false
+            if [[ -z "$cpath" ]]; then
+              ndjson_line warn "no client folder set — skipped Patch-A.MPQ (set it on the Modules page, then re-run this)"
+            elif [[ ! -f "$mdir/Patch-A.MPQ" ]]; then
+              ndjson_line warn "Patch-A.MPQ not found in the mod-arac clone — try Update on the Modules page, or copy it manually into <client>/Data/"
+            else
+              ndjson_line info "installing Patch-A.MPQ into the client Data folder..."
+              if cp "$mdir/Patch-A.MPQ" "$cpath/Data/Patch-A.MPQ" 2>/dev/null; then
+                client_done=true
+                ndjson_line info "Patch-A.MPQ installed"
+              else
+                ndjson_line warn "could not copy Patch-A.MPQ — copy $mdir/Patch-A.MPQ into <client>/Data/ manually"
+              fi
+            fi
+            # mod-arac is data-only: a RESTART loads the new DBCs -- no
+            # worldserver rebuild is ever needed (matches the install
+            # path's skip of the rebuild-pending mark for this key).
+            ndjson_line info "restart the server (Home) to load the new race/class combinations — no rebuild needed"
+            ndjson_section_end client-patch ok
+            ndjson_done "{\"key\":\"mod-arac\",\"dbc_files\":$dbc_n,\"client_patched\":$client_done,\"restart_required\":true}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
