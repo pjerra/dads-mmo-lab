@@ -19,6 +19,13 @@ impl std::fmt::Display for RunnerError {
     }
 }
 
+/// The WSL distro + Linux user the launcher talks to. Shared by the default
+/// runner's invocation prefix and by anything else that needs to open a
+/// shell into the same place (e.g. `open_shell` in lib.rs) -- keep these as
+/// the single source of truth rather than re-hardcoding the strings.
+pub const DISTRO: &str = "dml-arch";
+pub const USER: &str = "dml";
+
 pub struct DmlRunner {
     pub program: OsString,
     pub prefix_args: Vec<String>,
@@ -28,7 +35,7 @@ impl Default for DmlRunner {
     fn default() -> Self {
         DmlRunner {
             program: "wsl.exe".into(),
-            prefix_args: ["-d", "dml-arch", "-u", "dml", "--", "dml"]
+            prefix_args: ["-d", DISTRO, "-u", USER, "--", "dml"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -71,6 +78,34 @@ impl DmlRunner {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| RunnerError::Spawn(e.to_string()))
+    }
+
+    /// Non-interactive TEXT-mode capture (no `--json`): for CLI subcommands
+    /// like `lan` and `doctor` that print plain, user-facing status lines
+    /// (including their own error messages) straight to stdout/stderr rather
+    /// than emitting a JSON envelope. Stdout and stderr are captured
+    /// separately by the OS pipe and concatenated here (stdout first, then
+    /// stderr if non-empty) -- true interleaving order isn't preserved, but
+    /// these commands don't need it. Unlike `run_json`, a non-zero exit is
+    /// NOT an error: the CLI's own failure text is the payload the caller
+    /// wants to display, not a signal to synthesize a different message.
+    pub fn run_captured(&self, args: &[&str]) -> Result<String, RunnerError> {
+        let out = self
+            .command_raw(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| RunnerError::Spawn(e.to_string()))?;
+        let mut combined = decode_wsl_output(&out.stdout);
+        let stderr = decode_wsl_output(&out.stderr);
+        if !stderr.trim().is_empty() {
+            if !combined.is_empty() && !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push_str(&stderr);
+        }
+        Ok(combined)
     }
 
     pub fn run_json(&self, args: &[&str]) -> Result<Envelope, RunnerError> {
@@ -300,6 +335,28 @@ mod tests {
         assert!(out.contains("answer me:"));
         assert!(out.contains("you typed hello"));
         assert_eq!(status.code(), Some(0));
+    }
+
+    #[test]
+    fn run_captured_combines_stdout_and_stderr_regardless_of_exit_code() {
+        let text = fixture_runner()
+            .run_captured(&[&fixture("captured_mixed.cmd")])
+            .unwrap();
+        assert!(text.contains("stdout line"), "missing stdout in: {text:?}");
+        assert!(text.contains("stderr line"), "missing stderr in: {text:?}");
+    }
+
+    #[test]
+    fn run_captured_missing_program_is_spawn_error() {
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![] };
+        assert!(matches!(r.run_captured(&["x"]), Err(RunnerError::Spawn(_))));
+    }
+
+    #[test]
+    fn default_runner_uses_distro_and_user_constants() {
+        let r = DmlRunner::default();
+        assert!(r.prefix_args.contains(&DISTRO.to_string()));
+        assert!(r.prefix_args.contains(&USER.to_string()));
     }
 
     #[test]

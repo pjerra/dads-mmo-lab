@@ -611,3 +611,37 @@ export const gamesRemove = (id: string, onEvent: (e: TermEvent) => void): Promis
   ch.onmessage = onEvent;
   return invoke("games_remove", { id, onEvent: ch });
 };
+
+// --- LAN / doctor / tool-install / shell (Round Q Tools page) --------------
+
+export type LanAction = "on" | "off" | "status" | "refresh";
+
+// Text-mode CLI output (dml lan / dml doctor print plain status lines, not
+// a JSON envelope) -- both return the raw combined stdout+stderr as a string
+// for display in a <pre>, same shape either way.
+export async function wowLan(action: LanAction, ip?: string): Promise<string> {
+  return await invoke("wow_lan", { action, ip });
+}
+
+export async function dmlDoctor(): Promise<string> {
+  return await invoke("dml_doctor");
+}
+
+export type ToolName = "unbound" | "unbound-remove";
+
+// Mirrors gamesInstall's shape exactly: same InstallEvent stream, same
+// single global interactive session (games_install_input/games_install_cancel
+// work against it unchanged).
+export const toolInstall = (tool: ToolName, onEvent: (e: InstallEvent) => void): Promise<void> => {
+  const ch = new Channel<InstallEvent>();
+  ch.onmessage = onEvent;
+  return invoke("tool_install", { tool, onEvent: ch });
+};
+
+export async function openShell(): Promise<void> {
+  return await invoke("open_shell");
+}
+
+export async function detectLanIp(): Promise<string | null> {
+  return await invoke("detect_lan_ip");
+}

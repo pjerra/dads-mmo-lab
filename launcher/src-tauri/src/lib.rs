@@ -92,6 +92,38 @@ fn bad_id(id: &str) -> CmdError {
     }
 }
 
+// --- LAN / doctor / tool-install plumbing (Round Q) ------------------------
+//
+// These commands take webview input directly (action, ip, tool), so every
+// value is checked against a closed allowlist or a pure validator BEFORE it
+// reaches a spawn. Nothing here is string-interpolated into a shell -- args
+// go straight into Command::args as separate argv entries -- but validating
+// up front keeps garbage/injection-shaped input from ever reaching the CLI
+// and turns a bad webview call into a typed error instead of a mystery
+// WSL/CLI failure.
+
+const LAN_TITLE: &str = "wow-server-playerbots";
+const LAN_ACTIONS: [&str; 4] = ["on", "off", "status", "refresh"];
+const TOOL_NAMES: [&str; 2] = ["unbound", "unbound-remove"];
+
+/// Pure, testable IPv4-shape check: `^[0-9]{1,3}(\.[0-9]{1,3}){3}$`. Exactly
+/// 4 dot-separated groups of 1-3 ASCII digits each -- matches the CLI's own
+/// guard in `dml lan` (it re-validates independently) rather than a strict
+/// 0-255 range check, so this only needs to reject shapes that could carry
+/// something other than an address (whitespace, semicolons, letters, extra
+/// segments) before the value is ever used to build a command line.
+pub fn validate_ip(ip: &str) -> bool {
+    let parts: Vec<&str> = ip.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+fn bad_arg(message: impl Into<String>) -> CmdError {
+    CmdError { code: "BAD_ARG".into(), message: message.into(), hint: "Check the value and try again.".into() }
+}
+
 #[tauri::command]
 async fn dml_version(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let runner = state.runner.clone();
@@ -774,6 +806,141 @@ async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, 
 }
 
 #[tauri::command]
+async fn wow_lan(
+    action: String,
+    ip: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<String, CmdError> {
+    if !LAN_ACTIONS.contains(&action.as_str()) {
+        return Err(bad_arg(format!("invalid lan action: {action:?}")));
+    }
+    let ip_arg = if action == "on" || action == "refresh" {
+        let ip = ip.ok_or_else(|| bad_arg("ip is required for the on/refresh actions"))?;
+        if !validate_ip(&ip) {
+            return Err(bad_arg(format!("invalid IPv4 address: {ip:?}")));
+        }
+        Some(ip)
+    } else {
+        None
+    };
+    let mut args: Vec<String> = vec!["lan".into(), LAN_TITLE.into(), action];
+    if let Some(ip) = ip_arg {
+        args.push(ip);
+    }
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        runner.run_captured(&refs)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+    .map_err(CmdError::from)
+}
+
+#[tauri::command]
+async fn dml_doctor(state: State<'_, AppState>) -> Result<String, CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || runner.run_captured(&["doctor"]))
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+        .map_err(CmdError::from)
+}
+
+/// Detached, no-wait: opens a terminal window for the user, it doesn't
+/// report back through the command's return value. `wt.exe` (Windows
+/// Terminal) is preferred; when it isn't on PATH (spawn fails), fall back to
+/// a plain `cmd /c start` so a basic console window still opens. Distro/user
+/// come from the same constants the runner's default WSL invocation uses --
+/// see `dml::runner::{DISTRO, USER}` -- so this can never drift from where
+/// every other command actually talks to.
+#[tauri::command]
+fn open_shell() -> Result<(), String> {
+    use crate::dml::runner::{DISTRO, USER};
+    let cwd = format!("/home/{USER}");
+    let wsl_args = ["wsl", "-d", DISTRO, "-u", USER, "--cd", &cwd];
+    if std::process::Command::new("wt.exe").args(wsl_args).spawn().is_ok() {
+        return Ok(());
+    }
+    let mut cmd_args: Vec<&str> = vec!["/C", "start", "wsl"];
+    cmd_args.extend_from_slice(&wsl_args[1..]);
+    std::process::Command::new("cmd")
+        .args(cmd_args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// No packets are sent: connecting a UDP socket only makes the OS pick a
+/// local route/address for that destination, which is enough to read back
+/// this machine's LAN-facing IP without any traffic actually leaving.
+/// 8.8.8.8:80 is just a stand-in destination on the public internet's
+/// address space to force a real (non-loopback) route decision.
+#[tauri::command]
+fn detect_lan_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+#[tauri::command]
+async fn tool_install(
+    tool: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    if !TOOL_NAMES.contains(&tool.as_str()) {
+        return Err(bad_arg(format!("invalid tool: {tool:?}")));
+    }
+    let runner = state.runner.clone();
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Starting);
+    }
+    let state_arc = state.install.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Read;
+        let mut child = match runner.spawn_interactive(&[tool.as_str()]) {
+            Ok(c) => c,
+            Err(e) => {
+                *state_arc.lock().unwrap() = None;
+                let _ = on_event.send(serde_json::json!({"event":"chunk","text": format!("failed to start: {e}\n")}));
+                let _ = on_event.send(serde_json::json!({"event":"exit","code": -1}));
+                return;
+            }
+        };
+        let stdin = child.stdin.take().expect("stdin piped");
+        let pid = child.id();
+        *state_arc.lock().unwrap() = Some(InstallSlot::Running(InstallSession { stdin, pid }));
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdout.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
+                }
+                Err(_) => break,
+            }
+        }
+        let code = child.wait().ok().and_then(|s| s.code()).unwrap_or(-1);
+        *state_arc.lock().unwrap() = None;
+        let _ = on_event.send(serde_json::json!({"event":"exit","code": code}));
+    })
+    .await
+    .map_err(|e| CmdError { code: "IPC".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+#[tauri::command]
 async fn games_catalog(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["games".into(), "catalog".into()]).await
 }
@@ -1017,6 +1184,11 @@ pub fn run() {
             wow_gm_revive,
             wow_gm_summon,
             wow_gm_at_login,
+            wow_lan,
+            dml_doctor,
+            tool_install,
+            open_shell,
+            detect_lan_ip,
             save_text_file
         ])
         .run(tauri::generate_context!())
@@ -1035,5 +1207,54 @@ mod tests {
         assert!(!validate_game_id("wow; rm -rf /"));
         assert!(!validate_game_id("wow server"));
         assert!(!validate_game_id("../escape"));
+    }
+
+    #[test]
+    fn ip_validation_accepts_well_shaped_ipv4() {
+        assert!(validate_ip("192.168.1.1"));
+        assert!(validate_ip("8.8.8.8"));
+        assert!(validate_ip("1.2.3.4"));
+        assert!(validate_ip("255.255.255.255"));
+        assert!(validate_ip("0.0.0.0"));
+    }
+
+    #[test]
+    fn ip_validation_rejects_garbage() {
+        assert!(!validate_ip(""));
+        assert!(!validate_ip("not an ip"));
+        assert!(!validate_ip("1.2.3"));
+        assert!(!validate_ip("1.2.3.4.5"));
+        assert!(!validate_ip("1..3.4"));
+        assert!(!validate_ip(".1.2.3"));
+        assert!(!validate_ip("1.2.3."));
+        assert!(!validate_ip("1.2.3.4444"));
+    }
+
+    #[test]
+    fn ip_validation_rejects_injection_shaped_strings() {
+        assert!(!validate_ip("1.2.3.4; rm -rf /"));
+        assert!(!validate_ip("1.2.3.4 && whoami"));
+        assert!(!validate_ip("1.2.3.4\nrm -rf /"));
+        assert!(!validate_ip("$(rm -rf /)"));
+        assert!(!validate_ip("1.2.3.4`id`"));
+        assert!(!validate_ip("../../etc/passwd"));
+    }
+
+    #[test]
+    fn lan_action_allowlist_is_closed() {
+        assert!(LAN_ACTIONS.contains(&"on"));
+        assert!(LAN_ACTIONS.contains(&"off"));
+        assert!(LAN_ACTIONS.contains(&"status"));
+        assert!(LAN_ACTIONS.contains(&"refresh"));
+        assert!(!LAN_ACTIONS.contains(&"on; rm -rf /"));
+        assert!(!LAN_ACTIONS.contains(&"reset"));
+    }
+
+    #[test]
+    fn tool_name_allowlist_is_closed() {
+        assert!(TOOL_NAMES.contains(&"unbound"));
+        assert!(TOOL_NAMES.contains(&"unbound-remove"));
+        assert!(!TOOL_NAMES.contains(&"unbound; rm -rf /"));
+        assert!(!TOOL_NAMES.contains(&"anything-else"));
     }
 }
