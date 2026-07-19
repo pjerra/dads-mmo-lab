@@ -3,6 +3,14 @@
   import { qualityName, QUALITY_COLORS } from "$lib/wow";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+
+  // Batch 3 F11e: open the item's Wowhead (WotLK) page in the system
+  // browser. Entry ids are numbers from our own DB query -- the URL is never
+  // user-typed text. Best-effort, same as ModuleManager's openModUrl.
+  function openWowhead(entry: number) {
+    openUrl(`https://www.wowhead.com/wotlk/item=${entry}`).catch(() => {});
+  }
 
   let name = $state("");
   let quality = $state<string>("");
@@ -98,7 +106,10 @@
             <td>{qualityName(it.quality)}</td>
             <td>{it.item_level}</td>
             <td>{it.required_level}</td>
-            <td><button disabled={sending} onclick={() => { sendItem = it; sentMsg = null; }}>Send</button></td>
+            <td>
+              <button class="wh" title="View on Wowhead" onclick={() => openWowhead(it.entry)}>🔗</button>
+              <button disabled={sending} onclick={() => { sendItem = it; sentMsg = null; }}>Send</button>
+            </td>
           </tr>
         {/each}
       </tbody>
@@ -107,7 +118,10 @@
 
   {#if sendItem}
     <div class="card sendbox">
-      <strong>Send {sendItem.name}</strong>
+      <strong>
+        Send {sendItem.name}
+        <button class="wh" title="View on Wowhead" onclick={() => sendItem && openWowhead(sendItem.entry)}>🔗</button>
+      </strong>
       <div class="row">
         <CharPicker bind:selected={sendTo} />
         <label>Count <input type="number" min="1" max="200" bind:value={sendCount} /></label>
@@ -140,6 +154,8 @@
   .row { display: flex; gap: 10px; align-items: center; }
   label { font-size: 14px; color: #8b949e; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
+  button.wh { padding: 6px 8px; font-size: 12px; }
+  button.wh:hover { border-color: #58a6ff; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; }
