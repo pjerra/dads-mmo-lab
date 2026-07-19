@@ -93,15 +93,22 @@ _wait_ready() {
 }
 
 _start_auth_world() {
-  # Use docker start (not compose up) so we do NOT re-trigger ac-db-import
-  # or ac-client-data-init on every restart — that was killing the database.
   if docker ps -a --format '{{.Names}}' | grep -qx "$AUTH_CONTAINER" \
      && docker ps -a --format '{{.Names}}' | grep -qx "$WORLD_CONTAINER"; then
     docker start "$DB_CONTAINER" 2>/dev/null || true
     _wait_db_healthy || { echo "[dml] ERROR: Database not healthy" >&2; exit 1; }
     _pin_realm_local
-    _log "Starting auth + world (direct)..."
-    docker start "$AUTH_CONTAINER" "$WORLD_CONTAINER"
+    # compose up --no-deps, NOT plain `docker start`: a started container
+    # keeps the environment it was CREATED with, so settings saved as
+    # compose environment overrides (XP rates, bot counts) silently never
+    # applied across restarts. compose recreates the containers when their
+    # config changed and just starts them when it didn't; --no-deps keeps
+    # the one-shot ac-db-import/ac-client-data-init dependencies from
+    # re-running (re-triggering those every restart was killing the
+    # database, and a surprise db-import also applies pending core
+    # migrations).
+    _log "Starting auth + world (compose, no deps)..."
+    docker compose up -d --no-deps "$AUTH_CONTAINER" "$WORLD_CONTAINER"
   else
     _log "First boot — running docker compose up..."
     docker compose up -d "$AUTH_CONTAINER" "$WORLD_CONTAINER"
