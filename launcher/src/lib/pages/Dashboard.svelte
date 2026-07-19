@@ -22,6 +22,7 @@
     wowItemInfo,
     wowCharProgress,
     wowEntityInfo,
+    wowAchievements,
     type ServerDetail,
     type PaperdollData,
     type PaperdollItem,
@@ -33,6 +34,13 @@
   import { sanitizeTooltipHtml } from "$lib/tooltip";
   import { chunkIds, formatEpochDate } from "$lib/progress";
   import { learnedRank, treePoints, treeRows, type Tree, type Talent } from "$lib/talent-trees";
+  import {
+    categoryTree,
+    scopeAchievements,
+    earnedPoints,
+    type AchievementCategory,
+    type AchievementDef,
+  } from "$lib/achievements";
   import talentTreesJson from "$lib/talent-trees-wotlk.json";
   import CharPicker from "$lib/CharPicker.svelte";
   import CharacterModel from "$lib/CharacterModel.svelte";
@@ -117,6 +125,109 @@
     }
   }
 
+  // Task P2: tabbed character window. Default/reset target is always
+  // "character" -- a fresh character load must land there, never leave a
+  // previous character's Achievements/Talents tab selected.
+  let activeTab: "character" | "talents" | "achievements" = $state("character");
+  function setTab(tab: "character" | "talents" | "achievements") {
+    activeTab = tab;
+    if (tab === "achievements") void ensureAchievementsData();
+  }
+
+  // The 217KB achievements-wotlk.json is dynamic-imported (not a static
+  // top-level import) so its parse cost never lands on app startup or the
+  // critical Dashboard bundle chunk -- it's only pulled in the first time
+  // someone actually opens the Achievements tab, and cached module-level
+  // (survives Dashboard remounts, like infoCache/entityCache above) so
+  // later tab switches / character loads never re-import it.
+  interface AchievementsData {
+    categories: AchievementCategory[];
+    achievements: AchievementDef[];
+  }
+  // Generic-param $state style (matches `doll`/`progress` above) rather
+  // than annotating the `let` -- the latter defeats TS narrowing for
+  // property access on this variable under this project's svelte-check
+  // version (confirmed via isolated repro), the former doesn't.
+  let achievementsData = $state<AchievementsData | null>(null);
+  let loadingAchData = $state(false);
+  async function ensureAchievementsData() {
+    if (achievementsData || loadingAchData) return;
+    loadingAchData = true;
+    try {
+      const mod = await import("$lib/achievements-wotlk.json");
+      achievementsData = mod.default as unknown as AchievementsData;
+    } catch {
+      // best-effort, like the rest of this file's fetches -- the tab just
+      // shows nothing rather than an error card.
+    } finally {
+      loadingAchData = false;
+    }
+  }
+
+  // The character's COMPLETE earned-achievement list (distinct from
+  // progress.achievements.recent above, which is only the 10 most recent
+  // and stays as-is to keep pre-warming entityCache). Fetched once per
+  // character alongside loadProgress.
+  let earnedAchievements: AchievementEntry[] = $state([]);
+  async function loadEarnedAchievements(name: string) {
+    try {
+      const r = await wowAchievements(name);
+      earnedAchievements = r.earned;
+    } catch {
+      earnedAchievements = [];
+    }
+  }
+  const earnedSet = $derived(new Set(earnedAchievements.map((e) => e.id)));
+  const earnedDateById = $derived(new Map(earnedAchievements.map((e) => [e.id, e.date])));
+
+  const totalAchPoints = $derived(
+    achievementsData ? earnedPoints(achievementsData.achievements, earnedSet) : 0,
+  );
+  const earnedAchCount = $derived(
+    achievementsData ? achievementsData.achievements.filter((a) => earnedSet.has(a.id)).length : 0,
+  );
+  const totalAchCount = $derived(achievementsData ? achievementsData.achievements.length : 0);
+  const catTree = $derived(achievementsData ? categoryTree(achievementsData.categories) : []);
+
+  // Selected left-rail category; null until the dataset has loaded and a
+  // default (first root) has been picked below.
+  let selectedCatId = $state<number | null>(null);
+
+  // Achievement rows for the currently selected scope only -- never the
+  // full 1320. Faction filtering is a known simplification: the launcher
+  // has no way to know the viewed character's faction here, so every row
+  // is shown regardless of the `faction` field (matches the brief: -1
+  // always shown, 0/1 "show both" rather than guessing/hiding either).
+  const scopeList = $derived(
+    achievementsData && selectedCatId !== null
+      ? scopeAchievements(achievementsData.achievements, selectedCatId, achievementsData.categories)
+      : [],
+  );
+
+  // Selecting a category fetches icons ONLY for that scope's achievements
+  // (chunked ≤25 via the existing loadEntities, which already skips
+  // anything already cached) -- never all 1320 up front, and re-selecting
+  // a previously-viewed category costs nothing.
+  function selectCategory(catId: number) {
+    selectedCatId = catId;
+    if (!achievementsData) return;
+    const scope = scopeAchievements(achievementsData.achievements, catId, achievementsData.categories);
+    void loadEntities(
+      "achievement",
+      scope.map((a) => a.id),
+    );
+  }
+
+  // Default selection once the dataset has loaded: the first root
+  // category, in-game style. Guarded on selectedCatId === null so this
+  // only ever fires once per dataset load / per character reset, never on
+  // every render.
+  $effect(() => {
+    if (achievementsData && selectedCatId === null && catTree.length > 0) {
+      selectCategory(catTree[0].root.id);
+    }
+  });
+
   async function refreshInfo() {
     loadingInfo = true;
     infoError = null;
@@ -154,10 +265,19 @@
     hovered = null;
     progress = null;
     progressError = null;
+    // Task P2: a fresh character load always lands on the Character tab
+    // and drops the previous character's earned-achievement state/category
+    // selection -- the achievements DATASET itself (categories/defs) is
+    // character-independent and stays cached, only the per-character
+    // earned list and which category was being browsed reset.
+    activeTab = "character";
+    earnedAchievements = [];
+    selectedCatId = null;
     try {
       doll = await wowPaperdoll(charName);
       fetchItemInfo(doll.equipped);
       void loadProgress(charName);
+      void loadEarnedAchievements(charName);
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       dollError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -354,25 +474,32 @@
   </div>
 {/snippet}
 
-{#snippet achievementRow(entry: AchievementEntry)}
-  {@const info = entityInfo("achievement", entry.id)}
+{#snippet achBrowserRow(a: AchievementDef)}
+  {@const info = entityInfo("achievement", a.id)}
+  {@const earnedDate = earnedDateById.get(a.id)}
+  {@const isEarned = earnedSet.has(a.id)}
   <div
-    class="arow"
+    class="abrow"
+    class:earned={isEarned}
     role="button"
     tabindex="0"
-    aria-label={info?.wowhead?.name ?? `Achievement #${entry.id}`}
-    onmouseenter={(e: MouseEvent) => showTooltip(e, { source: "achievement", id: entry.id })}
+    aria-label={a.name}
+    onmouseenter={(e: MouseEvent) => showTooltip(e, { source: "achievement", id: a.id })}
     onmouseleave={hideTooltip}
-    onfocus={(e: FocusEvent) => showTooltip(e, { source: "achievement", id: entry.id })}
+    onfocus={(e: FocusEvent) => showTooltip(e, { source: "achievement", id: a.id })}
     onblur={hideTooltip}
   >
-    <div class="arow-icon" class:filled={!!info?.icon_b64}>
+    <div class="abrow-icon" class:filled={!!info?.icon_b64}>
       {#if info?.icon_b64}
         <img src="data:image/jpeg;base64,{info.icon_b64}" alt="" />
       {/if}
     </div>
-    <span class="arow-name">{info?.wowhead?.name ?? `#${entry.id}`}</span>
-    <span class="arow-date muted">{formatEpochDate(entry.date)}</span>
+    <div class="abrow-text">
+      <span class="abrow-name">{a.name}</span>
+      <span class="abrow-desc muted">{a.desc}</span>
+    </div>
+    <span class="abrow-points">{a.points}</span>
+    <span class="abrow-date muted">{isEarned && earnedDate ? formatEpochDate(earnedDate) : ""}</span>
   </div>
 {/snippet}
 
@@ -428,79 +555,108 @@
   {#if dollError}
     <div class="error-card"><strong>Couldn't load character gear.</strong><p>{dollError}</p></div>
   {:else if doll}
-    <div class="doll-row">
-      <div class="card doll">
-        <div class="paperdoll">
-          <div class="col">
-            {#each LEFT_SLOTS as [slotNum, label] (slotNum)}
-              {@render slotBox(slotNum, label)}
-            {/each}
-          </div>
-          <div class="summary">
-            <div class="charname">{doll.name}</div>
-            <div class="muted">Level {doll.level} {className(doll.class)}</div>
-            <div class="gold">{doll.gold} gold</div>
-            <CharacterModel {doll} />
-          </div>
-          <div class="col">
-            {#each RIGHT_SLOTS as [slotNum, label] (slotNum)}
-              {@render slotBox(slotNum, label)}
-            {/each}
-          </div>
-          <div class="bottom-row">
-            {#each BOTTOM_SLOTS as [slotNum, label] (slotNum)}
-              {@render slotBox(slotNum, label)}
-            {/each}
+    <div class="tabbed-window">
+      <div class="tabstrip">
+        <button class:active={activeTab === "character"} onclick={() => setTab("character")}>Character</button>
+        <button class:active={activeTab === "talents"} onclick={() => setTab("talents")}>Talents</button>
+        <button class:active={activeTab === "achievements"} onclick={() => setTab("achievements")}>Achievements</button>
+      </div>
+
+      {#if activeTab === "character"}
+        <div class="doll-row">
+          <div class="card doll">
+            <div class="paperdoll">
+              <div class="col">
+                {#each LEFT_SLOTS as [slotNum, label] (slotNum)}
+                  {@render slotBox(slotNum, label)}
+                {/each}
+              </div>
+              <div class="summary">
+                <div class="charname">{doll.name}</div>
+                <div class="muted">Level {doll.level} {className(doll.class)}</div>
+                <div class="gold">{doll.gold} gold</div>
+                <CharacterModel {doll} />
+              </div>
+              <div class="col">
+                {#each RIGHT_SLOTS as [slotNum, label] (slotNum)}
+                  {@render slotBox(slotNum, label)}
+                {/each}
+              </div>
+              <div class="bottom-row">
+                {#each BOTTOM_SLOTS as [slotNum, label] (slotNum)}
+                  {@render slotBox(slotNum, label)}
+                {/each}
+              </div>
+            </div>
+            <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
           </div>
         </div>
-        <p class="muted">Shown as of the character's last save — an online character can lag a little.</p>
-      </div>
-    </div>
-
-    <div class="progress-row">
-      <div class="card talents-card">
-        <div class="card-head">
-          <h3>Talents</h3>
-          {#if progress && progress.talents.groups_count > 1}
-            <span class="badge">Dual spec</span>
+      {:else if activeTab === "talents"}
+        <div class="card talents-card">
+          <div class="card-head">
+            <h3>Talents</h3>
+            {#if progress && progress.talents.groups_count > 1}
+              <span class="badge">Dual spec</span>
+            {/if}
+          </div>
+          {#if progressError}
+            <p class="muted">{progressError}</p>
+          {:else if loadingProgress && !progress}
+            <p class="muted">Loading…</p>
+          {:else if progress}
+            {@const learnedSet = new Set(progress.talents.spells)}
+            {@const trees = talentTreesForClass(doll.class)}
+            {@const pointsPerTree = trees.map((t) => treePoints(t, learnedSet))}
+            <p class="muted">
+              {pointsPerTree.reduce((a, b) => a + b, 0)} points — {pointsPerTree.join("/")}
+            </p>
+            <div class="tree-row">
+              {#each trees as tree (tree.id)}
+                {@render treePanel(tree, learnedSet)}
+              {/each}
+            </div>
           {/if}
         </div>
-        {#if progressError}
-          <p class="muted">{progressError}</p>
-        {:else if loadingProgress && !progress}
-          <p class="muted">Loading…</p>
-        {:else if progress}
-          {@const learnedSet = new Set(progress.talents.spells)}
-          {@const trees = talentTreesForClass(doll.class)}
-          {@const pointsPerTree = trees.map((t) => treePoints(t, learnedSet))}
-          <p class="muted">
-            {pointsPerTree.reduce((a, b) => a + b, 0)} points — {pointsPerTree.join("/")}
-          </p>
-          <div class="tree-row">
-            {#each trees as tree (tree.id)}
-              {@render treePanel(tree, learnedSet)}
-            {/each}
+      {:else}
+        <div class="card ach-browser">
+          <div class="ach-header">
+            {#if loadingAchData}
+              <p class="muted">Loading achievements…</p>
+            {:else if achievementsData}
+              <p class="muted">{totalAchPoints} points · {earnedAchCount} of {totalAchCount}</p>
+            {/if}
           </div>
-        {/if}
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <h3>Achievements</h3>
+          {#if achievementsData}
+            <div class="ach-body">
+              <div class="ach-rail">
+                {#each catTree as node (node.root.id)}
+                  <button
+                    class="cat-root"
+                    class:active={selectedCatId === node.root.id}
+                    onclick={() => selectCategory(node.root.id)}
+                  >
+                    {node.root.name}
+                  </button>
+                  {#each node.children as child (child.id)}
+                    <button
+                      class="cat-child"
+                      class:active={selectedCatId === child.id}
+                      onclick={() => selectCategory(child.id)}
+                    >
+                      {child.name}
+                    </button>
+                  {/each}
+                {/each}
+              </div>
+              <div class="ach-list">
+                {#each scopeList as a (a.id)}
+                  {@render achBrowserRow(a)}
+                {/each}
+              </div>
+            </div>
+          {/if}
         </div>
-        {#if progressError}
-          <p class="muted">{progressError}</p>
-        {:else if loadingProgress && !progress}
-          <p class="muted">Loading…</p>
-        {:else if progress}
-          <p class="muted">{progress.achievements.total} earned</p>
-          <div class="arow-list">
-            {#each progress.achievements.recent.slice(0, 10) as entry (entry.id)}
-              {@render achievementRow(entry)}
-            {/each}
-          </div>
-        {/if}
-      </div>
+      {/if}
     </div>
   {/if}
 </section>
@@ -617,15 +773,32 @@
   .wow-tooltip :global(th) { text-align: right; color: #9d9d9d; font-weight: normal; }
   .wow-tooltip :global(.whtt-extra) { color: #9d9d9d; }
 
-  /* Talents/Achievements cards, side by side beneath the model+paperdoll
-     row; wraps to stacked on narrow windows like .doll-row. */
-  .progress-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-  .progress-row .card { flex: 1 1 320px; min-width: 280px; }
-  /* Three 4-col/40px tree panels need more room than the achievements
-     card's single icon+text list -- give it a bigger share of the row. */
+  /* Task P2: Character/Talents/Achievements tabbed window -- replaces the
+     old side-by-side .doll-row + .progress-row layout. Horizontal tab
+     strip in the sidebar nav's visual language (active = bright text +
+     accent underline instead of the sidebar's left border, since this
+     strip is horizontal); each tab's own content keeps its own card
+     chrome below the strip (matching Config.svelte's dark-card/#30363d
+     language) rather than the whole window being one big outer card. */
+  .tabbed-window { display: flex; flex-direction: column; gap: 12px; }
+  .tabstrip { display: flex; gap: 4px; border-bottom: 1px solid #30363d; }
+  .tabstrip button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 8px 16px;
+    color: #8b949e;
+    font-size: 14px;
+  }
+  .tabstrip button.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
+  .tabstrip button:hover:not(.active) { color: #c9d1d9; }
+
   /* 590px = three 172px tree grids + two 20px gaps + 32px card padding --
-     the floor at which all three trees genuinely fit side by side. */
-  .progress-row .talents-card { flex: 2 1 590px; min-width: 590px; }
+     the floor at which all three trees genuinely fit side by side. No
+     longer needs a flex-basis (it's the sole child of its tab now, not
+     racing an achievements card for a shared row). */
+  .talents-card { min-width: 590px; }
   .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   .card-head h3 { margin: 0; font-size: 14px; color: #f0f6fc; }
   .badge {
@@ -676,19 +849,66 @@
   }
   .rank-badge.maxed { color: #d4af37; border-color: #d4af37; }
 
-  .arow-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-  .arow { display: flex; align-items: center; gap: 8px; cursor: pointer; }
-  .arow-icon {
+  /* Achievements-tab in-game-style browser: left rail of root/child
+     categories, scrollable row list on the right (capped ~60vh so the
+     page doesn't grow unbounded -- the character/talents tabs don't need
+     this since they're bounded by their own fixed grids). */
+  .ach-header p { margin: 0; }
+  .ach-body { display: flex; gap: 16px; align-items: flex-start; }
+  .ach-rail {
+    flex: 0 0 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .ach-rail button {
+    background: none;
+    border: none;
+    text-align: left;
+    padding: 6px 10px;
+    color: #8b949e;
+    font-size: 13px;
+    border-radius: 4px;
+  }
+  .ach-rail button.cat-child { padding-left: 22px; font-size: 12px; }
+  .ach-rail button:hover:not(.active) { color: #c9d1d9; background: #161b22; }
+  .ach-rail button.active { color: #f0f6fc; background: #161b22; }
+
+  .ach-list {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .abrow { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
+  .abrow:hover { background: #161b22; }
+  /* Unearned rows read as locked/incomplete, in-game style: dimmed row +
+     grayscale icon; earned rows are full-color (the default). */
+  .abrow:not(.earned) { opacity: 0.45; }
+  .abrow-icon {
     box-sizing: border-box;
-    width: 20px;
-    height: 20px;
+    width: 32px;
+    height: 32px;
     flex-shrink: 0;
     background: #0d1117;
     border: 1px dashed #30363d;
     border-radius: 4px;
   }
-  .arow-icon.filled { border-style: solid; }
-  .arow-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
-  .arow-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .arow-date { flex-shrink: 0; text-align: right; }
+  .abrow-icon.filled { border-style: solid; }
+  .abrow-icon img { width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+  .abrow:not(.earned) .abrow-icon img { filter: grayscale(1); }
+  .abrow-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .abrow-name { font-size: 13px; color: #f0f6fc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Explicit font-size (overrides .muted's 13px, same cascade position
+     wins since this rule comes later in the sheet) so the description
+     reads visibly smaller than the achievement name, per the in-game
+     achievement pane's look. */
+  .abrow-desc { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .abrow-points { flex-shrink: 0; font-size: 12px; color: #d4af37; font-weight: 600; min-width: 24px; text-align: right; }
+  .abrow-date { flex-shrink: 0; min-width: 74px; text-align: right; }
 </style>
