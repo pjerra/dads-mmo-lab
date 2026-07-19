@@ -34,7 +34,7 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ✅ | [console-send] Send command | Send `server info` → reply appears in history with real stats. Send `bogus` → the fault text shows inline, not a crash. (Passed 2026-07-18: real stats + inline fault user-confirmed.) |
 | ⬜ | Stopped-server state | Stop the server → Console shows "No server logs — is the server installed?" (or stale tail) without erroring. |
 | ⬜ | Console persistence (Round N) | Start a stream (e.g. a module conf activate or any action with a terminal) on one page, hop to another page and back → the transcript is intact and still streaming. Console page: send a command, leave, return → command history still there. |
-| ⬜ | Clear buttons (Round N) | Terminal Clear (greyed while running) empties + hides the panel; Console Clear empties the LOG VIEW + history — only lines arriving after the clear render (fixed 2026-07-19: was history-only, looked like a no-op). |
+| ✅ | Clear buttons (Round N) | Terminal Clear (greyed while running) empties + hides the panel; Console Clear empties the LOG VIEW + history — only lines arriving after the clear render (fixed 2026-07-19: was history-only, looked like a no-op; user-confirmed after fix). |
 | ✅ | Download log (Round N) | Terminal/Console Download opens a native save dialog; the saved file contains the transcript (sections as `== name ==` blocks); cancel does nothing. (Passed 2026-07-19.) |
 | ⬜ | Console fill (Round N) | Console page: the log fills the free window height, the page itself never scrolls; only log/history scroll internally. Other pages: starting a run auto-scrolls the terminal into view; it grows tall (viewport-capped) instead of forcing page scrolling. |
 
