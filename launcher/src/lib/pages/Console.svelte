@@ -14,6 +14,39 @@
   let command = $state("");
   let sending = $state(false);
 
+  // Command favorites (Batch 3 F11c): starred console commands, persisted in
+  // localStorage, rendered as chips above the input. Clicking a chip FILLS
+  // the input (never auto-sends). The star next to the send box adds/removes
+  // the current input text. Guarded storage access, same idiom as
+  // features.svelte.ts (vitest's node env has no localStorage).
+  const FAVS_KEY = "dml.consoleFavs";
+  function readFavs(): string[] {
+    try {
+      if (typeof localStorage === "undefined") return [];
+      const raw = localStorage.getItem(FAVS_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  function writeFavs(favs: string[]): void {
+    try {
+      if (typeof localStorage !== "undefined") localStorage.setItem(FAVS_KEY, JSON.stringify(favs));
+    } catch {
+      // In-memory list still applies this session.
+    }
+  }
+  let favs: string[] = $state(readFavs());
+  const isFav = $derived(favs.includes(command.trim()));
+  function toggleFav() {
+    const cmd = command.trim();
+    if (!cmd) return;
+    favs = favs.includes(cmd) ? favs.filter((f) => f !== cmd) : [...favs, cmd];
+    writeFavs(favs);
+  }
+
   let logEl: HTMLDivElement | undefined = $state();
 
   async function refreshLogs() {
@@ -153,6 +186,14 @@
     </div>
   {/if}
 
+  {#if favs.length > 0}
+    <div class="favrow">
+      {#each favs as f (f)}
+        <button class="fav-chip" title="Fill the command box (does not send)" onclick={() => (command = f)}>{f}</button>
+      {/each}
+    </div>
+  {/if}
+
   <form
     class="sendrow"
     onsubmit={(e) => {
@@ -167,6 +208,16 @@
       disabled={sending || featureLocked("console-send")}
       title={featureLocked("console-send") ? LOCKED_HINT : undefined}
     />
+    <button
+      type="button"
+      class="starbtn"
+      class:faved={isFav}
+      onclick={toggleFav}
+      disabled={command.trim() === ""}
+      title={isFav ? "Remove this command from favorites" : "Save this command as a favorite"}
+    >
+      {isFav ? "★" : "☆"}
+    </button>
     <button
       class="primary"
       type="submit"
@@ -188,6 +239,11 @@
   .log { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.45; overflow-y: auto; flex: 1; min-height: 200px; }
   .logline { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
   .sendrow { display: flex; gap: 8px; flex-shrink: 0; }
+  .favrow { display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+  .fav-chip { background: #161b22; border: 1px solid #30363d; border-radius: 12px; color: #c9d1d9; font-family: Consolas, monospace; font-size: 12px; padding: 3px 10px; cursor: pointer; }
+  .fav-chip:hover { border-color: #58a6ff; }
+  .starbtn { font-size: 16px; padding: 6px 10px; }
+  .starbtn.faved { color: #d29922; border-color: #d29922; }
   .sendrow input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; font-family: Consolas, monospace; font-size: 13px; }
   .history { display: flex; flex-direction: column; gap: 10px; max-height: 22vh; overflow-y: auto; flex-shrink: 0; }
   .entry { border-left: 2px solid #30363d; padding-left: 10px; }
