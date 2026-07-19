@@ -509,6 +509,13 @@ export const wowBotsFlush = (onEvent: (e: TermEvent) => void): Promise<void> => 
 };
 
 export interface OnlineChar { guid: number; name: string; class: number; level: number; }
+// Batch 3 F11a: Home "players online" card row (bots excluded CLI-side).
+export interface PlayerOnline { name: string; level: number; class: number; zone: number; }
+
+export async function wowPlayersOnline(): Promise<PlayerOnline[]> {
+  const d = await invoke<{ players: PlayerOnline[] }>("wow_players_online");
+  return d.players;
+}
 export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }
 export interface PartyAddResult { added: boolean; joined: boolean; bot: string | null; note: string | null; }
 

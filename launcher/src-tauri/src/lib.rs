@@ -858,6 +858,12 @@ async fn wow_party_online(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "party".into(), "online".into()]).await
 }
 
+// Batch 3 F11a: read-only who's-playing list for the Home card.
+#[tauri::command]
+async fn wow_players_online(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "players".into(), "online".into()]).await
+}
+
 #[tauri::command]
 async fn wow_party_add(player: String, class: String, gender: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let mut a: Vec<String> = vec!["wow".into(),"party".into(),"add".into(),"--player".into(),player,"--class".into(),class];
@@ -1415,6 +1421,7 @@ pub fn run() {
             wow_bots_flush,
             wow_party_setup,
             wow_party_online,
+            wow_players_online,
             wow_party_add,
             wow_party_list,
             wow_party_kick,

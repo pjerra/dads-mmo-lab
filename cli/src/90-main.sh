@@ -2294,6 +2294,40 @@ case "$cmd" in
           echo "[dml] bridge-setup done (changed=$ch, restart_required=$ch)"
         fi
         ;;
+      players)
+        # Batch 3 F11a: read-only "who's playing right now" for the Home
+        # card. Same cross-schema exclusion as `party online` below (bot
+        # accounts filtered via acore_playerbots.playerbots_account_type),
+        # plus the zone id for a bit of flavor.
+        psub="${1:-}"; shift || true
+        case "$psub" in
+          online)
+            sql="SELECT c.name, c.level, c.class, c.zone
+                 FROM characters c
+                 WHERE c.online = 1
+                   AND c.account NOT IN (
+                     SELECT account_id FROM acore_playerbots.playerbots_account_type
+                     WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            rows="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not query online players" "Is ac-database running?"; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r name lvl cls zone || [[ -n "$name" ]]; do
+              [[ -z "$name" ]] && continue
+              [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"name\":\"$(json_escape "$name")\",\"level\":$lvl,\"class\":$cls,\"zone\":$zone}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"players\":$out}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown players subcommand: $psub" "Try: dml wow players online --json"
+            exit 1
+            ;;
+        esac
+        ;;
       party)
         psub="${1:-}"; shift || true
         case "$psub" in

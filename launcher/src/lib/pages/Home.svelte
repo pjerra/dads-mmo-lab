@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesStatus, gamesStart, gamesStop, gamesRestart } from "$lib/api";
+  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, type PlayerOnline } from "$lib/api";
+  import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
@@ -37,9 +38,37 @@
       containerState = null;
     }
     await refreshServerStatus();
+    void refreshPlayers();
     refreshing = false;
   }
   onMount(refresh);
+
+  // Players-online card (Batch 3 F11a): fetched only while the world is
+  // actually up (the DB query would just error otherwise). Refetches on
+  // page Refresh and whenever the polled verdict flips to online.
+  let players: PlayerOnline[] = $state([]);
+  let playersLoaded = $state(false);
+  async function refreshPlayers() {
+    if (serverStatus.detail?.verdict !== "online") {
+      players = [];
+      playersLoaded = false;
+      return;
+    }
+    try {
+      players = await wowPlayersOnline();
+      playersLoaded = true;
+    } catch {
+      // Best-effort card -- a transient DB error just keeps the last list.
+    }
+  }
+  let lastVerdict: string | null = null;
+  $effect(() => {
+    const v = serverStatus.detail?.verdict ?? null;
+    if (v !== lastVerdict) {
+      lastVerdict = v;
+      void refreshPlayers();
+    }
+  });
 
   // Chip quick-start consumer (Batch 2 F8): the sidebar ▶ sets the request
   // and navigates here; this effect runs on mount AND when the request flips
@@ -151,6 +180,24 @@
     <div class="error-card"><strong>Couldn't read world status.</strong><p>{serverStatus.lastError}</p></div>
   {/if}
 
+  {#if serverStatus.detail?.verdict === "online" && playersLoaded}
+    <div class="card players-card">
+      <div class="card-title"><strong>Players online</strong></div>
+      {#if players.length === 0}
+        <p class="muted">Nobody online right now.</p>
+      {:else}
+        <div class="players">
+          {#each players as p (p.name)}
+            <span class="player">
+              <strong>{p.name}</strong>
+              <span class="muted">lvl {p.level} {className(p.class)}</span>
+            </span>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <header class="bar"><h2>WoW server</h2></header>
   {#if statusError}
     <div class="error-card"><strong>Couldn't reach the DML backend.</strong><p>{statusError}</p></div>
@@ -256,6 +303,9 @@
   .dot.status-dot.crash { background: #f85149; animation: dot-pulse 0.9s ease-in-out infinite; }
   @keyframes dot-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   .stats { display: flex; gap: 18px; flex-wrap: wrap; }
+  .players-card { flex-direction: column; align-items: stretch; gap: 8px; }
+  .players { display: flex; gap: 8px; flex-wrap: wrap; }
+  .player { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 3px 12px; font-size: 13px; display: inline-flex; gap: 8px; align-items: baseline; }
   .health { margin-top: 12px; border-top: 1px solid #30363d; padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
   .hrow { display: flex; gap: 10px; align-items: center; font-size: 14px; }
   .hname { min-width: 150px; color: #8b949e; }
