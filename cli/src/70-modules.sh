@@ -528,6 +528,127 @@ _lua_remove_deployed() {
     return 0
 }
 
+# --- accountwide configurator (overnight Batch 1) --------------------------
+# The accountwide ALE family ships EVERY sharing subsystem DISABLED, one
+# `local ENABLE_* = false` line (column 0) per per-subsystem lua file, and no
+# in-game UI. This helper set reads/writes those flags in the DEPLOYED copy
+# under env/dist/etc/modules/lua_scripts/accountwide/ -- NEVER the repo: this
+# family clones the upstream repo fresh at install time and copies the lua in
+# (see _lua_deploy's accountwide case). Ported from the manager's _aw_enable +
+# configure_ale_accountwide (guides/wow-wotlk/wow-manage.sh), generalized to
+# also turn flags back OFF and to READ current state for the launcher GUI.
+# Apply is `.reload ale` in-game (or a worldserver restart) -- the dispatch
+# surfaces that hint; the create_accountwide_tables.sql prerequisite is
+# applied by the install path, not here.
+
+# Deployed accountwide script dir for a server dir.
+_aw_dir() { printf '%s' "$1/env/dist/etc/modules/lua_scripts/accountwide"; }
+
+# Is the accountwide payload deployed? (exit status IS the signal)
+_aw_installed() { [[ -d "$(_aw_dir "$1")" ]]; }
+
+# Subsystem registry (reputation is pick-one -- handled separately below).
+# One row per togglable flag:  flag|file|group|parent|label|explain
+# `group` nests the money/achievement sub-toggles under their parent in the
+# GUI; `parent` is the flag that must be ON for a sub-toggle to have any
+# effect ("" = a top-level system). Descriptions are plain-language for a
+# parent running the server. Flag names + files are the upstream HEAD's,
+# verbatim (Aldori15/azerothcore-eluna-accountwide).
+_aw_registry() {
+cat <<'EOF'
+ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS|AccountAchievements.lua|achievements||Achievements|Earn an achievement on one character and every character on the account gets it too.
+ENABLE_ACCOUNTWIDE_CRITERIA_PROGRESS|AccountAchievements.lua|achievements|ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS|Achievement progress|Also share partial progress toward achievements, not just the finished ones.
+ENABLE_ACCOUNTWIDE_REALM_FIRST_ACHIEVEMENTS|AccountAchievements.lua|achievements|ENABLE_ACCOUNTWIDE_COMPLETED_ACHIEVEMENTS|Realm-first achievements|Include the special "realm first" achievements in the sharing.
+ENABLE_ACCOUNTWIDE_CURRENCY|AccountCurrency.lua|currency||Currency|Share badges and tokens (like dungeon emblems) across all your characters.
+ENABLE_ACCOUNTWIDE_MONEY|AccountMoney.lua|money||Gold|Keep one shared gold pool for every character on the account.
+ENABLE_REALTIME_TICK|AccountMoney.lua|money|ENABLE_ACCOUNTWIDE_MONEY|Live gold sync|Update the shared gold every few seconds while you play, not only on logout.
+ENABLE_ALTBOT_REALTIME_TICK|AccountMoney.lua|money|ENABLE_REALTIME_TICK|Live gold sync for alt-bots|Also live-sync the shared gold for your alt playerbots.
+ENABLE_ACCOUNTWIDE_MOUNTS|AccountMounts.lua|mounts||Mounts|Learn a mount on one character and all your characters can ride it.
+ENABLE_ACCOUNTWIDE_PETS|AccountPets.lua|pets||Battle pets|Share companion and vanity pets across all your characters.
+ENABLE_ACCOUNTWIDE_PLAYTIME|AccountPlaytime.lua|playtime||Playtime|Adds a .playtime command that totals time played across the whole account.
+ENABLE_ACCOUNTWIDE_PROFESSIONS|AccountProfessions.lua|professions||Professions|Share learned professions and their skill level across all your characters.
+ENABLE_ACCOUNTWIDE_PVP_RANK|AccountPvPRank.lua|pvp||PvP rank|Share honor kills and honor/arena points across the account.
+ENABLE_ACCOUNTWIDE_TAXI_PATHS|AccountTaxiPaths.lua|taxi||Flight paths|Share discovered flight points per faction. Needs a special mod-ale fork - may not work on this server.
+ENABLE_ACCOUNTWIDE_TITLES|AccountTitles.lua|titles||Titles|Earn a title on one character and every character on the account can use it.
+EOF
+}
+
+# Flag-name allowlist (identifier-safe -> never sed/awk regex-injectable).
+_aw_valid_flag() { [[ "$1" =~ ^ENABLE_[A-Z0-9_]{1,60}$ ]]; }
+
+# _aw_flag_read <file> <flag>: echoes "on" | "off" | "" (flag absent / no
+# file). Matches an UNCOMMENTED `local <flag> = true|false` line (leading
+# whitespace tolerated; a `-- local ...` comment is skipped), LAST occurrence
+# wins. The flag travels via the environment (F=), never awk -v, so its
+# underscores are never escape-processed; a trailing `-- comment` after the
+# boolean is tolerated. The `rest ~ /^[ \t]*=/` guard makes prefix flag names
+# safe (a longer flag's line has more identifier chars, not `=`, after ours).
+_aw_flag_read() {
+    local file="$1"
+    [[ -f "$file" ]] || { printf ''; return 0; }
+    F="$2" awk '
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            head = "local " ENVIRON["F"]
+            if (index(s, head) == 1) {
+                rest = substr(s, length(head) + 1)
+                if (rest ~ /^[ \t]*=/) {
+                    sub(/^[ \t]*=[ \t]*/, "", rest)
+                    tok = rest
+                    sub(/[ \t].*$/, "", tok); sub(/--.*$/, "", tok); sub(/;.*$/, "", tok)
+                    if (tok == "true")  { val = "on";  found = 1 }
+                    else if (tok == "false") { val = "off"; found = 1 }
+                }
+            }
+        }
+        END { if (found) print val }
+    ' "$file" 2>/dev/null
+    return 0
+}
+
+# _aw_flag_write <file> <flag> <on|off>: flips the flag's `= true|false`
+# value in place. Tolerant sed anchored to line-start (so `-- local` comments
+# are skipped -- the manager's proven pattern); verifies the new value landed
+# before committing via tmp-file + mv, so a failed edit never truncates the
+# file. Returns 1 when the flag line is absent OR the patch cannot be
+# verified; sets AW_CHANGED=true only when the value actually moved. Callers
+# validate <flag> with _aw_valid_flag first.
+_aw_flag_write() {
+    local file="$1" flag="$2" want="$3" cur from to tmp
+    [[ -f "$file" ]] || return 1
+    cur="$(_aw_flag_read "$file" "$flag")"
+    [[ -z "$cur" ]] && return 1
+    [[ "$cur" == "$want" ]] && return 0
+    if [[ "$want" == on ]]; then from=false; to=true; else from=true; to=false; fi
+    tmp="$file.tmp.$$"
+    sed "s/^\([[:space:]]*local ${flag}\)[[:space:]]*=[[:space:]]*${from}/\1 = ${to}/" "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if grep -q "^[[:space:]]*local ${flag} = ${to}" "$tmp"; then
+        mv "$tmp" "$file"
+        AW_CHANGED=true
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# _aw_rep_files <dir>: reputation is pick-one -- two variant files may ship
+# (default AC-WotLK vs a custom/Ashen-Order build), both carrying
+# ENABLE_ACCOUNTWIDE_REPUTATION. Echoes "default|custom<TAB><path>" rows for
+# whichever AccountReputation*.lua files are present (no nullglob set, so a
+# no-match glob stays literal and is filtered by the -f test).
+_aw_rep_files() {
+    local dir="$1" f bn
+    for f in "$dir"/AccountReputation*.lua; do
+        [[ -f "$f" ]] || continue
+        bn="$(basename "$f")"
+        case "$bn" in
+            *[Dd]efault*) printf 'default\t%s\n' "$f" ;;
+            *)            printf 'custom\t%s\n'  "$f" ;;
+        esac
+    done
+    return 0
+}
+
 # --- sql-mod family ---------------------------------------------------------
 _sqlmod_dirs() { mkdir -p "$1/sql_scripts/installed" "$1/sql_scripts/clones"; return 0; }
 _sqlmod_marker() { echo "$1/sql_scripts/installed/$2.installed"; }

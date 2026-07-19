@@ -3397,6 +3397,150 @@ case "$cmd" in
             ;;
         esac
         ;;
+      accountwide)
+        # Account-wide sharing configurator (overnight Batch 1). Reads/writes
+        # the ENABLE_* flags in the DEPLOYED accountwide lua files (see the
+        # _aw_* helpers in 70-modules.sh). Two verbs, both plain-JSON like
+        # `config get`/`set` (no streaming): `get` reports installed-state +
+        # every present subsystem's on/off + the reputation pick-one block;
+        # `set` flips one flag (reputation is the pick-one special case).
+        awsub="${1:-}"; shift || true
+        case "$awsub" in
+          get)
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            awdir="$(_aw_dir "$sdir")"
+            if ! _aw_installed "$sdir"; then
+              # Not an error: the GUI shows an "install accountwide first" hint.
+              json_ok '{"installed":false,"subsystems":[],"reputation":{"present":false,"value":"off","variants":[],"active":null}}'
+              exit 0
+            fi
+            subs='['; first=1
+            while IFS='|' read -r awflag awfile awgroup awparent awlabel awexplain; do
+              [[ -z "$awflag" ]] && continue
+              awval="$(_aw_flag_read "$awdir/$awfile" "$awflag")"
+              [[ -z "$awval" ]] && continue   # SKIP-if-absent: flag/file not in this install
+              [[ $first -eq 0 ]] && subs+=','
+              awpj=null; [[ -n "$awparent" ]] && awpj="\"$awparent\""
+              subs+="{\"key\":\"$awflag\",\"file\":\"$(json_escape "$awfile")\",\"group\":\"$awgroup\",\"parent\":$awpj,\"label\":\"$(json_escape "$awlabel")\",\"explain\":\"$(json_escape "$awexplain")\",\"value\":\"$awval\"}"
+              first=0
+            done < <(_aw_registry)
+            subs+=']'
+            reppresent=false; repvalue=off; repactive=null; repvars='['; vfirst=1
+            while IFS=$'\t' read -r rid rfile; do
+              [[ -z "$rid" ]] && continue
+              reppresent=true
+              [[ $vfirst -eq 0 ]] && repvars+=','
+              repvars+="\"$rid\""; vfirst=0
+              rv="$(_aw_flag_read "$rfile" ENABLE_ACCOUNTWIDE_REPUTATION)"
+              [[ "$rv" == on ]] && { repvalue=on; repactive="\"$rid\""; }
+            done < <(_aw_rep_files "$awdir")
+            repvars+=']'
+            json_ok "{\"installed\":true,\"subsystems\":$subs,\"reputation\":{\"present\":$reppresent,\"value\":\"$repvalue\",\"variants\":$repvars,\"active\":$repactive}}"
+            ;;
+          set)
+            awkey=""; awval=""; awvariant=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; awkey="$2"; shift 2 ;;
+                --value) _need_flag_val "$1" $#; awval="$2"; shift 2 ;;
+                --variant) _need_flag_val "$1" $#; awvariant="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow accountwide set --key <FLAG> --value on|off [--variant default|custom]"; exit 1 ;;
+              esac
+            done
+            case "$awval" in on|off) ;; *) json_err BAD_ARG "--value must be on or off" ""; exit 1 ;; esac
+            if ! _aw_valid_flag "$awkey"; then
+              json_err BAD_ARG "Invalid flag name: $awkey" "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json"; exit 1
+            fi
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            if ! _aw_installed "$sdir"; then
+              json_err NOT_INSTALLED "Accountwide is not installed" "Install it from the Modules page (Lua family), then reopen this page."; exit 1
+            fi
+            awdir="$(_aw_dir "$sdir")"
+            AW_CHANGED=false
+            awreload=".reload ale (Console page) or restart the server to apply"
+            if [[ "$awkey" == ENABLE_ACCOUNTWIDE_REPUTATION ]]; then
+              # Pick-one reputation: keep the chosen variant + delete the other
+              # so only one loads; disabling clears the flag in every present
+              # variant. Variant ids/files come from _aw_rep_files.
+              awrepids=(); awrepfiles=()
+              while IFS=$'\t' read -r rid rfile; do
+                [[ -z "$rid" ]] && continue
+                awrepids+=("$rid"); awrepfiles+=("$rfile")
+              done < <(_aw_rep_files "$awdir")
+              if [[ ${#awrepfiles[@]} -eq 0 ]]; then
+                json_err NOT_FOUND "No AccountReputation lua file is deployed" "Reputation sharing isn't available in this install."; exit 1
+              fi
+              if [[ "$awval" == off ]]; then
+                awrepfail=0
+                for awi in "${!awrepfiles[@]}"; do
+                  [[ "$(_aw_flag_read "${awrepfiles[$awi]}" ENABLE_ACCOUNTWIDE_REPUTATION)" == off ]] && continue
+                  _aw_flag_write "${awrepfiles[$awi]}" ENABLE_ACCOUNTWIDE_REPUTATION off || awrepfail=1
+                done
+                [[ "$awrepfail" != 0 ]] && { json_err WRITE_FAILED "Could not disable reputation sharing" "Edit the AccountReputation lua manually."; exit 1; }
+                json_ok "{\"key\":\"ENABLE_ACCOUNTWIDE_REPUTATION\",\"value\":\"off\",\"changed\":$AW_CHANGED,\"reload\":\"$(json_escape "$awreload")\"}"
+                exit 0
+              fi
+              # value == on: choose a variant (default to the sole one present).
+              awchosen=""
+              if [[ ${#awrepfiles[@]} -eq 1 ]]; then
+                if [[ -n "$awvariant" && "$awvariant" != "${awrepids[0]}" ]]; then
+                  json_err BAD_ARG "Only the ${awrepids[0]} reputation variant is deployed" "Pass --variant ${awrepids[0]} or omit it."; exit 1
+                fi
+                awchosen="${awrepfiles[0]}"
+              else
+                case "$awvariant" in
+                  default|custom) ;;
+                  *) json_err BAD_ARG "Two reputation variants are deployed -- pass --variant default|custom" ""; exit 1 ;;
+                esac
+                for awi in "${!awrepids[@]}"; do
+                  [[ "${awrepids[$awi]}" == "$awvariant" ]] && awchosen="${awrepfiles[$awi]}"
+                done
+                [[ -z "$awchosen" ]] && { json_err NOT_FOUND "The $awvariant reputation variant is not deployed" ""; exit 1; }
+              fi
+              awremoved='['; dfirst=1
+              for awf in "${awrepfiles[@]}"; do
+                [[ "$awf" == "$awchosen" ]] && continue
+                if rm -f "$awf"; then
+                  [[ $dfirst -eq 0 ]] && awremoved+=','
+                  awremoved+="\"$(json_escape "$(basename "$awf")")\""; dfirst=0
+                  AW_CHANGED=true
+                else
+                  json_err WRITE_FAILED "Could not remove the other reputation variant" "Both files would load and conflict -- remove one manually."; exit 1
+                fi
+              done
+              awremoved+=']'
+              if ! _aw_flag_write "$awchosen" ENABLE_ACCOUNTWIDE_REPUTATION on; then
+                json_err WRITE_FAILED "Could not enable reputation sharing in $(basename "$awchosen")" ""; exit 1
+              fi
+              json_ok "{\"key\":\"ENABLE_ACCOUNTWIDE_REPUTATION\",\"value\":\"on\",\"variant\":\"$(json_escape "$(basename "$awchosen")")\",\"removed\":$awremoved,\"changed\":$AW_CHANGED,\"reload\":\"$(json_escape "$awreload")\"}"
+              exit 0
+            fi
+            # Generic (non-reputation) flag: must be a known registry flag.
+            awrow="$(_aw_registry | grep -m1 -F "$awkey|" || true)"
+            if [[ "$awrow" != "$awkey|"* ]]; then
+              json_err BAD_ARG "Unknown accountwide flag: $awkey" "See: dml wow accountwide get --json"; exit 1
+            fi
+            awfile="$(printf '%s' "$awrow" | cut -d'|' -f2)"
+            if ! _aw_flag_write "$awdir/$awfile" "$awkey" "$awval"; then
+              if [[ -z "$(_aw_flag_read "$awdir/$awfile" "$awkey")" ]]; then
+                json_err NOT_FOUND "$awkey is not present in $awfile" "This subsystem may not exist in the installed accountwide version."; exit 1
+              fi
+              json_err WRITE_FAILED "Could not update $awkey in $awfile" "Edit the file manually or reinstall accountwide."; exit 1
+            fi
+            json_ok "{\"key\":\"$awkey\",\"value\":\"$awval\",\"changed\":$AW_CHANGED,\"reload\":\"$(json_escape "$awreload")\"}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown accountwide subcommand: $awsub" "Try: dml wow accountwide get --json"
+            exit 1
+            ;;
+        esac
+        ;;
       ahbot)
         ahsub="${1:-}"; shift || true
         case "$ahsub" in
