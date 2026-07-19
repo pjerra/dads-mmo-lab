@@ -184,6 +184,22 @@ Feature keys in [brackets] match `features.ts`. Rows without a key are read-only
 | ⬜ | Crashed verdict (read-only) | With the server running: kill the world hard (`wsl -d dml-arch -u dml -- docker kill ac-worldserver`) → within ~7s chip + Home card show "Server crashed" (pulsing red, distinct from a normal Stop) with the exit code and a Recover button; Recover = normal Start, world comes back. A normal Stop must still read plain "Stopped". |
 | ⬜ | [chip-start] Chip ▶ quick-start | With the server stopped (or crashed), a small green ▶ shows next to the sidebar chip on EVERY page → click → lands on Home with the start streaming into Home's terminal. No stop button on the chip, ever. |
 
+## 17. Batch 3 — pages & QoL
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | Help & FAQ page (read-only) | Sidebar bottom → Help & FAQ: six accordion sections open/close; every Copy button puts the command on the clipboard ("Copied!" flash); the Tools/Backups deep links navigate; Community opens the Dad's MMO Lab GitHub in the browser. No Discord link anywhere (none exists). |
+| ⬜ | AZEROTH IS READY toast + Windows notification | Start the server from stopped and wait for boot → the moment the chip flips to "World is up": green bottom-right toast on whatever page you're on (click or 12s dismisses) AND a Windows notification (first time: Windows asks permission — allow). Restart → fires again after boot. Quit+reopen the launcher while the world is already up → NO notification on first poll. |
+| ⬜ | Players online card (read-only) | With the world up and your character logged in: Home shows a "Players online" card with name + lvl + class (bots never listed — compare a busy city). Log out → after a Refresh the card says "Nobody online right now." Card absent while stopped/starting. |
+| ⬜ | Core GM cheat-sheet (read-only) | Commands page: "Core commands (always available)" card sits ABOVE the module blocks with 11 rows (.tele → .saveall); try one in-game (e.g. `.server info`) to confirm the wording matches reality. |
+| ⬜ | Console command favorites | Console: type `server info` → star it (★ turns gold) → chip appears above the input; click the chip → input FILLS but does not send; star again → removed. Restart the launcher → favorites still there. |
+| ⬜ | Teleport favorites | Teleport: star 2-3 locations → they pin to the top of the list (gold star); filter → favorites that match still sort first; unstar → row drops back. Restart the launcher → stars kept. |
+| ⬜ | Wowhead links (read-only) | Item Database: search anything → 🔗 on a result row opens wowhead.com/wotlk/item=<id> in the browser (right item!); the Send box header 🔗 does the same. |
+| ⬜ | [world-restart] Restart world only | Server running: Home → "Restart world only" → terminal streams the settings-don't-apply warning, saveall, docker restart, readiness wait; chip shows amber during, "World is up" after — noticeably faster than full Restart. THEN verify the caveat is real: change a Settings value, world-restart, confirm the change is NOT live; full Restart applies it. |
+| ⬜ | Character switcher | Pick a character on any page's picker → sidebar footer shows "playing as <name>". Click the chip → dropdown lists all accounts' characters; pick another → every open picker (Teleport/GM Tools/Items) follows. Restart the launcher → still selected. Delete that character (or use another account) → pickers fall back to the first char without erroring. |
+| ⬜ | [module-fixit] Battle Pass NPC fix | With Battle Pass installed: Modules → Battle Pass row → "Fix missing NPC" → note says placed in Stormwind + Orgrimmar and to restart. Restart the world → NPC "Battle Pass Vendor" stands in the Stormwind trade district (-8819 636) and Org Valley of Strength (1609 -4407) and opens gossip. Click Fix again → "already placed", no duplicate NPC after another restart. |
+| ⬜ | [title-remove] Keep game data on remove | Remove an AC-based title with "Keep downloaded game data" CHECKED → stream says keeping the volume; `docker volume ls` in the distro still shows `<title>_ac-client-data`; reinstall skips the big client-data download. Remove again UNCHECKED → stream says removed game data volume and `docker volume ls` no longer lists it. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installs but its client-side DBC/MPQ patching is NOT ported yet — don't judge it broken, it's a known gap.

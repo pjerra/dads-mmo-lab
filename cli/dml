@@ -171,15 +171,17 @@ soap_exec() {
 # ---------------------------------------------------------------------------
 # MySQL access to the AzerothCore DBs via the ac-database container.
 # Search/dashboard queries here are read-only; most mutations go through
-# SOAP, never a direct write. FOUR direct MySQL writes are sanctioned
+# SOAP, never a direct write. FIVE direct MySQL writes are sanctioned
 # project-wide (see 60-backup.sh header for the full list): the pre-existing
 # LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore,
 # teleport-coords' characters.position_x/y/z/map/orientation UPDATE via
 # _chars_write_stmt below -- OFFLINE characters only, see the
-# `teleport-coords` arm in 90-main.sh -- and (new) module repair's
-# INSERT/DELETE on the `updates` tracking tables ONLY (never game tables) via
-# the generalized _db_write_stmt below, see the `module repair` arm in
-# 90-main.sh.
+# `teleport-coords` arm in 90-main.sh -- module repair's INSERT/DELETE on
+# the `updates` tracking tables ONLY (never game tables), and (Batch 3
+# F13b) `module fixit battlepass-npc`'s fixed-literal INSERTs of
+# creature_template/creature entry 90100 (idempotence-checked, no user
+# input in the statements) -- both via the generalized _db_write_stmt
+# below, see the `module repair` / `module fixit` arms in 90-main.sh.
 # ---------------------------------------------------------------------------
 _db_pw() { echo "${DML_DB_ROOT_PASSWORD:-password}"; }
 
@@ -1530,17 +1532,19 @@ _gm_require_online() {
 # ---------------------------------------------------------------------------
 # Character backups (Lab-parity round 5): whole-server snapshots.
 # mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
-# FOUR DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
+# FIVE DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
 # toggle's realmlist UPDATE (90-main.sh `lan`), teleport-coords'
 # characters.position_x/y/z/map/orientation UPDATE (offline characters only
 # -- 90-main.sh `teleport-coords` arm, via `_chars_write_stmt` in
 # 30-db.sh), module repair's INSERT/DELETE on the `updates` tracking tables
 # ONLY -- never game tables (90-main.sh `module repair` arm, via the
 # generalized `_db_write_stmt` in 30-db.sh; see
-# docs/superpowers/specs/2026-07-18-module-repair-design.md), and RESTORE
-# below -- the project's one sanctioned write path for whole CHARACTER-DB
-# snapshots: only inside `backup restore`, only with world+auth stopped,
-# always behind an automatic pre-restore safety backup.
+# docs/superpowers/specs/2026-07-18-module-repair-design.md), `module fixit
+# battlepass-npc`'s fixed-literal creature_template/creature INSERTs for
+# entry 90100 (Batch 3 F13b -- idempotence-checked, zero user input in the
+# statements), and RESTORE below -- the project's one sanctioned write path
+# for whole CHARACTER-DB snapshots: only inside `backup restore`, only with
+# world+auth stopped, always behind an automatic pre-restore safety backup.
 # See docs/.../2026-07-17-backups-design.md.
 # ---------------------------------------------------------------------------
 
@@ -3452,8 +3456,16 @@ case "$cmd" in
         ;;
       remove)
         gid="${1:-}"; shift || true
-        confirm=0
-        [[ "${1:-}" == "--yes" ]] && confirm=1
+        confirm=0; keepdata=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --yes) confirm=1; shift ;;
+            # Batch 3 F13c: preserve the client-data docker volume (the ~6 GB
+            # maps/DBC download) so a later reinstall skips re-fetching it.
+            --keep-data) keepdata=1; shift ;;
+            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data]"; exit 1 ;;
+          esac
+        done
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start games-remove
         trow="$(_title_row "$gid")"
         if [[ -z "$trow" ]]; then
@@ -3485,6 +3497,43 @@ case "$cmd" in
           ndjson_line info "stopping $gid..."
           (cd "$tcompose" && docker compose down >/dev/null 2>&1) || true
         fi
+        # --- client-data volume (Batch 3 F13c) -------------------------------
+        # `compose down` (no -v) never removes named volumes, so the ~6 GB
+        # maps/DBC volume used to be left behind forever. If the title's
+        # compose file declares the AzerothCore client-data volume, remove it
+        # here by default (a removed title shouldn't keep 6 GB of disk) --
+        # unless --keep-data asked to preserve it for a faster reinstall.
+        # Volume name: compose prefixes the declared name with the project
+        # (compose-dir basename, lowercased/sanitized); the declared name
+        # itself defaults to ac-client-data but the base file reads it from
+        # DOCKER_VOL_DATA in the project .env, so honor that override.
+        vol_base=""
+        if [[ -n "$tcompose" ]]; then
+          for _c in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+            if [[ -f "$tcompose/$_c" ]] && grep -qE '^[[:space:]]*ac-client-data:' "$tcompose/$_c"; then
+              vol_base="ac-client-data"
+              break
+            fi
+          done
+          if [[ -n "$vol_base" ]]; then
+            _ovr="$(grep -m1 '^DOCKER_VOL_DATA=' "$tcompose/.env" 2>/dev/null | cut -d= -f2- || true)"
+            [[ -n "$_ovr" ]] && vol_base="$_ovr"
+          fi
+        fi
+        if [[ -n "$vol_base" ]]; then
+          vproj="$(basename "$tcompose" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+          tvol="${vproj}_${vol_base}"
+          if [[ "$keepdata" == 1 ]]; then
+            ndjson_line info "keeping the downloaded game data volume ($tvol, ~6 GB) for a faster reinstall"
+          else
+            if docker volume rm "$tvol" >/dev/null 2>&1; then
+              ndjson_line info "removed game data volume $tvol"
+            else
+              ndjson_line warn "could not remove game data volume $tvol (may not exist or still in use)"
+            fi
+          fi
+        fi
+        # ---------------------------------------------------------------------
         if [[ -L "$GAMES_DIR/$gid" ]]; then
           ttarget="$(readlink -f "$GAMES_DIR/$gid" 2>/dev/null || true)"
           rm -f "$GAMES_DIR/$gid"
@@ -3783,6 +3832,51 @@ case "$cmd" in
         else
           json_ok '{"available":false,"lines":[]}'
         fi
+        ;;
+      world-restart)
+        # Batch 3 F11f: fast world-only restart. `docker restart` keeps the
+        # container's CREATION-time env frozen (the documented env-freeze
+        # behavior that bit full restarts before they moved to compose
+        # recreate) -- so settings/conf-env changes do NOT apply here. That
+        # caveat is surfaced in the stream AND the done payload; the full
+        # Restart (compose down+up) owns applying settings. Flow: saveall
+        # best-effort -> docker restart -t 300 of ONLY ac-worldserver ->
+        # readiness wait on the boot-complete marker (_world_ready, which is
+        # StartedAt-scoped so the pre-restart marker can't lie).
+        [[ "$DML_JSON" == 1 ]] && ndjson_section_start world-restart
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          ndjson_section_end world-restart error
+          ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          ndjson_section_end world-restart error
+          ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
+        fi
+        ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
+        ndjson_line info "saving all characters (best effort)..."
+        soap_exec 'saveall' >/dev/null 2>&1 || true
+        ndjson_line info "restarting the world server (graceful stop, up to 300s)..."
+        if ! _stream_cmd docker restart -t 300 ac-worldserver; then
+          ndjson_section_end world-restart error
+          ndjson_error RESTART_FAILED "docker restart failed for ac-worldserver" "Is the server installed and started? Check: dml doctor"; exit 1
+        fi
+        ndjson_line info "waiting for the world to come back..."
+        wr_timeout="${DML_READY_TIMEOUT_SECS:-1800}"; wr_t0=$SECONDS; wr_note=0
+        until _world_ready; do
+          wr_elapsed=$(( SECONDS - wr_t0 ))
+          if (( wr_elapsed >= wr_timeout )); then
+            ndjson_section_end world-restart error
+            ndjson_error READY_TIMEOUT "The world did not come back within ${wr_timeout}s" "Check the Console logs; a full Restart may be needed."; exit 1
+          fi
+          if (( wr_elapsed - wr_note >= 60 )); then
+            wr_note=$wr_elapsed
+            ndjson_line info "still waiting (~$(( wr_elapsed / 60 ))m) - bots respawning takes a while..."
+          fi
+          sleep 2
+        done
+        ndjson_section_end world-restart ok
+        ndjson_done '{"restarted":"world-only","note":"settings changes were NOT applied -- use full Restart for that"}'
         ;;
       console-send)
         # The manual GM console: free text is DELIBERATE here (same
@@ -4674,6 +4768,40 @@ case "$cmd" in
         else
           echo "[dml] bridge-setup done (changed=$ch, restart_required=$ch)"
         fi
+        ;;
+      players)
+        # Batch 3 F11a: read-only "who's playing right now" for the Home
+        # card. Same cross-schema exclusion as `party online` below (bot
+        # accounts filtered via acore_playerbots.playerbots_account_type),
+        # plus the zone id for a bit of flavor.
+        psub="${1:-}"; shift || true
+        case "$psub" in
+          online)
+            sql="SELECT c.name, c.level, c.class, c.zone
+                 FROM characters c
+                 WHERE c.online = 1
+                   AND c.account NOT IN (
+                     SELECT account_id FROM acore_playerbots.playerbots_account_type
+                     WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            rows="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not query online players" "Is ac-database running?"; exit 1; }
+            first=1; out='['
+            while IFS=$'\t' read -r name lvl cls zone || [[ -n "$name" ]]; do
+              [[ -z "$name" ]] && continue
+              [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"name\":\"$(json_escape "$name")\",\"level\":$lvl,\"class\":$cls,\"zone\":$zone}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"players\":$out}"
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown players subcommand: $psub" "Try: dml wow players online --json"
+            exit 1
+            ;;
+        esac
         ;;
       party)
         psub="${1:-}"; shift || true
@@ -6063,6 +6191,59 @@ case "$cmd" in
             done
             resultsj+=']'
             json_ok "{\"key\":\"$mkey\",\"db\":\"$rdb\",\"mode\":\"$rmode\",\"results\":$resultsj}"
+            ;;
+          fixit)
+            # Batch 3 F13b: canned one-shot fixes for known module gaps.
+            # battlepass-npc: the Battle Pass vendor (entry 90100) is NOT in
+            # the upstream lua-battlepass SQL (the manager creates it by hand
+            # -- wow-manage.sh fix_battlepass_npc), so after a launcher
+            # install there is no NPC to talk to. This fix ensures the
+            # creature_template exists (ported from the manager, incl. its
+            # schema-adaptive model statements as best-effort) and INSERTs
+            # spawn rows at the manager's documented capital coordinates
+            # (Stormwind map 0 / Orgrimmar map 1 -- the cheat-sheet block in
+            # 47-commands.sh). FIFTH sanctioned direct MySQL write (see
+            # 30-db.sh / 60-backup.sh headers): every statement is a fixed
+            # literal, zero user input. Idempotent: an existing spawn of
+            # entry 90100 short-circuits to already_placed. The NPC only
+            # appears after a worldserver restart -- said in the envelope.
+            fkey="${1:-}"; shift || true
+            case "$fkey" in
+              battlepass-npc) ;;
+              *) json_err BAD_ARG "Unknown fixit: ${fkey:-<none>}" "Available: battlepass-npc"; exit 1 ;;
+            esac
+            cnt="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            cnt="${cnt//[[:space:]]/}"
+            if [[ "$cnt" =~ ^[0-9]+$ && "$cnt" -gt 0 ]]; then
+              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in the world."}'
+              exit 0
+            fi
+            tcnt="$(db_world_query "SELECT COUNT(*) FROM creature_template WHERE entry=90100;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            tcnt="${tcnt//[[:space:]]/}"
+            template=exists
+            if [[ ! "$tcnt" =~ ^[0-9]+$ ]] || [[ "$tcnt" -eq 0 ]]; then
+              # Template INSERT ported verbatim from the manager's fix
+              # (values incl. npcflag=1 gossip, faction 35, level 80).
+              _db_write_stmt acore_world "SET foreign_key_checks=0; SET sql_mode=''; INSERT INTO creature_template (\`entry\`,\`name\`,\`subname\`,\`gossip_menu_id\`,\`minlevel\`,\`maxlevel\`,\`exp\`,\`faction\`,\`npcflag\`,\`speed_walk\`,\`speed_run\`,\`rank\`,\`dmgschool\`,\`DamageModifier\`,\`BaseAttackTime\`,\`RangeAttackTime\`,\`BaseVariance\`,\`RangeVariance\`,\`unit_class\`,\`unit_flags\`,\`unit_flags2\`,\`dynamicflags\`,\`type\`,\`AIName\`,\`MovementType\`,\`HoverHeight\`,\`HealthModifier\`,\`ManaModifier\`,\`ArmorModifier\`,\`RegenHealth\`,\`flags_extra\`,\`VerifiedBuild\`) VALUES (90100,'Battle Pass Vendor','Seasonal Rewards',0,80,80,0,35,1,1.0,1.14286,0,0,1.0,2000,2000,1.0,1.0,1,33536,2048,0,7,'',0,1.0,1.0,1.0,1.0,1,2,0); SET foreign_key_checks=1;" >/dev/null \
+                || { json_err SQL_FAILED "Could not create the Battle Pass NPC template" "Is ac-database running?"; exit 1; }
+              # Schema-adaptive model/scale statements (manager parity,
+              # best-effort -- older/newer schemas differ here).
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='scale'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET scale=1.0 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'DELETE FROM acore_world.creature_template_model WHERE CreatureID=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template_model'); SET @s=IF(@h>0,'INSERT INTO acore_world.creature_template_model (CreatureID,Idx,CreatureDisplayID,DisplayScale,Probability,VerifiedBuild) VALUES (90100,0,25478,1.0,1.0,0)','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              _db_write_stmt acore_world "SET @h=(SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acore_world' AND TABLE_NAME='creature_template' AND COLUMN_NAME='modelid1'); SET @s=IF(@h>0,'UPDATE acore_world.creature_template SET modelid1=25478 WHERE entry=90100','SELECT 1'); PREPARE _p FROM @s; EXECUTE _p; DEALLOCATE PREPARE _p;" >/dev/null 2>&1 || true
+              template=created
+            fi
+            # Spawn rows at the manager's documented capital coordinates
+            # (see the battlepass cheat-sheet in 47-commands.sh):
+            #   Stormwind (map 0): -8819.3 636.2 94.1, facing 3.7
+            #   Orgrimmar (map 1): 1609.2 -4407.7 17.5, facing 4.5
+            # guid is AUTO_INCREMENT; remaining columns have sane defaults.
+            _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
+              || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
+            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
