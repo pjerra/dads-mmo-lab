@@ -44,6 +44,12 @@
   async function act(action: "start" | "stop" | "restart") {
     busy = true;
     beginRun("home");
+    // The shared restarting flag drives the amber "Restarting…" override on
+    // the card and the sidebar chip -- without it, polling mid-restart flaps
+    // through stopped/starting. Config/Backups set it for their flows; this
+    // covers the Home buttons (a start after a stop reads as "starting" via
+    // the polled verdict, so only restart needs the explicit flag).
+    if (action === "restart") restartState.restarting = true;
     try {
       const run = action === "start" ? gamesStart : action === "stop" ? gamesStop : gamesRestart;
       await run(WOW_ID, (e) => {
@@ -60,6 +66,7 @@
         },
       });
     } finally {
+      if (action === "restart") restartState.restarting = false;
       busy = false;
       await refresh();
     }
