@@ -839,6 +839,39 @@ async fn wow_config_files(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "config".into(), "files".into()]).await
 }
 
+// Account-wide sharing configurator (overnight Batch 1): read/write the
+// ENABLE_* flags in the deployed accountwide lua files. Both are plain-JSON
+// (no streaming) -- get reports installed-state + per-subsystem on/off + the
+// reputation pick-one block; set flips one flag (reputation takes an optional
+// variant).
+#[tauri::command]
+async fn wow_accountwide_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "accountwide".into(), "get".into()]).await
+}
+
+#[tauri::command]
+async fn wow_accountwide_set(
+    key: String,
+    value: String,
+    variant: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut args: Vec<String> = vec![
+        "wow".into(),
+        "accountwide".into(),
+        "set".into(),
+        "--key".into(),
+        key,
+        "--value".into(),
+        value,
+    ];
+    if let Some(v) = variant {
+        args.push("--variant".into());
+        args.push(v);
+    }
+    run_json_cmd(state, args).await
+}
+
 // Flush & rebuild the ambient bot population. The typed "flush" ack is
 // enforced CLI-side too -- this command always passes it, so the webview's
 // own typed-confirm is the user-facing gate while the CLI contract keeps
@@ -1884,6 +1917,8 @@ pub fn run() {
             wow_config_files,
             wow_config_raw_reset,
             wow_config_raw_write,
+            wow_accountwide_get,
+            wow_accountwide_set,
             wow_bots_flush,
             wow_ahbot_repair,
             wow_party_setup,

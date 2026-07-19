@@ -239,6 +239,12 @@ unchanged and is separate from the **Module files** tab (for editing conf files)
 | ⬜ | [skip-saveall] Faster restart toggle | Home (server running): the "Save characters before restart (safer; off = faster)" checkbox sits under the Stop/Restart buttons, ON by default. UNTICK it (needs untested features enabled) → Restart → the stream shows `Skipping pre-stop saveall (faster restart)…` instead of `Saving all characters (saveall)…`, and the restart is noticeably quicker. Re-tick → Restart → the `Saving all characters…` line is back. Same behavior applies to **Restart world only**. Setting survives an app restart. |
 | ⬜ | Characters still safe with saveall off | With the box UNTICKED: play a bit (gain XP/gold), Restart, log back in → your progress is INTACT — the graceful stop still saved you on shutdown. (This is the whole point: off is faster, not lossy, in normal operation.) |
 
+## 21. Overnight new features
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | [accountwide-config] Account-wide sharing configurator | Prereq: install **Accountwide Systems** from Modules (Lua) so its scripts deploy. Config → **Account-wide** tab: before install the tab says "isn't installed yet" and points at Modules; after install it lists every system (Achievements, Currency, Gold, Mounts, Pets, Playtime, Professions, PvP rank, Flight paths, Titles) all OFF, with the Achievement-progress/Realm-first and Live-gold-sync/alt-bot sub-toggles indented and disabled until their parent is on. Toggle **Mounts** on → the yellow "reload to apply" banner appears → **Reload account-wide scripts** → `.reload ale` result shows. Re-open the tab → Mounts reads on (and `AccountMounts.lua` on the server has `ENABLE_ACCOUNTWIDE_MOUNTS = true`). **Reputation** is a dropdown (Off / Default / Custom); pick Default → the other variant file is deleted server-side and the flag flips on. Turn Mounts back off. NB the whole tab is locked until "Enable untested features" is ticked. |
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installing the module is server-side only. The client DBC/MPQ patch is now a separate **Apply client patch** step on the module's Modules row (Batch 5, locked behind [arac-client-patch] until row §19 passes) — so a bare install still won't show new race/class combos until you run that patch and cold-start once. Not a bug; it's the two-step design.

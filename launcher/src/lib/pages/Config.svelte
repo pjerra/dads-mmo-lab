@@ -12,10 +12,14 @@
     gamesRestart,
     wowBotsFlush,
     wowAhbotRepair,
+    wowAccountwideGet,
+    wowAccountwideSet,
     type ConfFile,
     type ConfigSetting,
     type PbKey,
     type RawFileName,
+    type AccountwideState,
+    type AwSubsystem,
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags } from "$lib/config-diff";
@@ -40,12 +44,13 @@
   // One Config page, four tabs (was four sidebar entries). `tab` is internal
   // state now; the in-page tab bar switches it, and the lazy-load $effects
   // below fire when a tab first becomes active.
-  type ConfigTab = "settings" | "botworld" | "ahbot" | "files";
+  type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide" | "files";
   let tab = $state<ConfigTab>("settings");
   const TABS: { id: ConfigTab; label: string }[] = [
     { id: "settings", label: "Settings" },
     { id: "botworld", label: "Bot World" },
     { id: "ahbot", label: "Auction House" },
+    { id: "accountwide", label: "Account-wide" },
     { id: "files", label: "Module files" },
   ];
   let settings: ConfigSetting[] = $state([]);
@@ -192,6 +197,84 @@
     } finally {
       ahRepairing = false;
     }
+  }
+
+  // --- Account-wide sharing configurator (overnight Batch 1) ---------------
+  // Toggles the accountwide module's ENABLE_* flags in the deployed lua
+  // files. The whole tab is locked behind [accountwide-config] until its
+  // smoke test passes. Only shown as usable when the module is installed.
+  let awState = $state<AccountwideState | null>(null);
+  let awLoaded = $state(false);
+  let awSaving = $state(false);
+  let awReloadPending = $state(false); // a flag changed -> reload ALE to apply
+
+  async function loadAccountwide() {
+    error = null;
+    try {
+      awState = await wowAccountwideGet();
+      awLoaded = true;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    }
+  }
+  $effect(() => {
+    if (tab === "accountwide" && !awLoaded) void loadAccountwide();
+  });
+
+  const awByKey = $derived(new Map((awState?.subsystems ?? []).map((s) => [s.key, s])));
+  function awValueOf(key: string): "on" | "off" {
+    return awByKey.get(key)?.value ?? "off";
+  }
+  // Indent depth = number of ancestors (money -> live sync -> alt-bot sync).
+  function awDepth(s: AwSubsystem): number {
+    let d = 0;
+    let p = s.parent;
+    while (p) {
+      d++;
+      p = awByKey.get(p)?.parent ?? null;
+    }
+    return d;
+  }
+  // A sub-toggle has no effect until its parent system is on -- disable it.
+  function awParentOff(s: AwSubsystem): boolean {
+    return s.parent !== null && awValueOf(s.parent) === "off";
+  }
+
+  async function setAwFlag(key: string, value: "on" | "off", variant?: "default" | "custom") {
+    awSaving = true;
+    error = null;
+    try {
+      const r = await wowAccountwideSet(key, value, variant);
+      if (r.changed) awReloadPending = true;
+      await loadAccountwide();
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      awSaving = false;
+    }
+  }
+
+  // Reputation is pick-one: "off" or a variant. Picking a variant deletes the
+  // other file server-side (only one may load).
+  const repSelect = $derived(
+    awState && awState.reputation.value === "on"
+      ? (awState.reputation.active ?? "off")
+      : "off",
+  );
+  async function setAwReputation(sel: string) {
+    if (sel === "off") await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "off");
+    else await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "on", sel as "default" | "custom");
+  }
+  const repVariantLabel = (v: string) =>
+    v === "default"
+      ? "Default (standard AzerothCore factions)"
+      : "Custom (custom race/faction build)";
+
+  async function awReloadAle() {
+    await reloadAle();
+    awReloadPending = false;
   }
 
   async function savePbChanges() {
@@ -607,6 +690,88 @@
       </div>
     {/if}
 
+  {:else if tab === "accountwide"}
+    {#if !awLoaded}
+      <p class="muted">Loading…</p>
+    {:else if !awState?.installed}
+      <div class="card">
+        <strong>Account-wide sharing isn't installed yet</strong>
+        <p class="muted">
+          This shares things like achievements, mounts, pets, gold and titles across every
+          character on the same account. Install <strong>Accountwide Systems</strong> from the
+          <strong>Modules</strong> page (Lua scripts), then reopen this tab to turn each system on.
+        </p>
+      </div>
+    {:else}
+      <div class="card testing-card">
+        <p class="muted">
+          Turn on any system below to share it across all characters on an account. Everything
+          ships off. Changes are written to the server's script files — click
+          <strong>Reload account-wide scripts</strong> (or restart the server) to make them take
+          effect in-game.
+        </p>
+      </div>
+
+      {#if awReloadPending}
+        <div class="warn-card">
+          <p>Saved — reload the account-wide scripts to apply the change in-game.</p>
+          <div class="row">
+            <button
+              class="primary"
+              onclick={awReloadAle}
+              disabled={awSaving || restartState.restarting || featureLocked("accountwide-config")}
+              title={featureLocked("accountwide-config") ? LOCKED_HINT : undefined}
+            >
+              Reload account-wide scripts
+            </button>
+          </div>
+        </div>
+      {/if}
+      {#if aleNote}<p class="muted">{aleNote}</p>{/if}
+
+      {#each awState.subsystems as s (s.key)}
+        <div class="setting aw-row" style={`margin-left:${awDepth(s) * 22}px`}>
+          <div class="meta">
+            <strong>{s.label}</strong>
+            <span class="muted">{s.explain}</span>
+            {#if awParentOff(s)}
+              <span class="muted aw-hint">Turn on the system above for this to have any effect.</span>
+            {/if}
+          </div>
+          <input
+            type="checkbox"
+            checked={s.value === "on"}
+            disabled={awSaving || restartState.restarting || featureLocked("accountwide-config")}
+            title={featureLocked("accountwide-config") ? LOCKED_HINT : undefined}
+            onchange={(e) => setAwFlag(s.key, e.currentTarget.checked ? "on" : "off")}
+          />
+        </div>
+      {/each}
+
+      {#if awState.reputation.present}
+        <div class="setting aw-row">
+          <div class="meta">
+            <strong>Reputation</strong>
+            <span class="muted">
+              Share faction reputation across characters of the same faction. Two versions may be
+              installed — only one can run, so picking one removes the other.
+            </span>
+          </div>
+          <select
+            value={repSelect}
+            disabled={awSaving || restartState.restarting || featureLocked("accountwide-config")}
+            title={featureLocked("accountwide-config") ? LOCKED_HINT : undefined}
+            onchange={(e) => setAwReputation(e.currentTarget.value)}
+          >
+            <option value="off">Off</option>
+            {#each awState.reputation.variants as v (v)}
+              <option value={v}>{repVariantLabel(v)}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+    {/if}
+
   {:else}
     <div class="row">
       <select bind:value={file} onchange={onFileSelect} disabled={saving || restartState.restarting || loadingFile}>
@@ -725,4 +890,6 @@
   .pbkey { font-family: Consolas, monospace; font-size: 12.5px; color: #c9d1d9; overflow-wrap: anywhere; }
   .pbval { width: 220px; flex-shrink: 0; font-family: Consolas, monospace; font-size: 12.5px; }
   .ah-steps { margin: 0; padding-left: 20px; color: #c9d1d9; font-size: 13.5px; display: flex; flex-direction: column; gap: 4px; }
+  .aw-hint { color: #d29922; }
+  .warn-card .row { margin-top: 8px; }
 </style>

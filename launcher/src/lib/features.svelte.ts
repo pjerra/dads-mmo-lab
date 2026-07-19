@@ -68,6 +68,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "gear-sets": "untested",
   "party-spec": "untested",
   "skip-saveall": "untested",
+  "accountwide-config": "untested",
 };
 
 export const LOCKED_HINT =

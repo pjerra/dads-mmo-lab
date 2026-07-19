@@ -504,6 +504,39 @@ export async function wowConfigFiles(): Promise<ConfFile[]> {
   const data = await invoke<{ files: ConfFile[] }>("wow_config_files");
   return data.files;
 }
+
+// --- Account-wide sharing configurator (overnight Batch 1) -----------------
+// Reads/writes the ENABLE_* flags in the deployed accountwide lua files.
+export interface AwSubsystem {
+  key: string;
+  file: string;
+  group: string;
+  parent: string | null; // flag that must be ON for this sub-toggle to matter
+  label: string;
+  explain: string;
+  value: "on" | "off";
+}
+export interface AwReputation {
+  present: boolean;
+  value: "on" | "off";
+  variants: ("default" | "custom")[]; // which variant files are deployed
+  active: "default" | "custom" | null; // the variant currently enabled
+}
+export interface AccountwideState {
+  installed: boolean;
+  subsystems: AwSubsystem[];
+  reputation: AwReputation;
+}
+export async function wowAccountwideGet(): Promise<AccountwideState> {
+  return await invoke("wow_accountwide_get");
+}
+export async function wowAccountwideSet(
+  key: string,
+  value: "on" | "off",
+  variant?: "default" | "custom",
+): Promise<{ key: string; value: "on" | "off"; changed: boolean; reload: string; variant?: string }> {
+  return await invoke("wow_accountwide_set", { key, value, variant });
+}
 export async function wowConfigRawRead(
   file: RawFileName,
 ): Promise<{ file: string; source?: "conf" | "dist"; content: string }> {
