@@ -14,6 +14,7 @@ cat <<'EOF'
 mod-1v1-arena|1v1 Arena|https://github.com/azerothcore/mod-1v1-arena.git|characters
 mod-aoe-loot|AoE Loot|https://github.com/azerothcore/mod-aoe-loot.git|world
 mod-ah-bot|Auction House Bot|https://github.com/azerothcore/mod-ah-bot.git|world
+mod-ah-bot-plus|Auction House Bot Plus (blizzlike pricing)|https://github.com/NathanHandley/mod-ah-bot-plus.git|world
 mod-autobalance|Auto Balance (dynamic difficulty)|https://github.com/azerothcore/mod-autobalance.git|world
 mod-ale|AzerothCore Lua Engine (ALE)|https://github.com/azerothcore/mod-ale.git|
 mod-player-bot-level-brackets|Bot Level Brackets (Playerbot distribution)|https://github.com/DustinHendrickson/mod-player-bot-level-brackets.git|characters
@@ -73,6 +74,7 @@ _module_desc() {
       mod-1v1-arena) echo "Adds a 1v1 arena bracket to the arena system -- queue solo duels through the arena NPC." ;;
       mod-aoe-loot) echo "Loot every nearby corpse with one click, retail-style." ;;
       mod-ah-bot) echo "Keeps the Auction House stocked and buying: a bot lists and purchases items so the economy works on a solo server." ;;
+      mod-ah-bot-plus) echo "Enhanced Auction House Bot fork: fully customizable, blizzlike pricing by category/quality/item level, conf-only (no SQL). Replaces mod-ah-bot -- install one or the other, not both." ;;
       mod-autobalance) echo "Scales dungeon/raid mob health and damage to your party size, so any group size can run any instance." ;;
       mod-ale) echo "The Lua scripting engine (Eluna fork) that powers every script in the Lua/ALE family below -- install this first." ;;
       mod-player-bot-level-brackets) echo "Spreads the random playerbot population across level ranges you configure, instead of everyone clustering at cap." ;;
@@ -163,6 +165,7 @@ _module_conf_name() {
         mod-1v1-arena)                  echo "1v1arena.conf" ;;
         mod-aoe-loot)                   echo "mod_aoe_loot.conf" ;;
         mod-ah-bot)                     echo "mod_ahbot.conf" ;;
+        mod-ah-bot-plus)                echo "mod_ahbot.conf" ;;
         mod-autobalance)                echo "AutoBalance.conf" ;;
         mod-dungeon-master)             echo "mod_dungeon_master.conf" ;;
         mod-talentbutton)               echo "mod_talentbutton.conf" ;;

@@ -18,9 +18,9 @@ src() {
   source "$BATS_TEST_DIRNAME/../src/70-modules.sh"
 }
 
-@test "cpp registry has 18 rows incl. mod-custom-login; sql registry has 10 without xp-rates" {
+@test "cpp registry has 19 rows incl. mod-custom-login; sql registry has 10 without xp-rates" {
   run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/10-json.sh"; source "'"$BATS_TEST_DIRNAME"'/../src/70-modules.sh"; _module_registry_cpp | wc -l; _module_registry_sql | wc -l; _module_registry_lua | wc -l'
-  [ "${lines[0]}" = "18" ]
+  [ "${lines[0]}" = "19" ]
   [ "${lines[1]}" = "10" ]
   [ "${lines[2]}" = "9" ]
   run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/10-json.sh"; source "'"$BATS_TEST_DIRNAME"'/../src/70-modules.sh"; _module_registry_cpp | grep -c custom-login; _module_registry_sql | grep -c xp-rates || true'
@@ -53,7 +53,7 @@ src() {
   run bash "$DML" wow module list --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.ok')" = "true" ]
-  [ "$(echo "$output" | jq -r '.data.families.cpp | length')" = "18" ]
+  [ "$(echo "$output" | jq -r '.data.families.cpp | length')" = "19" ]
   [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-aoe-loot") | .installed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-aoe-loot") | .pending_rebuild')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-transmog") | .installed')" = "false" ]
