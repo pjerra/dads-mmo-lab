@@ -70,6 +70,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "skip-saveall": "untested",
   "accountwide-config": "untested",
   "place-npc": "untested",
+  "guided-config": "untested",
 };
 
 export const LOCKED_HINT =

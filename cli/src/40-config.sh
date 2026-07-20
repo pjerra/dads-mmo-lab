@@ -587,3 +587,159 @@ _host_port_json() {
     if [[ "$out" =~ ^[0-9]+$ ]]; then printf '"%s"' "$out"; else printf 'null'; fi
     return 0
 }
+
+# --- guided module tuning (overnight Batch 3) ------------------------------
+# Plain-language, curated activator controls for a handful of optional modules
+# whose knobs are otherwise buried in a .conf or a deployed .lua script. Two
+# backends share one surface (`config tuning-list` / `config tuning-set`):
+#
+#   conf : reuses the existing conf-row mechanism (_cfg_conf_path/_read/_write
+#          + _cfg_conf_ensure) against the bind-mounted module .conf under
+#          env/dist/etc/modules/. Read at server startup -> restart to apply.
+#   lua  : a safe, comment/format-preserving line-replace of the DEPLOYED ALE
+#          script under env/dist/etc/modules/lua_scripts/ (never the repo --
+#          this family is cloned + deployed at install time). Applies live via
+#          `.reload ale` (or a restart).
+#
+# Every write ships LOCKED behind the frontend `guided-config` flag (see
+# launcher/src/lib/features.svelte.ts + docs/SMOKE-TESTS.md section 21).
+#
+# One row per knob:  key|backend|file|confkey|module|label|type|min|max|default|explain
+# `key`     = stable composite id the GUI/CLI address the row by (module.knob).
+# `backend` = conf | lua.
+# `file`    = the .conf basename (conf) or the .lua basename (lua) as deployed.
+# `confkey` = the exact key token in that file (BeastMaster.Enable,
+#             UnlimitedAmmoNamespace.ENABLED, the bare table key DURATION, ...).
+# `module`  = the plain module name (also the GUI card heading / group).
+# `type`    = bool (1/0) | int (min..max) | list (comma-separated ids).
+# `default` = the DISPLAY/JSON form of the value (bool -> 1/0). For a lua bool
+#             this is translated to true/false on write and back on read.
+# Keys/defaults are the upstream .conf.dist / .lua HEADs, verified 2026-07-20
+# (mod-npc-beastmaster, mod-learn-spells, Day36512/Acore_Lua_Unlimited_Ammo,
+# Brytenwally/SitMeansRest).
+_mtune_rows() {
+cat <<'EOF'
+beastmaster.enable|conf|mod_npc_beastmaster.conf|BeastMaster.Enable|NPC Beastmaster|Enable the Beastmaster NPC|bool|||1|Master switch for the Beastmaster NPC that lets classes tame, stable and use hunter pets.
+beastmaster.hunter_only|conf|mod_npc_beastmaster.conf|BeastMaster.HunterOnly|NPC Beastmaster|Hunters only|bool|||1|When on, only Hunters may use the Beastmaster. Turn it off to let every class tame pets.
+beastmaster.allowed_classes|conf|mod_npc_beastmaster.conf|BeastMaster.AllowedClasses|NPC Beastmaster|Allowed classes|list|||0|Comma-separated class ids allowed to adopt pets (0 = all classes). Only used when Hunters-only is off.
+beastmaster.min_level|conf|mod_npc_beastmaster.conf|BeastMaster.MinLevel|NPC Beastmaster|Minimum level|int|0|80|10|Level a character must reach before adopting a pet (0 = no requirement).
+learnspells.enable|conf|mod_learnspells.conf|LearnSpells.Enable|Learn Spells on Level-up|Enable auto-learn|bool|||1|Master switch: characters learn their class spells automatically on level-up, no trainer visits.
+learnspells.announce|conf|mod_learnspells.conf|LearnSpells.Announce|Learn Spells on Level-up|Announce at login|bool|||1|Show a short message at login telling the player auto-learn is active.
+learnspells.on_first_login|conf|mod_learnspells.conf|LearnSpells.OnFirstLogin|Learn Spells on Level-up|Grant all spells on first login|bool|||0|Give a brand-new character every spell up to its level at once. Handy for instant-level servers.
+learnspells.max_level|conf|mod_learnspells.conf|LearnSpells.MaxLevel|Learn Spells on Level-up|Learn up to level|int|1|80|80|Stop auto-learning spells past this level.
+unlimitedammo.enabled|lua|UnlimitedAmmo.lua|UnlimitedAmmoNamespace.ENABLED|Unlimited Ammo|Enable unlimited ammo|bool|||0|Ships off. When on, Hunters' arrows and bullets refill automatically so they never run out.
+unlimitedammo.max_ammo|lua|UnlimitedAmmo.lua|UnlimitedAmmoNamespace.MAX_AMMO|Unlimited Ammo|Ammo to keep stocked|int|1|100000|1000|How many arrows or bullets to top the quiver up to on each refill.
+unlimitedammo.min_threshold|lua|UnlimitedAmmo.lua|UnlimitedAmmoNamespace.MIN_AMMO_THRESHOLD|Unlimited Ammo|Refill when below|int|1|100000|52|Top the ammo back up once it drops under this many.
+sitmeansrest.duration|lua|SitMeansRest.lua|DURATION|Sit Means Rest|Rest duration (seconds)|int|1|86400|20|How long the sit-to-rest regen buff lasts.
+sitmeansrest.regen_aura|lua|SitMeansRest.lua|REGEN_AURA|Sit Means Rest|Regen spell id|int|1|999999|25990|The spell applied while resting. 25990 restores health and mana at any level.
+EOF
+}
+
+# Deployed ALE script path for a lua-backend tuning file.
+_lua_cfg_path() { printf '%s' "$1/env/dist/etc/modules/lua_scripts/$2"; }
+
+# _mtune_to_json <type> <fileval>: lua file value -> display/JSON form.
+_mtune_to_json() {
+    if [[ "$1" == bool ]]; then
+        case "$2" in true) printf '1' ;; false) printf '0' ;; *) printf '%s' "$2" ;; esac
+    else
+        printf '%s' "$2"
+    fi
+    return 0
+}
+
+# _mtune_to_lua <type> <jsonval>: display/JSON form -> lua file value.
+_mtune_to_lua() {
+    if [[ "$1" == bool ]]; then
+        case "$2" in 1) printf 'true' ;; 0) printf 'false' ;; *) printf '%s' "$2" ;; esac
+    else
+        printf '%s' "$2"
+    fi
+    return 0
+}
+
+# _lua_cfg_read <path> <key>: echoes the current file value of a `<key> = ...`
+# assignment ("" when the file or an UNCOMMENTED key line is absent). Handles
+# both column-0 namespaced keys (UnlimitedAmmoNamespace.ENABLED = false) and
+# indented bare table keys with a trailing comma (    DURATION = 20,). The
+# value token is everything after `=` up to the first whitespace/comma/
+# semicolon/inline `--` comment; LAST occurrence wins (Lua load semantics).
+# The key travels via the environment (K=), never awk -v, so its dots are
+# never regex/escape-processed, and `index()` matches it literally.
+_lua_cfg_read() {
+    local val=""
+    [[ -f "$1" ]] || { printf ''; return 0; }
+    val="$(K="$2" awk '
+        {
+            s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+            k = ENVIRON["K"]
+            if (index(s, k) == 1) {
+                rest = substr(s, length(k) + 1)
+                if (rest ~ /^[ \t]*=/) {
+                    sub(/^[ \t]*=[ \t]*/, "", rest)
+                    tok = rest
+                    sub(/[ \t].*$/, "", tok)
+                    sub(/,.*$/, "", tok)
+                    sub(/;.*$/, "", tok)
+                    sub(/--.*$/, "", tok)
+                    if (tok != "") { val = tok; found = 1 }
+                }
+            }
+        }
+        END { if (found) print val }
+    ' "$1" 2>/dev/null)" || val=""
+    printf '%s' "$val"
+    return 0
+}
+
+# _lua_cfg_write <path> <key> <fileval>: replaces the value of the FIRST
+# uncommented `<key> = ...` line in place, preserving leading whitespace, the
+# original spacing around `=`, and any trailer (a table comma and/or inline
+# `-- comment`). tmp-file + verify + mv, like _cfg_conf_write, so a bad edit
+# never truncates the file. Returns 1 when the key line is absent (caller maps
+# that to NOT_FOUND) OR the patch cannot be verified. Sets MTUNE_CHANGED=true
+# only when the value actually moved. <fileval> is already file-form
+# (true/false or a validated integer), so the reconstructed line is safe.
+_lua_cfg_write() {
+    local cur tmp
+    cur="$(_lua_cfg_read "$1" "$2")"
+    [[ -z "$cur" ]] && return 1
+    [[ "$cur" == "$3" ]] && return 0
+    tmp="$1.tmp.$$"
+    K="$2" V="$3" awk '
+        BEGIN { done = 0 }
+        {
+            line = $0
+            cr = ""
+            s = line
+            if (s ~ /\r$/) { cr = "\r"; sub(/\r$/, "", s) }
+            lead = ""
+            if (match(s, /^[ \t]+/)) { lead = substr(s, 1, RLENGTH) }
+            body = substr(s, length(lead) + 1)
+            k = ENVIRON["K"]
+            if (!done && index(body, k) == 1) {
+                after = substr(body, length(k) + 1)
+                if (after ~ /^[ \t]*=/) {
+                    eqlen = 0
+                    if (match(after, /^[ \t]*=[ \t]*/)) { eqlen = RLENGTH }
+                    eqpart = substr(after, 1, eqlen)
+                    rest = substr(after, eqlen + 1)
+                    vlen = length(rest)
+                    if (match(rest, /[ \t,;]/)) { vlen = RSTART - 1 }
+                    trailer = substr(rest, vlen + 1)
+                    print lead k eqpart ENVIRON["V"] trailer cr
+                    done = 1
+                    next
+                }
+            }
+            print line
+        }
+    ' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
+    if [[ "$(_lua_cfg_read "$tmp" "$2")" != "$3" ]]; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv "$tmp" "$1"
+    MTUNE_CHANGED=true
+    return 0
+}

@@ -15,12 +15,15 @@
     wowModuleList,
     wowAccountwideGet,
     wowAccountwideSet,
+    wowConfigTuningList,
+    wowConfigTuningSet,
     type ConfFile,
     type ConfigSetting,
     type PbKey,
     type RawFileName,
     type AccountwideState,
     type AwSubsystem,
+    type ModuleTuning,
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags } from "$lib/config-diff";
@@ -45,13 +48,14 @@
   // One Config page, four tabs (was four sidebar entries). `tab` is internal
   // state now; the in-page tab bar switches it, and the lazy-load $effects
   // below fire when a tab first becomes active.
-  type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide" | "files";
+  type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide" | "moduletuning" | "files";
   let tab = $state<ConfigTab>("settings");
   const TABS: { id: ConfigTab; label: string }[] = [
     { id: "settings", label: "Settings" },
     { id: "botworld", label: "Bot World" },
     { id: "ahbot", label: "Auction House" },
     { id: "accountwide", label: "Account-wide" },
+    { id: "moduletuning", label: "Module tuning" },
     { id: "files", label: "Module files" },
   ];
   let settings: ConfigSetting[] = $state([]);
@@ -302,6 +306,79 @@
   async function awReloadAle() {
     await reloadAle();
     awReloadPending = false;
+  }
+
+  // --- Guided module tuning (overnight Batch 3) ----------------------------
+  // Curated activator knobs for a few optional modules: NPC Beastmaster +
+  // Learn Spells (their .conf) and Unlimited Ammo + Sit Means Rest (their
+  // deployed ALE .lua). All writes are locked behind the single [guided-config]
+  // flag until its smoke test passes. Conf changes need a restart; lua changes
+  // apply with `.reload ale`.
+  let mtSettings = $state<ModuleTuning[]>([]);
+  let mtLoaded = $state(false);
+  let mtEdits: Record<string, string> = $state({});
+  let mtSaving = $state(false);
+  let mtReloadPending = $state(false); // a lua knob changed -> reload ALE to apply
+
+  async function loadModuleTuning() {
+    error = null;
+    try {
+      mtSettings = await wowConfigTuningList();
+      mtEdits = {};
+      mtLoaded = true;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    }
+  }
+  $effect(() => {
+    if (tab === "moduletuning" && !mtLoaded) void loadModuleTuning();
+  });
+
+  // Stable module order (first appearance in the list), each with its rows.
+  const mtModules = $derived.by(() => {
+    const order: string[] = [];
+    const byMod = new Map<string, ModuleTuning[]>();
+    for (const s of mtSettings) {
+      if (!byMod.has(s.module)) {
+        byMod.set(s.module, []);
+        order.push(s.module);
+      }
+      byMod.get(s.module)!.push(s);
+    }
+    return order.map((m) => ({
+      name: m,
+      installed: byMod.get(m)!.every((r) => r.installed),
+      rows: byMod.get(m)!,
+    }));
+  });
+  const mtDirty = $derived(
+    mtSettings.filter((s) => mtEdits[s.key] !== undefined && mtEdits[s.key] !== s.value).map((s) => s.key),
+  );
+
+  async function saveModuleTuning() {
+    mtSaving = true;
+    error = null;
+    try {
+      for (const key of mtDirty) {
+        const r = await wowConfigTuningSet(key, mtEdits[key]);
+        if (r.changed) {
+          if (r.backend === "lua") mtReloadPending = true;
+          if (r.restart_required) restartState.needed = true;
+        }
+      }
+      await loadModuleTuning();
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    } finally {
+      mtSaving = false;
+    }
+  }
+
+  async function mtReloadAle() {
+    await reloadAle();
+    mtReloadPending = false;
   }
 
   async function savePbChanges() {
@@ -810,6 +887,89 @@
           </select>
         </div>
       {/if}
+    {/if}
+
+  {:else if tab === "moduletuning"}
+    {#if !mtLoaded}
+      <p class="muted">Loading…</p>
+    {:else}
+      <div class="card testing-card">
+        <p class="muted">
+          Plain-language switches for a few optional modules. Turn a knob and click <strong>Save</strong>.
+          Install the module first from the <strong>Modules</strong> page if a card says it isn't installed —
+          the settings still show here but won't take effect until it is.
+        </p>
+      </div>
+
+      {#if mtReloadPending}
+        <div class="warn-card">
+          <p>Saved — reload the Lua scripts to apply the script (Lua) changes in-game.</p>
+          <div class="row">
+            <button
+              class="primary"
+              onclick={mtReloadAle}
+              disabled={mtSaving || restartState.restarting || featureLocked("guided-config")}
+              title={featureLocked("guided-config") ? LOCKED_HINT : undefined}
+            >
+              Reload Lua scripts
+            </button>
+          </div>
+        </div>
+      {/if}
+      {#if aleNote}<p class="muted">{aleNote}</p>{/if}
+
+      {#each mtModules as m (m.name)}
+        <h3>{m.name}</h3>
+        {#if !m.installed}
+          <p class="muted">
+            Not installed — install <strong>{m.name}</strong> from the Modules page first, then reopen this tab.
+          </p>
+        {/if}
+        {#each m.rows as s (s.key)}
+          <div class="setting" class:dirty={mtDirty.includes(s.key)}>
+            <div class="meta">
+              <strong>{s.label}</strong>
+              <span class="muted">{s.explain}</span>
+            </div>
+            {#if s.type === "bool"}
+              <input
+                type="checkbox"
+                checked={(mtEdits[s.key] ?? s.value) === "1"}
+                disabled={mtSaving || restartState.restarting}
+                onchange={(e) => (mtEdits[s.key] = e.currentTarget.checked ? "1" : "0")}
+              />
+            {:else if s.type === "int"}
+              <input
+                type="number"
+                min={s.min}
+                max={s.max}
+                step="1"
+                value={mtEdits[s.key] ?? s.value}
+                disabled={mtSaving || restartState.restarting}
+                oninput={(e) => (mtEdits[s.key] = e.currentTarget.value)}
+              />
+            {:else}
+              <input
+                value={mtEdits[s.key] ?? s.value}
+                placeholder="e.g. 3,8 (0 = all)"
+                disabled={mtSaving || restartState.restarting}
+                oninput={(e) => (mtEdits[s.key] = e.currentTarget.value)}
+              />
+            {/if}
+          </div>
+        {/each}
+      {/each}
+
+      <div class="row">
+        <button
+          class="primary"
+          onclick={saveModuleTuning}
+          disabled={mtDirty.length === 0 || mtSaving || restartState.restarting || featureLocked("guided-config")}
+          title={featureLocked("guided-config") ? LOCKED_HINT : undefined}
+        >
+          Save {mtDirty.length > 0 ? `(${mtDirty.length})` : ""}
+        </button>
+      </div>
     {/if}
 
   {:else}

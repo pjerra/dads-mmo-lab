@@ -2466,6 +2466,123 @@ case "$cmd" in
             mv "$tmp" "$fpath"
             json_ok "{\"written\":true,\"backup\":$bakjson}"
             ;;
+          tuning-list)
+            # Guided module tuning (overnight Batch 3): read-only listing of
+            # the curated activator knobs (see _mtune_rows in 40-config.sh).
+            # Each row reports its current value (conf-first -> .dist -> lua
+            # file -> registry default), whether the owning module is deployed,
+            # and its meta. No yq needed -- module tuning never touches the
+            # compose override (these keys were never env-bridged), so this
+            # sets cfg_sdir directly instead of via _cfg_preamble.
+            cfg_sdir="$(_wow_server_dir)"
+            if [[ -z "$cfg_sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
+              exit 1
+            fi
+            first=1; out='['
+            while IFS='|' read -r mtkey mtbackend mtfile mtconfkey mtmod mtlabel mttype mtmin mtmax mtdef mtexplain; do
+              [[ -z "$mtkey" ]] && continue
+              mtinstalled=false
+              if [[ "$mtbackend" == conf ]]; then
+                mtpath="$(_cfg_conf_path "$mtfile")"
+                [[ -f "$mtpath" ]] && mtinstalled=true
+                mtval="$(_cfg_conf_read "$mtpath" "$mtconfkey")"
+                [[ -n "$mtval" ]] || mtval="$(_cfg_conf_read "$mtpath.dist" "$mtconfkey")"
+                [[ -n "$mtval" ]] || mtval="$mtdef"
+              else
+                mtpath="$(_lua_cfg_path "$cfg_sdir" "$mtfile")"
+                [[ -f "$mtpath" ]] && mtinstalled=true
+                mtraw="$(_lua_cfg_read "$mtpath" "$mtconfkey")"
+                if [[ -n "$mtraw" ]]; then
+                  mtval="$(_mtune_to_json "$mttype" "$mtraw")"
+                else
+                  mtval="$mtdef"
+                fi
+              fi
+              mtminj="${mtmin:-null}"; mtmaxj="${mtmax:-null}"
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$(json_escape "$mtmod")\",\"label\":\"$(json_escape "$mtlabel")\",\"explain\":\"$(json_escape "$mtexplain")\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"$(json_escape "$mtval")\",\"default\":\"$(json_escape "$mtdef")\",\"installed\":$mtinstalled}"
+              first=0
+            done < <(_mtune_rows)
+            out+=']'
+            json_ok "{\"settings\":$out}"
+            ;;
+          tuning-set)
+            key=""; value=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; key="$2"; shift 2 ;;
+                --value) _need_flag_val "$1" $#; value="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow config tuning-set --key <module.knob> --value <v>"; exit 1 ;;
+              esac
+            done
+            [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config tuning-list --json"; exit 1; }
+            row="$(_mtune_rows | grep -F "$key|" | head -1)" || true
+            [[ "$row" == "$key|"* ]] || { json_err NOT_FOUND "Unknown tuning setting: $key" "See: dml wow config tuning-list --json"; exit 1; }
+            IFS='|' read -r _ backend file confkey mtmod label type minv maxv def explain <<< "$row"
+            case "$type" in
+              bool)
+                [[ "$value" =~ ^[01]$ ]] \
+                  || { json_err BAD_ARG "$label takes 1 (on) or 0 (off), got: $value" ""; exit 1; }
+                ;;
+              int)
+                [[ "$value" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "$label must be a whole number between $minv and $maxv, got: $value" ""; exit 1; }
+                value="$((10#$value))"
+                (( value >= minv && value <= maxv )) \
+                  || { json_err BAD_ARG "$label must be a whole number between $minv and $maxv, got: $value" ""; exit 1; }
+                ;;
+              list)
+                [[ "$value" =~ ^[0-9]+(,[0-9]+)*$ ]] \
+                  || { json_err BAD_ARG "$label must be comma-separated numbers (e.g. 3,8) or 0 for all, got: $value" ""; exit 1; }
+                ;;
+            esac
+            cfg_sdir="$(_wow_server_dir)"
+            if [[ -z "$cfg_sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
+              exit 1
+            fi
+            if [[ "$backend" == conf ]]; then
+              # Reuse the proven conf-row edit path: create the conf from its
+              # .dist on first touch, comment-preserving in-place write. These
+              # module confs are read at server startup, so a change always
+              # needs a restart (no live reload attempted).
+              CFG_CHANGED=false
+              cpath="$(_cfg_conf_path "$file")"
+              _cfg_conf_ensure "$cpath" \
+                || { json_err NOT_INSTALLED "$mtmod is not installed" "Install $mtmod from the Modules page first, then reopen this page."; exit 1; }
+              _cfg_conf_write "$cpath" "$confkey" "$value" \
+                || { json_err WRITE_FAILED "Could not write $file" ""; exit 1; }
+              if [[ "$CFG_CHANGED" == true ]]; then
+                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":true,\"restart_required\":true,\"applied\":\"restart\"}"
+              else
+                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\"}"
+              fi
+            else
+              # Lua backend: line-replace the DEPLOYED script. Applies live via
+              # `.reload ale`. The script must already be deployed (this family
+              # has no .dist to seed from) -- absent file/key -> NOT_INSTALLED.
+              lpath="$(_lua_cfg_path "$cfg_sdir" "$file")"
+              [[ -f "$lpath" ]] \
+                || { json_err NOT_INSTALLED "$mtmod is not installed" "Install $mtmod from the Modules page (Lua scripts) first, then reopen this page."; exit 1; }
+              MTUNE_CHANGED=false
+              fileval="$(_mtune_to_lua "$type" "$value")"
+              mtreload=".reload ale (Console page) or restart the server to apply"
+              if _lua_cfg_write "$lpath" "$confkey" "$fileval"; then
+                if [[ "$MTUNE_CHANGED" == true ]]; then
+                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":true,\"restart_required\":false,\"applied\":\"reload-ale\",\"reload\":\"$(json_escape "$mtreload")\"}"
+                else
+                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\"}"
+                fi
+              else
+                if [[ -z "$(_lua_cfg_read "$lpath" "$confkey")" ]]; then
+                  json_err NOT_FOUND "$confkey is not present in $file" "This setting may not exist in the installed version of $mtmod."
+                else
+                  json_err WRITE_FAILED "Could not update $confkey in $file" "Edit the file manually or reinstall $mtmod."
+                fi
+                exit 1
+              fi
+            fi
+            ;;
           *)
             json_err BAD_ARG "Unknown config subcommand: $csub" "Try: dml wow config list --json"
             exit 1

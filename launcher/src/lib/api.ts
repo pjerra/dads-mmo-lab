@@ -523,6 +523,43 @@ export async function wowConfigFiles(): Promise<ConfFile[]> {
   return data.files;
 }
 
+// --- Guided module tuning (overnight Batch 3) ------------------------------
+// Curated, plain-language activator knobs for a few optional modules. Two
+// backends share one surface: "conf" rows edit the module's bind-mounted
+// .conf (restart to apply); "lua" rows line-replace the deployed ALE script
+// (apply live with `.reload ale`). `installed` = the owning module's file is
+// deployed on the box; when false the GUI points the user at the Modules page.
+export interface ModuleTuning {
+  key: string;
+  backend: "conf" | "lua";
+  module: string; // plain module name; also the card heading
+  label: string;
+  explain: string;
+  type: "bool" | "int" | "list";
+  min: number | null;
+  max: number | null;
+  value: string;
+  default: string;
+  installed: boolean;
+}
+export async function wowConfigTuningList(): Promise<ModuleTuning[]> {
+  const data = await invoke<{ settings: ModuleTuning[] }>("wow_config_tuning_list");
+  return data.settings;
+}
+export async function wowConfigTuningSet(
+  key: string,
+  value: string,
+): Promise<{
+  key: string;
+  backend: "conf" | "lua";
+  changed: boolean;
+  restart_required: boolean;
+  applied: "restart" | "reload-ale" | "none";
+  reload?: string;
+}> {
+  return await invoke("wow_config_tuning_set", { key, value });
+}
+
 // --- Account-wide sharing configurator (overnight Batch 1) -----------------
 // Reads/writes the ENABLE_* flags in the deployed accountwide lua files.
 export interface AwSubsystem {

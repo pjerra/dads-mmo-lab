@@ -859,6 +859,29 @@ async fn wow_config_files(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "config".into(), "files".into()]).await
 }
 
+// Guided module tuning (overnight Batch 3): plain-JSON read/write of the
+// curated activator knobs for a few optional modules (NPC Beastmaster + Learn
+// Spells via their .conf; Unlimited Ammo + Sit Means Rest via their deployed
+// ALE .lua). `list` reports each knob's value + whether its module is
+// deployed; `set` writes one knob with the right backend.
+#[tauri::command]
+async fn wow_config_tuning_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "config".into(), "tuning-list".into()]).await
+}
+
+#[tauri::command]
+async fn wow_config_tuning_set(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "config".into(), "tuning-set".into(), "--key".into(), key, "--value".into(), value],
+    )
+    .await
+}
+
 // Account-wide sharing configurator (overnight Batch 1): read/write the
 // ENABLE_* flags in the deployed accountwide lua files. Both are plain-JSON
 // (no streaming) -- get reports installed-state + per-subsystem on/off + the
@@ -1933,6 +1956,8 @@ pub fn run() {
             wow_entity_info,
             wow_config_list,
             wow_config_set,
+            wow_config_tuning_list,
+            wow_config_tuning_set,
             wow_config_raw_read,
             wow_config_pb_keys,
             wow_config_files,
