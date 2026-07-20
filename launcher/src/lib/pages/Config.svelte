@@ -156,6 +156,12 @@
     try {
       await wowBotsFlush((e) => {
         buf.term = applyEvent(buf.term, e);
+        // The flush restarts the server twice, so any pending "restart to
+        // apply" banner is now stale -- its changes were applied by those
+        // restarts. Clear it on the successful terminal event (a failure
+        // arrives as an "error" event instead, which leaves the banner).
+        const ev = e as { event?: string };
+        if (ev.event === "done") restartState.needed = false;
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
