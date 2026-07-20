@@ -876,14 +876,17 @@ export async function gamesInstallCancel(): Promise<void> {
 }
 // keepData (Batch 3 F13c): preserve the ~6 GB client-data docker volume so a
 // later reinstall skips the big download.
+// removeImages (Batch 6 B): ALSO delete the AzerothCore/MySQL docker images
+// (~3-5 GB) the title used. Default off -- kept for a fast reinstall.
 export const gamesRemove = (
   id: string,
   onEvent: (e: TermEvent) => void,
   keepData?: boolean,
+  removeImages?: boolean,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("games_remove", { id, keepData, onEvent: ch });
+  return invoke("games_remove", { id, keepData, removeImages, onEvent: ch });
 };
 
 // --- LAN / doctor / tool-install / shell (Round Q Tools page) --------------

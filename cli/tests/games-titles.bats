@@ -221,3 +221,57 @@ EOF
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'BAD_ARG'
 }
+
+# --- remove-images (Batch 6 B) ---------------------------------------------
+# --remove-images ALSO deletes the AzerothCore/MySQL docker images the
+# title's compose referenced (~3-5 GB), with ${DOCKER_IMAGE_TAG:-master}
+# resolved. Default KEEP (fast reinstall).
+
+_setup_wow_images() {  # installed title whose compose names two server images
+  mkdir -p "$FIXTURE/maplestory-server"
+  cat > "$FIXTURE/maplestory-server/docker-compose.yml" <<'EOF'
+services:
+  ac-database:
+    image: mysql:8.4
+  ac-worldserver:
+    image: acore/ac-wotlk-worldserver:${DOCKER_IMAGE_TAG:-master}
+volumes:
+  ac-client-data:
+EOF
+}
+
+@test "games remove --yes --remove-images: image rm runs per resolved image" {
+  _setup_wow_images
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --remove-images --json
+  [ "$status" -eq 0 ]
+  grep -q '^image rm mysql:8.4$' "$FIXTURE/calls.log"
+  grep -q '^image rm acore/ac-wotlk-worldserver:master$' "$FIXTURE/calls.log"
+  echo "$output" | grep -q 'removed server image mysql:8.4'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+}
+
+@test "games remove --yes (no --remove-images): no image rm, kept note emitted" {
+  _setup_wow_images
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  run grep 'image rm' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "games remove --yes (no --remove-images): kept-images note shown for compose titles" {
+  _setup_wow_images
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'kept the downloaded server images'
+}
+
+@test "games remove --remove-images: DOCKER_IMAGE_TAG in .env resolves the tag" {
+  _setup_wow_images
+  printf 'DOCKER_IMAGE_TAG=v1.2.3\n' > "$FIXTURE/maplestory-server/.env"
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" games remove maplestory-server --yes --remove-images --json
+  [ "$status" -eq 0 ]
+  grep -q '^image rm acore/ac-wotlk-worldserver:v1.2.3$' "$FIXTURE/calls.log"
+}

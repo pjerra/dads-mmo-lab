@@ -1888,6 +1888,7 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
 async fn games_remove(
     id: String,
     keep_data: Option<bool>,
+    remove_images: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
@@ -1895,6 +1896,10 @@ async fn games_remove(
     // Batch 3 F13c: preserve the ~6 GB client-data volume for reinstalls.
     if keep_data.unwrap_or(false) {
         args.push("--keep-data".into());
+    }
+    // Batch 6 B: also delete the AzerothCore/MySQL images (~3-5 GB).
+    if remove_images.unwrap_or(false) {
+        args.push("--remove-images".into());
     }
     stream_args(args, on_event, state).await
 }

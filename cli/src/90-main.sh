@@ -70,6 +70,38 @@ _resolve_compose_dir() {
     return 0
 }
 
+# Echoes the docker images a title's compose file(s) reference, one per line,
+# deduped, with ${DOCKER_IMAGE_TAG:-master} / ${DOCKER_IMAGE_TAG} resolved
+# from the title's own .env (default "master"). Used by `games remove
+# --remove-images` to delete the AzerothCore/MySQL server images (~3-5 GB)
+# after a title is removed. Images still carrying an unresolved ${...} after
+# substitution are skipped (we can't safely name them). All four canonical
+# compose filenames plus the override file are scanned.
+_compose_server_images() {
+    local cdir="$1" imgtag="master" envtag c line img seen=""
+    if [[ -f "$cdir/.env" ]]; then
+        envtag="$(grep -m1 '^DOCKER_IMAGE_TAG=' "$cdir/.env" | cut -d= -f2- 2>/dev/null || true)"
+        [[ -n "$envtag" ]] && imgtag="$envtag"
+    fi
+    for c in docker-compose.yml docker-compose.yaml compose.yml compose.yaml docker-compose.override.yml; do
+        [[ -f "$cdir/$c" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            img="${line#*image:}"
+            img="${img%$'\r'}"                    # strip a trailing CR
+            img="${img#"${img%%[![:space:]]*}"}"  # trim leading whitespace
+            img="${img%%[[:space:]]*}"            # keep the first token only
+            [[ -z "$img" ]] && continue
+            img="${img//'${DOCKER_IMAGE_TAG:-master}'/$imgtag}"
+            img="${img//'${DOCKER_IMAGE_TAG}'/$imgtag}"
+            [[ "$img" == *'${'* ]] && continue    # unresolved var -> skip
+            case " $seen " in *" $img "*) continue ;; esac
+            seen+=" $img"
+            printf '%s\n' "$img"
+        done < <(grep -E '^[[:space:]]*image:[[:space:]]*[^[:space:]]' "$cdir/$c" 2>/dev/null)
+    done
+    return 0
+}
+
 # Compose dir of the WoW Playerbots title, or empty.
 _wow_server_dir() {
     local dir="$GAMES_DIR/wow-server-playerbots"
@@ -1126,14 +1158,18 @@ case "$cmd" in
         ;;
       remove)
         gid="${1:-}"; shift || true
-        confirm=0; keepdata=0
+        confirm=0; keepdata=0; rmimages=0
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --yes) confirm=1; shift ;;
             # Batch 3 F13c: preserve the client-data docker volume (the ~6 GB
             # maps/DBC download) so a later reinstall skips re-fetching it.
             --keep-data) keepdata=1; shift ;;
-            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data]"; exit 1 ;;
+            # Batch 6 B: ALSO delete the AzerothCore/MySQL docker images
+            # (~3-5 GB) the title's compose used. Default OFF -- kept for a
+            # fast reinstall (no multi-GB re-pull/build).
+            --remove-images) rmimages=1; shift ;;
+            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data] [--remove-images]"; exit 1 ;;
           esac
         done
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start games-remove
@@ -1158,7 +1194,7 @@ case "$cmd" in
         [[ -n "$tlauncher" && -e "$HOME/$tlauncher" ]] && targets+="$HOME/$tlauncher"
         if [[ "$confirm" != 1 ]]; then
           ndjson_section_end games-remove error
-          ndjson_error CONFIRM_REQUIRED "Removing $gid deletes: $targets" "Re-run with --yes. Backups under ~/.dml are kept."
+          ndjson_error CONFIRM_REQUIRED "Removing $gid deletes: $targets" "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept."
           exit 1
         fi
         tdir="$GAMES_DIR/$gid"; [[ -d "$tdir" ]] || tdir="$HOME/$gid"
@@ -1209,6 +1245,28 @@ case "$cmd" in
               ndjson_line warn "could not remove game data volume $tvol (may not exist or still in use)"
             fi
           fi
+        fi
+        # --- server docker images (Batch 6 B) --------------------------------
+        # With --remove-images, delete the images the title's compose used
+        # (AzerothCore + MySQL, ~3-5 GB) now that `compose down` has removed
+        # its containers. Best-effort per image: an image still used by
+        # another title stays (docker refuses) and becomes a warn, not a
+        # failure. Runs BEFORE the title dir is deleted (the compose file is
+        # the image list). Default keeps them for a fast reinstall.
+        if [[ "$rmimages" == 1 && -n "$tcompose" ]]; then
+          rmimg_count=0
+          while IFS= read -r _img || [[ -n "$_img" ]]; do
+            [[ -z "$_img" ]] && continue
+            if docker image rm "$_img" >/dev/null 2>&1; then
+              ndjson_line info "removed server image $_img"
+              rmimg_count=$(( rmimg_count + 1 ))
+            else
+              ndjson_line warn "could not remove image $_img (in use by another title, or already gone)"
+            fi
+          done < <(_compose_server_images "$tcompose")
+          [[ "$rmimg_count" -eq 0 ]] && ndjson_line info "no server images to remove"
+        elif [[ "$rmimages" != 1 && -n "$tcompose" ]]; then
+          ndjson_line info "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)"
         fi
         # ---------------------------------------------------------------------
         if [[ -L "$GAMES_DIR/$gid" ]]; then

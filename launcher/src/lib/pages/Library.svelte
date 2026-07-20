@@ -31,6 +31,8 @@
   let removeBusy = $state(false);
   // Batch 3 F13c: keep the ~6 GB client-data volume for a faster reinstall.
   let removeKeepData = $state(false);
+  // Batch 6 B: also delete the AzerothCore/MySQL server images (~3-5 GB).
+  let removeImages = $state(false);
 
   // Install: which title's panel is shown, and whether its session is still
   // active. This lives in installStore (term-store.svelte.ts), NOT local
@@ -115,6 +117,7 @@
     removingId = id;
     removeInput = "";
     removeKeepData = false;
+    removeImages = false;
   }
   function cancelRemoveArm() {
     removingId = null;
@@ -152,6 +155,7 @@
           }
         },
         removeKeepData,
+        removeImages,
       );
     } catch (e) {
       outcomeErr = e;
@@ -267,6 +271,10 @@
             <label class="keep-data">
               <input type="checkbox" bind:checked={removeKeepData} disabled={busy} />
               Keep downloaded game data (~6 GB) for faster reinstall
+            </label>
+            <label class="keep-data">
+              <input type="checkbox" bind:checked={removeImages} disabled={busy} />
+              Also delete downloaded server images (~3-5 GB) — slower to reinstall
             </label>
             <div class="row">
               <input type="text" placeholder={t.id} bind:value={removeInput} />
