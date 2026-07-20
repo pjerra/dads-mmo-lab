@@ -210,6 +210,20 @@ pub fn compact_script(distro: &str) -> String {
 $ErrorActionPreference = 'Stop'
 Write-Host '== DML shrink disk =='
 
+# 0. Refuse to run without Administrator rights: the trim, the WSL shutdown and
+#    the diskpart compact below all need elevation, and failing halfway (WSL
+#    already down) is worse than not starting. Exit BEFORE touching anything.
+$admin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent() `
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) {{
+    Write-Host 'ERROR: This script must be run as Administrator.'
+    Write-Host 'Right-click the file and choose "Run with PowerShell", or start an'
+    Write-Host 'elevated PowerShell (Run as administrator) and run it from there.'
+    pause
+    exit 1
+}}
+
 # 1. Find {distro}'s virtual disk via the registry
 $lxss = Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' |
     Where-Object {{ ($_ | Get-ItemProperty).DistributionName -eq '{distro}' }}
@@ -454,6 +468,14 @@ mod tests {
     fn compact_script_contains_the_safety_rails_and_no_set_sparse() {
         let s = compact_script("dml-arch");
         assert!(s.contains("RUN AS ADMINISTRATOR"));
+        // Admin self-check that bails BEFORE any privileged step.
+        assert!(s.contains("IsInRole"));
+        assert!(s.contains("Administrator"));
+        let admin_at = s.find("IsInRole").expect("admin check present");
+        let fstrim_at = s.find("fstrim").expect("fstrim present");
+        let shutdown_at = s.find("wsl --shutdown").expect("shutdown present");
+        assert!(admin_at < fstrim_at, "admin check must precede fstrim");
+        assert!(admin_at < shutdown_at, "admin check must precede wsl --shutdown");
         assert!(s.contains("fstrim /"));
         assert!(s.contains("wsl --shutdown"));
         assert!(s.contains("attach vdisk readonly"));
