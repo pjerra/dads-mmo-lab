@@ -3523,11 +3523,24 @@ case "$cmd" in
             for v in "$btminl" "$btmaxl" "$btlimit" "$btoffset"; do
               [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
             done
+            # --limit ""/--offset "" slip the guard above (it permits empty)
+            # and would then crash `$(( 10# ))` fatally with no envelope. Fall
+            # back to the defaults before expansion.
+            [[ -n "$btlimit" ]] || btlimit=50
+            [[ -n "$btoffset" ]] || btoffset=0
             btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
             (( btlimit > 200 )) && btlimit=200
             (( btlimit < 1 )) && btlimit=1
             btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
-            [[ -n "$btname" ]] && btwhere+=" AND c.name LIKE '$(sql_escape "$btname")%'"
+            # --name is a LIKE prefix. _valid_charname permits '_', which is a
+            # single-char LIKE wildcard, so a name like Foo_bar would also match
+            # Foo<any>bar. Escape the LIKE metacharacters (_ and %) with a marker
+            # that can never occur in a valid charname and declare it via ESCAPE.
+            # sql_escape still runs afterwards for string-literal safety.
+            if [[ -n "$btname" ]]; then
+              btlike="${btname//%/!%}"; btlike="${btlike//_/!_}"
+              btwhere+=" AND c.name LIKE '$(sql_escape "$btlike")%' ESCAPE '!'"
+            fi
             [[ -n "$btclass" ]] && btwhere+=" AND c.class = $((10#$btclass))"
             if [[ -n "$btminl" && -n "$btmaxl" ]]; then
               btwhere+=" AND c.level BETWEEN $((10#$btminl)) AND $((10#$btmaxl))"

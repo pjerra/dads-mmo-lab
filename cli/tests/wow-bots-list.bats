@@ -100,6 +100,27 @@ seed_two_bots() {
   [ "$(echo "$output" | jq -r '.data.limit')" = "200" ]
 }
 
+@test "bots list: empty --limit/--offset fall back to defaults, not a fatal crash" {
+  seed_two_bots
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
+  run bash "$DML" wow bots list --limit "" --offset "" --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.limit')" = "50" ]
+  [ "$(echo "$output" | jq -r '.data.offset')" = "0" ]
+  grep -q 'LIMIT 50 OFFSET 0' "$FIXTURE/q.log"
+}
+
+@test "bots list: an underscore in --name is escaped so it is not a LIKE wildcard" {
+  seed_two_bots
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
+  run bash "$DML" wow bots list --name Bot_x --json
+  [ "$status" -eq 0 ]
+  # '_' is escaped with the ESCAPE marker; the trailing % stays a wildcard.
+  grep -q "c.name LIKE 'Bot!_x%' ESCAPE '!'" "$FIXTURE/q.log"
+  # the raw, unescaped pattern must NOT appear
+  ! grep -q "c.name LIKE 'Bot_x%'" "$FIXTURE/q.log"
+}
+
 @test "bots list rejects a name prefix outside the charname allowlist" {
   run bash "$DML" wow bots list --name "x%' OR 1=1--" --json
   [ "$status" -eq 1 ]
