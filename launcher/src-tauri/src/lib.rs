@@ -1199,6 +1199,14 @@ async fn wow_gm_at_login(player: String, flag: String, state: State<'_, AppState
     .await
 }
 
+// Batch 4 C: send a (possibly stuck) character to their hearth/home via the
+// stock `.unstuck <name> inn` SOAP command. The name re-validates CLI-side
+// and travels as its own argv token.
+#[tauri::command]
+async fn wow_gm_return_home(char_name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "gm".into(), "return-home".into(), "--char".into(), char_name]).await
+}
+
 #[tauri::command]
 async fn wow_party_preset_show(name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "party".into(), "preset-show".into(), "--name".into(), name]).await
@@ -2003,6 +2011,7 @@ pub fn run() {
             wow_gm_revive,
             wow_gm_summon,
             wow_gm_at_login,
+            wow_gm_return_home,
             wow_lan,
             wow_lan_public_ip,
             dml_doctor,

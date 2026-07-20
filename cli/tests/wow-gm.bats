@@ -253,3 +253,53 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
+
+# ---------- gm return-home (stock .unstuck, no bridge, works offline) ----------
+
+@test "gm return-home fires .unstuck <name> inn over plain SOAP" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow gm return-home --char Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.player')" = "Testen" ]
+  grep -q '.unstuck Testen inn' "$FIXTURE/cap.txt"
+}
+
+@test "gm return-home does NOT need the DB (works for offline chars)" {
+  export DML_STUB_DB_EXIT=1
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow gm return-home --char Offline --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
+}
+
+@test "gm return-home rejects an invalid character name" {
+  run bash "$DML" wow gm return-home --char 'x; drop' --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "gm return-home maps a SOAP fault (in combat / on flight) to SOAP_FAULT" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  run bash "$DML" wow gm return-home --char Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+}
+
+@test "gm return-home maps 401 to SOAP_AUTH and curl exit 7 to SOAP_UNREACHABLE" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_HTTP=401
+  run bash "$DML" wow gm return-home --char Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
+  unset DML_STUB_HTTP
+  export DML_STUB_CURL_EXIT=7
+  run bash "$DML" wow gm return-home --char Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
+}

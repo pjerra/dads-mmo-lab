@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowGmAtLogin, wowBridgeSetup,
+    wowPartyOnline, wowGmLevel, wowGmGold, wowGmHeal, wowGmRevive, wowGmSummon, wowGmAtLogin, wowGmReturnHome, wowBridgeSetup,
     type OnlineChar,
   } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
@@ -67,6 +67,9 @@
 
   function revive() { const p = charName; act(() => wowGmRevive(p), `Revived ${p}.`); }
   function heal() { const p = charName; act(() => wowGmHeal(p), `Healed ${p} to full.`); }
+  // Works OFFLINE too (`.unstuck … inn` reads homebind), so unlike revive/heal
+  // it is not gated on the character being online.
+  function returnHome() { const p = charName; act(() => wowGmReturnHome(p), `Sent ${p} home to their hearth.`); }
   function applyLevel() {
     if (confirming !== "level") { confirming = "level"; return; }
     confirming = null;
@@ -153,6 +156,14 @@
     >
       Full heal
     </button>
+    <button
+      onclick={returnHome}
+      disabled={!charName || busy || featureLocked("gm-return-home")}
+      title={featureLocked("gm-return-home") ? LOCKED_HINT : "Teleports the character to their hearth/inn — fixes a character stuck in the world; works even while they're offline"}
+    >
+      Send home (unstuck)
+    </button>
+    <span class="muted">Send home works offline too.</span>
   </div>
 
   <div class="card row">

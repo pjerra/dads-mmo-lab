@@ -72,6 +72,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "place-npc": "untested",
   "guided-config": "untested",
   "backup-validate": "untested",
+  "gm-return-home": "untested",
 };
 
 export const LOCKED_HINT =

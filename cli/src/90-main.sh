@@ -3137,8 +3137,33 @@ case "$cmd" in
               *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
             esac
             ;;
+          return-home)
+            player=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --char) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            # `.unstuck <name> inn` -- stock AC command (cs_misc.cpp,
+            # Console::Yes so it is SOAP-callable): teleports the character to
+            # their hearth/homebind location (the "inn" default). Works for
+            # OFFLINE characters too -- for a disconnected char AC reads
+            # character_homebind and SavePositionInDB -- so this is the safe
+            # "my character is stuck in the world" rescue. The ONLY failure is
+            # an ONLINE character who is in combat or on a flight path (the
+            # command returns false -> SOAP fault), surfaced as a hint.
+            if out="$(soap_exec ".unstuck $player inn")"; then rc=0; else rc=$?; fi
+            case "$rc" in
+              0) json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\"}" ;;
+              2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "If the character is online it can't be in combat or on a flight path -- try again once it is idle." ; exit 1 ;;
+              3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+              *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+            esac
+            ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon|at-login --json"
+            json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon|at-login|return-home --json"
             exit 1
             ;;
         esac

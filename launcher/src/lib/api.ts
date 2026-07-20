@@ -742,6 +742,11 @@ export async function wowGmAtLogin(
 ): Promise<{ applied: boolean; player: string; flag: string }> {
   return await invoke("wow_gm_at_login", { player, flag });
 }
+// Batch 4 C: send a stuck character to their hearth/home (`.unstuck … inn`).
+// Works for offline characters too.
+export async function wowGmReturnHome(charName: string): Promise<{ sent_home: boolean; player: string }> {
+  return await invoke("wow_gm_return_home", { charName });
+}
 
 export interface BotcmdResult { sent: boolean; player: string; bot: string; action: string; }
 export interface PresetInfo { name: string; bots: number; }
