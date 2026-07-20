@@ -208,6 +208,15 @@ export function deleteGearSet(name: string): void {
   writeStored(store.sets);
 }
 
+// Batch 4 D: add/replace an already-built GearSet (e.g. one parsed from an
+// imported TOML block). Same replace-by-name + persist as saveGearSet, but
+// from an existing set rather than a live paperdoll.
+export function addGearSet(set: GearSet): GearSet {
+  store.sets = [...store.sets.filter((s) => s.name !== set.name), set];
+  writeStored(store.sets);
+  return set;
+}
+
 // Mail a saved set to a character, sequentially, ≤12 items per mail.
 export async function mailGearSet(
   to: string,

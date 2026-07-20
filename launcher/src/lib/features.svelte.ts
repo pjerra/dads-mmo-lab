@@ -73,6 +73,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "guided-config": "untested",
   "backup-validate": "untested",
   "gm-return-home": "untested",
+  "gear-sets-io": "untested",
 };
 
 export const LOCKED_HINT =

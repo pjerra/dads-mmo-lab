@@ -3,7 +3,8 @@
   import { qualityName, QUALITY_COLORS, className } from "$lib/wow";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { listGearSets, deleteGearSet, mailGearSet, type GearSet } from "$lib/gearsets.svelte";
+  import { listGearSets, deleteGearSet, mailGearSet, addGearSet, type GearSet } from "$lib/gearsets.svelte";
+  import { gearSetToToml, gearSetFromToml } from "$lib/gearset-toml";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
   // Batch 3 F11e: open the item's Wowhead (WotLK) page in the system
@@ -59,9 +60,48 @@
   let mailingSet = $state(false);
   let confirmDeleteSet = $state<string | null>(null);
 
+  // TOML export/import (Batch 4 D) -- pure frontend, localStorage only.
+  let exportSetName = $state<string | null>(null);
+  let exportText = $state("");
+  let exportCopied = $state(false);
+  let importText = $state("");
+  let importMsg = $state<string | null>(null);
+  let importErr = $state<string | null>(null);
+
   function toggleMailSet(name: string) {
     mailSetName = mailSetName === name ? null : name;
     confirmDeleteSet = null;
+    exportSetName = null;
+  }
+
+  function toggleExport(gs: GearSet) {
+    if (exportSetName === gs.name) { exportSetName = null; return; }
+    exportSetName = gs.name;
+    exportText = gearSetToToml(gs);
+    exportCopied = false;
+    mailSetName = null;
+    confirmDeleteSet = null;
+  }
+
+  async function copyExport() {
+    try {
+      await navigator.clipboard.writeText(exportText);
+      exportCopied = true;
+      setTimeout(() => (exportCopied = false), 1500);
+    } catch {
+      // Clipboard unavailable -- the read-only textarea is the fallback.
+    }
+  }
+
+  function importSet() {
+    importErr = null; importMsg = null;
+    try {
+      const s = addGearSet(gearSetFromToml(importText));
+      importMsg = `Imported "${s.name}" — ${s.items.length} items.`;
+      importText = "";
+    } catch (e) {
+      importErr = (e as Error)?.message ?? String(e);
+    }
   }
 
   function removeSet(name: string) {
@@ -163,7 +203,7 @@
   <div class="card">
     <strong>Gear sets</strong>
     {#if listGearSets().length === 0}
-      <p class="muted">None saved yet — open a character on the Dashboard and click "Save gear set".</p>
+      <p class="muted">None saved yet — open a character on the Dashboard and click "Save gear set", or paste one below.</p>
     {:else}
       {#each listGearSets() as gs (gs.name)}
         <div class="row">
@@ -173,6 +213,9 @@
           </span>
           <button onclick={() => toggleMailSet(gs.name)} disabled={mailingSet}>
             {mailSetName === gs.name ? "Hide" : "Mail to…"}
+          </button>
+          <button onclick={() => toggleExport(gs)} disabled={mailingSet}>
+            {exportSetName === gs.name ? "Hide" : "Export"}
           </button>
           <button onclick={() => removeSet(gs.name)} disabled={mailingSet}>
             {confirmDeleteSet === gs.name ? `Delete "${gs.name}" — sure?` : "Delete"}
@@ -192,8 +235,35 @@
             <span class="muted">Fresh copies by in-game mail{gs.items.length > 12 ? `, split into 2 mails` : ""} — the receiver may not be able to wear cross-class gear.</span>
           </div>
         {/if}
+        {#if exportSetName === gs.name}
+          <div class="iocol">
+            <textarea class="toml" readonly rows="6" value={exportText}></textarea>
+            <div class="row">
+              <button onclick={copyExport}>{exportCopied ? "Copied" : "Copy"}</button>
+              <span class="muted">Copy this whole block and paste it into Import (below) on another launcher.</span>
+            </div>
+          </div>
+        {/if}
       {/each}
     {/if}
+
+    <div class="iocol import">
+      <strong>Import a gear set</strong>
+      <textarea class="toml" bind:value={importText} rows="5"
+        placeholder="Paste an exported gear-set TOML block here…"></textarea>
+      <div class="row">
+        <button
+          class="primary"
+          onclick={importSet}
+          disabled={!importText.trim() || featureLocked("gear-sets-io")}
+          title={featureLocked("gear-sets-io") ? LOCKED_HINT : undefined}
+        >
+          Import
+        </button>
+        {#if importMsg}<span class="ok-text">{importMsg}</span>{/if}
+        {#if importErr}<span class="err-text">{importErr}</span>{/if}
+      </div>
+    </div>
   </div>
 
   {#if sendItem}
@@ -232,6 +302,11 @@
   td { padding: 4px 14px 4px 0; font-size: 14px; border-top: 1px solid #21262d; }
   .card, .sendbox { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
   .row { display: flex; gap: 10px; align-items: center; }
+  .iocol { display: flex; flex-direction: column; gap: 6px; }
+  .import { border-top: 1px solid #21262d; padding-top: 12px; margin-top: 4px; }
+  textarea.toml { background: #010409; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px; font-family: ui-monospace, monospace; font-size: 12px; resize: vertical; width: 100%; box-sizing: border-box; }
+  .ok-text { color: #3fb950; font-size: 13px; }
+  .err-text { color: #f85149; font-size: 13px; }
   label { font-size: 14px; color: #8b949e; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.wh { padding: 6px 8px; font-size: 12px; }
