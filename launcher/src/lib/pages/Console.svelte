@@ -4,6 +4,7 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
   import { serverStatus, containersExist } from "$lib/server-status.svelte";
+  import { recallHistory, logSeverity } from "$lib/console-input";
 
   let available = $state(true);
   let lines: string[] = $state([]);
@@ -13,6 +14,32 @@
 
   let command = $state("");
   let sending = $state(false);
+
+  // Improvements Batch 3 F2: shell-style Up/Down recall over prior commands.
+  // `histCursor`/`histDraft` are plain (non-reactive) locals -- nothing renders
+  // them; they only thread state between keydowns. Recall logic is the pure
+  // recallHistory() so it's unit-tested away from the DOM.
+  let inputEl: HTMLInputElement | undefined = $state();
+  let histCursor: number | null = null;
+  let histDraft = "";
+
+  function onCommandKey(e: KeyboardEvent) {
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    const hist = consoleStore.hist.map((h) => h.command);
+    if (hist.length === 0) return;
+    e.preventDefault();
+    const dir = e.key === "ArrowUp" ? "up" : "down";
+    if (histCursor === null && dir === "up") histDraft = command;
+    const r = recallHistory(hist, histCursor, dir, histDraft);
+    command = r.value;
+    histCursor = r.cursor;
+    // Move the caret to the end once the recalled value has rendered.
+    void tick().then(() => inputEl?.setSelectionRange(command.length, command.length));
+  }
+  // Any real typing (not a programmatic recall assignment) drops out of recall.
+  function onCommandInput() {
+    histCursor = null;
+  }
 
   // Command favorites (Batch 3 F11c): starred console commands, persisted in
   // localStorage, rendered as chips above the input. Clicking a chip FILLS
@@ -100,6 +127,8 @@
       const r = await wowConsoleSend(cmd);
       consoleStore.hist = [...consoleStore.hist, { command: cmd, result: r.result, error: null }];
       command = "";
+      histCursor = null;
+      histDraft = "";
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       consoleStore.hist = [
@@ -123,6 +152,7 @@
     consoleStore.hist = [];
     consoleStore.clearAnchor = lines.slice(-3);
     lines = [];
+    histCursor = null;
   }
 
   let saveErr: string | null = $state(null);
@@ -166,7 +196,7 @@
   {:else}
     <div class="log" bind:this={logEl}>
       {#each lines as line, i (i)}
-        <div class="logline">{line}</div>
+        <div class="logline {logSeverity(line)}">{line}</div>
       {/each}
     </div>
   {/if}
@@ -205,6 +235,9 @@
       type="text"
       placeholder="Console command, e.g. server info"
       bind:value={command}
+      bind:this={inputEl}
+      onkeydown={onCommandKey}
+      oninput={onCommandInput}
       disabled={sending || featureLocked("console-send")}
       title={featureLocked("console-send") ? LOCKED_HINT : undefined}
     />
@@ -238,6 +271,8 @@
   .save-err { color: #f85149; font-size: 12.5px; align-self: center; }
   .log { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 12px; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.45; overflow-y: auto; flex: 1; min-height: 200px; }
   .logline { white-space: pre-wrap; word-break: break-all; color: #c9d1d9; }
+  .logline.warn { color: #d29922; }
+  .logline.error { color: #f85149; }
   .sendrow { display: flex; gap: 8px; flex-shrink: 0; }
   .favrow { display: flex; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
   .fav-chip { background: #161b22; border: 1px solid #30363d; border-radius: 12px; color: #c9d1d9; font-family: Consolas, monospace; font-size: 12px; padding: 3px 10px; cursor: pointer; }
