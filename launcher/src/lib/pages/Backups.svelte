@@ -6,6 +6,7 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   let backups: BackupInfo[] = $state([]);
   let error: string | null = $state(null);
@@ -40,7 +41,7 @@
   // Streaming outcomes derive from done/error EVENTS, never promise
   // resolution -- streaming promises resolve even when the CLI fails.
   async function backupNow() {
-    streaming = true; error = null; note = null; beginRun("backups");
+    streaming = true; error = null; note = null; beginRun("backups"); taskbarBusy();
     let doneFile: string | null = null; let doneSize = 0;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
@@ -56,6 +57,7 @@
       }, includeWorld);
     } catch (e) { outcomeErr = e; }
     finally {
+      taskbarIdle();
       streaming = false;
       await refresh();
       if (outcomeErr) showErr(outcomeErr);
@@ -70,7 +72,7 @@
       return;
     }
     confirming = null;
-    streaming = true; restartState.restarting = true; error = null; note = null; beginRun("backups");
+    streaming = true; restartState.restarting = true; error = null; note = null; beginRun("backups"); taskbarBusy();
     let safety: string | null = null; let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
@@ -87,6 +89,7 @@
       });
     } catch (e) { outcomeErr = e; }
     finally {
+      taskbarIdle();
       restartState.restarting = false;
       streaming = false;
       await refresh();

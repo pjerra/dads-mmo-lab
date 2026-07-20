@@ -34,6 +34,7 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT, testingModeOn, setTestingMode } from "$lib/features.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   const WOW_ID = "wow-server-playerbots";
   // Static fallback shown until (or if) `wow config files` answers -- the
@@ -154,6 +155,7 @@
     restartState.restarting = true; // the flush restarts the server twice
     error = null;
     beginRun("config");
+    taskbarBusy();
     try {
       await wowBotsFlush((e) => {
         buf.term = applyEvent(buf.term, e);
@@ -171,6 +173,7 @@
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
     } finally {
+      taskbarIdle();
       flushing = false;
       restartState.restarting = false;
     }
@@ -618,6 +621,7 @@
     if (!(await saveFn())) return;
     restartState.restarting = true;
     beginRun("config");
+    taskbarBusy();
     try {
       // Applying settings is a deliberate, infrequent restart -- always save
       // characters first (false = don't skip). The "faster restart" option
@@ -633,6 +637,7 @@
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
     } finally {
+      taskbarIdle();
       restartState.restarting = false;
     }
   }

@@ -46,6 +46,7 @@
   }
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   let list: ModuleList | null = $state(null);
   let error: string | null = $state(null);
@@ -195,6 +196,7 @@
     onDone: (doneData: unknown) => void,
   ) {
     busy = true; error = null; note = null; beginRun("modules");
+    taskbarBusy();
     let sawDone = false;
     let doneData: unknown;
     let streamErr: { message?: string; hint?: string } | null = null;
@@ -212,6 +214,7 @@
     } catch (e) {
       outcomeErr = e;
     } finally {
+      taskbarIdle();
       busy = false;
       await refresh();
       if (outcomeErr) showErr(outcomeErr);

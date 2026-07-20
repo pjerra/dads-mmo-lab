@@ -8,6 +8,7 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   const WOW_ID = "wow-server-playerbots";
   const ROLE_LABELS: Record<string, string> = {
@@ -112,6 +113,7 @@
   async function act(action: "start" | "stop" | "restart") {
     busy = true;
     beginRun("home");
+    taskbarBusy();
     // The shared restarting flag drives the amber "Restarting…" override on
     // the card and the sidebar chip -- without it, polling mid-restart flaps
     // through stopped/starting. Config/Backups set it for their flows; this
@@ -140,6 +142,7 @@
         },
       });
     } finally {
+      taskbarIdle();
       if (action === "restart") restartState.restarting = false;
       busy = false;
       await refresh();
@@ -154,6 +157,7 @@
     busy = true;
     beginRun("home");
     restartState.restarting = true;
+    taskbarBusy();
     try {
       await wowWorldRestart(skipSaveallNow(), (e) => {
         buf.term = applyEvent(buf.term, e);
@@ -169,6 +173,7 @@
         },
       });
     } finally {
+      taskbarIdle();
       restartState.restarting = false;
       busy = false;
       await refresh();

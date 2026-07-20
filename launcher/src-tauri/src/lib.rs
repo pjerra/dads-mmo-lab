@@ -374,6 +374,33 @@ fn set_keep_awake(on: bool) {
     power::keep_awake(on);
 }
 
+/// Taskbar progress cue (Batch 4): flip the main window's taskbar button to
+/// an indeterminate "busy" state while a long streamed op runs (rebuild /
+/// flush / server-update / restart / backup), and clear it when done -- so a
+/// minimized launcher still shows work is in flight. Best-effort and
+/// infallible: a cosmetic hint must never disrupt the operation it decorates,
+/// so a missing window or an unsupported platform is silently ignored. On
+/// Windows this is the marquee taskbar state; Linux/macOS render what they
+/// can (or nothing).
+#[tauri::command]
+fn set_taskbar_progress(active: bool, app: tauri::AppHandle) {
+    use tauri::window::{ProgressBarState, ProgressBarStatus};
+    let status = if active {
+        ProgressBarStatus::Indeterminate
+    } else {
+        ProgressBarStatus::None
+    };
+    let win = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next());
+    if let Some(w) = win {
+        let _ = w.set_progress_bar(ProgressBarState {
+            status: Some(status),
+            progress: None,
+        });
+    }
+}
+
 /// Enable/disable the auto-shutdown watcher. Enabling spawns a fresh watcher
 /// thread (fresh = DISARMED until Wow.exe is seen); disabling just bumps the
 /// generation so the running thread exits on its next wake. Idempotent from
@@ -2168,6 +2195,7 @@ pub fn run() {
             save_text_file,
             set_auto_shutdown,
             set_keep_awake,
+            set_taskbar_progress,
             realmlist_status,
             realmlist_fix,
             realmlist_lock
