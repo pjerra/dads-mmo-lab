@@ -10,6 +10,7 @@
   import { restartState } from "$lib/restart-state.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { summonModuleHint } from "$lib/gm-summon";
 
   let charName = $state("");
   let online: OnlineChar[] = $state([]);
@@ -44,19 +45,6 @@
     { entry: 14337, label: "Repair Bot" },
     { entry: 990000, label: "Casino" },
   ];
-
-  // Summon targets that only exist once a specific module is installed. When a
-  // summon of one of these fails with NOT_FOUND (its creature_template row is
-  // absent), name the module + point at the Modules page instead of the raw
-  // "no creature with entry N" CLI error. Entries: Casino (mod-gasino-casino),
-  // Transmogrifier 190010 (mod-transmog), Beastmaster 601026
-  // (mod-npc-beastmaster), Black Market 2069430 (bmah).
-  const MODULE_NPCS: Record<number, { npc: string; module: string }> = {
-    990000: { npc: "Casino", module: "the Casino module (mod-gasino-casino)" },
-    190010: { npc: "Transmogrifier", module: "the Transmogrification module (mod-transmog)" },
-    601026: { npc: "Beastmaster", module: "the NPC Beastmaster module (mod-npc-beastmaster)" },
-    2069430: { npc: "Black Market Auctioneer", module: "the Black Market Auction House module (bmah)" },
-  };
 
   function showErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -110,13 +98,12 @@
       const r = await wowGmSummon(p, entry);
       note = `Summoned ${r.npc} — despawns in 5 minutes.`;
     } catch (e) {
-      const err = e as { code?: string };
-      const mod = MODULE_NPCS[entry];
-      if (err.code === "NOT_FOUND" && mod) {
-        error = `No ${mod.npc} NPC exists yet (entry ${entry}). It comes from ${mod.module} — install it on the Modules page, restart the server, then try again.`;
-      } else {
-        showErr(e);
-      }
+      // summonModuleHint only fires for a genuinely-missing module NPC; an
+      // offline-character NOT_FOUND (same code, different message) falls
+      // through to the plain error.
+      const hint = summonModuleHint(entry, e as { code?: string; message?: string });
+      if (hint) error = hint;
+      else showErr(e);
     } finally { busy = false; }
   }
 
