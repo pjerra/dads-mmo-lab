@@ -1586,11 +1586,28 @@ fn wslconfig_path() -> Result<std::path::PathBuf, CmdError> {
     Ok(std::path::PathBuf::from(profile).join(".wslconfig"))
 }
 
+/// Read .wslconfig into UTF-8 text, stripping a leading UTF-8 BOM and
+/// rejecting a UTF-16-encoded file with a clear "save as UTF-8" message.
+/// Absent file = empty content (the write side creates it). Shared by the
+/// read-state and merge-write paths so both agree on encoding.
+fn read_wslconfig_content(path: &std::path::Path) -> Result<String, CmdError> {
+    if !path.is_file() {
+        return Ok(String::new());
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| bad_arg(format!("could not read {}: {e}", path.display())))?;
+    wslconfig::decode_wslconfig(&bytes).map_err(|_| {
+        bad_arg(format!(
+            "{} is not UTF-8 (looks like a UTF-16 file). Open it in Notepad and re-save it with encoding UTF-8, then try again.",
+            path.display()
+        ))
+    })
+}
+
 fn read_wslconfig_state() -> Result<WslConfigState, CmdError> {
     let path = wslconfig_path()?;
     let exists = path.is_file();
-    // Absent file = empty content (the write side creates it).
-    let content = if exists { std::fs::read_to_string(&path).unwrap_or_default() } else { String::new() };
+    let content = read_wslconfig_content(&path)?;
     Ok(WslConfigState {
         path: path.to_string_lossy().into_owned(),
         exists,
@@ -1626,12 +1643,9 @@ fn wslconfig_write(
         }
     }
     let path = wslconfig_path()?;
-    let mut content = if path.is_file() {
-        std::fs::read_to_string(&path)
-            .map_err(|e| bad_arg(format!("could not read {}: {e}", path.display())))?
-    } else {
-        String::new()
-    };
+    // Same BOM-stripping / UTF-16-rejecting read as the state path: merging
+    // into a silently-emptied UTF-16 file would drop the user's other keys.
+    let mut content = read_wslconfig_content(&path)?;
     if let Some(m) = &memory {
         content = wslconfig::merge_wsl2_key(&content, "memory", m);
     }

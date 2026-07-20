@@ -114,12 +114,33 @@ pub fn merge_wsl2_key(content: &str, key: &str, value: &str) -> String {
     s
 }
 
-/// Memory spec for [wsl2] memory=: digits + GB/MB (e.g. "8GB", "512MB").
+/// Decode raw .wslconfig bytes to UTF-8 text for parse/merge.
+/// * A leading UTF-8 BOM (EF BB BF) is stripped -- left in place it would glue
+///   onto the first `[wsl2]` header and hide the section from the parser.
+/// * A UTF-16 BOM (LE FF FE / BE FE FF) returns Err: `read_to_string` would
+///   fail on it and the caller's `.unwrap_or_default()` would silently treat
+///   the file as EMPTY, so the next merge-write would drop every existing
+///   setting. Surface a clear "save as UTF-8" message instead.
+/// Anything else is read as UTF-8 (lossy -- stray bytes never abort the read).
+pub fn decode_wslconfig(bytes: &[u8]) -> Result<String, &'static str> {
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+        return Err("utf16");
+    }
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    Ok(String::from_utf8_lossy(body).into_owned())
+}
+
+/// Memory spec for [wsl2] memory=: EXACTLY digits + one GB/MB unit
+/// (e.g. "8GB", "512MB"). `strip_suffix` (not `trim_end_matches`, which peels
+/// repeats) so a doubled unit like "8GBGB" leaves "8GB" as the digit part and
+/// is correctly rejected.
 pub fn valid_memory_spec(v: &str) -> bool {
     let upper = v.to_ascii_uppercase();
-    let digits = upper.trim_end_matches("GB").trim_end_matches("MB");
-    (upper.ends_with("GB") || upper.ends_with("MB"))
-        && !digits.is_empty()
+    let digits = match upper.strip_suffix("GB").or_else(|| upper.strip_suffix("MB")) {
+        Some(d) => d,
+        None => return false,
+    };
+    !digits.is_empty()
         && digits.len() <= 4
         && digits.chars().all(|c| c.is_ascii_digit())
         && digits.parse::<u32>().map(|n| n > 0).unwrap_or(false)
@@ -375,6 +396,38 @@ mod tests {
         assert!(!valid_memory_spec("8 GB"));
         assert!(!valid_memory_spec("8GB; rm"));
         assert!(!valid_memory_spec("99999GB"));
+    }
+
+    #[test]
+    fn memory_spec_rejects_doubled_or_mixed_units() {
+        // trim_end_matches used to peel both "GB"s here and accept it.
+        assert!(!valid_memory_spec("8GBGB"));
+        assert!(!valid_memory_spec("8MBMB"));
+        assert!(!valid_memory_spec("8GBMB"));
+        assert!(!valid_memory_spec("8MBGB"));
+        assert!(!valid_memory_spec("GBGB"));
+    }
+
+    #[test]
+    fn decode_strips_utf8_bom_and_rejects_utf16() {
+        // UTF-8 BOM stripped -- the [wsl2] header must still parse.
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"[wsl2]\nmemory=8GB\n");
+        let s = decode_wslconfig(&bytes).expect("utf8 BOM should decode");
+        assert!(!s.starts_with('\u{feff}'));
+        assert_eq!(read_wsl2_key(&s, "memory").as_deref(), Some("8GB"));
+
+        // UTF-16 LE/BE BOMs are rejected, never silently treated as empty.
+        assert!(decode_wslconfig(&[0xFF, 0xFE, 0x00, 0x00]).is_err());
+        assert!(decode_wslconfig(&[0xFE, 0xFF, 0x00, 0x00]).is_err());
+
+        // Plain UTF-8 (no BOM) passes through byte-for-byte.
+        assert_eq!(
+            decode_wslconfig(b"[wsl2]\nmemory=4GB\n").unwrap(),
+            "[wsl2]\nmemory=4GB\n"
+        );
+        // Empty file = empty string (absent .wslconfig).
+        assert_eq!(decode_wslconfig(b"").unwrap(), "");
     }
 
     #[test]
