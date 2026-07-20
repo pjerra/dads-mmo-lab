@@ -265,12 +265,23 @@ _cfg_conf_ensure() {
     return 0
 }
 
-# _cfg_conf_read <path> <Key>: echoes the conf's value for Key ("" when the
-# file or key is absent). Exact-key match (prefix + '='), comments skipped,
-# LAST occurrence wins (AC semantics), surrounding quotes stripped. The key
-# travels via the environment (K=), never awk -v, so dots/backslashes are
-# never escape-processed.
-_cfg_conf_read() {
+# _cfg_unquote <s>: strips ONE matching pair of surrounding double quotes,
+# leaving a bare or unbalanced value untouched. Symmetric on purpose -- used
+# to normalize/compare conf values regardless of quoting style.
+_cfg_unquote() {
+    local s="${1-}"
+    if [[ ${#s} -ge 2 && "${s:0:1}" == '"' && "${s: -1}" == '"' ]]; then
+        s="${s:1:${#s}-2}"
+    fi
+    printf '%s' "$s"
+    return 0
+}
+
+# _cfg_conf_read_raw <path> <Key>: the conf's value for Key, quoting PRESERVED
+# ("" when the file or key is absent). Exact-key match (prefix + '='), comments
+# skipped, LAST occurrence wins (AC semantics). The key travels via the
+# environment (K=), never awk -v, so dots/backslashes are never escape-processed.
+_cfg_conf_read_raw() {
     local val=""
     [[ -f "$1" ]] || { printf ''; return 0; }
     val="$(K="$2" awk '
@@ -289,6 +300,15 @@ _cfg_conf_read() {
         }
         END { if (found) print val }
     ' "$1" 2>/dev/null)" || val=""
+    printf '%s' "$val"
+    return 0
+}
+
+# _cfg_conf_read <path> <Key>: like _cfg_conf_read_raw but with surrounding
+# quotes stripped -- the common read used by config list/env fallbacks.
+_cfg_conf_read() {
+    local val
+    val="$(_cfg_conf_read_raw "$1" "$2")"
     val="${val%\"}"; val="${val#\"}"
     printf '%s' "$val"
     return 0
@@ -298,13 +318,27 @@ _cfg_conf_read() {
 # replaces every active `Key = ...` line (duplicates collapse to the same
 # value; AC reads the last anyway) or appends `Key = value` when absent.
 # tmp-file + mv like raw-write, so a failure never truncates the conf.
-# Sets CFG_CHANGED=true when the effective value actually changed.
+# Sets CFG_CHANGED=true when the EFFECTIVE value actually changed.
+#
+# Quotes are normalized SYMMETRICALLY before the compare, so a pure quote
+# toggle (foo <-> "foo") is a no-op that never flips restart_required. The
+# written value preserves quoting style -- it stays quoted when the user
+# quoted the new value OR the stored line was quoted -- so a legitimate edit
+# of a value that needs quotes (spaces etc.) never silently drops them.
 _cfg_conf_write() {
-    local cur tmp
-    cur="$(_cfg_conf_read "$1" "$2")"
-    [[ "$cur" == "$3" ]] && return 0
+    local curq cur newq new out_val tmp
+    curq="$(_cfg_conf_read_raw "$1" "$2")"
+    cur="$(_cfg_unquote "$curq")"
+    newq="$3"
+    new="$(_cfg_unquote "$newq")"
+    [[ "$cur" == "$new" ]] && return 0
+    if [[ "$newq" != "$new" || "$curq" != "$cur" ]]; then
+        out_val="\"$new\""
+    else
+        out_val="$new"
+    fi
     tmp="$1.tmp.$$"
-    K="$2" V="$3" awk '
+    K="$2" V="$out_val" awk '
         BEGIN { done = 0 }
         {
             s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)

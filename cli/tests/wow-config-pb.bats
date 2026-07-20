@@ -132,6 +132,34 @@ EOF
   grep -q '^AiPlayerbot.EnableGreet = 1$' "$PB"
 }
 
+# CommandPrefix is seeded quoted ("") -- the quote-handling round-trip cases.
+@test "direct conf route: re-setting a quoted value to the same value is a no-op" {
+  _seed_pb
+  # effective value unchanged ("" -> "") must NOT report a change or flip restart
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.CommandPrefix --value '""' --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.restart_required')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.applied')" = "none" ]
+}
+
+@test "direct conf route: editing a quoted value preserves the quotes" {
+  _seed_pb
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.CommandPrefix --value '.' --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
+  # a value that may need quotes keeps them across a legitimate edit
+  grep -q '^AiPlayerbot.CommandPrefix = "."$' "$PB"
+}
+
+@test "direct conf route: a user-quoted value is written with its quotes" {
+  _seed_pb
+  run bash "$DML" wow config set --key conf:playerbots.conf:AiPlayerbot.EnableGreet --value '"1"' --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
+  grep -q '^AiPlayerbot.EnableGreet = "1"$' "$PB"
+}
+
 @test "bots.population conf row writes BOTH Min and Max and removes both legacy envs" {
   _seed_pb
   cat > "$OVR" <<'EOF'
