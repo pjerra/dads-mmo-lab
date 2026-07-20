@@ -2126,6 +2126,25 @@ _lua_deployed() {
 
 _lua_cloned() { [[ -d "$1/ale_scripts/$2/.git" ]]; }
 
+# Read-only advisory string for a lua script, or empty. Surfaced on the
+# Modules card as a warning. Only fires when the script is actually DEPLOYED
+# (live on the server), so it never nags about a module the user hasn't run.
+# Paragon's upstream ships a `.test` chat command with NO GM permission gate
+# -- any player can invoke it (a debug leftover), a real footgun once the
+# server is opened to others. Uses a single-quoted string (never printf'd
+# through a double-quoted context) so the literal ".test" carries no shell
+# meaning.
+_lua_warn() {
+    case "$2" in
+        paragon)
+            if _lua_deployed "$1" paragon; then
+                printf '%s' 'Heads-up: the Paragon script adds a ".test" chat command with no GM permission check — any player can run it (an upstream debug leftover). Remove or guard it before opening your server to other people.'
+            fi
+            ;;
+    esac
+    return 0
+}
+
 _sql_installed() { [[ -f "$1/sql_scripts/installed/$2.installed" ]]; }
 
 # --- backup gate ------------------------------------------------------------
@@ -2880,6 +2899,38 @@ _resolve_compose_dir() {
             echo "${subdir%/}"
             return 0
         fi
+    done
+    return 0
+}
+
+# Echoes the docker images a title's compose file(s) reference, one per line,
+# deduped, with ${DOCKER_IMAGE_TAG:-master} / ${DOCKER_IMAGE_TAG} resolved
+# from the title's own .env (default "master"). Used by `games remove
+# --remove-images` to delete the AzerothCore/MySQL server images (~3-5 GB)
+# after a title is removed. Images still carrying an unresolved ${...} after
+# substitution are skipped (we can't safely name them). All four canonical
+# compose filenames plus the override file are scanned.
+_compose_server_images() {
+    local cdir="$1" imgtag="master" envtag c line img seen=""
+    if [[ -f "$cdir/.env" ]]; then
+        envtag="$(grep -m1 '^DOCKER_IMAGE_TAG=' "$cdir/.env" | cut -d= -f2- 2>/dev/null || true)"
+        [[ -n "$envtag" ]] && imgtag="$envtag"
+    fi
+    for c in docker-compose.yml docker-compose.yaml compose.yml compose.yaml docker-compose.override.yml; do
+        [[ -f "$cdir/$c" ]] || continue
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            img="${line#*image:}"
+            img="${img%$'\r'}"                    # strip a trailing CR
+            img="${img#"${img%%[![:space:]]*}"}"  # trim leading whitespace
+            img="${img%%[[:space:]]*}"            # keep the first token only
+            [[ -z "$img" ]] && continue
+            img="${img//'${DOCKER_IMAGE_TAG:-master}'/$imgtag}"
+            img="${img//'${DOCKER_IMAGE_TAG}'/$imgtag}"
+            [[ "$img" == *'${'* ]] && continue    # unresolved var -> skip
+            case " $seen " in *" $img "*) continue ;; esac
+            seen+=" $img"
+            printf '%s\n' "$img"
+        done < <(grep -E '^[[:space:]]*image:[[:space:]]*[^[:space:]]' "$cdir/$c" 2>/dev/null)
     done
     return 0
 }
@@ -3940,14 +3991,18 @@ case "$cmd" in
         ;;
       remove)
         gid="${1:-}"; shift || true
-        confirm=0; keepdata=0
+        confirm=0; keepdata=0; rmimages=0
         while [[ $# -gt 0 ]]; do
           case "$1" in
             --yes) confirm=1; shift ;;
             # Batch 3 F13c: preserve the client-data docker volume (the ~6 GB
             # maps/DBC download) so a later reinstall skips re-fetching it.
             --keep-data) keepdata=1; shift ;;
-            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data]"; exit 1 ;;
+            # Batch 6 B: ALSO delete the AzerothCore/MySQL docker images
+            # (~3-5 GB) the title's compose used. Default OFF -- kept for a
+            # fast reinstall (no multi-GB re-pull/build).
+            --remove-images) rmimages=1; shift ;;
+            *) ndjson_error BAD_ARG "Unknown flag: $1" "Usage: dml games remove <title> --yes [--keep-data] [--remove-images]"; exit 1 ;;
           esac
         done
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start games-remove
@@ -3972,7 +4027,7 @@ case "$cmd" in
         [[ -n "$tlauncher" && -e "$HOME/$tlauncher" ]] && targets+="$HOME/$tlauncher"
         if [[ "$confirm" != 1 ]]; then
           ndjson_section_end games-remove error
-          ndjson_error CONFIRM_REQUIRED "Removing $gid deletes: $targets" "Re-run with --yes. Backups under ~/.dml are kept."
+          ndjson_error CONFIRM_REQUIRED "Removing $gid deletes: $targets" "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept."
           exit 1
         fi
         tdir="$GAMES_DIR/$gid"; [[ -d "$tdir" ]] || tdir="$HOME/$gid"
@@ -4023,6 +4078,28 @@ case "$cmd" in
               ndjson_line warn "could not remove game data volume $tvol (may not exist or still in use)"
             fi
           fi
+        fi
+        # --- server docker images (Batch 6 B) --------------------------------
+        # With --remove-images, delete the images the title's compose used
+        # (AzerothCore + MySQL, ~3-5 GB) now that `compose down` has removed
+        # its containers. Best-effort per image: an image still used by
+        # another title stays (docker refuses) and becomes a warn, not a
+        # failure. Runs BEFORE the title dir is deleted (the compose file is
+        # the image list). Default keeps them for a fast reinstall.
+        if [[ "$rmimages" == 1 && -n "$tcompose" ]]; then
+          rmimg_count=0
+          while IFS= read -r _img || [[ -n "$_img" ]]; do
+            [[ -z "$_img" ]] && continue
+            if docker image rm "$_img" >/dev/null 2>&1; then
+              ndjson_line info "removed server image $_img"
+              rmimg_count=$(( rmimg_count + 1 ))
+            else
+              ndjson_line warn "could not remove image $_img (in use by another title, or already gone)"
+            fi
+          done < <(_compose_server_images "$tcompose")
+          [[ "$rmimg_count" -eq 0 ]] && ndjson_line info "no server images to remove"
+        elif [[ "$rmimages" != 1 && -n "$tcompose" ]]; then
+          ndjson_line info "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)"
         fi
         # ---------------------------------------------------------------------
         if [[ -L "$GAMES_DIR/$gid" ]]; then
@@ -4317,6 +4394,43 @@ case "$cmd" in
         ndjson_line info "Next rebuild will be a full recompile (30-90 min)."
         ndjson_section_end docker-clean ok
         ndjson_done "{\"level\":$dclevel,\"cleaned\":true}"
+        ;;
+      cache-status)
+        # Batch 6 C: read-only size report for the RUNTIME item-info cache
+        # (wowhead tooltips + icons under ~/.dml/wowhead-cache). Repopulates
+        # per-item on the next Items-page lookup, so wiping it is safe. NOT a
+        # committed dataset (talent-trees-wotlk.json etc. are bundled into the
+        # binary and never live here). No server dir / docker needed.
+        ccpath="$(_iteminfo_cache)"
+        ccpresent=false; ccbytes=0; ccfiles=0
+        if [[ -d "$ccpath" ]]; then
+          ccpresent=true
+          ccbytes="$(du -sb "$ccpath" 2>/dev/null | cut -f1 || true)"
+          [[ "$ccbytes" =~ ^[0-9]+$ ]] || ccbytes=0
+          ccfiles="$(find "$ccpath" -type f 2>/dev/null | wc -l || true)"
+          [[ "$ccfiles" =~ ^[0-9]+$ ]] || ccfiles=0
+        fi
+        json_ok "{\"caches\":[{\"key\":\"wowhead\",\"label\":\"Item tooltips & icons\",\"path\":\"$(json_escape "$ccpath")\",\"present\":$ccpresent,\"bytes\":$ccbytes,\"files\":$ccfiles}]}"
+        ;;
+      cache-clean)
+        # Batch 6 C: wipe the runtime item-info cache. Safety invariant: the
+        # path is code-derived (_iteminfo_cache), but we still assert it ends
+        # in /.dml/wowhead-cache before any rm -rf, so this can NEVER delete
+        # ~/.dml itself (which also holds non-cache state like client-path).
+        ccpath="$(_iteminfo_cache)"
+        case "$ccpath" in
+          */.dml/wowhead-cache) : ;;
+          *) json_err INTERNAL "refusing to wipe unexpected cache path" "$ccpath"; exit 1 ;;
+        esac
+        ccfreed=0
+        if [[ -d "$ccpath" ]]; then
+          ccfreed="$(du -sb "$ccpath" 2>/dev/null | cut -f1 || true)"
+          [[ "$ccfreed" =~ ^[0-9]+$ ]] || ccfreed=0
+          if ! rm -rf "$ccpath"; then
+            json_err WIPE_FAILED "could not remove the cache dir" "$ccpath"; exit 1
+          fi
+        fi
+        json_ok "{\"wiped\":true,\"freed_bytes\":$ccfreed,\"path\":\"$(json_escape "$ccpath")\"}"
         ;;
       console-tail)
         # Read-only worldserver log tail for the Console page. Down is an
@@ -6755,8 +6869,10 @@ case "$cmd" in
               cl=false; _lua_cloned "$sdir" "$mk" && cl=true
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
               lsql=false; _lua_has_sql "$mk" && lsql=true
+              lwarn="$(_lua_warn "$sdir" "$mk")"
+              lwarnjson=null; [[ -n "$lwarn" ]] && lwarnjson="\"$(json_escape "$lwarn")\""
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql,\"warn\":$lwarnjson}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'

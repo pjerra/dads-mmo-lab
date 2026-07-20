@@ -103,6 +103,60 @@ pub fn zam_serve(cache_root: &std::path::Path, raw_path: &str) -> Option<(Vec<u8
     Some((bytes, ct))
 }
 
+/// The single runtime-cache subdir name under the app cache root. All the
+/// zam-scheme model/icon bytes live under `<app_cache_dir>/zam-cache`; the
+/// maintenance commands (Batch 6 C) only ever construct paths from this
+/// constant, so a wipe can never be aimed at anything but the cache.
+pub const ZAM_CACHE_DIR: &str = "zam-cache";
+
+/// Recursively total the file sizes (bytes) and file count under `dir`.
+/// A missing/unreadable dir yields (0, 0); unreadable subdirs are skipped
+/// rather than aborting the walk. Symlinks are not followed (file_type on the
+/// dir entry, not the target), so the count is of real files under the tree.
+pub fn dir_report(dir: &std::path::Path) -> (u64, u64) {
+    let mut bytes: u64 = 0;
+    let mut files: u64 = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for ent in rd.flatten() {
+            match ent.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(ent.path()),
+                Ok(ft) if ft.is_file() => {
+                    if let Ok(m) = ent.metadata() {
+                        bytes = bytes.saturating_add(m.len());
+                        files += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (bytes, files)
+}
+
+/// Size report for the zam runtime cache (`<cache_root>/zam-cache`).
+pub fn zam_cache_report(cache_root: &std::path::Path) -> (u64, u64) {
+    dir_report(&cache_root.join(ZAM_CACHE_DIR))
+}
+
+/// Delete `<cache_root>/zam-cache` entirely, returning the bytes freed
+/// (measured before deletion; 0 if the dir was absent). The target path is
+/// always built here from the fixed `ZAM_CACHE_DIR` name joined onto the
+/// caller's cache root, so this can only ever remove the cache subdir --
+/// never the cache root or anything outside it.
+pub fn zam_cache_clear(cache_root: &std::path::Path) -> std::io::Result<u64> {
+    let dir = cache_root.join(ZAM_CACHE_DIR);
+    let (bytes, _) = dir_report(&dir);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +221,71 @@ mod tests {
         assert_eq!(percent_decode_lossy("a%2eb"), "a.b");
         assert_eq!(percent_decode_lossy("a%2"), "a%2");
         assert_eq!(percent_decode_lossy("a%zz"), "a%zz");
+    }
+
+    // --- Batch 6 C: cache maintenance --------------------------------------
+
+    fn tmp_root(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("zamcache_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn dir_report_counts_bytes_and_files_recursively() {
+        let root = tmp_root("report");
+        let sub = root.join("images/wow/icons");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("a.json"), b"1234").unwrap(); // 4 bytes
+        std::fs::write(sub.join("b.jpg"), b"abcdef").unwrap(); // 6 bytes
+        let (bytes, files) = dir_report(&root);
+        assert_eq!(files, 2);
+        assert_eq!(bytes, 10);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dir_report_missing_dir_is_zero() {
+        let (bytes, files) = dir_report(&tmp_root("missing").join("nope"));
+        assert_eq!((bytes, files), (0, 0));
+    }
+
+    #[test]
+    fn zam_cache_clear_removes_only_the_cache_subdir() {
+        let root = tmp_root("clear");
+        // The cache subdir with content...
+        let cache = root.join(ZAM_CACHE_DIR).join("images");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("x.jpg"), b"xxxxx").unwrap(); // 5 bytes
+        // ...plus a SIBLING file in the cache root that must survive.
+        std::fs::write(root.join("keep-me.txt"), b"keep").unwrap();
+
+        let freed = zam_cache_clear(&root).unwrap();
+        assert_eq!(freed, 5);
+        assert!(!root.join(ZAM_CACHE_DIR).exists(), "zam-cache subdir wiped");
+        assert!(root.join("keep-me.txt").exists(), "sibling state preserved");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zam_cache_clear_absent_is_ok_and_zero() {
+        let root = tmp_root("clear_absent");
+        std::fs::create_dir_all(&root).unwrap();
+        let freed = zam_cache_clear(&root).unwrap();
+        assert_eq!(freed, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn zam_cache_report_targets_the_subdir() {
+        let root = tmp_root("report_sub");
+        let cache = root.join(ZAM_CACHE_DIR);
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("t.json"), b"abc").unwrap(); // 3 bytes
+        // A file OUTSIDE the cache subdir must not be counted.
+        std::fs::write(root.join("outside.txt"), b"zzzzzzzz").unwrap();
+        let (bytes, files) = zam_cache_report(&root);
+        assert_eq!((bytes, files), (3, 1));
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

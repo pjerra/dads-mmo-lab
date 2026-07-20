@@ -1061,6 +1061,32 @@ export async function defenderHint(): Promise<{ vhdx_dir: string | null; command
   return await invoke("defender_hint");
 }
 
+// --- Enrichment-cache maintenance (Batch 6 C) ------------------------------
+// Two RUNTIME caches (safe to wipe -- they repopulate on demand): the
+// Windows-side 3D-model/icon cache (zam) and the WSL-side item tooltip/icon
+// cache (wowhead). Committed datasets (talent trees, achievements) are
+// bundled into the binary and never appear here.
+export interface CacheEntry {
+  key: string;
+  label: string;
+  path: string;
+  present: boolean;
+  bytes: number;
+  files: number;
+}
+export async function zamCacheStatus(): Promise<CacheEntry> {
+  return await invoke("zam_cache_status");
+}
+export async function zamCacheClear(): Promise<{ cleared: boolean; freed_bytes: number }> {
+  return await invoke("zam_cache_clear");
+}
+export async function wowCacheStatus(): Promise<{ caches: CacheEntry[] }> {
+  return await invoke("wow_cache_status");
+}
+export async function wowCacheClean(): Promise<{ wiped: boolean; freed_bytes: number; path: string }> {
+  return await invoke("wow_cache_clean");
+}
+
 // --- Keep-awake sleep block (Batch 2 F6) -----------------------------------
 
 export async function setKeepAwake(on: boolean): Promise<void> {

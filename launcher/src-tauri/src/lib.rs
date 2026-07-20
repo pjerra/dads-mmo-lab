@@ -1781,6 +1781,66 @@ fn defender_hint() -> Result<serde_json::Value, CmdError> {
     Ok(serde_json::json!({"vhdx_dir": base, "command": command}))
 }
 
+// --- Enrichment-cache maintenance (Batch 6 C) ------------------------------
+//
+// Two runtime caches, on two filesystems:
+//  * zam-cache -- Windows-side 3D-model + icon bytes under app_cache_dir();
+//    measured/wiped directly in Rust (crate::zam).
+//  * wowhead-cache -- WSL-side item tooltip/icon JSON under ~/.dml; measured/
+//    wiped by the `dml wow cache-status|cache-clean` CLI verbs.
+// Committed datasets (talent-trees-wotlk.json, achievements-wotlk.json) are
+// bundled into the binary, live on NO cache path, and are never touched.
+
+/// Size report for the Windows-side zam model/icon cache.
+#[tauri::command]
+fn zam_cache_status(app: tauri::AppHandle) -> Result<serde_json::Value, CmdError> {
+    let root = app.path().app_cache_dir().map_err(|e| CmdError {
+        code: "CACHE_DIR".into(),
+        message: e.to_string(),
+        hint: "Could not locate the app cache directory.".into(),
+    })?;
+    let (bytes, files) = crate::zam::zam_cache_report(&root);
+    let path = root.join(crate::zam::ZAM_CACHE_DIR);
+    Ok(serde_json::json!({
+        "key": "models",
+        "label": "3D models & icons (this PC)",
+        "path": path.to_string_lossy(),
+        "present": path.exists(),
+        "bytes": bytes,
+        "files": files,
+    }))
+}
+
+/// Wipe the Windows-side zam model/icon cache. Only ever removes the
+/// `<app_cache_dir>/zam-cache` subdir (path built from a fixed constant).
+#[tauri::command]
+fn zam_cache_clear(app: tauri::AppHandle) -> Result<serde_json::Value, CmdError> {
+    let root = app.path().app_cache_dir().map_err(|e| CmdError {
+        code: "CACHE_DIR".into(),
+        message: e.to_string(),
+        hint: "Could not locate the app cache directory.".into(),
+    })?;
+    let freed = crate::zam::zam_cache_clear(&root).map_err(|e| CmdError {
+        code: "WIPE_FAILED".into(),
+        message: e.to_string(),
+        hint: "The cache could not be removed -- close other app windows and retry.".into(),
+    })?;
+    Ok(serde_json::json!({"cleared": true, "freed_bytes": freed}))
+}
+
+/// Size report for the WSL-side item tooltip/icon cache (via the CLI).
+#[tauri::command]
+async fn wow_cache_status(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "cache-status".into()]).await
+}
+
+/// Wipe the WSL-side item tooltip/icon cache (via the CLI). The CLI asserts
+/// its target ends in /.dml/wowhead-cache before any rm -rf.
+#[tauri::command]
+async fn wow_cache_clean(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "cache-clean".into()]).await
+}
+
 #[tauri::command]
 async fn games_catalog(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["games".into(), "catalog".into()]).await
@@ -1990,6 +2050,10 @@ pub fn run() {
             games_start,
             games_stop,
             games_restart,
+            zam_cache_status,
+            zam_cache_clear,
+            wow_cache_status,
+            wow_cache_clean,
             wow_accounts,
             wow_account_create,
             wow_account_set_password,

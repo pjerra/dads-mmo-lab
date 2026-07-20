@@ -1562,6 +1562,43 @@ case "$cmd" in
         ndjson_section_end docker-clean ok
         ndjson_done "{\"level\":$dclevel,\"cleaned\":true}"
         ;;
+      cache-status)
+        # Batch 6 C: read-only size report for the RUNTIME item-info cache
+        # (wowhead tooltips + icons under ~/.dml/wowhead-cache). Repopulates
+        # per-item on the next Items-page lookup, so wiping it is safe. NOT a
+        # committed dataset (talent-trees-wotlk.json etc. are bundled into the
+        # binary and never live here). No server dir / docker needed.
+        ccpath="$(_iteminfo_cache)"
+        ccpresent=false; ccbytes=0; ccfiles=0
+        if [[ -d "$ccpath" ]]; then
+          ccpresent=true
+          ccbytes="$(du -sb "$ccpath" 2>/dev/null | cut -f1 || true)"
+          [[ "$ccbytes" =~ ^[0-9]+$ ]] || ccbytes=0
+          ccfiles="$(find "$ccpath" -type f 2>/dev/null | wc -l || true)"
+          [[ "$ccfiles" =~ ^[0-9]+$ ]] || ccfiles=0
+        fi
+        json_ok "{\"caches\":[{\"key\":\"wowhead\",\"label\":\"Item tooltips & icons\",\"path\":\"$(json_escape "$ccpath")\",\"present\":$ccpresent,\"bytes\":$ccbytes,\"files\":$ccfiles}]}"
+        ;;
+      cache-clean)
+        # Batch 6 C: wipe the runtime item-info cache. Safety invariant: the
+        # path is code-derived (_iteminfo_cache), but we still assert it ends
+        # in /.dml/wowhead-cache before any rm -rf, so this can NEVER delete
+        # ~/.dml itself (which also holds non-cache state like client-path).
+        ccpath="$(_iteminfo_cache)"
+        case "$ccpath" in
+          */.dml/wowhead-cache) : ;;
+          *) json_err INTERNAL "refusing to wipe unexpected cache path" "$ccpath"; exit 1 ;;
+        esac
+        ccfreed=0
+        if [[ -d "$ccpath" ]]; then
+          ccfreed="$(du -sb "$ccpath" 2>/dev/null | cut -f1 || true)"
+          [[ "$ccfreed" =~ ^[0-9]+$ ]] || ccfreed=0
+          if ! rm -rf "$ccpath"; then
+            json_err WIPE_FAILED "could not remove the cache dir" "$ccpath"; exit 1
+          fi
+        fi
+        json_ok "{\"wiped\":true,\"freed_bytes\":$ccfreed,\"path\":\"$(json_escape "$ccpath")\"}"
+        ;;
       console-tail)
         # Read-only worldserver log tail for the Console page. Down is an
         # answer: docker/container unavailable -> available:false, exit 0.

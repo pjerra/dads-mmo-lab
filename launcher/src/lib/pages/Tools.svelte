@@ -18,11 +18,16 @@
     generateMysqlProxyScript,
     wowPortCheck,
     defenderHint,
+    zamCacheStatus,
+    zamCacheClear,
+    wowCacheStatus,
+    wowCacheClean,
     type LanAction,
     type ToolName,
     type RealmlistStatus,
     type WslConfigState,
     type PortCheck,
+    type CacheEntry,
   } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -597,6 +602,72 @@
       shellError = fmtErr(e);
     } finally {
       shellBusy = false;
+    }
+  }
+
+  // --- Cache maintenance (Batch 6 C) ---------------------------------------
+  // Status + wipe for the two RUNTIME enrichment caches (safe to clear -- they
+  // re-download on demand): the Windows zam 3D-model/icon cache and the WSL
+  // wowhead item tooltip/icon cache. The committed talent/achievement datasets
+  // ship in the binary and are never touched. Only the wipe is locked
+  // (cache-maint); reading sizes is read-only.
+  let cacheEntries: CacheEntry[] = $state([]);
+  let cacheError: string | null = $state(null);
+  let cacheBusy = $state(false);
+  let cacheNote: string | null = $state(null);
+  let cacheConfirm = $state(false);
+
+  function fmtBytes(n: number): string {
+    if (!n || n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    let v = n;
+    let i = 0;
+    while (v >= 1024 && i < units.length - 1) {
+      v /= 1024;
+      i += 1;
+    }
+    return `${i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+  }
+
+  async function loadCaches() {
+    cacheBusy = true;
+    cacheError = null;
+    try {
+      const [zam, wh] = await Promise.all([zamCacheStatus(), wowCacheStatus()]);
+      cacheEntries = [zam, ...wh.caches];
+    } catch (e) {
+      cacheError = fmtErr(e);
+    } finally {
+      cacheBusy = false;
+    }
+  }
+
+  onMount(() => {
+    void loadCaches().catch(() => {});
+  });
+
+  function armClearCaches() {
+    if (!cacheConfirm) {
+      cacheConfirm = true;
+      return;
+    }
+    cacheConfirm = false;
+    void clearCaches();
+  }
+
+  async function clearCaches() {
+    cacheBusy = true;
+    cacheError = null;
+    cacheNote = null;
+    try {
+      const [zam, wh] = await Promise.all([zamCacheClear(), wowCacheClean()]);
+      const freed = (zam.freed_bytes ?? 0) + (wh.freed_bytes ?? 0);
+      cacheNote = `Cleared ${fmtBytes(freed)} of cached tooltips, icons and 3D-model data — it rebuilds itself as you browse.`;
+      await loadCaches();
+    } catch (e) {
+      cacheError = fmtErr(e);
+    } finally {
+      cacheBusy = false;
     }
   }
 </script>
@@ -1207,6 +1278,40 @@
         <code>Add-MpPreference -ExclusionPath "&lt;folder containing dml-arch's ext4.vhdx&gt;"</code>.
       </p>
     {/if}
+  </div>
+
+  <div class="card">
+    <h3>Cache maintenance</h3>
+    <p class="muted">
+      The launcher saves item tooltips, icons and 3D-model data it downloads so pages open
+      instantly next time. Clearing it is safe — it just re-downloads what you look at. This
+      does NOT touch the built-in talent trees or achievements data (those ship inside the
+      app and are never cached).
+    </p>
+    {#if cacheError}<p class="inline-error">{cacheError}</p>{/if}
+    <ul class="port-list">
+      {#each cacheEntries as c (c.key)}
+        <li>
+          <span class="mono">{c.label}</span>
+          <span class="mono">{fmtBytes(c.bytes)}</span>
+          <span class="muted">{c.files} file{c.files === 1 ? "" : "s"}</span>
+        </li>
+      {/each}
+      {#if cacheEntries.length === 0 && !cacheBusy}
+        <li><span class="muted">No cache measured yet.</span></li>
+      {/if}
+    </ul>
+    <div class="row">
+      <button onclick={loadCaches} disabled={cacheBusy}>Refresh</button>
+      <button
+        onclick={armClearCaches}
+        disabled={cacheBusy || featureLocked("cache-maint")}
+        title={featureLocked("cache-maint") ? LOCKED_HINT : undefined}
+      >
+        {cacheConfirm ? "Clear all caches — sure?" : "Clear caches"}
+      </button>
+    </div>
+    {#if cacheNote}<p class="notice">{cacheNote}</p>{/if}
   </div>
 
   <div class="card">
