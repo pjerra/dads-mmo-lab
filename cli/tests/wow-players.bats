@@ -52,6 +52,20 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.players[0].zone')" = "0" ]
 }
 
+@test "players online: a NULL level or class degrades to 0 instead of breaking the JSON" {
+  # cols: name, level(NULL), class(NULL), zone -- mysql -N emits NULLs as the
+  # literal "NULL"; unguarded that yields `"level":NULL,` -> invalid JSON that
+  # blanks the Home card.
+  printf 'Testen\tNULL\tNULL\t1519\n' > "$FIXTURE/pl.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/pl.tsv"
+  run bash "$DML" wow players online --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.players | length')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.players[0].level')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.players[0].class')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.players[0].zone')" = "1519" ]
+}
+
 @test "players online maps db failure to DB_UNREACHABLE" {
   export DML_STUB_DB_EXIT=1
   run bash "$DML" wow players online --json

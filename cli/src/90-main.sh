@@ -2761,6 +2761,11 @@ case "$cmd" in
             first=1; out='['
             while IFS=$'\t' read -r name lvl cls zone || [[ -n "$name" ]]; do
               [[ -z "$name" ]] && continue
+              # Guard EVERY interpolated numeric, not just zone: a NULL/empty
+              # level or class would emit `"level":,` -> invalid JSON that
+              # blanks the Home card. Degrade each to 0 like zone.
+              [[ "$lvl" =~ ^[0-9]+$ ]] || lvl=0
+              [[ "$cls" =~ ^[0-9]+$ ]] || cls=0
               [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
               [[ $first -eq 0 ]] && out+=','
               out+="{\"name\":\"$(json_escape "$name")\",\"level\":$lvl,\"class\":$cls,\"zone\":$zone}"
