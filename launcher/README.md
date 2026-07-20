@@ -25,24 +25,52 @@ Node.js 18+, and Rust (for building the app shell).
 
 ## What it does
 
+The sidebar is grouped into five collapsible sections — **Server**,
+**Characters**, **Items & Bots**, **Config**, **Help** — each a
+dropdown/accordion; the group holding your current page opens automatically.
+Tabs remain in exactly one place: the character view (Character / Talents /
+Achievements).
+
 **Server**
 - **Home** — live server card: world up/down/starting/restarting with real-time
   updates, players, uptime, latency, bots online / max. Start, Stop and
-  Restart with streamed output. Restarts save every character first and apply
-  changed settings.
+  Restart with streamed output. Restart applies changed settings and, by
+  default, saves every character first; an optional toggle skips that extra
+  save for a faster restart (the graceful shutdown still saves normally).
 - **Live status chip** — current server state always visible in the sidebar,
   on every page, updating every few seconds.
 - **Library** — install complete game servers (WotLK Playerbots, Vanilla, TBC,
   MapleStory, RuneScape, Mu Online) through their interactive installers, with
-  a real terminal for answering prompts; start/stop/remove per title.
+  a real terminal for answering prompts, or from a trusted repo URL;
+  start/stop/remove per title, optionally also deleting a removed title's
+  downloaded server images to free disk space.
 - **Console** — live worldserver log that fills the window, with send-command
-  support (GM console), command history, clear and download.
-- **Tools** — LAN play (let other PCs on your network join), the Wrath Unbound
-  multi-class addon (install/uninstall), environment doctor, and a one-click
-  WSL shell.
+  support (GM console), command history with Up/Down recall and autocomplete
+  (GM catalog + your favorites), ERROR/WARN log coloring, clear and download.
+- **Tools** — LAN play (let other PCs on your network join), "Play over the
+  internet" (guided router port-forward + optional DuckDNS), "Play Together"
+  over Tailscale (friends join without any port-forwarding), the Wrath
+  Unbound multi-class addon (install/uninstall), a realmlist status-and-fix
+  card, a LAN/database diagnostic with a generated script to expose MySQL to
+  HeidiSQL on your LAN, auto-shutdown when WoW closes, keep-PC-awake while
+  the server's online, disk & performance tools (WSL memory/CPU limits,
+  restart WSL, a disk-shrink script, a Windows Defender exclusion hint),
+  cache maintenance, an environment doctor, and a one-click WSL shell.
+- **Accounts** — create accounts, set passwords and GM levels, delete
+  accounts (with protection for the admin account).
+- **Modules** — 38 server modules across three families (C++ / Lua / SQL)
+  with one-line descriptions and GitHub links: transmog, auction house bot
+  (or the Auction House Bot Plus fork, auto-detected), solocraft, autobalance,
+  1v1 arena, hardcore modes and more. Handles the worldserver rebuild, config
+  activation, install-state repair, Docker disk cleanup and server source
+  updates; modules that add a service NPC (e.g. NPC Beastmaster, Black
+  Market AH) get a one-click "place NPC in capitals" button, and some
+  modules show an inline advisory (e.g. Paragon's unguarded `.test` command).
 
 **Characters**
-- **Dashboard** — an in-game-style character sheet in tabs:
+- **Character** — an in-game-style character sheet in tabs, auto-loading
+  when you pick a character from the sidebar's "playing as" switcher
+  (**Reload gear** re-fetches on demand):
   - *Character*: equipment grid with wowhead tooltips and item icons, and a
     rotatable 3D model of your character wearing their gear, centered in the
     pane like the in-game window.
@@ -53,40 +81,67 @@ Node.js 18+, and Rust (for building the app shell).
     earned dates, icons and tooltips (1320 achievements).
 - **Teleport** — send any character to any of ~2000 named locations, or exact
   coordinates.
-- **GM Tools** — revive, heal, set level, set gold on any character; summon
-  service NPCs (banker, auctioneer, repair bot, …); at-login flags (rename,
-  customize).
+- **GM Tools** — revive, heal, set level, set gold, or send a character home
+  (unstuck — works offline too) on any character; summon service NPCs
+  (banker, auctioneer, repair bot, …); at-login flags (rename, customize).
 
 **Items & Bots**
-- **Item Database** — search the item database and mail items to characters.
-- **Playerbots (My Party)** — build a bot party by class, gear them up, fix
-  their talents, set their level; save and load full party presets;
+- **Item Database** — search the item database and mail items to characters;
+  save a character's equipped gear as a reusable "gear set", mail whole sets
+  to other characters, and export/import sets as shareable TOML text.
+- **Playerbots (My Party)** — build a bot party by role/class/spec (spec list
+  pulled live from the server), gear them up, fix their talents, set their
+  level, see who's online at a glance; save and load full party presets;
   export/import presets as text.
-- **Commands** — a cheat-sheet page with the in-game commands of every
-  installed module.
+- **Browse Bots** — search all ~2500 world bots by name/class/level/online
+  status, star favorites, inspect a bot's gear/talents/achievement count, and
+  invite one to your party or set its level.
+- **Commands** — a cheat-sheet page with the always-available core GM
+  commands plus the in-game commands of every installed module.
 
 **Config**
-- **Accounts** — create accounts, set passwords and GM levels, delete
-  accounts (with protection for the admin account).
 - **Settings** — curated server settings (XP/gold rates, bot population,
-  AHBot, message of the day) with safe ranges; applied on restart (motd is
-  instant).
-- **Modules** — 37 server modules across three families (C++ / Lua / SQL)
-  with one-line descriptions and GitHub links: transmog, auction house bot,
-  solocraft, autobalance, 1v1 arena, hardcore modes and more. Handles the
-  worldserver rebuild, config activation, install-state repair, Docker disk
-  cleanup and server source updates.
-- **Module Configs** — full-window text editor for module conf files with
-  automatic backups.
+  AHBot, message of the day), each showing its default and safe range with a
+  per-row Reset; most apply on restart (motd is instant, and some rate
+  changes can apply live).
+- **Bot World** — the same curated bot-population controls plus a searchable
+  browser of every `playerbots.conf` key, and a guarded "flush & rebuild
+  bots" danger-zone action.
+- **Auction House** — repair/configure the Auction House Bot, or the Auction
+  House Bot Plus fork (auto-detected), so the in-game auction house fills
+  with bot listings.
+- **Account-wide** — once the Accountwide Systems module is installed, turn
+  on account-wide sharing per system: achievements, currency, gold, mounts,
+  pets, playtime, professions, PvP rank, flight paths, titles.
+- **Module tuning** — guided settings for modules like NPC Beastmaster, Learn
+  Spells on Level-up, Unlimited Ammo and Sit Means Rest, without
+  hand-editing conf files.
+- **Module files** — full-window text editor for module conf files, with
+  automatic backups and a sanity check before saving.
 - **Backups** — one-click snapshots of all characters/accounts/bots (works
-  while running, always saves characters first); restore rolls everything
-  back with an automatic safety backup.
+  while running, always saves characters first), each with a short content
+  summary and a Verify button that checks archive integrity without
+  restoring; restore rolls everything back with an automatic safety backup.
+
+**Help**
+- **Help & FAQ** — accordion of setup/troubleshooting help with copyable
+  commands and deep links into the rest of the app.
 
 **Quality of life throughout**: every terminal keeps its transcript when you
-switch pages (streams keep running), Clear/Download buttons everywhere,
-save dialogs are native, item/spell/achievement data is cached for offline
-use after first view, and untested features ship locked until they pass a
-live smoke test (`docs/SMOKE-TESTS.md`).
+switch pages (streams keep running), Clear/Download buttons everywhere, save
+dialogs are native, item/spell/achievement data is cached for offline use
+after first view, Windows taskbar progress during long-running operations,
+consistent loading/empty states, and themed scrollbars/text selection
+matching the dark UI.
+
+Many mutating actions — not just the newest additions but also things like
+installing/removing titles, module installs/rebuilds, backups, accounts, and
+LAN/Unbound-addon play — ship behind an "Enable untested features" toggle in
+Settings until each one passes a live smoke test by hand. Read-only views and
+a core set (server start/stop/restart, console, teleport, GM actions,
+item mail, My Party, curated Settings) are already verified; everything
+else is grey + locked until tested. See `docs/SMOKE-TESTS.md` for the full,
+up-to-date list of what's verified and what's still pending.
 
 ## Architecture
 
