@@ -4,7 +4,7 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
   import { serverStatus, containersExist } from "$lib/server-status.svelte";
-  import { recallHistory, logSeverity, consoleCommands, commandSuggestions } from "$lib/console-input";
+  import { stepRecall, logSeverity, consoleCommands, commandSuggestions } from "$lib/console-input";
   import { CORE_COMMANDS } from "$lib/gm-commands";
 
   let available = $state(true);
@@ -122,10 +122,13 @@
     if (hist.length === 0) return;
     e.preventDefault();
     const dir = e.key === "ArrowUp" ? "up" : "down";
-    if (histCursor === null && dir === "up") histDraft = command;
-    const r = recallHistory(hist, histCursor, dir, histDraft);
+    // stepRecall captures the live draft whenever we're not already walking
+    // history, so a Down press with no prior Up is a no-op instead of wiping
+    // the typed command with a stale draft.
+    const r = stepRecall(hist, histCursor, dir, command, histDraft);
     command = r.value;
     histCursor = r.cursor;
+    histDraft = r.draft;
     caretToEnd();
   }
 

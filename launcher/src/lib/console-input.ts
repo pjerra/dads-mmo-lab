@@ -35,6 +35,30 @@ export function recallHistory(
   return { value: history[next], cursor: next };
 }
 
+// One arrow keystroke of recall, INCLUDING the draft bookkeeping that used to
+// live in the component. Whenever we're not already walking history
+// (cursor === null) the live `command` is captured as the draft first -- so a
+// Down press with no prior Up recalls that same text (a no-op) instead of
+// clobbering the user's typed input with a stale/empty draft. Returns the new
+// input value plus the cursor and draft to store back.
+export interface StepRecallResult {
+  value: string;
+  cursor: number | null;
+  draft: string;
+}
+
+export function stepRecall(
+  history: string[],
+  cursor: number | null,
+  dir: "up" | "down",
+  command: string,
+  draft: string,
+): StepRecallResult {
+  const nextDraft = cursor === null ? command : draft;
+  const r = recallHistory(history, cursor, dir, nextDraft);
+  return { value: r.value, cursor: r.cursor, draft: nextDraft };
+}
+
 // --- Log severity coloring (F2) --------------------------------------------
 // Classify a raw worldserver log line by the level marker it prints. Matched
 // case-sensitively against the upper-case tokens the server emits, so ordinary

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { recallHistory, logSeverity, consoleCommands, commandSuggestions } from "./console-input";
+import { recallHistory, stepRecall, logSeverity, consoleCommands, commandSuggestions } from "./console-input";
 import { CORE_COMMANDS } from "./gm-commands";
 
 describe("recallHistory", () => {
@@ -39,6 +39,42 @@ describe("recallHistory", () => {
     r = recallHistory(hist, r.cursor, "down", "draft"); // -> gm on (2)
     r = recallHistory(hist, r.cursor, "down", "draft"); // -> draft (null)
     expect(r).toEqual({ value: "draft", cursor: null });
+  });
+});
+
+describe("stepRecall (draft bookkeeping the component used to do)", () => {
+  const hist = ["server info", "saveall", "gm on"]; // oldest -> newest
+
+  it("Down with no prior Up is a no-op that keeps the typed command", () => {
+    // Regression: the component fed a stale histDraft ("") on a down press,
+    // wiping the input. stepRecall captures the live command as the draft.
+    expect(stepRecall(hist, null, "down", "account create bob", "")).toEqual({
+      value: "account create bob",
+      cursor: null,
+      draft: "account create bob",
+    });
+  });
+
+  it("Up from the draft captures the live command and recalls the newest", () => {
+    expect(stepRecall(hist, null, "up", "half-typed", "")).toEqual({
+      value: "gm on",
+      cursor: 2,
+      draft: "half-typed",
+    });
+  });
+
+  it("keeps the captured draft while walking history, restoring it on Down past newest", () => {
+    // Type, Up (captures draft), Down back past the newest -> the ORIGINAL
+    // typed text returns, not an empty/stale draft.
+    let s = stepRecall(hist, null, "up", "typed", ""); // -> gm on (2), draft "typed"
+    expect(s).toEqual({ value: "gm on", cursor: 2, draft: "typed" });
+    s = stepRecall(hist, s.cursor, "down", s.value, s.draft); // -> draft
+    expect(s).toEqual({ value: "typed", cursor: null, draft: "typed" });
+  });
+
+  it("empty history leaves the typed command untouched in both directions", () => {
+    expect(stepRecall([], null, "down", "keep me", "")).toEqual({ value: "keep me", cursor: null, draft: "keep me" });
+    expect(stepRecall([], null, "up", "keep me", "")).toEqual({ value: "keep me", cursor: null, draft: "keep me" });
   });
 });
 
