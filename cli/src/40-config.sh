@@ -692,14 +692,18 @@ _lua_cfg_read() {
     return 0
 }
 
-# _lua_cfg_write <path> <key> <fileval>: replaces the value of the FIRST
+# _lua_cfg_write <path> <key> <fileval>: replaces the value of the LAST
 # uncommented `<key> = ...` line in place, preserving leading whitespace, the
 # original spacing around `=`, and any trailer (a table comma and/or inline
-# `-- comment`). tmp-file + verify + mv, like _cfg_conf_write, so a bad edit
-# never truncates the file. Returns 1 when the key line is absent (caller maps
-# that to NOT_FOUND) OR the patch cannot be verified. Sets MTUNE_CHANGED=true
-# only when the value actually moved. <fileval> is already file-form
-# (true/false or a validated integer), so the reconstructed line is safe.
+# `-- comment`). Editing the LAST occurrence matches _lua_cfg_read (and Lua's
+# own last-assignment-wins load semantics), so a write round-trips through a
+# read -- targeting the FIRST occurrence instead would leave the effective
+# (last) value unchanged and fail verification. tmp-file + verify + mv, like
+# _cfg_conf_write, so a bad edit never truncates the file. Returns 1 when the
+# key line is absent (caller maps that to NOT_FOUND) OR the patch cannot be
+# verified. Sets MTUNE_CHANGED=true only when the value actually moved.
+# <fileval> is already file-form (true/false or a validated integer), so the
+# reconstructed line is safe.
 _lua_cfg_write() {
     local cur tmp
     cur="$(_lua_cfg_read "$1" "$2")"
@@ -707,9 +711,17 @@ _lua_cfg_write() {
     [[ "$cur" == "$3" ]] && return 0
     tmp="$1.tmp.$$"
     K="$2" V="$3" awk '
-        BEGIN { done = 0 }
-        {
-            line = $0
+        function is_key_line(line,    s, lead, body, k) {
+            s = line
+            sub(/\r$/, "", s)
+            lead = ""
+            if (match(s, /^[ \t]+/)) { lead = substr(s, 1, RLENGTH) }
+            body = substr(s, length(lead) + 1)
+            k = ENVIRON["K"]
+            if (index(body, k) != 1) { return 0 }
+            return (substr(body, length(k) + 1) ~ /^[ \t]*=/)
+        }
+        function rebuild(line,    cr, s, lead, body, k, after, eqlen, eqpart, rest, vlen, trailer) {
             cr = ""
             s = line
             if (s ~ /\r$/) { cr = "\r"; sub(/\r$/, "", s) }
@@ -717,22 +729,22 @@ _lua_cfg_write() {
             if (match(s, /^[ \t]+/)) { lead = substr(s, 1, RLENGTH) }
             body = substr(s, length(lead) + 1)
             k = ENVIRON["K"]
-            if (!done && index(body, k) == 1) {
-                after = substr(body, length(k) + 1)
-                if (after ~ /^[ \t]*=/) {
-                    eqlen = 0
-                    if (match(after, /^[ \t]*=[ \t]*/)) { eqlen = RLENGTH }
-                    eqpart = substr(after, 1, eqlen)
-                    rest = substr(after, eqlen + 1)
-                    vlen = length(rest)
-                    if (match(rest, /[ \t,;]/)) { vlen = RSTART - 1 }
-                    trailer = substr(rest, vlen + 1)
-                    print lead k eqpart ENVIRON["V"] trailer cr
-                    done = 1
-                    next
-                }
+            after = substr(body, length(k) + 1)
+            eqlen = 0
+            if (match(after, /^[ \t]*=[ \t]*/)) { eqlen = RLENGTH }
+            eqpart = substr(after, 1, eqlen)
+            rest = substr(after, eqlen + 1)
+            vlen = length(rest)
+            if (match(rest, /[ \t,;]/)) { vlen = RSTART - 1 }
+            trailer = substr(rest, vlen + 1)
+            return lead k eqpart ENVIRON["V"] trailer cr
+        }
+        { lines[NR] = $0; if (is_key_line($0)) last = NR }
+        END {
+            for (i = 1; i <= NR; i++) {
+                if (i == last) print rebuild(lines[i])
+                else print lines[i]
             }
-            print line
         }
     ' "$1" > "$tmp" || { rm -f "$tmp"; return 1; }
     if [[ "$(_lua_cfg_read "$tmp" "$2")" != "$3" ]]; then

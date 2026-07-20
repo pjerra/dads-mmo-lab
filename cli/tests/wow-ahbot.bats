@@ -99,17 +99,31 @@ _done_line() { echo "$1" | grep '"event":"done"' | tail -1; }
 }
 
 @test "ahbot repair works with the plus fork installed instead (mod-ah-bot-plus)" {
-  # Batch 2 (overnight): only mod-ah-bot-plus present -- repair must detect it,
-  # write the same mod_ahbot.conf keys, and report module=mod-ah-bot-plus.
+  # Batch 2 (overnight): only mod-ah-bot-plus present -- repair must detect it
+  # and write the PLUS fork's OWN key names, which differ from the original
+  # mod-ah-bot's: GUIDs (plural list) and Buyer.Enabled, with NO Account key
+  # (verified against each fork's conf/mod_ahbot.conf.dist, 2026-07-20).
   rm -rf "$GDIR/modules/mod-ah-bot"
   mkdir -p "$GDIR/modules/mod-ah-bot-plus"
+  # Seed the plus fork's dist shape so the keys exist to edit in place.
+  cat > "$AHCONF.dist" <<'EOF'
+# AH bot plus dist header comment
+AuctionHouseBot.EnableSeller = 0
+AuctionHouseBot.Buyer.Enabled = 0
+AuctionHouseBot.GUIDs =
+EOF
   run bash "$DML" wow ahbot repair --char Gasino --json
   [ "$status" -eq 0 ]
   d="$(_done_line "$output")"
   [ "$(echo "$d" | jq -r '.data.repaired')" = "true" ]
   [ "$(echo "$d" | jq -r '.data.module')" = "mod-ah-bot-plus" ]
-  grep -q '^AuctionHouseBot.Account = 42$' "$AHCONF"
+  # plus-fork key names, singular Account/GUID/EnableBuyer NOT introduced
+  grep -q '^AuctionHouseBot.GUIDs = 7$' "$AHCONF"
   grep -q '^AuctionHouseBot.EnableSeller = 1$' "$AHCONF"
+  grep -q '^AuctionHouseBot.Buyer.Enabled = 1$' "$AHCONF"
+  ! grep -qE '^AuctionHouseBot\.Account' "$AHCONF"
+  ! grep -qE '^AuctionHouseBot\.GUID ' "$AHCONF"
+  ! grep -qE '^AuctionHouseBot\.EnableBuyer' "$AHCONF"
 }
 
 @test "ahbot repair prefers the plus fork when both are somehow present" {

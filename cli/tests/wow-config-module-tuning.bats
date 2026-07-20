@@ -95,7 +95,16 @@ EOF
   run bash "$DML" wow config tuning-list --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="beastmaster.min_level") | .value')" = "15" ]
-  # still not "installed" -- only the dist is present, not the live conf
+  # installed once the .dist is present: the module ships that dist, and
+  # tuning-set creates the live .conf from it on first write. (Reporting
+  # "not installed" here contradicted the tuning-set path.)
+  [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="beastmaster.min_level") | .installed')" = "true" ]
+}
+
+@test "tuning-list: a conf module with neither .conf nor .dist stays installed:false" {
+  # Guard the negative case: with nothing on disk the row is not installed.
+  run bash "$DML" wow config tuning-list --json
+  [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="beastmaster.min_level") | .installed')" = "false" ]
 }
 
@@ -211,6 +220,26 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.changed')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "none" ]
+}
+
+@test "tuning-set (lua): a key that appears twice edits the LAST occurrence (matches read/Lua last-wins)" {
+  # Two assignments of the same key -- Lua (and _lua_cfg_read) take the last.
+  # The write must edit that same last line so an edit round-trips; editing
+  # the first would leave the effective value unchanged.
+  cat > "$LUA/UnlimitedAmmo.lua" <<'EOF'
+UnlimitedAmmoNamespace = {}
+UnlimitedAmmoNamespace.ENABLED = false -- default off
+UnlimitedAmmoNamespace.ENABLED = false -- override, this one wins
+EOF
+  run bash "$DML" wow config tuning-set --key unlimitedammo.enabled --value 1 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
+  # the LAST occurrence flipped, the first is untouched
+  grep -q '^UnlimitedAmmoNamespace.ENABLED = false -- default off$' "$LUA/UnlimitedAmmo.lua"
+  grep -q '^UnlimitedAmmoNamespace.ENABLED = true -- override, this one wins$' "$LUA/UnlimitedAmmo.lua"
+  # and it round-trips through the list (which also reads last-wins)
+  run bash "$DML" wow config tuning-list --json
+  [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="unlimitedammo.enabled") | .value')" = "1" ]
 }
 
 @test "tuning-set (lua): script not deployed -> NOT_INSTALLED" {

@@ -31,6 +31,11 @@ ac-database 3306 13306"
   [ "$(echo "$output" | jq -r '.data.ports[] | select(.service=="login") | .lan_ready')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.ports[] | select(.service=="world") | .host_port')" = "8085" ]
   [ "$(echo "$output" | jq -r '.data.ports[] | select(.service=="database") | .host_port')" = "13306" ]
+  # The DB's 0.0.0.0 docker bind does NOT make it LAN-reachable (WSL2 NAT):
+  # it stays "this PC only" until the Windows portproxy exposure script runs,
+  # which port-check can't detect. Never falsely "LAN-reachable".
+  [ "$(echo "$output" | jq -r '.data.ports[] | select(.service=="database") | .lan_ready')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.db_lan_exposed')" = "false" ]
 }
 
 @test "port-check: db bound to loopback -> db_lan_exposed false, game still ready" {

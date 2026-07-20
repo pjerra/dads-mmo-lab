@@ -21,7 +21,9 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.leveled')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.player')" = "Testen" ]
   [ "$(echo "$output" | jq -r '.data.level')" = "42" ]
-  grep -q '.character level Testen 42' "$FIXTURE/cap.txt"
+  # -F: literal leading dot (same anti-pattern as the return-home grep) so a
+  # dropped '.' can't slip through the regex wildcard.
+  grep -qF '.character level Testen 42' "$FIXTURE/cap.txt"
 }
 
 @test "gm level does NOT need the DB (works for offline chars)" {
@@ -264,16 +266,26 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.player')" = "Testen" ]
-  grep -q '.unstuck Testen inn' "$FIXTURE/cap.txt"
+  # -F so the leading dot is a literal, not a regex wildcard that would still
+  # match if the command fired as `unstuck ...` with the '.' dropped.
+  grep -qF '.unstuck Testen inn' "$FIXTURE/cap.txt"
 }
 
 @test "gm return-home does NOT need the DB (works for offline chars)" {
+  # return-home is NOT online-guarded (unlike gold/heal/revive): it must fire
+  # the SOAP even with the DB unavailable. DB_EXIT=1 fails any DB read, so a
+  # captured SOAP fire proves the command never depended on the DB. Capturing
+  # and asserting the command (not just the exit status) is what makes this
+  # actually exercise the offline path instead of passing inertly.
   export DML_STUB_DB_EXIT=1
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
   run bash "$DML" wow gm return-home --char Offline --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
+  # -F: the leading dot is literal, so a dropped '.' would fail this.
+  grep -qF '.unstuck Offline inn' "$FIXTURE/cap.txt"
 }
 
 @test "gm return-home rejects an invalid character name" {

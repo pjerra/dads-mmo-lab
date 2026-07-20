@@ -2580,7 +2580,12 @@ case "$cmd" in
               mtinstalled=false
               if [[ "$mtbackend" == conf ]]; then
                 mtpath="$(_cfg_conf_path "$mtfile")"
-                [[ -f "$mtpath" ]] && mtinstalled=true
+                # Installed = the module ships its conf, in EITHER form: the
+                # live .conf OR the .conf.dist it deploys with (tuning-set seeds
+                # the live conf from the dist on first write via _cfg_conf_ensure).
+                # Keying off the live .conf alone wrongly reported "not installed"
+                # for a freshly-installed-but-never-tuned module.
+                [[ -f "$mtpath" || -f "$mtpath.dist" ]] && mtinstalled=true
                 mtval="$(_cfg_conf_read "$mtpath" "$mtconfkey")"
                 [[ -n "$mtval" ]] || mtval="$(_cfg_conf_read "$mtpath.dist" "$mtconfkey")"
                 [[ -n "$mtval" ]] || mtval="$mtdef"
@@ -3923,12 +3928,26 @@ case "$cmd" in
               exit 1
             fi
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "selected: $ahchar (guid $ahguid, account $ahacct)"
+            # Fork-specific conf keys. The original azerothcore/mod-ah-bot keys
+            # a single Account + GUID with separate Enable{Seller,Buyer}. The
+            # NathanHandley/mod-ah-bot-plus fork RENAMED these: it has NO
+            # Account, takes GUIDs (plural, comma-separated list) and nests the
+            # buyer switch under Buyer.Enabled -- only EnableSeller is shared
+            # (verified against each fork's conf/mod_ahbot.conf.dist, 2026-07-20).
+            # Writing the other fork's names would just append dead keys via
+            # _cfg_conf_write's append-on-absent path and never actually point
+            # the bot at the character.
+            if [[ "$ahmod" == "mod-ah-bot-plus" ]]; then
+              ah_keys=( "AuctionHouseBot.GUIDs=$ahguid" "AuctionHouseBot.EnableSeller=1" "AuctionHouseBot.Buyer.Enabled=1" )
+            else
+              ah_keys=( "AuctionHouseBot.Account=$ahacct" "AuctionHouseBot.GUID=$ahguid" "AuctionHouseBot.EnableSeller=1" "AuctionHouseBot.EnableBuyer=1" )
+            fi
             CFG_CHANGED=false
             ahfail=0
-            _cfg_conf_write "$ahconf" "AuctionHouseBot.Account" "$ahacct" || ahfail=1
-            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.GUID" "$ahguid" || ahfail=1; }
-            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableSeller" "1" || ahfail=1; }
-            [[ "$ahfail" == 0 ]] && { _cfg_conf_write "$ahconf" "AuctionHouseBot.EnableBuyer" "1" || ahfail=1; }
+            for ahkv in "${ah_keys[@]}"; do
+              [[ "$ahfail" == 0 ]] || break
+              _cfg_conf_write "$ahconf" "${ahkv%%=*}" "${ahkv#*=}" || ahfail=1
+            done
             if [[ "$ahfail" != 0 ]]; then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end ahbot-repair error
@@ -3936,7 +3955,7 @@ case "$cmd" in
               else echo "[dml] ERROR: conf write failed" >&2; fi
               exit 1
             fi
-            [[ "$DML_JSON" == 1 ]] && ndjson_line info "wrote mod_ahbot.conf (account $ahacct, character $ahguid, seller + buyer on)"
+            [[ "$DML_JSON" == 1 ]] && ndjson_line info "wrote mod_ahbot.conf for $ahchar (guid $ahguid): seller + buyer on"
             # Legacy env cleanup, same derivation the conf rows use. Needs
             # the _cfg_env_* context that _cfg_preamble would set up, minus
             # its exit-on-missing-yq behavior (a streaming arm must not die
@@ -3945,7 +3964,8 @@ case "$cmd" in
             cfg_ovr="$sdir/docker-compose.override.yml"
             DML_YQ_BIN="${DML_YQ_BIN:-yq}"
             envwas=false
-            for ahk in AuctionHouseBot.Account AuctionHouseBot.GUID AuctionHouseBot.EnableSeller AuctionHouseBot.EnableBuyer; do
+            for ahkv in "${ah_keys[@]}"; do
+              ahk="${ahkv%%=*}"
               ename="$(_cfg_env_name_for "$ahk")"
               if [[ -n "$(_cfg_env_read "$ename")" ]]; then
                 _cfg_env_remove "$ename"
@@ -5182,6 +5202,15 @@ case "$cmd" in
         IFS='|' read -r pc_a_pub pc_a_ip pc_a_port pc_a_ready <<< "$(_pc_probe ac-authserver 3724)"
         IFS='|' read -r pc_w_pub pc_w_ip pc_w_port pc_w_ready <<< "$(_pc_probe ac-worldserver 8085)"
         IFS='|' read -r pc_d_pub pc_d_ip pc_d_port pc_d_ready <<< "$(_pc_probe ac-database 3306)"
+        # The DB's docker 0.0.0.0 bind lives inside WSL2's NAT: reachable from
+        # THIS PC (localhost) but NOT from other LAN machines until the user
+        # runs the Windows portproxy+firewall "LAN-exposure script" -- which we
+        # can't detect from here. So the DB is "this PC only" regardless of the
+        # docker bind, never falsely "LAN-reachable" on a standard install
+        # (which would also contradict the very exposure step that offers to
+        # open it). The game ports have their own LAN-play flow and keep their
+        # bind-derived readiness.
+        pc_d_ready=false
         pc_running=false
         { [[ "$pc_a_pub" == true ]] || [[ "$pc_w_pub" == true ]] || [[ "$pc_d_pub" == true ]]; } && pc_running=true
         pc_game_ready=false
