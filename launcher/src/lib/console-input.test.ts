@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { recallHistory, logSeverity } from "./console-input";
+import { recallHistory, logSeverity, consoleCommands, commandSuggestions } from "./console-input";
+import { CORE_COMMANDS } from "./gm-commands";
 
 describe("recallHistory", () => {
   const hist = ["server info", "saveall", "gm on"]; // oldest -> newest
@@ -63,5 +64,59 @@ describe("logSeverity", () => {
 
   it("error outranks warn when both markers appear", () => {
     expect(logSeverity("WARN then ERROR on the same line")).toBe("error");
+  });
+});
+
+describe("consoleCommands", () => {
+  it("strips the leading dot and placeholder args", () => {
+    const stems = consoleCommands([
+      { cmd: ".tele <place>", what: "" },
+      { cmd: ".saveall", what: "" },
+    ]);
+    expect(stems).toEqual(["tele", "saveall"]);
+  });
+
+  it("splits slash-separated variants into separate stems", () => {
+    expect(consoleCommands([{ cmd: ".gm on / .gm off", what: "" }])).toEqual(["gm on", "gm off"]);
+  });
+
+  it("keeps multi-word command stems intact", () => {
+    expect(consoleCommands([{ cmd: ".modify money <copper>", what: "" }])).toEqual(["modify money"]);
+  });
+
+  it("derives dot-less stems from the real catalog", () => {
+    const stems = consoleCommands(CORE_COMMANDS);
+    expect(stems).toContain("tele");
+    expect(stems).toContain("server info");
+    expect(stems).toContain("gm off");
+    expect(stems.every((s) => !s.startsWith("."))).toBe(true);
+    expect(stems.every((s) => !s.includes("<"))).toBe(true);
+  });
+});
+
+describe("commandSuggestions", () => {
+  const pool = ["tele", "levelup", "modify money", "modify speed", "server info", "saveall"];
+
+  it("returns nothing for empty input", () => {
+    expect(commandSuggestions(pool, "")).toEqual([]);
+    expect(commandSuggestions(pool, "   ")).toEqual([]);
+  });
+
+  it("prefix-matches case-insensitively", () => {
+    expect(commandSuggestions(pool, "mod")).toEqual(["modify money", "modify speed"]);
+    expect(commandSuggestions(pool, "SERV")).toEqual(["server info"]);
+  });
+
+  it("drops an exact match (nothing left to complete)", () => {
+    expect(commandSuggestions(pool, "tele")).toEqual([]);
+  });
+
+  it("de-duplicates favorites that repeat catalog stems", () => {
+    expect(commandSuggestions([...pool, "saveall", "sadface"], "sa")).toEqual(["saveall", "sadface"]);
+  });
+
+  it("honors the cap", () => {
+    const many = ["ta", "tb", "tc", "td", "te"];
+    expect(commandSuggestions(many, "t", 3)).toEqual(["ta", "tb", "tc"]);
   });
 });

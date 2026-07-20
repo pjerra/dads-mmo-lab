@@ -1,6 +1,8 @@
 // Pure logic for the Console page (improvements Batch 3): shell-style command
-// history recall and log-line severity classification. No Svelte/DOM/store
-// access here so it's node-testable in isolation.
+// history recall, log-line severity classification, and command autocomplete.
+// No Svelte/DOM/store access here so it's node-testable in isolation.
+
+import type { CoreCommand } from "./gm-commands";
 
 // --- History recall (F2) ---------------------------------------------------
 // `history` is the list of prior commands, oldest first. `cursor` is the
@@ -43,4 +45,42 @@ export function logSeverity(line: string): LogSeverity {
   if (/\b(?:ERROR|FATAL)\b/.test(line)) return "error";
   if (/\b(?:WARN|WARNING)\b/.test(line)) return "warn";
   return "normal";
+}
+
+// --- Command autocomplete (F3) ---------------------------------------------
+// Derive dot-less, placeholder-free command stems from the GM cheat-sheet
+// catalog. The Console sends commands without the leading dot, so ".tele
+// <place>" -> "tele" and ".gm on / .gm off" -> ["gm on", "gm off"].
+export function consoleCommands(catalog: CoreCommand[]): string[] {
+  const out = new Set<string>();
+  for (const c of catalog) {
+    for (const part of c.cmd.split("/")) {
+      let stem = part.trim();
+      const lt = stem.indexOf("<");
+      if (lt >= 0) stem = stem.slice(0, lt).trim();
+      stem = stem.replace(/^\./, "").trim();
+      if (stem) out.add(stem);
+    }
+  }
+  return [...out];
+}
+
+// Prefix-match the input against a pool of candidate commands (catalog stems
+// plus the user's favorites). Case-insensitive, de-duplicated, exact matches
+// dropped (nothing left to complete), capped so the dropdown stays small.
+export function commandSuggestions(pool: string[], input: string, cap = 8): string[] {
+  const q = input.trim().toLowerCase();
+  if (!q) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of pool) {
+    const cl = c.trim().toLowerCase();
+    if (!cl || seen.has(cl)) continue;
+    seen.add(cl);
+    if (cl.startsWith(q) && cl !== q) {
+      out.push(c.trim());
+      if (out.length >= cap) break;
+    }
+  }
+  return out;
 }

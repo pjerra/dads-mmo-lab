@@ -4,7 +4,8 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
   import { serverStatus, containersExist } from "$lib/server-status.svelte";
-  import { recallHistory, logSeverity } from "$lib/console-input";
+  import { recallHistory, logSeverity, consoleCommands, commandSuggestions } from "$lib/console-input";
+  import { CORE_COMMANDS } from "$lib/gm-commands";
 
   let available = $state(true);
   let lines: string[] = $state([]);
@@ -14,32 +15,6 @@
 
   let command = $state("");
   let sending = $state(false);
-
-  // Improvements Batch 3 F2: shell-style Up/Down recall over prior commands.
-  // `histCursor`/`histDraft` are plain (non-reactive) locals -- nothing renders
-  // them; they only thread state between keydowns. Recall logic is the pure
-  // recallHistory() so it's unit-tested away from the DOM.
-  let inputEl: HTMLInputElement | undefined = $state();
-  let histCursor: number | null = null;
-  let histDraft = "";
-
-  function onCommandKey(e: KeyboardEvent) {
-    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
-    const hist = consoleStore.hist.map((h) => h.command);
-    if (hist.length === 0) return;
-    e.preventDefault();
-    const dir = e.key === "ArrowUp" ? "up" : "down";
-    if (histCursor === null && dir === "up") histDraft = command;
-    const r = recallHistory(hist, histCursor, dir, histDraft);
-    command = r.value;
-    histCursor = r.cursor;
-    // Move the caret to the end once the recalled value has rendered.
-    void tick().then(() => inputEl?.setSelectionRange(command.length, command.length));
-  }
-  // Any real typing (not a programmatic recall assignment) drops out of recall.
-  function onCommandInput() {
-    histCursor = null;
-  }
 
   // Command favorites (Batch 3 F11c): starred console commands, persisted in
   // localStorage, rendered as chips above the input. Clicking a chip FILLS
@@ -72,6 +47,94 @@
     if (!cmd) return;
     favs = favs.includes(cmd) ? favs.filter((f) => f !== cmd) : [...favs, cmd];
     writeFavs(favs);
+  }
+
+  // --- Input helpers: history recall (F2) + autocomplete (F3) --------------
+  // `histCursor`/`histDraft` are plain (non-reactive) locals -- nothing renders
+  // them; they only thread state between keydowns. Recall + suggestion logic is
+  // pure (console-input.ts) so it's unit-tested away from the DOM.
+  let inputEl: HTMLInputElement | undefined = $state();
+  let histCursor: number | null = null;
+  let histDraft = "";
+
+  // Autocomplete pool: the GM cheat-sheet command stems plus the user's saved
+  // favorites. The catalog is static; favorites are reactive.
+  const catalogStems = consoleCommands(CORE_COMMANDS);
+  const pool = $derived([...catalogStems, ...favs]);
+  const suggestions = $derived(commandSuggestions(pool, command));
+  let suggestOpen = $state(false);
+  let suggIndex = $state(-1);
+  const showSuggest = $derived(suggestOpen && suggestions.length > 0);
+
+  function caretToEnd() {
+    void tick().then(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(command.length, command.length);
+    });
+  }
+
+  function acceptSuggestion(s: string) {
+    // Complete in place; trailing space both readies any args and (being an
+    // exact-match prefix) collapses the dropdown on the next derived pass.
+    command = `${s} `;
+    suggestOpen = false;
+    suggIndex = -1;
+    histCursor = null;
+    caretToEnd();
+  }
+
+  function onCommandKey(e: KeyboardEvent) {
+    // While the suggestion dropdown is open, the arrows/enter/tab drive it;
+    // otherwise the arrows do history recall.
+    if (showSuggest) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        suggIndex = (suggIndex + 1) % suggestions.length;
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        suggIndex = suggIndex <= 0 ? suggestions.length - 1 : suggIndex - 1;
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        acceptSuggestion(suggestions[suggIndex >= 0 ? suggIndex : 0]);
+        return;
+      }
+      if (e.key === "Enter" && suggIndex >= 0) {
+        // A highlighted suggestion completes instead of sending; with none
+        // highlighted, Enter falls through to the form's submit (send).
+        e.preventDefault();
+        acceptSuggestion(suggestions[suggIndex]);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        suggestOpen = false;
+        suggIndex = -1;
+        return;
+      }
+    }
+
+    if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+    const hist = consoleStore.hist.map((h) => h.command);
+    if (hist.length === 0) return;
+    e.preventDefault();
+    const dir = e.key === "ArrowUp" ? "up" : "down";
+    if (histCursor === null && dir === "up") histDraft = command;
+    const r = recallHistory(hist, histCursor, dir, histDraft);
+    command = r.value;
+    histCursor = r.cursor;
+    caretToEnd();
+  }
+
+  // Real typing (not a programmatic recall/accept assignment) reopens the
+  // suggestion list and drops out of recall.
+  function onCommandInput() {
+    histCursor = null;
+    suggestOpen = true;
+    suggIndex = -1;
   }
 
   let logEl: HTMLDivElement | undefined = $state();
@@ -129,6 +192,8 @@
       command = "";
       histCursor = null;
       histDraft = "";
+      suggestOpen = false;
+      suggIndex = -1;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       consoleStore.hist = [
@@ -231,16 +296,34 @@
       send();
     }}
   >
-    <input
-      type="text"
-      placeholder="Console command, e.g. server info"
-      bind:value={command}
-      bind:this={inputEl}
-      onkeydown={onCommandKey}
-      oninput={onCommandInput}
-      disabled={sending || featureLocked("console-send")}
-      title={featureLocked("console-send") ? LOCKED_HINT : undefined}
-    />
+    <div class="inputwrap">
+      {#if showSuggest}
+        <div class="suggest" role="listbox">
+          {#each suggestions as s, i (s)}
+            <button
+              type="button"
+              role="option"
+              aria-selected={i === suggIndex}
+              class="suggest-item"
+              class:active={i === suggIndex}
+              onmousedown={(e) => e.preventDefault()}
+              onclick={() => acceptSuggestion(s)}
+            >{s}</button>
+          {/each}
+        </div>
+      {/if}
+      <input
+        type="text"
+        placeholder="Console command, e.g. server info"
+        bind:value={command}
+        bind:this={inputEl}
+        onkeydown={onCommandKey}
+        oninput={onCommandInput}
+        onblur={() => (suggestOpen = false)}
+        disabled={sending || featureLocked("console-send")}
+        title={featureLocked("console-send") ? LOCKED_HINT : undefined}
+      />
+    </div>
     <button
       type="button"
       class="starbtn"
@@ -279,7 +362,11 @@
   .fav-chip:hover { border-color: #58a6ff; }
   .starbtn { font-size: 16px; padding: 6px 10px; }
   .starbtn.faved { color: #d29922; border-color: #d29922; }
+  .inputwrap { position: relative; flex: 1; display: flex; }
   .sendrow input { flex: 1; background: #0d1117; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; font-family: Consolas, monospace; font-size: 13px; }
+  .suggest { position: absolute; bottom: calc(100% + 4px); left: 0; right: 0; z-index: 5; display: flex; flex-direction: column; max-height: 200px; overflow-y: auto; background: #161b22; border: 1px solid #30363d; border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); }
+  .suggest-item { text-align: left; background: transparent; border: none; border-radius: 0; color: #c9d1d9; font-family: Consolas, monospace; font-size: 13px; padding: 6px 10px; cursor: pointer; }
+  .suggest-item:hover, .suggest-item.active { background: #1f2937; color: #f0f6fc; }
   .history { display: flex; flex-direction: column; gap: 10px; max-height: 22vh; overflow-y: auto; flex-shrink: 0; }
   .entry { border-left: 2px solid #30363d; padding-left: 10px; }
   .cmd { color: #58a6ff; font-family: Consolas, monospace; font-size: 13px; }
