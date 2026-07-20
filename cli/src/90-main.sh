@@ -2201,6 +2201,11 @@ case "$cmd" in
             # Guarded (set -e): a down DB or absent docker falls back to the
             # registry default below, so `list` still answers.
             if motd_live="$(db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;")"; then :; else motd_live=""; fi
+            # Snapshot the override env map ONCE (single yq fork) so the ~65
+            # per-row _cfg_env_read lookups below resolve in-process instead of
+            # forking yq each. Dropped after the loop so mutating paths are
+            # unaffected.
+            _cfg_env_load_map
             first=1; out='['
             while IFS='|' read -r key group label type minv maxv env def explain; do
               [[ -z "$key" ]] && continue
@@ -2234,6 +2239,7 @@ case "$cmd" in
               out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$(json_escape "$label")\",\"explain\":\"$(json_escape "$explain")\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$(json_escape "$val")\",\"default\":\"$(json_escape "$def")\",\"restart_required\":$rreq,\"env\":\"$env\"}"
               first=0
             done < <(_cfg_rows)
+            _cfg_env_unload_map
             out+=']'
             json_ok "{\"settings\":$out}"
             ;;

@@ -168,8 +168,47 @@ _cfg_preamble() {
     return 0
 }
 
+# CFG_ENV_MAP: an in-process snapshot of the override's ac-worldserver
+# environment (KEY -> value), populated by _cfg_env_load_map. While
+# CFG_ENV_MAP_LOADED is 1, _cfg_env_read resolves here instead of forking yq
+# per call -- `config list` does one env read per registry row (~65), and a
+# yq fork each made every page load laggy.
+declare -gA CFG_ENV_MAP=()
+CFG_ENV_MAP_LOADED=0
+
+# _cfg_env_load_map: dump the override's ac-worldserver environment ONCE (a
+# single yq fork) into CFG_ENV_MAP, then flip CFG_ENV_MAP_LOADED so subsequent
+# _cfg_env_read calls resolve in-process. Safe when the file/section is absent
+# (an empty map is a valid answer). A caller that later MUTATES the override
+# must _cfg_env_unload_map so reads see fresh data.
+_cfg_env_load_map() {
+    CFG_ENV_MAP=()
+    CFG_ENV_MAP_LOADED=1
+    [[ -f "$cfg_ovr" ]] || return 0
+    local line k v
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        k="${line%%=*}"; v="${line#*=}"
+        [[ -n "$k" ]] && CFG_ENV_MAP["$k"]="$v"
+    done < <("$DML_YQ_BIN" -r '.services.ac-worldserver.environment // {} | to_entries[] | .key + "=" + (.value | tostring)' "$cfg_ovr" 2>/dev/null || true)
+    return 0
+}
+
+# _cfg_env_unload_map: drop the snapshot so _cfg_env_read forks yq again.
+_cfg_env_unload_map() {
+    CFG_ENV_MAP=()
+    CFG_ENV_MAP_LOADED=0
+    return 0
+}
+
 # _cfg_env_read <ENV>: echoes the override's value for that env key, or "".
+# Resolves against the CFG_ENV_MAP snapshot when one is loaded (identical
+# answer, no fork); otherwise forks yq as before.
 _cfg_env_read() {
+    if [[ "${CFG_ENV_MAP_LOADED:-0}" == 1 ]]; then
+        printf '%s' "${CFG_ENV_MAP[$1]:-}"
+        return 0
+    fi
     [[ -f "$cfg_ovr" ]] || { printf ''; return 0; }
     E="$1" "$DML_YQ_BIN" -r '.services.ac-worldserver.environment[strenv(E)] // ""' "$cfg_ovr" 2>/dev/null || printf ''
     return 0
