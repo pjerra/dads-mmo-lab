@@ -641,6 +641,8 @@
         </div>
       {/if}
     </div>
+  {:else if loadingDoll}
+    <p class="muted">Loading character…</p>
   {/if}
 </section>
 

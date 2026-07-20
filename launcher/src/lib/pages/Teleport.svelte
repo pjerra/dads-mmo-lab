@@ -190,7 +190,12 @@
   {/if}
 
   <div class="loclist">
-    {#each sortedLocations as l (l.name)}
+    {#if loading}
+      <p class="muted">Loading locations…</p>
+    {:else if sortedLocations.length === 0}
+      <p class="muted">No locations match the filter.</p>
+    {:else}
+      {#each sortedLocations as l (l.name)}
       <span class="locrow" class:sel={picked === l.name}>
         <button class="loc" onclick={() => pick(l.name)} disabled={teleporting}>
           {l.name} <span class="muted">map {l.map}</span>
@@ -204,7 +209,8 @@
           {favs.includes(l.name) ? "★" : "☆"}
         </button>
       </span>
-    {/each}
+      {/each}
+    {/if}
   </div>
 </section>
 
