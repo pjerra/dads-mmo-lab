@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { NAV, DEFAULT_PAGE, type PageId } from "$lib/nav";
+  import { NAV, DEFAULT_PAGE, CONFIG_VIEWS, BOTS_VIEWS, type PageId } from "$lib/nav";
   import {
     chipStart,
     chipStartVisible,
@@ -31,6 +31,25 @@
 
   let page: PageId = $state(DEFAULT_PAGE);
 
+  // Collapsible (accordion) sidebar: each multi-item section expands/collapses
+  // independently; the section owning the current page starts open. Navigating
+  // to a page always opens its section. Single-item sections (Help) render as
+  // a plain link, no header.
+  function sectionOf(pid: PageId): string {
+    return NAV.find((s) => s.pages.some((p) => p.id === pid))?.section ?? "";
+  }
+  let expanded = $state<Record<string, boolean>>({ [sectionOf(DEFAULT_PAGE)]: true });
+  function toggleSection(sec: string) {
+    expanded[sec] = !expanded[sec];
+  }
+  function go(pid: PageId) {
+    page = pid;
+    expanded[sectionOf(pid)] = true;
+  }
+  // The Config/Bots components take the nav page id as their `view` prop.
+  const isConfigView = $derived((CONFIG_VIEWS as readonly string[]).includes(page));
+  const isBotsView = $derived((BOTS_VIEWS as readonly string[]).includes(page));
+
   // Polling is idempotent (module-level flag) and lives here so it starts
   // once for the whole app regardless of which page the user lands on --
   // the status chip below must be live even when Home is never visited.
@@ -52,7 +71,7 @@
   // counterpart on the chip (accidental-click risk).
   function requestChipStart() {
     chipStart.requested = true;
-    page = "home";
+    go("home");
   }
 
   // Sidebar "playing as" switcher (Batch 3 F12): minimal footer chip; the
@@ -90,7 +109,7 @@
       <button
         class="status-chip"
         class:crashed={status.dot === "crash"}
-        onclick={() => (page = "home")}
+        onclick={() => go("home")}
         title="Go to Home"
       >
         <span
@@ -121,10 +140,33 @@
       <span class="chip-note lan">{serverStatus.lanNotice}</span>
     {/if}
     {#each NAV as s (s.section)}
-      <span class="section">{s.section}</span>
-      {#each s.pages as p (p.id)}
-        <button class:active={page === p.id} onclick={() => (page = p.id)}>{p.label}</button>
-      {/each}
+      {#if s.pages.length === 1}
+        <!-- Single-item section (Help): a plain top-level link, no dropdown. -->
+        <button
+          class="navitem"
+          class:active={page === s.pages[0].id}
+          onclick={() => go(s.pages[0].id)}>{s.pages[0].label}</button
+        >
+      {:else}
+        <button
+          class="section-head"
+          class:open={expanded[s.section]}
+          aria-expanded={!!expanded[s.section]}
+          onclick={() => toggleSection(s.section)}
+        >
+          <span class="sec-caret">{expanded[s.section] ? "▾" : "▸"}</span>
+          {s.section}
+        </button>
+        {#if expanded[s.section]}
+          {#each s.pages as p (p.id)}
+            <button
+              class="navitem child"
+              class:active={page === p.id}
+              onclick={() => go(p.id)}>{p.label}</button
+            >
+          {/each}
+        {/if}
+      {/if}
     {/each}
 
     <!-- Persistent character switcher (Batch 3 F12): name + dropdown only. -->
@@ -169,11 +211,11 @@
   {#if page === "teleport"}<Teleport />{/if}
   {#if page === "gmtools"}<GMTools />{/if}
   {#if page === "items"}<Items />{/if}
-  {#if page === "bots"}<Bots />{/if}
+  {#if isBotsView}<Bots view={page} />{/if}
   {#if page === "commands"}<Commands />{/if}
-  {#if page === "settings"}<Config />{/if}
+  {#if isConfigView}<Config view={page} />{/if}
   {#if page === "backups"}<Backups />{/if}
-  {#if page === "help"}<Help onnav={(p) => (page = p)} />{/if}
+  {#if page === "help"}<Help onnav={(p) => go(p)} />{/if}
 
   {#if serverStatus.readyToast}
     <!-- Batch 3 F10: in-app "world just came up" toast, visible from any
@@ -232,7 +274,28 @@
   /* Small hints under the chip (keep-awake indicator, LAN refresh toast). */
   .chip-note { margin: -8px 12px 8px; padding: 0 10px; font-size: 11px; color: #6e7681; }
   .chip-note.lan { color: #3fb950; }
-  .section { padding: 12px 16px 4px; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: #6e7681; user-select: none; }
+  /* Collapsible section header (accordion). Looks like the old section label
+     but is a clickable toggle with a caret. */
+  .sidebar button.section-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 11px 14px 5px;
+    font-size: 11px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #6e7681;
+    background: none;
+    border: none;
+    border-left: 2px solid transparent;
+    cursor: pointer;
+    user-select: none;
+  }
+  .sidebar button.section-head:hover { color: #b1bac4; }
+  .sidebar button.section-head.open { color: #8b949e; }
+  .sec-caret { font-size: 9px; width: 9px; display: inline-block; }
+  /* Child nav items sit indented under an open section header. */
+  .sidebar button.navitem.child { padding-left: 30px; }
   /* "Azeroth is ready" toast (Batch 3 F10): bottom-right, click to dismiss,
      auto-dismisses via the store's timer. */
   .ready-toast {

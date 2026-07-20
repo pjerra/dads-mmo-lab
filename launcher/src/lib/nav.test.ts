@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NAV, DEFAULT_PAGE } from "./nav";
+import { NAV, DEFAULT_PAGE, CONFIG_VIEWS, BOTS_VIEWS } from "./nav";
 
 describe("NAV", () => {
   const ids = NAV.flatMap((s) => s.pages.map((p) => p.id));
@@ -16,9 +16,15 @@ describe("NAV", () => {
       "teleport",
       "gmtools",
       "items",
-      "bots",
+      "party",
+      "browse",
       "commands",
       "settings",
+      "botworld",
+      "ahbot",
+      "accountwide",
+      "moduletuning",
+      "files",
       "backups",
       "help",
     ]);
@@ -51,13 +57,32 @@ describe("NAV", () => {
     }
   });
 
-  it("config section is Settings + Backups (Bot World / Auction House / Module files are tabs inside Settings)", () => {
+  it("config section promotes the config views + Backups to sidebar children", () => {
     const cfg = NAV.find((s) => s.section === "Config")!;
-    expect(cfg.pages.map((p) => p.id)).toEqual(["settings", "backups"]);
+    expect(cfg.pages.map((p) => p.id)).toEqual([
+      "settings",
+      "botworld",
+      "ahbot",
+      "accountwide",
+      "moduletuning",
+      "files",
+      "backups",
+    ]);
   });
 
-  it("items & bots section has a single merged Bots entry", () => {
+  it("items & bots section has the two bot views as children", () => {
     const ib = NAV.find((s) => s.section === "Items & Bots")!;
-    expect(ib.pages.map((p) => p.id)).toEqual(["items", "bots", "commands"]);
+    expect(ib.pages.map((p) => p.id)).toEqual(["items", "party", "browse", "commands"]);
+  });
+
+  it("CONFIG_VIEWS + BOTS_VIEWS are all real nav page ids", () => {
+    for (const v of [...CONFIG_VIEWS, ...BOTS_VIEWS]) {
+      expect(ids).toContain(v);
+    }
+    // Config views map 1:1 onto the Config section's non-Backups children.
+    const cfg = NAV.find((s) => s.section === "Config")!;
+    expect(cfg.pages.filter((p) => p.id !== "backups").map((p) => p.id)).toEqual([
+      ...CONFIG_VIEWS,
+    ]);
   });
 });

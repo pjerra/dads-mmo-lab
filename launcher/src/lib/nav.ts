@@ -1,5 +1,10 @@
-// Grouped sidebar structure (Lab-parity round 1). Future rounds append
-// their entries here when the page ships -- never before (no "[soon]" rows).
+// Grouped sidebar structure. The sidebar renders each multi-item section as a
+// collapsible dropdown (accordion) in routes/+page.svelte; single-item
+// sections render as a plain top-level link. Pages that used to be in-page
+// tabs (the Config views, the two Bots views) are promoted to sidebar
+// children here -- their page id doubles as the `view` prop passed to the
+// shared Config/Bots component, so the sidebar drives the view (no in-page
+// tab bar). The character view (Dashboard) keeps its OWN internal tabs.
 export const NAV = [
   {
     section: "Server",
@@ -15,7 +20,7 @@ export const NAV = [
   {
     section: "Characters",
     pages: [
-      { id: "dashboard", label: "Dashboard" },
+      { id: "dashboard", label: "Character" },
       { id: "teleport", label: "Teleport" },
       { id: "gmtools", label: "GM Tools" },
     ],
@@ -24,29 +29,44 @@ export const NAV = [
     section: "Items & Bots",
     pages: [
       { id: "items", label: "Item Database" },
-      // Playerbots (My Party) + Bot Browser live as tabs inside one Bots page.
-      { id: "bots", label: "Bots" },
+      // Promoted from the old Bots page tabs -> Bots view="party" / "browse".
+      { id: "party", label: "My Party" },
+      { id: "browse", label: "Browse Bots" },
       { id: "commands", label: "Commands" },
     ],
   },
   {
     section: "Config",
-    // Settings / Bot World / Auction House / Module Configs are all tabs of
-    // the one Config page -- a single sidebar entry opens it with its own
-    // in-page tab bar. Backups is a separate page.
+    // Promoted from the old Config page tabs -> Config view=<id>. Backups is
+    // its own page (Backups component).
     pages: [
       { id: "settings", label: "Settings" },
+      { id: "botworld", label: "Bot World" },
+      { id: "ahbot", label: "Auction House" },
+      { id: "accountwide", label: "Account-wide" },
+      { id: "moduletuning", label: "Module tuning" },
+      { id: "files", label: "Module files" },
       { id: "backups", label: "Backups" },
     ],
   },
   {
-    // Batch 3 F9: bottom of the sidebar, near Commands -- the "something is
-    // wrong" entry point for a non-technical parent.
     section: "Help",
     pages: [{ id: "help", label: "Help & FAQ" }],
   },
 ] as const;
 
 export type PageId = (typeof NAV)[number]["pages"][number]["id"];
+
+// Page ids that route to the shared Config component (their id == the Config
+// view). Kept here so the router and any nav logic share one source.
+export const CONFIG_VIEWS = [
+  "settings",
+  "botworld",
+  "ahbot",
+  "accountwide",
+  "moduletuning",
+  "files",
+] as const;
+export const BOTS_VIEWS = ["party", "browse"] as const;
 
 export const DEFAULT_PAGE: PageId = "home";

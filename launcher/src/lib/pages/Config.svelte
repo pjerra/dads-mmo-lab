@@ -47,19 +47,33 @@
   // UI mirror of the CLI's raw-write lock (cli rejects these two names).
   const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
 
-  // One Config page, four tabs (was four sidebar entries). `tab` is internal
-  // state now; the in-page tab bar switches it, and the lazy-load $effects
-  // below fire when a tab first becomes active.
+  // The view is now driven by the sidebar (this page has no in-page tab bar).
+  // `view` comes from the router as a plain string (the nav page id); `tab`
+  // narrows it to a known ConfigTab so all the existing tab logic + lazy-load
+  // $effects are unchanged. Switching sidebar items keeps this component
+  // mounted (one router {#if}), so edits/lazy-loads persist across views.
   type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide" | "moduletuning" | "files";
-  let tab = $state<ConfigTab>("settings");
-  const TABS: { id: ConfigTab; label: string }[] = [
-    { id: "settings", label: "Settings" },
-    { id: "botworld", label: "Bot World" },
-    { id: "ahbot", label: "Auction House" },
-    { id: "accountwide", label: "Account-wide" },
-    { id: "moduletuning", label: "Module tuning" },
-    { id: "files", label: "Module files" },
+  const CONFIG_TABS: ConfigTab[] = [
+    "settings",
+    "botworld",
+    "ahbot",
+    "accountwide",
+    "moduletuning",
+    "files",
   ];
+  const TAB_LABELS: Record<ConfigTab, string> = {
+    settings: "Settings",
+    botworld: "Bot World",
+    ahbot: "Auction House",
+    accountwide: "Account-wide",
+    moduletuning: "Module tuning",
+    files: "Module files",
+  };
+  let { view = "settings" }: { view?: string } = $props();
+  let tab = $derived<ConfigTab>(
+    (CONFIG_TABS as string[]).includes(view) ? (view as ConfigTab) : "settings",
+  );
+  let tabLabel = $derived(TAB_LABELS[tab]);
   let settings: ConfigSetting[] = $state([]);
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
@@ -666,16 +680,7 @@
 
 <section class="content" class:fill={tab === "files" && fileLoaded}>
   <header class="bar">
-    <div class="subtabs" role="tablist">
-      {#each TABS as t (t.id)}
-        <button
-          role="tab"
-          aria-selected={tab === t.id}
-          class:active={tab === t.id}
-          onclick={() => (tab = t.id)}
-        >{t.label}</button>
-      {/each}
-    </div>
+    <h2>{tabLabel}</h2>
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
@@ -1188,18 +1193,7 @@
   .content.fill textarea { flex: 1; min-height: 240px; resize: none; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   /* In-page tab bar (was four sidebar entries). */
-  .subtabs { display: flex; gap: 4px; flex-wrap: wrap; }
-  .subtabs button {
-    padding: 6px 14px;
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #8b949e;
-    font-size: 13.5px;
-    cursor: pointer;
-  }
-  .subtabs button:hover { border-color: #58a6ff; color: #c9d1d9; }
-  .subtabs button.active { background: #1f2937; border-color: #58a6ff; color: #f0f6fc; }
+  .bar h2 { margin: 0; font-size: 18px; }
   h3 { margin: 10px 0 0; font-size: 15px; color: #58a6ff; }
   .setting { display: flex; justify-content: space-between; align-items: center; gap: 16px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
   .setting.dirty { border-color: #d29922; }

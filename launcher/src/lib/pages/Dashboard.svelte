@@ -277,6 +277,20 @@
     }
   }
 
+  // Auto-load gear when the selected character changes -- e.g. picking your
+  // character in the sidebar "playing as" switcher, which CharPicker adopts
+  // into charName. No manual "Show gear" click needed. `lastAutoChar` is a
+  // plain (non-reactive) guard so this fires once per distinct character and
+  // never loops on loadDoll's own loadingDoll toggles.
+  let lastAutoChar: string | null = null;
+  $effect(() => {
+    const name = charName;
+    if (name && name !== lastAutoChar && !loadingDoll) {
+      lastAutoChar = name;
+      void loadDoll();
+    }
+  });
+
   // Gear sets (Batch 5 F4): capture the shown paperdoll as a named local
   // set (pure localStorage write -- no backend call, so no feature lock on
   // capture; MAILING a set is the locked half, over on the Item Database
@@ -514,7 +528,9 @@
   <header class="bar"><h2>Character viewer</h2></header>
   <div class="pickrow">
     <CharPicker bind:selected={charName} />
-    <button onclick={loadDoll} disabled={!charName || loadingDoll}>Show gear</button>
+    <!-- Gear auto-loads when the character changes (see the $effect); this
+         button is a manual refresh. -->
+    <button onclick={loadDoll} disabled={!charName || loadingDoll}>Reload gear</button>
   </div>
   {#if dollError}
     <div class="error-card"><strong>Couldn't load character gear.</strong><p>{dollError}</p></div>
