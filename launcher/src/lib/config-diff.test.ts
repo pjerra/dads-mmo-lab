@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dirtyKeys, requiredSaveFlags, settingsInGroups } from "./config-diff";
+import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "./config-diff";
 
 const settings = [
   { key: "rates.xp_kill", value: "1" },
@@ -82,5 +82,31 @@ describe("settingsInGroups (per-tab Save scoping)", () => {
   it("returns nothing when no group matches", () => {
     expect(settingsInGroups(rows, [])).toEqual([]);
     expect(settingsInGroups(rows, ["Nope"])).toEqual([]);
+  });
+});
+
+describe("clearSavedEdits (per-tab Save keeps other tabs' pending edits)", () => {
+  it("drops only the just-saved keys and keeps the rest", () => {
+    // User edited a Bot World row AND a Settings row, then saved only the
+    // Settings row. The Bot World edit must survive the post-save reload.
+    const edits = { "bots.count": "5000", "server.motd": "Yo" };
+    expect(clearSavedEdits(edits, ["server.motd"])).toEqual({ "bots.count": "5000" });
+  });
+
+  it("does not mutate the input map", () => {
+    const edits = { a: "1", b: "2" };
+    const out = clearSavedEdits(edits, ["a"]);
+    expect(edits).toEqual({ a: "1", b: "2" });
+    expect(out).toEqual({ b: "2" });
+  });
+
+  it("empty saved list keeps every edit; saving all clears the map", () => {
+    const edits = { a: "1", b: "2" };
+    expect(clearSavedEdits(edits, [])).toEqual({ a: "1", b: "2" });
+    expect(clearSavedEdits(edits, ["a", "b"])).toEqual({});
+  });
+
+  it("ignores saved keys that aren't present in edits", () => {
+    expect(clearSavedEdits({ a: "1" }, ["ghost"])).toEqual({ a: "1" });
   });
 });

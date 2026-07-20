@@ -21,6 +21,24 @@ export function settingsInGroups<T extends { group: string }>(
   return settings.filter((s) => set.has(s.group));
 }
 
+// After a per-tab Save, refresh the shared edits map without discarding the
+// OTHER tabs' pending input. The Settings / Bot World / Auction House tabs
+// share ONE `edits` map; Save writes only the visible tab's dirty rows, so on
+// reload we must keep every edit EXCEPT the keys we just saved (whose live
+// value now matches). A blanket `edits = {}` reset would silently drop a value
+// the user typed on a hidden tab but hasn't saved yet.
+export function clearSavedEdits(
+  edits: Record<string, string>,
+  saved: string[],
+): Record<string, string> {
+  const done = new Set(saved);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(edits)) {
+    if (!done.has(k)) out[k] = v;
+  }
+  return out;
+}
+
 // Which feature-lock keys must be unlocked to save this dirty set (Batch 1).
 // Conf-file rows (env column "conf:...") are a NEW save mechanism, gated
 // separately from the long-tested env rows:

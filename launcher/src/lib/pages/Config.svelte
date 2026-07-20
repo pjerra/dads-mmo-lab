@@ -26,7 +26,7 @@
     type ModuleTuning,
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
-  import { dirtyKeys, requiredSaveFlags, settingsInGroups } from "$lib/config-diff";
+  import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "$lib/config-diff";
   import { lintConfContent } from "$lib/conf-lint";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
@@ -477,17 +477,20 @@
   const saveLocked = $derived(requiredSaveFlags(visibleSettings, dirty).some((f) => featureLocked(f)));
   let liveNote = $state(false);
 
-  async function load() {
+  // `saved` (passed only by a per-tab Save) keeps the OTHER shared-map tabs'
+  // pending edits and drops just the keys that were written; a plain load
+  // (mount / manual) starts from a clean edits map.
+  async function load(saved?: string[]) {
     error = null;
     try {
       settings = await wowConfigList();
-      edits = {};
+      edits = saved ? clearSavedEdits(edits, saved) : {};
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
     }
   }
-  onMount(load);
+  onMount(() => void load());
 
   async function saveSettings(): Promise<boolean> {
     saving = true;
@@ -511,7 +514,11 @@
       // "applied live" note instead of the restart banner (only when NO
       // saved row still needs a restart).
       liveNote = anyLive && !anyRestart;
-      await load();
+      // Reload live values but KEEP edits on the other shared-map tabs
+      // (Settings/Bot World/Auction House share one `edits` map) -- only the
+      // just-saved keys are cleared, so switching tabs mid-edit and saving
+      // one no longer silently discards the other's typed input.
+      await load(toSave);
       return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
