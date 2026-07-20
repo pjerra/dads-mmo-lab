@@ -70,6 +70,14 @@ if [[ "${1:-}" == "ps" ]]; then
 fi
 if [[ "${1:-}" == "inspect" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  # world-restart running precondition (Batch 1): `docker inspect -f
+  # '{{.State.Running}}' <container>`. DML_STUB_RUNNING_STATE drives it
+  # (default true so the happy path sees an up stack); set it to false to
+  # model a stopped stack -> NOT_RUNNING with no long readiness wait.
+  if [[ "$*" == *State.Running* ]]; then
+    printf '%s\n' "${DML_STUB_RUNNING_STATE:-true}"
+    exit 0
+  fi
   # server-detail crashed-vs-stopped (Batch 2 F8): the ExitCode format string
   # is served from DML_STUB_EXIT_CODE (default 0 = clean exit); the StartedAt
   # form keeps its canned timestamp for the world-ready checks.

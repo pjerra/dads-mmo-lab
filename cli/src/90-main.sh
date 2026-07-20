@@ -1647,6 +1647,19 @@ case "$cmd" in
           ndjson_section_end world-restart error
           ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
         fi
+        # Running precondition (Batch 1 CLI robustness): `docker restart` on a
+        # STOPPED container STARTS it. On a fully-stopped stack that boots the
+        # worldserver ALONE against a down database, where it blocks on the DB
+        # handshake until READY_TIMEOUT (~30 min) -- a half-hour hang for what
+        # should be an instant "the server is not running" answer. Require BOTH
+        # the world and database containers to already be up; a stopped stack
+        # means the user wants the full Start, not a world-only restart.
+        wr_wrun="$(docker inspect -f '{{.State.Running}}' ac-worldserver 2>/dev/null || true)"; wr_wrun="${wr_wrun%%$'\n'*}"
+        wr_drun="$(docker inspect -f '{{.State.Running}}' ac-database 2>/dev/null || true)"; wr_drun="${wr_drun%%$'\n'*}"
+        if [[ "$wr_wrun" != true || "$wr_drun" != true ]]; then
+          ndjson_section_end world-restart error
+          ndjson_error NOT_RUNNING "The server is not running" "A world-only restart needs the world server and database already up. Start the server (full Start) first."; exit 1
+        fi
         ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
         # --no-saveall (GUI "faster" option): skip the redundant pre-stop
         # saveall. `docker restart -t 300` below stops gracefully first, so the

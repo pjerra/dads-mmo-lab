@@ -94,3 +94,17 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 1 ]
   echo "$output" | tail -1 | grep -q '"code":"DOCKER_DOWN"'
 }
+
+@test "world-restart: a stopped stack -> NOT_RUNNING with no long readiness wait" {
+  # The world/database containers report not-running: `docker restart` would
+  # otherwise START the world alone against a down DB and hang ~30 min.
+  export DML_STUB_RUNNING_STATE=false
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"event":"section_end","name":"world-restart","status":"error"'
+  echo "$output" | tail -1 | grep -q '"code":"NOT_RUNNING"'
+  # It bailed BEFORE issuing any docker restart (that is what would hang).
+  run grep -q '^restart -t 300 ac-worldserver$' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
