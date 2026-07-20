@@ -101,3 +101,19 @@ seed_clone() { mkdir -p "$SDIR/ale_scripts/$1"; }
   [ "$(echo "$output" | jq -r '.data.families.lua[] | select(.key=="accountwide") | .has_sql')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.families.lua[] | select(.key=="lootpet") | .has_sql')" = "false" ]
 }
+
+# Batch 6 A: the Paragon `.test` unguarded-command warning is a read-only
+# field on the lua row, present ONLY once the script is deployed (live).
+@test "lua list: paragon warn is null until deployed, set once deployed" {
+  run bash "$DML" wow module list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.families.lua[] | select(.key=="paragon") | .warn')" = "null" ]
+  # No warn on an unrelated lua row either.
+  [ "$(echo "$output" | jq -r '.data.families.lua[] | select(.key=="lootpet") | .warn')" = "null" ]
+  # Deploy paragon (its deployed-check is the lua_scripts/paragon dir).
+  mkdir -p "$SDIR/env/dist/etc/modules/lua_scripts/paragon"
+  run bash "$DML" wow module list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.families.lua[] | select(.key=="paragon") | .warn')" != "null" ]
+  echo "$output" | jq -r '.data.families.lua[] | select(.key=="paragon") | .warn' | grep -q '\.test'
+}

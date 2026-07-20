@@ -230,6 +230,25 @@ _lua_deployed() {
 
 _lua_cloned() { [[ -d "$1/ale_scripts/$2/.git" ]]; }
 
+# Read-only advisory string for a lua script, or empty. Surfaced on the
+# Modules card as a warning. Only fires when the script is actually DEPLOYED
+# (live on the server), so it never nags about a module the user hasn't run.
+# Paragon's upstream ships a `.test` chat command with NO GM permission gate
+# -- any player can invoke it (a debug leftover), a real footgun once the
+# server is opened to others. Uses a single-quoted string (never printf'd
+# through a double-quoted context) so the literal ".test" carries no shell
+# meaning.
+_lua_warn() {
+    case "$2" in
+        paragon)
+            if _lua_deployed "$1" paragon; then
+                printf '%s' 'Heads-up: the Paragon script adds a ".test" chat command with no GM permission check — any player can run it (an upstream debug leftover). Remove or guard it before opening your server to other people.'
+            fi
+            ;;
+    esac
+    return 0
+}
+
 _sql_installed() { [[ -f "$1/sql_scripts/installed/$2.installed" ]]; }
 
 # --- backup gate ------------------------------------------------------------

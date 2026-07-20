@@ -251,6 +251,9 @@ export interface LuaModule {
   cloned: boolean;
   deployed: boolean;
   has_sql: boolean;
+  // Batch 6 A: read-only advisory shown on the card (e.g. Paragon's
+  // unguarded `.test` chat command). Null when there's nothing to flag.
+  warn: string | null;
 }
 export interface SqlModule {
   key: string;

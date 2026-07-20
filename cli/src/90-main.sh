@@ -3941,8 +3941,10 @@ case "$cmd" in
               cl=false; _lua_cloned "$sdir" "$mk" && cl=true
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
               lsql=false; _lua_has_sql "$mk" && lsql=true
+              lwarn="$(_lua_warn "$sdir" "$mk")"
+              lwarnjson=null; [[ -n "$lwarn" ]] && lwarnjson="\"$(json_escape "$lwarn")\""
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql,\"warn\":$lwarnjson}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'

@@ -754,6 +754,11 @@
               {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
             </button>
           </div>
+          {#if m.warn}
+            <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
+                 `.test` command), shown only when the CLI reports it. -->
+            <p class="mod-warn">⚠ {m.warn}</p>
+          {/if}
         {/each}
       {/if}
     {/if}
@@ -1023,6 +1028,7 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
+  .mod-warn { color: #d29922; font-size: 12.5px; margin: 0 0 6px 0; line-height: 1.4; }
   .inline-error { color: #f85149; font-size: 13px; margin: 0; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .repair-panel { margin: 0 0 6px 0; padding: 10px 12px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; }
