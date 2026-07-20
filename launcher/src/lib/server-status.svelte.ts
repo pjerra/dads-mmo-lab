@@ -29,6 +29,25 @@ export const serverStatus = $state({
   readyToast: false,
 });
 
+// Batch 2 F6 follow-up: keep-awake is engaged only while we BELIEVE the server
+// is online, and it is released on an observed online→stopped/crashed
+// transition. But a failed poll keeps the stale detail and skips every
+// transition, so if polls START failing while the last verdict was online the
+// release never fires and the PC stays pinned awake forever. Count consecutive
+// failed polls and, past this limit, release the block even though we never
+// saw a clean stop.
+export const KEEP_AWAKE_FAILURE_LIMIT = 3;
+let consecutivePollFailures = 0;
+
+// Pure: past the failure limit, with the sleep block actually engaged, we can
+// no longer trust the stale "online" verdict that engaged it -- release it.
+export function shouldReleaseKeepAwakeOnFailure(
+  consecutiveFailures: number,
+  keepAwakeActive: boolean,
+): boolean {
+  return keepAwakeActive && consecutiveFailures >= KEEP_AWAKE_FAILURE_LIMIT;
+}
+
 // Single-flight: refreshServerStatus can be called concurrently from the
 // poll loop, a manual Refresh click, and post-action refreshes -- only one
 // underlying request runs at a time, everyone else is a no-op.
@@ -39,6 +58,7 @@ export async function refreshServerStatus(): Promise<void> {
     const prev = serverStatus.detail?.verdict ?? null;
     serverStatus.detail = await wowServerDetail();
     serverStatus.lastError = null;
+    consecutivePollFailures = 0;
     runTransitionActions(prev, serverStatus.detail.verdict);
   } catch (e) {
     // A failed poll must NOT clobber the last-known detail -- the bar/chip
@@ -48,6 +68,15 @@ export async function refreshServerStatus(): Promise<void> {
     // succeeded).
     const err = e as { message?: string; hint?: string };
     serverStatus.lastError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    // Release keep-awake if polls keep failing while the block is held (see
+    // KEEP_AWAKE_FAILURE_LIMIT). The guard on keepAwakeActive makes this a
+    // no-op once released, so it fires at most once per failure streak.
+    consecutivePollFailures += 1;
+    if (shouldReleaseKeepAwakeOnFailure(consecutivePollFailures, serverStatus.keepAwakeActive)) {
+      setKeepAwake(false)
+        .then(() => (serverStatus.keepAwakeActive = false))
+        .catch(() => {});
+    }
   } finally {
     serverStatus.refreshing = false;
   }

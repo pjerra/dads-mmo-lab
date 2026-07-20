@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  KEEP_AWAKE_FAILURE_LIMIT,
   azerothReadyTransition,
   chipStartVisible,
   containersExist,
   lanRefreshApplied,
+  shouldReleaseKeepAwakeOnFailure,
   statusLabel,
 } from "./server-status.svelte";
 import type { ServerDetail } from "./api";
@@ -138,6 +140,28 @@ describe("lanRefreshApplied", () => {
   });
   it("is false on empty output", () => {
     expect(lanRefreshApplied("")).toBe(false);
+  });
+});
+
+// Keep-awake release on a stuck poll loop (improvements Batch 2): a failed
+// poll skips the online→stopped transition that normally releases the sleep
+// block, so it must be released once failures pile up -- but only while the
+// block is actually engaged.
+describe("shouldReleaseKeepAwakeOnFailure", () => {
+  it("does not release below the limit", () => {
+    for (let n = 0; n < KEEP_AWAKE_FAILURE_LIMIT; n++) {
+      expect(shouldReleaseKeepAwakeOnFailure(n, true)).toBe(false);
+    }
+  });
+
+  it("releases at and beyond the limit while engaged", () => {
+    expect(shouldReleaseKeepAwakeOnFailure(KEEP_AWAKE_FAILURE_LIMIT, true)).toBe(true);
+    expect(shouldReleaseKeepAwakeOnFailure(KEEP_AWAKE_FAILURE_LIMIT + 5, true)).toBe(true);
+  });
+
+  it("never releases when the block was not engaged (nothing to release)", () => {
+    expect(shouldReleaseKeepAwakeOnFailure(KEEP_AWAKE_FAILURE_LIMIT, false)).toBe(false);
+    expect(shouldReleaseKeepAwakeOnFailure(KEEP_AWAKE_FAILURE_LIMIT + 99, false)).toBe(false);
   });
 });
 
