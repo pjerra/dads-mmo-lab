@@ -27,6 +27,7 @@
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags, settingsInGroups } from "$lib/config-diff";
+  import { lintConfContent } from "$lib/conf-lint";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
@@ -458,6 +459,16 @@
   const fileReadonly = $derived(
     confFiles.find((f) => f.name === file)?.readonly ?? READONLY_FILES.includes(file),
   );
+  // Improvements Batch 3 F4: cheap "does this still look like a .conf?" check
+  // shown live while editing an editable .conf, and gating Save with a one-off
+  // "save anyway" confirm. Only .conf files use Key = Value syntax (the .env /
+  // compose files are read-only), so scope the check to them.
+  const lintIssues = $derived(
+    fileLoaded && !fileReadonly && file.toLowerCase().endsWith(".conf")
+      ? lintConfContent(fileContent)
+      : [],
+  );
+  let lintConfirm = $state(false);
   // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
   // flags -- the Save button locks when ANY dirty row's flag is still locked.
   const saveLocked = $derived(requiredSaveFlags(visibleSettings, dirty).some((f) => featureLocked(f)));
@@ -551,6 +562,26 @@
     }
   }
 
+  // Gate the raw-file Save behind the lint check: the first click on a file
+  // with suspicious lines arms a "save anyway" confirm instead of writing.
+  async function saveFileChecked(): Promise<boolean> {
+    if (lintIssues.length > 0 && !lintConfirm) {
+      lintConfirm = true;
+      return false;
+    }
+    lintConfirm = false;
+    return await saveFile();
+  }
+
+  function saveAndRestartFile(): void {
+    // Arm the lint confirm together with the restart confirm on the FIRST
+    // click, so the restart's second click isn't silently swallowed by an
+    // unconfirmed lint gate (saveAndRestart would call saveFileChecked, which
+    // would otherwise just arm the lint confirm and abort the restart).
+    if (!confirmingRestart && lintIssues.length > 0) lintConfirm = true;
+    void saveAndRestart(saveFileChecked);
+  }
+
   async function reloadAle(): Promise<boolean> {
     saving = true;
     error = null;
@@ -616,6 +647,7 @@
     lastBackup = null;
     confirmingRestart = false;
     confirmingReset = false;
+    lintConfirm = false;
     aleNote = null;
   }
 </script>
@@ -1080,6 +1112,7 @@
         oninput={() => {
           confirmingRestart = false;
           confirmingReset = false;
+          lintConfirm = false;
         }}
         readonly={fileReadonly}
         disabled={saving || restartState.restarting}
@@ -1087,18 +1120,28 @@
       {#if fileReadonly}
         <p class="muted">Read-only — locked so a bad edit can't run commands on your PC. Change these via the Settings page.</p>
       {:else}
+        {#if lintIssues.length > 0}
+          <div class="warn-card">
+            <p>
+              {lintIssues.length} line{lintIssues.length === 1 ? "" : "s"} don't look like
+              <code>Key = Value</code> (line{lintIssues.length === 1 ? "" : "s"}
+              {lintIssues.slice(0, 10).map((i) => i.line).join(", ")}{lintIssues.length > 10 ? "…" : ""}).
+              Check for typos before saving — you can still save if this is intentional.
+            </p>
+          </div>
+        {/if}
         {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
         <div class="row">
           <button
             class="primary"
-            onclick={saveFile}
+            onclick={saveFileChecked}
             disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
             title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
           >
-            Save
+            {lintConfirm && lintIssues.length > 0 ? "Save anyway — sure?" : "Save"}
           </button>
           <button
-            onclick={() => saveAndRestart(saveFile)}
+            onclick={saveAndRestartFile}
             disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
             title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
           >
@@ -1166,6 +1209,7 @@
   .muted { color: #8b949e; font-size: 13px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
+  .warn-card code { font-family: Consolas, monospace; font-size: 12.5px; background: #21262d; border-radius: 4px; padding: 1px 5px; }
   .live-card { background: #161b22; border: 1px solid #2ea043; border-radius: 8px; padding: 12px 16px; }
   .danger-card { border-color: #f85149; }
   .pb-list { display: flex; flex-direction: column; gap: 4px; max-height: 420px; overflow-y: auto; }
