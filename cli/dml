@@ -474,8 +474,47 @@ _cfg_preamble() {
     return 0
 }
 
+# CFG_ENV_MAP: an in-process snapshot of the override's ac-worldserver
+# environment (KEY -> value), populated by _cfg_env_load_map. While
+# CFG_ENV_MAP_LOADED is 1, _cfg_env_read resolves here instead of forking yq
+# per call -- `config list` does one env read per registry row (~65), and a
+# yq fork each made every page load laggy.
+declare -gA CFG_ENV_MAP=()
+CFG_ENV_MAP_LOADED=0
+
+# _cfg_env_load_map: dump the override's ac-worldserver environment ONCE (a
+# single yq fork) into CFG_ENV_MAP, then flip CFG_ENV_MAP_LOADED so subsequent
+# _cfg_env_read calls resolve in-process. Safe when the file/section is absent
+# (an empty map is a valid answer). A caller that later MUTATES the override
+# must _cfg_env_unload_map so reads see fresh data.
+_cfg_env_load_map() {
+    CFG_ENV_MAP=()
+    CFG_ENV_MAP_LOADED=1
+    [[ -f "$cfg_ovr" ]] || return 0
+    local line k v
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        k="${line%%=*}"; v="${line#*=}"
+        [[ -n "$k" ]] && CFG_ENV_MAP["$k"]="$v"
+    done < <("$DML_YQ_BIN" -r '.services.ac-worldserver.environment // {} | to_entries[] | .key + "=" + (.value | tostring)' "$cfg_ovr" 2>/dev/null || true)
+    return 0
+}
+
+# _cfg_env_unload_map: drop the snapshot so _cfg_env_read forks yq again.
+_cfg_env_unload_map() {
+    CFG_ENV_MAP=()
+    CFG_ENV_MAP_LOADED=0
+    return 0
+}
+
 # _cfg_env_read <ENV>: echoes the override's value for that env key, or "".
+# Resolves against the CFG_ENV_MAP snapshot when one is loaded (identical
+# answer, no fork); otherwise forks yq as before.
 _cfg_env_read() {
+    if [[ "${CFG_ENV_MAP_LOADED:-0}" == 1 ]]; then
+        printf '%s' "${CFG_ENV_MAP[$1]:-}"
+        return 0
+    fi
     [[ -f "$cfg_ovr" ]] || { printf ''; return 0; }
     E="$1" "$DML_YQ_BIN" -r '.services.ac-worldserver.environment[strenv(E)] // ""' "$cfg_ovr" 2>/dev/null || printf ''
     return 0
@@ -571,12 +610,23 @@ _cfg_conf_ensure() {
     return 0
 }
 
-# _cfg_conf_read <path> <Key>: echoes the conf's value for Key ("" when the
-# file or key is absent). Exact-key match (prefix + '='), comments skipped,
-# LAST occurrence wins (AC semantics), surrounding quotes stripped. The key
-# travels via the environment (K=), never awk -v, so dots/backslashes are
-# never escape-processed.
-_cfg_conf_read() {
+# _cfg_unquote <s>: strips ONE matching pair of surrounding double quotes,
+# leaving a bare or unbalanced value untouched. Symmetric on purpose -- used
+# to normalize/compare conf values regardless of quoting style.
+_cfg_unquote() {
+    local s="${1-}"
+    if [[ ${#s} -ge 2 && "${s:0:1}" == '"' && "${s: -1}" == '"' ]]; then
+        s="${s:1:${#s}-2}"
+    fi
+    printf '%s' "$s"
+    return 0
+}
+
+# _cfg_conf_read_raw <path> <Key>: the conf's value for Key, quoting PRESERVED
+# ("" when the file or key is absent). Exact-key match (prefix + '='), comments
+# skipped, LAST occurrence wins (AC semantics). The key travels via the
+# environment (K=), never awk -v, so dots/backslashes are never escape-processed.
+_cfg_conf_read_raw() {
     local val=""
     [[ -f "$1" ]] || { printf ''; return 0; }
     val="$(K="$2" awk '
@@ -595,6 +645,15 @@ _cfg_conf_read() {
         }
         END { if (found) print val }
     ' "$1" 2>/dev/null)" || val=""
+    printf '%s' "$val"
+    return 0
+}
+
+# _cfg_conf_read <path> <Key>: like _cfg_conf_read_raw but with surrounding
+# quotes stripped -- the common read used by config list/env fallbacks.
+_cfg_conf_read() {
+    local val
+    val="$(_cfg_conf_read_raw "$1" "$2")"
     val="${val%\"}"; val="${val#\"}"
     printf '%s' "$val"
     return 0
@@ -604,13 +663,27 @@ _cfg_conf_read() {
 # replaces every active `Key = ...` line (duplicates collapse to the same
 # value; AC reads the last anyway) or appends `Key = value` when absent.
 # tmp-file + mv like raw-write, so a failure never truncates the conf.
-# Sets CFG_CHANGED=true when the effective value actually changed.
+# Sets CFG_CHANGED=true when the EFFECTIVE value actually changed.
+#
+# Quotes are normalized SYMMETRICALLY before the compare, so a pure quote
+# toggle (foo <-> "foo") is a no-op that never flips restart_required. The
+# written value preserves quoting style -- it stays quoted when the user
+# quoted the new value OR the stored line was quoted -- so a legitimate edit
+# of a value that needs quotes (spaces etc.) never silently drops them.
 _cfg_conf_write() {
-    local cur tmp
-    cur="$(_cfg_conf_read "$1" "$2")"
-    [[ "$cur" == "$3" ]] && return 0
+    local curq cur newq new out_val tmp
+    curq="$(_cfg_conf_read_raw "$1" "$2")"
+    cur="$(_cfg_unquote "$curq")"
+    newq="$3"
+    new="$(_cfg_unquote "$newq")"
+    [[ "$cur" == "$new" ]] && return 0
+    if [[ "$newq" != "$new" || "$curq" != "$cur" ]]; then
+        out_val="\"$new\""
+    else
+        out_val="$new"
+    fi
     tmp="$1.tmp.$$"
-    K="$2" V="$3" awk '
+    K="$2" V="$out_val" awk '
         BEGIN { done = 0 }
         {
             s = $0; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
@@ -4492,6 +4565,19 @@ case "$cmd" in
           ndjson_section_end world-restart error
           ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
         fi
+        # Running precondition (Batch 1 CLI robustness): `docker restart` on a
+        # STOPPED container STARTS it. On a fully-stopped stack that boots the
+        # worldserver ALONE against a down database, where it blocks on the DB
+        # handshake until READY_TIMEOUT (~30 min) -- a half-hour hang for what
+        # should be an instant "the server is not running" answer. Require BOTH
+        # the world and database containers to already be up; a stopped stack
+        # means the user wants the full Start, not a world-only restart.
+        wr_wrun="$(docker inspect -f '{{.State.Running}}' ac-worldserver 2>/dev/null || true)"; wr_wrun="${wr_wrun%%$'\n'*}"
+        wr_drun="$(docker inspect -f '{{.State.Running}}' ac-database 2>/dev/null || true)"; wr_drun="${wr_drun%%$'\n'*}"
+        if [[ "$wr_wrun" != true || "$wr_drun" != true ]]; then
+          ndjson_section_end world-restart error
+          ndjson_error NOT_RUNNING "The server is not running" "A world-only restart needs the world server and database already up. Start the server (full Start) first."; exit 1
+        fi
         ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
         # --no-saveall (GUI "faster" option): skip the redundant pre-stop
         # saveall. `docker restart -t 300` below stops gracefully first, so the
@@ -5033,6 +5119,11 @@ case "$cmd" in
             # Guarded (set -e): a down DB or absent docker falls back to the
             # registry default below, so `list` still answers.
             if motd_live="$(db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;")"; then :; else motd_live=""; fi
+            # Snapshot the override env map ONCE (single yq fork) so the ~65
+            # per-row _cfg_env_read lookups below resolve in-process instead of
+            # forking yq each. Dropped after the loop so mutating paths are
+            # unaffected.
+            _cfg_env_load_map
             first=1; out='['
             while IFS='|' read -r key group label type minv maxv env def explain; do
               [[ -z "$key" ]] && continue
@@ -5066,6 +5157,7 @@ case "$cmd" in
               out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$(json_escape "$label")\",\"explain\":\"$(json_escape "$explain")\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$(json_escape "$val")\",\"default\":\"$(json_escape "$def")\",\"restart_required\":$rreq,\"env\":\"$env\"}"
               first=0
             done < <(_cfg_rows)
+            _cfg_env_unload_map
             out+=']'
             json_ok "{\"settings\":$out}"
             ;;
@@ -5593,6 +5685,11 @@ case "$cmd" in
             first=1; out='['
             while IFS=$'\t' read -r name lvl cls zone || [[ -n "$name" ]]; do
               [[ -z "$name" ]] && continue
+              # Guard EVERY interpolated numeric, not just zone: a NULL/empty
+              # level or class would emit `"level":,` -> invalid JSON that
+              # blanks the Home card. Degrade each to 0 like zone.
+              [[ "$lvl" =~ ^[0-9]+$ ]] || lvl=0
+              [[ "$cls" =~ ^[0-9]+$ ]] || cls=0
               [[ "$zone" =~ ^[0-9]+$ ]] || zone=0
               [[ $first -eq 0 ]] && out+=','
               out+="{\"name\":\"$(json_escape "$name")\",\"level\":$lvl,\"class\":$cls,\"zone\":$zone}"
@@ -6350,11 +6447,24 @@ case "$cmd" in
             for v in "$btminl" "$btmaxl" "$btlimit" "$btoffset"; do
               [[ -z "$v" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
             done
+            # --limit ""/--offset "" slip the guard above (it permits empty)
+            # and would then crash `$(( 10# ))` fatally with no envelope. Fall
+            # back to the defaults before expansion.
+            [[ -n "$btlimit" ]] || btlimit=50
+            [[ -n "$btoffset" ]] || btoffset=0
             btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
             (( btlimit > 200 )) && btlimit=200
             (( btlimit < 1 )) && btlimit=1
             btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
-            [[ -n "$btname" ]] && btwhere+=" AND c.name LIKE '$(sql_escape "$btname")%'"
+            # --name is a LIKE prefix. _valid_charname permits '_', which is a
+            # single-char LIKE wildcard, so a name like Foo_bar would also match
+            # Foo<any>bar. Escape the LIKE metacharacters (_ and %) with a marker
+            # that can never occur in a valid charname and declare it via ESCAPE.
+            # sql_escape still runs afterwards for string-literal safety.
+            if [[ -n "$btname" ]]; then
+              btlike="${btname//%/!%}"; btlike="${btlike//_/!_}"
+              btwhere+=" AND c.name LIKE '$(sql_escape "$btlike")%' ESCAPE '!'"
+            fi
             [[ -n "$btclass" ]] && btwhere+=" AND c.class = $((10#$btclass))"
             if [[ -n "$btminl" && -n "$btmaxl" ]]; then
               btwhere+=" AND c.level BETWEEN $((10#$btminl)) AND $((10#$btmaxl))"
@@ -7535,11 +7645,21 @@ case "$cmd" in
               battlepass-npc) ;;
               *) json_err BAD_ARG "Unknown fixit: ${fkey:-<none>}" "Available: battlepass-npc"; exit 1 ;;
             esac
-            cnt="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100;")" \
+            # Per-map idempotence: COUNT the entry-90100 spawns in EACH capital
+            # SEPARATELY (map 0 = Stormwind, map 1 = Orgrimmar). A single
+            # COUNT(*) across both maps reported already_placed as soon as
+            # EITHER capital had a spawn, so one capital permanently blocked the
+            # other. Read both counts first (deterministic order), decide after.
+            bp_sw="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100 AND map=0;")" \
               || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
-            cnt="${cnt//[[:space:]]/}"
-            if [[ "$cnt" =~ ^[0-9]+$ && "$cnt" -gt 0 ]]; then
-              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in the world."}'
+            bp_sw="${bp_sw//[[:space:]]/}"
+            bp_og="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100 AND map=1;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            bp_og="${bp_og//[[:space:]]/}"
+            bp_need_sw=1; [[ "$bp_sw" =~ ^[0-9]+$ && "$bp_sw" -gt 0 ]] && bp_need_sw=0
+            bp_need_og=1; [[ "$bp_og" =~ ^[0-9]+$ && "$bp_og" -gt 0 ]] && bp_need_og=0
+            if [[ "$bp_need_sw" -eq 0 && "$bp_need_og" -eq 0 ]]; then
+              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in both capitals."}'
               exit 0
             fi
             tcnt="$(db_world_query "SELECT COUNT(*) FROM creature_template WHERE entry=90100;")" \
@@ -7563,10 +7683,20 @@ case "$cmd" in
             # (see the battlepass cheat-sheet in 47-commands.sh):
             #   Stormwind (map 0): -8819.3 636.2 94.1, facing 3.7
             #   Orgrimmar (map 1): 1609.2 -4407.7 17.5, facing 4.5
-            # guid is AUTO_INCREMENT; remaining columns have sane defaults.
-            _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
-              || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
-            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            # Insert ONLY the capital(s) that lacked a spawn -- guid is
+            # AUTO_INCREMENT; remaining columns have sane defaults.
+            bp_placed=0
+            if [[ "$bp_need_sw" -eq 1 ]]; then
+              _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300);" >/dev/null \
+                || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawn" "Is ac-database running?"; exit 1; }
+              bp_placed=$((bp_placed + 1))
+            fi
+            if [[ "$bp_need_og" -eq 1 ]]; then
+              _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
+                || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawn" "Is ac-database running?"; exit 1; }
+              bp_placed=$((bp_placed + 1))
+            fi
+            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":$bp_placed,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
             ;;
           place-npc)
             # Batch 2 (overnight): generalizes the battlepass-npc-fixit per-map
