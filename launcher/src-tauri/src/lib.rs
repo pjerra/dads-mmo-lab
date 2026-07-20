@@ -1388,6 +1388,15 @@ async fn wow_tailscale(action: String, state: State<'_, AppState>) -> Result<ser
     run_json_cmd(state, vec!["wow".into(), "tailscale".into(), action]).await
 }
 
+/// Batch 5 (overnight): LAN-readiness port diagnostic (`wow port-check`).
+/// Read-only -- reports how Docker publishes the game/DB ports so the Tools
+/// "Database access / LAN diagnostic" card can tell the user whether other
+/// PCs can reach the server (and hand them the DB host port for HeidiSQL).
+#[tauri::command]
+async fn wow_port_check(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "port-check".into()]).await
+}
+
 #[tauri::command]
 async fn dml_doctor(state: State<'_, AppState>) -> Result<String, CmdError> {
     let runner = state.runner.clone();
@@ -1704,6 +1713,34 @@ fn generate_compact_script() -> Result<String, CmdError> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| bad_arg(format!("could not create {}: {e}", dir.display())))?;
     std::fs::write(&path, wslconfig::compact_script(DISTRO))
+        .map_err(|e| bad_arg(format!("could not write {}: {e}", path.display())))?;
+    let select = format!("/select,{}", path.display());
+    let mut cmd = std::process::Command::new("explorer");
+    cmd.arg(&select);
+    let _ = cmd.spawn(); // best-effort -- the returned path is shown either way
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Batch 5 (overnight): drop the "expose MySQL to LAN" PowerShell script into
+/// Downloads and open Explorer at it -- same generate-and-run-as-admin flow as
+/// the shrink-disk script (NO elevation from the app; the user right-clicks
+/// and runs it as admin, and the header shouts the LAN-only warning). `port`
+/// is the DB host port from the port-check diagnostic (3306, or the remapped
+/// value like 13306); validated to a real TCP port before it reaches the
+/// generated script.
+#[tauri::command]
+fn generate_mysql_proxy_script(port: Option<u32>) -> Result<String, CmdError> {
+    let p = port.unwrap_or(3306);
+    if p == 0 || p > 65535 {
+        return Err(bad_arg(format!("invalid port: {p} (expected 1-65535)")));
+    }
+    let profile = std::env::var("USERPROFILE")
+        .map_err(|_| bad_arg("USERPROFILE is not set -- cannot locate Downloads"))?;
+    let dir = std::path::PathBuf::from(profile).join("Downloads");
+    let path = dir.join("dml-expose-mysql.ps1");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| bad_arg(format!("could not create {}: {e}", dir.display())))?;
+    std::fs::write(&path, wslconfig::mysql_expose_script(p as u16))
         .map_err(|e| bad_arg(format!("could not write {}: {e}", path.display())))?;
     let select = format!("/select,{}", path.display());
     let mut cmd = std::process::Command::new("explorer");
@@ -2030,6 +2067,7 @@ pub fn run() {
             wow_lan,
             wow_lan_public_ip,
             wow_tailscale,
+            wow_port_check,
             dml_doctor,
             tool_install,
             open_shell,
@@ -2038,6 +2076,7 @@ pub fn run() {
             wslconfig_write,
             restart_wsl,
             generate_compact_script,
+            generate_mysql_proxy_script,
             defender_hint,
             save_text_file,
             set_auto_shutdown,

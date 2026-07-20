@@ -935,6 +935,30 @@ export async function wowTailscale(action: TailscaleAction): Promise<unknown> {
   return await invoke("wow_tailscale", { action });
 }
 
+// --- LAN port diagnostic + MySQL LAN exposure (Batch 5 overnight) ----------
+
+export interface PortBinding {
+  name: string;
+  service: "login" | "world" | "database";
+  internal: number;
+  published: boolean;
+  host_ip: string | null;
+  host_port: number | null;
+  lan_ready: boolean;
+}
+export interface PortCheck {
+  running: boolean;
+  game_lan_ready: boolean;
+  db_host_port: number;
+  db_lan_exposed: boolean;
+  ports: PortBinding[];
+}
+
+// Read-only diagnostic: how Docker publishes the game/DB ports.
+export async function wowPortCheck(): Promise<PortCheck> {
+  return await invoke("wow_port_check");
+}
+
 export async function dmlDoctor(): Promise<string> {
   return await invoke("dml_doctor");
 }
@@ -1018,6 +1042,13 @@ export async function restartWsl(): Promise<{
 // the script path.
 export async function generateCompactScript(): Promise<string> {
   return await invoke("generate_compact_script");
+}
+
+// Batch 5 (overnight): writes the "expose MySQL to LAN" admin PowerShell
+// script into Downloads and opens Explorer at it; returns the script path.
+// The port is the DB host port from the diagnostic (defaults to 3306).
+export async function generateMysqlProxyScript(port?: number): Promise<string> {
+  return await invoke("generate_mysql_proxy_script", { port });
 }
 
 export async function defenderHint(): Promise<{ vhdx_dir: string | null; command: string | null }> {

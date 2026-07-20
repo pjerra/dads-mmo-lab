@@ -75,6 +75,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "gm-return-home": "untested",
   "gear-sets-io": "untested",
   "tailscale-play": "untested",
+  "port-proxy": "untested",
 };
 
 export const LOCKED_HINT =

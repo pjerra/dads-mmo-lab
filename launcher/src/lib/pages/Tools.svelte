@@ -15,11 +15,14 @@
     wslconfigWrite,
     restartWsl,
     generateCompactScript,
+    generateMysqlProxyScript,
+    wowPortCheck,
     defenderHint,
     type LanAction,
     type ToolName,
     type RealmlistStatus,
     type WslConfigState,
+    type PortCheck,
   } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -541,6 +544,46 @@
     }
   }
 
+  // --- Database access / LAN diagnostic (Batch 5) --------------------
+  // Read-only port diagnostic + a generated admin PowerShell script that
+  // exposes MySQL to the LAN for HeidiSQL. The 3306 exposure is the mutating
+  // part -> locked behind port-proxy; the diagnostic itself is read-only.
+  let pcData: PortCheck | null = $state(null);
+  let pcError: string | null = $state(null);
+  let pcBusy = $state(false);
+  let pcScriptPath: string | null = $state(null);
+  let pcScriptError: string | null = $state(null);
+  let pcScriptBusy = $state(false);
+
+  onMount(() => {
+    void runPortCheck().catch(() => {});
+  });
+
+  async function runPortCheck() {
+    pcBusy = true;
+    pcError = null;
+    try {
+      pcData = await wowPortCheck();
+    } catch (e) {
+      pcError = fmtErr(e);
+    } finally {
+      pcBusy = false;
+    }
+  }
+
+  async function makeMysqlScript() {
+    pcScriptBusy = true;
+    pcScriptError = null;
+    pcScriptPath = null;
+    try {
+      pcScriptPath = await generateMysqlProxyScript(pcData?.db_host_port);
+    } catch (e) {
+      pcScriptError = fmtErr(e);
+    } finally {
+      pcScriptBusy = false;
+    }
+  }
+
   // --- DML shell -----------------------------------------------------
   let shellError: string | null = $state(null);
   let shellBusy = $state(false);
@@ -898,6 +941,81 @@
   </div>
 
   <div class="card">
+    <h3>Database access / LAN diagnostic</h3>
+    <p class="muted">
+      Checks whether your server's ports are reachable from other PCs on your network, and
+      helps you connect HeidiSQL (a free database viewer) to the game's database.
+    </p>
+    {#if pcError}<p class="inline-error">{pcError}</p>{/if}
+    <div class="row">
+      <button class="primary" onclick={runPortCheck} disabled={pcBusy}>
+        {pcBusy ? "Checking…" : "Re-check"}
+      </button>
+    </div>
+
+    {#if pcData}
+      {#if !pcData.running}
+        <p class="muted">The server isn't running — start it from Home, then Re-check.</p>
+      {:else}
+        <p class="rl-state" class:good={pcData.game_lan_ready} class:warn={!pcData.game_lan_ready}>
+          {pcData.game_lan_ready
+            ? "Game ports (login + world) are reachable from other PCs on your network."
+            : "Game ports are bound to this PC only — other PCs can't reach them yet."}
+        </p>
+        <ul class="port-list">
+          {#each pcData.ports as p (p.name)}
+            <li>
+              <span class="mono">{p.service}</span>
+              {#if p.published}
+                <span class="mono">{p.host_ip}:{p.host_port}</span>
+                <span class={p.lan_ready ? "ok-chip" : "warn-chip"}>
+                  {p.lan_ready ? "LAN-reachable" : "this PC only"}
+                </span>
+              {:else}
+                <span class="warn-chip">not published</span>
+              {/if}
+            </li>
+          {/each}
+        </ul>
+      {/if}
+
+      <div class="step">
+        <strong>HeidiSQL on THIS PC</strong>
+        <p class="muted">
+          No setup needed — connect HeidiSQL to Host <code>127.0.0.1</code>, Port
+          <code>{pcData.db_host_port}</code>, User <code>root</code>, Password
+          <code>password</code>.
+        </p>
+      </div>
+
+      <div class="step">
+        <strong>HeidiSQL from ANOTHER PC on your LAN</strong>
+        <p class="warn-text">
+          This opens your database (port {pcData.db_host_port}) to your local network. Only do
+          this on a network you trust, and NEVER forward it on your router or expose it to the
+          internet — it is your whole server's data. The script writes a Windows
+          portproxy + firewall rule; run it as Administrator.
+        </p>
+        {#if pcScriptError}<p class="inline-error">{pcScriptError}</p>{/if}
+        <div class="row">
+          <button
+            onclick={makeMysqlScript}
+            disabled={pcScriptBusy || featureLocked("port-proxy")}
+            title={featureLocked("port-proxy") ? LOCKED_HINT : undefined}
+          >
+            Create the LAN-exposure script
+          </button>
+        </div>
+        {#if pcScriptPath}
+          <p class="notice">
+            Script created: {pcScriptPath} — right-click it → Run with PowerShell (as admin).
+          </p>
+        {/if}
+      </div>
+    {/if}
+  </div>
+
+  <div class="card">
     <h3>Auto-shutdown</h3>
     <p class="muted">
       Stops the server automatically (characters saved, graceful stop) a few seconds after
@@ -1157,6 +1275,12 @@
   .rl-state { margin: 0; font-size: 14px; }
   .rl-state.good { color: #3fb950; }
   .rl-state.warn { color: #d29922; }
+  .port-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #8b949e; }
+  .port-list li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .port-list .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d1d9; }
+  .port-list li .mono:first-child { min-width: 68px; }
+  .ok-chip { color: #3fb950; font-size: 12px; }
+  .warn-chip { color: #d29922; font-size: 12px; }
   .usage {
     background: #161b22;
     border: 1px solid #21262d;

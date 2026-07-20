@@ -223,6 +223,76 @@ pause
     )
 }
 
+/// The PowerShell script dropped into Downloads to expose the game's MySQL
+/// port to the LAN for a remote HeidiSQL (mirrors compact_script's
+/// generate-and-run-as-admin pattern). It discovers this PC's LAN IPv4 at run
+/// time (the adapter with a default gateway), ensures IP Helper is running,
+/// then adds a netsh v4tov4 portproxy + a Private/Domain-only firewall rule.
+///
+/// Two safety rails baked in per research:
+///   * listenaddress is the SPECIFIC LAN IP, never 0.0.0.0 -- a wildcard
+///     triggers the wslrelay infinite-loop / IPv6 failure.
+///   * the firewall rule is Domain,Private only, NEVER Public -- and the
+///     header shouts that this must stay on a trusted LAN, never the internet.
+/// `port` is the DB host port (3306, or the remapped value from the compose
+/// .env, e.g. 13306) on BOTH sides -- the WSL localhost relay makes
+/// 127.0.0.1:<port> reach the container.
+pub fn mysql_expose_script(port: u16) -> String {
+    format!(
+        r#"# DML Launcher -- expose MySQL (port {port}) to your LAN for HeidiSQL (generated)
+#
+#   RUN AS ADMINISTRATOR: right-click this file -> "Run with PowerShell"
+#   from an elevated PowerShell, or the netsh/firewall changes will fail.
+#
+#   *** SECURITY ***
+#   This opens your game server's DATABASE to your LOCAL NETWORK so another PC
+#   on your home network can connect with HeidiSQL. ONLY run this on a network
+#   you trust. NEVER port-forward this on your router or expose it to the
+#   internet -- it is your whole server's data. The DML installer deliberately
+#   does NOT open this port; this reverses that on purpose.
+#
+#   You do NOT need this on the SAME PC: HeidiSQL there connects to
+#   127.0.0.1 port {port} directly.
+#
+#   TO UNDO later (admin PowerShell):
+#     netsh interface portproxy delete v4tov4 listenaddress=<the IP shown below> listenport={port}
+#     Remove-NetFirewallRule -DisplayName 'DML MySQL (HeidiSQL)'
+
+$ErrorActionPreference = 'Stop'
+Write-Host '== DML expose MySQL to LAN =='
+
+# 1. This PC's LAN IPv4 = the up adapter that has a default gateway.
+$lanIp = (Get-NetIPConfiguration |
+    Where-Object {{ $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' }} |
+    Select-Object -First 1 -ExpandProperty IPv4Address).IPAddress
+if (-not $lanIp) {{ Write-Host 'ERROR: could not find a LAN IPv4 address.'; pause; exit 1 }}
+Write-Host "LAN address: $lanIp"
+
+# 2. IP Helper (iphlpsvc) must run for portproxy to work.
+Set-Service -Name iphlpsvc -StartupType Automatic
+Start-Service -Name iphlpsvc
+
+# 3. Forward LAN:{port} -> 127.0.0.1:{port}. listenaddress is the SPECIFIC LAN
+#    IP on purpose -- 0.0.0.0 triggers a wslrelay loop / IPv6 failure.
+netsh interface portproxy add v4tov4 listenaddress=$lanIp listenport={port} connectaddress=127.0.0.1 connectport={port}
+
+# 4. Allow it through the firewall for PRIVATE/DOMAIN networks only (never Public).
+if (Get-NetFirewallRule -DisplayName 'DML MySQL (HeidiSQL)' -ErrorAction SilentlyContinue) {{
+    Write-Host 'Firewall rule already exists -- leaving it.'
+}} else {{
+    New-NetFirewallRule -DisplayName 'DML MySQL (HeidiSQL)' -Direction Inbound -Action Allow `
+        -Protocol TCP -LocalPort {port} -Profile Domain,Private | Out-Null
+}}
+
+Write-Host ''
+Write-Host 'Done. From another PC on your LAN, connect HeidiSQL to:'
+Write-Host "    Host: $lanIp   Port: {port}   User: root   Password: password"
+Write-Host 'On THIS PC use 127.0.0.1 instead.'
+pause
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +411,34 @@ mod tests {
         // registry discovery, not a baked-in path
         assert!(s.contains("Lxss"));
         assert!(s.contains("DistributionName"));
+    }
+
+    #[test]
+    fn mysql_expose_script_has_the_safety_rails_and_uses_the_port() {
+        let s = mysql_expose_script(13306);
+        assert!(s.contains("RUN AS ADMINISTRATOR"));
+        // security warnings
+        assert!(s.contains("SECURITY"));
+        assert!(s.contains("NEVER port-forward"));
+        assert!(s.to_ascii_lowercase().contains("trust"));
+        // undo instructions
+        assert!(s.contains("TO UNDO"));
+        assert!(s.contains("Remove-NetFirewallRule"));
+        // the port appears in the portproxy + firewall lines
+        assert!(s.contains("listenport=13306"));
+        assert!(s.contains("connectport=13306"));
+        assert!(s.contains("-LocalPort 13306"));
+        // never a wildcard listen address, never a Public firewall profile
+        assert!(!s.contains("listenaddress=0.0.0.0"));
+        assert!(s.contains("Domain,Private"));
+        assert!(!s.contains("-Profile Public"));
+        // uses the WSL localhost relay as the connect target
+        assert!(s.contains("connectaddress=127.0.0.1"));
+    }
+
+    #[test]
+    fn mysql_expose_script_defaults_and_custom_ports_render() {
+        assert!(mysql_expose_script(3306).contains("listenport=3306"));
+        assert!(mysql_expose_script(23306).contains("-LocalPort 23306"));
     }
 }

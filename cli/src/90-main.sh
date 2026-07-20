@@ -5037,6 +5037,67 @@ case "$cmd" in
         cmods+=']'
         json_ok "{\"mods\":$cmods}"
         ;;
+      port-check)
+        # Batch 5 (overnight): LAN-readiness diagnostic. Reads how Docker
+        # PUBLISHES the game/DB ports (docker port <container> <internal>) and
+        # reports whether each is bound so other PCs can reach it (0.0.0.0 / a
+        # LAN IP) versus loopback-only (127.0.0.1 / ::1). Read-only -- no flag.
+        # The DB host port is NOT hardcoded: _check_port_conflicts remaps 3306
+        # -> 13306 when 3306 is busy (written to the compose .env), so we read
+        # the live `docker port` mapping and fall back to DOCKER_DB_EXTERNAL_PORT.
+        sdir="$(_wow_server_dir)"
+        if [[ -z "$sdir" ]]; then
+          json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          json_err DOCKER_DOWN "Docker is not running" "Start the server first, then re-check."; exit 1
+        fi
+        # DB host-port fallback from the compose .env (3306 unless remapped).
+        pc_dbport=3306
+        pc_envf="$sdir/.env"
+        if [[ -f "$pc_envf" ]]; then
+          pc_v="$(grep -m1 '^DOCKER_DB_EXTERNAL_PORT=' "$pc_envf" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]' || true)"
+          [[ "$pc_v" =~ ^[0-9]+$ ]] && pc_dbport="$pc_v"
+        fi
+        # Probe one container's published mapping. Echoes
+        # "published|host_ip|host_port|lan_ready".
+        _pc_probe() {
+          local name="$1" internal="$2" bind hostip hostport ready
+          bind="$(docker port "$name" "$internal" 2>/dev/null | head -1 || true)"
+          if [[ -z "$bind" ]]; then echo "false|||false"; return 0; fi
+          hostport="${bind##*:}"; hostip="${bind%:*}"
+          [[ "$hostport" =~ ^[0-9]+$ ]] || hostport=""
+          # LAN-ready = reachable from another machine; loopback binds are not.
+          case "$hostip" in
+            127.0.0.1|::1|"[::1]"|localhost) ready=false ;;
+            *) ready=true ;;
+          esac
+          echo "true|$hostip|$hostport|$ready"
+        }
+        # Build one port object. Args: name service internal published ip port ready.
+        _pc_obj() {
+          local ipj=null portj=null
+          [[ -n "$5" ]] && ipj="\"$(json_escape "$5")\""
+          [[ "$6" =~ ^[0-9]+$ ]] && portj="$6"
+          printf '{"name":"%s","service":"%s","internal":%s,"published":%s,"host_ip":%s,"host_port":%s,"lan_ready":%s}' \
+            "$(json_escape "$1")" "$2" "$3" "$4" "$ipj" "$portj" "$7"
+        }
+        IFS='|' read -r pc_a_pub pc_a_ip pc_a_port pc_a_ready <<< "$(_pc_probe ac-authserver 3724)"
+        IFS='|' read -r pc_w_pub pc_w_ip pc_w_port pc_w_ready <<< "$(_pc_probe ac-worldserver 8085)"
+        IFS='|' read -r pc_d_pub pc_d_ip pc_d_port pc_d_ready <<< "$(_pc_probe ac-database 3306)"
+        pc_running=false
+        { [[ "$pc_a_pub" == true ]] || [[ "$pc_w_pub" == true ]] || [[ "$pc_d_pub" == true ]]; } && pc_running=true
+        pc_game_ready=false
+        [[ "$pc_a_ready" == true && "$pc_w_ready" == true ]] && pc_game_ready=true
+        pc_db_exposed=false
+        [[ "$pc_d_ready" == true ]] && pc_db_exposed=true
+        pc_db_host_port="$pc_d_port"
+        [[ "$pc_db_host_port" =~ ^[0-9]+$ ]] || pc_db_host_port="$pc_dbport"
+        pc_auth_j="$(_pc_obj ac-authserver login 3724 "$pc_a_pub" "$pc_a_ip" "$pc_a_port" "$pc_a_ready")"
+        pc_world_j="$(_pc_obj ac-worldserver world 8085 "$pc_w_pub" "$pc_w_ip" "$pc_w_port" "$pc_w_ready")"
+        pc_db_j="$(_pc_obj ac-database database 3306 "$pc_d_pub" "$pc_d_ip" "$pc_d_port" "$pc_d_ready")"
+        json_ok "{\"running\":$pc_running,\"game_lan_ready\":$pc_game_ready,\"db_host_port\":$pc_db_host_port,\"db_lan_exposed\":$pc_db_exposed,\"ports\":[$pc_auth_j,$pc_world_j,$pc_db_j]}"
+        ;;
       tailscale)
         # Batch 5 (overnight): "Play Together over the internet" via Tailscale.
         # Tailscale gives every device a stable 100.x tailnet IP that peers

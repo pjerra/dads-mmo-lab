@@ -112,9 +112,13 @@ if [[ "${1:-}" == "port" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
   # `docker port <name> <internal>` -> DML_STUB_PORTS is a newline table of
   # "<container> <internal> <hostport>"; matching row prints "0.0.0.0:<hostport>".
+  # The <hostport> field may also be a full "ip:port" (e.g. 127.0.0.1:7878) so
+  # the port-check diagnostic can exercise loopback-vs-0.0.0.0 detection --
+  # bare ports keep the historical 0.0.0.0 default (server-detail relies on it).
   if [[ -n "${DML_STUB_PORTS:-}" ]]; then
     while read -r c i h; do
-      [[ "$c" == "${2:-}" && "$i" == "${3:-}" ]] && echo "0.0.0.0:$h"
+      [[ "$c" == "${2:-}" && "$i" == "${3:-}" ]] || continue
+      case "$h" in *:*) echo "$h" ;; *) echo "0.0.0.0:$h" ;; esac
     done <<< "$DML_STUB_PORTS"
   fi
   exit 0
