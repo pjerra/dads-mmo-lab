@@ -41,4 +41,20 @@ describe("lintConfContent", () => {
   it("ignores trailing whitespace when classifying", () => {
     expect(lintConfContent("Key = 1   \n   ")).toEqual([]);
   });
+
+  it("accepts INI-style [section] headers (real AC conf files open with one)", () => {
+    const conf = [
+      "[worldserver]",
+      "",
+      "LoginDatabaseInfo = \"127.0.0.1;3306;acore;acore;acore_auth\"",
+      "  [authserver]  ",
+    ].join("\n");
+    expect(lintConfContent(conf)).toEqual([]);
+  });
+
+  it("still flags a bracketed line that isn't a bare header", () => {
+    // A stray '[' with no closing ']' is not a valid section header, so it
+    // must still be reported (the guard is anchored ^\[.*\]$).
+    expect(lintConfContent("[worldserver")).toEqual([{ line: 1, text: "[worldserver" }]);
+  });
 });

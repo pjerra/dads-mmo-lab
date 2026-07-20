@@ -14,6 +14,11 @@ export function lintConfContent(content: string): ConfLintIssue[] {
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
+    // INI-style section headers ("[worldserver]", "[authserver]", the AH
+    // module's "[worldserver]", ...) are valid AzerothCore .conf syntax, not
+    // Key = Value lines -- don't flag them (they open worldserver.conf /
+    // authserver.conf / mod_ahbot.conf).
+    if (/^\[.*\]$/.test(trimmed)) continue;
     // A valid assignment has a non-empty key before the first '='. eq === -1
     // (no '=') or eq === 0 (empty key) both fail.
     if (trimmed.indexOf("=") <= 0) {
