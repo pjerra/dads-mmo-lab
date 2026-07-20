@@ -447,3 +447,95 @@ EOS
   chmod +x "$STUB_BIN/git"
   export PATH="$STUB_BIN:$PATH"
 }
+
+# Batch 5 (overnight): Tailscale Play Together. Stubs the whole privileged
+# tool-chain the `wow tailscale` arm shells out to -- tailscale (client),
+# sudo (transparent pass-through minus its -n), pacman, systemctl, iptables.
+# The arm reads the tailscale binary via the DML_TS_BIN seam, so a test points
+# it at $STUB_BIN/tailscale for present/connected cases and at a bogus name to
+# exercise the not-installed path. Behaviour knobs:
+#   DML_STUB_TS_CONNECTED=1   `tailscale up` succeeds silently (already authed)
+#   DML_STUB_TS_IP=100.a.b.c  `tailscale ip -4` prints this (a tailnet IP)
+#   DML_STUB_TS_UP_URL        auth URL `tailscale up` prints when NOT connected
+#   DML_STUB_TS_STATE=Running BackendState in `tailscale status --json`
+#   DML_STUB_TS_DOWN_EXIT     exit code of `tailscale down` (default 0)
+#   DML_STUB_SUDO_FAIL=1      sudo -n fails like a missing NOPASSWD rule
+#   DML_STUB_PACMAN_EXIT      exit code of `pacman -S ...` (default 0)
+#   DML_STUB_IPTABLES_C_EXIT  exit of `iptables -C` (default 1 = rule absent)
+#   DML_STUB_TS_CALL_LOG      append one line per tailscale call for assertions
+use_tailscale_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+
+  cat > "$STUB_BIN/sudo" <<'EOS'
+#!/usr/bin/env bash
+# Transparent sudo: drop leading option flags (e.g. -n), then exec the rest.
+# DML_STUB_SUDO_FAIL models a box without passwordless sudo.
+if [[ "${DML_STUB_SUDO_FAIL:-0}" == 1 ]]; then
+  echo "sudo: a password is required" >&2
+  exit 1
+fi
+while [[ "${1:-}" == -* ]]; do shift; done
+exec "$@"
+EOS
+  chmod +x "$STUB_BIN/sudo"
+
+  cat > "$STUB_BIN/tailscale" <<'EOS'
+#!/usr/bin/env bash
+[[ -n "${DML_STUB_TS_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_TS_CALL_LOG"
+case "${1:-}" in
+  up)
+    if [[ "${DML_STUB_TS_CONNECTED:-0}" == 1 ]]; then
+      exit 0
+    fi
+    printf 'To authenticate, visit:\n\n\t%s\n\n' "${DML_STUB_TS_UP_URL:-https://login.tailscale.com/a/0123456789abcdef}"
+    exit 1
+    ;;
+  ip)
+    [[ -n "${DML_STUB_TS_IP:-}" ]] && printf '%s\n' "${DML_STUB_TS_IP}"
+    exit 0
+    ;;
+  status)
+    if [[ "${2:-}" == "--json" ]]; then
+      printf '{"BackendState":"%s","Self":{"TailscaleIPs":["%s"]}}\n' "${DML_STUB_TS_STATE:-Running}" "${DML_STUB_TS_IP:-100.64.0.1}"
+      exit 0
+    fi
+    printf '%s   dml-host   linux   -\n' "${DML_STUB_TS_IP:-100.64.0.1}"
+    exit 0
+    ;;
+  down)
+    exit "${DML_STUB_TS_DOWN_EXIT:-0}"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+EOS
+  chmod +x "$STUB_BIN/tailscale"
+
+  cat > "$STUB_BIN/pacman" <<'EOS'
+#!/usr/bin/env bash
+exit "${DML_STUB_PACMAN_EXIT:-0}"
+EOS
+  chmod +x "$STUB_BIN/pacman"
+
+  cat > "$STUB_BIN/systemctl" <<'EOS'
+#!/usr/bin/env bash
+# is-system-running -> "running"; enable/anything else -> success.
+[[ "${1:-}" == "is-system-running" ]] && { echo running; exit 0; }
+exit 0
+EOS
+  chmod +x "$STUB_BIN/systemctl"
+
+  cat > "$STUB_BIN/iptables" <<'EOS'
+#!/usr/bin/env bash
+# -C (check) -> DML_STUB_IPTABLES_C_EXIT (default 1 = rule absent so -I runs);
+# -I (insert) and everything else -> success.
+[[ "${1:-}" == "-C" ]] && exit "${DML_STUB_IPTABLES_C_EXIT:-1}"
+exit 0
+EOS
+  chmod +x "$STUB_BIN/iptables"
+
+  export PATH="$STUB_BIN:$PATH"
+  export DML_TS_BIN="$STUB_BIN/tailscale"
+}

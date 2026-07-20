@@ -118,6 +118,7 @@ fn bad_id(id: &str) -> CmdError {
 
 const LAN_TITLE: &str = "wow-server-playerbots";
 const LAN_ACTIONS: [&str; 4] = ["on", "off", "status", "refresh"];
+const TAILSCALE_ACTIONS: [&str; 4] = ["install", "up", "status", "down"];
 const TOOL_NAMES: [&str; 2] = ["unbound", "unbound-remove"];
 
 /// Pure, testable IPv4-shape check: `^[0-9]{1,3}(\.[0-9]{1,3}){3}$`. Exactly
@@ -1373,6 +1374,20 @@ async fn wow_lan_public_ip(state: State<'_, AppState>) -> Result<serde_json::Val
     run_json_cmd(state, vec!["wow".into(), "lan".into(), "public-ip".into()]).await
 }
 
+/// Batch 5 (overnight): Tailscale "Play Together" -- `wow tailscale
+/// install|up|status|down`. The action arrives from the webview, so it is
+/// checked against a closed allowlist before it becomes an argv token (same
+/// doctrine as wow_lan). Each arm is a captured JSON envelope; `up` uses a
+/// bounded `--timeout` CLI-side so this never hangs waiting on the browser
+/// login.
+#[tauri::command]
+async fn wow_tailscale(action: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    if !TAILSCALE_ACTIONS.contains(&action.as_str()) {
+        return Err(bad_arg(format!("invalid tailscale action: {action:?}")));
+    }
+    run_json_cmd(state, vec!["wow".into(), "tailscale".into(), action]).await
+}
+
 #[tauri::command]
 async fn dml_doctor(state: State<'_, AppState>) -> Result<String, CmdError> {
     let runner = state.runner.clone();
@@ -2014,6 +2029,7 @@ pub fn run() {
             wow_gm_return_home,
             wow_lan,
             wow_lan_public_ip,
+            wow_tailscale,
             dml_doctor,
             tool_install,
             open_shell,
@@ -2143,5 +2159,15 @@ mod tests {
         assert!(TOOL_NAMES.contains(&"unbound-remove"));
         assert!(!TOOL_NAMES.contains(&"unbound; rm -rf /"));
         assert!(!TOOL_NAMES.contains(&"anything-else"));
+    }
+
+    #[test]
+    fn tailscale_action_allowlist_is_closed() {
+        assert!(TAILSCALE_ACTIONS.contains(&"install"));
+        assert!(TAILSCALE_ACTIONS.contains(&"up"));
+        assert!(TAILSCALE_ACTIONS.contains(&"status"));
+        assert!(TAILSCALE_ACTIONS.contains(&"down"));
+        assert!(!TAILSCALE_ACTIONS.contains(&"up; rm -rf /"));
+        assert!(!TAILSCALE_ACTIONS.contains(&"login"));
     }
 }

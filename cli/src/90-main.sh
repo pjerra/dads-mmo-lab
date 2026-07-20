@@ -5037,6 +5037,148 @@ case "$cmd" in
         cmods+=']'
         json_ok "{\"mods\":$cmods}"
         ;;
+      tailscale)
+        # Batch 5 (overnight): "Play Together over the internet" via Tailscale.
+        # Tailscale gives every device a stable 100.x tailnet IP that peers
+        # reach DIRECTLY -- no router port-forwarding, no Windows netsh
+        # portproxy, sidestepping the whole WSL2-NAT problem the LAN path
+        # exists to solve. The game ports (auth 3724, world 8085) already bind
+        # 0.0.0.0 in the compose file, so they are reachable on tailscale0 the
+        # moment the tunnel is up; SOAP 7878 stays loopback-only (private).
+        #
+        # Every privileged call uses `sudo -n` (the dml user has passwordless
+        # sudo via /etc/sudoers.d/wheel) so a mis-provisioned box fails FAST
+        # with a guided SUDO_REQUIRED envelope instead of hanging the GUI on a
+        # password prompt. The ONE genuinely headless-impossible step -- the
+        # first-time browser login -- is surfaced as a URL for the user to
+        # open on any device, never faked.
+        tssub="${1:-}"; shift || true
+        # TS_BIN is the tailscale CLI name; the DML_TS_BIN seam lets tests
+        # point at a stub (and prove the not-installed path deterministically)
+        # -- same convention as DML_YQ_BIN.
+        TS_BIN="${DML_TS_BIN:-tailscale}"
+        case "$tssub" in
+          install)
+            # Idempotent: Tailscale ships in Arch `extra` (tailscale +
+            # tailscaled). Present already -> report and stop.
+            if command -v "$TS_BIN" >/dev/null 2>&1; then
+              json_ok '{"installed":true,"already":true}'
+              exit 0
+            fi
+            if ! command -v sudo >/dev/null 2>&1; then
+              json_err SUDO_REQUIRED "sudo is not available in the distro" "Install by hand as root: pacman -S tailscale"
+              exit 1
+            fi
+            if tsout="$(sudo -n pacman -S --needed --noconfirm tailscale 2>&1)"; then
+              json_ok '{"installed":true,"already":false}'
+            else
+              tsrc=$?
+              tstail="$(printf '%s' "$tsout" | tail -c 400 | tr -d '\r' | tr '\n' ' ')" || tstail=""
+              if printf '%s' "$tsout" | grep -qiE 'password is required|sudo:.*(no tty|askpass)'; then
+                json_err SUDO_REQUIRED "Installing Tailscale needs admin rights not available without a password" "Open the DML shell (Tools -> DML shell) and run: sudo pacman -S tailscale"
+              else
+                json_err INSTALL_FAILED "Could not install Tailscale (pacman exit $tsrc)" "${tstail:-Check your internet connection and try again.}"
+              fi
+              exit 1
+            fi
+            ;;
+          up)
+            if ! command -v "$TS_BIN" >/dev/null 2>&1; then
+              json_err NOT_INSTALLED "Tailscale is not installed" "Run Install first on the Tailscale card."
+              exit 1
+            fi
+            # 1. Bring the daemon up. Kernel-TUN via systemd is the reliable
+            # path (a real tailscale0 interface); userspace-networking is the
+            # fallback when there is no /dev/net/tun or no systemd. Best-effort
+            # -- `tailscale up` below surfaces the real error if it did not.
+            ts_daemon="unknown"
+            if [[ -c /dev/net/tun ]] && systemctl is-system-running >/dev/null 2>&1; then
+              if sudo -n systemctl enable --now tailscaled >/dev/null 2>&1; then ts_daemon="systemd"; fi
+            else
+              if sudo -n "$TS_BIN" status >/dev/null 2>&1; then
+                ts_daemon="existing"
+              else
+                # Detached so the daemon outlives this CLI invocation.
+                sudo -n bash -c 'nohup tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state >/dev/null 2>&1 &' >/dev/null 2>&1 || true
+                ts_daemon="userspace"
+                sleep 1
+              fi
+            fi
+            # 2. Log in. `tailscale up` blocks until authenticated; --timeout
+            # bounds the wait so the GUI never hangs. When unauthenticated it
+            # prints the auth URL FIRST (which stays valid after the timeout),
+            # then errors out -- so we grab the URL and return it for the user
+            # to open in any browser. Already-authenticated returns 0 fast.
+            if tsout="$(sudo -n "$TS_BIN" up --timeout="${DML_TS_UP_TIMEOUT:-8s}" 2>&1)"; then :; else :; fi
+            ts_url="$(printf '%s' "$tsout" | grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9./_-]+' | head -1 || true)"
+            [[ -z "$ts_url" ]] && ts_url="$(printf '%s' "$tsout" | grep -oE 'https://[A-Za-z0-9./_-]+' | head -1 || true)"
+            ts_ip="$(sudo -n "$TS_BIN" ip -4 2>/dev/null | head -1 || true)"
+            [[ "$ts_ip" =~ ^100\. ]] || ts_ip=""
+            ts_conn=false
+            [[ -n "$ts_ip" && -z "$ts_url" ]] && ts_conn=true
+            # 3. Optional hardening (kernel-TUN only -- the -i tailscale0 match
+            # needs a real interface): allow the game ports IN from the tailnet
+            # on the DOCKER-USER chain. Idempotent via -C before -I. In
+            # userspace mode there is no tailscale0 to match, so we skip it (the
+            # 0.0.0.0-bound ports are reachable anyway).
+            ts_fw="skipped"
+            if [[ "$ts_conn" == true && -c /dev/net/tun ]]; then
+              if sudo -n iptables -C DOCKER-USER -i tailscale0 -p tcp -m multiport --dports 3724,8085 -j ACCEPT >/dev/null 2>&1; then
+                ts_fw="present"
+              elif sudo -n iptables -I DOCKER-USER -i tailscale0 -p tcp -m multiport --dports 3724,8085 -j ACCEPT >/dev/null 2>&1; then
+                ts_fw="added"
+              else
+                ts_fw="failed"
+              fi
+            fi
+            # No connection AND no URL to offer -> a real failure worth an error.
+            if [[ "$ts_conn" != true && -z "$ts_url" ]]; then
+              tstail="$(printf '%s' "$tsout" | tail -c 400 | tr -d '\r' | tr '\n' ' ')" || tstail=""
+              if printf '%s' "$tsout" | grep -qiE 'password is required|sudo:.*(no tty|askpass)'; then
+                json_err SUDO_REQUIRED "Logging in needs admin rights not available without a password" "Open the DML shell and run: sudo tailscale up"
+              else
+                json_err TAILSCALE_UP_FAILED "Could not start Tailscale login" "${tstail:-Is the Tailscale daemon running? Try Install, then Log in again.}"
+              fi
+              exit 1
+            fi
+            ts_url_json=null; [[ -n "$ts_url" ]] && ts_url_json="\"$(json_escape "$ts_url")\""
+            ts_ip_json=null; [[ -n "$ts_ip" ]] && ts_ip_json="\"$(json_escape "$ts_ip")\""
+            json_ok "{\"connected\":$ts_conn,\"auth_url\":$ts_url_json,\"ip\":$ts_ip_json,\"daemon\":\"$ts_daemon\",\"firewall\":\"$ts_fw\"}"
+            ;;
+          status)
+            if ! command -v "$TS_BIN" >/dev/null 2>&1; then
+              json_err NOT_INSTALLED "Tailscale is not installed" "Run Install first on the Tailscale card."
+              exit 1
+            fi
+            ts_ip="$(sudo -n "$TS_BIN" ip -4 2>/dev/null | head -1 || true)"
+            [[ "$ts_ip" =~ ^100\. ]] || ts_ip=""
+            # BackendState from --json without a runtime jq: flatten whitespace
+            # then pluck the first "BackendState":"X" pair.
+            ts_state="$(sudo -n "$TS_BIN" status --json 2>/dev/null | tr -d ' \t\r\n' | grep -oE '"BackendState":"[A-Za-z]+"' | head -1 | sed 's/.*:"//; s/"$//' || true)"
+            ts_text="$(sudo -n "$TS_BIN" status 2>&1 | head -c 4000 || true)"
+            ts_conn=false; [[ -n "$ts_ip" ]] && ts_conn=true
+            ts_ip_json=null; [[ -n "$ts_ip" ]] && ts_ip_json="\"$(json_escape "$ts_ip")\""
+            ts_state_json=null; [[ -n "$ts_state" ]] && ts_state_json="\"$(json_escape "$ts_state")\""
+            json_ok "{\"connected\":$ts_conn,\"ip\":$ts_ip_json,\"backend_state\":$ts_state_json,\"status_text\":\"$(json_escape "$ts_text")\"}"
+            ;;
+          down)
+            if ! command -v "$TS_BIN" >/dev/null 2>&1; then
+              json_err NOT_INSTALLED "Tailscale is not installed" "Run Install first on the Tailscale card."
+              exit 1
+            fi
+            if sudo -n "$TS_BIN" down >/dev/null 2>&1; then
+              json_ok '{"down":true}'
+            else
+              json_err TAILSCALE_DOWN_FAILED "Could not disconnect from Tailscale" "Try from the DML shell: sudo tailscale down"
+              exit 1
+            fi
+            ;;
+          *)
+            json_err UNKNOWN_COMMAND "Unknown tailscale subcommand: $tssub" "Try: dml wow tailscale up --json"
+            exit 1
+            ;;
+        esac
+        ;;
       *)
         json_err UNKNOWN_COMMAND "Unknown wow subcommand: $wsub" "Try: dml wow soap-setup --json"
         exit 1

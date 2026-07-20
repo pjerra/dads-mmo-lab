@@ -901,6 +901,40 @@ export async function wowLanPublicIp(): Promise<string | null> {
   return d.public_ip;
 }
 
+// --- Tailscale "Play Together" (Batch 5 overnight) -------------------------
+
+export type TailscaleAction = "install" | "up" | "status" | "down";
+
+export interface TailscaleInstall {
+  installed: boolean;
+  already: boolean;
+}
+export interface TailscaleUp {
+  connected: boolean;
+  // The first-time login URL for the user to open in any browser; null once
+  // authenticated. This is the ONE genuinely interactive step.
+  auth_url: string | null;
+  // The 100.x tailnet IP to share with friends (set once connected).
+  ip: string | null;
+  daemon: string;
+  firewall: string;
+}
+export interface TailscaleStatus {
+  connected: boolean;
+  ip: string | null;
+  backend_state: string | null;
+  status_text: string;
+}
+
+// Overloads keep each action's payload typed at the call site.
+export async function wowTailscale(action: "install"): Promise<TailscaleInstall>;
+export async function wowTailscale(action: "up"): Promise<TailscaleUp>;
+export async function wowTailscale(action: "status"): Promise<TailscaleStatus>;
+export async function wowTailscale(action: "down"): Promise<{ down: boolean }>;
+export async function wowTailscale(action: TailscaleAction): Promise<unknown> {
+  return await invoke("wow_tailscale", { action });
+}
+
 export async function dmlDoctor(): Promise<string> {
   return await invoke("dml_doctor");
 }

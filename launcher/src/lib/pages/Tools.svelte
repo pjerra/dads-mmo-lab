@@ -3,6 +3,7 @@
   import {
     wowLan,
     wowLanPublicIp,
+    wowTailscale,
     dmlDoctor,
     toolInstall,
     openShell,
@@ -158,6 +159,152 @@
       setTimeout(() => (inetCopied = false), 1500);
     } catch {
       // Clipboard unavailable -- the line is still shown for manual copy.
+    }
+  }
+
+  // --- Play Together over the internet (Tailscale, Batch 5) ----------------
+  // Guided stepper: Install -> Log in (show the one-time auth URL) -> shows the
+  // 100.x tailnet address -> point the realm at it so friends' clients reach
+  // the world server -> friends set realmlist to it. Every mutating step rides
+  // the tailscale-play lock; Refresh status is read-only.
+  let tsBusy = $state(false);
+  let tsError: string | null = $state(null);
+  let tsNote: string | null = $state(null);
+  let tsInstalled: boolean | null = $state(null);
+  let tsConnected = $state(false);
+  let tsIp: string | null = $state(null);
+  let tsAuthUrl: string | null = $state(null);
+  let tsApplied = $state(false);
+  let tsCopied = $state(false);
+  let tsAuthCopied = $state(false);
+  let tsConfirm: "down" | null = $state(null);
+
+  onMount(() => {
+    // Best-effort prefill; NOT_INSTALLED is a normal answer, not an error.
+    void tsLoadStatus(true);
+  });
+
+  async function tsLoadStatus(silent = false) {
+    tsBusy = true;
+    if (!silent) tsError = null;
+    try {
+      const s = await wowTailscale("status");
+      tsInstalled = true;
+      tsConnected = s.connected;
+      tsIp = s.ip;
+      tsAuthUrl = null;
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code === "NOT_INSTALLED") {
+        tsInstalled = false;
+      } else if (!silent) {
+        tsError = fmtErr(e);
+      }
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  async function tsInstall() {
+    tsBusy = true;
+    tsError = null;
+    tsNote = null;
+    try {
+      const r = await wowTailscale("install");
+      tsInstalled = true;
+      tsNote = r.already ? "Tailscale is already installed." : "Tailscale installed.";
+    } catch (e) {
+      tsError = fmtErr(e);
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  async function tsLogin() {
+    tsBusy = true;
+    tsError = null;
+    tsNote = null;
+    tsAuthUrl = null;
+    try {
+      const r = await wowTailscale("up");
+      tsInstalled = true;
+      tsConnected = r.connected;
+      tsIp = r.ip;
+      tsAuthUrl = r.auth_url;
+      if (r.connected) tsNote = "Connected to your tailnet.";
+    } catch (e) {
+      tsError = fmtErr(e);
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  async function tsApplyRealm() {
+    if (!tsIp) return;
+    tsBusy = true;
+    tsError = null;
+    tsNote = null;
+    try {
+      // 100.x is CGNAT, not a private-LAN range, so the realmlist write goes
+      // through the --internet path (internet=true) -- same backend as the
+      // "Play over the internet" card.
+      await wowLan("on", tsIp, true);
+      tsApplied = true;
+      tsNote = `Your realm now points friends at ${tsIp}.`;
+      void lanStatus();
+    } catch (e) {
+      tsError = fmtErr(e);
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  function armTsDown() {
+    if (tsConfirm !== "down") {
+      tsConfirm = "down";
+      return;
+    }
+    tsConfirm = null;
+    void tsDown();
+  }
+
+  async function tsDown() {
+    tsBusy = true;
+    tsError = null;
+    tsNote = null;
+    try {
+      await wowTailscale("down");
+      tsConnected = false;
+      tsIp = null;
+      tsAuthUrl = null;
+      tsApplied = false;
+      tsNote = "Disconnected from Tailscale.";
+    } catch (e) {
+      tsError = fmtErr(e);
+    } finally {
+      tsBusy = false;
+    }
+  }
+
+  async function tsCopyRealmline() {
+    if (!tsIp) return;
+    try {
+      await navigator.clipboard.writeText(`set realmlist ${tsIp}`);
+      tsCopied = true;
+      setTimeout(() => (tsCopied = false), 1500);
+    } catch {
+      // shown for manual copy either way
+    }
+  }
+
+  async function tsCopyAuth() {
+    if (!tsAuthUrl) return;
+    try {
+      await navigator.clipboard.writeText(tsAuthUrl);
+      tsAuthCopied = true;
+      setTimeout(() => (tsAuthCopied = false), 1500);
+    } catch {
+      // shown for manual copy either way
     }
   }
 
@@ -581,6 +728,106 @@
     </div>
 
     {#if inetOutput}<pre class="usage">{inetOutput}</pre>{/if}
+  </div>
+
+  <div class="card">
+    <h3>Play Together over the internet (Tailscale)</h3>
+    <p class="muted">
+      The easy way to let far-away friends join — no router port-forwarding. Tailscale gives
+      this PC a private address that friends' clients reach directly. Everyone installs the
+      free Tailscale app and joins the same "tailnet" (get it at
+      <code>tailscale.com/download</code>).
+    </p>
+    {#if tsError}<p class="inline-error">{tsError}</p>{/if}
+
+    <div class="step">
+      <strong>1. Install Tailscale on this server</strong>
+      <div class="row">
+        <button
+          class="primary"
+          onclick={tsInstall}
+          disabled={tsBusy || featureLocked("tailscale-play")}
+          title={featureLocked("tailscale-play") ? LOCKED_HINT : undefined}
+        >
+          {tsInstalled ? "Re-install / update" : "Install"}
+        </button>
+        {#if tsInstalled === true}<span class="notice">Installed.</span>{/if}
+        {#if tsInstalled === false}<span class="muted">Not installed yet.</span>{/if}
+      </div>
+    </div>
+
+    <div class="step">
+      <strong>2. Log in</strong>
+      <p class="muted">
+        This starts a one-time login. Click Log in, then open the link it shows on any device
+        (your phone is fine) and sign in — Google, Microsoft and GitHub all work.
+      </p>
+      <div class="row">
+        <button
+          class="primary"
+          onclick={tsLogin}
+          disabled={tsBusy || featureLocked("tailscale-play")}
+          title={featureLocked("tailscale-play") ? LOCKED_HINT : undefined}
+        >
+          {tsConnected ? "Re-check login" : "Log in"}
+        </button>
+        <button onclick={() => tsLoadStatus(false)} disabled={tsBusy}>Refresh status</button>
+      </div>
+      {#if tsAuthUrl}
+        <p class="notice">Open this link on any device and sign in:</p>
+        <div class="row">
+          <code class="copyline">{tsAuthUrl}</code>
+          <button onclick={tsCopyAuth}>{tsAuthCopied ? "Copied!" : "Copy"}</button>
+        </div>
+      {/if}
+    </div>
+
+    <div class="step">
+      <strong>3. Your Tailscale address</strong>
+      {#if tsConnected && tsIp}
+        <p class="rl-state good">Connected — your address is <code>{tsIp}</code>.</p>
+        <div class="row">
+          <button
+            class="primary"
+            onclick={tsApplyRealm}
+            disabled={tsBusy || featureLocked("tailscale-play")}
+            title={featureLocked("tailscale-play") ? LOCKED_HINT : undefined}
+          >
+            Point my realm at {tsIp}
+          </button>
+        </div>
+        {#if tsApplied}
+          <p class="muted">
+            Now each friend puts this line in their <code>Data\enUS\realmlist.wtf</code>:
+          </p>
+          <div class="row">
+            <code class="copyline">set realmlist {tsIp}</code>
+            <button onclick={tsCopyRealmline}>{tsCopied ? "Copied!" : "Copy"}</button>
+          </div>
+          <p class="muted">
+            Each friend also needs to join your tailnet in their Tailscale app AND have a game
+            account (create those on the Accounts page).
+          </p>
+        {/if}
+      {:else}
+        <p class="muted">Log in above to get your shareable Tailscale address.</p>
+      {/if}
+    </div>
+
+    <div class="step">
+      <strong>4. Done playing?</strong>
+      <div class="row">
+        <button
+          onclick={armTsDown}
+          disabled={tsBusy || featureLocked("tailscale-play")}
+          title={featureLocked("tailscale-play") ? LOCKED_HINT : undefined}
+        >
+          {tsConfirm === "down" ? "Disconnect Tailscale — sure?" : "Disconnect Tailscale"}
+        </button>
+      </div>
+    </div>
+
+    {#if tsNote}<p class="notice">{tsNote}</p>{/if}
   </div>
 
   <div class="card">
