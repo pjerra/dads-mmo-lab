@@ -71,6 +71,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "accountwide-config": "untested",
   "place-npc": "untested",
   "guided-config": "untested",
+  "backup-validate": "untested",
 };
 
 export const LOCKED_HINT =

@@ -1299,6 +1299,14 @@ async fn wow_backup_delete(file: String, state: State<'_, AppState>) -> Result<s
     run_json_cmd(state, vec!["wow".into(), "backup".into(), "delete".into(), "--file".into(), file]).await
 }
 
+// Batch 4 A: verify a backup archive (gzip integrity + light SQL-sanity)
+// before trusting it in a restore. Pure local file checks CLI-side -- the
+// file name travels as its own argv token and is re-validated there.
+#[tauri::command]
+async fn wow_backup_validate(file: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "backup".into(), "validate".into(), "--file".into(), file]).await
+}
+
 #[tauri::command]
 async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
     stream_args(vec!["wow".into(), "backup".into(), "restore".into(), "--file".into(), file], on_event, state).await
@@ -1986,6 +1994,7 @@ pub fn run() {
             wow_backup_create,
             wow_backup_list,
             wow_backup_delete,
+            wow_backup_validate,
             wow_backup_restore,
             wow_bridge_setup,
             wow_gm_level,

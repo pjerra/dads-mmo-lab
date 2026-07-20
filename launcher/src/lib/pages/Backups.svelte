@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowBackupCreate, wowBackupList, wowBackupDelete, wowBackupRestore, type BackupInfo } from "$lib/api";
+  import { wowBackupCreate, wowBackupList, wowBackupDelete, wowBackupRestore, wowBackupValidate, type BackupInfo, type BackupValidation } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
@@ -14,6 +14,9 @@
   let streaming = $state(false);     // create/restore streaming ops
   let confirming: { kind: "restore" | "delete"; file: string } | null = $state(null);
   let includeWorld = $state(false);
+  // Batch 4 A: per-file verify verdicts (gzip integrity + SQL sanity).
+  let verdicts: Record<string, BackupValidation> = $state({});
+  let validating = $state(false);
 
   const buf = termBuf("backups");
 
@@ -93,6 +96,14 @@
     }
   }
 
+  async function verifyBackup(file: string) {
+    validating = true; error = null; note = null;
+    try {
+      const v = await wowBackupValidate(file);
+      verdicts = { ...verdicts, [file]: v };
+    } catch (e) { showErr(e); } finally { validating = false; }
+  }
+
   async function deleteBackup(file: string) {
     if (confirming?.kind !== "delete" || confirming?.file !== file) {
       confirming = { kind: "delete", file };
@@ -138,24 +149,38 @@
   {:else}
     <div class="card">
       {#each backups as b (b.file)}
-        <div class="row brow">
-          <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span></span>
-          <button
-            onclick={() => restoreBackup(b.file)}
-            disabled={busy || streaming || restartState.restarting || featureLocked("backup-restore")}
-            title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
-          >
-            {confirming?.kind === "restore" && confirming?.file === b.file
-              ? `This rolls EVERY character back to ${b.created} and restarts the server — sure?`
-              : "Restore"}
-          </button>
-          <button
-            onclick={() => deleteBackup(b.file)}
-            disabled={busy || streaming || featureLocked("backup-restore")}
-            title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
-          >
-            {confirming?.kind === "delete" && confirming?.file === b.file ? "Delete this backup — sure?" : "Delete"}
-          </button>
+        <div class="bentry">
+          <div class="row brow">
+            <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span></span>
+            <button
+              onclick={() => verifyBackup(b.file)}
+              disabled={busy || streaming || validating || featureLocked("backup-validate")}
+              title={featureLocked("backup-validate") ? LOCKED_HINT : "Check this file is intact before restoring — safe to run anytime"}
+            >
+              Verify
+            </button>
+            <button
+              onclick={() => restoreBackup(b.file)}
+              disabled={busy || streaming || validating || restartState.restarting || featureLocked("backup-restore")}
+              title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
+            >
+              {confirming?.kind === "restore" && confirming?.file === b.file
+                ? `This rolls EVERY character back to ${b.created} and restarts the server — sure?`
+                : "Restore"}
+            </button>
+            <button
+              onclick={() => deleteBackup(b.file)}
+              disabled={busy || streaming || validating || featureLocked("backup-restore")}
+              title={featureLocked("backup-restore") ? LOCKED_HINT : undefined}
+            >
+              {confirming?.kind === "delete" && confirming?.file === b.file ? "Delete this backup — sure?" : "Delete"}
+            </button>
+          </div>
+          {#if verdicts[b.file]}
+            <p class="verdict {verdicts[b.file].valid ? 'good' : 'bad'}">
+              {verdicts[b.file].valid ? "✓" : "✗"} {verdicts[b.file].detail}
+            </p>
+          {/if}
         </div>
       {/each}
     </div>
@@ -172,7 +197,12 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 8px 16px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .bentry { border-bottom: 1px solid #21262d; }
+  .bentry:last-child { border-bottom: none; }
   .brow { padding: 6px 0; }
+  .verdict { font-size: 13px; margin: 0 0 8px; }
+  .verdict.good { color: #3fb950; }
+  .verdict.bad { color: #f85149; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }

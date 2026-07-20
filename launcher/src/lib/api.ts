@@ -796,6 +796,20 @@ export async function wowBackupList(): Promise<BackupInfo[]> {
 export async function wowBackupDelete(file: string): Promise<{ deleted: boolean; file: string }> {
   return await invoke("wow_backup_delete", { file });
 }
+export interface BackupValidation {
+  valid: boolean;
+  file: string;
+  size: number;
+  gzip_ok: boolean;
+  sql_ok: boolean;
+  markers: string[];
+  detail: string;
+}
+// Batch 4 A: verify a backup before restoring it (gzip integrity + a light
+// SQL-sanity scan for the character/account tables). Read-only, no server.
+export async function wowBackupValidate(file: string): Promise<BackupValidation> {
+  return await invoke("wow_backup_validate", { file });
+}
 export const wowBackupCreate = (onEvent: (e: TermEvent) => void, includeWorld?: boolean): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;

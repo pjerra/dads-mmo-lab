@@ -227,3 +227,65 @@ _seed_backup() {
   [ "$status" -eq 0 ]
   ! grep 'mysqldump' "$FIXTURE/calls.log" | grep -q 'acore_world'
 }
+
+# ---------- backup validate (Batch 4 A: gzip -t + light SQL-sanity) ----------
+
+@test "backup validate passes a good dump (gzip ok + core table markers)" {
+  mkdir -p "$BDIR"
+  printf -- '-- MySQL dump\nCREATE TABLE `characters` (guid int);\nCREATE TABLE `account` (id int);\n' \
+    | gzip > "$BDIR/wow-20250101-120000.sql.gz"
+  run bash "$DML" wow backup validate --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.valid')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.gzip_ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.sql_ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.markers | sort | join(",")')" = "account,characters" ]
+  [ "$(echo "$output" | jq -r '.data.size')" -gt 0 ]
+}
+
+@test "backup validate fails a corrupt (non-gzip) file without touching docker" {
+  mkdir -p "$BDIR"
+  printf 'this is not a gzip archive at all' > "$BDIR/wow-20250102-120000.sql.gz"
+  run bash "$DML" wow backup validate --file wow-20250102-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.valid')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.gzip_ok')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.sql_ok')" = "false" ]
+  echo "$output" | grep -qi 'corrupt'
+}
+
+@test "backup validate fails a truncated gzip archive" {
+  mkdir -p "$BDIR"
+  printf -- '-- MySQL dump\nCREATE TABLE `characters` (guid int);\nCREATE TABLE `account` (id int);\n' \
+    | gzip > "$BDIR/wow-20250103-120000.sql.gz"
+  # Lop off the trailing bytes so gzip -t reports a truncated/corrupt archive.
+  full=$(stat -c %s "$BDIR/wow-20250103-120000.sql.gz")
+  head -c $(( full - 6 )) "$BDIR/wow-20250103-120000.sql.gz" > "$BDIR/wow-20250103-120000.sql.gz.cut"
+  mv "$BDIR/wow-20250103-120000.sql.gz.cut" "$BDIR/wow-20250103-120000.sql.gz"
+  run bash "$DML" wow backup validate --file wow-20250103-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.valid')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.gzip_ok')" = "false" ]
+}
+
+@test "backup validate flags a valid gzip that is missing the character tables" {
+  mkdir -p "$BDIR"
+  printf 'just some unrelated text, no CREATE TABLE here\n' | gzip > "$BDIR/wow-20250104-120000.sql.gz"
+  run bash "$DML" wow backup validate --file wow-20250104-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.valid')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.gzip_ok')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.sql_ok')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.markers | length')" = "0" ]
+}
+
+@test "backup validate rejects invalid names (traversal-proof) and missing files" {
+  for bad in '../etc' 'wow-x.sql.gz' 'wow-20250101-120000.sql.gz;rm'; do
+    run bash "$DML" wow backup validate --file "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done
+  run bash "$DML" wow backup validate --file wow-19990101-000000.sql.gz --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}

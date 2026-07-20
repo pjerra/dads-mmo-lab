@@ -3218,6 +3218,53 @@ case "$cmd" in
             rm -f "$bdir/$file"
             json_ok "{\"deleted\":true,\"file\":\"$(json_escape "$file")\"}"
             ;;
+          validate)
+            # Batch 4 A: verify a backup BEFORE trusting it in a restore. Pure
+            # local file checks -- no docker, no server -- so it's usable while
+            # the server is down. gzip -t proves the archive decompresses
+            # intact; a light SQL-sanity scan proves the decompressed stream is
+            # actually a character dump (contains the `characters` and `account`
+            # CREATE TABLE markers) rather than an unrelated/empty gz. A bad
+            # file is NOT an operational error: the check ran fine, so we return
+            # a normal ok envelope carrying valid:false + the reasons (json_err
+            # is reserved for a bad name / a missing file).
+            file=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --file) _need_flag_val "$1" $#; file="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_backup_name "$file" || { json_err BAD_ARG "Invalid backup name: $file" ""; exit 1; }
+            bdir="$(_backup_dir)"
+            [[ -f "$bdir/$file" ]] || { json_err NOT_FOUND "No backup named $file" ""; exit 1; }
+            vsize="$(stat -c %s "$bdir/$file" 2>/dev/null)" || vsize=0
+            if gzip -t "$bdir/$file" 2>/dev/null; then vgzip=1; else vgzip=0; fi
+            vchars=0; vacct=0
+            if [[ "$vgzip" == 1 ]]; then
+              # Single decompression pass; grep -a (force text) extracts every
+              # core CREATE TABLE marker, dedups. `|| true` guards the pipeline
+              # under pipefail when grep matches nothing (exit 1) and, belt-and-
+              # braces, any late gunzip hiccup.
+              vscan="$(gunzip -c "$bdir/$file" 2>/dev/null | grep -aoE 'CREATE TABLE `(characters|account)`' | sort -u | tr '\n' ' ')" || true
+              [[ "$vscan" == *'`characters`'* ]] && vchars=1
+              [[ "$vscan" == *'`account`'* ]] && vacct=1
+            fi
+            if [[ "$vchars" == 1 && "$vacct" == 1 ]]; then vsql=1; else vsql=0; fi
+            vmarkers='['
+            [[ "$vchars" == 1 ]] && vmarkers+='"characters"'
+            [[ "$vchars" == 1 && "$vacct" == 1 ]] && vmarkers+=','
+            [[ "$vacct" == 1 ]] && vmarkers+='"account"'
+            vmarkers+=']'
+            if [[ "$vgzip" == 1 && "$vsql" == 1 ]]; then
+              vvalid=true; vdetail="Archive is intact and looks like a full character backup."
+            elif [[ "$vgzip" != 1 ]]; then
+              vvalid=false; vdetail="gzip integrity check failed -- the file is truncated or corrupt. Do NOT restore it."
+            else
+              vvalid=false; vdetail="Archive decompresses, but the expected character/account tables were not found -- it may be an incomplete or unrelated dump."
+            fi
+            json_ok "{\"valid\":$vvalid,\"file\":\"$(json_escape "$file")\",\"size\":$vsize,\"gzip_ok\":$([[ "$vgzip" == 1 ]] && echo true || echo false),\"sql_ok\":$([[ "$vsql" == 1 ]] && echo true || echo false),\"markers\":$vmarkers,\"detail\":\"$(json_escape "$vdetail")\"}"
+            ;;
           restore)
             file=""
             while [[ $# -gt 0 ]]; do
@@ -3289,7 +3336,7 @@ case "$cmd" in
             else echo "[dml] restored $file (safety: $safety)"; fi
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|delete|restore --json"
+            json_err UNKNOWN_COMMAND "Unknown backup subcommand: $bsub" "Try: dml wow backup create|list|validate|delete|restore --json"
             exit 1
             ;;
         esac
