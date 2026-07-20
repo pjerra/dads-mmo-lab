@@ -229,6 +229,17 @@
 
 <style>
   :global(body) { margin: 0; background: #010409; color: #c9d1d9; font-family: "Segoe UI", system-ui, sans-serif; }
+  /* Themed scrollbars app-wide (WebView2/Chromium): the default system bars
+     are light and clash with the dark UI. A transparent track lets these sit
+     cleanly on every background -- sidebar, page content, dropdowns,
+     terminals, textareas and every scrollable list. */
+  :global(::-webkit-scrollbar) { width: 10px; height: 10px; }
+  :global(::-webkit-scrollbar-track) { background: transparent; }
+  :global(::-webkit-scrollbar-thumb) { background: #30363d; border-radius: 8px; }
+  :global(::-webkit-scrollbar-thumb:hover) { background: #484f58; }
+  :global(::-webkit-scrollbar-corner) { background: transparent; }
+  /* Text selection matches the app's accent instead of the browser default. */
+  :global(::selection) { background: rgba(56, 139, 253, 0.35); color: #f0f6fc; }
   .shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
   .sidebar { background: #0d1117; border-right: 1px solid #30363d; padding: 16px 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
   .sidebar h1 { font-size: 16px; margin: 0 16px 8px; color: #58a6ff; }
