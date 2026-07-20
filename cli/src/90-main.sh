@@ -4721,11 +4721,21 @@ case "$cmd" in
               battlepass-npc) ;;
               *) json_err BAD_ARG "Unknown fixit: ${fkey:-<none>}" "Available: battlepass-npc"; exit 1 ;;
             esac
-            cnt="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100;")" \
+            # Per-map idempotence: COUNT the entry-90100 spawns in EACH capital
+            # SEPARATELY (map 0 = Stormwind, map 1 = Orgrimmar). A single
+            # COUNT(*) across both maps reported already_placed as soon as
+            # EITHER capital had a spawn, so one capital permanently blocked the
+            # other. Read both counts first (deterministic order), decide after.
+            bp_sw="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100 AND map=0;")" \
               || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
-            cnt="${cnt//[[:space:]]/}"
-            if [[ "$cnt" =~ ^[0-9]+$ && "$cnt" -gt 0 ]]; then
-              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in the world."}'
+            bp_sw="${bp_sw//[[:space:]]/}"
+            bp_og="$(db_world_query "SELECT COUNT(*) FROM creature WHERE id=90100 AND map=1;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the world database" "Is ac-database running?"; exit 1; }
+            bp_og="${bp_og//[[:space:]]/}"
+            bp_need_sw=1; [[ "$bp_sw" =~ ^[0-9]+$ && "$bp_sw" -gt 0 ]] && bp_need_sw=0
+            bp_need_og=1; [[ "$bp_og" =~ ^[0-9]+$ && "$bp_og" -gt 0 ]] && bp_need_og=0
+            if [[ "$bp_need_sw" -eq 0 && "$bp_need_og" -eq 0 ]]; then
+              json_ok '{"key":"battlepass-npc","already_placed":true,"template":"exists","spawns_placed":0,"restart_required":false,"note":"The Battle Pass NPC is already placed in both capitals."}'
               exit 0
             fi
             tcnt="$(db_world_query "SELECT COUNT(*) FROM creature_template WHERE entry=90100;")" \
@@ -4749,10 +4759,20 @@ case "$cmd" in
             # (see the battlepass cheat-sheet in 47-commands.sh):
             #   Stormwind (map 0): -8819.3 636.2 94.1, facing 3.7
             #   Orgrimmar (map 1): 1609.2 -4407.7 17.5, facing 4.5
-            # guid is AUTO_INCREMENT; remaining columns have sane defaults.
-            _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300), (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
-              || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawns" "Is ac-database running?"; exit 1; }
-            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":2,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
+            # Insert ONLY the capital(s) that lacked a spawn -- guid is
+            # AUTO_INCREMENT; remaining columns have sane defaults.
+            bp_placed=0
+            if [[ "$bp_need_sw" -eq 1 ]]; then
+              _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 0, -8819.3, 636.2, 94.1, 3.7, 300);" >/dev/null \
+                || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawn" "Is ac-database running?"; exit 1; }
+              bp_placed=$((bp_placed + 1))
+            fi
+            if [[ "$bp_need_og" -eq 1 ]]; then
+              _db_write_stmt acore_world "INSERT INTO creature (id, map, position_x, position_y, position_z, orientation, spawntimesecs) VALUES (90100, 1, 1609.2, -4407.7, 17.5, 4.5, 300);" >/dev/null \
+                || { json_err SQL_FAILED "Could not insert the Battle Pass NPC spawn" "Is ac-database running?"; exit 1; }
+              bp_placed=$((bp_placed + 1))
+            fi
+            json_ok "{\"key\":\"battlepass-npc\",\"already_placed\":false,\"template\":\"$template\",\"spawns_placed\":$bp_placed,\"restart_required\":true,\"note\":\"Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).\"}"
             ;;
           place-npc)
             # Batch 2 (overnight): generalizes the battlepass-npc-fixit per-map

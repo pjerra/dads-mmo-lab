@@ -19,9 +19,9 @@ setup() {
 teardown() { teardown_fixture; }
 
 @test "fixit battlepass-npc: full insert path -- template + both capital spawns + restart note" {
-  # Call 1: spawn COUNT -> 0; call 2: template COUNT -> 0; later calls are
-  # writes (output ignored, sticky-last).
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/zero.tsv $FIXTURE/zero.tsv"
+  # Reads: map0 COUNT -> 0; map1 COUNT -> 0; template COUNT -> 0; later calls
+  # are writes (output ignored, sticky-last).
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/zero.tsv $FIXTURE/zero.tsv $FIXTURE/zero.tsv"
   run bash "$DML" wow module fixit battlepass-npc --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.already_placed')" = "false" ]
@@ -37,7 +37,8 @@ teardown() { teardown_fixture; }
 }
 
 @test "fixit battlepass-npc: template already present -> spawns only, template=exists" {
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/zero.tsv $FIXTURE/one.tsv"
+  # map0 COUNT -> 0; map1 COUNT -> 0; template COUNT -> 1.
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/zero.tsv $FIXTURE/zero.tsv $FIXTURE/one.tsv"
   run bash "$DML" wow module fixit battlepass-npc --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.template')" = "exists" ]
@@ -47,14 +48,31 @@ teardown() { teardown_fixture; }
   grep -q 'INSERT INTO creature (id, map' "$FIXTURE/q.log"
 }
 
-@test "fixit battlepass-npc: idempotent -- an existing spawn short-circuits with NO writes" {
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/two.tsv"
+@test "fixit battlepass-npc: idempotent -- both capitals present short-circuits with NO writes" {
+  # map0 COUNT -> 1; map1 COUNT -> 1 (both spawned) -> already_placed, no writes.
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/one.tsv $FIXTURE/one.tsv"
   run bash "$DML" wow module fixit battlepass-npc --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.already_placed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.spawns_placed')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "false" ]
   run grep 'INSERT' "$FIXTURE/q.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "fixit battlepass-npc: one capital present, the other missing -> inserts ONLY the missing one" {
+  # map0 (Stormwind) COUNT -> 1 (present); map1 (Orgrimmar) COUNT -> 0
+  # (missing); template COUNT -> 1 (exists). The old single COUNT reported
+  # already_placed and left Orgrimmar empty forever -- this is the fix.
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/one.tsv $FIXTURE/zero.tsv $FIXTURE/one.tsv"
+  run bash "$DML" wow module fixit battlepass-npc --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.already_placed')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.template')" = "exists" ]
+  [ "$(echo "$output" | jq -r '.data.spawns_placed')" = "1" ]
+  # only Orgrimmar (map 1) was inserted; Stormwind (map 0) was left alone
+  grep -q -- '1609.2, -4407.7, 17.5, 4.5' "$FIXTURE/q.log"
+  run grep -- '-8819.3, 636.2, 94.1, 3.7' "$FIXTURE/q.log"
   [ "$status" -ne 0 ]
 }
 
