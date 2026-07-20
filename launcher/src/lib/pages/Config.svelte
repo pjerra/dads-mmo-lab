@@ -422,6 +422,22 @@
     }
   }
 
+  // Improvements Batch 3 F1: surface the default + valid range each curated
+  // row already carries (ConfigSetting.default/min/max) and give every row a
+  // one-click Reset. Mirrors the Bot World tab, which already tooltips each
+  // key's default.
+  function defaultLabel(s: ConfigSetting): string {
+    if (s.type === "bool") return s.default === "1" ? "on" : "off";
+    return s.default;
+  }
+  function atDefault(s: ConfigSetting): boolean {
+    return (edits[s.key] ?? s.value) === s.default;
+  }
+  function resetSetting(s: ConfigSetting): void {
+    edits[s.key] = s.default;
+    confirmingRestart = false;
+  }
+
   const groups = $derived([...new Set(settings.map((s) => s.group))]);
   // "Bot ..."-prefixed groups render on the Bot World tab, "Auction..."
   // groups on the Auction House tab (Batch 4 F14), everything else on
@@ -649,6 +665,16 @@
           <div class="meta">
             <strong>{s.label}</strong>
             <span class="muted">{s.explain}</span>
+            <span class="muted defaults">
+              default {defaultLabel(s)}{#if s.min !== null && s.max !== null} · range {s.min}–{s.max}{/if}
+              <button
+                class="reset-link"
+                type="button"
+                onclick={() => resetSetting(s)}
+                disabled={saving || restartState.restarting || atDefault(s)}
+                title={`Set this back to its default (${defaultLabel(s)})`}
+              >Reset</button>
+            </span>
           </div>
           {#if s.type === "bool"}
             <input
@@ -1125,6 +1151,10 @@
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 6px; }
   .testing-card { margin-top: 6px; }
   .meta { display: flex; flex-direction: column; gap: 2px; }
+  .defaults { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .reset-link { background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 4px; padding: 1px 8px; font-size: 11.5px; cursor: pointer; }
+  .reset-link:hover:not(:disabled) { border-color: #58a6ff; color: #c9d1d9; }
+  .reset-link:disabled { opacity: 0.4; cursor: default; }
   .charwrap { display: flex; gap: 8px; align-items: center; }
   input, select, textarea { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   textarea { font-family: Consolas, monospace; font-size: 13px; width: 100%; box-sizing: border-box; }
