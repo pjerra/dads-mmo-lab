@@ -228,6 +228,92 @@ _seed_backup() {
   ! grep 'mysqldump' "$FIXTURE/calls.log" | grep -q 'acore_world'
 }
 
+# ---------- backup content summary (Batch 4: per-snapshot sidecar) ----------
+
+@test "backup create records a per-snapshot content summary sidecar" {
+  # A docker stub that also answers the summary COUNT(*) queries so the
+  # sidecar gets real numbers (use_backup_stub's -e arm returns nothing).
+  # Match order matters: the bots query contains BOTH playerbots_account_type
+  # and "FROM characters", so it must be checked first.
+  cat > "$FIXTURE/bin/docker" <<'EOS'
+#!/usr/bin/env bash
+[[ -n "${DML_STUB_CALL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_CALL_LOG"
+[[ "${1:-}" == info ]] && exit 0
+if [[ "${1:-}" == exec ]]; then
+  args="$*"
+  if [[ "$args" == *mysqldump* ]]; then printf 'SQL DUMP CONTENT\n'; exit 0; fi
+  if [[ "$args" == *playerbots_account_type* ]]; then echo 42; exit 0; fi
+  if [[ "$args" == *"FROM account"* ]]; then echo 7; exit 0; fi
+  if [[ "$args" == *"FROM characters"* ]]; then echo 130; exit 0; fi
+  exit 0
+fi
+exit 0
+EOS
+  chmod +x "$FIXTURE/bin/docker"
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  f="$(_done_data "$output" | jq -r '.data.file')"
+  [ -f "$BDIR/$f.meta" ]
+  run cat "$BDIR/$f.meta"
+  [ "$(echo "$output" | jq -r '.characters')" = "130" ]
+  [ "$(echo "$output" | jq -r '.accounts')" = "7" ]
+  [ "$(echo "$output" | jq -r '.bots')" = "42" ]
+}
+
+@test "backup create writes no sidecar when the counts can't be read" {
+  # The default use_backup_stub returns nothing for `mysql -e` queries, so
+  # the summary is unreadable -- the backup still succeeds, just sidecar-free.
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  f="$(_done_data "$output" | jq -r '.data.file')"
+  [ -f "$BDIR/$f" ]
+  [ ! -f "$BDIR/$f.meta" ]
+}
+
+@test "backup list surfaces a snapshot summary and null for sidecar-less backups" {
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20250101-120000.sql.gz"
+  printf '{"characters":130,"accounts":7,"bots":42}\n' > "$BDIR/wow-20250101-120000.sql.gz.meta"
+  printf 'x' > "$BDIR/wow-20240101-120000.sql.gz"   # older, no sidecar
+  run bash "$DML" wow backup list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].summary.characters')" = "130" ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].summary.accounts')" = "7" ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].summary.bots')" = "42" ]
+  [ "$(echo "$output" | jq -r '.data.backups[1].summary')" = "null" ]
+}
+
+@test "backup list degrades a malformed summary sidecar to null" {
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20250101-120000.sql.gz"
+  printf 'garbage not json\n' > "$BDIR/wow-20250101-120000.sql.gz.meta"
+  run bash "$DML" wow backup list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.backups[0].summary')" = "null" ]
+}
+
+@test "backup delete also removes the summary sidecar" {
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20250101-120000.sql.gz"
+  printf '{"characters":1,"accounts":1,"bots":null}\n' > "$BDIR/wow-20250101-120000.sql.gz.meta"
+  run bash "$DML" wow backup delete --file wow-20250101-120000.sql.gz --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$BDIR/wow-20250101-120000.sql.gz" ]
+  [ ! -f "$BDIR/wow-20250101-120000.sql.gz.meta" ]
+}
+
+@test "backup create prunes a pruned backup's summary sidecar too" {
+  mkdir -p "$BDIR"
+  printf 'x' > "$BDIR/wow-20200101-000000.sql.gz"
+  printf '{"characters":1,"accounts":1,"bots":null}\n' > "$BDIR/wow-20200101-000000.sql.gz.meta"
+  printf 'x' > "$BDIR/wow-20200102-000000.sql.gz"
+  export DML_BACKUP_KEEP=2
+  run bash "$DML" wow backup create --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$BDIR/wow-20200101-000000.sql.gz" ]
+  [ ! -f "$BDIR/wow-20200101-000000.sql.gz.meta" ]
+}
+
 # ---------- backup validate (Batch 4 A: gzip -t + light SQL-sanity) ----------
 
 @test "backup validate passes a good dump (gzip ok + core table markers)" {

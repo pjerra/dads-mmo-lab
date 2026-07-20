@@ -795,7 +795,10 @@ export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> =
   return invoke("wow_bridge_setup", { onEvent: ch });
 };
 
-export interface BackupInfo { file: string; size: number; created: string; world: boolean; }
+// Batch 4: a lightweight per-snapshot content summary recorded at backup
+// time (a `.meta` sidecar). Older backups predate it, so `summary` is null.
+export interface BackupSummary { characters: number; accounts: number; bots: number | null; }
+export interface BackupInfo { file: string; size: number; created: string; world: boolean; summary: BackupSummary | null; }
 
 export async function wowBackupList(): Promise<BackupInfo[]> {
   const d = await invoke<{ backups: BackupInfo[] }>("wow_backup_list");

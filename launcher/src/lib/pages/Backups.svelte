@@ -179,6 +179,11 @@
               {confirming?.kind === "delete" && confirming?.file === b.file ? "Delete this backup — sure?" : "Delete"}
             </button>
           </div>
+          {#if b.summary}
+            <p class="bsummary muted">
+              {b.summary.characters} character{b.summary.characters === 1 ? "" : "s"} · {b.summary.accounts} account{b.summary.accounts === 1 ? "" : "s"}{b.summary.bots ? ` · ${b.summary.bots} bots` : ""}
+            </p>
+          {/if}
           {#if verdicts[b.file]}
             <p class="verdict {verdicts[b.file].valid ? 'good' : 'bad'}">
               {verdicts[b.file].valid ? "✓" : "✗"} {verdicts[b.file].detail}
@@ -203,6 +208,7 @@
   .bentry { border-bottom: 1px solid #21262d; }
   .bentry:last-child { border-bottom: none; }
   .brow { padding: 6px 0; }
+  .bsummary { font-size: 12px; margin: 0 0 6px; }
   .verdict { font-size: 13px; margin: 0 0 8px; }
   .verdict.good { color: #3fb950; }
   .verdict.bad { color: #f85149; }

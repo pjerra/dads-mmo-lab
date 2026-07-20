@@ -3325,6 +3325,10 @@ case "$cmd" in
               exit 1
             fi
             bsize="$(stat -c %s "$bdir/$bfile" 2>/dev/null)" || bsize=0
+            # Batch 4: drop a lightweight content-summary sidecar so the
+            # Backups page can distinguish snapshots before a restore.
+            # Best-effort -- never blocks or fails the backup.
+            _backup_write_meta "$bdir/$bfile"
             first=1; parr='['
             while IFS= read -r p || [[ -n "$p" ]]; do
               [[ -z "$p" ]] && continue
@@ -3350,8 +3354,9 @@ case "$cmd" in
                 created="${d:0:4}-${d:4:2}-${d:6:2} ${t:0:2}:${t:2:2}:${t:4:2}"
                 bw=false
                 [[ "$f" == *-full.sql.gz || "$f" == *-full-prerestore.sql.gz ]] && bw=true
+                bsum="$(_backup_summary_read "$bdir/$f")"
                 [[ $first -eq 0 ]] && out+=','
-                out+="{\"file\":\"$(json_escape "$f")\",\"size\":$fsize,\"created\":\"$created\",\"world\":$bw}"
+                out+="{\"file\":\"$(json_escape "$f")\",\"size\":$fsize,\"created\":\"$created\",\"world\":$bw,\"summary\":$bsum}"
                 first=0
               done < <(ls -1 "$bdir" 2>/dev/null | grep -E '\.sql\.gz$' | sort -r)
             fi
@@ -3364,7 +3369,7 @@ case "$cmd" in
             _valid_backup_name "$file" || { json_err BAD_ARG "Invalid backup name: $file" ""; exit 1; }
             bdir="$(_backup_dir)"
             [[ -f "$bdir/$file" ]] || { json_err NOT_FOUND "No backup named $file" ""; exit 1; }
-            rm -f "$bdir/$file"
+            rm -f "$bdir/$file" "$bdir/$file.meta"
             json_ok "{\"deleted\":true,\"file\":\"$(json_escape "$file")\"}"
             ;;
           validate)

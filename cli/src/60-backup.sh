@@ -37,7 +37,7 @@ _backup_prune() {
         [[ -z "$f" ]] && continue
         n=$(( n + 1 ))
         if (( n > keep )); then
-            rm -f "$bdir/$f"
+            rm -f "$bdir/$f" "$bdir/$f.meta"
             echo "$f"
         fi
     done < <(ls -1 "$bdir" 2>/dev/null | grep -E '\.sql\.gz$' | sort -r)
@@ -60,4 +60,58 @@ _backup_dump_to() {
     fi
     rm -f "$tmp"
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# Batch 4 (progress & empty states): per-snapshot content summary. At create
+# time we drop a tiny sidecar `<backup>.meta` next to the .sql.gz holding a
+# compact JSON count of what the snapshot contains, so the Backups page can
+# tell snapshots apart BEFORE a restore. Purely additive and best-effort:
+# a failed/empty count writes no sidecar, `backup list` renders old backups
+# (no sidecar) with a null summary, and this NEVER fails the backup.
+# ---------------------------------------------------------------------------
+
+# Echoes {"characters":N,"accounts":N,"bots":N|null} on success (return 0),
+# nothing on failure (return 1). characters+accounts are the raw dumped-table
+# row counts; bots is the playerbots subset (null when that schema/read is
+# unavailable -- an optional "if cheap" field, exactly the account_type IN
+# (1,2) idiom `wow config`'s _bots_counts already uses). Reuses the existing
+# db_*_query wrappers (30-db.sh), so it runs only while ac-database is up --
+# which it always is at backup time (mysqldump needs it too).
+_backup_summary_json() {
+    local chars accts bots
+    chars="$(db_chars_query "SELECT COUNT(*) FROM characters;")" || chars=""
+    chars="${chars%%$'\n'*}"
+    accts="$(db_auth_query "SELECT COUNT(*) FROM account;")" || accts=""
+    accts="${accts%%$'\n'*}"
+    [[ "$chars" =~ ^[0-9]+$ && "$accts" =~ ^[0-9]+$ ]] || return 1
+    bots="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || bots=""
+    bots="${bots%%$'\n'*}"
+    if [[ "$bots" =~ ^[0-9]+$ ]]; then bots="$((10#$bots))"; else bots=null; fi
+    printf '{"characters":%s,"accounts":%s,"bots":%s}' "$((10#$chars))" "$((10#$accts))" "$bots"
+    return 0
+}
+
+# Writes the summary sidecar for a just-created backup ($1 = the .sql.gz
+# path). Swallows every failure -- a missing summary is never an error.
+_backup_write_meta() {
+    local sj
+    sj="$(_backup_summary_json)" || return 0
+    [[ -n "$sj" ]] && printf '%s\n' "$sj" > "$1.meta"
+    return 0
+}
+
+# Reads + validates a backup's summary sidecar; echoes the compact JSON
+# object when present and well-formed, or the literal `null` otherwise (so
+# `backup list` can embed the result directly). A malformed/garbage sidecar
+# degrades to null rather than corrupting the list envelope. $1 = the .sql.gz
+# path (NOT the .meta path).
+_backup_summary_read() {
+    local meta="$1.meta" raw re
+    [[ -f "$meta" ]] || { echo null; return 0; }
+    raw="$(<"$meta")"
+    raw="${raw%%$'\n'*}"
+    re='^\{"characters":[0-9]+,"accounts":[0-9]+,"bots":([0-9]+|null)\}$'
+    if [[ "$raw" =~ $re ]]; then echo "$raw"; else echo null; fi
+    return 0
 }
