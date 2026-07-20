@@ -106,7 +106,13 @@ export function gearSetFromToml(text: string): GearSet {
       items.push(ctx);
       continue;
     }
-    if (line.startsWith("[")) continue; // any other table header -> ignore
+    if (line.startsWith("[")) {
+      // Any other table header (foreign/unknown): point the active context at
+      // a throwaway sink so keys under it are discarded, NOT silently merged
+      // into the previous [[items]] table (which would overwrite that item).
+      ctx = {};
+      continue;
+    }
     const eq = line.indexOf("=");
     if (eq < 0) continue;
     const key = line.slice(0, eq).trim();

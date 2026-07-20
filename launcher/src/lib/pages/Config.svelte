@@ -236,17 +236,23 @@
   // smoke test passes. Only shown as usable when the module is installed.
   let awState = $state<AccountwideState | null>(null);
   let awLoaded = $state(false);
+  let awError = $state<string | null>(null); // initial-load failed -> show retry, not a stuck "Loading…"
   let awSaving = $state(false);
   let awReloadPending = $state(false); // a flag changed -> reload ALE to apply
 
   async function loadAccountwide() {
     error = null;
+    awError = null;
     try {
       awState = await wowAccountwideGet();
       awLoaded = true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      const msg = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      error = msg;
+      // Without this the tab stays on "Loading…" forever when the very first
+      // load fails; awError drives a retry card in that not-yet-loaded state.
+      awError = msg;
     }
   }
   $effect(() => {
@@ -272,16 +278,25 @@
     return s.parent !== null && awValueOf(s.parent) === "off";
   }
 
-  async function setAwFlag(key: string, value: "on" | "off", variant?: "default" | "custom") {
+  // Returns true on success so the control's onchange can revert the checkbox/
+  // select back to the (unchanged) server value when a write fails -- otherwise
+  // the widget keeps showing the new position while the server never moved.
+  async function setAwFlag(
+    key: string,
+    value: "on" | "off",
+    variant?: "default" | "custom",
+  ): Promise<boolean> {
     awSaving = true;
     error = null;
     try {
       const r = await wowAccountwideSet(key, value, variant);
       if (r.changed) awReloadPending = true;
       await loadAccountwide();
+      return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      return false;
     } finally {
       awSaving = false;
     }
@@ -294,9 +309,9 @@
       ? (awState.reputation.active ?? "off")
       : "off",
   );
-  async function setAwReputation(sel: string) {
-    if (sel === "off") await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "off");
-    else await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "on", sel as "default" | "custom");
+  async function setAwReputation(sel: string): Promise<boolean> {
+    if (sel === "off") return await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "off");
+    return await setAwFlag("ENABLE_ACCOUNTWIDE_REPUTATION", "on", sel as "default" | "custom");
   }
   const repVariantLabel = (v: string) =>
     v === "default"
@@ -304,8 +319,9 @@
       : "Custom (custom race/faction build)";
 
   async function awReloadAle() {
-    await reloadAle();
-    awReloadPending = false;
+    // Keep the "reload to apply" banner up when the reload itself failed --
+    // clearing it would tell the user the change is live when it isn't.
+    if (await reloadAle()) awReloadPending = false;
   }
 
   // --- Guided module tuning (overnight Batch 3) ----------------------------
@@ -506,16 +522,18 @@
     }
   }
 
-  async function reloadAle() {
+  async function reloadAle(): Promise<boolean> {
     saving = true;
     error = null;
     aleNote = null;
     try {
       const r = await wowConsoleSend("reload ale");
       aleNote = r.result.trim();
+      return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      return false;
     } finally {
       saving = false;
     }
@@ -809,7 +827,17 @@
 
   {:else if tab === "accountwide"}
     {#if !awLoaded}
-      <p class="muted">Loading…</p>
+      {#if awError}
+        <div class="card">
+          <strong>Couldn't load the account-wide settings</strong>
+          <p class="muted">{awError}</p>
+          <div class="row">
+            <button onclick={loadAccountwide}>Try again</button>
+          </div>
+        </div>
+      {:else}
+        <p class="muted">Loading…</p>
+      {/if}
     {:else if !awState?.installed}
       <div class="card">
         <strong>Account-wide sharing isn't installed yet</strong>
@@ -860,7 +888,14 @@
             checked={s.value === "on"}
             disabled={awSaving || restartState.restarting || featureLocked("accountwide-config")}
             title={featureLocked("accountwide-config") ? LOCKED_HINT : undefined}
-            onchange={(e) => setAwFlag(s.key, e.currentTarget.checked ? "on" : "off")}
+            onchange={(e) => {
+              const el = e.currentTarget;
+              void setAwFlag(s.key, el.checked ? "on" : "off").then((ok) => {
+                // On failure the server value never moved -- snap the checkbox
+                // back to it (Svelte won't, the bound value didn't change).
+                if (!ok) el.checked = s.value === "on";
+              });
+            }}
           />
         </div>
       {/each}
@@ -878,7 +913,13 @@
             value={repSelect}
             disabled={awSaving || restartState.restarting || featureLocked("accountwide-config")}
             title={featureLocked("accountwide-config") ? LOCKED_HINT : undefined}
-            onchange={(e) => setAwReputation(e.currentTarget.value)}
+            onchange={(e) => {
+              const el = e.currentTarget;
+              void setAwReputation(el.value).then((ok) => {
+                // Revert the dropdown to the server's value on a failed write.
+                if (!ok) el.value = repSelect;
+              });
+            }}
           >
             <option value="off">Off</option>
             {#each awState.reputation.variants as v (v)}

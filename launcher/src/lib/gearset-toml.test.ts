@@ -103,6 +103,26 @@ describe("gearSetFromToml hardening", () => {
     expect(s.items[0].name).toBe("Spaced");
   });
 
+  it("an unknown table header does not leak keys into the previous item", () => {
+    // A foreign header after an [[items]] table must clear the active context;
+    // otherwise keys under it silently overwrite the last item's fields.
+    const toml = [
+      'name = "Guarded"',
+      "[[items]]",
+      "slot = 5",
+      "entry = 100",
+      'name = "Good"',
+      "quality = 2",
+      "[meta]", // foreign/unknown header
+      "slot = 999", // must be discarded, not applied to the item above
+      "entry = 777",
+    ].join("\n");
+    const s = gearSetFromToml(toml);
+    expect(s.items).toHaveLength(1);
+    expect(s.items[0].slot).toBe(5);
+    expect(s.items[0].entry).toBe(100);
+  });
+
   it("defaults missing scalar fields the same way the storage path does", () => {
     // Only name + one entry supplied -> parseGearSets fills the rest.
     const s = gearSetFromToml('name = "Sparse"\n[[items]]\nentry = 7\n');

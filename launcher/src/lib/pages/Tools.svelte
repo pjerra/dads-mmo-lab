@@ -256,7 +256,15 @@
       // 100.x is CGNAT, not a private-LAN range, so the realmlist write goes
       // through the --internet path (internet=true) -- same backend as the
       // "Play over the internet" card.
-      await wowLan("on", tsIp, true);
+      const out = await wowLan("on", tsIp, true);
+      // wow_lan resolves with the CLI's text even on a non-zero exit (a failed
+      // realmlist write comes back as an error string, not a thrown promise),
+      // so gate the "applied" state + share line on the CLI's own ok marker
+      // instead of on the call merely returning.
+      if (!out.includes("[ok] LAN play ENABLED")) {
+        tsError = out.trim() || "Could not point the realm at your Tailscale address.";
+        return;
+      }
       tsApplied = true;
       tsNote = `Your realm now points friends at ${tsIp}.`;
       void lanStatus();
