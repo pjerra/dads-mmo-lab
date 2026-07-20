@@ -149,6 +149,10 @@ pub fn validate_git_url(url: &str) -> bool {
         && url[PREFIX.len()..]
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '_' | '-'))
+        // No `..` path segment: the URL becomes the clone target for
+        // `dml run <url>`, and a `..` segment could escape the clone dir.
+        // A dot-only charset can't otherwise be rejected by the char filter.
+        && !url.split('/').any(|seg| seg == "..")
 }
 
 /// Internet-play address check (Batch 4 F15): a public IPv4 or hostname,
@@ -2243,6 +2247,13 @@ mod tests {
         assert!(!validate_git_url("https://evil.com/$(id)"));
         assert!(!validate_git_url("https://user:pass@github.com/user/repo.git"));
         assert!(!validate_git_url(&format!("https://x.com/{}", "a".repeat(300))));
+        // No `..` path segment (clone-dir escape) -- the char filter alone
+        // would pass these since '.' and '/' are allowed.
+        assert!(!validate_git_url("https://github.com/../../../etc/passwd"));
+        assert!(!validate_git_url("https://github.com/user/../repo"));
+        assert!(!validate_git_url("https://../repo"));
+        // A dot that isn't a lone `..` segment stays valid (real repo names).
+        assert!(validate_git_url("https://github.com/user/repo..git"));
     }
 
     #[test]
