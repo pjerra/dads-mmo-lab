@@ -26,7 +26,7 @@
     type ModuleTuning,
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
-  import { dirtyKeys, requiredSaveFlags } from "$lib/config-diff";
+  import { dirtyKeys, requiredSaveFlags, settingsInGroups } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
@@ -425,13 +425,18 @@
         ? groups.filter((g) => g.startsWith("Auction"))
         : groups.filter((g) => !g.startsWith("Bot ") && !g.startsWith("Auction")),
   );
-  const dirty = $derived(dirtyKeys(settings, edits));
+  // Scope dirty/toSave/saveLocked to the rows the CURRENT tab shows: the
+  // Settings/Bot World/Auction House tabs share the single settings+edits map,
+  // so an unscoped `dirty` would let each tab's Save write (and lock on) the
+  // other tabs' dirty rows.
+  const visibleSettings = $derived(settingsInGroups(settings, visibleGroups));
+  const dirty = $derived(dirtyKeys(visibleSettings, edits));
   const fileReadonly = $derived(
     confFiles.find((f) => f.name === file)?.readonly ?? READONLY_FILES.includes(file),
   );
   // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
   // flags -- the Save button locks when ANY dirty row's flag is still locked.
-  const saveLocked = $derived(requiredSaveFlags(settings, dirty).some((f) => featureLocked(f)));
+  const saveLocked = $derived(requiredSaveFlags(visibleSettings, dirty).some((f) => featureLocked(f)));
   let liveNote = $state(false);
 
   async function load() {

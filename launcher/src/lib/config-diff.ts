@@ -7,6 +7,20 @@ export function dirtyKeys(
     .map((s) => s.key);
 }
 
+// Per-tab Save scoping (improvements Batch 2): the curated-row tabs
+// (Settings / Bot World / Auction House) share ONE settings+edits map, so a
+// Save button must act only on the rows the CURRENT tab actually shows.
+// Restrict the settings list to the currently-visible groups before computing
+// dirty/toSave/saveLocked -- otherwise Save on one tab writes another tab's
+// dirty rows, and saveLocked leaks a locked flag from a tab you can't see.
+export function settingsInGroups<T extends { group: string }>(
+  settings: T[],
+  groups: string[],
+): T[] {
+  const set = new Set(groups);
+  return settings.filter((s) => set.has(s.group));
+}
+
 // Which feature-lock keys must be unlocked to save this dirty set (Batch 1).
 // Conf-file rows (env column "conf:...") are a NEW save mechanism, gated
 // separately from the long-tested env rows:

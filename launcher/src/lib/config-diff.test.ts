@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dirtyKeys, requiredSaveFlags } from "./config-diff";
+import { dirtyKeys, requiredSaveFlags, settingsInGroups } from "./config-diff";
 
 const settings = [
   { key: "rates.xp_kill", value: "1" },
@@ -51,5 +51,36 @@ describe("requiredSaveFlags", () => {
       requiredSaveFlags(rows, ["legacy.env_row", "rates.honor", "bots.talk", "ahbot.seller", "ghost"]).sort(),
     ).toEqual(["ahbot-page", "bots-world", "rates-live", "settings-save"]);
     expect(requiredSaveFlags(rows, [])).toEqual([]);
+  });
+});
+
+describe("settingsInGroups (per-tab Save scoping)", () => {
+  const rows = [
+    { key: "rates.xp", group: "Rates", value: "1" },
+    { key: "server.motd", group: "Server", value: "Hi" },
+    { key: "bots.count", group: "Bot World", value: "2000" },
+    { key: "ahbot.seller", group: "Auction House", value: "1" },
+  ];
+
+  it("keeps only rows whose group is currently visible", () => {
+    expect(settingsInGroups(rows, ["Rates", "Server"]).map((s) => s.key)).toEqual([
+      "rates.xp",
+      "server.motd",
+    ]);
+    expect(settingsInGroups(rows, ["Bot World"]).map((s) => s.key)).toEqual(["bots.count"]);
+    expect(settingsInGroups(rows, ["Auction House"]).map((s) => s.key)).toEqual(["ahbot.seller"]);
+  });
+
+  it("scopes dirtyKeys so one tab's edits don't leak into another tab's Save", () => {
+    // A Bot World edit is dirty, but on the Settings tab (Rates/Server groups)
+    // it must NOT appear as dirty -- that was the pre-fix cross-tab bleed.
+    const edits = { "bots.count": "5000" };
+    expect(dirtyKeys(settingsInGroups(rows, ["Rates", "Server"]), edits)).toEqual([]);
+    expect(dirtyKeys(settingsInGroups(rows, ["Bot World"]), edits)).toEqual(["bots.count"]);
+  });
+
+  it("returns nothing when no group matches", () => {
+    expect(settingsInGroups(rows, [])).toEqual([]);
+    expect(settingsInGroups(rows, ["Nope"])).toEqual([]);
   });
 });
