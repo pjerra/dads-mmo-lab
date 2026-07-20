@@ -1,4 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import type { LiveSpec } from "./party-specs";
+export type { LiveSpec };
 
 export interface DmlErr {
   code: string;
@@ -679,7 +681,7 @@ export type BotFilters = {
 export async function wowBotsList(f: BotFilters): Promise<BotsPage> {
   return await invoke("wow_bots_list", f);
 }
-export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; }
+export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; online: boolean; }
 // spec/spec_applied only present when the add carried a --spec (Batch 5 F5).
 export interface PartyAddResult {
   added: boolean;
@@ -693,6 +695,12 @@ export interface PartyAddResult {
 export async function wowPartyOnline(): Promise<OnlineChar[]> {
   const d = await invoke<{ online: OnlineChar[] }>("wow_party_online");
   return d.online;
+}
+// Read-only: the live premade specs from the deployed playerbots.conf. Empty
+// when the server isn't installed (the UI then falls back to its static maps).
+export async function wowPartySpecs(): Promise<LiveSpec[]> {
+  const d = await invoke<{ source: string; specs: LiveSpec[] }>("wow_party_specs");
+  return d.specs;
 }
 export async function wowPartyAdd(
   player: string,

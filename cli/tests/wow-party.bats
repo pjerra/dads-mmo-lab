@@ -169,8 +169,8 @@ teardown() { teardown_fixture; }
 @test "party list returns group members with bot flags" {
   use_mysql_stub
   printf '2503\n' > "$FIXTURE/guid.tsv"
-  # members rows: guid, name, class, level, is_bot
-  printf '2503\tTesten\t8\t1\t0\n9001\tBotmage\t8\t80\t1\n' > "$FIXTURE/mem.tsv"
+  # members rows: guid, name, class, level, is_bot, online (Batch 5: online dot)
+  printf '2503\tTesten\t8\t1\t0\t1\n9001\tBotmage\t8\t80\t1\t0\n' > "$FIXTURE/mem.tsv"
   export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/mem.tsv"
   export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
   run bash "$DML" wow party list --player Testen --json
@@ -184,6 +184,12 @@ teardown() { teardown_fixture; }
   # would slip past the value asserts above.
   [ "$(echo "$output" | jq -r '.data.members[1].is_bot | type')" = "boolean" ]
   [ "$(echo "$output" | jq -r '.data.members[0].is_bot | type')" = "boolean" ]
+  # Batch 5 F5 (per-bot online dot): online is a real JSON boolean mapped from
+  # characters.online (Testen online -> true, the offline bot -> false).
+  [ "$(echo "$output" | jq -r '.data.members[0].online')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.members[1].online')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.members[0].online | type')" = "boolean" ]
+  [ "$(echo "$output" | jq -r '.data.members[1].online | type')" = "boolean" ]
 }
 
 @test "party list of an offline player is NOT_FOUND" {

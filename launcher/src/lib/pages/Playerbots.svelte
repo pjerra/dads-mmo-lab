@@ -3,9 +3,10 @@
   import {
     wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyRelogin, wowPartySetup,
     wowPartyBotcmd, wowPartyPresetSave, wowPartyPresetList, wowPartyPresetDelete, wowPartyPresetLoad,
-    wowPartyPresetShow, wowPartyPresetImport, wowGmLevel, wowServerDetail,
+    wowPartyPresetShow, wowPartyPresetImport, wowGmLevel, wowServerDetail, wowPartySpecs,
     type OnlineChar, type PartyMember, type PresetInfo,
   } from "$lib/api";
+  import { openUrl } from "@tauri-apps/plugin-opener";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -17,8 +18,14 @@
     ROLE_MAP,
     PVE_SPECS_BY_CLASS_ID,
     VALID_BOT_CLASSES,
+    buildSpecIndex,
     type Role,
+    type SpecIndex,
   } from "$lib/party-specs";
+
+  // Shown whenever an Add / Re-summon does not confirm a join in the short
+  // poll window -- the bot is usually just still spawning in-game (Batch 5 F5).
+  const SPAWNING_NOTE = "The bot may still be spawning — check in-game, then Refresh.";
 
   let online: OnlineChar[] = $state([]);
   let player = $state("");           // the chosen online player's name
@@ -27,6 +34,11 @@
   let busy = $state(false);
   let note: string | null = $state(null);
   let botsOnline: number | null = $state(null);
+
+  // Batch 5 F5: live spec picker index, built from the deployed playerbots.conf
+  // (`wow party specs`). Empty when the server isn't installed -> the static
+  // ROLE_MAP / PVE_SPECS_BY_CLASS_ID fallbacks below take over.
+  let specIndex: SpecIndex = $state({ byName: {}, byId: {} });
 
   const buf = termBuf("playerbots");
   let setting = $state(false);
@@ -73,7 +85,13 @@
   async function refreshPresets() {
     try { presets = await wowPartyPresetList(); } catch (e) { showErr(e); }
   }
-  onMount(() => { refresh(); refreshPresets(); });
+  // Live spec list (read-only). Never fails the page: on error (server not
+  // installed / conf missing) the index stays empty and the static maps drive
+  // the picker instead.
+  async function refreshSpecs() {
+    try { specIndex = buildSpecIndex(await wowPartySpecs()); } catch { /* static fallback */ }
+  }
+  onMount(() => { refresh(); refreshPresets(); refreshSpecs(); });
 
   // Batch 5 F5: role -> class -> spec picker state. "Any role" shows all 9
   // classes; "Any spec" ("" here) keeps today's no---spec behavior exactly.
@@ -92,6 +110,26 @@
   function onClassChange() {
     // Default the spec to the role's pick for that class; Any-role -> any.
     pickSpec = roleClasses.find((c) => c.class === pickClass)?.spec ?? "";
+  }
+  // Batch 5 F5: the ACTUAL spec options for the picked class come from the live
+  // conf; empty means "server not installed" -> the single role spec is offered
+  // as a fallback (see the template). pickSpecMeta drives the build preview.
+  const liveSpecsForPick = $derived(pickClass ? (specIndex.byName[pickClass] ?? []) : []);
+  const pickSpecMeta = $derived(
+    pickSpec ? (liveSpecsForPick.find((s) => s.name === pickSpec) ?? null) : null,
+  );
+  // Per-bot Change-spec options by characters.class id: live names when known,
+  // else the static pve fallback list.
+  function specOptionsForClassId(cid: number): string[] {
+    const live = specIndex.byId[cid];
+    if (live && live.length) return live.map((s) => s.name);
+    return PVE_SPECS_BY_CLASS_ID[cid] ?? [];
+  }
+  // Open the Wowhead talent-calc preview for a live spec (its class name is a
+  // wowhead class slug; the link is the talent fragment). Opener plugin +
+  // capability are already granted (used by Items/Help/Modules).
+  function openSpecPreview(cls: string, link: string) {
+    openUrl(`https://www.wowhead.com/wotlk/talent-calc/${cls}/${link}`).catch(() => {});
   }
   const addLocked = $derived(
     featureLocked("party-ops") || (pickSpec !== "" && featureLocked("party-spec")),
@@ -112,15 +150,33 @@
     busy = true; error = null; note = null;
     try {
       const r = await wowPartyAdd(p, cls, undefined, spec);
-      if (r.joined && spec) {
-        note = r.spec_applied
-          ? `Added a ${spec} ${cls} to your party (talents + gear applied).`
-          : (r.note ?? `Added a ${cls} — spec not applied.`);
+      // The CLI already polled a short window for the join. Confirmed -> a
+      // success note; not confirmed -> the spawning guidance (not "Adding…").
+      if (r.joined) {
+        if (spec) {
+          note = r.spec_applied
+            ? `Added a ${spec} ${cls} to your party (talents + gear applied).`
+            : (r.note ?? `Added a ${cls} — spec not applied.`);
+        } else {
+          note = `Added a ${cls} to your party.`;
+        }
       } else {
-        note = r.joined ? `Added a ${cls} to your party.` : (r.note ?? "Adding…");
+        note = SPAWNING_NOTE;
       }
       members = await wowPartyList(p);
     } catch (e) { showErr(e); } finally { busy = false; }
+  }
+
+  // Poll the party list a few times for a bot to come (back) online. Updates
+  // `members` on each pass and resolves true as soon as the bot shows online.
+  async function waitForBotOnline(p: string, bot: string): Promise<boolean> {
+    const TRIES = 4, DELAY_MS = 600;
+    for (let i = 0; i < TRIES; i++) {
+      members = await wowPartyList(p);
+      if (members.some((m) => m.name === bot && m.online)) return true;
+      if (i < TRIES - 1) await new Promise((r) => setTimeout(r, DELAY_MS));
+    }
+    return false;
   }
 
   async function changeSpec(bot: string) {
@@ -141,8 +197,14 @@
   }
   async function resummon(bot: string) {
     const p = player;
-    busy = true; error = null;
-    try { await wowPartyRelogin(p, bot); members = await wowPartyList(p); }
+    busy = true; error = null; note = null;
+    try {
+      await wowPartyRelogin(p, bot);
+      // Relogin fires and returns immediately; confirm the bot actually comes
+      // back online in a short window, else surface the spawning guidance.
+      const online = await waitForBotOnline(p, bot);
+      note = online ? `Re-summoned ${bot}.` : SPAWNING_NOTE;
+    }
     catch (e) { showErr(e); } finally { busy = false; }
   }
   const BOTCMD_PHRASE = { gear: "gear up", talents: "fix its talents", maintain: "do maintenance" } as const;
@@ -327,9 +389,13 @@
       <select bind:value={pickSpec} disabled={busy || setting || loadingPreset || !pickClass}>
         <option value="">Any spec</option>
         {#if pickClass}
-          {@const roleSpec = roleClasses.find((c) => c.class === pickClass)?.spec}
-          {#if roleSpec}
-            <option value={roleSpec}>{roleSpec}</option>
+          {#if liveSpecsForPick.length > 0}
+            <!-- Live options from the deployed playerbots.conf (party specs). -->
+            {#each liveSpecsForPick as s (s.name)}<option value={s.name}>{s.name}</option>{/each}
+          {:else}
+            <!-- Fallback (server not installed): the single role spec only. -->
+            {@const roleSpec = roleClasses.find((c) => c.class === pickClass)?.spec}
+            {#if roleSpec}<option value={roleSpec}>{roleSpec}</option>{/if}
           {/if}
         {/if}
       </select>
@@ -342,6 +408,14 @@
         Add bot
       </button>
     </div>
+    {#if pickSpecMeta}
+      <p class="muted">
+        {pickSpec} build{#if pickSpecMeta.tree}: talents {pickSpecMeta.tree}{/if}
+        {#if pickSpecMeta.link}
+          · <button class="link" onclick={() => openSpecPreview(pickSpecMeta.class, pickSpecMeta.link!)}>preview on Wowhead</button>
+        {/if}
+      </p>
+    {/if}
     {#if note}<p class="muted">{note}</p>{/if}
 
     <header class="bar"><h3>Current party</h3></header>
@@ -352,7 +426,7 @@
         <tbody>
           {#each members as m (m.guid)}
             <tr>
-              <td>{m.name}</td><td class="muted">{className(m.class)} · lvl {m.level}</td>
+              <td>{#if m.is_bot}<span class="dot" class:on={m.online} title={m.online ? "online" : "offline"}></span>{/if}{m.name}</td><td class="muted">{className(m.class)} · lvl {m.level}</td>
               <td>{#if m.is_bot}<button
                     onclick={() => kick(m.name)}
                     disabled={busy || loadingPreset || featureLocked("party-ops")}
@@ -399,14 +473,15 @@
                   >
                     Set level
                   </button>
-                  {#if PVE_SPECS_BY_CLASS_ID[m.class]}
+                  {@const specOpts = specOptionsForClassId(m.class)}
+                  {#if specOpts.length > 0}
                     <select
                       value={botSpec[m.name] ?? ""}
                       onchange={(e) => (botSpec[m.name] = e.currentTarget.value)}
                       disabled={busy || loadingPreset}
                     >
                       <option value="">spec…</option>
-                      {#each PVE_SPECS_BY_CLASS_ID[m.class] as s (s)}
+                      {#each specOpts as s (s)}
                         <option value={s}>{s}</option>
                       {/each}
                     </select>
@@ -423,6 +498,8 @@
           {/each}
         </tbody>
       </table>
+      <!-- Batch 5 F5: set-level guidance, consistent with GM Tools. -->
+      <p class="muted">Set level: 1–255; your server's max level applies.</p>
     {/if}
 
     <header class="bar"><h3>Party presets</h3></header>
@@ -499,5 +576,10 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; }
   .chip { font-size: .85em; color: #8b949e; border: 1px solid #30363d; border-radius: 999px; padding: 2px 10px; }
+  /* Per-bot online dot: grey by default, green when the bot is online. */
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: #8b949e; vertical-align: middle; }
+  .dot.on { background: #3fb950; }
+  /* Inline text-button styling for the Wowhead build preview. */
+  button.link { background: none; border: none; padding: 0; color: #58a6ff; text-decoration: underline; cursor: pointer; font: inherit; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
 </style>

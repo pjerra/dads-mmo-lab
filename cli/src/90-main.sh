@@ -2809,6 +2809,31 @@ case "$cmd" in
             out+=']'
             json_ok "{\"online\":$out}"
             ;;
+          specs)
+            # Batch 5 F5 follow-up: read-only dump of the LIVE premade specs
+            # parsed straight from the deployed playerbots.conf. Drives the
+            # launcher's spec picker AND (via _party_spec_names) _valid_bot_spec
+            # -- one source of truth, no hand-kept mirror to drift. Each row
+            # carries the highest-level Wowhead talent link and its tree
+            # distribution ("a/b/c" points per tree) for the build preview.
+            conf="$(_party_pb_conf)"
+            [[ -n "$conf" ]] || { json_err NOT_FOUND "playerbots.conf not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
+            srcname="playerbots.conf"; [[ "$conf" == *.dist ]] && srcname="playerbots.conf.dist"
+            rows="$(_party_spec_rows "$conf")"
+            first=1; out='['
+            while IFS=$'\t' read -r cid spno sname slink stree || [[ -n "$cid" ]]; do
+              [[ -z "$cid" ]] && continue
+              cname="$(_class_name_from_id "$cid")"
+              [[ -n "$cname" ]] || continue
+              lk=null; [[ -n "$slink" ]] && lk="\"$(json_escape "$slink")\""
+              tr=null; [[ -n "$stree" ]] && tr="\"$(json_escape "$stree")\""
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"class_id\":$cid,\"class\":\"$(json_escape "$cname")\",\"specno\":$spno,\"name\":\"$(json_escape "$sname")\",\"link\":$lk,\"tree\":$tr}"
+              first=0
+            done <<< "$rows"
+            out+=']'
+            json_ok "{\"source\":\"$(json_escape "$srcname")\",\"specs\":$out}"
+            ;;
           add)
             player=""; class=""; gender=""; spec=""
             while [[ $# -gt 0 ]]; do
@@ -2880,7 +2905,8 @@ case "$cmd" in
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             sql="SELECT c.guid, c.name, c.class, c.level,
-                        CASE WHEN c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) THEN 1 ELSE 0 END AS is_bot
+                        CASE WHEN c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) THEN 1 ELSE 0 END AS is_bot,
+                        c.online AS onl
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
@@ -2888,11 +2914,12 @@ case "$cmd" in
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not query the party" ""; exit 1; }
             first=1; out='['
-            while IFS=$'\t' read -r guid name cls lvl isbot || [[ -n "$guid" ]]; do
+            while IFS=$'\t' read -r guid name cls lvl isbot onl || [[ -n "$guid" ]]; do
               [[ -z "$guid" ]] && continue
               [[ $first -eq 0 ]] && out+=','
               local_bot=false; [[ "$isbot" == "1" ]] && local_bot=true
-              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"level\":$lvl,\"is_bot\":$local_bot}"
+              local_online=false; [[ "$onl" == "1" ]] && local_online=true
+              out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"level\":$lvl,\"is_bot\":$local_bot,\"online\":$local_online}"
               first=0
             done <<< "$rows"
             out+=']'
@@ -3143,7 +3170,7 @@ case "$cmd" in
             json_ok "{\"imported\":true,\"name\":\"$(json_escape "$name")\",\"classes\":[$jarr]}"
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|specs|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
             exit 1
             ;;
         esac

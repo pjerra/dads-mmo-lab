@@ -1,17 +1,49 @@
-// Party wizard light (Batch 5 F5): static role -> class -> spec map for the
+// Party wizard light (Batch 5 F5): role -> class -> spec map for the
 // Playerbots page picker, plus per-class pve spec lists for the per-bot
-// "Change spec" control. Every spec string here MUST be a member of
-// SPEC_ALLOWLIST below, which mirrors the CLI's _valid_bot_spec closed
-// allowlist (50-party.sh) -- itself verified against the deployed
-// playerbots.conf's AiPlayerbot.PremadeSpecName.* values (2026-07-19).
-// A vitest pins the mirror (party-specs.test.ts).
+// "Change spec" control.
 //
-// CAVEAT (also in the CLI comment): spec names are conf-driven. If the user
-// edits PremadeSpecName.* the allowlist drifts and a mismatch fails
-// SILENTLY in-game (whisper reply only, invisible to SOAP).
+// SPEC SOURCE OF TRUTH (Batch 5 F5 follow-up): the ACTUAL spec options and the
+// CLI validation both come from the deployed playerbots.conf at runtime --
+// `wow party specs` parses it, buildSpecIndex() below turns that into the
+// picker's option lists, and the same conf drives the CLI's _valid_bot_spec.
+// So the picker can no longer offer a spec the validator would reject. The
+// static ROLE_MAP / PVE_SPECS_BY_CLASS_ID / SPEC_ALLOWLIST below are the
+// ROLE grouping (which class fills which role -- a UI concept absent from the
+// conf) and the OFFLINE FALLBACK used only when the live conf isn't readable
+// (server not installed / dev). SPEC_ALLOWLIST still mirrors the shipped
+// defaults (verified 2026-07-19); a vitest pins its self-consistency.
 //
 // No DK anywhere -- class 6 is excluded from the party system entirely
 // (_valid_bot_class). "bear pvp" / "frostfire pvp" do not exist in the conf.
+
+// A live premade spec parsed from the deployed playerbots.conf. Defined here
+// (the dependency-free data module) so api.ts and the picker share one shape.
+export interface LiveSpec {
+  class_id: number;
+  class: string;
+  specno: number;
+  name: string;
+  link: string | null;
+  tree: string | null;
+}
+
+// The picker's live index: spec lists keyed by class NAME (the add-picker
+// works in class names) and by class ID (the per-bot Change-spec works in
+// characters.class ids). Each value keeps the full LiveSpec so the preview can
+// read tree/link. Names within a class are unique in the conf.
+export interface SpecIndex {
+  byName: Record<string, LiveSpec[]>;
+  byId: Record<number, LiveSpec[]>;
+}
+export function buildSpecIndex(specs: LiveSpec[]): SpecIndex {
+  const byName: Record<string, LiveSpec[]> = {};
+  const byId: Record<number, LiveSpec[]> = {};
+  for (const s of specs) {
+    (byName[s.class] ??= []).push(s);
+    (byId[s.class_id] ??= []).push(s);
+  }
+  return { byName, byId };
+}
 
 export type Role = "Tank" | "Healer" | "Melee" | "Ranged";
 
@@ -66,9 +98,11 @@ export const PVE_SPECS_BY_CLASS_ID: Record<number, string[]> = {
   11: ["balance pve", "bear pve", "resto pve", "cat pve"],
 };
 
-// Mirror of the CLI's _valid_bot_spec allowlist (50-party.sh) -- keep the
-// two in sync BY HAND; the vitest only proves this file is self-consistent
-// (everything offered by the maps above is in this list).
+// OFFLINE FALLBACK allowlist -- mirrors the shipped playerbots.conf defaults
+// (the same static fallback the CLI's _valid_bot_spec uses when no conf is
+// deployed). At runtime the live conf (`wow party specs`) is the source of
+// truth for BOTH sides, so this list is only a self-consistency net for the
+// static ROLE_MAP / PVE maps above (a vitest pins it).
 export const SPEC_ALLOWLIST: string[] = [
   "arms pve", "arms pvp", "fury pve", "fury pvp", "prot pve", "prot pvp",
   "holy pve", "holy pvp", "ret pve", "ret pvp",

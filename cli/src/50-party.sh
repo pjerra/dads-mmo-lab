@@ -128,21 +128,95 @@ _valid_bot_class() {
     esac
 }
 
-# Premade-spec names `party add --spec` / `party botcmd --action spec`
-# accept (Batch 5 F5). CLOSED allowlist of the EXACT live spec names
-# (AiPlayerbot.PremadeSpecName.* -- verified against the deployed
-# playerbots.conf 2026-07-19): the playerbots `talents spec <name>` command
-# exact-matches these, and a wrong name replies only IN-GAME ("Spec <x> not
-# found" -- invisible to SOAP), so the CLI must reject anything else up
-# front. Chars are only [a-z ] -- injection-safe in the whisper tail; the
-# no-free-text-whisper rule holds because this is still a fixed allowlist.
-# DK (class 6) specs are deliberately absent (no DK in the wizard, matching
-# _valid_bot_class). NB per the live conf: "bear pvp" and "frostfire pvp"
-# DO NOT EXIST -- do not "complete the symmetry" here. CAVEAT: these names
-# are conf-driven; if the user edits PremadeSpecName.* this list drifts and
-# failures become silent (in-game whisper reply only).
+# Path of the DEPLOYED playerbots.conf (falling back to the shipped .dist),
+# or empty when the WoW server is not installed. Single source of truth for
+# both the live spec picker (`party specs`) and _valid_bot_spec below, so the
+# two can never disagree (Batch 5 F5 follow-up: kills the old hand-kept
+# allowlist mirror's silent drift).
+_party_pb_conf() {
+    local sdir conf
+    sdir="$(_wow_server_dir)" || sdir=""
+    [[ -n "$sdir" ]] || return 0
+    conf="$sdir/env/dist/etc/modules/playerbots.conf"
+    [[ -f "$conf" ]] || conf="$conf.dist"
+    [[ -f "$conf" ]] || return 0
+    printf '%s' "$conf"
+    return 0
+}
+
+# Every live premade spec NAME (AiPlayerbot.PremadeSpecName.<class>.<specno>),
+# one per line, deduped, EXCLUDING class 6 (deathknight -- no DK in the party
+# system, matching _valid_bot_class). Empty when no conf is deployed. POSIX awk
+# (index/substr/split -- no gawk 3-arg match), same style as _pb_kv_lines.
+_party_spec_names() {
+    local conf; conf="$(_party_pb_conf)"; [[ -n "$conf" ]] || return 0
+    awk '
+        { s=$0; sub(/\r$/,"",s); sub(/^[ \t]+/,"",s)
+          if (s !~ /^AiPlayerbot\.PremadeSpecName\./) next
+          eq=index(s,"="); if (eq==0) next
+          key=substr(s,1,eq-1); sub(/[ \t]+$/,"",key)
+          val=substr(s,eq+1); sub(/^[ \t]+/,"",val); sub(/[ \t]+$/,"",val)
+          n=split(key,p,"."); cls=p[3]+0
+          if (cls==6) next
+          if (val != "") print val
+        }
+    ' "$conf" 2>/dev/null | sort -u
+    return 0
+}
+
+# Rows for `party specs`: one TAB-separated row per (class,specno) --
+# class_id<TAB>specno<TAB>name<TAB>highest-level-link<TAB>tree ("a/b/c" digit
+# sums of the three dash-separated talent trees; empty when no link). Class 6
+# excluded. Sorted by class then specno. $1 = conf path.
+_party_spec_rows() {
+    awk '
+        function digsum(x,   i,c,t){ t=0; for(i=1;i<=length(x);i++){c=substr(x,i,1); if(c>="0"&&c<="9") t+=c+0} return t }
+        { s=$0; sub(/\r$/,"",s); sub(/^[ \t]+/,"",s)
+          if (s !~ /^AiPlayerbot\.PremadeSpec(Name|Link)\./) next
+          eq=index(s,"="); if (eq==0) next
+          key=substr(s,1,eq-1); sub(/[ \t]+$/,"",key)
+          val=substr(s,eq+1); sub(/^[ \t]+/,"",val); sub(/[ \t]+$/,"",val)
+          n=split(key,p,"."); cls=p[3]+0; spc=p[4]+0
+          if (cls==6) next
+          k=cls SUBSEP spc
+          if (p[2]=="PremadeSpecName") { if (val!=""){ name[k]=val; seen[k]=1 } }
+          else if (p[2]=="PremadeSpecLink") { lvl=p[5]+0; if (lvl>=blvl[k]){ blvl[k]=lvl; link[k]=val } }
+        }
+        END {
+          for (k in seen) {
+            split(k,kk,SUBSEP); cls=kk[1]+0; spc=kk[2]+0
+            lk=link[k]; tree=""
+            if (lk!="") { ng=split(lk,g,"-"); tree=digsum(g[1]) "/" (ng>=2?digsum(g[2]):0) "/" (ng>=3?digsum(g[3]):0) }
+            printf "%d\t%d\t%s\t%s\t%s\n", cls, spc, name[k], lk, tree
+          }
+        }
+    ' "$1" 2>/dev/null | sort -t"$(printf '\t')" -k1,1n -k2,2n
+    return 0
+}
+
+# Premade-spec names `party add --spec` / `party botcmd --action spec` accept
+# (Batch 5 F5). Driven by the DEPLOYED playerbots.conf's
+# AiPlayerbot.PremadeSpecName.* values (via _party_spec_names) so it can never
+# drift from what the playerbots `talents spec <name>` command actually
+# accepts -- a wrong name replies only IN-GAME ("Spec <x> not found",
+# invisible to SOAP), so the CLI must reject anything the conf does not define.
+# The [a-z ] charset guard is enforced regardless (injection-safe whisper
+# tail; the no-free-text-whisper rule holds because the value must still be a
+# conf-listed name). When no conf is deployed (server not installed / tests)
+# it FALLS BACK to a static mirror of the shipped defaults so validation keeps
+# working. DK (class 6) specs are deliberately absent (no DK in the wizard).
 _valid_bot_spec() {
-    case "$1" in
+    local want="$1" names
+    # Injection guard first: live spec names are lowercase words + spaces only.
+    [[ "$want" =~ ^[a-z][a-z\ ]*$ ]] || return 1
+    names="$(_party_spec_names)"
+    if [[ -n "$names" ]]; then
+        if grep -qxF -- "$want" <<< "$names"; then return 0; else return 1; fi
+    fi
+    # Fallback (no deployed conf): static mirror of the shipped playerbots.conf
+    # defaults (verified 2026-07-19). NB "bear pvp" / "frostfire pvp" do NOT
+    # exist -- do not "complete the symmetry".
+    case "$want" in
       "arms pve"|"arms pvp"|"fury pve"|"fury pvp"|"prot pve"|"prot pvp") return 0 ;;
       "holy pve"|"holy pvp"|"ret pve"|"ret pvp") return 0 ;;
       "bm pve"|"bm pvp"|"mm pve"|"mm pvp"|"surv pve"|"surv pvp") return 0 ;;

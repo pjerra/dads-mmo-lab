@@ -1065,6 +1065,15 @@ async fn wow_party_online(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "party".into(), "online".into()]).await
 }
 
+// Batch 5 F5 follow-up: read-only dump of the LIVE premade specs parsed from
+// the deployed playerbots.conf. Drives the launcher's spec picker AND (CLI
+// side) _valid_bot_spec, so the picker can never offer a spec the validator
+// would reject.
+#[tauri::command]
+async fn wow_party_specs(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "party".into(), "specs".into()]).await
+}
+
 // Batch 3 F11a: read-only who's-playing list for the Home card.
 #[tauri::command]
 async fn wow_players_online(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
@@ -2151,6 +2160,7 @@ pub fn run() {
             wow_ahbot_repair,
             wow_party_setup,
             wow_party_online,
+            wow_party_specs,
             wow_players_online,
             wow_bots_list,
             wow_world_restart,
