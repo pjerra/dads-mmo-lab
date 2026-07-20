@@ -393,8 +393,10 @@
   }
 
   async function mtReloadAle() {
-    await reloadAle();
-    mtReloadPending = false;
+    // Keep the "reload to apply" banner up when the reload itself failed --
+    // clearing it would tell the user the change is live when it isn't (mirror
+    // of awReloadAle's boolean gate).
+    if (await reloadAle()) mtReloadPending = false;
   }
 
   async function savePbChanges() {

@@ -145,8 +145,19 @@
     inetError = null;
     try {
       if (action === "apply") {
-        inetOutput = await wowLan("on", inetAddr.trim(), true);
-        inetApplied = inetAddr.trim();
+        // wow_lan resolves with the CLI's text even on a non-zero exit (a
+        // failed realmlist write comes back as an error string, not a thrown
+        // promise), so gate `inetApplied` (which drives the friends-connect
+        // share line) on the CLI's own ok marker instead of on the call merely
+        // returning -- same pattern as tsApplyRealm / lanRefreshApplied.
+        const out = await wowLan("on", inetAddr.trim(), true);
+        inetOutput = out;
+        if (out.includes("[ok] LAN play ENABLED")) {
+          inetApplied = inetAddr.trim();
+        } else {
+          inetApplied = null;
+          inetError = out.trim() || "Could not point the realm at that address.";
+        }
       } else {
         inetOutput = await wowLan("off");
         inetApplied = null;
