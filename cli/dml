@@ -5384,7 +5384,30 @@ case "$cmd" in
         # SOAP falls through silently (|| true) to the last-saved data.
         pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;" 2>/dev/null)" || pd_online=""
         if [[ "${pd_online%%$'\n'*}" == "1" ]]; then
-          soap_exec "saveall" >/dev/null 2>&1 || true
+          # Review follow-up (live impact): `saveall` serializes EVERY online
+          # player on the world thread -- with the ambient bot population that
+          # is hundreds of save transactions per fire, and the GUI reads
+          # paperdolls often (Dashboard auto-load on every character switch,
+          # Bot Browser Details on online bots). Rate-limit the flush through
+          # a stamp file so rapid browsing costs at most one global save per
+          # window: DML_SAVEALL_COOLDOWN seconds (default 30; 0 = fire every
+          # time). The stamp is written only on a SUCCESSFUL fire so a down
+          # SOAP keeps retrying -- the fire itself stays best-effort/silent,
+          # and any stamp problem falls through to firing (freshness wins).
+          pd_cd="${DML_SAVEALL_COOLDOWN:-30}"
+          if [[ "$pd_cd" =~ ^[0-9]+$ ]]; then pd_cd=$((10#$pd_cd)); else pd_cd=30; fi
+          pd_now="$(date +%s)" || pd_now=0
+          pd_stamp="$HOME/.dml/saveall.stamp"
+          pd_last="$(cat "$pd_stamp" 2>/dev/null)" || pd_last=""
+          if [[ "$pd_last" =~ ^[0-9]+$ ]]; then pd_last=$((10#$pd_last)); else pd_last=0; fi
+          # pd_now < pd_last = a future-dated stamp (clock jump): fire and
+          # re-stamp with the sane current time instead of throttling forever.
+          if (( pd_cd == 0 || pd_now < pd_last || pd_now - pd_last >= pd_cd )); then
+            if soap_exec "saveall" >/dev/null 2>&1; then
+              mkdir -p "$HOME/.dml" 2>/dev/null || true
+              printf '%s' "$pd_now" > "$pd_stamp" 2>/dev/null || true
+            fi
+          fi
         fi
         # AC's ac-db-import (re-run on any cold `compose up`) applies core
         # migrations, one of which replaced the packed playerBytes/
@@ -6332,22 +6355,43 @@ case "$cmd" in
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
-            dismissed=0; jarr=""; first=1
+            dismissed=0; attempted=0; da_rc=0; jarr=""; first=1
             while IFS= read -r b || [[ -n "$b" ]]; do
               [[ -z "$b" ]] && continue
               # Defense-in-depth: DB-sourced names still pass the charname
               # allowlist before any command string is built (same rule as
               # every other SOAP fire path).
               _valid_charname "$b" || continue
+              attempted=$(( attempted + 1 ))
               # Best-effort per bot, same kick-then-dismiss pair as `kick`:
               # one unreachable bot must not strand the rest of the party.
-              out="$(soap_exec "dml_uninvite $b")" || true
-              out="$(soap_exec "dml_whisper $player $b logout")" || true
-              dismissed=$(( dismissed + 1 ))
-              [[ $first -eq 0 ]] && jarr+=','
-              jarr+="\"$(json_escape "$b")\""; first=0
+              # But `dismissed` counts only bots whose uninvite fire actually
+              # succeeded -- an attempt is not a dismissal (review finding:
+              # SOAP down with the DB up used to report "dismissed: N" and
+              # exit 0 while every bot was still in the party).
+              if out="$(soap_exec "dml_uninvite $b")"; then
+                out="$(soap_exec "dml_whisper $player $b logout")" || true
+                dismissed=$(( dismissed + 1 ))
+                [[ $first -eq 0 ]] && jarr+=','
+                jarr+="\"$(json_escape "$b")\""; first=0
+              else
+                da_rc=$?
+                # Still whisper: a stray that already left the group (uninvite
+                # rejected) is exactly the bot a logout whisper despawns.
+                out="$(soap_exec "dml_whisper $player $b logout")" || true
+              fi
             done <<< "$kicklist"
-            json_ok "{\"dismissed\":$dismissed,\"bots\":[$jarr]}"
+            # Every fire failed -> an error envelope, not fabricated success.
+            # Map the last uninvite rc through the same table _party_fire uses.
+            if [[ $attempted -gt 0 && $dismissed -eq 0 ]]; then
+              case "$da_rc" in
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ;;
+                2) json_err SOAP_FAULT "Every dismiss was rejected" "Deploy the server bridges (bridge-setup) and restart the server first." ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ;;
+              esac
+              exit 1
+            fi
+            json_ok "{\"dismissed\":$dismissed,\"attempted\":$attempted,\"bots\":[$jarr]}"
             ;;
           relogin)
             player=""; bot=""
@@ -6500,11 +6544,23 @@ case "$cmd" in
             kicklist="$(db_chars_query "$sql")" || kicklist=""
             while IFS= read -r b || [[ -n "$b" ]]; do
               [[ -z "$b" ]] && continue
+              # Defense-in-depth: DB-sourced names still pass the charname
+              # allowlist before any command string is built (same rule as
+              # kick/dismiss-all and every other SOAP fire path).
+              _valid_charname "$b" || continue
               if out="$(soap_exec "dml_uninvite $b")"; then
                 [[ "$DML_JSON" == 1 ]] && ndjson_line info "kicked $b"
               else
                 [[ "$DML_JSON" == 1 ]] && ndjson_line warn "could not kick $b"
               fi
+              # Same smoke finding as kick/dismiss-all: uninvite alone leaves
+              # the bot in-world, still following its ex-master -- only a
+              # master `logout` whisper despawns it. Fixed-string whisper
+              # (both names charname-validated above), best-effort: the
+              # replace must go on even if one bot's whisper fails, and it
+              # still fires when the uninvite was rejected (a stray that
+              # already left the group is exactly the bot that needs it).
+              out="$(soap_exec "dml_whisper $player $b logout")" || true
             done <<< "$kicklist"
             requested=0; joined=0
             while IFS= read -r cls || [[ -n "$cls" ]]; do
