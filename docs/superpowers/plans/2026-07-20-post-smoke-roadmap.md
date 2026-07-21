@@ -88,6 +88,27 @@ real:
 - Spec picker/validator drift for non-lowercase custom spec names (the picker
   can offer a name `_valid_bot_spec` then rejects).
 
+### Statistics page (user request, 2026-07-21 — DECIDED, build after smoke testing)
+
+Beyond-parity feature (verified: The Lab has NO stats page). Scoped against the
+live DB — every stat below ran sub-second. User picked the groups:
+
+- **INCLUDE:** World Population (family vs bots, level spread, class/faction
+  split, guilds) · Economy (gold in circulation, richest, AH stock, mail) ·
+  Family's Journey (playtime, last seen, achievements, quests, honor,
+  professions) · Server History (boots, lifetime hours, longest session,
+  connection peak — from acore_auth.uptime) · Bot Watch (busiest zones,
+  bots per continent, combined bot playtime).
+- **EXCLUDED:** Fun & Games (casino/transmog/pets) — user opted out.
+- Implementation notes (from scoping run wf_1f4d916a): new read-only `wow
+  stats` CLI arm → wow_stats Tauri cmd → api.ts → Statistics.svelte in the
+  Server sidebar group; load-on-mount + Refresh (NOT the 7s poll); needs
+  client-side id→name maps (class/race exist in $lib/wow; zone map = biggest
+  cost, drives Bot Watch's medium effort); label AH stock as shop stock (it is
+  100% ahbot); arena ratings are seeded fiction — never show a ladder; deaths
+  are not tracked in stock AC (impossible); server-stopped → the in-page
+  greeting. Read-only only — never extend the sanctioned-write list.
+
 ## Round 3 — Shareable release / installer
 
 **The highest-value new capability**, given the stated goal of sharing this.
