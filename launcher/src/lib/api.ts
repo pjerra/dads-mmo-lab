@@ -802,9 +802,12 @@ export async function wowPartyKick(
 ): Promise<{ kicked: boolean; dismissed: boolean }> {
   return await invoke("wow_party_kick", { player, bot });
 }
+// `dismissed` counts bots whose uninvite fire actually succeeded (the CLI
+// errors out instead when EVERY fire failed); `attempted` is the party's
+// bot count, so attempted > dismissed means a partial failure.
 export async function wowPartyDismissAll(
   player: string,
-): Promise<{ dismissed: number; bots: string[] }> {
+): Promise<{ dismissed: number; attempted: number; bots: string[] }> {
   return await invoke("wow_party_dismiss_all", { player });
 }
 export async function wowPartyRelogin(player: string, bot: string): Promise<{ relogged: boolean }> {

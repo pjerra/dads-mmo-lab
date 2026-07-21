@@ -2975,22 +2975,43 @@ case "$cmd" in
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
-            dismissed=0; jarr=""; first=1
+            dismissed=0; attempted=0; da_rc=0; jarr=""; first=1
             while IFS= read -r b || [[ -n "$b" ]]; do
               [[ -z "$b" ]] && continue
               # Defense-in-depth: DB-sourced names still pass the charname
               # allowlist before any command string is built (same rule as
               # every other SOAP fire path).
               _valid_charname "$b" || continue
+              attempted=$(( attempted + 1 ))
               # Best-effort per bot, same kick-then-dismiss pair as `kick`:
               # one unreachable bot must not strand the rest of the party.
-              out="$(soap_exec "dml_uninvite $b")" || true
-              out="$(soap_exec "dml_whisper $player $b logout")" || true
-              dismissed=$(( dismissed + 1 ))
-              [[ $first -eq 0 ]] && jarr+=','
-              jarr+="\"$(json_escape "$b")\""; first=0
+              # But `dismissed` counts only bots whose uninvite fire actually
+              # succeeded -- an attempt is not a dismissal (review finding:
+              # SOAP down with the DB up used to report "dismissed: N" and
+              # exit 0 while every bot was still in the party).
+              if out="$(soap_exec "dml_uninvite $b")"; then
+                out="$(soap_exec "dml_whisper $player $b logout")" || true
+                dismissed=$(( dismissed + 1 ))
+                [[ $first -eq 0 ]] && jarr+=','
+                jarr+="\"$(json_escape "$b")\""; first=0
+              else
+                da_rc=$?
+                # Still whisper: a stray that already left the group (uninvite
+                # rejected) is exactly the bot a logout whisper despawns.
+                out="$(soap_exec "dml_whisper $player $b logout")" || true
+              fi
             done <<< "$kicklist"
-            json_ok "{\"dismissed\":$dismissed,\"bots\":[$jarr]}"
+            # Every fire failed -> an error envelope, not fabricated success.
+            # Map the last uninvite rc through the same table _party_fire uses.
+            if [[ $attempted -gt 0 && $dismissed -eq 0 ]]; then
+              case "$da_rc" in
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ;;
+                2) json_err SOAP_FAULT "Every dismiss was rejected" "Deploy the server bridges (bridge-setup) and restart the server first." ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ;;
+              esac
+              exit 1
+            fi
+            json_ok "{\"dismissed\":$dismissed,\"attempted\":$attempted,\"bots\":[$jarr]}"
             ;;
           relogin)
             player=""; bot=""

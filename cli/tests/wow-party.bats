@@ -243,6 +243,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow party dismiss-all --player Testen --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.dismissed')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.attempted')" = "2" ]
   [ "$(echo "$output" | jq -r '.data.bots | length')" = "2" ]
   [ "$(echo "$output" | jq -r '.data.bots[0]')" = "Botmage" ]
   # Per bot: uninvite then logout whisper; bots processed in list order.
@@ -251,6 +252,56 @@ teardown() { teardown_fixture; }
   u2="$(grep -n 'dml_uninvite Botwar' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
   w2="$(grep -n 'dml_whisper Testen Botwar logout' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
   [ "$u1" -lt "$w1" ]; [ "$w1" -lt "$u2" ]; [ "$u2" -lt "$w2" ]
+}
+
+@test "party dismiss-all fails honestly when EVERY SOAP fire fails (no fabricated success)" {
+  # SOAP down while the DB is up: the online-guard and member query succeed,
+  # every uninvite/whisper fails. The old code exited 0 with dismissed:N --
+  # now this is an error envelope mapped like _party_fire (rc 4 -> UNREACHABLE).
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CURL_EXIT=7
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Botmage\nBotwar\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/bots.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow party dismiss-all --player Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
+}
+
+@test "party dismiss-all maps an all-faults run to SOAP_FAULT with the bridge hint" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Botmage\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/bots.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow party dismiss-all --player Testen --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
+  echo "$output" | grep -q 'bridge-setup'
+}
+
+@test "party dismiss-all counts only real dismissals on a partial failure" {
+  use_curl_stub
+  # SOAP call order: uninvite Botmage (ok), whisper Botmage (ok),
+  # uninvite Botwar (FAULT), whisper Botwar (fault too -- still best-effort).
+  export DML_STUB_CURL_SEQ="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml $BATS_TEST_DIRNAME/fixtures/soap-ok.xml $BATS_TEST_DIRNAME/fixtures/soap-fault.xml $BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  export DML_STUB_CURL_SEQ_STATE="$FIXTURE/soap.state"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Botmage\nBotwar\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/bots.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow party dismiss-all --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.dismissed')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.attempted')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.bots | length')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.bots[0]')" = "Botmage" ]
 }
 
 @test "party dismiss-all with an offline player is NOT_FOUND before any SOAP fire" {
@@ -275,6 +326,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow party dismiss-all --player Testen --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.dismissed')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.attempted')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.bots | length')" = "0" ]
 }
 

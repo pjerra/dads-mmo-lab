@@ -206,9 +206,13 @@
     busy = true; error = null; note = null;
     try {
       const r = await wowPartyDismissAll(p);
+      // dismissed === 0 can only mean "no bots in the party" now: the CLI
+      // returns an error envelope (caught below) when every fire failed.
       note = r.dismissed === 0
         ? "No bots to dismiss."
-        : `Dismissed ${r.dismissed} bot${r.dismissed === 1 ? "" : "s"}.`;
+        : r.attempted > r.dismissed
+          ? `Dismissed ${r.dismissed} of ${r.attempted} bots — the rest did not respond, try again.`
+          : `Dismissed ${r.dismissed} bot${r.dismissed === 1 ? "" : "s"}.`;
       members = await wowPartyList(p);
     } catch (e) { showErr(e); } finally { busy = false; }
   }
