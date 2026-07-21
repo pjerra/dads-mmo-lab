@@ -52,17 +52,23 @@ or show empty/broken states. User wants either (a) grey out those sidebar
 items when the server is down, or (b) let you open the page and greet you with
 a clear "start the server first" message.
 
-**Recommendation: (b) the friendly in-page greeting, NOT greying out** — plus
-an optional subtle sidebar hint. Reasons: greying-out is confusing (no reason
-shown, looks broken), blocks exploring what a page does, and needs the same
-per-page "requires server" metadata anyway; the greeting is discoverable, can
-carry a **Start server** button right there, and several pages already do a
-rough version of this (Console's offline note, Home's start card). Work = a
-shared `<ServerRequired>` placeholder + a per-page `requiresServer` flag, shown
-reactively off the existing server-status store. Pages that DON'T need it
-(Help, Tools disk/wslconfig, Library install, Module install, file-based
-config edits, Backups) stay fully usable when stopped. Small-medium, no
-backend. Awaiting the user's pick between (a)/(b)/hybrid before building.
+**DECIDED (user, 2026-07-21): (b) the friendly in-page greeting**, not
+grey-out. Reasons: grey-out is confusing (no reason shown, looks broken),
+blocks exploring what a page does, and needs the same per-page metadata anyway;
+the greeting is discoverable and can carry a **Start server** button right
+there, and several pages already do a rough version (Console's offline note,
+Home's start card).
+
+Build plan: a shared `<ServerRequired>` placeholder (message + Start button),
+shown reactively off the existing `server-status` store when the verdict is not
+`online`. Gate ONLY the pages that are useless while stopped — Console,
+Character view, Teleport, GM Tools, Item Database, My Party, Bot Browser,
+Accounts (all need the DB/SOAP up). Do NOT blanket-gate the mixed/offline-ok
+pages — Config (file edits apply on next start), Modules/Library install,
+Tools disk tools, Backups' Verify, Help — they stay usable stopped (they can
+keep their own inline notices where a specific action needs the server).
+Small-medium, frontend-only, no new flag (read-only UX). Not started — waiting
+on the user's "build now vs after smoke testing".
 
 
 Concrete items deferred from the improvements review, all low-severity but
