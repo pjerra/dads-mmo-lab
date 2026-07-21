@@ -174,9 +174,10 @@ soap_exec() {
 # SOAP, never a direct write. SIX direct MySQL writes are sanctioned
 # project-wide (see 60-backup.sh header for the full list): the pre-existing
 # LAN toggle's realmlist UPDATE (90-main.sh `lan`), backup restore,
-# teleport-coords' characters.position_x/y/z/map/orientation UPDATE via
-# _chars_write_stmt below -- OFFLINE characters only, see the
-# `teleport-coords` arm in 90-main.sh -- module repair's INSERT/DELETE on
+# the characters.position_x/y/z/map/orientation UPDATE via
+# _chars_write_stmt below -- OFFLINE characters only, two callers with
+# identical mechanics: the `teleport-coords` arm and `gm return-home`'s
+# offline faction-capital path in 90-main.sh -- module repair's INSERT/DELETE on
 # the `updates` tracking tables ONLY (never game tables), (Batch 3
 # F13b) `module fixit battlepass-npc`'s fixed-literal INSERTs of
 # creature_template/creature entry 90100 (idempotence-checked, no user
@@ -1754,15 +1755,22 @@ _npc_coord_specs() {
 # EXCLUDING the AHBOT and DMLSOAP system accounts.
 #
 # The query order is FIXED -- tests stub the mysql calls positionally via
-# DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change:
-#   1  population overview (chars)   2  level buckets (chars)
-#   3  class breakdown (chars)       4  faction split (chars)
-#   5  top-5 levels (chars)          6  guild count+members (chars)
-#   7  copper totals (chars)         8  top-5 richest (chars)
-#   9  auction house (chars)         10 mail counts (chars)
-#   11 family journey rows (chars)   12 uptime aggregates (auth)
-#   13 realm name (auth)             14 last-15 boots (auth)
-#   15 online-bot zones (chars)      16 online-bot continents (chars)
+# DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change.
+# Segment-sensitive stats (classes/factions/top-levels/richest) carry
+# per-segment family/bots data for the page's All|Family|Bots filter
+# ("all" is a client-side merge):
+#   1  playerbots-schema probe (chars; the ONLY tolerated failure -- a
+#      missing acore_playerbots schema degrades every bot stat to zero
+#      instead of failing the whole envelope)
+#   2  population overview (chars)   3  level buckets (chars)
+#   4  class breakdown f/b (chars)   5  faction split f/b (chars)
+#   6  top-5 levels FAMILY (chars)   7  top-5 levels BOTS (chars)
+#   8  guild count+members (chars)   9  copper totals (chars)
+#   10 top-5 richest FAMILY (chars)  11 top-5 richest BOTS (chars)
+#   12 auction house (chars)         13 mail counts (chars)
+#   14 family journey rows (chars)   15 uptime aggregates (auth)
+#   16 realm name (auth)             17 last-15 boots (auth)
+#   18 online-bot zones (chars)      19 online-bot continents (chars)
 # ---------------------------------------------------------------------------
 
 # Echo a JSON-safe non-negative integer: the 10#-normalized value when the
@@ -1796,9 +1804,20 @@ _stats_payload() {
     # System accounts that are neither family nor ambient bots: the auction
     # house seeder and the launcher's own SOAP account.
     sys="c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))"
+
+    # -- 1: playerbots schema probe (review finding 8c). A box without the
+    # acore_playerbots schema (playerbots module absent / not yet migrated)
+    # used to fail EVERY $bot-referencing query and surface as one opaque
+    # DB_UNREACHABLE. Probe it once; when missing, substitute a constant
+    # FALSE so all bot counts degrade to zeros and the rest of the page
+    # keeps working. A fully-down DB fails this probe too -- and then also
+    # fails query 2, so the envelope still errors exactly as before.
+    if ! db_chars_query "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;" >/dev/null 2>&1; then
+        bot="0=1"
+    fi
     fam="NOT ($bot) AND NOT ($sys)"
 
-    # -- 1: population overview: one full-table pass, five numbers ----------
+    # -- 2: population overview: one full-table pass, five numbers ----------
     local fam_total fam_online bot_total bot_online bot_playtime
     rows="$(db_chars_query "SELECT
         COALESCE(SUM(CASE WHEN $fam THEN 1 ELSE 0 END),0),
@@ -1813,10 +1832,14 @@ _stats_payload() {
     bot_total="$(_stats_num "$bot_total")"; bot_online="$(_stats_num "$bot_online")"
     bot_playtime="$(_stats_num "$bot_playtime")"
 
-    # -- 2: level spread bucketed by 10 (bucket 0 = levels 1-10 ... 7 = 71-80),
+    # -- 3: level spread bucketed by 10 (bucket 0 = levels 1-10 ... 7 = 71-80),
     # family/bot split per bucket so the chart can stack the two series.
+    # GREATEST(c.level,1): level is UNSIGNED, so a level-0 row (possible via
+    # hand-edited DBs) would make `level-1` an out-of-range error in strict
+    # mode and fail the whole envelope (review finding 8a); clamping folds
+    # level 0 into bucket 0 instead.
     local levels='[' lfirst=1 b fcnt bcnt
-    rows="$(db_chars_query "SELECT FLOOR((c.level-1)/10),
+    rows="$(db_chars_query "SELECT FLOOR((GREATEST(c.level,1)-1)/10),
         COALESCE(SUM(CASE WHEN $fam THEN 1 ELSE 0 END),0),
         COALESCE(SUM(CASE WHEN $bot THEN 1 ELSE 0 END),0)
       FROM characters c GROUP BY 1 ORDER BY 1;")" || return 1
@@ -1831,49 +1854,76 @@ _stats_payload() {
     done <<< "$rows"
     levels+=']'
 
-    # -- 3: class breakdown (all non-system characters) ---------------------
-    local classes='[' cfirst=1 cls cnt
-    rows="$(db_chars_query "SELECT c.class, COUNT(*) FROM characters c WHERE NOT ($sys) GROUP BY c.class ORDER BY c.class;")" || return 1
-    while IFS=$'\t' read -r cls cnt || [[ -n "$cls" ]]; do
+    # -- 4: class breakdown, family/bots split per class (segment filter).
+    # Zero-count entries are dropped per segment -- "all" is a client-side
+    # sum of the two arrays, so nothing is lost.
+    local cls_fam='[' cls_bot='[' cffirst=1 cbfirst=1 cls fcls_n bcls_n fv bv
+    rows="$(db_chars_query "SELECT c.class,
+        COALESCE(SUM(CASE WHEN $fam THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN $bot THEN 1 ELSE 0 END),0)
+      FROM characters c WHERE NOT ($sys) GROUP BY c.class ORDER BY c.class;")" || return 1
+    while IFS=$'\t' read -r cls fcls_n bcls_n || [[ -n "$cls" ]]; do
         [[ -z "$cls" ]] && continue
         [[ "$cls" =~ ^[0-9]+$ ]] || continue
-        [[ $cfirst -eq 0 ]] && classes+=','
-        classes+="{\"class\":$((10#$cls)),\"count\":$(_stats_num "$cnt")}"
-        cfirst=0
+        fv="$(_stats_num "$fcls_n")"; bv="$(_stats_num "$bcls_n")"
+        if (( fv > 0 )); then
+            [[ $cffirst -eq 0 ]] && cls_fam+=','
+            cls_fam+="{\"class\":$((10#$cls)),\"count\":$fv}"; cffirst=0
+        fi
+        if (( bv > 0 )); then
+            [[ $cbfirst -eq 0 ]] && cls_bot+=','
+            cls_bot+="{\"class\":$((10#$cls)),\"count\":$bv}"; cbfirst=0
+        fi
     done <<< "$rows"
-    classes+=']'
+    cls_fam+=']'; cls_bot+=']'
 
-    # -- 4: faction split via the race -> faction mapping -------------------
-    local alliance horde
+    # -- 5: faction split per segment (race -> faction mapping) -------------
+    local fam_alliance fam_horde bot_alliance bot_horde
     rows="$(db_chars_query "SELECT
-        COALESCE(SUM(CASE WHEN c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
-        COALESCE(SUM(CASE WHEN c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0)
-      FROM characters c WHERE NOT ($sys);")" || return 1
+        COALESCE(SUM(CASE WHEN ($fam) AND c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($fam) AND c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($bot) AND c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($bot) AND c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0)
+      FROM characters c;")" || return 1
     rows="${rows%%$'\n'*}"
-    IFS=$'\t' read -r alliance horde <<< "$rows" || true
-    alliance="$(_stats_num "$alliance")"; horde="$(_stats_num "$horde")"
+    IFS=$'\t' read -r fam_alliance fam_horde bot_alliance bot_horde <<< "$rows" || true
+    fam_alliance="$(_stats_num "$fam_alliance")"; fam_horde="$(_stats_num "$fam_horde")"
+    bot_alliance="$(_stats_num "$bot_alliance")"; bot_horde="$(_stats_num "$bot_horde")"
 
-    # -- 5: top-5 highest-level characters (family flagged) -----------------
-    local tops='[' tfirst=1 name lvl isfam
-    rows="$(db_chars_query "SELECT c.name, c.level, CASE WHEN $fam THEN 1 ELSE 0 END
-      FROM characters c WHERE NOT ($sys)
+    # -- 6+7: top-5 highest-level characters per segment. The per-row
+    # `family` flag is kept (true/false by construction) so the client's
+    # merged "all" view renders the family badge exactly as before.
+    local tops_fam='[' tops_bot='[' tfirst=1 name lvl
+    rows="$(db_chars_query "SELECT c.name, c.level
+      FROM characters c WHERE $fam
       ORDER BY c.level DESC, c.totaltime DESC, c.name LIMIT 5;")" || return 1
-    while IFS=$'\t' read -r name lvl isfam || [[ -n "$name" ]]; do
+    while IFS=$'\t' read -r name lvl || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
-        [[ $tfirst -eq 0 ]] && tops+=','
-        tops+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":$(_stats_bool "$isfam")}"
+        [[ $tfirst -eq 0 ]] && tops_fam+=','
+        tops_fam+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":true}"
         tfirst=0
     done <<< "$rows"
-    tops+=']'
+    tops_fam+=']'
+    tfirst=1
+    rows="$(db_chars_query "SELECT c.name, c.level
+      FROM characters c WHERE $bot
+      ORDER BY c.level DESC, c.totaltime DESC, c.name LIMIT 5;")" || return 1
+    while IFS=$'\t' read -r name lvl || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        [[ $tfirst -eq 0 ]] && tops_bot+=','
+        tops_bot+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":false}"
+        tfirst=0
+    done <<< "$rows"
+    tops_bot+=']'
 
-    # -- 6: guild count + member total (avg size is client-side math) ------
+    # -- 8: guild count + member total (avg size is client-side math) ------
     local guilds members
     rows="$(db_chars_query "SELECT (SELECT COUNT(*) FROM guild), (SELECT COUNT(*) FROM guild_member);")" || return 1
     rows="${rows%%$'\n'*}"
     IFS=$'\t' read -r guilds members <<< "$rows" || true
     guilds="$(_stats_num "$guilds")"; members="$(_stats_num "$members")"
 
-    # -- 7: copper totals (money is COPPER -- the client divides by 10000).
+    # -- 9: copper totals (money is COPPER -- the client divides by 10000).
     # "total" spans family+bots only (system accounts excluded), so the
     # three numbers always add up on screen.
     local cop_total cop_fam cop_bot
@@ -1886,20 +1936,32 @@ _stats_payload() {
     IFS=$'\t' read -r cop_total cop_fam cop_bot <<< "$rows" || true
     cop_total="$(_stats_num "$cop_total")"; cop_fam="$(_stats_num "$cop_fam")"; cop_bot="$(_stats_num "$cop_bot")"
 
-    # -- 8: top-5 richest characters (family flagged) -----------------------
-    local rich='[' rfirst=1 money
-    rows="$(db_chars_query "SELECT c.name, c.money, CASE WHEN $fam THEN 1 ELSE 0 END
-      FROM characters c WHERE NOT ($sys)
+    # -- 10+11: top-5 richest characters per segment (same family-flag
+    # convention as the top-levels pair above).
+    local rich_fam='[' rich_bot='[' rfirst=1 money
+    rows="$(db_chars_query "SELECT c.name, c.money
+      FROM characters c WHERE $fam
       ORDER BY c.money DESC, c.name LIMIT 5;")" || return 1
-    while IFS=$'\t' read -r name money isfam || [[ -n "$name" ]]; do
+    while IFS=$'\t' read -r name money || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
-        [[ $rfirst -eq 0 ]] && rich+=','
-        rich+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":$(_stats_bool "$isfam")}"
+        [[ $rfirst -eq 0 ]] && rich_fam+=','
+        rich_fam+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":true}"
         rfirst=0
     done <<< "$rows"
-    rich+=']'
+    rich_fam+=']'
+    rfirst=1
+    rows="$(db_chars_query "SELECT c.name, c.money
+      FROM characters c WHERE $bot
+      ORDER BY c.money DESC, c.name LIMIT 5;")" || return 1
+    while IFS=$'\t' read -r name money || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        [[ $rfirst -eq 0 ]] && rich_bot+=','
+        rich_bot+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":false}"
+        rfirst=0
+    done <<< "$rows"
+    rich_bot+=']'
 
-    # -- 9: auction house stock. On this server the AH is 100% the ahbot's
+    # -- 12: auction house stock. On this server the AH is 100% the ahbot's
     # shop -- the page labels it "auction house shop stock", never implying
     # player listings.
     local ah_count ah_buyout
@@ -1908,7 +1970,7 @@ _stats_payload() {
     IFS=$'\t' read -r ah_count ah_buyout <<< "$rows" || true
     ah_count="$(_stats_num "$ah_count")"; ah_buyout="$(_stats_num "$ah_buyout")"
 
-    # -- 10: pending mail (+ how much of it is addressed to the family) -----
+    # -- 13: pending mail (+ how much of it is addressed to the family) -----
     local mail_total mail_fam
     rows="$(db_chars_query "SELECT COUNT(*),
         COALESCE(SUM(CASE WHEN m.receiver IN (SELECT c.guid FROM characters c WHERE $fam) THEN 1 ELSE 0 END),0)
@@ -1917,25 +1979,28 @@ _stats_payload() {
     IFS=$'\t' read -r mail_total mail_fam <<< "$rows" || true
     mail_total="$(_stats_num "$mail_total")"; mail_fam="$(_stats_num "$mail_fam")"
 
-    # -- 11: the family's journey -- one row per family character. The two
+    # -- 14: the family's journey -- one row per family character. The two
     # correlated COUNTs are per-guid index lookups (guid is the PK prefix on
     # both side tables); with a handful of family characters this stays
     # sub-second (validated live).
-    local journey='[' jfirst=1 jlvl jcls jtime jseen jkills jach jquests
-    rows="$(db_chars_query "SELECT c.name, c.level, c.class, c.totaltime, c.logout_time, c.totalKills,
+    local journey='[' jfirst=1 jlvl jcls jtime jseen jonl jkills jach jquests
+    rows="$(db_chars_query "SELECT c.name, c.level, c.class, c.totaltime, c.logout_time, c.online, c.totalKills,
         (SELECT COUNT(*) FROM character_achievement a WHERE a.guid = c.guid),
         (SELECT COUNT(*) FROM character_queststatus_rewarded q WHERE q.guid = c.guid)
       FROM characters c WHERE $fam
       ORDER BY c.totaltime DESC, c.name;")" || return 1
-    while IFS=$'\t' read -r name jlvl jcls jtime jseen jkills jach jquests || [[ -n "$name" ]]; do
+    while IFS=$'\t' read -r name jlvl jcls jtime jseen jonl jkills jach jquests || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
         [[ $jfirst -eq 0 ]] && journey+=','
-        journey+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$jlvl"),\"class\":$(_stats_num "$jcls"),\"playtime\":$(_stats_num "$jtime"),\"last_seen\":$(_stats_num "$jseen"),\"kills\":$(_stats_num "$jkills"),\"achievements\":$(_stats_num "$jach"),\"quests\":$(_stats_num "$jquests")}"
+        # online (review finding 8b): logout_time is stale by definition for
+        # a character who is logged in RIGHT NOW -- the client shows "Online
+        # now" instead of the last-seen timestamp.
+        journey+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$jlvl"),\"class\":$(_stats_num "$jcls"),\"playtime\":$(_stats_num "$jtime"),\"last_seen\":$(_stats_num "$jseen"),\"online\":$(_stats_bool "$jonl"),\"kills\":$(_stats_num "$jkills"),\"achievements\":$(_stats_num "$jach"),\"quests\":$(_stats_num "$jquests")}"
         jfirst=0
     done <<< "$rows"
     journey+=']'
 
-    # -- 12: server history aggregates (acore_auth.uptime) ------------------
+    # -- 15: server history aggregates (acore_auth.uptime) ------------------
     local boots up_total up_longest up_peak
     rows="$(db_auth_query "SELECT COUNT(*), COALESCE(SUM(uptime),0), COALESCE(MAX(uptime),0), COALESCE(MAX(maxplayers),0) FROM uptime;")" || return 1
     rows="${rows%%$'\n'*}"
@@ -1943,12 +2008,12 @@ _stats_payload() {
     boots="$(_stats_num "$boots")"; up_total="$(_stats_num "$up_total")"
     up_longest="$(_stats_num "$up_longest")"; up_peak="$(_stats_num "$up_peak")"
 
-    # -- 13: realm name -----------------------------------------------------
+    # -- 16: realm name -----------------------------------------------------
     local realm
     realm="$(db_auth_query "SELECT name FROM realmlist ORDER BY id LIMIT 1;")" || return 1
     realm="${realm%%$'\n'*}"
 
-    # -- 14: the last 15 boots, oldest first (per-boot chart data) ----------
+    # -- 17: the last 15 boots, oldest first (per-boot chart data) ----------
     local recent='[' refirst=1 rstart rup
     rows="$(db_auth_query "SELECT starttime, uptime FROM (SELECT starttime, uptime FROM uptime ORDER BY starttime DESC LIMIT 15) t ORDER BY starttime;")" || return 1
     while IFS=$'\t' read -r rstart rup || [[ -n "$rstart" ]]; do
@@ -1960,7 +2025,7 @@ _stats_payload() {
     done <<< "$rows"
     recent+=']'
 
-    # -- 15: top-8 busiest zones for ONLINE bots (ids -> names client-side) -
+    # -- 18: top-8 busiest zones for ONLINE bots (ids -> names client-side) -
     local zones='[' zfirst=1 zone zcnt
     rows="$(db_chars_query "SELECT c.zone, COUNT(*) FROM characters c WHERE c.online = 1 AND ($bot) GROUP BY c.zone ORDER BY COUNT(*) DESC, c.zone LIMIT 8;")" || return 1
     while IFS=$'\t' read -r zone zcnt || [[ -n "$zone" ]]; do
@@ -1972,19 +2037,23 @@ _stats_payload() {
     done <<< "$rows"
     zones+=']'
 
-    # -- 16: online bots per continent (map ids -> names client-side) -------
+    # -- 19: online bots per continent, bounded to the four playable maps +
+    # one "other worlds" bucket (map -1; review finding 8d) -- bots parked in
+    # instances/battlegrounds used to spray one chip per raw map id.
     local conts='[' cofirst=1 cmap ccnt
-    rows="$(db_chars_query "SELECT c.map, COUNT(*) FROM characters c WHERE c.online = 1 AND ($bot) GROUP BY c.map ORDER BY COUNT(*) DESC, c.map;")" || return 1
+    rows="$(db_chars_query "SELECT CASE WHEN c.map IN (0,1,530,571) THEN c.map ELSE -1 END, COUNT(*) FROM characters c WHERE c.online = 1 AND ($bot) GROUP BY 1 ORDER BY 2 DESC, 1;")" || return 1
     while IFS=$'\t' read -r cmap ccnt || [[ -n "$cmap" ]]; do
         [[ -z "$cmap" ]] && continue
-        [[ "$cmap" =~ ^[0-9]+$ ]] || continue
+        [[ "$cmap" =~ ^-?[0-9]+$ ]] || continue
+        # 10# refuses a sign, so normalize the only legal negative by hand.
+        if [[ "$cmap" == -* ]]; then cmap="-1"; else cmap=$((10#$cmap)); fi
         [[ $cofirst -eq 0 ]] && conts+=','
-        conts+="{\"map\":$((10#$cmap)),\"count\":$(_stats_num "$ccnt")}"
+        conts+="{\"map\":$cmap,\"count\":$(_stats_num "$ccnt")}"
         cofirst=0
     done <<< "$rows"
     conts+=']'
 
-    printf '%s' "{\"population\":{\"family\":{\"total\":$fam_total,\"online\":$fam_online},\"bots\":{\"total\":$bot_total,\"online\":$bot_online},\"levels\":$levels,\"classes\":$classes,\"factions\":{\"alliance\":$alliance,\"horde\":$horde},\"top_levels\":$tops,\"guilds\":{\"count\":$guilds,\"members\":$members}},\"economy\":{\"copper\":{\"total\":$cop_total,\"family\":$cop_fam,\"bots\":$cop_bot},\"richest\":$rich,\"auction\":{\"count\":$ah_count,\"buyout\":$ah_buyout},\"mail\":{\"total\":$mail_total,\"to_family\":$mail_fam}},\"journey\":$journey,\"history\":{\"boots\":$boots,\"total_uptime\":$up_total,\"longest\":$up_longest,\"peak\":$up_peak,\"realm\":\"$(json_escape "$realm")\",\"recent\":$recent},\"botwatch\":{\"zones\":$zones,\"continents\":$conts,\"playtime\":$bot_playtime}}"
+    printf '%s' "{\"population\":{\"family\":{\"total\":$fam_total,\"online\":$fam_online},\"bots\":{\"total\":$bot_total,\"online\":$bot_online},\"levels\":$levels,\"classes\":{\"family\":$cls_fam,\"bots\":$cls_bot},\"factions\":{\"family\":{\"alliance\":$fam_alliance,\"horde\":$fam_horde},\"bots\":{\"alliance\":$bot_alliance,\"horde\":$bot_horde}},\"top_levels\":{\"family\":$tops_fam,\"bots\":$tops_bot},\"guilds\":{\"count\":$guilds,\"members\":$members}},\"economy\":{\"copper\":{\"total\":$cop_total,\"family\":$cop_fam,\"bots\":$cop_bot},\"richest\":{\"family\":$rich_fam,\"bots\":$rich_bot},\"auction\":{\"count\":$ah_count,\"buyout\":$ah_buyout},\"mail\":{\"total\":$mail_total,\"to_family\":$mail_fam}},\"journey\":$journey,\"history\":{\"boots\":$boots,\"total_uptime\":$up_total,\"longest\":$up_longest,\"peak\":$up_peak,\"realm\":\"$(json_escape "$realm")\",\"recent\":$recent},\"botwatch\":{\"zones\":$zones,\"continents\":$conts,\"playtime\":$bot_playtime}}"
     return 0
 }
 # ---------------------------------------------------------------------------
@@ -5306,6 +5375,17 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        # Smoke item 5: the character row only updates on the character's
+        # save, so an ONLINE character can show stale gear (seen live with a
+        # GM robe swap). Best-effort freshness: when the target is online,
+        # flush live state with a SOAP `saveall` BEFORE the equipment read.
+        # Guarded so it can never break the paperdoll: offline characters
+        # (and chars the lookup can't resolve) skip it entirely, and a down
+        # SOAP falls through silently (|| true) to the last-saved data.
+        pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;" 2>/dev/null)" || pd_online=""
+        if [[ "${pd_online%%$'\n'*}" == "1" ]]; then
+          soap_exec "saveall" >/dev/null 2>&1 || true
+        fi
         # AC's ac-db-import (re-run on any cold `compose up`) applies core
         # migrations, one of which replaced the packed playerBytes/
         # playerBytes2 appearance columns with discrete skin/face/hairStyle/
@@ -6214,11 +6294,60 @@ case "$cmd" in
             json_ok "{\"members\":$out}"
             ;;
           kick)
-            bot=""
-            [[ "${1:-}" == "--bot" ]] && { _need_flag_val "$1" $#; bot="$2"; shift 2; }
+            player=""; bot=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" "Kick needs --player (the bot's master) so the bot can also be dismissed."; exit 1; }
             _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
+            # Smoke finding: uninvite alone leaves the bot in the world,
+            # still following its master. Playerbots only logs a bot out when
+            # its MASTER whispers `logout`, so kick = uninvite THEN a logout
+            # whisper through the same fixed-string dml_whisper bridge the
+            # botcmd allowlist uses (no free-text path: both names are
+            # _valid_charname-checked, the message is the literal `logout`).
+            # The whisper is best-effort: once the uninvite succeeded the
+            # kick must not half-fail (e.g. the bot already logged out).
             _party_fire "dml_uninvite $bot" "kick"
-            json_ok "{\"kicked\":true}"
+            dismissed=true
+            out="$(soap_exec "dml_whisper $player $bot logout")" || dismissed=false
+            json_ok "{\"kicked\":true,\"dismissed\":$dismissed}"
+            ;;
+          dismiss-all)
+            player=""
+            [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            pguid="$(_party_online_guid "$player")"
+            [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
+            # Same bot-members query as preset-load's kick phase.
+            sql="SELECT c.name
+                 FROM group_member gm
+                 JOIN characters c ON c.guid = gm.memberGuid
+                 WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
+                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            kicklist="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
+            dismissed=0; jarr=""; first=1
+            while IFS= read -r b || [[ -n "$b" ]]; do
+              [[ -z "$b" ]] && continue
+              # Defense-in-depth: DB-sourced names still pass the charname
+              # allowlist before any command string is built (same rule as
+              # every other SOAP fire path).
+              _valid_charname "$b" || continue
+              # Best-effort per bot, same kick-then-dismiss pair as `kick`:
+              # one unreachable bot must not strand the rest of the party.
+              out="$(soap_exec "dml_uninvite $b")" || true
+              out="$(soap_exec "dml_whisper $player $b logout")" || true
+              dismissed=$(( dismissed + 1 ))
+              [[ $first -eq 0 ]] && jarr+=','
+              jarr+="\"$(json_escape "$b")\""; first=0
+            done <<< "$kicklist"
+            json_ok "{\"dismissed\":$dismissed,\"bots\":[$jarr]}"
             ;;
           relogin)
             player=""; bot=""
@@ -6458,7 +6587,7 @@ case "$cmd" in
             json_ok "{\"imported\":true,\"name\":\"$(json_escape "$name")\",\"classes\":[$jarr]}"
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|specs|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|specs|add|list|kick|dismiss-all|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
             exit 1
             ;;
         esac
@@ -6585,21 +6714,46 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            # `.unstuck <name> inn` -- stock AC command (cs_misc.cpp,
-            # Console::Yes so it is SOAP-callable): teleports the character to
-            # their hearth/homebind location (the "inn" default). Works for
-            # OFFLINE characters too -- for a disconnected char AC reads
-            # character_homebind and SavePositionInDB -- so this is the safe
-            # "my character is stuck in the world" rescue. The ONLY failure is
-            # an ONLINE character who is in combat or on a flight path (the
-            # command returns false -> SOAP fault), surfaced as a hint.
-            if out="$(soap_exec ".unstuck $player inn")"; then rc=0; else rc=$?; fi
-            case "$rc" in
-              0) json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\"}" ;;
-              2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "If the character is online it can't be in combat or on a flight path -- try again once it is idle." ; exit 1 ;;
-              3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
-              *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+            # Smoke finding: `.unstuck <name> inn` sent characters to their
+            # hearth, which can itself be the stuck spot. Send them to their
+            # FACTION CAPITAL instead: faction from characters.race
+            # (Alliance 1,3,4,7,11 / Horde 2,5,6,8,10), coords = the proven
+            # place-npc capital spawn points (Stormwind map 0, Orgrimmar
+            # map 1).
+            rh_row="$(db_chars_query "SELECT guid, race, online FROM characters WHERE name='$(sql_escape "$player")' LIMIT 1;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
+            [[ -n "$rh_row" ]] || { json_err NOT_FOUND "No such character: $player" ""; exit 1; }
+            IFS=$'\t' read -r rh_guid rh_race rh_online <<< "$rh_row"
+            [[ "$rh_guid" =~ ^[0-9]+$ ]] || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+            case "$rh_race" in
+              1|3|4|7|11) rh_cap="Stormwind"; rh_map=0; rh_x=-8819.3; rh_y=636.2; rh_z=94.1 ;;
+              2|5|6|8|10) rh_cap="Orgrimmar"; rh_map=1; rh_x=1609.2; rh_y=-4407.7; rh_z=17.5 ;;
+              *) json_err NOT_FOUND "Could not determine the faction of $player (race $rh_race)" ""; exit 1 ;;
             esac
+            if [[ "$rh_online" == "1" ]]; then
+              # ONLINE: the stock `.teleport name <char> <location>` console
+              # command (cs_tele.cpp registers the table under "teleport";
+              # the `name` arm is Console::Yes, so SOAP-callable) -- the SAME
+              # fire path the `wow teleport` arm already uses live. The
+              # capital name is a fixed literal from the case above, never
+              # user input; both game_tele rows verified present in this
+              # build's acore_world.game_tele.
+              if out="$(soap_exec "teleport name $player $rh_cap")"; then rc=0; else rc=$?; fi
+              case "$rc" in
+                0) json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\",\"capital\":\"$rh_cap\",\"via\":\"teleport\"}" ;;
+                2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The character can't be teleported in combat or on a flight path -- try again once it is idle." ; exit 1 ;;
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+              esac
+            else
+              # OFFLINE: the sanctioned direct characters-position write --
+              # identical mechanics (columns, orientation=0, guid-keyed) to
+              # the teleport-coords arm above; coords are fixed literals.
+              sql="UPDATE characters SET position_x=$rh_x, position_y=$rh_y, position_z=$rh_z, map=$rh_map, orientation=0 WHERE guid=$rh_guid;"
+              _chars_write_stmt "$sql" \
+                || { json_err DB_UNREACHABLE "Could not update the character's position" "Is ac-database running?"; exit 1; }
+              json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\",\"capital\":\"$rh_cap\",\"via\":\"db\"}"
+            fi
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon|at-login|return-home --json"
@@ -8545,7 +8699,14 @@ case "$cmd" in
         if st_payload="$(_stats_payload)"; then
           json_ok "$st_payload"
         else
-          json_err DB_UNREACHABLE "Could not read statistics from the database" "Is ac-database running?"
+          # Honest hint (review finding 8c): a failed statistics query on a
+          # perfectly reachable DB (e.g. a missing table/migration) must not
+          # masquerade as "is the database running?".
+          if db_chars_query "SELECT 1;" >/dev/null 2>&1; then
+            json_err DB_UNREACHABLE "The statistics queries failed" "The database is reachable but a query failed -- a table or migration may be missing (check the worldserver logs)."
+          else
+            json_err DB_UNREACHABLE "Could not read statistics from the database" "Is ac-database running?"
+          fi
           exit 1
         fi
         ;;
