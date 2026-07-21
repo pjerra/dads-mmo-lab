@@ -242,6 +242,18 @@
   :global(::-webkit-scrollbar-corner) { background: transparent; }
   /* Text selection matches the app's accent instead of the browser default. */
   :global(::selection) { background: rgba(56, 139, 253, 0.35); color: #f0f6fc; }
+  /* Dark native <select>/<option> app-wide (same spirit as the scrollbar
+     theming above): WebView2's UA default renders white dropdowns, which is
+     exactly what pages WITHOUT a local scoped `select` rule showed (e.g. My
+     Party's Role/Class/Spec pickers). Element-level :global(select) is
+     (0,0,1) specificity, so every page that already themes its selects with
+     a scoped rule (`select.svelte-hash`, (0,1,1)) keeps its own look --
+     this is purely the fallback for unstyled ones. <option> has no scoped
+     styling anywhere, so the popup list goes dark app-wide. */
+  :global(select) { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
+  :global(select:focus) { outline: none; border-color: #58a6ff; }
+  :global(select:disabled) { opacity: 0.5; }
+  :global(option) { background: #161b22; color: #c9d1d9; }
   .shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
   .sidebar { background: #0d1117; border-right: 1px solid #30363d; padding: 16px 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
   .sidebar h1 { font-size: 16px; margin: 0 16px 8px; color: #58a6ff; }
