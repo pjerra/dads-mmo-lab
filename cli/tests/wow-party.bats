@@ -200,22 +200,82 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
 }
 
-@test "party kick fires dml_uninvite over SOAP" {
+@test "party kick fires dml_uninvite THEN the master logout whisper, in order" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
-  export DML_STUB_CAPTURE="$FIXTURE/cap.xml"
-  run bash "$DML" wow party kick --bot Botmage --json
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  run bash "$DML" wow party kick --player Testen --bot Botmage --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.kicked')" = "true" ]
-  cap="$(cat "$FIXTURE/cap.xml")"; cmd="${cap#*<command>}"; cmd="${cmd%%</command>*}"
-  [ "$cmd" = "dml_uninvite Botmage" ]
+  [ "$(echo "$output" | jq -r '.data.dismissed')" = "true" ]
+  grep -q 'dml_uninvite Botmage' "$FIXTURE/cap.txt"
+  grep -q 'dml_whisper Testen Botmage logout' "$FIXTURE/cap.txt"
+  # order: uninvite BEFORE the dismissal whisper
+  [ "$(grep -n 'dml_uninvite Botmage' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n 'dml_whisper Testen Botmage logout' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)" ]
 }
 
 @test "party kick rejects a bad bot name" {
   use_curl_stub
-  run bash "$DML" wow party kick --bot 'x y' --json
+  run bash "$DML" wow party kick --player Testen --bot 'x y' --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+}
+
+@test "party kick without --player is BAD_ARG (no half-kick without a dismisser)" {
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow party kick --bot Botmage --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ ! -f "$FIXTURE/curl.log" ]
+}
+
+@test "party dismiss-all uninvites + logout-whispers every stubbed party bot, in order" {
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Botmage\nBotwar\n' > "$FIXTURE/bots.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/bots.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  run bash "$DML" wow party dismiss-all --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.dismissed')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.bots | length')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.bots[0]')" = "Botmage" ]
+  # Per bot: uninvite then logout whisper; bots processed in list order.
+  u1="$(grep -n 'dml_uninvite Botmage' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
+  w1="$(grep -n 'dml_whisper Testen Botmage logout' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
+  u2="$(grep -n 'dml_uninvite Botwar' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
+  w2="$(grep -n 'dml_whisper Testen Botwar logout' "$FIXTURE/cap.txt" | head -1 | cut -d: -f1)"
+  [ "$u1" -lt "$w1" ]; [ "$w1" -lt "$u2" ]; [ "$u2" -lt "$w2" ]
+}
+
+@test "party dismiss-all with an offline player is NOT_FOUND before any SOAP fire" {
+  use_mysql_stub
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow party dismiss-all --player Ghost --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  [ ! -f "$FIXTURE/curl.log" ]
+}
+
+@test "party dismiss-all with no party bots dismisses zero and still succeeds" {
+  use_mysql_stub
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf '' > "$FIXTURE/nobots.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/nobots.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party dismiss-all --player Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.dismissed')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.bots | length')" = "0" ]
 }
 
 @test "party relogin fires dml_login player+bot over SOAP" {
@@ -232,7 +292,7 @@ teardown() { teardown_fixture; }
 @test "party kick maps a SOAP fault to a bridge-setup hint" {
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
-  run bash "$DML" wow party kick --bot Botmage --json
+  run bash "$DML" wow party kick --player Testen --bot Botmage --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_FAULT" ]
 }
@@ -241,7 +301,7 @@ teardown() { teardown_fixture; }
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-401-unauthorized.txt"
   export DML_STUB_HTTP=401
-  run bash "$DML" wow party kick --bot Botmage --json
+  run bash "$DML" wow party kick --player Testen --bot Botmage --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_AUTH" ]
 }
@@ -250,9 +310,22 @@ teardown() { teardown_fixture; }
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CURL_EXIT=7
-  run bash "$DML" wow party kick --bot Botmage --json
+  run bash "$DML" wow party kick --player Testen --bot Botmage --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "SOAP_UNREACHABLE" ]
+}
+
+@test "party kick still reports kicked when the dismissal whisper fails (best-effort)" {
+  # First SOAP call (uninvite) succeeds, second (logout whisper) faults:
+  # the kick itself already worked, so the envelope stays ok with
+  # dismissed:false instead of half-failing after the uninvite.
+  use_curl_stub
+  export DML_STUB_CURL_SEQ="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml $BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
+  export DML_STUB_CURL_SEQ_STATE="$FIXTURE/soap.state"
+  run bash "$DML" wow party kick --player Testen --bot Botmage --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.kicked')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.dismissed')" = "false" ]
 }
 
 # ---------- botcmd (My Party phase 2) ----------

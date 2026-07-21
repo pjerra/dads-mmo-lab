@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyRelogin, wowPartySetup,
+    wowPartyOnline, wowPartyAdd, wowPartyList, wowPartyKick, wowPartyDismissAll, wowPartyRelogin, wowPartySetup,
     wowPartyBotcmd, wowPartyPresetSave, wowPartyPresetList, wowPartyPresetDelete, wowPartyPresetLoad,
     wowPartyPresetShow, wowPartyPresetImport, wowGmLevel, wowServerDetail, wowPartySpecs,
     type OnlineChar, type PartyMember, type PresetInfo,
@@ -67,6 +67,7 @@
     error = null;
     confirmSetup = false;
     confirmingPreset = null;
+    confirmDismissAll = false;
     note = null;
     try {
       online = await wowPartyOnline();
@@ -192,8 +193,24 @@
   async function kick(bot: string) {
     const p = player;
     busy = true; error = null;
-    try { await wowPartyKick(bot); members = await wowPartyList(p); }
+    try { await wowPartyKick(p, bot); members = await wowPartyList(p); }
     catch (e) { showErr(e); } finally { busy = false; }
+  }
+  // Dismiss ALL party bots (uninvite + logout each) -- two-step confirm like
+  // the preset load/delete buttons above.
+  let confirmDismissAll = $state(false);
+  async function dismissAll() {
+    if (!confirmDismissAll) { confirmDismissAll = true; return; }
+    confirmDismissAll = false;
+    const p = player;
+    busy = true; error = null; note = null;
+    try {
+      const r = await wowPartyDismissAll(p);
+      note = r.dismissed === 0
+        ? "No bots to dismiss."
+        : `Dismissed ${r.dismissed} bot${r.dismissed === 1 ? "" : "s"}.`;
+      members = await wowPartyList(p);
+    } catch (e) { showErr(e); } finally { busy = false; }
   }
   async function resummon(bot: string) {
     const p = player;
@@ -418,7 +435,17 @@
     {/if}
     {#if note}<p class="muted">{note}</p>{/if}
 
-    <header class="bar"><h3>Current party</h3></header>
+    <header class="bar"><h3>Current party</h3>
+      {#if members.filter((m) => m.is_bot).length > 0}
+        <button
+          onclick={dismissAll}
+          disabled={busy || loadingPreset || featureLocked("party-ops")}
+          title={featureLocked("party-ops") ? LOCKED_HINT : "Kicks every bot from the party and sends it away"}
+        >
+          {confirmDismissAll ? "Send every bot away — sure?" : "Dismiss all bots"}
+        </button>
+      {/if}
+    </header>
     {#if members.length <= 1}
       <p class="muted">Just you so far — click a class above to add a bot.</p>
     {:else}

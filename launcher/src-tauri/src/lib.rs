@@ -1156,8 +1156,15 @@ async fn wow_party_list(player: String, state: State<'_, AppState>) -> Result<se
 }
 
 #[tauri::command]
-async fn wow_party_kick(bot: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
-    run_json_cmd(state, vec!["wow".into(),"party".into(),"kick".into(),"--bot".into(),bot]).await
+async fn wow_party_kick(player: String, bot: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    // --player is the bot's master: the CLI kick now also whispers `logout`
+    // as the master so the bot actually despawns (smoke-findings fix).
+    run_json_cmd(state, vec!["wow".into(),"party".into(),"kick".into(),"--player".into(),player,"--bot".into(),bot]).await
+}
+
+#[tauri::command]
+async fn wow_party_dismiss_all(player: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(),"party".into(),"dismiss-all".into(),"--player".into(),player]).await
 }
 
 #[tauri::command]
@@ -2173,6 +2180,7 @@ pub fn run() {
             wow_party_add,
             wow_party_list,
             wow_party_kick,
+            wow_party_dismiss_all,
             wow_party_relogin,
             wow_party_botcmd,
             wow_party_preset_save,

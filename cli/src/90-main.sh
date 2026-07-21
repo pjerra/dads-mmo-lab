@@ -2926,11 +2926,60 @@ case "$cmd" in
             json_ok "{\"members\":$out}"
             ;;
           kick)
-            bot=""
-            [[ "${1:-}" == "--bot" ]] && { _need_flag_val "$1" $#; bot="$2"; shift 2; }
+            player=""; bot=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --player) _need_flag_val "$1" $#; player="$2"; shift 2 ;;
+                --bot) _need_flag_val "$1" $#; bot="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" "Kick needs --player (the bot's master) so the bot can also be dismissed."; exit 1; }
             _valid_charname "$bot" || { json_err BAD_ARG "Invalid bot name: $bot" ""; exit 1; }
+            # Smoke finding: uninvite alone leaves the bot in the world,
+            # still following its master. Playerbots only logs a bot out when
+            # its MASTER whispers `logout`, so kick = uninvite THEN a logout
+            # whisper through the same fixed-string dml_whisper bridge the
+            # botcmd allowlist uses (no free-text path: both names are
+            # _valid_charname-checked, the message is the literal `logout`).
+            # The whisper is best-effort: once the uninvite succeeded the
+            # kick must not half-fail (e.g. the bot already logged out).
             _party_fire "dml_uninvite $bot" "kick"
-            json_ok "{\"kicked\":true}"
+            dismissed=true
+            out="$(soap_exec "dml_whisper $player $bot logout")" || dismissed=false
+            json_ok "{\"kicked\":true,\"dismissed\":$dismissed}"
+            ;;
+          dismiss-all)
+            player=""
+            [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
+            _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            pguid="$(_party_online_guid "$player")"
+            [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
+            # Same bot-members query as preset-load's kick phase.
+            sql="SELECT c.name
+                 FROM group_member gm
+                 JOIN characters c ON c.guid = gm.memberGuid
+                 WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
+                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                 ORDER BY c.name;"
+            kicklist="$(db_chars_query "$sql")" \
+              || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
+            dismissed=0; jarr=""; first=1
+            while IFS= read -r b || [[ -n "$b" ]]; do
+              [[ -z "$b" ]] && continue
+              # Defense-in-depth: DB-sourced names still pass the charname
+              # allowlist before any command string is built (same rule as
+              # every other SOAP fire path).
+              _valid_charname "$b" || continue
+              # Best-effort per bot, same kick-then-dismiss pair as `kick`:
+              # one unreachable bot must not strand the rest of the party.
+              out="$(soap_exec "dml_uninvite $b")" || true
+              out="$(soap_exec "dml_whisper $player $b logout")" || true
+              dismissed=$(( dismissed + 1 ))
+              [[ $first -eq 0 ]] && jarr+=','
+              jarr+="\"$(json_escape "$b")\""; first=0
+            done <<< "$kicklist"
+            json_ok "{\"dismissed\":$dismissed,\"bots\":[$jarr]}"
             ;;
           relogin)
             player=""; bot=""
@@ -3170,7 +3219,7 @@ case "$cmd" in
             json_ok "{\"imported\":true,\"name\":\"$(json_escape "$name")\",\"classes\":[$jarr]}"
             ;;
           *)
-            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|specs|add|list|kick|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
+            json_err UNKNOWN_COMMAND "Unknown party subcommand: $psub" "Try: dml wow party online|specs|add|list|kick|dismiss-all|relogin|botcmd|preset-save|preset-list|preset-delete|preset-load|preset-show|preset-import --json"
             exit 1
             ;;
         esac

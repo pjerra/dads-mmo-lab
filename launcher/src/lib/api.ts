@@ -779,8 +779,18 @@ export async function wowPartyList(player: string): Promise<PartyMember[]> {
   const d = await invoke<{ members: PartyMember[] }>("wow_party_list", { player });
   return d.members;
 }
-export async function wowPartyKick(bot: string): Promise<{ kicked: boolean }> {
-  return await invoke("wow_party_kick", { bot });
+// Kick = uninvite + a master `logout` whisper (the bot despawns instead of
+// following its ex-party around) -- hence the master `player` argument.
+export async function wowPartyKick(
+  player: string,
+  bot: string,
+): Promise<{ kicked: boolean; dismissed: boolean }> {
+  return await invoke("wow_party_kick", { player, bot });
+}
+export async function wowPartyDismissAll(
+  player: string,
+): Promise<{ dismissed: number; bots: string[] }> {
+  return await invoke("wow_party_dismiss_all", { player });
 }
 export async function wowPartyRelogin(player: string, bot: string): Promise<{ relogged: boolean }> {
   return await invoke("wow_party_relogin", { player, bot });
