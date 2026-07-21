@@ -68,9 +68,11 @@
 
   function revive() { const p = charName; act(() => wowGmRevive(p), `Revived ${p}.`); }
   function heal() { const p = charName; act(() => wowGmHeal(p), `Healed ${p} to full.`); }
-  // Works OFFLINE too (`.unstuck … inn` reads homebind), so unlike revive/heal
-  // it is not gated on the character being online.
-  function returnHome() { const p = charName; act(() => wowGmReturnHome(p), `Sent ${p} home to their hearth.`); }
+  // Works OFFLINE too (online -> console teleport, offline -> DB position
+  // write), so unlike revive/heal it is not gated on the character being
+  // online. Destination is the character's faction capital (smoke-findings
+  // fix: the old hearth/`.unstuck` target could itself be the stuck spot).
+  function returnHome() { const p = charName; act(() => wowGmReturnHome(p), `Sent ${p} to their faction capital.`); }
   function applyLevel() {
     if (confirming !== "level") { confirming = "level"; return; }
     confirming = null;
@@ -167,11 +169,11 @@
     <button
       onclick={returnHome}
       disabled={!charName || busy || featureLocked("gm-return-home")}
-      title={featureLocked("gm-return-home") ? LOCKED_HINT : "Teleports the character to their hearth/inn — fixes a character stuck in the world; works even while they're offline"}
+      title={featureLocked("gm-return-home") ? LOCKED_HINT : "Teleports the character to their faction capital (Stormwind or Orgrimmar) — fixes a character stuck in the world; works even while they're offline"}
     >
-      Send home (unstuck)
+      Send to capital (unstuck)
     </button>
-    <span class="muted">Send home works offline too.</span>
+    <span class="muted">Send to capital works offline too.</span>
   </div>
 
   <div class="card row">

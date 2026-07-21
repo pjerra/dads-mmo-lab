@@ -3346,21 +3346,46 @@ case "$cmd" in
               esac
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
-            # `.unstuck <name> inn` -- stock AC command (cs_misc.cpp,
-            # Console::Yes so it is SOAP-callable): teleports the character to
-            # their hearth/homebind location (the "inn" default). Works for
-            # OFFLINE characters too -- for a disconnected char AC reads
-            # character_homebind and SavePositionInDB -- so this is the safe
-            # "my character is stuck in the world" rescue. The ONLY failure is
-            # an ONLINE character who is in combat or on a flight path (the
-            # command returns false -> SOAP fault), surfaced as a hint.
-            if out="$(soap_exec ".unstuck $player inn")"; then rc=0; else rc=$?; fi
-            case "$rc" in
-              0) json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\"}" ;;
-              2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "If the character is online it can't be in combat or on a flight path -- try again once it is idle." ; exit 1 ;;
-              3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
-              *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+            # Smoke finding: `.unstuck <name> inn` sent characters to their
+            # hearth, which can itself be the stuck spot. Send them to their
+            # FACTION CAPITAL instead: faction from characters.race
+            # (Alliance 1,3,4,7,11 / Horde 2,5,6,8,10), coords = the proven
+            # place-npc capital spawn points (Stormwind map 0, Orgrimmar
+            # map 1).
+            rh_row="$(db_chars_query "SELECT guid, race, online FROM characters WHERE name='$(sql_escape "$player")' LIMIT 1;")" \
+              || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
+            [[ -n "$rh_row" ]] || { json_err NOT_FOUND "No such character: $player" ""; exit 1; }
+            IFS=$'\t' read -r rh_guid rh_race rh_online <<< "$rh_row"
+            [[ "$rh_guid" =~ ^[0-9]+$ ]] || { json_err DB_UNREACHABLE "Unexpected character lookup result" ""; exit 1; }
+            case "$rh_race" in
+              1|3|4|7|11) rh_cap="Stormwind"; rh_map=0; rh_x=-8819.3; rh_y=636.2; rh_z=94.1 ;;
+              2|5|6|8|10) rh_cap="Orgrimmar"; rh_map=1; rh_x=1609.2; rh_y=-4407.7; rh_z=17.5 ;;
+              *) json_err NOT_FOUND "Could not determine the faction of $player (race $rh_race)" ""; exit 1 ;;
             esac
+            if [[ "$rh_online" == "1" ]]; then
+              # ONLINE: the stock `.teleport name <char> <location>` console
+              # command (cs_tele.cpp registers the table under "teleport";
+              # the `name` arm is Console::Yes, so SOAP-callable) -- the SAME
+              # fire path the `wow teleport` arm already uses live. The
+              # capital name is a fixed literal from the case above, never
+              # user input; both game_tele rows verified present in this
+              # build's acore_world.game_tele.
+              if out="$(soap_exec "teleport name $player $rh_cap")"; then rc=0; else rc=$?; fi
+              case "$rc" in
+                0) json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\",\"capital\":\"$rh_cap\",\"via\":\"teleport\"}" ;;
+                2) json_err SOAP_FAULT "$(_soap_text_decode "$out")" "The character can't be teleported in combat or on a flight path -- try again once it is idle." ; exit 1 ;;
+                3) json_err SOAP_AUTH "SOAP auth failed" "Check ~/.dml/soap.env" ; exit 1 ;;
+                *) json_err SOAP_UNREACHABLE "Could not reach the server" "Is it running?" ; exit 1 ;;
+              esac
+            else
+              # OFFLINE: the sanctioned direct characters-position write --
+              # identical mechanics (columns, orientation=0, guid-keyed) to
+              # the teleport-coords arm above; coords are fixed literals.
+              sql="UPDATE characters SET position_x=$rh_x, position_y=$rh_y, position_z=$rh_z, map=$rh_map, orientation=0 WHERE guid=$rh_guid;"
+              _chars_write_stmt "$sql" \
+                || { json_err DB_UNREACHABLE "Could not update the character's position" "Is ac-database running?"; exit 1; }
+              json_ok "{\"sent_home\":true,\"player\":\"$(json_escape "$player")\",\"capital\":\"$rh_cap\",\"via\":\"db\"}"
+            fi
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown gm subcommand: $gsub" "Try: dml wow gm level|gold|heal|revive|summon|at-login|return-home --json"

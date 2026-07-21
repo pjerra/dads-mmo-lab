@@ -256,9 +256,12 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
 
-# ---------- gm return-home (stock .unstuck, no bridge, works offline) ----------
+# ---------- gm return-home (faction capital; online=SOAP tele, offline=DB) ----------
+# Character lookup row: guid <TAB> race <TAB> online.
 
-@test "gm return-home fires .unstuck <name> inn over plain SOAP" {
+@test "gm return-home sends an ONLINE Horde char to Orgrimmar via the teleport console command" {
+  printf '7\t2\t1\n' > "$FIXTURE/row.tsv"           # orc, online
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
@@ -266,26 +269,59 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.player')" = "Testen" ]
-  # -F so the leading dot is a literal, not a regex wildcard that would still
-  # match if the command fired as `unstuck ...` with the '.' dropped.
-  grep -qF '.unstuck Testen inn' "$FIXTURE/cap.txt"
+  [ "$(echo "$output" | jq -r '.data.capital')" = "Orgrimmar" ]
+  [ "$(echo "$output" | jq -r '.data.via')" = "teleport" ]
+  grep -qF 'teleport name Testen Orgrimmar' "$FIXTURE/cap.txt"
 }
 
-@test "gm return-home does NOT need the DB (works for offline chars)" {
-  # return-home is NOT online-guarded (unlike gold/heal/revive): it must fire
-  # the SOAP even with the DB unavailable. DB_EXIT=1 fails any DB read, so a
-  # captured SOAP fire proves the command never depended on the DB. Capturing
-  # and asserting the command (not just the exit status) is what makes this
-  # actually exercise the offline path instead of passing inertly.
-  export DML_STUB_DB_EXIT=1
+@test "gm return-home sends an ONLINE Alliance char to Stormwind via the teleport console command" {
+  printf '5\t11\t1\n' > "$FIXTURE/row.tsv"          # draenei, online
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
-  run bash "$DML" wow gm return-home --char Offline --json
+  run bash "$DML" wow gm return-home --char Milla --json
   [ "$status" -eq 0 ]
-  [ "$(echo "$output" | jq -r '.data.sent_home')" = "true" ]
-  # -F: the leading dot is literal, so a dropped '.' would fail this.
-  grep -qF '.unstuck Offline inn' "$FIXTURE/cap.txt"
+  [ "$(echo "$output" | jq -r '.data.capital')" = "Stormwind" ]
+  [ "$(echo "$output" | jq -r '.data.via')" = "teleport" ]
+  grep -qF 'teleport name Milla Stormwind' "$FIXTURE/cap.txt"
+}
+
+@test "gm return-home writes an OFFLINE Horde char's position to the Orgrimmar coords (map 1)" {
+  printf '7\t8\t0\n' > "$FIXTURE/row.tsv"           # troll, offline
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow gm return-home --char Testen --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.via')" = "db" ]
+  [ "$(echo "$output" | jq -r '.data.capital')" = "Orgrimmar" ]
+  update_line="$(grep UPDATE "$FIXTURE/query.log")"
+  [[ "$update_line" == *"position_x=1609.2"* ]]
+  [[ "$update_line" == *"position_y=-4407.7"* ]]
+  [[ "$update_line" == *"position_z=17.5"* ]]
+  [[ "$update_line" == *"map=1"* ]]
+  [[ "$update_line" == *"orientation=0"* ]]
+  [[ "$update_line" == *"WHERE guid=7"* ]]
+  # offline path must never fire SOAP
+  [ ! -f "$FIXTURE/curl.log" ]
+}
+
+@test "gm return-home writes an OFFLINE Alliance char's position to the Stormwind coords (map 0)" {
+  printf '5\t1\t0\n' > "$FIXTURE/row.tsv"           # human, offline
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  run bash "$DML" wow gm return-home --char Milla --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.via')" = "db" ]
+  [ "$(echo "$output" | jq -r '.data.capital')" = "Stormwind" ]
+  update_line="$(grep UPDATE "$FIXTURE/query.log")"
+  [[ "$update_line" == *"position_x=-8819.3"* ]]
+  [[ "$update_line" == *"position_y=636.2"* ]]
+  [[ "$update_line" == *"position_z=94.1"* ]]
+  [[ "$update_line" == *"map=0"* ]]
+  [[ "$update_line" == *"WHERE guid=5"* ]]
 }
 
 @test "gm return-home rejects an invalid character name" {
@@ -294,7 +330,22 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
 }
 
+@test "gm return-home maps an unknown character to NOT_FOUND and an unknown race to an error" {
+  printf '' > "$FIXTURE/none.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  run bash "$DML" wow gm return-home --char Ghost --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+  printf '5\t9\t1\n' > "$FIXTURE/row.tsv"           # race 9: no WotLK faction
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
+  run bash "$DML" wow gm return-home --char Weird --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
 @test "gm return-home maps a SOAP fault (in combat / on flight) to SOAP_FAULT" {
+  printf '7\t2\t1\n' > "$FIXTURE/row.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-fault.xml"
   run bash "$DML" wow gm return-home --char Testen --json
@@ -303,6 +354,8 @@ teardown() { teardown_fixture; }
 }
 
 @test "gm return-home maps 401 to SOAP_AUTH and curl exit 7 to SOAP_UNREACHABLE" {
+  printf '7\t2\t1\n' > "$FIXTURE/row.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/row.tsv"
   use_curl_stub
   export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
   export DML_STUB_HTTP=401
