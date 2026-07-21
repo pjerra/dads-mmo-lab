@@ -124,6 +124,10 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ "$(echo "$d" | jq -r '.data.requested')" = "2" ]
   [ "$(echo "$d" | jq -r '.data.joined')" = "2" ]
   grep -q 'dml_uninvite Oldbot' "$FIXTURE/allcaps.txt"
+  # Review fix: the kick phase pairs every uninvite with a master `logout`
+  # whisper (uninvite alone leaves the bot in-world following the player --
+  # the exact smoke finding `kick`/`dismiss-all` already fixed).
+  grep -q 'dml_whisper Testen Oldbot logout' "$FIXTURE/allcaps.txt"
   grep -q 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt"
   grep -q 'dml_addclass Testen priest' "$FIXTURE/allcaps.txt"
   grep -q 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/allcaps.txt"
@@ -131,13 +135,37 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   grep -q 'dml_whisper Testen Botpriest talents autopick' "$FIXTURE/allcaps.txt"
   # Second joiner gets BOTH whispers too.
   grep -q 'dml_whisper Testen Botpriest autogear' "$FIXTURE/allcaps.txt"
-  # Ordering: the kick precedes the first add, which precedes its whispers
-  # (the capture file appends in call order).
+  # Ordering: the kick precedes its logout whisper, which precedes the first
+  # add, which precedes its whispers (the capture file appends in call order).
   kick_line=$(grep -n 'dml_uninvite Oldbot' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
+  logout_line=$(grep -n 'dml_whisper Testen Oldbot logout' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
   add_line=$(grep -n 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
   whisper_line=$(grep -n 'dml_whisper Testen Botmage talents autopick' "$FIXTURE/allcaps.txt" | head -1 | cut -d: -f1)
-  [ "$kick_line" -lt "$add_line" ]
+  [ "$kick_line" -lt "$logout_line" ]
+  [ "$logout_line" -lt "$add_line" ]
   [ "$add_line" -lt "$whisper_line" ]
+}
+
+@test "preset-load kick phase skips an invalid DB-sourced bot name (defense-in-depth)" {
+  # A hostile/corrupt row in the kick-list must never reach a SOAP command
+  # string -- the loop re-checks _valid_charname like kick/dismiss-all do.
+  mkdir -p "$PDIR"; printf 'mage\n' > "$PDIR/solo"
+  printf '2503\n' > "$FIXTURE/guid.tsv"
+  printf 'Bad;Name\n' > "$FIXTURE/kicklist.tsv"
+  printf '2503\n' > "$FIXTURE/before1.tsv"
+  printf '2503\n' > "$FIXTURE/after1.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/guid.tsv $FIXTURE/kicklist.tsv $FIXTURE/before1.tsv $FIXTURE/after1.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  export DML_PARTY_POLL_TRIES=1 DML_PARTY_POLL_SLEEP=0
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/allcaps.txt"
+  run bash "$DML" wow party preset-load --player Testen --name solo --json
+  [ "$status" -eq 0 ]
+  # The add phase still fired; the bad name produced NO uninvite/logout fire.
+  grep -q 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt"
+  ! grep -q 'dml_uninvite' "$FIXTURE/allcaps.txt"
+  ! grep -q 'Bad;Name' "$FIXTURE/allcaps.txt"
 }
 
 @test "preset-load missing preset emits a NOT_FOUND error event" {

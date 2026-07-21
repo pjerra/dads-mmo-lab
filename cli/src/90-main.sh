@@ -3143,11 +3143,23 @@ case "$cmd" in
             kicklist="$(db_chars_query "$sql")" || kicklist=""
             while IFS= read -r b || [[ -n "$b" ]]; do
               [[ -z "$b" ]] && continue
+              # Defense-in-depth: DB-sourced names still pass the charname
+              # allowlist before any command string is built (same rule as
+              # kick/dismiss-all and every other SOAP fire path).
+              _valid_charname "$b" || continue
               if out="$(soap_exec "dml_uninvite $b")"; then
                 [[ "$DML_JSON" == 1 ]] && ndjson_line info "kicked $b"
               else
                 [[ "$DML_JSON" == 1 ]] && ndjson_line warn "could not kick $b"
               fi
+              # Same smoke finding as kick/dismiss-all: uninvite alone leaves
+              # the bot in-world, still following its ex-master -- only a
+              # master `logout` whisper despawns it. Fixed-string whisper
+              # (both names charname-validated above), best-effort: the
+              # replace must go on even if one bot's whisper fails, and it
+              # still fires when the uninvite was rejected (a stray that
+              # already left the group is exactly the bot that needs it).
+              out="$(soap_exec "dml_whisper $player $b logout")" || true
             done <<< "$kicklist"
             requested=0; joined=0
             while IFS= read -r cls || [[ -n "$cls" ]]; do
