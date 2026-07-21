@@ -35,9 +35,12 @@ teardown() { teardown_fixture; }
   # playerBytes decode must produce identical JSON.
   pb=$(( 3 | (5 << 8) | (7 << 16) | (9 << 24) ))
   : > "$FIXTURE/none"
+  # Query 1 is now the online-freshness lookup (smoke item 5): offline -> no
+  # saveall. Queries 2/3 are the new-schema attempt + packed fallback.
+  printf '0\n' > "$FIXTURE/off"
   printf 'Testchar\t80\t1\t123450000\t2\t1\t%s\t11\t0\t40001\tHelm\t4\t200\t5001\n' "$pb" > "$FIXTURE/oldrows"
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/none $FIXTURE/oldrows"
-  export DML_STUB_DB_EXIT_SEQ="1 0"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/off $FIXTURE/none $FIXTURE/oldrows"
+  export DML_STUB_DB_EXIT_SEQ="0 1 0"
   export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq"
   run bash "$DML" wow paperdoll --char Testchar --json
   [ "$status" -eq 0 ]
@@ -51,8 +54,10 @@ teardown() { teardown_fixture; }
 
 @test "paperdoll: both schema queries failing is DB_UNREACHABLE" {
   : > "$FIXTURE/none"
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/none $FIXTURE/none"
-  export DML_STUB_DB_EXIT_SEQ="1 1"
+  # Slot 1 = the online lookup (fails too -- ignored by design), 2/3 = the
+  # two schema queries.
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/none $FIXTURE/none $FIXTURE/none"
+  export DML_STUB_DB_EXIT_SEQ="1 1 1"
   export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq"
   run bash "$DML" wow paperdoll --char Testchar --json
   [ "$status" -eq 1 ]

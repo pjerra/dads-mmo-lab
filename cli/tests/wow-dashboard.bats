@@ -89,6 +89,49 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "DB_UNREACHABLE" ]
 }
 
+# ---------- online-gear freshness (smoke item 5) ----------
+# Query order: 1 = the online lookup, 2 = the equipment SELECT.
+
+@test "paperdoll fires a best-effort saveall BEFORE reading an ONLINE character" {
+  printf '1\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE="$FIXTURE/cap.txt"
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.equipped[0].name')" = "Hearthstone" ]
+  grep -q 'saveall' "$FIXTURE/cap.txt"
+}
+
+@test "paperdoll for an ONLINE character still works when SOAP is down (saveall is best-effort)" {
+  printf '1\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_CURL_EXIT=7
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.equipped[0].name')" = "Hearthstone" ]
+  [ "$(echo "$output" | jq -r '.data.note')" = "last_saved" ]
+}
+
+@test "paperdoll for an OFFLINE character never fires SOAP" {
+  printf '0\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.equipped[0].name')" = "Hearthstone" ]
+  [ ! -f "$FIXTURE/curl.log" ]
+}
+
 @test "paperdoll maps an unknown character to NOT_FOUND" {
   : > "$FIXTURE/empty.tsv"
   export DML_STUB_DB_ROWS="$FIXTURE/empty.tsv"

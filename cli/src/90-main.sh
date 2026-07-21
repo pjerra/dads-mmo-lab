@@ -2018,6 +2018,17 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        # Smoke item 5: the character row only updates on the character's
+        # save, so an ONLINE character can show stale gear (seen live with a
+        # GM robe swap). Best-effort freshness: when the target is online,
+        # flush live state with a SOAP `saveall` BEFORE the equipment read.
+        # Guarded so it can never break the paperdoll: offline characters
+        # (and chars the lookup can't resolve) skip it entirely, and a down
+        # SOAP falls through silently (|| true) to the last-saved data.
+        pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;" 2>/dev/null)" || pd_online=""
+        if [[ "${pd_online%%$'\n'*}" == "1" ]]; then
+          soap_exec "saveall" >/dev/null 2>&1 || true
+        fi
         # AC's ac-db-import (re-run on any cold `compose up`) applies core
         # migrations, one of which replaced the packed playerBytes/
         # playerBytes2 appearance columns with discrete skin/face/hairStyle/
