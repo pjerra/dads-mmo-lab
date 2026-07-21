@@ -265,7 +265,8 @@
                   <td>{j.level}</td>
                   <td>{className(j.class)}</td>
                   <td>{formatPlaytime(j.playtime)}</td>
-                  <td>{formatLastSeen(j.last_seen)}</td>
+                  <!-- logout_time is stale by definition while logged in (8b) -->
+                  <td>{#if j.online}<span class="online-now">Online now</span>{:else}{formatLastSeen(j.last_seen)}{/if}</td>
                   <td>{j.achievements.toLocaleString("en-US")}</td>
                   <td>{j.quests.toLocaleString("en-US")}</td>
                   <td>{j.kills.toLocaleString("en-US")}</td>
@@ -430,4 +431,5 @@
   .journey td { padding: 6px 10px 6px 0; border-bottom: 1px solid #21262d; color: #c9d1d9; white-space: nowrap; }
   .journey tr:last-child td { border-bottom: none; }
   .jname { font-weight: 600; color: #f0f6fc; }
+  .online-now { color: #3fb950; }
 </style>

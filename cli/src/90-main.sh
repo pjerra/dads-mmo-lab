@@ -5342,7 +5342,14 @@ case "$cmd" in
         if st_payload="$(_stats_payload)"; then
           json_ok "$st_payload"
         else
-          json_err DB_UNREACHABLE "Could not read statistics from the database" "Is ac-database running?"
+          # Honest hint (review finding 8c): a failed statistics query on a
+          # perfectly reachable DB (e.g. a missing table/migration) must not
+          # masquerade as "is the database running?".
+          if db_chars_query "SELECT 1;" >/dev/null 2>&1; then
+            json_err DB_UNREACHABLE "The statistics queries failed" "The database is reachable but a query failed -- a table or migration may be missing (check the worldserver logs)."
+          else
+            json_err DB_UNREACHABLE "Could not read statistics from the database" "Is ac-database running?"
+          fi
           exit 1
         fi
         ;;

@@ -160,9 +160,12 @@ const CONTINENT_NAMES: Record<number, string> = {
   1: "Kalimdor",
   530: "Outland",
   571: "Northrend",
+  // The CLI folds every non-playable map (instances, battlegrounds, GM
+  // island, ...) into this single bucket (review finding 8d).
+  [-1]: "Other worlds",
 };
 
-/** Map id -> continent name; instances/others stay readable. */
+/** Map id -> continent name; unexpected raw ids stay readable. */
 export function continentName(map: number): string {
   return CONTINENT_NAMES[map] ?? `Map ${map}`;
 }

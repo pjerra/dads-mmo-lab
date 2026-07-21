@@ -226,6 +226,7 @@ export interface StatsJourneyRow {
   class: number;
   playtime: number; // seconds
   last_seen: number; // unix seconds (0 = never saved a logout)
+  online: boolean; // logged in right now -> the page shows "Online now"
   kills: number;
   achievements: number;
   quests: number;

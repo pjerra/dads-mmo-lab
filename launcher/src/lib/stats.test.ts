@@ -114,6 +114,9 @@ describe("names", () => {
     expect(continentName(571)).toBe("Northrend");
     expect(continentName(37)).toBe("Map 37");
   });
+  it("continentName renders the CLI's -1 bucket as Other worlds (8d)", () => {
+    expect(continentName(-1)).toBe("Other worlds");
+  });
 });
 
 describe("avgGuildSize", () => {
