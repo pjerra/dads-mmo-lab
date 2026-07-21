@@ -88,6 +88,31 @@ real:
 - Spec picker/validator drift for non-lowercase custom spec names (the picker
   can offer a name `_valid_bot_spec` then rejects).
 
+### Incident follow-ups (2026-07-21 docker-network wedge — diagnosed live)
+
+Root cause that night: the distro's Docker network black-holed (connect
+timeouts, not refusals) → in-game "can run but not interact", soap_unreachable
+card, and a restart that crash-retried on "Can't connect to MySQL (110)" for
+10 minutes while the stream said "world is loading". Fix was
+`systemctl restart docker` in dml-arch (manual). Improvements earned:
+
+1. **One-click "Restart Docker in the distro"** on Tools (+ the
+   soap_unreachable card linking to it). The actual fix tonight is not
+   clickable anywhere today.
+2. **Boot-loop detection in the readiness wait**: while waiting, watch the log
+   for repeated "Could not connect to MySQL" (or repeated boot banners) and
+   say so — after N retries, suggest the Docker restart — instead of
+   "world is loading" forever.
+3. **Snapshot the worldserver log before stop/restart** (to ~/.dml/logs):
+   compose recreate destroys the old container's log; we lost the freeze
+   evidence twice.
+4. **skip-saveall UX**: the unticked "save characters" box silently persisted
+   from an earlier session and surprised the user during an incident.
+   Consider not persisting it (default safe every app start) or a clearly
+   visible "faster mode" badge. NB the skip path itself fired correctly in
+   the wild (message shown, restart proceeded) — a live half-sighting of the
+   [skip-saveall] row; character data verified intact afterward.
+
 ### Statistics page (user request, 2026-07-21 — DECIDED, build after smoke testing)
 
 Beyond-parity feature (verified: The Lab has NO stats page). Scoped against the
