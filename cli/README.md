@@ -228,6 +228,15 @@ silently ignored (treated as if omitted), rather than rejected.
   filtered out; accounts with no characters (e.g. a SOAP-only account) come
   back with an empty `characters` array. Errors: `DB_UNREACHABLE`.
 
+- `dml wow stats --json` →
+  `{"population":{"family":{"total","online"},"bots":{"total","online"},"levels":[{"bucket","family","bots"}],"classes":[{"class","count"}],"factions":{"alliance","horde"},"top_levels":[{"name","level","family"}],"guilds":{"count","members"}},"economy":{"copper":{"total","family","bots"},"richest":[{"name","copper","family"}],"auction":{"count","buyout"},"mail":{"total","to_family"}},"journey":[{"name","level","class","playtime","last_seen","kills","achievements","quests"}],"history":{"boots","total_uptime","longest","peak","realm","recent":[{"start","uptime"}]},"botwatch":{"zones":[{"zone","count"}],"continents":[{"map","count"}],"playtime"}}`
+  Read-only statistics envelope for the launcher's Statistics page — every
+  number in one call (16 fixed-order queries, see `src/48-stats.sh`).
+  "Family" = non-bot accounts excluding the `AHBOT`/`DMLSOAP` system
+  accounts; bots via the `playerbots_account_type` idiom. Money fields are
+  COPPER; times are seconds; `last_seen`/`start` are unix seconds. An empty
+  DB answers zeros/empty arrays with `ok:true`; errors: `DB_UNREACHABLE`.
+
 - `dml wow server-info --json` →
   `{"online","version","players","uptime","mean_ms","median_ms"}`
   Parsed `server info` over SOAP. A down/unreachable worldserver is
