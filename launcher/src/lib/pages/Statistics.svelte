@@ -6,6 +6,7 @@
   import zoneNamesJson from "$lib/zone-names-wotlk.json";
   import {
     avgGuildSize,
+    bucketValue,
     continentName,
     fillLevelBuckets,
     formatBootDate,
@@ -15,7 +16,12 @@
     formatYears,
     levelBucketLabel,
     pct,
+    pickClasses,
+    pickFactions,
+    pickRichest,
+    pickTopLevels,
     zoneName,
+    type StatsSegment,
   } from "$lib/stats";
 
   const zoneNames = zoneNamesJson as Record<string, string>;
@@ -45,30 +51,55 @@
     void refresh();
   });
 
+  // All|Family|Bots segment filter (smoke item 7). Sections that are
+  // inherently one-segment (Journey/Bot Watch/Server History) dim with a
+  // one-line note when the filter excludes them instead of hiding.
+  let segment = $state<StatsSegment>("all");
+  const SEGMENTS: { id: StatsSegment; label: string }[] = [
+    { id: "all", label: "All" },
+    { id: "family", label: "Family" },
+    { id: "bots", label: "Bots" },
+  ];
+
   // $derived.by closures (not inline $derived expressions): at the top level
   // TS flow-narrows `stats` to null right after its $state(null) init, which
   // makes an inline `stats ? ...` truthy branch type to `never`. Inside a
   // closure the declared union type applies and the guard narrows normally.
   const levels = $derived.by(() => (stats ? fillLevelBuckets(stats.population.levels) : []));
-  const levelMax = $derived.by(() => Math.max(1, ...levels.map((l) => l.family + l.bots)));
-  const classMax = $derived.by(() =>
-    stats ? Math.max(1, ...stats.population.classes.map((c) => c.count)) : 1,
+  const levelMax = $derived.by(() => Math.max(1, ...levels.map((l) => bucketValue(segment, l))));
+  const shownClasses = $derived.by(() =>
+    stats ? pickClasses(segment, stats.population.classes) : [],
   );
+  const classMax = $derived.by(() => Math.max(1, ...shownClasses.map((c) => c.count)));
+  const shownFactions = $derived.by(() =>
+    stats ? pickFactions(segment, stats.population.factions) : { alliance: 0, horde: 0 },
+  );
+  const shownTops = $derived.by(() =>
+    stats ? pickTopLevels(segment, stats.population.top_levels) : [],
+  );
+  const shownRich = $derived.by(() => (stats ? pickRichest(segment, stats.economy.richest) : []));
   const zoneMax = $derived.by(() =>
     stats ? Math.max(1, ...stats.botwatch.zones.map((z) => z.count)) : 1,
   );
   const bootMax = $derived.by(() =>
     stats ? Math.max(1, ...stats.history.recent.map((b) => b.uptime)) : 1,
   );
-  const factionTotal = $derived.by(() =>
-    stats ? stats.population.factions.alliance + stats.population.factions.horde : 0,
-  );
+  const factionTotal = $derived.by(() => shownFactions.alliance + shownFactions.horde);
 </script>
 
 <section class="content">
   <header class="bar">
     <h2>Statistics</h2>
-    <button onclick={refresh} disabled={loading}>Refresh</button>
+    <div class="barright">
+      {#if stats}
+        <div class="segctl" role="group" aria-label="Show statistics for">
+          {#each SEGMENTS as s (s.id)}
+            <button class:selseg={segment === s.id} onclick={() => (segment = s.id)}>{s.label}</button>
+          {/each}
+        </div>
+      {/if}
+      <button onclick={refresh} disabled={loading}>Refresh</button>
+    </div>
   </header>
 
   {#if !stats}
@@ -92,12 +123,12 @@
     <div class="card">
       <div class="card-title"><strong>World population</strong></div>
       <div class="tiles">
-        <div class="tile">
+        <div class="tile" class:dimmed={segment === "bots"}>
           <span class="big">{stats.population.family.total}</span>
           <span class="tlabel">family characters</span>
           <span class="tsub">{stats.population.family.online} online now</span>
         </div>
-        <div class="tile">
+        <div class="tile" class:dimmed={segment === "family"}>
           <span class="big">{stats.population.bots.total}</span>
           <span class="tlabel">bot characters</span>
           <span class="tsub">{stats.population.bots.online} online now</span>
@@ -113,23 +144,27 @@
       <div class="colchart">
         {#each levels as l (l.bucket)}
           <div class="col" title="{levelBucketLabel(l.bucket)}: {l.family} family, {l.bots} bots">
-            <span class="colcount">{l.family + l.bots}</span>
+            <span class="colcount">{bucketValue(segment, l)}</span>
             <div class="colbar">
-              <div class="colfill bots" style="height: {pct(l.bots, levelMax)}%"></div>
-              <div class="colfill fam" style="height: {pct(l.family, levelMax)}%"></div>
+              {#if segment !== "family"}
+                <div class="colfill bots" style="height: {pct(l.bots, levelMax)}%"></div>
+              {/if}
+              {#if segment !== "bots"}
+                <div class="colfill fam" style="height: {pct(l.family, levelMax)}%"></div>
+              {/if}
             </div>
             <span class="collabel">{levelBucketLabel(l.bucket)}</span>
           </div>
         {/each}
       </div>
       <p class="legend">
-        <span class="swatch fam"></span> family
-        <span class="swatch bots"></span> bots
+        {#if segment !== "bots"}<span class="swatch fam"></span> family{/if}
+        {#if segment !== "family"}<span class="swatch bots"></span> bots{/if}
       </p>
 
       <h4>Classes</h4>
       <div class="hbars">
-        {#each stats.population.classes as c (c.class)}
+        {#each shownClasses as c (c.class)}
           <div class="hbar-row">
             <span class="hbar-name">{className(c.class)}</span>
             <div class="hbar-track"><div class="hbar-fill" style="width: {pct(c.count, classMax)}%"></div></div>
@@ -141,19 +176,19 @@
       {#if factionTotal > 0}
         <h4>Factions</h4>
         <div class="faction-bar">
-          <div class="fside alliance" style="width: {pct(stats.population.factions.alliance, factionTotal)}%"></div>
-          <div class="fside horde" style="width: {pct(stats.population.factions.horde, factionTotal)}%"></div>
+          <div class="fside alliance" style="width: {pct(shownFactions.alliance, factionTotal)}%"></div>
+          <div class="fside horde" style="width: {pct(shownFactions.horde, factionTotal)}%"></div>
         </div>
         <div class="faction-labels">
-          <span class="alliance-text">Alliance · {stats.population.factions.alliance}</span>
-          <span class="horde-text">Horde · {stats.population.factions.horde}</span>
+          <span class="alliance-text">Alliance · {shownFactions.alliance}</span>
+          <span class="horde-text">Horde · {shownFactions.horde}</span>
         </div>
       {/if}
 
-      {#if stats.population.top_levels.length > 0}
+      {#if shownTops.length > 0}
         <h4>Highest levels</h4>
         <div class="chips">
-          {#each stats.population.top_levels as t (t.name)}
+          {#each shownTops as t (t.name)}
             <span class="chip">
               <strong>{t.name}</strong>
               <span class="muted">lvl {t.level}</span>
@@ -168,24 +203,24 @@
     <div class="card">
       <div class="card-title"><strong>Economy</strong></div>
       <div class="tiles">
-        <div class="tile">
+        <div class="tile" class:dimmed={segment === "bots"}>
           <span class="big">{formatGold(stats.economy.copper.family)}</span>
           <span class="tlabel">family gold</span>
         </div>
-        <div class="tile">
+        <div class="tile" class:dimmed={segment === "family"}>
           <span class="big">{formatGold(stats.economy.copper.bots)}</span>
           <span class="tlabel">bot gold</span>
         </div>
-        <div class="tile">
+        <div class="tile" class:dimmed={segment !== "all"}>
           <span class="big">{formatGold(stats.economy.copper.total)}</span>
           <span class="tlabel">everyone together</span>
         </div>
       </div>
 
-      {#if stats.economy.richest.length > 0}
+      {#if shownRich.length > 0}
         <h4>Richest characters</h4>
         <div class="chips">
-          {#each stats.economy.richest as r (r.name)}
+          {#each shownRich as r (r.name)}
             <span class="chip">
               <strong>{r.name}</strong>
               <span class="muted">{formatGold(r.copper)}</span>
@@ -208,8 +243,10 @@
     </div>
 
     <!-- 3: Family's Journey -->
-    <div class="card">
-      <div class="card-title"><strong>The family's journey</strong></div>
+    <div class="card" class:dimcard={segment === "bots"}>
+      <div class="card-title"><strong>The family's journey</strong>
+        {#if segment === "bots"}<span class="segnote">always about the family</span>{/if}
+      </div>
       {#if stats.journey.length === 0}
         <p class="muted">No family characters yet — make one and it shows up here.</p>
       {:else}
@@ -241,9 +278,10 @@
     </div>
 
     <!-- 4: Server History -->
-    <div class="card">
+    <div class="card" class:dimcard={segment !== "all"}>
       <div class="card-title">
         <strong>Server history{stats.history.realm ? ` — ${stats.history.realm}` : ""}</strong>
+        {#if segment !== "all"}<span class="segnote">server-wide numbers</span>{/if}
       </div>
       <div class="tiles">
         <div class="tile">
@@ -281,8 +319,10 @@
     </div>
 
     <!-- 5: Bot Watch -->
-    <div class="card">
-      <div class="card-title"><strong>Bot watch</strong></div>
+    <div class="card" class:dimcard={segment === "family"}>
+      <div class="card-title"><strong>Bot watch</strong>
+        {#if segment === "family"}<span class="segnote">always about the bots</span>{/if}
+      </div>
       {#if stats.botwatch.zones.length === 0}
         <p class="muted">No bots online right now.</p>
       {:else}
@@ -315,8 +355,18 @@
   .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
+  .barright { display: flex; gap: 12px; align-items: center; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
+  /* All|Family|Bots segmented control (smoke item 7). */
+  .segctl { display: inline-flex; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+  .segctl button { border: none; border-radius: 0; padding: 6px 14px; background: #0d1117; color: #8b949e; }
+  .segctl button + button { border-left: 1px solid #30363d; }
+  .segctl button.selseg { background: #1f6feb33; color: #f0f6fc; }
+  /* Filter-excluded content: dimmed, never hidden. */
+  .tile.dimmed { opacity: 0.4; }
+  .card.dimcard > :global(:not(.card-title)) { opacity: 0.4; }
+  .segnote { font-size: 11.5px; font-weight: 400; color: #8b949e; margin-left: 8px; }
   .muted { color: #8b949e; margin: 0; }
   .stale-note { font-size: 12.5px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }

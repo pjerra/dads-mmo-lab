@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   avgGuildSize,
+  bucketValue,
   continentName,
   fillLevelBuckets,
   formatGold,
@@ -9,6 +10,10 @@ import {
   formatYears,
   levelBucketLabel,
   pct,
+  pickClasses,
+  pickFactions,
+  pickRichest,
+  pickTopLevels,
   zoneName,
 } from "./stats";
 
@@ -115,5 +120,78 @@ describe("avgGuildSize", () => {
   it("is members/guilds to one decimal, 0 with no guilds", () => {
     expect(avgGuildSize(300, 20)).toBe("15.0");
     expect(avgGuildSize(0, 0)).toBe("0");
+  });
+});
+
+describe("segment filter (All|Family|Bots)", () => {
+  const classes = {
+    family: [
+      { class: 1, count: 3 },
+      { class: 8, count: 1 },
+    ],
+    bots: [
+      { class: 1, count: 37 },
+      { class: 5, count: 20 },
+    ],
+  };
+
+  it("pickClasses returns a single segment untouched", () => {
+    expect(pickClasses("family", classes)).toEqual(classes.family);
+    expect(pickClasses("bots", classes)).toEqual(classes.bots);
+  });
+
+  it("pickClasses merges 'all' by summing per class id, sorted by id", () => {
+    expect(pickClasses("all", classes)).toEqual([
+      { class: 1, count: 40 },
+      { class: 5, count: 20 },
+      { class: 8, count: 1 },
+    ]);
+  });
+
+  it("pickFactions adds the two splits for 'all'", () => {
+    const f = {
+      family: { alliance: 3, horde: 1 },
+      bots: { alliance: 117, horde: 133 },
+    };
+    expect(pickFactions("family", f)).toEqual({ alliance: 3, horde: 1 });
+    expect(pickFactions("all", f)).toEqual({ alliance: 120, horde: 134 });
+  });
+
+  it("pickTopLevels re-takes the top 5 by level from the merged lists", () => {
+    const tops = {
+      family: [
+        { name: "Milla", level: 80, family: true },
+        { name: "Venn", level: 12, family: true },
+      ],
+      bots: [
+        { name: "Bota", level: 80, family: false },
+        { name: "Botb", level: 79, family: false },
+        { name: "Botc", level: 78, family: false },
+        { name: "Botd", level: 77, family: false },
+      ],
+    };
+    const all = pickTopLevels("all", tops);
+    expect(all).toHaveLength(5);
+    expect(all.map((t) => t.name)).toEqual(["Bota", "Milla", "Botb", "Botc", "Botd"]);
+    expect(pickTopLevels("family", tops)).toEqual(tops.family);
+  });
+
+  it("pickRichest re-takes the top 5 by copper from the merged lists", () => {
+    const rich = {
+      family: [{ name: "Milla", copper: 90_000, family: true }],
+      bots: [
+        { name: "Goldy", copper: 1_211_290_000, family: false },
+        { name: "Poor", copper: 10, family: false },
+      ],
+    };
+    expect(pickRichest("all", rich).map((r) => r.name)).toEqual(["Goldy", "Milla", "Poor"]);
+    expect(pickRichest("bots", rich)).toEqual(rich.bots);
+  });
+
+  it("bucketValue picks the segment's series ('all' stacks)", () => {
+    const l = { bucket: 3, family: 2, bots: 30 };
+    expect(bucketValue("all", l)).toBe(32);
+    expect(bucketValue("family", l)).toBe(2);
+    expect(bucketValue("bots", l)).toBe(30);
   });
 });

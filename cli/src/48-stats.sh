@@ -7,15 +7,19 @@
 # EXCLUDING the AHBOT and DMLSOAP system accounts.
 #
 # The query order is FIXED -- tests stub the mysql calls positionally via
-# DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change:
+# DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change.
+# Segment-sensitive stats (classes/factions/top-levels/richest) carry
+# per-segment family/bots data for the page's All|Family|Bots filter
+# ("all" is a client-side merge):
 #   1  population overview (chars)   2  level buckets (chars)
-#   3  class breakdown (chars)       4  faction split (chars)
-#   5  top-5 levels (chars)          6  guild count+members (chars)
-#   7  copper totals (chars)         8  top-5 richest (chars)
-#   9  auction house (chars)         10 mail counts (chars)
-#   11 family journey rows (chars)   12 uptime aggregates (auth)
-#   13 realm name (auth)             14 last-15 boots (auth)
-#   15 online-bot zones (chars)      16 online-bot continents (chars)
+#   3  class breakdown f/b (chars)   4  faction split f/b (chars)
+#   5  top-5 levels FAMILY (chars)   6  top-5 levels BOTS (chars)
+#   7  guild count+members (chars)   8  copper totals (chars)
+#   9  top-5 richest FAMILY (chars)  10 top-5 richest BOTS (chars)
+#   11 auction house (chars)         12 mail counts (chars)
+#   13 family journey rows (chars)   14 uptime aggregates (auth)
+#   15 realm name (auth)             16 last-15 boots (auth)
+#   17 online-bot zones (chars)      18 online-bot continents (chars)
 # ---------------------------------------------------------------------------
 
 # Echo a JSON-safe non-negative integer: the 10#-normalized value when the
@@ -84,49 +88,76 @@ _stats_payload() {
     done <<< "$rows"
     levels+=']'
 
-    # -- 3: class breakdown (all non-system characters) ---------------------
-    local classes='[' cfirst=1 cls cnt
-    rows="$(db_chars_query "SELECT c.class, COUNT(*) FROM characters c WHERE NOT ($sys) GROUP BY c.class ORDER BY c.class;")" || return 1
-    while IFS=$'\t' read -r cls cnt || [[ -n "$cls" ]]; do
+    # -- 3: class breakdown, family/bots split per class (segment filter).
+    # Zero-count entries are dropped per segment -- "all" is a client-side
+    # sum of the two arrays, so nothing is lost.
+    local cls_fam='[' cls_bot='[' cffirst=1 cbfirst=1 cls fcls_n bcls_n fv bv
+    rows="$(db_chars_query "SELECT c.class,
+        COALESCE(SUM(CASE WHEN $fam THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN $bot THEN 1 ELSE 0 END),0)
+      FROM characters c WHERE NOT ($sys) GROUP BY c.class ORDER BY c.class;")" || return 1
+    while IFS=$'\t' read -r cls fcls_n bcls_n || [[ -n "$cls" ]]; do
         [[ -z "$cls" ]] && continue
         [[ "$cls" =~ ^[0-9]+$ ]] || continue
-        [[ $cfirst -eq 0 ]] && classes+=','
-        classes+="{\"class\":$((10#$cls)),\"count\":$(_stats_num "$cnt")}"
-        cfirst=0
+        fv="$(_stats_num "$fcls_n")"; bv="$(_stats_num "$bcls_n")"
+        if (( fv > 0 )); then
+            [[ $cffirst -eq 0 ]] && cls_fam+=','
+            cls_fam+="{\"class\":$((10#$cls)),\"count\":$fv}"; cffirst=0
+        fi
+        if (( bv > 0 )); then
+            [[ $cbfirst -eq 0 ]] && cls_bot+=','
+            cls_bot+="{\"class\":$((10#$cls)),\"count\":$bv}"; cbfirst=0
+        fi
     done <<< "$rows"
-    classes+=']'
+    cls_fam+=']'; cls_bot+=']'
 
-    # -- 4: faction split via the race -> faction mapping -------------------
-    local alliance horde
+    # -- 4: faction split per segment (race -> faction mapping) -------------
+    local fam_alliance fam_horde bot_alliance bot_horde
     rows="$(db_chars_query "SELECT
-        COALESCE(SUM(CASE WHEN c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
-        COALESCE(SUM(CASE WHEN c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0)
-      FROM characters c WHERE NOT ($sys);")" || return 1
+        COALESCE(SUM(CASE WHEN ($fam) AND c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($fam) AND c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($bot) AND c.race IN (1,3,4,7,11) THEN 1 ELSE 0 END),0),
+        COALESCE(SUM(CASE WHEN ($bot) AND c.race IN (2,5,6,8,10) THEN 1 ELSE 0 END),0)
+      FROM characters c;")" || return 1
     rows="${rows%%$'\n'*}"
-    IFS=$'\t' read -r alliance horde <<< "$rows" || true
-    alliance="$(_stats_num "$alliance")"; horde="$(_stats_num "$horde")"
+    IFS=$'\t' read -r fam_alliance fam_horde bot_alliance bot_horde <<< "$rows" || true
+    fam_alliance="$(_stats_num "$fam_alliance")"; fam_horde="$(_stats_num "$fam_horde")"
+    bot_alliance="$(_stats_num "$bot_alliance")"; bot_horde="$(_stats_num "$bot_horde")"
 
-    # -- 5: top-5 highest-level characters (family flagged) -----------------
-    local tops='[' tfirst=1 name lvl isfam
-    rows="$(db_chars_query "SELECT c.name, c.level, CASE WHEN $fam THEN 1 ELSE 0 END
-      FROM characters c WHERE NOT ($sys)
+    # -- 5+6: top-5 highest-level characters per segment. The per-row
+    # `family` flag is kept (true/false by construction) so the client's
+    # merged "all" view renders the family badge exactly as before.
+    local tops_fam='[' tops_bot='[' tfirst=1 name lvl
+    rows="$(db_chars_query "SELECT c.name, c.level
+      FROM characters c WHERE $fam
       ORDER BY c.level DESC, c.totaltime DESC, c.name LIMIT 5;")" || return 1
-    while IFS=$'\t' read -r name lvl isfam || [[ -n "$name" ]]; do
+    while IFS=$'\t' read -r name lvl || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
-        [[ $tfirst -eq 0 ]] && tops+=','
-        tops+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":$(_stats_bool "$isfam")}"
+        [[ $tfirst -eq 0 ]] && tops_fam+=','
+        tops_fam+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":true}"
         tfirst=0
     done <<< "$rows"
-    tops+=']'
+    tops_fam+=']'
+    tfirst=1
+    rows="$(db_chars_query "SELECT c.name, c.level
+      FROM characters c WHERE $bot
+      ORDER BY c.level DESC, c.totaltime DESC, c.name LIMIT 5;")" || return 1
+    while IFS=$'\t' read -r name lvl || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        [[ $tfirst -eq 0 ]] && tops_bot+=','
+        tops_bot+="{\"name\":\"$(json_escape "$name")\",\"level\":$(_stats_num "$lvl"),\"family\":false}"
+        tfirst=0
+    done <<< "$rows"
+    tops_bot+=']'
 
-    # -- 6: guild count + member total (avg size is client-side math) ------
+    # -- 7: guild count + member total (avg size is client-side math) ------
     local guilds members
     rows="$(db_chars_query "SELECT (SELECT COUNT(*) FROM guild), (SELECT COUNT(*) FROM guild_member);")" || return 1
     rows="${rows%%$'\n'*}"
     IFS=$'\t' read -r guilds members <<< "$rows" || true
     guilds="$(_stats_num "$guilds")"; members="$(_stats_num "$members")"
 
-    # -- 7: copper totals (money is COPPER -- the client divides by 10000).
+    # -- 8: copper totals (money is COPPER -- the client divides by 10000).
     # "total" spans family+bots only (system accounts excluded), so the
     # three numbers always add up on screen.
     local cop_total cop_fam cop_bot
@@ -139,20 +170,32 @@ _stats_payload() {
     IFS=$'\t' read -r cop_total cop_fam cop_bot <<< "$rows" || true
     cop_total="$(_stats_num "$cop_total")"; cop_fam="$(_stats_num "$cop_fam")"; cop_bot="$(_stats_num "$cop_bot")"
 
-    # -- 8: top-5 richest characters (family flagged) -----------------------
-    local rich='[' rfirst=1 money
-    rows="$(db_chars_query "SELECT c.name, c.money, CASE WHEN $fam THEN 1 ELSE 0 END
-      FROM characters c WHERE NOT ($sys)
+    # -- 9+10: top-5 richest characters per segment (same family-flag
+    # convention as the top-levels pair above).
+    local rich_fam='[' rich_bot='[' rfirst=1 money
+    rows="$(db_chars_query "SELECT c.name, c.money
+      FROM characters c WHERE $fam
       ORDER BY c.money DESC, c.name LIMIT 5;")" || return 1
-    while IFS=$'\t' read -r name money isfam || [[ -n "$name" ]]; do
+    while IFS=$'\t' read -r name money || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
-        [[ $rfirst -eq 0 ]] && rich+=','
-        rich+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":$(_stats_bool "$isfam")}"
+        [[ $rfirst -eq 0 ]] && rich_fam+=','
+        rich_fam+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":true}"
         rfirst=0
     done <<< "$rows"
-    rich+=']'
+    rich_fam+=']'
+    rfirst=1
+    rows="$(db_chars_query "SELECT c.name, c.money
+      FROM characters c WHERE $bot
+      ORDER BY c.money DESC, c.name LIMIT 5;")" || return 1
+    while IFS=$'\t' read -r name money || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        [[ $rfirst -eq 0 ]] && rich_bot+=','
+        rich_bot+="{\"name\":\"$(json_escape "$name")\",\"copper\":$(_stats_num "$money"),\"family\":false}"
+        rfirst=0
+    done <<< "$rows"
+    rich_bot+=']'
 
-    # -- 9: auction house stock. On this server the AH is 100% the ahbot's
+    # -- 11: auction house stock. On this server the AH is 100% the ahbot's
     # shop -- the page labels it "auction house shop stock", never implying
     # player listings.
     local ah_count ah_buyout
@@ -161,7 +204,7 @@ _stats_payload() {
     IFS=$'\t' read -r ah_count ah_buyout <<< "$rows" || true
     ah_count="$(_stats_num "$ah_count")"; ah_buyout="$(_stats_num "$ah_buyout")"
 
-    # -- 10: pending mail (+ how much of it is addressed to the family) -----
+    # -- 12: pending mail (+ how much of it is addressed to the family) -----
     local mail_total mail_fam
     rows="$(db_chars_query "SELECT COUNT(*),
         COALESCE(SUM(CASE WHEN m.receiver IN (SELECT c.guid FROM characters c WHERE $fam) THEN 1 ELSE 0 END),0)
@@ -170,7 +213,7 @@ _stats_payload() {
     IFS=$'\t' read -r mail_total mail_fam <<< "$rows" || true
     mail_total="$(_stats_num "$mail_total")"; mail_fam="$(_stats_num "$mail_fam")"
 
-    # -- 11: the family's journey -- one row per family character. The two
+    # -- 13: the family's journey -- one row per family character. The two
     # correlated COUNTs are per-guid index lookups (guid is the PK prefix on
     # both side tables); with a handful of family characters this stays
     # sub-second (validated live).
@@ -188,7 +231,7 @@ _stats_payload() {
     done <<< "$rows"
     journey+=']'
 
-    # -- 12: server history aggregates (acore_auth.uptime) ------------------
+    # -- 14: server history aggregates (acore_auth.uptime) ------------------
     local boots up_total up_longest up_peak
     rows="$(db_auth_query "SELECT COUNT(*), COALESCE(SUM(uptime),0), COALESCE(MAX(uptime),0), COALESCE(MAX(maxplayers),0) FROM uptime;")" || return 1
     rows="${rows%%$'\n'*}"
@@ -196,12 +239,12 @@ _stats_payload() {
     boots="$(_stats_num "$boots")"; up_total="$(_stats_num "$up_total")"
     up_longest="$(_stats_num "$up_longest")"; up_peak="$(_stats_num "$up_peak")"
 
-    # -- 13: realm name -----------------------------------------------------
+    # -- 15: realm name -----------------------------------------------------
     local realm
     realm="$(db_auth_query "SELECT name FROM realmlist ORDER BY id LIMIT 1;")" || return 1
     realm="${realm%%$'\n'*}"
 
-    # -- 14: the last 15 boots, oldest first (per-boot chart data) ----------
+    # -- 16: the last 15 boots, oldest first (per-boot chart data) ----------
     local recent='[' refirst=1 rstart rup
     rows="$(db_auth_query "SELECT starttime, uptime FROM (SELECT starttime, uptime FROM uptime ORDER BY starttime DESC LIMIT 15) t ORDER BY starttime;")" || return 1
     while IFS=$'\t' read -r rstart rup || [[ -n "$rstart" ]]; do
@@ -213,7 +256,7 @@ _stats_payload() {
     done <<< "$rows"
     recent+=']'
 
-    # -- 15: top-8 busiest zones for ONLINE bots (ids -> names client-side) -
+    # -- 17: top-8 busiest zones for ONLINE bots (ids -> names client-side) -
     local zones='[' zfirst=1 zone zcnt
     rows="$(db_chars_query "SELECT c.zone, COUNT(*) FROM characters c WHERE c.online = 1 AND ($bot) GROUP BY c.zone ORDER BY COUNT(*) DESC, c.zone LIMIT 8;")" || return 1
     while IFS=$'\t' read -r zone zcnt || [[ -n "$zone" ]]; do
@@ -225,7 +268,7 @@ _stats_payload() {
     done <<< "$rows"
     zones+=']'
 
-    # -- 16: online bots per continent (map ids -> names client-side) -------
+    # -- 18: online bots per continent (map ids -> names client-side) -------
     local conts='[' cofirst=1 cmap ccnt
     rows="$(db_chars_query "SELECT c.map, COUNT(*) FROM characters c WHERE c.online = 1 AND ($bot) GROUP BY c.map ORDER BY COUNT(*) DESC, c.map;")" || return 1
     while IFS=$'\t' read -r cmap ccnt || [[ -n "$cmap" ]]; do
@@ -237,6 +280,6 @@ _stats_payload() {
     done <<< "$rows"
     conts+=']'
 
-    printf '%s' "{\"population\":{\"family\":{\"total\":$fam_total,\"online\":$fam_online},\"bots\":{\"total\":$bot_total,\"online\":$bot_online},\"levels\":$levels,\"classes\":$classes,\"factions\":{\"alliance\":$alliance,\"horde\":$horde},\"top_levels\":$tops,\"guilds\":{\"count\":$guilds,\"members\":$members}},\"economy\":{\"copper\":{\"total\":$cop_total,\"family\":$cop_fam,\"bots\":$cop_bot},\"richest\":$rich,\"auction\":{\"count\":$ah_count,\"buyout\":$ah_buyout},\"mail\":{\"total\":$mail_total,\"to_family\":$mail_fam}},\"journey\":$journey,\"history\":{\"boots\":$boots,\"total_uptime\":$up_total,\"longest\":$up_longest,\"peak\":$up_peak,\"realm\":\"$(json_escape "$realm")\",\"recent\":$recent},\"botwatch\":{\"zones\":$zones,\"continents\":$conts,\"playtime\":$bot_playtime}}"
+    printf '%s' "{\"population\":{\"family\":{\"total\":$fam_total,\"online\":$fam_online},\"bots\":{\"total\":$bot_total,\"online\":$bot_online},\"levels\":$levels,\"classes\":{\"family\":$cls_fam,\"bots\":$cls_bot},\"factions\":{\"family\":{\"alliance\":$fam_alliance,\"horde\":$fam_horde},\"bots\":{\"alliance\":$bot_alliance,\"horde\":$bot_horde}},\"top_levels\":{\"family\":$tops_fam,\"bots\":$tops_bot},\"guilds\":{\"count\":$guilds,\"members\":$members}},\"economy\":{\"copper\":{\"total\":$cop_total,\"family\":$cop_fam,\"bots\":$cop_bot},\"richest\":{\"family\":$rich_fam,\"bots\":$rich_bot},\"auction\":{\"count\":$ah_count,\"buyout\":$ah_buyout},\"mail\":{\"total\":$mail_total,\"to_family\":$mail_fam}},\"journey\":$journey,\"history\":{\"boots\":$boots,\"total_uptime\":$up_total,\"longest\":$up_longest,\"peak\":$up_peak,\"realm\":\"$(json_escape "$realm")\",\"recent\":$recent},\"botwatch\":{\"zones\":$zones,\"continents\":$conts,\"playtime\":$bot_playtime}}"
     return 0
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # `wow stats`: the Statistics page's single read-only envelope (48-stats.sh).
 # The query order is FIXED (see the 48-stats.sh header) -- the happy path
-# stubs all 16 mysql calls positionally via DML_STUB_DB_ROWS_SEQ.
+# stubs all 18 mysql calls positionally via DML_STUB_DB_ROWS_SEQ.
 load helpers/env.bash
 
 setup() {
@@ -17,24 +17,26 @@ teardown() { teardown_fixture; }
 make_stats_rows() {
   printf '4\t1\t250\t120\t900000000\n'      > "$FIXTURE/q01"  # fam tot/on, bot tot/on, bot playtime
   printf '0\t1\t50\n7\t2\t30\n'             > "$FIXTURE/q02"  # level buckets
-  printf '1\t40\n8\t30\n'                   > "$FIXTURE/q03"  # classes
-  printf '120\t134\n'                       > "$FIXTURE/q04"  # factions
-  printf 'Milla\t80\t1\nRndbot\t80\t0\n'    > "$FIXTURE/q05"  # top levels
-  printf '3\t27\n'                          > "$FIXTURE/q06"  # guilds, members
-  printf '1211290000\t90000\t1211200000\n'  > "$FIXTURE/q07"  # copper totals
-  printf 'Goldy\t1211290000\t1\n'           > "$FIXTURE/q08"  # richest
-  printf '412\t998877\n'                    > "$FIXTURE/q09"  # auction
-  printf '9\t2\n'                           > "$FIXTURE/q10"  # mail
-  printf 'Milla\t80\t1\t63720\t1750000000\t12\t345\t678\n' > "$FIXTURE/q11"  # journey
-  printf '57\t400000\t90000\t260\n'         > "$FIXTURE/q12"  # uptime aggregates
-  printf 'DML\n'                            > "$FIXTURE/q13"  # realm name
-  printf '1750000000\t3600\n1750100000\t7200\n' > "$FIXTURE/q14"  # recent boots
-  printf '1637\t18\n17\t11\n'               > "$FIXTURE/q15"  # bot zones
-  printf '0\t60\n1\t50\n571\t10\n'          > "$FIXTURE/q16"  # continents
-  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/q01 $FIXTURE/q02 $FIXTURE/q03 $FIXTURE/q04 $FIXTURE/q05 $FIXTURE/q06 $FIXTURE/q07 $FIXTURE/q08 $FIXTURE/q09 $FIXTURE/q10 $FIXTURE/q11 $FIXTURE/q12 $FIXTURE/q13 $FIXTURE/q14 $FIXTURE/q15 $FIXTURE/q16"
+  printf '1\t3\t37\n8\t0\t30\n'             > "$FIXTURE/q03"  # classes: class, fam, bot
+  printf '3\t1\t117\t133\n'                 > "$FIXTURE/q04"  # factions: famA famH botA botH
+  printf 'Milla\t80\n'                      > "$FIXTURE/q05"  # top levels FAMILY
+  printf 'Rndbot\t80\n'                     > "$FIXTURE/q06"  # top levels BOTS
+  printf '3\t27\n'                          > "$FIXTURE/q07"  # guilds, members
+  printf '1211290000\t90000\t1211200000\n'  > "$FIXTURE/q08"  # copper totals
+  printf 'Milla\t90000\n'                   > "$FIXTURE/q09"  # richest FAMILY
+  printf 'Goldy\t1211290000\n'              > "$FIXTURE/q10"  # richest BOTS
+  printf '412\t998877\n'                    > "$FIXTURE/q11"  # auction
+  printf '9\t2\n'                           > "$FIXTURE/q12"  # mail
+  printf 'Milla\t80\t1\t63720\t1750000000\t12\t345\t678\n' > "$FIXTURE/q13"  # journey
+  printf '57\t400000\t90000\t260\n'         > "$FIXTURE/q14"  # uptime aggregates
+  printf 'DML\n'                            > "$FIXTURE/q15"  # realm name
+  printf '1750000000\t3600\n1750100000\t7200\n' > "$FIXTURE/q16"  # recent boots
+  printf '1637\t18\n17\t11\n'               > "$FIXTURE/q17"  # bot zones
+  printf '0\t60\n1\t50\n571\t10\n'          > "$FIXTURE/q18"  # continents
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/q01 $FIXTURE/q02 $FIXTURE/q03 $FIXTURE/q04 $FIXTURE/q05 $FIXTURE/q06 $FIXTURE/q07 $FIXTURE/q08 $FIXTURE/q09 $FIXTURE/q10 $FIXTURE/q11 $FIXTURE/q12 $FIXTURE/q13 $FIXTURE/q14 $FIXTURE/q15 $FIXTURE/q16 $FIXTURE/q17 $FIXTURE/q18"
 }
 
-@test "stats happy path assembles all five groups from the 16 queries" {
+@test "stats happy path assembles all five groups from the 18 queries" {
   make_stats_rows
   run bash "$DML" wow stats --json
   [ "$status" -eq 0 ]
@@ -48,21 +50,34 @@ make_stats_rows() {
   [ "$(echo "$output" | jq -r '.data.population.levels[1].bucket')" = "7" ]
   [ "$(echo "$output" | jq -r '.data.population.levels[1].family')" = "2" ]
   [ "$(echo "$output" | jq -r '.data.population.levels[1].bots')" = "30" ]
-  [ "$(echo "$output" | jq -r '.data.population.classes[1].class')" = "8" ]
-  [ "$(echo "$output" | jq -r '.data.population.classes[1].count')" = "30" ]
-  [ "$(echo "$output" | jq -r '.data.population.factions.alliance')" = "120" ]
-  [ "$(echo "$output" | jq -r '.data.population.factions.horde')" = "134" ]
-  [ "$(echo "$output" | jq -r '.data.population.top_levels[0].name')" = "Milla" ]
-  [ "$(echo "$output" | jq -r '.data.population.top_levels[0].family')" = "true" ]
-  [ "$(echo "$output" | jq -r '.data.population.top_levels[1].family')" = "false" ]
+  # classes: segmented; zero-count rows dropped per segment (class 8 has no
+  # family chars -> only in bots)
+  [ "$(echo "$output" | jq -r '.data.population.classes.family | length')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.family[0].class')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.family[0].count')" = "3" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.bots | length')" = "2" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.bots[1].class')" = "8" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.bots[1].count')" = "30" ]
+  # factions: segmented
+  [ "$(echo "$output" | jq -r '.data.population.factions.family.alliance')" = "3" ]
+  [ "$(echo "$output" | jq -r '.data.population.factions.family.horde')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.population.factions.bots.alliance')" = "117" ]
+  [ "$(echo "$output" | jq -r '.data.population.factions.bots.horde')" = "133" ]
+  # top levels: segmented, family flag fixed per segment
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.family[0].name')" = "Milla" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.family[0].family')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.bots[0].name')" = "Rndbot" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.bots[0].family')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.population.guilds.count')" = "3" ]
   [ "$(echo "$output" | jq -r '.data.population.guilds.members')" = "27" ]
   # economy
   [ "$(echo "$output" | jq -r '.data.economy.copper.total')" = "1211290000" ]
   [ "$(echo "$output" | jq -r '.data.economy.copper.family')" = "90000" ]
   [ "$(echo "$output" | jq -r '.data.economy.copper.bots')" = "1211200000" ]
-  [ "$(echo "$output" | jq -r '.data.economy.richest[0].name')" = "Goldy" ]
-  [ "$(echo "$output" | jq -r '.data.economy.richest[0].copper')" = "1211290000" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.family[0].name')" = "Milla" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.family[0].family')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.bots[0].name')" = "Goldy" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.bots[0].copper')" = "1211290000" ]
   [ "$(echo "$output" | jq -r '.data.economy.auction.count')" = "412" ]
   [ "$(echo "$output" | jq -r '.data.economy.auction.buyout')" = "998877" ]
   [ "$(echo "$output" | jq -r '.data.economy.mail.total')" = "9" ]
@@ -101,9 +116,12 @@ make_stats_rows() {
   [ "$(echo "$output" | jq -r '.data.population.family.total')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.population.bots.online')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.population.levels | length')" = "0" ]
-  [ "$(echo "$output" | jq -r '.data.population.top_levels | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.family | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.bots | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.population.classes.family | length')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.economy.copper.total')" = "0" ]
-  [ "$(echo "$output" | jq -r '.data.economy.richest | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.family | length')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.economy.richest.bots | length')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.journey | length')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.history.boots')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.history.realm')" = "" ]
@@ -127,9 +145,11 @@ make_stats_rows() {
   # continents key on bucket/zone/map)...
   [ "$(echo "$output" | jq -r '.data.population.levels | length')" = "0" ]
   [ "$(echo "$output" | jq -r '.data.botwatch.zones | length')" = "0" ]
-  # ...while name-keyed rows keep the row and zero the numerics.
-  [ "$(echo "$output" | jq -r '.data.population.top_levels[0].level')" = "0" ]
-  [ "$(echo "$output" | jq -r '.data.population.top_levels[0].family')" = "false" ]
+  # ...while name-keyed rows keep the row and zero the numerics. The family
+  # flag is fixed per segment now (true in the family list, false in bots).
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.family[0].level')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.family[0].family')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.population.top_levels.bots[0].family')" = "false" ]
 }
 
 @test "stats: leading zeros are normalized (007 -> 7), not emitted as invalid JSON" {

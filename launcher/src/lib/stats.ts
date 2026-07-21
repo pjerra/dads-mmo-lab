@@ -3,7 +3,79 @@
 // page passes the zone-names lookup in (same split as achievements.ts /
 // talent-trees.ts).
 
-import type { StatsLevelBucket } from "./api";
+import type {
+  StatsClassCount,
+  StatsFactionSplit,
+  StatsLevelBucket,
+  StatsRich,
+  StatsSegmented,
+  StatsTopLevel,
+} from "./api";
+
+// --- All|Family|Bots segment filter (smoke item 7) -------------------------
+// The CLI ships segment-sensitive stats pre-split; "all" merges client-side.
+
+export type StatsSegment = "all" | "family" | "bots";
+
+/** Class breakdown for a segment; "all" sums the two lists per class id. */
+export function pickClasses(
+  segment: StatsSegment,
+  classes: StatsSegmented<StatsClassCount[]>,
+): StatsClassCount[] {
+  if (segment === "family") return classes.family;
+  if (segment === "bots") return classes.bots;
+  const byId = new Map<number, number>();
+  for (const c of [...classes.family, ...classes.bots]) {
+    byId.set(c.class, (byId.get(c.class) ?? 0) + c.count);
+  }
+  return [...byId.entries()]
+    .map(([cls, count]) => ({ class: cls, count }))
+    .sort((a, b) => a.class - b.class);
+}
+
+/** Faction split for a segment; "all" adds the two splits. */
+export function pickFactions(
+  segment: StatsSegment,
+  factions: StatsSegmented<StatsFactionSplit>,
+): StatsFactionSplit {
+  if (segment === "family") return factions.family;
+  if (segment === "bots") return factions.bots;
+  return {
+    alliance: factions.family.alliance + factions.bots.alliance,
+    horde: factions.family.horde + factions.bots.horde,
+  };
+}
+
+/** Top levels for a segment; "all" merges the two top-5s and re-takes 5. */
+export function pickTopLevels(
+  segment: StatsSegment,
+  tops: StatsSegmented<StatsTopLevel[]>,
+): StatsTopLevel[] {
+  if (segment === "family") return tops.family;
+  if (segment === "bots") return tops.bots;
+  return [...tops.family, ...tops.bots]
+    .sort((a, b) => b.level - a.level || a.name.localeCompare(b.name))
+    .slice(0, 5);
+}
+
+/** Richest for a segment; "all" merges the two top-5s and re-takes 5. */
+export function pickRichest(
+  segment: StatsSegment,
+  rich: StatsSegmented<StatsRich[]>,
+): StatsRich[] {
+  if (segment === "family") return rich.family;
+  if (segment === "bots") return rich.bots;
+  return [...rich.family, ...rich.bots]
+    .sort((a, b) => b.copper - a.copper || a.name.localeCompare(b.name))
+    .slice(0, 5);
+}
+
+/** Per-bucket chart value for the active segment ("all" stacks both). */
+export function bucketValue(segment: StatsSegment, l: StatsLevelBucket): number {
+  if (segment === "family") return l.family;
+  if (segment === "bots") return l.bots;
+  return l.family + l.bots;
+}
 
 /** Copper -> whole gold with thousands separators: 1211292125 -> "121,129g". */
 export function formatGold(copper: number): string {

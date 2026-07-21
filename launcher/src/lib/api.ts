@@ -206,6 +206,20 @@ export interface StatsRich {
   copper: number;
   family: boolean;
 }
+// Segment-sensitive stats arrive split per segment for the page's
+// All|Family|Bots filter -- "all" is a client-side merge (stats.ts pick*).
+export interface StatsClassCount {
+  class: number;
+  count: number;
+}
+export interface StatsFactionSplit {
+  alliance: number;
+  horde: number;
+}
+export interface StatsSegmented<T> {
+  family: T;
+  bots: T;
+}
 export interface StatsJourneyRow {
   name: string;
   level: number;
@@ -225,15 +239,15 @@ export interface WowStats {
     family: { total: number; online: number };
     bots: { total: number; online: number };
     levels: StatsLevelBucket[];
-    classes: { class: number; count: number }[];
-    factions: { alliance: number; horde: number };
-    top_levels: StatsTopLevel[];
+    classes: StatsSegmented<StatsClassCount[]>;
+    factions: StatsSegmented<StatsFactionSplit>;
+    top_levels: StatsSegmented<StatsTopLevel[]>;
     guilds: { count: number; members: number };
   };
   economy: {
     // Money is COPPER everywhere -- divide by 10000 for gold on screen.
     copper: { total: number; family: number; bots: number };
-    richest: StatsRich[];
+    richest: StatsSegmented<StatsRich[]>;
     auction: { count: number; buyout: number };
     mail: { total: number; to_family: number };
   };
