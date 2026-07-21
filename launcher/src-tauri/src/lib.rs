@@ -526,6 +526,11 @@ async fn wow_server_detail(state: State<'_, AppState>) -> Result<serde_json::Val
 }
 
 #[tauri::command]
+async fn wow_stats(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "stats".into()]).await
+}
+
+#[tauri::command]
 async fn wow_docker_usage(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "docker-usage".into()]).await
 }
@@ -2115,6 +2120,7 @@ pub fn run() {
             wow_account_delete,
             wow_server_info,
             wow_server_detail,
+            wow_stats,
             wow_docker_usage,
             wow_docker_clean,
             wow_update_check,

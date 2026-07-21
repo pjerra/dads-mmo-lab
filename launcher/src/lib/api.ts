@@ -190,6 +190,71 @@ export async function wowServerInfo(): Promise<ServerInfo> {
 export async function wowServerDetail(): Promise<ServerDetail> {
   return await invoke("wow_server_detail");
 }
+// --- Statistics page (`dml wow stats`): one read-only envelope ------------
+export interface StatsLevelBucket {
+  bucket: number; // 0 = levels 1-10 ... 7 = levels 71-80
+  family: number;
+  bots: number;
+}
+export interface StatsTopLevel {
+  name: string;
+  level: number;
+  family: boolean;
+}
+export interface StatsRich {
+  name: string;
+  copper: number;
+  family: boolean;
+}
+export interface StatsJourneyRow {
+  name: string;
+  level: number;
+  class: number;
+  playtime: number; // seconds
+  last_seen: number; // unix seconds (0 = never saved a logout)
+  kills: number;
+  achievements: number;
+  quests: number;
+}
+export interface StatsBoot {
+  start: number; // unix seconds
+  uptime: number; // seconds
+}
+export interface WowStats {
+  population: {
+    family: { total: number; online: number };
+    bots: { total: number; online: number };
+    levels: StatsLevelBucket[];
+    classes: { class: number; count: number }[];
+    factions: { alliance: number; horde: number };
+    top_levels: StatsTopLevel[];
+    guilds: { count: number; members: number };
+  };
+  economy: {
+    // Money is COPPER everywhere -- divide by 10000 for gold on screen.
+    copper: { total: number; family: number; bots: number };
+    richest: StatsRich[];
+    auction: { count: number; buyout: number };
+    mail: { total: number; to_family: number };
+  };
+  journey: StatsJourneyRow[];
+  history: {
+    boots: number;
+    total_uptime: number;
+    longest: number;
+    peak: number;
+    realm: string;
+    recent: StatsBoot[];
+  };
+  botwatch: {
+    zones: { zone: number; count: number }[];
+    continents: { map: number; count: number }[];
+    playtime: number; // seconds, all bots combined
+  };
+}
+export async function wowStats(): Promise<WowStats> {
+  return await invoke("wow_stats");
+}
 export async function wowDockerUsage(): Promise<{ lines: string[] }> {
   return await invoke("wow_docker_usage");
 }

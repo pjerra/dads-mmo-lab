@@ -11,6 +11,7 @@ describe("NAV", () => {
       "console",
       "tools",
       "accounts",
+      "statistics",
       "modmanager",
       "dashboard",
       "teleport",

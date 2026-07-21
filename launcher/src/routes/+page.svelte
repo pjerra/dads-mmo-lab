@@ -18,6 +18,7 @@
   import Console from "$lib/pages/Console.svelte";
   import Tools from "$lib/pages/Tools.svelte";
   import Accounts from "$lib/pages/Accounts.svelte";
+  import Statistics from "$lib/pages/Statistics.svelte";
   import ModuleManager from "$lib/pages/ModuleManager.svelte";
   import Dashboard from "$lib/pages/Dashboard.svelte";
   import Items from "$lib/pages/Items.svelte";
@@ -206,6 +207,7 @@
   {#if page === "console"}<Console />{/if}
   {#if page === "tools"}<Tools />{/if}
   {#if page === "accounts"}<Accounts />{/if}
+  {#if page === "statistics"}<Statistics />{/if}
   {#if page === "modmanager"}<ModuleManager />{/if}
   {#if page === "dashboard"}<Dashboard />{/if}
   {#if page === "teleport"}<Teleport />{/if}
