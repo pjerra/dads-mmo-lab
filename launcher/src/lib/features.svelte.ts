@@ -76,7 +76,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "gear-sets-io": "untested",
   "tailscale-play": "untested",
   "port-proxy": "untested",
-  "cache-maint": "untested",
+  "cache-maint": "tested",
 };
 
 export const LOCKED_HINT =
