@@ -374,7 +374,13 @@ export async function probeRenderableItems(
     }
     const fb = viewerFallbackSlot(slot);
     if (fb !== null && (await probe(`${CONTENT_PATH}meta/armor/${fb}/${id}.json`)) !== false) {
-      kept.push([slot, id]);
+      // Keep the item under the FALLBACK slot -- the renderer refetches the
+      // meta itself, so handing it the original slot replays the 404 the
+      // probe just saw and the item is silently dropped. Live case: robes
+      // (chest 5 -> robe 20, e.g. Gamemaster's Robe 22033) and weapons
+      // (16 -> 21 / 18 -> 22, e.g. Warglaive off-hands) only exist on the
+      // CDN under their fallback slot.
+      kept.push([fb, id]);
     }
   }
   return kept;

@@ -45,14 +45,26 @@ describe("probeRenderableItems", () => {
     expect(kept).toEqual([[1, 100]]);
   });
 
-  it("retries the fallback slot before dropping chest/mainhand/offhand items", async () => {
+  it("retries the fallback slot and keeps the item UNDER the fallback slot (weapons)", async () => {
     const { probe, asked } = probeFrom({
       "http://zam.localhost/modelviewer/wrath/meta/armor/16/200.json": false,
       "http://zam.localhost/modelviewer/wrath/meta/armor/21/200.json": true,
     });
     const kept = await probeRenderableItems([[16, 200]], probe);
-    expect(kept).toEqual([[16, 200]]);
+    // The renderer refetches meta itself: handing it the original slot
+    // replays the 404 and silently drops the item (the live robe/Warglaive
+    // bug) -- the fallback slot must WIN.
+    expect(kept).toEqual([[21, 200]]);
     expect(asked).toHaveLength(2);
+  });
+
+  it("keeps robes under the robe slot when chest meta is missing (Gamemaster's Robe case)", async () => {
+    const { probe } = probeFrom({
+      "http://zam.localhost/modelviewer/wrath/meta/armor/5/22033.json": false,
+      "http://zam.localhost/modelviewer/wrath/meta/armor/20/22033.json": true,
+    });
+    const kept = await probeRenderableItems([[5, 22033]], probe);
+    expect(kept).toEqual([[20, 22033]]);
   });
 
   it("keeps items when the probe itself fails (null) -- never strips gear on a network hiccup", async () => {
