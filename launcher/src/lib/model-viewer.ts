@@ -408,12 +408,30 @@ export async function geometryAvailable(modelId: number): Promise<boolean> {
   }
 }
 
+// Pure: the "K of N equipped items can't be shown" caption for the model
+// card (smoke item 6: silently dropped GM/custom items read as a bug).
+// Null when nothing was dropped -- the card then shows no note at all.
+export function skippedItemsNote(total: number, shown: number): string | null {
+  const skipped = total - shown;
+  if (total <= 0 || skipped <= 0) return null;
+  return `${skipped} of ${total} equipped item${total === 1 ? "" : "s"} can't be shown in 3D (custom/GM items).`;
+}
+
+// What createCharacterViewer resolves with: the (untyped) viewer instance
+// plus how many of the doll's viewer-renderable items actually made it into
+// the construction -- the caller derives the skipped-items note from these.
+export interface CharacterViewerResult {
+  viewer: unknown;
+  totalItems: number;
+  shownItems: number;
+}
+
 // Recon §1.1: the final options object ZamModelViewer receives for a
 // playable character (env='live'-shaped, which is what the wrath tree
 // wants too) -- `type: 2, contentPath, container: jQuery(selector), aspect,
 // hd: true, models: {id, type: 16}, items, charCustomization` (the last
 // omitted entirely when unavailable, matching `model.noCharCustomization`).
-// Returns the viewer instance as `unknown` (recon has no documented
+// The viewer instance stays `unknown` (recon has no documented
 // destroy/teardown API -- see CharacterModel.svelte's guarded call site).
 //
 // Construction runs up to three attempts: full gear first; if that rejects,
@@ -423,7 +441,7 @@ export async function geometryAvailable(modelId: number): Promise<boolean> {
 export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
-): Promise<unknown> {
+): Promise<CharacterViewerResult> {
   const modelId = buildCharacterModelId(doll.race, doll.gender);
   if (!(await geometryAvailable(modelId))) {
     throw new Error(
@@ -458,18 +476,21 @@ export async function createCharacterViewer(
 
   const allItems = buildViewerItems(doll.equipped);
   try {
-    return await construct(allItems);
+    const viewer = await construct(allItems);
+    return { viewer, totalItems: allItems.length, shownItems: allItems.length };
   } catch (e) {
     document.getElementById(containerId)?.replaceChildren();
     const kept = await probeRenderableItems(allItems, fetchProbe);
     if (kept.length !== allItems.length) {
       try {
-        return await construct(kept);
+        const viewer = await construct(kept);
+        return { viewer, totalItems: allItems.length, shownItems: kept.length };
       } catch {
         document.getElementById(containerId)?.replaceChildren();
       }
     }
     if (allItems.length === 0) throw e;
-    return await construct([]);
+    const viewer = await construct([]);
+    return { viewer, totalItems: allItems.length, shownItems: 0 };
   }
 }

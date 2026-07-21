@@ -4,6 +4,7 @@ import {
   buildCharacterModelId,
   buildViewerItems,
   probeRenderableItems,
+  skippedItemsNote,
   viewerFallbackSlot,
 } from "./model-viewer";
 
@@ -104,6 +105,32 @@ describe("buildViewerItems", () => {
 
   it("returns an empty array when every item is unmapped or empty", () => {
     expect(buildViewerItems([{ slot: 1, displayid: 999 }, { slot: 12, displayid: 1 }])).toEqual([]);
+  });
+});
+
+describe("skippedItemsNote", () => {
+  it("is null when nothing was skipped (including a naked doll)", () => {
+    expect(skippedItemsNote(0, 0)).toBeNull();
+    expect(skippedItemsNote(12, 12)).toBeNull();
+  });
+
+  it("counts the dropped items against the renderable total", () => {
+    expect(skippedItemsNote(12, 10)).toBe(
+      "2 of 12 equipped items can't be shown in 3D (custom/GM items).",
+    );
+    expect(skippedItemsNote(5, 0)).toBe(
+      "5 of 5 equipped items can't be shown in 3D (custom/GM items).",
+    );
+  });
+
+  it("uses the singular form for a single-item doll", () => {
+    expect(skippedItemsNote(1, 0)).toBe(
+      "1 of 1 equipped item can't be shown in 3D (custom/GM items).",
+    );
+  });
+
+  it("never emits a note on nonsense inputs (shown > total)", () => {
+    expect(skippedItemsNote(3, 5)).toBeNull();
   });
 });
 

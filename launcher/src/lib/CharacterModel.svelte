@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PaperdollData } from "$lib/api";
-  import { createCharacterViewer, loadViewerScripts } from "$lib/model-viewer";
+  import { createCharacterViewer, loadViewerScripts, skippedItemsNote } from "$lib/model-viewer";
 
   let { doll }: { doll: PaperdollData } = $props();
 
@@ -14,6 +14,10 @@
   // The real rejection reason -- surfaced in the UI because "needs internet"
   // turned out to cover at least three unrelated failure modes in practice.
   let errDetail = $state("");
+  // Smoke item 6: items the CDN has no geometry for (custom/GM gear) are
+  // silently dropped by the retry ladder -- without this note that read as
+  // "the model viewer lost my gear" in live testing.
+  let skipNote = $state<string | null>(null);
 
   // Teardown has no documented API in the recon (ZamModelViewer's own
   // destroy/dispose method was never captured in the source extracts) --
@@ -38,14 +42,16 @@
     void doll.name;
 
     status = "loading";
+    skipNote = null;
     let cancelled = false;
     let created: unknown = null;
 
     loadViewerScripts()
       .then(() => createCharacterViewer(containerId, doll))
-      .then((viewer) => {
+      .then((res) => {
         if (cancelled) return;
-        created = viewer;
+        created = res.viewer;
+        skipNote = skippedItemsNote(res.totalItems, res.shownItems);
         status = "ready";
       })
       .catch((e: unknown) => {
@@ -79,6 +85,8 @@
     <p class="muted">
       3D model unavailable{#if errDetail}<br /><span class="errdetail">{errDetail}</span>{/if}
     </p>
+  {:else if skipNote}
+    <p class="skipnote">{skipNote}</p>
   {/if}
 </div>
 
@@ -113,5 +121,18 @@
     color: #f85149;
     font-size: 11.5px;
     word-break: break-word;
+  }
+  /* Skipped-items caption: pinned under the canvas, deliberately quiet --
+     informational, not an error state. */
+  .skipnote {
+    position: absolute;
+    bottom: 4px;
+    left: 8px;
+    right: 8px;
+    margin: 0;
+    color: #8b949e;
+    font-size: 11px;
+    text-align: center;
+    pointer-events: none;
   }
 </style>
