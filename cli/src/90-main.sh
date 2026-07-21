@@ -5243,6 +5243,24 @@ case "$cmd" in
         cmods+=']'
         json_ok "{\"mods\":$cmods}"
         ;;
+      stats)
+        # Read-only statistics envelope for the Statistics page: every
+        # number in ONE call, so a page load is a single dml invocation.
+        # Assembly + the fixed query order live in 48-stats.sh
+        # (_stats_payload); an empty DB answers with zeros, only an
+        # unreachable DB errors. No flags.
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow stats --json"; exit 1 ;;
+          esac
+        done
+        if st_payload="$(_stats_payload)"; then
+          json_ok "$st_payload"
+        else
+          json_err DB_UNREACHABLE "Could not read statistics from the database" "Is ac-database running?"
+          exit 1
+        fi
+        ;;
       port-check)
         # Batch 5 (overnight): LAN-readiness diagnostic. Reads how Docker
         # PUBLISHES the game/DB ports (docker port <container> <internal>) and
