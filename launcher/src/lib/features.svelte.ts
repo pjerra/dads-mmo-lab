@@ -49,7 +49,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "lan-play": "untested",
   "unbound-addon": "untested",
   "rates-live": "tested",
-  "bots-world": "untested",
+  "bots-world": "tested",
   "config-reset": "untested",
   "bots-flush": "untested",
   "auto-shutdown": "untested",

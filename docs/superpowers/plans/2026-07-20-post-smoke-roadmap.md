@@ -44,6 +44,27 @@ rows pass.
 
 ## Round 2 — Known polish tail (small, already identified)
 
+### Server-required UX (user request, 2026-07-21)
+
+Many pages need the server running (Console, Players-online, GM tools, live
+config-apply, item DB, Bot Browser, etc.); with the server stopped they error
+or show empty/broken states. User wants either (a) grey out those sidebar
+items when the server is down, or (b) let you open the page and greet you with
+a clear "start the server first" message.
+
+**Recommendation: (b) the friendly in-page greeting, NOT greying out** — plus
+an optional subtle sidebar hint. Reasons: greying-out is confusing (no reason
+shown, looks broken), blocks exploring what a page does, and needs the same
+per-page "requires server" metadata anyway; the greeting is discoverable, can
+carry a **Start server** button right there, and several pages already do a
+rough version of this (Console's offline note, Home's start card). Work = a
+shared `<ServerRequired>` placeholder + a per-page `requiresServer` flag, shown
+reactively off the existing server-status store. Pages that DON'T need it
+(Help, Tools disk/wslconfig, Library install, Module install, file-based
+config edits, Backups) stay fully usable when stopped. Small-medium, no
+backend. Awaiting the user's pick between (a)/(b)/hybrid before building.
+
+
 Concrete items deferred from the improvements review, all low-severity but
 real:
 
