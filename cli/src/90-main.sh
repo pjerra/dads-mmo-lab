@@ -2027,7 +2027,30 @@ case "$cmd" in
         # SOAP falls through silently (|| true) to the last-saved data.
         pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;" 2>/dev/null)" || pd_online=""
         if [[ "${pd_online%%$'\n'*}" == "1" ]]; then
-          soap_exec "saveall" >/dev/null 2>&1 || true
+          # Review follow-up (live impact): `saveall` serializes EVERY online
+          # player on the world thread -- with the ambient bot population that
+          # is hundreds of save transactions per fire, and the GUI reads
+          # paperdolls often (Dashboard auto-load on every character switch,
+          # Bot Browser Details on online bots). Rate-limit the flush through
+          # a stamp file so rapid browsing costs at most one global save per
+          # window: DML_SAVEALL_COOLDOWN seconds (default 30; 0 = fire every
+          # time). The stamp is written only on a SUCCESSFUL fire so a down
+          # SOAP keeps retrying -- the fire itself stays best-effort/silent,
+          # and any stamp problem falls through to firing (freshness wins).
+          pd_cd="${DML_SAVEALL_COOLDOWN:-30}"
+          if [[ "$pd_cd" =~ ^[0-9]+$ ]]; then pd_cd=$((10#$pd_cd)); else pd_cd=30; fi
+          pd_now="$(date +%s)" || pd_now=0
+          pd_stamp="$HOME/.dml/saveall.stamp"
+          pd_last="$(cat "$pd_stamp" 2>/dev/null)" || pd_last=""
+          if [[ "$pd_last" =~ ^[0-9]+$ ]]; then pd_last=$((10#$pd_last)); else pd_last=0; fi
+          # pd_now < pd_last = a future-dated stamp (clock jump): fire and
+          # re-stamp with the sane current time instead of throttling forever.
+          if (( pd_cd == 0 || pd_now < pd_last || pd_now - pd_last >= pd_cd )); then
+            if soap_exec "saveall" >/dev/null 2>&1; then
+              mkdir -p "$HOME/.dml" 2>/dev/null || true
+              printf '%s' "$pd_now" > "$pd_stamp" 2>/dev/null || true
+            fi
+          fi
         fi
         # AC's ac-db-import (re-run on any cold `compose up`) applies core
         # migrations, one of which replaced the packed playerBytes/

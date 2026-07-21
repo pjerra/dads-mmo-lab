@@ -6,6 +6,10 @@ setup() {
   bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
   make_fixture
   use_mysql_stub
+  # Sandbox ~/.dml: the saveall cooldown stamp (and soap.lock) must live in
+  # the per-test fixture, never the real HOME -- a leftover real-HOME stamp
+  # would make the saveall tests below flake across suite runs.
+  export HOME="$FIXTURE"
 }
 teardown() { teardown_fixture; }
 
@@ -117,6 +121,61 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.equipped[0].name')" = "Hearthstone" ]
   [ "$(echo "$output" | jq -r '.data.note')" = "last_saved" ]
+}
+
+@test "paperdoll saveall is rate-limited: a second read inside the cooldown skips the fire" {
+  # Review follow-up: saveall saves EVERY online player, so browsing several
+  # online characters must not fire one global save per view. Two full reads
+  # in the same HOME -> exactly ONE saveall (default 30s window).
+  printf '1\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv $FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.equipped[0].name')" = "Hearthstone" ]
+  [ "$(grep -c '<command>saveall</command>' "$FIXTURE/cap.txt")" -eq 1 ]
+}
+
+@test "paperdoll saveall cooldown 0 disables the throttle (fires on every read)" {
+  printf '1\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv $FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CAPTURE_APPEND="$FIXTURE/cap.txt"
+  export DML_SAVEALL_COOLDOWN=0
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '<command>saveall</command>' "$FIXTURE/cap.txt")" -eq 2 ]
+}
+
+@test "paperdoll saveall failure does not stamp the cooldown (next read retries)" {
+  # Fire 1 fails (SOAP down) -> no stamp -> fire 2 retries once SOAP is back.
+  printf '1\n' > "$FIXTURE/online.tsv"
+  printf 'Priesttest\t80\t5\t123456\t0\t0\t0\t0\t0\t0\t0\t0\t6948\tHearthstone\t1\t1\t6418\n' > "$FIXTURE/pd.tsv"
+  export DML_STUB_DB_ROWS_SEQ="$FIXTURE/online.tsv $FIXTURE/pd.tsv $FIXTURE/online.tsv $FIXTURE/pd.tsv"
+  export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  export DML_STUB_CURL_EXIT=7
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$HOME/.dml/saveall.stamp" ]
+  unset DML_STUB_CURL_EXIT
+  export DML_STUB_CAPTURE="$FIXTURE/cap2.txt"
+  run bash "$DML" wow paperdoll --char Priesttest --json
+  [ "$status" -eq 0 ]
+  grep -q '<command>saveall</command>' "$FIXTURE/cap2.txt"
+  [ -f "$HOME/.dml/saveall.stamp" ]
 }
 
 @test "paperdoll for an OFFLINE character never fires SOAP" {
