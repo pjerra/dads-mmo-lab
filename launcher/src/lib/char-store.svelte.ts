@@ -67,6 +67,18 @@ export const charStore = $state({
   selected: readStored() as SelectedChar | null,
 });
 
+// Cross-page "open the full Character view for <name>" request (smoke
+// item 4b), following the chipStart pattern in server-status.svelte.ts:
+// Bot Browser sets it, the shell route navigates to the Character page,
+// Dashboard adopts the name into charName (its auto-load effect then
+// fetches) and clears the request. NOT persisted -- purely an in-flight
+// navigation signal.
+export const charView = $state({ requestedName: null as string | null });
+
+export function requestCharView(name: string): void {
+  charView.requestedName = name;
+}
+
 export function setSelectedChar(sel: SelectedChar | null): void {
   charStore.selected = sel;
   try {

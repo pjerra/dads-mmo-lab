@@ -27,6 +27,7 @@
     levelValid,
   } from "$lib/bot-browser";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { requestCharView } from "$lib/char-store.svelte";
 
   const talentTreesByClass = talentTreesJson as unknown as Record<string, Tree[]>;
   const CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
@@ -110,7 +111,12 @@
       master = "";
     }
   }
-  onMount(refreshOnline);
+  onMount(() => {
+    void refreshOnline();
+    // Smoke item 4a: fire the default search on open so the page starts
+    // populated -- the Search button stays as the refine action.
+    void search(0);
+  });
 
   async function openDetail(bot: BotRow) {
     if (detailBot?.guid === bot.guid) {
@@ -164,7 +170,7 @@
     note = null;
     try {
       await wowPartyRelogin(p, bot.name);
-      note = `Asked ${bot.name} to log in and join ${p}'s party — give it a moment.`;
+      note = `Asked ${bot.name} to log in and join ${p}'s party — give it a moment. If nothing happens, see the permission note in the bot's Details.`;
     } catch (e) {
       showErr(e);
     } finally {
@@ -261,6 +267,13 @@
                   <p class="muted small">Gear and level show the bot's last save — online bots can lag a little.</p>
 
                   <div class="actions">
+                    <button
+                      onclick={() => requestCharView(b.name)}
+                      title="Open this bot in the full Character view — gear grid, 3D model, talents and achievements"
+                    >
+                      Open full view
+                    </button>
+                    <span class="sep"></span>
                     <label class="muted">Invite to
                       <select bind:value={master} disabled={busy || online.length === 0}>
                         {#each online as o (o.guid)}<option value={o.name}>{o.name}</option>{/each}
@@ -288,6 +301,16 @@
                       Set level
                     </button>
                   </div>
+                  <!-- Smoke item 4c: the in-game "not allowed to control" denial is
+                       invisible to the launcher (it lands in the master's chat), so
+                       name the real mod-playerbots gate up front instead of leaving
+                       a mystery. -->
+                  <p class="muted small">
+                    If the game whispers "you are not allowed to control bot …", that's the
+                    server's playerbots permission gate: only bots made by My Party's Add bot,
+                    bots on your own account, or bots in your guild can be invited this way
+                    (mod-playerbots AiPlayerbot.AllowGuildBots / AllowAccountBots).
+                  </p>
                 {/if}
               </div>
             </td></tr>
@@ -298,7 +321,7 @@
   {/if}
 
   {#if !searched}
-    <p class="muted">Browse the ~2500 ambient bots: filter by name, class or level, star your favorites, open Details for gear and talents.</p>
+    <p class="muted">{searching ? "Loading the bot list…" : "Browse the ~2500 ambient bots: filter by name, class or level, star your favorites, open Details for gear and talents."}</p>
   {/if}
 </section>
 

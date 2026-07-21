@@ -32,6 +32,13 @@
   onMount(async () => {
     try {
       accounts = await wowAccounts();
+      // Mount staging is only a DEFAULT for an empty selection: if the
+      // parent already put a name into the bound `selected` (Dashboard
+      // adopting a Bot Browser "Open full view" request -- a bot name that
+      // is deliberately NOT in the accounts list), overwriting it here
+      // would clobber that request the moment this fetch resolves. The
+      // account dropdown then simply stays unpicked until the user picks.
+      if (selected) return;
       // Persistent selection (Batch 3 F12): prefer the stored character when
       // it still exists (and is actionable); otherwise the old first-account
       // default. Neither path calls onpick -- mount-time staging must not

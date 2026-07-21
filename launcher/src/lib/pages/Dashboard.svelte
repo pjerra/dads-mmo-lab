@@ -42,6 +42,7 @@
   import CharPicker from "$lib/CharPicker.svelte";
   import CharacterModel from "$lib/CharacterModel.svelte";
   import { saveGearSet } from "$lib/gearsets.svelte";
+  import { charView } from "$lib/char-store.svelte";
 
   // Keyed by class id (as a string, matching the JSON's object keys) -- cast
   // once here rather than at every lookup site. The raw JSON's inferred
@@ -288,6 +289,20 @@
     if (name && name !== lastAutoChar && !loadingDoll) {
       lastAutoChar = name;
       void loadDoll();
+    }
+  });
+
+  // Bot Browser "Open full view" handoff (smoke item 4b): adopt the
+  // requested name into charName -- the auto-load effect above then
+  // fetches it (bots are ordinary characters; the paperdoll arm queries by
+  // name). The request is cleared immediately so revisiting the page later
+  // doesn't replay it. Runs both on mount (request set before navigation)
+  // and while mounted (already on this page when the request arrives).
+  $effect(() => {
+    const req = charView.requestedName;
+    if (req) {
+      charView.requestedName = null;
+      charName = req;
     }
   });
 

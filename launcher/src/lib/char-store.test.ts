@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findStoredChar, parseStoredChar } from "./char-store.svelte";
+import { charView, findStoredChar, parseStoredChar, requestCharView } from "./char-store.svelte";
 import type { Account } from "./api";
 
 const ACCOUNTS: Account[] = [
@@ -57,5 +57,15 @@ describe("findStoredChar", () => {
 
   it("returns null for a null stored selection", () => {
     expect(findStoredChar(ACCOUNTS, null)).toBeNull();
+  });
+});
+
+describe("charView request (Bot Browser -> Character page handoff)", () => {
+  it("starts empty, carries a requested name, and can be cleared by the consumer", () => {
+    expect(charView.requestedName).toBeNull();
+    requestCharView("Botmage");
+    expect(charView.requestedName).toBe("Botmage");
+    charView.requestedName = null; // what Dashboard's adopt-effect does
+    expect(charView.requestedName).toBeNull();
   });
 });

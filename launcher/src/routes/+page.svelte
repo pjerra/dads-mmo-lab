@@ -11,7 +11,7 @@
   import { restartState } from "$lib/restart-state.svelte";
   import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { charStore, setSelectedChar } from "$lib/char-store.svelte";
+  import { charStore, charView, setSelectedChar } from "$lib/char-store.svelte";
   import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
@@ -74,6 +74,14 @@
     chipStart.requested = true;
     go("home");
   }
+
+  // Cross-page full-character-view request (smoke item 4b): Bot Browser's
+  // "Open full view" sets charView.requestedName; navigating here mounts
+  // Dashboard, which adopts the name and clears the request (mirrors the
+  // chipStart handoff above, in the opposite direction).
+  $effect(() => {
+    if (charView.requestedName) go("dashboard");
+  });
 
   // Sidebar "playing as" switcher (Batch 3 F12): minimal footer chip; the
   // dropdown fetches the same accounts/chars data CharPicker uses, on open.
