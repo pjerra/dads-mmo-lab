@@ -83,7 +83,10 @@ EOF
   [ "$(echo "$output" | jq -r '.data.applied')" = "none" ]
 }
 
-@test "direct conf route is limited to playerbots.conf and validates key/value shape" {
+# NB Module-tuning rework: the direct route now covers every module conf that
+# passes _cfg_file_path's allowlist (see wow-config-conf-keys.bats); the core
+# worldserver.conf/authserver.conf remain curated-rows-only, asserted here.
+@test "direct conf route rejects core confs and validates key/value shape" {
   _seed_pb
   run bash "$DML" wow config set --key conf:GameType --value 1 --json
   [ "$status" -eq 1 ]

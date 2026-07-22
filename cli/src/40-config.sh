@@ -77,9 +77,14 @@ _parse_server_info() {
 # keys, cleaning both legacy env keys). playerbots.conf rows
 # NEVER live-apply (the module reads its conf at startup) -- their set
 # always answers `"applied":"restart"`. `config set` additionally accepts a
-# DIRECT route key `conf:playerbots.conf:<Key>` for the Bot World all-keys
-# browser (playerbots.conf ONLY -- worldserver keys stay curated-rows-only
-# on purpose), validated as ^[A-Za-z0-9_.]+$ with a newline-free value.
+# DIRECT route key `conf:<file>.conf:<Key>` for the all-keys browsers (Bot
+# World's playerbots.conf + the Module tuning tab's per-module browsers):
+# any conf passing _cfg_file_path's dynamic module-conf allowlist is
+# writable there -- worldserver.conf/authserver.conf keys stay
+# curated-rows-only on purpose -- validated as ^[A-Za-z0-9_.]+$ with a
+# newline-free value. A direct save live-applies ONLY when the module has a
+# VERIFIED reload console command (_conf_reload_cmd; currently mod-transmog)
+# and no frozen legacy env; everything else stays restart-to-apply.
 _cfg_rows() {
 cat <<'EOF'
 rates.xp_kill|Rates|XP from kills|float|0.5|20|conf:Rate.XP.Kill|1|Multiplies XP earned from kills. 3 = level three times as fast.
@@ -415,6 +420,90 @@ _pb_kv_lines() {
             printf "%s\x1f%s\x1f%d\n", k, v, NR
         }
     ' "$1" 2>/dev/null || true
+    return 0
+}
+
+# _conf_help_lines <file>: per-key comment-block help for the conf-keys
+# browser, as key<US>help lines (US = 0x1f; keys without help are omitted).
+# Module authors document keys in the # comment blocks of their .conf.dist --
+# two documentation styles exist in the wild and both are handled:
+#
+#   adjacent block (mod-learn-spells style): the contiguous # block directly
+#     above the key, blank lines between block and key allowed (a NEW block
+#     after a blank replaces the old one, so section headers don't bleed in).
+#   shared doc block (mod-transmog / AC core style): ONE big block documents
+#     many keys, each entry introduced by a `#    Key.Name` header line; the
+#     lines after a header (until the next header / end of block) become that
+#     key's help. Wins over the adjacent block when both match.
+#
+# Decoration-only lines (####, lone #) are dropped, whitespace is squeezed,
+# lines join with single spaces, and each help is capped at 400 chars.
+_conf_help_lines() {
+    [[ -f "$1" ]] || return 0
+    awk '
+        { n++; line[n] = $0 }
+        END {
+            US = sprintf("%c", 31)
+            # pass 1: the keys this conf actually assigns (header detection
+            # matches ONLY real keys, so prose is never mistaken for one)
+            for (i = 1; i <= n; i++) {
+                s = line[i]; sub(/\r$/, "", s); sub(/^[ \t]+/, "", s)
+                if (s ~ /^[A-Za-z0-9_.]+[ \t]*=/) {
+                    eq = index(s, "=")
+                    k = substr(s, 1, eq - 1); sub(/[ \t]+$/, "", k)
+                    if (!(k in keyseen)) { keyseen[k] = 1; korder[++nk] = k }
+                }
+            }
+            # pass 2: adjacent blocks (buf) + per-key header slices (hdr)
+            prev = "start"; buf = ""; cap = ""
+            for (i = 1; i <= n; i++) {
+                s = line[i]; sub(/\r$/, "", s)
+                t = s; sub(/^[ \t]+/, "", t)
+                if (t ~ /^#/) {
+                    txt = t; sub(/^#+[ \t]*/, "", txt); sub(/[ \t]+$/, "", txt)
+                    gsub(/[ \t]+/, " ", txt)
+                    if (prev != "comment") buf = ""
+                    if (txt in keyseen) {
+                        cap = txt
+                    } else if (txt != "" && txt ~ /[A-Za-z0-9]/) {
+                        if (cap != "") hdr[cap] = (hdr[cap] == "" ? txt : hdr[cap] " " txt)
+                        buf = (buf == "" ? txt : buf " " txt)
+                    }
+                    prev = "comment"
+                } else if (t == "") {
+                    # blank keeps the block for the key below, ends a slice
+                    cap = ""; prev = "blank"
+                } else if (t ~ /^[A-Za-z0-9_.]+[ \t]*=/) {
+                    eq = index(t, "=")
+                    k = substr(t, 1, eq - 1); sub(/[ \t]+$/, "", k)
+                    if (buf != "") adj[k] = buf
+                    buf = ""; cap = ""; prev = "key"
+                } else {
+                    buf = ""; cap = ""; prev = "other"
+                }
+            }
+            for (i = 1; i <= nk; i++) {
+                k = korder[i]
+                h = (k in hdr && hdr[k] != "") ? hdr[k] : ((k in adj) ? adj[k] : "")
+                if (length(h) > 400) h = substr(h, 1, 400)
+                if (h != "") printf "%s%s%s\n", k, US, h
+            }
+        }
+    ' "$1" 2>/dev/null || true
+    return 0
+}
+
+# _conf_reload_cmd <conf-basename>: the owning module's known live-reload
+# console command, or "" when none is known. Deliberately tiny and honest:
+# only commands VERIFIED against the module's own docs belong here
+# (mod-transmog ships `.transmog reload` -- see its cheat-sheet block in
+# 47-commands.sh). Everything else stays restart-to-apply; do NOT invent
+# reload commands for other modules.
+_conf_reload_cmd() {
+    case "$1" in
+        transmog.conf) printf 'transmog reload' ;;
+        *) : ;;
+    esac
     return 0
 }
 

@@ -2288,19 +2288,24 @@ case "$cmd" in
             done
             [[ -n "$key" ]] || { json_err BAD_ARG "Missing --key" "See: dml wow config list --json"; exit 1; }
             if [[ "$key" == conf:* ]]; then
-              # DIRECT conf route (Bot World all-keys browser): the key IS a
-              # `conf:playerbots.conf:<Key>` spec, no registry row involved.
-              # Restricted to playerbots.conf on purpose -- worldserver.conf
-              # stays curated-rows-only. No registry type means no range
-              # check, so the value is shape-validated instead: single line,
-              # bounded length (playerbots values are short), written
-              # verbatim. Always restart-to-apply (playerbots reads its conf
-              # at startup).
+              # DIRECT conf route (Bot World all-keys browser + the Module
+              # tuning tab's per-module browsers): the key IS a
+              # `conf:<file>.conf:<Key>` spec, no registry row involved. Any
+              # conf passing _cfg_file_path's dynamic module-conf allowlist
+              # is writable; worldserver.conf/authserver.conf (and .env/the
+              # compose override) stay curated-rows-only on purpose. No
+              # registry type means no range check, so the value is
+              # shape-validated instead: single line, bounded length (conf
+              # values are short), written verbatim. Restart-to-apply unless
+              # the module has a VERIFIED live-reload console command
+              # (_conf_reload_cmd) -- see the live/restart decision below.
               _cfg_conf_route "$key" || { json_err BAD_ARG "Bad conf key: $key" ""; exit 1; }
-              if [[ "$conf_file" != "playerbots.conf" ]]; then
-                json_err BAD_ARG "Direct conf keys are limited to playerbots.conf" "Other settings live in the curated list: dml wow config list --json"
-                exit 1
-              fi
+              case "$conf_file" in
+                worldserver.conf|authserver.conf|.env|docker-compose.override.yml)
+                  json_err BAD_ARG "Direct conf keys are limited to module confs" "Core server settings live in the curated list: dml wow config list --json"
+                  exit 1
+                  ;;
+              esac
               [[ "$conf_key" =~ ^[A-Za-z0-9_.]+$ ]] \
                 || { json_err BAD_ARG "Invalid conf key: $conf_key" "Letters, digits, dots and underscores only."; exit 1; }
               # Denylist: keys `wow bots flush` owns. Setting this one by
@@ -2324,22 +2329,48 @@ case "$cmd" in
                 json_err BAD_ARG "Value too long (max 200 characters)" ""; exit 1
               fi
               _cfg_preamble
+              # The dynamic allowlist: module-conf shape (the regex is the
+              # traversal guard) AND the conf or its .dist already exists.
+              if cpath="$(_cfg_file_path "$conf_file")"; then :; else
+                json_err NOT_FOUND "Not an editable module conf: $conf_file" "See: dml wow config files --json"
+                exit 1
+              fi
               CFG_CHANGED=false
-              cpath="$(_cfg_conf_path "$conf_file")"
               _cfg_conf_ensure "$cpath" \
                 || { json_err NOT_FOUND "$conf_file not found (nor its .dist)" "Is the WoW server fully installed?"; exit 1; }
               _cfg_conf_write "$cpath" "$conf_key" "$value" \
                 || { json_err WRITE_FAILED "Could not write $conf_file" ""; exit 1; }
+              # Clean any legacy AC_* env override off override.yml (env
+              # beats conf, so leaving it would make this save a silent
+              # no-op after the next recreate) -- same honesty as the
+              # curated conf rows.
               ename="$(_cfg_env_name_for "$conf_key")"
+              envwas=false
               if [[ -n "$(_cfg_env_read "$ename")" ]]; then
                 _cfg_env_remove "$ename"
+                envwas=true
                 CFG_CHANGED=true
               fi
+              applied="none"; rreq=false
               if [[ "$CFG_CHANGED" == true ]]; then
-                json_ok '{"changed":true,"restart_required":true,"applied":"restart"}'
-              else
-                json_ok '{"changed":false,"restart_required":false,"applied":"none"}'
+                applied="restart"; rreq=true
+                # Live-apply only for modules with a VERIFIED reload console
+                # command (currently mod-transmog's `transmog reload`), and
+                # only when no legacy env still beats the conf -- in the
+                # override OR frozen inside the running container (the
+                # docker question is asked only when a reload is even on
+                # the table, so plain playerbots saves stay docker-free).
+                reloadcmd="$(_conf_reload_cmd "$conf_file")"
+                if [[ -n "$reloadcmd" && "$envwas" == false ]]; then
+                  if _cfg_env_frozen "$ename"; then envwas=true; fi
+                fi
+                if [[ -n "$reloadcmd" && "$envwas" == false ]]; then
+                  if soap_exec "$reloadcmd" >/dev/null 2>&1; then
+                    applied="live"; rreq=false
+                  fi
+                fi
               fi
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
               exit 0
             fi
             row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
@@ -2509,6 +2540,69 @@ case "$cmd" in
             [[ "$pbsrc" == "$pbdist" ]] && pbsrc_name="playerbots.conf.dist"
             json_ok "{\"source\":\"$pbsrc_name\",\"keys\":$out}"
             ;;
+          conf-keys)
+            # Module tuning rework: pb-keys generalized to ANY module conf
+            # that passes _cfg_file_path's dynamic allowlist. Read-only.
+            # Same parse semantics as pb-keys (active `Key = value` lines,
+            # duplicate keys keep FIRST position / LAST value, raw quoted
+            # values preserved for verbatim round-trips) plus each key's
+            # comment-block help from the .dist (_conf_help_lines) -- module
+            # authors document their keys there; surface those docs. Help
+            # falls back to the live conf when no .dist exists (an activated
+            # module conf IS a comment-preserving copy of its dist).
+            fname=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --file) _need_flag_val "$1" $#; fname="$2"; shift 2 ;;
+                *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow config conf-keys --file <name>.conf --json"; exit 1 ;;
+              esac
+            done
+            [[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" "See: dml wow config files --json"; exit 1; }
+            _cfg_preamble
+            case "$fname" in
+              .env|docker-compose.override.yml|worldserver.conf|authserver.conf)
+                json_err BAD_ARG "Not a module conf: $fname" "Core server settings live in the curated list: dml wow config list --json"
+                exit 1
+                ;;
+            esac
+            if ckpath="$(_cfg_file_path "$fname")"; then :; else
+              json_err NOT_FOUND "Not an editable module conf: $fname" "See: dml wow config files --json"
+              exit 1
+            fi
+            ckdist="$ckpath.dist"
+            cksrc="$ckpath"; cksrc_name="conf"
+            if [[ ! -f "$cksrc" ]]; then cksrc="$ckdist"; cksrc_name="dist"; fi
+            declare -A _ck_val=() _ck_line=() _ck_def=() _ck_help=()
+            _ck_order=()
+            while IFS=$'\x1f' read -r k v ln; do
+              [[ -n "${_ck_val[$k]+x}" ]] || _ck_order+=("$k")
+              _ck_val["$k"]="$v"; _ck_line["$k"]="$ln"
+            done < <(_pb_kv_lines "$cksrc")
+            if [[ "$cksrc_name" == "conf" && -f "$ckdist" ]]; then
+              while IFS=$'\x1f' read -r k v ln; do
+                _ck_def["$k"]="$v"
+              done < <(_pb_kv_lines "$ckdist")
+            fi
+            ckhelp_src="$cksrc"
+            [[ -f "$ckdist" ]] && ckhelp_src="$ckdist"
+            while IFS=$'\x1f' read -r k h; do
+              [[ -n "$k" ]] && _ck_help["$k"]="$h"
+            done < <(_conf_help_lines "$ckhelp_src")
+            first=1; out='['
+            for k in ${_ck_order[@]+"${_ck_order[@]}"}; do
+              dv=null
+              if [[ "$cksrc_name" == "dist" ]]; then
+                dv="\"$(json_escape "${_ck_val[$k]}")\""
+              elif [[ -n "${_ck_def[$k]+x}" ]]; then
+                dv="\"$(json_escape "${_ck_def[$k]}")\""
+              fi
+              [[ $first -eq 0 ]] && out+=','
+              out+="{\"key\":\"$(json_escape "$k")\",\"value\":\"$(json_escape "${_ck_val[$k]}")\",\"default\":$dv,\"line\":${_ck_line[$k]},\"help\":\"$(json_escape "${_ck_help[$k]:-}")\"}"
+              first=0
+            done
+            out+=']'
+            json_ok "{\"file\":\"$(json_escape "$fname")\",\"source\":\"$cksrc_name\",\"keys\":$out}"
+            ;;
           files)
             # Dynamic editable-conf list (Batch 1 F3): the fixed four plus
             # every *.conf / *.conf.dist basename found under modules/
@@ -2654,7 +2748,10 @@ case "$cmd" in
               fi
               mtminj="${mtmin:-null}"; mtmaxj="${mtmax:-null}"
               [[ $first -eq 0 ]] && out+=','
-              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$(json_escape "$mtmod")\",\"label\":\"$(json_escape "$mtlabel")\",\"explain\":\"$(json_escape "$mtexplain")\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"$(json_escape "$mtval")\",\"default\":\"$(json_escape "$mtdef")\",\"installed\":$mtinstalled}"
+              # `file` (additive, Module-tuning rework): the row's backing
+              # file basename so the GUI can render curated conf rows inside
+              # the owning module's card.
+              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$(json_escape "$mtmod")\",\"label\":\"$(json_escape "$mtlabel")\",\"explain\":\"$(json_escape "$mtexplain")\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"$(json_escape "$mtval")\",\"default\":\"$(json_escape "$mtdef")\",\"installed\":$mtinstalled,\"file\":\"$(json_escape "$mtfile")\"}"
               first=0
             done < <(_mtune_rows)
             out+=']'
@@ -4242,8 +4339,14 @@ case "$cmd" in
               inst=false; _cpp_installed "$sdir" "$mk" && inst=true
               pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
               cstate="$(_module_conf_state "$sdir" "$mk")"
+              # conf_name (additive, Module-tuning rework): the conf basename
+              # so the GUI can pair each installed module with its editable
+              # conf (config files/conf-keys); null when the module has none.
+              cnamej=null
+              cname="$(_module_conf_name "$mk")"
+              [[ -n "$cname" ]] && cnamej="\"$(json_escape "$cname")\""
               [[ $first -eq 0 ]] && cpp+=','
-              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"custom\":false}"
+              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"conf_name\":$cnamej,\"custom\":false}"
               first=0
             done < <(_module_registry_cpp)
             if [[ -d "$sdir/modules" ]]; then
@@ -4256,7 +4359,7 @@ case "$cmd" in
                 # Custom clones carry no registry row -- their origin remote
                 # is the best available "project page" link.
                 curl_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
-                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"custom\":true}"
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"conf_name\":null,\"custom\":true}"
               done
             fi
             cpp+=']'
