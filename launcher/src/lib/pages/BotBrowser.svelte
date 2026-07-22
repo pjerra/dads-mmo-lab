@@ -2,20 +2,14 @@
   import { onMount } from "svelte";
   import {
     wowBotsList,
-    wowPaperdoll,
-    wowCharProgress,
     wowPartyOnline,
     wowPartyRelogin,
     wowGmLevel,
     type BotRow,
     type BotsPage,
-    type PaperdollData,
-    type CharProgress,
     type OnlineChar,
   } from "$lib/api";
-  import { className, qualityName, QUALITY_COLORS } from "$lib/wow";
-  import { treePoints, type Tree } from "$lib/talent-trees";
-  import talentTreesJson from "$lib/talent-trees-wotlk.json";
+  import { className } from "$lib/wow";
   import {
     loadFavs,
     saveFavs,
@@ -27,9 +21,8 @@
     levelValid,
   } from "$lib/bot-browser";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { requestCharView } from "$lib/char-store.svelte";
+  import CharacterSheet from "$lib/CharacterSheet.svelte";
 
-  const talentTreesByClass = talentTreesJson as unknown as Record<string, Tree[]>;
   const CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
   const PAGE_SIZE = 50;
 
@@ -51,13 +44,16 @@
 
   let favs: string[] = $state(loadFavs());
 
-  // Detail drawer (one bot at a time).
+  // Details row (one bot at a time): embeds a COMPACT CharacterSheet --
+  // the sheet fetches its own paperdoll/talents/achievements, so no
+  // detail-fetching state lives here anymore.
   let detailBot = $state<BotRow | null>(null);
-  let detailDoll = $state<PaperdollData | null>(null);
-  let detailNaked = $state(false); // paperdoll NOT_FOUND: a naked bot is normal
-  let detailProgress = $state<CharProgress | null>(null);
-  let detailError = $state<string | null>(null);
-  let loadingDetail = $state(false);
+
+  // In-place full-size character view (user request 2026-07-22: "Open full
+  // view" must NOT navigate to the Characters tab). While set, the list is
+  // hidden -- but the component (and so every filter, the current page and
+  // favorites) stays mounted, and Back simply returns to it intact.
+  let fullView = $state<BotRow | null>(null);
 
   // Actions (Playerbots.svelte pattern: online-player select, busy, note).
   let online: OnlineChar[] = $state([]);
@@ -118,48 +114,9 @@
     void search(0);
   });
 
-  async function openDetail(bot: BotRow) {
-    if (detailBot?.guid === bot.guid) {
-      detailBot = null;
-      return;
-    }
-    detailBot = bot;
-    detailDoll = null;
-    detailNaked = false;
-    detailProgress = null;
-    detailError = null;
+  function toggleDetail(bot: BotRow) {
+    detailBot = detailBot?.guid === bot.guid ? null : bot;
     levelInput = "";
-    loadingDetail = true;
-    const requested = bot;
-    try {
-      try {
-        const doll = await wowPaperdoll(bot.name);
-        if (detailBot?.guid !== requested.guid) return;
-        detailDoll = doll;
-      } catch (e) {
-        if (detailBot?.guid !== requested.guid) return;
-        const err = e as { code?: string; message?: string };
-        // A bot with NO equipped items is normal (the CLI's paperdoll INNER
-        // JOIN reports NOT_FOUND) -- render "no gear saved yet", not an error.
-        if (err.code === "NOT_FOUND") detailNaked = true;
-        else detailError = err.message ?? String(e);
-      }
-      try {
-        const p = await wowCharProgress(bot.name);
-        if (detailBot?.guid !== requested.guid) return;
-        detailProgress = p;
-      } catch {
-        // progress is decorative here -- gear list is the main payload
-      }
-    } finally {
-      if (detailBot?.guid === requested.guid) loadingDetail = false;
-    }
-  }
-
-  function detailTrees(bot: BotRow): { name: string; points: number }[] {
-    const trees = talentTreesByClass[String(bot.class)] ?? [];
-    const learned = new Set(detailProgress?.talents.spells ?? []);
-    return trees.map((t) => ({ name: t.name, points: treePoints(t, learned) }));
   }
 
   async function invite(bot: BotRow) {
@@ -195,6 +152,16 @@
 </script>
 
 <section class="content">
+  {#if fullView}
+    <!-- In-place full-size character view: the list below stays mounted
+         (its state intact), Back just clears this. -->
+    <header class="bar fullbar">
+      <button onclick={() => (fullView = null)}>‹ Back to list</button>
+      <h2>{fullView.name}</h2>
+      <span class="muted">Level {fullView.level} {className(fullView.class)}</span>
+    </header>
+    <CharacterSheet name={fullView.name} />
+  {:else}
   <header class="bar"><h2>Bot Browser</h2></header>
 
   <form class="filters" onsubmit={(e) => { e.preventDefault(); search(0); }}>
@@ -244,83 +211,62 @@
                 title={b.online ? "Online" : "Offline"}
               ></span>
             </td>
-            <td><button onclick={() => openDetail(b)}>{detailBot?.guid === b.guid ? "Hide" : "Details"}</button></td>
+            <td><button onclick={() => toggleDetail(b)}>{detailBot?.guid === b.guid ? "Hide" : "Details"}</button></td>
           </tr>
           {#if detailBot?.guid === b.guid}
             <tr><td colspan="7">
               <div class="card detail">
-                {#if loadingDetail}
-                  <p class="muted">Loading…</p>
-                {:else}
-                  {#if detailError}
-                    <p class="muted">Couldn't load gear: {detailError}</p>
-                  {:else if detailNaked}
-                    <p class="muted">No gear saved yet — the bot hasn't equipped (or saved) any items.</p>
-                  {:else if detailDoll}
-                    <div class="detail-head">
-                      <strong>{detailDoll.name}</strong>
-                      <span class="muted">Level {detailDoll.level} {className(detailDoll.class)} · {detailDoll.gold} gold</span>
-                    </div>
-                    <div class="gearlist">
-                      {#each detailDoll.equipped as it (it.slot)}
-                        <span class="gearitem" style="color: {QUALITY_COLORS[it.quality] ?? '#c9d1d9'}" title="{qualityName(it.quality)} · item level {it.item_level}">{it.name}</span>
-                      {/each}
-                    </div>
-                  {/if}
-                  {#if detailProgress}
-                    <p class="muted">
-                      Talents: {detailTrees(b).map((t) => `${t.name} ${t.points}`).join(" / ")}
-                      · Achievements: {detailProgress.achievements.total}
-                    </p>
-                  {/if}
-                  <p class="muted small">Gear and level show the bot's last save — online bots can lag a little.</p>
+                <!-- Compact embedded character sheet (user request
+                     2026-07-22): the same tabbed view as the Character
+                     page, sized down -- it fetches and renders its own
+                     gear/model/talents/achievements. -->
+                <CharacterSheet name={b.name} compact />
 
-                  <div class="actions">
-                    <button
-                      onclick={() => requestCharView(b.name)}
-                      title="Open this bot in the full Character view — gear grid, 3D model, talents and achievements"
-                    >
-                      Open full view
-                    </button>
-                    <span class="sep"></span>
-                    <label class="muted">Invite to
-                      <select bind:value={master} disabled={busy || online.length === 0}>
-                        {#each online as o (o.guid)}<option value={o.name}>{o.name}</option>{/each}
-                      </select>
-                    </label>
-                    <button
-                      onclick={() => invite(b)}
-                      disabled={busy || !master || featureLocked("bot-browser")}
-                      title={featureLocked("bot-browser")
-                        ? LOCKED_HINT
-                        : online.length === 0
-                          ? "Log a character into the game first"
-                          : "Logs this bot in and adds it to the selected player's party (needs the bot bridge deployed)"}
-                    >
-                      Invite to party
-                    </button>
-                    {#if online.length === 0}<span class="muted small">log a character in first</span>{/if}
-                    <span class="sep"></span>
-                    <input class="lvl-input" type="number" min="1" max="255" placeholder="lvl" bind:value={levelInput} disabled={busy} />
-                    <button
-                      onclick={() => setLevel(b)}
-                      disabled={busy || !levelValid(levelInput) || featureLocked("bot-browser")}
-                      title={featureLocked("bot-browser") ? LOCKED_HINT : "Works even while the bot is offline"}
-                    >
-                      Set level
-                    </button>
-                  </div>
-                  <!-- Smoke item 4c: the in-game "not allowed to control" denial is
-                       invisible to the launcher (it lands in the master's chat), so
-                       name the real mod-playerbots gate up front instead of leaving
-                       a mystery. -->
-                  <p class="muted small">
-                    If the game whispers "you are not allowed to control bot …", that's the
-                    server's playerbots permission gate: only bots made by My Party's Add bot,
-                    bots on your own account, or bots in your guild can be invited this way
-                    (mod-playerbots AiPlayerbot.AllowGuildBots / AllowAccountBots).
-                  </p>
-                {/if}
+                <div class="actions">
+                  <button
+                    onclick={() => (fullView = b)}
+                    title="Show the full-size character view — stays on this page; Back returns to the list"
+                  >
+                    Open full view
+                  </button>
+                  <span class="sep"></span>
+                  <label class="muted">Invite to
+                    <select bind:value={master} disabled={busy || online.length === 0}>
+                      {#each online as o (o.guid)}<option value={o.name}>{o.name}</option>{/each}
+                    </select>
+                  </label>
+                  <button
+                    onclick={() => invite(b)}
+                    disabled={busy || !master || featureLocked("bot-browser")}
+                    title={featureLocked("bot-browser")
+                      ? LOCKED_HINT
+                      : online.length === 0
+                        ? "Log a character into the game first"
+                        : "Logs this bot in and adds it to the selected player's party (needs the bot bridge deployed)"}
+                  >
+                    Invite to party
+                  </button>
+                  {#if online.length === 0}<span class="muted small">log a character in first</span>{/if}
+                  <span class="sep"></span>
+                  <input class="lvl-input" type="number" min="1" max="255" placeholder="lvl" bind:value={levelInput} disabled={busy} />
+                  <button
+                    onclick={() => setLevel(b)}
+                    disabled={busy || !levelValid(levelInput) || featureLocked("bot-browser")}
+                    title={featureLocked("bot-browser") ? LOCKED_HINT : "Works even while the bot is offline"}
+                  >
+                    Set level
+                  </button>
+                </div>
+                <!-- Smoke item 4c: the in-game "not allowed to control" denial is
+                     invisible to the launcher (it lands in the master's chat), so
+                     name the real mod-playerbots gate up front instead of leaving
+                     a mystery. -->
+                <p class="muted small">
+                  If the game whispers "you are not allowed to control bot …", that's the
+                  server's playerbots permission gate: only bots made by My Party's Add bot,
+                  bots on your own account, or bots in your guild can be invited this way
+                  (mod-playerbots AiPlayerbot.AllowGuildBots / AllowAccountBots).
+                </p>
               </div>
             </td></tr>
           {/if}
@@ -331,6 +277,7 @@
 
   {#if !searched}
     <p class="muted">{searching ? "Loading the bot list…" : "Browse the ~2500 ambient bots: filter by name, class or level, star your favorites, open Details for gear and talents."}</p>
+  {/if}
   {/if}
 </section>
 
@@ -356,9 +303,8 @@
   .dot.on { background: #3fb950; }
   .dot.off { background: #f85149; }
   .card.detail { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; margin: 6px 0; }
-  .detail-head { display: flex; gap: 12px; align-items: baseline; }
-  .gearlist { display: flex; flex-wrap: wrap; gap: 6px 14px; }
-  .gearitem { font-size: 13.5px; }
+  /* Full-view header: Back button + name + level/class on one line. */
+  .fullbar { display: flex; gap: 12px; align-items: center; }
   .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .actions .sep { width: 12px; }
   input.lvl-input { width: 56px; }

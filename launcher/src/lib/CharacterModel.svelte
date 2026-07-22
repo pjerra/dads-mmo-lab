@@ -2,7 +2,7 @@
   import type { PaperdollData } from "$lib/api";
   import { createCharacterViewer, loadViewerScripts, skippedItemsNote } from "$lib/model-viewer";
 
-  let { doll }: { doll: PaperdollData } = $props();
+  let { doll, compact = false }: { doll: PaperdollData; compact?: boolean } = $props();
 
   // Only one CharacterModel is ever mounted at a time (Dashboard), but a
   // unique id still avoids any chance of colliding with a leftover
@@ -77,7 +77,7 @@
   });
 </script>
 
-<div class="model-card">
+<div class="model-card" class:compact>
   <div id={containerId} class="model-container"></div>
   {#if status === "loading"}
     <p class="muted">Loading model…</p>
@@ -104,6 +104,13 @@
     justify-content: center;
     position: relative;
     overflow: hidden;
+  }
+  /* Compact variant (CharacterSheet's Bot Browser embed): 225x285 keeps
+     the full card's exact 15:19 ratio, so model-viewer's VIEWER_ASPECT
+     (300/380) stays correct for the internal canvas sizing. */
+  .model-card.compact {
+    width: 225px;
+    height: 285px;
   }
   .model-container {
     width: 100%;
