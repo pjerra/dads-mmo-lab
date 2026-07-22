@@ -1857,6 +1857,38 @@ fn defender_hint() -> Result<serde_json::Value, CmdError> {
 // Committed datasets (talent-trees-wotlk.json, achievements-wotlk.json) are
 // bundled into the binary, live on NO cache path, and are never touched.
 
+/// Native 3D-meta probe for the model pre-flight. The WebView's fetch()
+/// cannot distinguish a clean upstream 404 from a network failure for
+/// custom-scheme responses on Windows (WebView2 surfaces non-2xx scheme
+/// responses as load errors), which silently poisoned every item probe --
+/// robes/weapons were kept on best-guess slots and the engine dropped them
+/// invisibly. This asks reqwest directly and warms the shared cache on hit.
+#[tauri::command]
+async fn zam_probe(path: String, app: tauri::AppHandle) -> Result<serde_json::Value, CmdError> {
+    let root = app.path().app_cache_dir().map_err(|e| CmdError {
+        code: "CACHE_DIR".into(),
+        message: e.to_string(),
+        hint: "Could not locate the app cache directory.".into(),
+    })?;
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        match crate::zam::zam_probe_upstream(&root, &path) {
+            crate::zam::ProbeOutcome::Hit(bytes) => serde_json::json!({
+                "status": "hit",
+                "inventoryType": crate::zam::parse_inventory_type(&bytes),
+            }),
+            crate::zam::ProbeOutcome::Miss => serde_json::json!({ "status": "miss" }),
+            crate::zam::ProbeOutcome::Err => serde_json::json!({ "status": "err" }),
+        }
+    })
+    .await
+    .map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })?;
+    Ok(out)
+}
+
 /// Size report for the Windows-side zam model/icon cache.
 #[tauri::command]
 fn zam_cache_status(app: tauri::AppHandle) -> Result<serde_json::Value, CmdError> {
@@ -2116,6 +2148,7 @@ pub fn run() {
             games_start,
             games_stop,
             games_restart,
+            zam_probe,
             zam_cache_status,
             zam_cache_clear,
             wow_cache_status,

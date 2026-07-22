@@ -28,6 +28,7 @@
 // ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 // OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+import { invoke } from "@tauri-apps/api/core";
 import type { PaperdollData } from "./api";
 
 // jquery (v3.x) ships no bundled TypeScript types and this repo doesn't carry
@@ -446,19 +447,27 @@ export async function resolveViewerItems(
   };
 }
 
+// NATIVE probe (2026-07-22): the WebView's fetch() proved unusable for this
+// -- WebView2 surfaces the zam scheme's clean 404s as network ERRORS, so
+// every "meta missing" read as "network hiccup", items stayed on best-guess
+// slots, and the engine dropped them invisibly (the robe-never-renders /
+// no-skip-note-ever bug, proven via cache forensics: the second chest probe
+// never fired). The Rust side answers three-valued (hit/miss/err) via
+// reqwest against the real upstream and warms the shared cache on hit.
 async function fetchMetaProbe(url: string): Promise<MetaProbeResult | null> {
   try {
-    const res = await fetch(url);
-    if (!res.ok) return { ok: false };
-    let inventoryType: number | undefined;
-    try {
-      const j = (await res.json()) as { Item?: { InventoryType?: number } };
-      if (typeof j?.Item?.InventoryType === "number") inventoryType = j.Item.InventoryType;
-    } catch {
-      // A 200 with an unparseable body still counts as "meta exists" --
-      // the InventoryType refinement just degrades to the default slot.
+    const rel = url.startsWith(CONTENT_PATH)
+      ? `modelviewer/wrath/${url.slice(CONTENT_PATH.length)}`
+      : url.replace(/^https?:\/\/[^/]+\//, "");
+    const r = (await invoke("zam_probe", { path: rel })) as {
+      status: "hit" | "miss" | "err";
+      inventoryType?: number | null;
+    };
+    if (r.status === "hit") {
+      return { ok: true, inventoryType: typeof r.inventoryType === "number" ? r.inventoryType : undefined };
     }
-    return { ok: true, inventoryType };
+    if (r.status === "miss") return { ok: false };
+    return null;
   } catch {
     return null;
   }

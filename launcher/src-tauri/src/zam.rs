@@ -103,6 +103,64 @@ pub fn zam_serve(cache_root: &std::path::Path, raw_path: &str) -> Option<(Vec<u8
     Some((bytes, ct))
 }
 
+/// Outcome of a native meta probe (see `zam_probe` in lib.rs): the WebView's
+/// fetch() cannot be trusted to distinguish a clean upstream 404 from a
+/// network failure for custom-scheme responses on Windows (WebView2 surfaces
+/// non-2xx scheme responses as load errors), so the 3D item pre-flight asks
+/// the Rust side instead. Hit also warms the shared cache for the engine.
+pub enum ProbeOutcome {
+    /// Meta exists; bytes returned (cached for the engine's own fetch).
+    Hit(Vec<u8>),
+    /// Upstream answered definitively: this meta does not exist.
+    Miss,
+    /// Transport-level failure -- unknown, caller should not treat as Miss.
+    Err,
+}
+
+/// Like `zam_serve`, but three-valued: cache hit / upstream 200 => Hit
+/// (cached), upstream non-success => Miss, transport error => Err. Path
+/// validation is identical to `zam_serve` (rejects map to Err -- an invalid
+/// path can never claim an item is missing).
+pub fn zam_probe_upstream(cache_root: &std::path::Path, raw_path: &str) -> ProbeOutcome {
+    let Some((url, rel)) = zam_map_path(raw_path) else {
+        return ProbeOutcome::Err;
+    };
+    let cached = cache_root.join(ZAM_CACHE_DIR).join(&rel);
+    if let Ok(bytes) = std::fs::read(&cached) {
+        return ProbeOutcome::Hit(bytes);
+    }
+    let resp = match client().get(&url).send() {
+        Ok(r) => r,
+        Err(_) => return ProbeOutcome::Err,
+    };
+    if !resp.status().is_success() {
+        return ProbeOutcome::Miss;
+    }
+    let mut bytes = Vec::new();
+    if resp.take(64 * 1024 * 1024).read_to_end(&mut bytes).is_err() {
+        return ProbeOutcome::Err;
+    }
+    if let Some(parent) = cached.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = cached.with_extension(format!(
+        "{}.tmp",
+        cached.extension().and_then(|e| e.to_str()).unwrap_or("bin")
+    ));
+    if std::fs::write(&tmp, &bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, &cached);
+    }
+    ProbeOutcome::Hit(bytes)
+}
+
+/// Pure: pull `Item.InventoryType` out of a meta JSON body (used by the 3D
+/// pre-flight to distinguish shields/bows from generic held items). Any
+/// parse failure -> None -- the caller degrades to its default slot.
+pub fn parse_inventory_type(bytes: &[u8]) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    v.get("Item")?.get("InventoryType")?.as_i64()
+}
+
 /// The single runtime-cache subdir name under the app cache root. All the
 /// zam-scheme model/icon bytes live under `<app_cache_dir>/zam-cache`; the
 /// maintenance commands (Batch 6 C) only ever construct paths from this
