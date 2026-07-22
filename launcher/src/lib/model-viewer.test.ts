@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AC_TO_INVENTORY_TYPE,
   buildCharacterModelId,
+  displayIdCandidates,
   resolveViewerItems,
   skippedItemsNote,
   viewerMetaUrl,
@@ -226,6 +227,172 @@ describe("resolveViewerItems", () => {
       [5, 22],
       [21, 33],
     ]);
+  });
+});
+
+describe("displayIdCandidates", () => {
+  it("is server-id only when wowhead knows nothing extra", () => {
+    expect(displayIdCandidates(30606)).toEqual([30606]);
+    expect(displayIdCandidates(30606, undefined)).toEqual([30606]);
+    expect(displayIdCandidates(30606, null)).toEqual([30606]);
+    expect(displayIdCandidates(30606, 0)).toEqual([30606]);
+  });
+
+  it("appends a differing wowhead id AFTER the server id (server meta wins when it exists)", () => {
+    expect(displayIdCandidates(45479, 45150)).toEqual([45479, 45150]);
+  });
+
+  it("dedupes an agreeing wowhead id", () => {
+    expect(displayIdCandidates(30606, 30606)).toEqual([30606]);
+  });
+
+  it("rescues a zero server displayid when wowhead knows the item", () => {
+    expect(displayIdCandidates(0, 45150)).toEqual([45150]);
+  });
+
+  it("drops unprobeable ids entirely", () => {
+    expect(displayIdCandidates(0)).toEqual([]);
+    expect(displayIdCandidates(0, 0)).toEqual([]);
+    expect(displayIdCandidates(-5, Number.NaN)).toEqual([]);
+  });
+});
+
+describe("resolveViewerItems with wowhead display-id overrides", () => {
+  const probeFrom = (answers: Record<string, MetaProbeResult | null>) => {
+    const asked: string[] = [];
+    const probe = async (url: string) => {
+      asked.push(url);
+      return url in answers ? answers[url] : { ok: false };
+    };
+    return { probe, asked };
+  };
+
+  it("renders both Warglaives via wowhead ids when the server displayids miss everywhere", async () => {
+    // Real ids: server item_template 45479 (MH) / 45481 (OH) 404 on every
+    // tree; wowhead's own displayIds 45150/45146 exist (tbc/cata -- served
+    // through the proxy's cross-tree fallback). OH meta InventoryType 22.
+    const { probe, asked } = probeFrom({
+      [`${BASE}meta/item/45479.json`]: { ok: false },
+      [`${BASE}meta/item/45150.json`]: { ok: true, inventoryType: 21 },
+      [`${BASE}meta/item/45481.json`]: { ok: false },
+      [`${BASE}meta/item/45146.json`]: { ok: true, inventoryType: 22 },
+    });
+    const r = await resolveViewerItems(
+      [
+        { slot: 15, entry: 32837, displayid: 45479 },
+        { slot: 16, entry: 32838, displayid: 45481 },
+      ],
+      probe,
+      new Map([
+        [32837, 45150],
+        [32838, 45146],
+      ]),
+    );
+    expect(r).toEqual({
+      items: [
+        [21, 45150],
+        [22, 45146],
+      ],
+      total: 2,
+    });
+    // Server id tried FIRST for each item, wowhead id only after its miss.
+    // (Items probe concurrently, so only the PER-ITEM relative order is
+    // guaranteed -- not the global interleaving.)
+    expect(asked.indexOf(`${BASE}meta/item/45479.json`)).toBeLessThan(
+      asked.indexOf(`${BASE}meta/item/45150.json`),
+    );
+    expect(asked.indexOf(`${BASE}meta/item/45481.json`)).toBeLessThan(
+      asked.indexOf(`${BASE}meta/item/45146.json`),
+    );
+    expect(asked).toHaveLength(4);
+  });
+
+  it("never probes the wowhead id when the server id's meta exists", async () => {
+    const { probe, asked } = probeFrom({
+      [`${BASE}meta/armor/1/1170.json`]: { ok: true },
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 0, entry: 999, displayid: 1170 }],
+      probe,
+      new Map([[999, 4242]]),
+    );
+    expect(r.items).toEqual([[1, 1170]]);
+    expect(asked).toEqual([`${BASE}meta/armor/1/1170.json`]);
+  });
+
+  it("skips honestly when BOTH the server and wowhead ids miss", async () => {
+    const { probe } = probeFrom({
+      [`${BASE}meta/item/111.json`]: { ok: false },
+      [`${BASE}meta/item/222.json`]: { ok: false },
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 15, entry: 5, displayid: 111 }],
+      probe,
+      new Map([[5, 222]]),
+    );
+    expect(r).toEqual({ items: [], total: 1 });
+    expect(skippedItemsNote(r.total, r.items.length)).toBe(
+      "1 of 1 equipped item can't be shown in 3D (no Wowhead model data).",
+    );
+  });
+
+  it("keeps the best-guess SERVER id on a probe failure instead of guessing on the override", async () => {
+    const { probe, asked } = probeFrom({
+      [`${BASE}meta/item/111.json`]: null,
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 15, entry: 5, displayid: 111 }],
+      probe,
+      new Map([[5, 222]]),
+    );
+    expect(r.items).toEqual([[21, 111]]);
+    expect(asked).toEqual([`${BASE}meta/item/111.json`]);
+  });
+
+  it("resolves the override through the per-slot ladders too (robe at 20 via wowhead id)", async () => {
+    const { probe, asked } = probeFrom({
+      [`${BASE}meta/armor/5/300.json`]: { ok: false },
+      [`${BASE}meta/armor/20/300.json`]: { ok: false },
+      [`${BASE}meta/armor/5/400.json`]: { ok: false },
+      [`${BASE}meta/armor/20/400.json`]: { ok: true },
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 4, entry: 7, displayid: 300 }],
+      probe,
+      new Map([[7, 400]]),
+    );
+    expect(r.items).toEqual([[20, 400]]);
+    expect(asked).toEqual([
+      `${BASE}meta/armor/5/300.json`,
+      `${BASE}meta/armor/20/300.json`,
+      `${BASE}meta/armor/5/400.json`,
+      `${BASE}meta/armor/20/400.json`,
+    ]);
+  });
+
+  it("rescues an item whose server displayid is 0 when wowhead knows it", async () => {
+    const { probe } = probeFrom({
+      [`${BASE}meta/armor/5/777.json`]: { ok: true },
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 4, entry: 8, displayid: 0 }],
+      probe,
+      new Map([[8, 777]]),
+    );
+    expect(r).toEqual({ items: [[5, 777]], total: 1 });
+  });
+
+  it("ignores overrides for entries the doll doesn't wear and items without an entry key", async () => {
+    const { probe, asked } = probeFrom({
+      [`${BASE}meta/armor/1/11.json`]: { ok: true },
+    });
+    const r = await resolveViewerItems(
+      [{ slot: 0, displayid: 11 }],
+      probe,
+      new Map([[12345, 999]]),
+    );
+    expect(r.items).toEqual([[1, 11]]);
+    expect(asked).toEqual([`${BASE}meta/armor/1/11.json`]);
   });
 });
 

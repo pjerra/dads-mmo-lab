@@ -551,6 +551,11 @@ export interface ItemInfo {
   name?: string;
   quality?: number;
   tooltip_html?: string;
+  // Wowhead's own 3D display id for this item (from the item XML's
+  // displayId attribute), emitted by the CLI only when strictly positive.
+  // The model viewer uses it as a fallback probe candidate when the
+  // server's displayid has no Wowhead model data (e.g. the Warglaives).
+  display_id?: number;
 }
 export async function wowItemInfo(entries: number[]): Promise<ItemInfo[]> {
   const d = await invoke<{ items: ItemInfo[] }>("wow_item_info", { entries });

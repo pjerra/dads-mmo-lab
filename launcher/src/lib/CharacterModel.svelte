@@ -2,7 +2,19 @@
   import type { PaperdollData } from "$lib/api";
   import { createCharacterViewer, loadViewerScripts, skippedItemsNote } from "$lib/model-viewer";
 
-  let { doll, compact = false }: { doll: PaperdollData; compact?: boolean } = $props();
+  // displayIds: CharacterSheet's item-info batch as a promise of
+  // entry -> wowhead display_id overrides. createCharacterViewer awaits it
+  // with its own bounded timeout (never rejects, never hangs the model);
+  // hosts without item info simply omit it and get server ids.
+  let {
+    doll,
+    compact = false,
+    displayIds = null,
+  }: {
+    doll: PaperdollData;
+    compact?: boolean;
+    displayIds?: Promise<Map<number, number>> | null;
+  } = $props();
 
   // Only one CharacterModel is ever mounted at a time (Dashboard), but a
   // unique id still avoids any chance of colliding with a leftover
@@ -47,7 +59,7 @@
     let created: unknown = null;
 
     loadViewerScripts()
-      .then(() => createCharacterViewer(containerId, doll))
+      .then(() => createCharacterViewer(containerId, doll, displayIds ?? undefined))
       .then((res) => {
         if (cancelled) return;
         created = res.viewer;

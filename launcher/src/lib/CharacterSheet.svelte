@@ -245,20 +245,36 @@
     }
   });
 
-  function fetchItemInfo(items: PaperdollItem[]) {
+  // Resolves once this doll's item-info batch is in infoCache, with the
+  // entry -> wowhead display_id override map the 3D viewer feeds through
+  // its probe ladder (Warglaive fix). NEVER rejects: a failed fetch just
+  // resolves with whatever the cache already holds -- item info must NEVER
+  // break the paperdoll, and the grid still renders immediately with
+  // name-only placeholders (icons/tooltips pop in when the batch lands).
+  function fetchItemInfo(items: PaperdollItem[]): Promise<Map<number, number>> {
+    const buildOverrides = () => {
+      const m = new Map<number, number>();
+      for (const it of items) {
+        const did = infoCache.get(it.entry)?.display_id;
+        if (typeof did === "number" && Number.isFinite(did) && did > 0) m.set(it.entry, did);
+      }
+      return m;
+    };
     const missing = items.map((it) => it.entry).filter((entry) => !infoCache.has(entry));
-    if (missing.length === 0) return;
-    // Fire-and-forget: the grid renders immediately with name-only
-    // placeholders, icons/tooltips pop in when this lands. Item info must
-    // NEVER break the paperdoll -- a failed call just leaves tooltips
-    // degraded to name-only.
-    wowItemInfo(missing)
+    if (missing.length === 0) return Promise.resolve(buildOverrides());
+    return wowItemInfo(missing)
       .then((infos) => {
         for (const info of infos) infoCache.set(info.entry, info);
         infoVersion++;
+        return buildOverrides();
       })
-      .catch(() => {});
+      .catch(() => buildOverrides());
   }
+
+  // The current doll's in-flight item-info batch, handed to CharacterModel
+  // so the viewer can wait (bounded, 3s) for display-id overrides instead
+  // of constructing off wrong server displayids and re-rendering later.
+  let modelDisplayIds = $state<Promise<Map<number, number>> | null>(null);
 
   async function loadDoll() {
     if (!name) return;
@@ -280,7 +296,7 @@
     achError = null;
     try {
       doll = await wowPaperdoll(name);
-      fetchItemInfo(doll.equipped);
+      modelDisplayIds = fetchItemInfo(doll.equipped);
       void loadProgress(name);
       void loadEarnedAchievements(name);
     } catch (e) {
@@ -586,7 +602,7 @@
                 <div class="charname">{doll.name}</div>
                 <div class="muted">Level {doll.level} {className(doll.class)}</div>
                 <div class="gold">{doll.gold} gold</div>
-                <CharacterModel {doll} {compact} />
+                <CharacterModel {doll} {compact} displayIds={modelDisplayIds} />
               </div>
               <div class="col">
                 {#each RIGHT_SLOTS as [slotNum, label] (slotNum)}

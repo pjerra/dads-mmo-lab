@@ -359,17 +359,57 @@ export interface MetaProbeResult {
 }
 export type MetaProbe = (url: string) => Promise<MetaProbeResult | null>;
 
-// Resolve one equipped item to its final [InventoryType, displayId] pair,
-// or null when the CDN confirms the meta doesn't exist anywhere the engine
-// would look (custom/GM displayids, and legit items absent from the wrath
-// tree -- e.g. both Warglaives of Azzinoth, displayids 45479/45481, 404 on
-// meta/item/ across every Wowhead tree).
+// Pure: the ordered display-id probe candidates for one equipped item --
+// the SERVER's displayid first, then wowhead's own display_id (from the
+// item-info XML) when it differs. The server value wins whenever its meta
+// exists; the wowhead value heals items whose server displayid has no
+// Wowhead model data (both Warglaives: server 45479/45481 404 on every
+// tree, wowhead 45150/45146 resolve via the proxy's cross-tree fallback).
+// Zero/negative/non-finite ids are never probeable and are dropped -- an
+// item whose server displayid is 0 but whose wowhead id is known is thereby
+// RESCUED rather than skipped.
+export function displayIdCandidates(serverDid: number, wowheadDid?: number | null): number[] {
+  const out: number[] = [];
+  if (Number.isFinite(serverDid) && serverDid > 0) out.push(serverDid);
+  if (
+    typeof wowheadDid === "number" &&
+    Number.isFinite(wowheadDid) &&
+    wowheadDid > 0 &&
+    wowheadDid !== serverDid
+  ) {
+    out.push(wowheadDid);
+  }
+  return out;
+}
+
+// Resolve one equipped item across its ordered display-id candidates:
+// first id whose meta exists wins; a candidate the CDN definitively lacks
+// falls through to the next; all-miss => null (honest skip). A probe
+// FAILURE (network) keeps the item on that candidate's best-guess slot
+// immediately -- a transient hiccup must never strip gear, and guessing on
+// the earlier (server) id beats guessing on a later one.
+async function resolveViewerItem(
+  acSlot: number,
+  ids: number[],
+  probe: MetaProbe,
+): Promise<[number, number] | null> {
+  for (const id of ids) {
+    const r = await resolveViewerItemForId(acSlot, id, probe);
+    if (r !== null) return r;
+  }
+  return null;
+}
+
+// Resolve ONE (slot, displayId) pair to its final [InventoryType, displayId]
+// pair, or null when the CDN confirms the meta doesn't exist anywhere the
+// engine would look (custom/GM displayids, and items absent from every
+// content tree even after the proxy's cross-tree fallback).
 //
 // This MUST run before construction: the live engine swallows per-item meta
 // 404s (`.catch(() => { t.H = true })` -- the item is just silently
 // invisible), so construction NEVER rejects over a missing item and no
 // after-the-fact retry can detect or fix a wrong slot.
-async function resolveViewerItem(
+async function resolveViewerItemForId(
   acSlot: number,
   id: number,
   probe: MetaProbe,
@@ -422,24 +462,37 @@ export interface ResolvedViewerItems {
 }
 
 export async function resolveViewerItems(
-  equipped: { slot: number; displayid: number }[],
+  equipped: { slot: number; displayid: number; entry?: number }[],
   probe: MetaProbe,
+  overrides?: Map<number, number>,
 ): Promise<ResolvedViewerItems> {
-  // Eligible = a slot the engine displays at all, with a real displayid.
-  // Neck/rings/trinkets and empty slots are not candidates and never count
-  // against the skipped-items note.
-  const candidates = equipped.filter(
+  // Eligible = a slot the engine displays at all, with at least one
+  // probeable display-id candidate (server displayid, or a wowhead
+  // display_id override keyed by item entry). Neck/rings/trinkets and
+  // empty slots are not candidates and never count against the
+  // skipped-items note.
+  const withIds = equipped.map(
     (it) =>
-      it.displayid !== 0 &&
+      [
+        it,
+        displayIdCandidates(
+          it.displayid,
+          it.entry !== undefined ? overrides?.get(it.entry) : undefined,
+        ),
+      ] as const,
+  );
+  const candidates = withIds.filter(
+    ([it, ids]) =>
+      ids.length > 0 &&
       (AC_TO_INVENTORY_TYPE[it.slot] !== undefined ||
         it.slot === 4 ||
         it.slot === 16 ||
         it.slot === 17),
   );
-  // Per-item probes run concurrently (each item needs at most 2 sequential
-  // fetches); results keep the equipped order.
+  // Per-item probes run concurrently (each item needs at most a handful of
+  // sequential fetches); results keep the equipped order.
   const resolved = await Promise.all(
-    candidates.map((it) => resolveViewerItem(it.slot, it.displayid, probe)),
+    candidates.map(([it, ids]) => resolveViewerItem(it.slot, ids, probe)),
   );
   return {
     items: resolved.filter((r): r is [number, number] => r !== null),
@@ -513,6 +566,37 @@ export interface CharacterViewerResult {
   shownItems: number;
 }
 
+// The item-info batch (CharacterSheet's fire-and-forget fetch) lands
+// asynchronously after the paperdoll -- the viewer waits for it briefly
+// because the wowhead display_id overrides it carries are what let
+// wrong-server-displayid items (the Warglaives) render at all. The bound
+// exists so a wowhead outage can never hang the model: past it the viewer
+// constructs with server ids only, exactly the pre-override behavior.
+const OVERRIDES_TIMEOUT_MS = 3000;
+
+async function boundedOverrides(
+  p: Promise<Map<number, number>>,
+  ms: number,
+): Promise<Map<number, number> | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const winner = await Promise.race([
+      p,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+      }),
+    ]);
+    return winner ?? undefined;
+  } catch {
+    // The batch promise itself never intentionally rejects (CharacterSheet
+    // resolves it with whatever the cache holds even on fetch failure) --
+    // any rejection just degrades to server ids.
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 // Recon §1.1: the final options object ZamModelViewer receives for a
 // playable character (env='live'-shaped, which is what the wrath tree
 // wants too) -- `type: 2, contentPath, container: jQuery(selector), aspect,
@@ -531,6 +615,7 @@ export interface CharacterViewerResult {
 export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
+  displayIds?: Promise<Map<number, number>>,
 ): Promise<CharacterViewerResult> {
   const modelId = buildCharacterModelId(doll.race, doll.gender);
   if (!(await geometryAvailable(modelId))) {
@@ -564,7 +649,10 @@ export async function createCharacterViewer(
     return await new Viewer(options);
   };
 
-  const resolved = await resolveViewerItems(doll.equipped, fetchMetaProbe);
+  const overrides = displayIds
+    ? await boundedOverrides(displayIds, OVERRIDES_TIMEOUT_MS)
+    : undefined;
+  const resolved = await resolveViewerItems(doll.equipped, fetchMetaProbe, overrides);
   try {
     const viewer = await construct(resolved.items);
     return { viewer, totalItems: resolved.total, shownItems: resolved.items.length };
