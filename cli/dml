@@ -1180,9 +1180,12 @@ _console_lines_json() {
 # The verb never fails on network/DB trouble -- degradation is per-item.
 # ---------------------------------------------------------------------------
 
-_wowhead_base()   { echo "${DML_WOWHEAD_BASE:-https://nether.wowhead.com}"; }
-_zamimg_base()    { echo "${DML_ZAMIMG_BASE:-https://wow.zamimg.com}"; }
-_iteminfo_cache() { echo "$HOME/.dml/wowhead-cache"; }
+_wowhead_base()     { echo "${DML_WOWHEAD_BASE:-https://nether.wowhead.com}"; }
+_zamimg_base()      { echo "${DML_ZAMIMG_BASE:-https://wow.zamimg.com}"; }
+# The item XML (displayId source) lives on the main site, NOT the tooltip
+# host -- nether.wowhead.com 404s on /wotlk/item=N&xml (curl-verified).
+_wowhead_xml_base() { echo "${DML_WOWHEAD_XML_BASE:-https://www.wowhead.com}"; }
+_iteminfo_cache()   { echo "$HOME/.dml/wowhead-cache"; }
 
 # Fetch url ($1) into file ($2); echoes the http code ("000" on transport
 # failure). Body goes straight to disk (icons are binary -- a bash variable
@@ -1208,14 +1211,58 @@ _iteminfo_stat_name() {
     esac
 }
 
+# Wowhead's 3D display id for an item entry, from the wotlk item XML (the
+# tooltip JSON carries NO displayId -- only the XML's <icon displayId="N">
+# attribute has it). Fetched once, disk-cached under xml/. Prints the bare
+# numeric id, or nothing when wowhead doesn't know the item / the attribute
+# is missing/zero-less-worthy / the fetch failed. Never fails.
+# NB: unknown items still answer HTTP 200 with an <error> body -- that IS
+# cached (a definitive "wowhead has no such item"), while non-200 bodies and
+# 200s that don't look like wowhead XML (CDN interstitials) are dropped so a
+# transient error page can't poison the cache.
+_iteminfo_display_id() {
+    local entry="$1" cache xf raw code
+    cache="$(_iteminfo_cache)"
+    xf="$cache/xml/$entry.xml"
+    if [[ ! -f "$xf" ]]; then
+        mkdir -p "$cache/xml"
+        code="$(_iteminfo_fetch "$(_wowhead_xml_base)/wotlk/item=$entry&xml" "$xf.tmp.$$")"
+        if [[ "$code" == 200 ]] && grep -q '<wowhead>' "$xf.tmp.$$" 2>/dev/null; then
+            mv "$xf.tmp.$$" "$xf"
+        else
+            rm -f "$xf.tmp.$$"
+        fi
+    fi
+    [[ -f "$xf" ]] || return 0
+    raw="$(cat "$xf")"
+    if [[ "$raw" =~ displayId=\"([0-9]+)\" ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+    return 0
+}
+
+# The optional `,"display_id":N` envelope fragment for one entry -- empty
+# when wowhead has no (positive) display id. Numeric regex-gate: only a
+# strictly positive integer is ever embedded (the XML serves displayId="0"
+# for non-displayable kinds like gems).
+_iteminfo_did_field() {
+    local did
+    did="$(_iteminfo_display_id "$1")"
+    if [[ "$did" =~ ^[1-9][0-9]*$ ]]; then
+        printf ',"display_id":%s' "$did"
+    fi
+    return 0
+}
+
 # Minimal in-game-style tooltip from item_template (custom/unknown-to-wowhead
 # items). Prints a "local" item object, or "unavailable" when the DB can't
-# answer either.
+# answer either. $2 (optional) = pre-formatted extra envelope fields
+# (`,"k":v...`) appended verbatim before the closing brace.
 _iteminfo_local() {
-    local entry="$1" row
+    local entry="$1" extra="${2:-}" row
     if row="$(db_world_query "SELECT name,Quality,ItemLevel,armor,RequiredLevel,dmg_min1,dmg_max1,delay,stat_type1,stat_value1,stat_type2,stat_value2,stat_type3,stat_value3,stat_type4,stat_value4,stat_type5,stat_value5 FROM item_template WHERE entry=$entry LIMIT 1;")"; then :; else row=""; fi
     if [[ -z "$row" ]]; then
-        printf '{"entry":%s,"source":"unavailable"}' "$entry"
+        printf '{"entry":%s,"source":"unavailable"%s}' "$entry" "$extra"
         return 0
     fi
     local name q ilvl armor rlvl dmin dmax delay t1 v1 t2 v2 t3 v3 t4 v4 t5 v5
@@ -1234,14 +1281,19 @@ _iteminfo_local() {
         html+="<br><span class=\"q1\">+$sv $(_iteminfo_stat_name "$st")</span>"
     done
     [[ "$rlvl" -gt 0 ]] 2>/dev/null && html+="<br><span class=\"q1\">Requires Level $rlvl</span>"
-    printf '{"entry":%s,"source":"local","name":"%s","quality":%s,"tooltip_html":"%s"}' \
-        "$entry" "$(json_escape "$name")" "$q" "$(json_escape "$html")"
+    printf '{"entry":%s,"source":"local","name":"%s","quality":%s,"tooltip_html":"%s"%s}' \
+        "$entry" "$(json_escape "$name")" "$q" "$(json_escape "$html")" "$extra"
     return 0
 }
 
-# One item object (wowhead -> local -> unavailable). Never fails.
+# One item object (wowhead -> local -> unavailable). Never fails. Every
+# source variant may carry `display_id` (wowhead's own 3D display id from
+# the item XML) -- the launcher's model viewer uses it to heal items whose
+# server displayid has no Wowhead model data (e.g. both Warglaives: server
+# 45479/45481 vs wowhead 45150/45146). Fetch ORDER is load-bearing for the
+# test curl stub's sequential responder: tooltip, icon, then xml.
 _iteminfo_one() {
-    local entry="$1" cache tj raw code icon="" iconfile iconjson=null b64json=null
+    local entry="$1" cache tj raw code icon="" iconfile iconjson=null b64json=null didfield
     cache="$(_iteminfo_cache)"
     tj="$cache/tooltips/$entry.json"
     if [[ ! -f "$tj" ]]; then
@@ -1267,13 +1319,17 @@ _iteminfo_one() {
                 fi
                 iconjson="\"$icon\""
             fi
-            printf '{"entry":%s,"source":"wowhead","icon":%s,"icon_b64":%s,"wowhead":%s}' \
-                "$entry" "$iconjson" "$b64json" "$raw"
+            didfield="$(_iteminfo_did_field "$entry")"
+            printf '{"entry":%s,"source":"wowhead","icon":%s,"icon_b64":%s,"wowhead":%s%s}' \
+                "$entry" "$iconjson" "$b64json" "$raw" "$didfield"
             return 0
         fi
         rm -f "$tj"   # poisoned cache entry (non-JSON body)
     fi
-    _iteminfo_local "$entry"
+    # Local fallback still asks the XML: a transient tooltip-host failure
+    # must not cost the viewer its display-id translation.
+    didfield="$(_iteminfo_did_field "$entry")"
+    _iteminfo_local "$entry" "$didfield"
     return 0
 }
 
