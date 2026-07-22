@@ -52,6 +52,33 @@ pub fn zam_map_path(raw: &str) -> Option<(String, String)> {
     Some((format!("https://wow.zamimg.com/{path}"), path.to_string()))
 }
 
+/// Cross-tree fallback (Warglaive fix, 2026-07-22): Wowhead's wrath content
+/// tree has gaps -- metas (and the m2/skin/texture files they reference)
+/// that exist on the sibling trees but 404 on wrath. Both Warglaives of
+/// Azzinoth (wowhead display ids 45150/45146) live on tbc + cata but not
+/// wrath, curl-verified. When a wrath-tree fetch misses upstream, the SAME
+/// rest-path is retried on these trees in order; the winning bytes are
+/// cached under the ORIGINAL wrath rel path so the engine's own follow-up
+/// fetches hit the cache transparently. The tree names come ONLY from this
+/// fixed table -- never from the request path (zam_map_path's allowlist and
+/// traversal checks are unchanged and still run first).
+const FALLBACK_TREES: [&str; 3] = ["tbc", "classic", "cata"];
+const WRATH_TREE_PREFIX: &str = "modelviewer/wrath/";
+
+/// Pure: the ordered upstream candidate URLs for one ALREADY-VALIDATED
+/// cache-relative path (`zam_map_path`'s `rel`). Non-wrath paths (images/,
+/// other trees) get exactly their own URL; wrath-tree paths append the
+/// tbc -> classic -> cata variants of the same rest.
+pub fn zam_candidate_urls(rel: &str) -> Vec<String> {
+    let mut urls = vec![format!("https://wow.zamimg.com/{rel}")];
+    if let Some(rest) = rel.strip_prefix(WRATH_TREE_PREFIX) {
+        for tree in FALLBACK_TREES {
+            urls.push(format!("https://wow.zamimg.com/modelviewer/{tree}/{rest}"));
+        }
+    }
+    urls
+}
+
 pub fn content_type_for(path: &str) -> &'static str {
     match path.rsplit('.').next().unwrap_or("") {
         "js" => "application/javascript",
@@ -74,22 +101,49 @@ fn client() -> &'static reqwest::blocking::Client {
     })
 }
 
-/// Serve one request: cache hit -> bytes; else fetch (NO browser Origin
-/// header -- that is the whole point), cache atomically, return. Any
-/// failure -> None (handler answers 404).
-pub fn zam_serve(cache_root: &std::path::Path, raw_path: &str) -> Option<(Vec<u8>, &'static str)> {
-    let (url, rel) = zam_map_path(raw_path)?;
-    let ct = content_type_for(&rel);
-    let cached = cache_root.join("zam-cache").join(&rel);
-    if let Ok(bytes) = std::fs::read(&cached) {
-        return Some((bytes, ct));
+/// One upstream fetch attempt's aggregate outcome across the candidate
+/// list: first 2xx wins (Hit); all candidates answered definitively
+/// non-success => Miss; otherwise (at least one transport failure and no
+/// hit) => Err -- a fallback tree being unreachable can never be spun as
+/// "this file does not exist".
+enum UpstreamResult {
+    Hit(Vec<u8>),
+    Miss,
+    Err,
+}
+
+/// Try each candidate URL in order (NO browser Origin header -- that is the
+/// whole point of the proxy); first success returns its bytes.
+fn fetch_first_hit(urls: &[String]) -> UpstreamResult {
+    let mut saw_transport_err = false;
+    for url in urls {
+        let resp = match client().get(url).send() {
+            Ok(r) => r,
+            Err(_) => {
+                saw_transport_err = true;
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if resp.take(64 * 1024 * 1024).read_to_end(&mut bytes).is_err() {
+            saw_transport_err = true;
+            continue;
+        }
+        return UpstreamResult::Hit(bytes);
     }
-    let resp = client().get(&url).send().ok()?;
-    if !resp.status().is_success() {
-        return None;
+    if saw_transport_err {
+        UpstreamResult::Err
+    } else {
+        UpstreamResult::Miss
     }
-    let mut bytes = Vec::new();
-    resp.take(64 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
+}
+
+/// Atomic-ish cache write (tmp + rename); best-effort, failures ignored --
+/// the caller already holds the bytes it is about to serve.
+fn cache_store(cached: &std::path::Path, bytes: &[u8]) {
     if let Some(parent) = cached.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -97,10 +151,28 @@ pub fn zam_serve(cache_root: &std::path::Path, raw_path: &str) -> Option<(Vec<u8
         "{}.tmp",
         cached.extension().and_then(|e| e.to_str()).unwrap_or("bin")
     ));
-    if std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, &cached);
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, cached);
     }
-    Some((bytes, ct))
+}
+
+/// Serve one request: cache hit -> bytes; else fetch with cross-tree
+/// fallback (zam_candidate_urls), cache the winner atomically UNDER THE
+/// REQUESTED rel path, return. Any failure -> None (handler answers 404).
+pub fn zam_serve(cache_root: &std::path::Path, raw_path: &str) -> Option<(Vec<u8>, &'static str)> {
+    let (_url, rel) = zam_map_path(raw_path)?;
+    let ct = content_type_for(&rel);
+    let cached = cache_root.join(ZAM_CACHE_DIR).join(&rel);
+    if let Ok(bytes) = std::fs::read(&cached) {
+        return Some((bytes, ct));
+    }
+    match fetch_first_hit(&zam_candidate_urls(&rel)) {
+        UpstreamResult::Hit(bytes) => {
+            cache_store(&cached, &bytes);
+            Some((bytes, ct))
+        }
+        UpstreamResult::Miss | UpstreamResult::Err => None,
+    }
 }
 
 /// Outcome of a native meta probe (see `zam_probe` in lib.rs): the WebView's
@@ -117,40 +189,29 @@ pub enum ProbeOutcome {
     Err,
 }
 
-/// Like `zam_serve`, but three-valued: cache hit / upstream 200 => Hit
-/// (cached), upstream non-success => Miss, transport error => Err. Path
+/// Like `zam_serve`, but three-valued: cache hit / any candidate 200 => Hit
+/// (cached under the requested rel), ALL candidates definitively
+/// non-success => Miss, any transport error without a hit => Err. Path
 /// validation is identical to `zam_serve` (rejects map to Err -- an invalid
-/// path can never claim an item is missing).
+/// path can never claim an item is missing). Shares the same cross-tree
+/// fallback as zam_serve, so a probe Hit on a fallback tree warms exactly
+/// the cache entry the engine's own wrath-path fetch will read.
 pub fn zam_probe_upstream(cache_root: &std::path::Path, raw_path: &str) -> ProbeOutcome {
-    let Some((url, rel)) = zam_map_path(raw_path) else {
+    let Some((_url, rel)) = zam_map_path(raw_path) else {
         return ProbeOutcome::Err;
     };
     let cached = cache_root.join(ZAM_CACHE_DIR).join(&rel);
     if let Ok(bytes) = std::fs::read(&cached) {
         return ProbeOutcome::Hit(bytes);
     }
-    let resp = match client().get(&url).send() {
-        Ok(r) => r,
-        Err(_) => return ProbeOutcome::Err,
-    };
-    if !resp.status().is_success() {
-        return ProbeOutcome::Miss;
+    match fetch_first_hit(&zam_candidate_urls(&rel)) {
+        UpstreamResult::Hit(bytes) => {
+            cache_store(&cached, &bytes);
+            ProbeOutcome::Hit(bytes)
+        }
+        UpstreamResult::Miss => ProbeOutcome::Miss,
+        UpstreamResult::Err => ProbeOutcome::Err,
     }
-    let mut bytes = Vec::new();
-    if resp.take(64 * 1024 * 1024).read_to_end(&mut bytes).is_err() {
-        return ProbeOutcome::Err;
-    }
-    if let Some(parent) = cached.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let tmp = cached.with_extension(format!(
-        "{}.tmp",
-        cached.extension().and_then(|e| e.to_str()).unwrap_or("bin")
-    ));
-    if std::fs::write(&tmp, &bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, &cached);
-    }
-    ProbeOutcome::Hit(bytes)
 }
 
 /// Pure: pull `Item.InventoryType` out of a meta JSON body (used by the 3D
@@ -272,6 +333,62 @@ mod tests {
         assert!(zam_map_path("/images/a%5cb.png").is_none());
         // benign encodings still pass
         assert!(zam_map_path("/modelviewer/wrath/meta/a%20b.json").is_some());
+    }
+
+    // --- Cross-tree fallback (Warglaive fix) -------------------------------
+
+    #[test]
+    fn candidate_urls_wrath_falls_back_tbc_classic_cata_in_order() {
+        assert_eq!(
+            zam_candidate_urls("modelviewer/wrath/meta/item/45150.json"),
+            vec![
+                "https://wow.zamimg.com/modelviewer/wrath/meta/item/45150.json",
+                "https://wow.zamimg.com/modelviewer/tbc/meta/item/45150.json",
+                "https://wow.zamimg.com/modelviewer/classic/meta/item/45150.json",
+                "https://wow.zamimg.com/modelviewer/cata/meta/item/45150.json",
+            ]
+        );
+    }
+
+    #[test]
+    fn candidate_urls_preserve_nested_rest_exactly() {
+        let urls = zam_candidate_urls("modelviewer/wrath/textures/item/objectcomponents/weapon/x_01.webp");
+        assert_eq!(urls.len(), 4);
+        for (url, tree) in urls.iter().zip(["wrath", "tbc", "classic", "cata"]) {
+            assert_eq!(
+                url,
+                &format!(
+                    "https://wow.zamimg.com/modelviewer/{tree}/textures/item/objectcomponents/weapon/x_01.webp"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_urls_non_wrath_paths_get_no_fallback() {
+        assert_eq!(
+            zam_candidate_urls("images/wow/icons/large/inv_sword_39.jpg"),
+            vec!["https://wow.zamimg.com/images/wow/icons/large/inv_sword_39.jpg"]
+        );
+        assert_eq!(
+            zam_candidate_urls("modelviewer/live/viewer/viewer.min.js"),
+            vec!["https://wow.zamimg.com/modelviewer/live/viewer/viewer.min.js"]
+        );
+        // A direct request for a sibling tree stays on that tree -- the
+        // fallback ladder only ever extends wrath requests.
+        assert_eq!(
+            zam_candidate_urls("modelviewer/tbc/meta/item/45146.json"),
+            vec!["https://wow.zamimg.com/modelviewer/tbc/meta/item/45146.json"]
+        );
+    }
+
+    #[test]
+    fn candidate_urls_wrath_prefix_is_segment_bounded() {
+        // "wrathx" must not be treated as the wrath tree.
+        assert_eq!(
+            zam_candidate_urls("modelviewer/wrathx/meta/item/1.json"),
+            vec!["https://wow.zamimg.com/modelviewer/wrathx/meta/item/1.json"]
+        );
     }
 
     #[test]
