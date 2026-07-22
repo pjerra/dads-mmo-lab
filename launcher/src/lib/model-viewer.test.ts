@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
   AC_TO_INVENTORY_TYPE,
+  applyViewerSheath,
   buildCharacterModelId,
+  deriveSheathValues,
   displayIdCandidates,
+  readSheathedPref,
   resolveViewerItems,
+  sheathTypeForItem,
   skippedItemsNote,
   viewerMetaUrl,
+  writeSheathedPref,
   type MetaProbeResult,
 } from "./model-viewer";
 
@@ -419,6 +424,193 @@ describe("skippedItemsNote", () => {
 
   it("never emits a note on nonsense inputs (shown > total)", () => {
     expect(skippedItemsNote(3, 5)).toBeNull();
+  });
+});
+
+// Ground truth for the sheathing tests: the live-tree viewer.min.js
+// decompile traced in .superpowers/sdd/sheathe-report.md -- the character
+// actor's setSheath(main, off) speaks the client SheatheType vocabulary
+// (1 = 2H back, 2 = staff back, 3 = 1H hips, 4 = shield, 7 = both crossed
+// on the back), applied via the engine's Lr/Ir attachment tables.
+describe("sheathTypeForItem", () => {
+  it("sheathes both Warglaives of Azzinoth crossed on the back (type 7) regardless of meta", () => {
+    expect(sheathTypeForItem(21, null, 32837)).toBe(7);
+    expect(sheathTypeForItem(22, null, 32838)).toBe(7);
+    // The entry special-case must beat the generic 1H-sword rule (subclass
+    // 7 -> hip) -- the hip look is exactly what this feature is NOT for.
+    expect(sheathTypeForItem(21, { itemClass: 2, itemSubClass: 7 }, 32837)).toBe(7);
+  });
+
+  it("puts two-handers on the back (type 1): 2H axe/mace/polearm/2H sword/fishing pole", () => {
+    for (const sub of [1, 5, 6, 8, 20]) {
+      expect(sheathTypeForItem(21, { itemClass: 2, itemSubClass: sub })).toBe(1);
+    }
+  });
+
+  it("gives staves their own back angle (type 2)", () => {
+    expect(sheathTypeForItem(21, { itemClass: 2, itemSubClass: 10 })).toBe(2);
+  });
+
+  it("puts one-handers on the hips (type 3): 1H axe/mace/sword/fist/dagger", () => {
+    for (const sub of [0, 4, 7, 13, 15]) {
+      expect(sheathTypeForItem(21, { itemClass: 2, itemSubClass: sub })).toBe(3);
+      expect(sheathTypeForItem(22, { itemClass: 2, itemSubClass: sub })).toBe(3);
+    }
+  });
+
+  it("mounts shields on the back (type 4) from the resolved slot alone", () => {
+    expect(sheathTypeForItem(14, null)).toBe(4);
+  });
+
+  it("gives held frills no sheathed pose (type 0)", () => {
+    expect(sheathTypeForItem(23, null)).toBe(0);
+  });
+
+  it("falls back to the generic back position (type 1) when the meta is unavailable", () => {
+    expect(sheathTypeForItem(21, null)).toBe(1);
+    expect(sheathTypeForItem(22, { itemClass: 4 })).toBe(1);
+  });
+});
+
+describe("deriveSheathValues", () => {
+  const fetcherFrom = (answers: Record<number, { itemClass?: number; itemSubClass?: number } | null>) => {
+    const asked: number[] = [];
+    const fetchMeta = async (displayId: number) => {
+      asked.push(displayId);
+      return answers[displayId] ?? null;
+    };
+    return { fetchMeta, asked };
+  };
+
+  it("derives 7/7 for the Warglaives by entry WITHOUT any meta fetch", async () => {
+    const { fetchMeta, asked } = fetcherFrom({});
+    const r = await deriveSheathValues(
+      [
+        [21, 45150],
+        [22, 45146],
+      ],
+      [
+        { slot: 15, entry: 32837 },
+        { slot: 16, entry: 32838 },
+      ],
+      fetchMeta,
+    );
+    expect(r).toEqual({ main: 7, off: 7 });
+    expect(asked).toEqual([]);
+  });
+
+  it("derives a 2H main hand from the meta (Trashbringer: 2H sword -> back)", async () => {
+    const { fetchMeta, asked } = fetcherFrom({ 23875: { itemClass: 2, itemSubClass: 8 } });
+    const r = await deriveSheathValues([[21, 23875]], [{ slot: 15, entry: 1 }], fetchMeta);
+    expect(r).toEqual({ main: 1, off: -1 });
+    expect(asked).toEqual([23875]);
+  });
+
+  it("derives 1H + shield with a single meta fetch (shield needs none)", async () => {
+    const { fetchMeta, asked } = fetcherFrom({ 100: { itemClass: 2, itemSubClass: 7 } });
+    const r = await deriveSheathValues(
+      [
+        [21, 100],
+        [14, 200],
+      ],
+      [
+        { slot: 15, entry: 10 },
+        { slot: 16, entry: 11 },
+      ],
+      fetchMeta,
+    );
+    expect(r).toEqual({ main: 3, off: 4 });
+    expect(asked).toEqual([100]);
+  });
+
+  it("gives a lone ranged weapon a sheath value so the engine's Lr fallback engages", async () => {
+    const { fetchMeta, asked } = fetcherFrom({});
+    const r = await deriveSheathValues([[15, 400]], [{ slot: 17, entry: 12 }], fetchMeta);
+    expect(r).toEqual({ main: 1, off: -1 });
+    expect(asked).toEqual([]);
+  });
+
+  it("derives a held frill off-hand without a fetch", async () => {
+    const { fetchMeta, asked } = fetcherFrom({});
+    const r = await deriveSheathValues([[23, 600]], [{ slot: 16, entry: 13 }], fetchMeta);
+    expect(r).toEqual({ main: -1, off: 0 });
+    expect(asked).toEqual([]);
+  });
+
+  it("is -1/-1 (nothing to sheathe) for an armor-only or empty doll", async () => {
+    const { fetchMeta, asked } = fetcherFrom({});
+    expect(
+      await deriveSheathValues(
+        [
+          [1, 5],
+          [5, 6],
+        ],
+        [],
+        fetchMeta,
+      ),
+    ).toEqual({ main: -1, off: -1 });
+    expect(await deriveSheathValues([], [], fetchMeta)).toEqual({ main: -1, off: -1 });
+    expect(asked).toEqual([]);
+  });
+
+  it("degrades to the generic back position when the meta fetch fails", async () => {
+    const { fetchMeta } = fetcherFrom({ 500: null });
+    const r = await deriveSheathValues([[21, 500]], [{ slot: 15, entry: 14 }], fetchMeta);
+    expect(r).toEqual({ main: 1, off: -1 });
+  });
+});
+
+describe("applyViewerSheath", () => {
+  const recordingViewer = () => {
+    const calls: [string, unknown[]][] = [];
+    return {
+      calls,
+      viewer: {
+        method(name: string, args: unknown[]) {
+          calls.push([name, args]);
+        },
+      },
+    };
+  };
+
+  it("sends the derived pair when sheathing and -1/-1 when drawing", () => {
+    const { calls, viewer } = recordingViewer();
+    applyViewerSheath(viewer, { main: 7, off: 7 }, true);
+    applyViewerSheath(viewer, { main: 7, off: 7 }, false);
+    expect(calls).toEqual([
+      ["setSheath", [7, 7]],
+      ["setSheath", [-1, -1]],
+    ]);
+  });
+
+  it("treats missing values as unsheathed", () => {
+    const { calls, viewer } = recordingViewer();
+    applyViewerSheath(viewer, null, true);
+    expect(calls).toEqual([["setSheath", [-1, -1]]]);
+  });
+
+  it("never throws on a null/method-less/throwing viewer (best-effort like destroyViewer)", () => {
+    expect(() => applyViewerSheath(null, { main: 1, off: -1 }, true)).not.toThrow();
+    expect(() => applyViewerSheath({}, { main: 1, off: -1 }, true)).not.toThrow();
+    expect(() =>
+      applyViewerSheath(
+        {
+          method() {
+            throw new Error("boom");
+          },
+        },
+        { main: 1, off: -1 },
+        true,
+      ),
+    ).not.toThrow();
+  });
+});
+
+describe("sheathed pref (guarded storage)", () => {
+  it("defaults to false and survives a write without localStorage (node env)", () => {
+    expect(readSheathedPref()).toBe(false);
+    expect(() => writeSheathedPref(true)).not.toThrow();
+    expect(readSheathedPref()).toBe(false);
   });
 });
 

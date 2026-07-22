@@ -557,13 +557,174 @@ export function skippedItemsNote(total: number, shown: number): string | null {
   return `${skipped} of ${total} equipped item${total === 1 ? "" : "s"} can't be shown in 3D (no Wowhead model data).`;
 }
 
+// ---------------------------------------------------------------------------
+// Weapon sheathing (2026-07-22, decompiled from the same live-tree
+// viewer.min.js -- full trace in .superpowers/sdd/sheathe-report.md):
+//
+// * The outer viewer instance (`Si` class) exposes `method(name, args)`,
+//   which forwards to the renderer's dispatcher: applied immediately when
+//   the character actor is loaded, else QUEUED on the actor's load promise
+//   (`actorPromises[0].then(...)`) -- so calling it right after
+//   construction is safe, never dropped.
+// * The character actor implements `setSheath(main, off)`: it stores the
+//   two values and the per-frame item update re-derives every attachment
+//   from them (`I(t,e)`), so the change repositions weapons LIVE -- no
+//   rebuild needed.
+// * The two values speak the client's SheatheType vocabulary (item.dbc
+//   SheatheType / AC item_template.sheath). -1 = in hands (default). The
+//   engine's own tables (`Lr` fallback + `Ir[sheathType][slot]`):
+//     1 -> back, two-hander diagonal   (attachments 26/27)
+//     2 -> back, staff angle           (attachments 30/31)
+//     3 -> hips, one-handers           (attachments 32/33)
+//     4 -> shield                      (shield always lands on attachment
+//                                       28 via Lr -- Ir never refines
+//                                       slot 14)
+//     7 -> BOTH weapons crossed on the back (26/27) -- the Warglaives look
+//   Passing any value >= 0 for either hand engages the Lr fallback for
+//   every weapon-ish slot (ranged included: bow -> back). Fist weapons
+//   (class 2 subclass 13) are HIDDEN by the engine while sheathed, exactly
+//   like in-game. Values outside -1..9 would make the engine index
+//   `Ir[value]` unguarded and throw -- sheathTypeForItem only ever
+//   produces 0..7.
+export interface SheathValues {
+  main: number;
+  off: number;
+}
+
+// Pure: the SheatheType for one resolved weapon-slot item. `finalSlot` is
+// the item's resolved engine InventoryType (21 main hand, 22 off-hand
+// weapon, 14 shield, 23 held frill); `meta` carries the item meta JSON's
+// Item.ItemClass/ItemSubClass (null when the meta couldn't be fetched).
+export function sheathTypeForItem(
+  finalSlot: number,
+  meta: { itemClass?: number; itemSubClass?: number } | null,
+  entry?: number,
+): number {
+  // The Warglaives of Azzinoth (32837 MH / 32838 OH) are one-hand swords
+  // (subclass 7 -> hip) by the generic rule, but the client sheathes them
+  // CROSSED ON THE BACK -- the iconic look this feature exists for.
+  if (entry === 32837 || entry === 32838) return 7;
+  if (finalSlot === 14) return 4; // shield -> shield-back mount
+  if (finalSlot === 23) return 0; // held frill: no real sheathed pose
+  if (meta?.itemClass === 2) {
+    const sub = meta.itemSubClass;
+    if (sub === 10) return 2; // staff
+    if (sub === 1 || sub === 5 || sub === 6 || sub === 8 || sub === 20) return 1; // 2H axe/mace/polearm/sword/fishing pole
+    return 3; // 1H axe/mace/sword/fist/dagger -> hips
+  }
+  // Meta unavailable (offline/uncached) or non-weapon shape: the generic
+  // back position -- correct for two-handers, acceptable for everything.
+  return 1;
+}
+
+export type ItemMetaFetch = (
+  displayId: number,
+) => Promise<{ itemClass?: number; itemSubClass?: number } | null>;
+
+// Derive the doll's SheathValues pair from the already-resolved items
+// array. Only the main-hand (21) and off-hand (22/14/23) rows matter --
+// the engine's Ir refinement only ever keys slots 21/22, and shields/held
+// items need no meta fetch at all. The metas fetched here are the exact
+// URLs the pre-flight probes warmed, so this is a local-cache read.
+export async function deriveSheathValues(
+  items: [number, number][],
+  equipped: { slot: number; entry?: number }[],
+  fetchMeta: ItemMetaFetch,
+): Promise<SheathValues> {
+  const entryAt = (acSlot: number) => equipped.find((e) => e.slot === acSlot)?.entry;
+  const typeFor = async (
+    found: [number, number] | undefined,
+    acSlot: number,
+  ): Promise<number> => {
+    if (!found) return -1;
+    const [slot, displayId] = found;
+    const entry = entryAt(acSlot);
+    const needsMeta = (slot === 21 || slot === 22) && entry !== 32837 && entry !== 32838;
+    return sheathTypeForItem(slot, needsMeta ? await fetchMeta(displayId) : null, entry);
+  };
+  const [main, off] = await Promise.all([
+    typeFor(
+      items.find(([s]) => s === 21),
+      15,
+    ),
+    typeFor(
+      items.find(([s]) => s === 22 || s === 14 || s === 23),
+      16,
+    ),
+  ]);
+  // A lone ranged weapon (bow 15 / thrown 25 / wand-gun 26) sheathes via
+  // the engine's Lr fallback, which only engages while ANY sheath value is
+  // >= 0 -- give it one so the toggle still works for e.g. a hunter.
+  if (main < 0 && off < 0 && items.some(([s]) => s === 15 || s === 25 || s === 26)) {
+    return { main: 1, off: -1 };
+  }
+  return { main, off };
+}
+
+// Real ItemMetaFetch: meta/item/{id}.json through the zam proxy (the
+// pre-flight probe already warmed the shared cache for every id this is
+// asked about). Any failure degrades to null -> generic back position.
+async function fetchItemSheathMeta(
+  displayId: number,
+): Promise<{ itemClass?: number; itemSubClass?: number } | null> {
+  try {
+    const res = await fetch(`${CONTENT_PATH}meta/item/${displayId}.json`);
+    if (!res.ok) return null;
+    const j = (await res.json()) as { Item?: { ItemClass?: number; ItemSubClass?: number } };
+    return j.Item ? { itemClass: j.Item.ItemClass, itemSubClass: j.Item.ItemSubClass } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Runtime toggle on a live viewer instance: `on` moves weapons to their
+// sheathed positions, `off` returns them to the hands (-1/-1, the engine
+// default). Best-effort guarded like destroyViewer -- an engine build
+// without `method`/`setSheath` just keeps weapons in hands.
+export function applyViewerSheath(
+  viewer: unknown,
+  values: SheathValues | null,
+  on: boolean,
+): void {
+  if (!viewer || typeof viewer !== "object") return;
+  const method = (viewer as { method?: unknown }).method;
+  if (typeof method !== "function") return;
+  const v = on && values ? values : { main: -1, off: -1 };
+  try {
+    (method as (name: string, args: unknown[]) => unknown).call(viewer, "setSheath", [
+      v.main,
+      v.off,
+    ]);
+  } catch {
+    // best-effort only
+  }
+}
+
+// Sheathe-toggle preference: one global pref (not per character), default
+// = weapons in hands. Guarded storage access, same idiom as
+// features.svelte.ts readStored (vitest's node env has no localStorage).
+const SHEATHED_PREF_KEY = "dml.modelSheathed";
+
+export function readSheathedPref(): boolean {
+  return typeof localStorage !== "undefined" && localStorage.getItem(SHEATHED_PREF_KEY) === "1";
+}
+
+export function writeSheathedPref(on: boolean): void {
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(SHEATHED_PREF_KEY, on ? "1" : "0");
+  }
+}
+
 // What createCharacterViewer resolves with: the (untyped) viewer instance
 // plus how many of the doll's viewer-renderable items actually made it into
 // the construction -- the caller derives the skipped-items note from these.
+// `sheath` is the doll's derived per-hand SheatheType pair for
+// applyViewerSheath (-1/-1 when there's nothing to sheathe).
 export interface CharacterViewerResult {
   viewer: unknown;
   totalItems: number;
   shownItems: number;
+  sheath: SheathValues;
 }
 
 // The item-info batch (CharacterSheet's fire-and-forget fetch) lands
@@ -655,11 +816,13 @@ export async function createCharacterViewer(
   const resolved = await resolveViewerItems(doll.equipped, fetchMetaProbe, overrides);
   try {
     const viewer = await construct(resolved.items);
-    return { viewer, totalItems: resolved.total, shownItems: resolved.items.length };
+    const sheath = await deriveSheathValues(resolved.items, doll.equipped, fetchItemSheathMeta);
+    return { viewer, totalItems: resolved.total, shownItems: resolved.items.length, sheath };
   } catch (e) {
     document.getElementById(containerId)?.replaceChildren();
     if (resolved.items.length === 0) throw e;
     const viewer = await construct([]);
-    return { viewer, totalItems: resolved.total, shownItems: 0 };
+    // Naked fallback construction shows no items -- nothing to sheathe.
+    return { viewer, totalItems: resolved.total, shownItems: 0, sheath: { main: -1, off: -1 } };
   }
 }

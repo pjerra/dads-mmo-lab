@@ -1,6 +1,14 @@
 <script lang="ts">
   import type { PaperdollData } from "$lib/api";
-  import { createCharacterViewer, loadViewerScripts, skippedItemsNote } from "$lib/model-viewer";
+  import {
+    applyViewerSheath,
+    createCharacterViewer,
+    loadViewerScripts,
+    readSheathedPref,
+    skippedItemsNote,
+    writeSheathedPref,
+    type SheathValues,
+  } from "$lib/model-viewer";
 
   // displayIds: CharacterSheet's item-info batch as a promise of
   // entry -> wowhead display_id overrides. createCharacterViewer awaits it
@@ -31,6 +39,21 @@
   // "the model viewer lost my gear" in live testing.
   let skipNote = $state<string | null>(null);
 
+  // Sheathe/draw toggle: one global persisted pref (default = weapons in
+  // hands). The engine call is live -- no viewer rebuild -- and the pref
+  // re-applies on every fresh construction below. `canSheathe` gates the
+  // button to dolls that actually rendered something sheathable.
+  let sheathed = $state(readSheathedPref());
+  let canSheathe = $state(false);
+  let viewerRef: unknown = null;
+  let sheathValues: SheathValues | null = null;
+
+  function toggleSheathed(): void {
+    sheathed = !sheathed;
+    writeSheathedPref(sheathed);
+    applyViewerSheath(viewerRef, sheathValues, sheathed);
+  }
+
   // Teardown has no documented API in the recon (ZamModelViewer's own
   // destroy/dispose method was never captured in the source extracts) --
   // this is a best-effort guarded call: if the viewer instance doesn't
@@ -55,6 +78,7 @@
 
     status = "loading";
     skipNote = null;
+    canSheathe = false;
     let cancelled = false;
     let created: unknown = null;
 
@@ -63,8 +87,15 @@
       .then((res) => {
         if (cancelled) return;
         created = res.viewer;
+        viewerRef = res.viewer;
+        sheathValues = res.sheath;
+        canSheathe = res.sheath.main >= 0 || res.sheath.off >= 0;
         skipNote = skippedItemsNote(res.totalItems, res.shownItems);
         status = "ready";
+        // A persisted "sheathed" pref must land on the FRESH viewer too --
+        // the engine queues the call while the actor is still loading, so
+        // firing immediately after construction is safe.
+        if (sheathed) applyViewerSheath(res.viewer, res.sheath, true);
       })
       .catch((e: unknown) => {
         if (cancelled) return;
@@ -77,6 +108,8 @@
     // then the body above loads+creates the next one) and on unmount.
     return () => {
       cancelled = true;
+      viewerRef = null;
+      sheathValues = null;
       destroyViewer(created);
       // destroyViewer is best-effort (no documented destroy API upstream --
       // see above), so it can silently no-op and leave the old canvas/WebGL
@@ -91,6 +124,11 @@
 
 <div class="model-card" class:compact>
   <div id={containerId} class="model-container"></div>
+  {#if status === "ready" && canSheathe}
+    <button class="sheath-btn" onclick={toggleSheathed}>
+      {sheathed ? "Draw weapons" : "Sheathe weapons"}
+    </button>
+  {/if}
   {#if status === "loading"}
     <p class="muted">Loading model…</p>
   {:else if status === "error"}
@@ -127,6 +165,25 @@
   .model-container {
     width: 100%;
     height: 100%;
+  }
+  /* Sheathe/draw toggle: quiet chip pinned to the card's top-right corner,
+     ABOVE the canvas (a sibling overlay -- clicks on it never reach the
+     model's drag-rotate). Same palette as the sheet's standard buttons,
+     translucent so it stays unobtrusive over the render. */
+  .sheath-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    background: rgba(33, 38, 45, 0.85);
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .sheath-btn:hover {
+    background: #30363d;
   }
   .muted {
     position: absolute;
