@@ -891,6 +891,22 @@ async fn wow_config_pb_keys(state: State<'_, AppState>) -> Result<serde_json::Va
     run_json_cmd(state, vec!["wow".into(), "config".into(), "pb-keys".into()]).await
 }
 
+// Module-tuning rework: pb-keys generalized to any editable module conf.
+// The CLI enforces the allowlist (module confs only; rejects .env/the
+// compose override/worldserver.conf/authserver.conf) and enriches each key
+// with its .dist comment-block help.
+#[tauri::command]
+async fn wow_config_conf_keys(
+    file: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(
+        state,
+        vec!["wow".into(), "config".into(), "conf-keys".into(), "--file".into(), file],
+    )
+    .await
+}
+
 #[tauri::command]
 async fn wow_config_files(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "config".into(), "files".into()]).await
@@ -2195,6 +2211,7 @@ pub fn run() {
             wow_config_set,
             wow_config_tuning_list,
             wow_config_tuning_set,
+            wow_config_conf_keys,
             wow_config_raw_read,
             wow_config_pb_keys,
             wow_config_files,

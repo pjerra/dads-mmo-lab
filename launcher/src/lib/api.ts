@@ -323,6 +323,10 @@ export interface CppModule {
   installed: boolean;
   pending_rebuild: boolean;
   conf: "none" | "needs-rebuild" | "ready" | "active";
+  // The module's conf basename (transmog.conf), null when the module has no
+  // conf file. Additive (Module-tuning rework) -- optional so an older
+  // deployed CLI without the field can't crash the Modules/Config pages.
+  conf_name?: string | null;
   custom: boolean;
 }
 export interface LuaModule {
@@ -608,6 +612,21 @@ export interface PbKey {
 export async function wowConfigPbKeys(): Promise<{ source: string; keys: PbKey[] }> {
   return await invoke("wow_config_pb_keys");
 }
+// Module-tuning rework: pb-keys generalized to any editable module conf.
+// `help` is the key's comment-block doc parsed from the conf's .dist ("" when
+// the module author documented nothing near the key).
+export interface ConfKey {
+  key: string;
+  value: string;
+  default: string | null;
+  line: number;
+  help: string;
+}
+export async function wowConfigConfKeys(
+  file: string,
+): Promise<{ file: string; source: "conf" | "dist"; keys: ConfKey[] }> {
+  return await invoke("wow_config_conf_keys", { file });
+}
 export async function wowConfigFiles(): Promise<ConfFile[]> {
   const data = await invoke<{ files: ConfFile[] }>("wow_config_files");
   return data.files;
@@ -631,6 +650,10 @@ export interface ModuleTuning {
   value: string;
   default: string;
   installed: boolean;
+  // The row's backing file basename (mod_learnspells.conf / UnlimitedAmmo.lua)
+  // -- lets the Module tuning tab render curated conf rows inside the owning
+  // module's card. Additive; optional so an older deployed CLI can't crash it.
+  file?: string;
 }
 export async function wowConfigTuningList(): Promise<ModuleTuning[]> {
   const data = await invoke<{ settings: ModuleTuning[] }>("wow_config_tuning_list");
