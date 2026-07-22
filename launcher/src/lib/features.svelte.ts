@@ -72,7 +72,7 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "place-npc": "untested",
   "guided-config": "untested",
   "backup-validate": "tested",
-  "gm-return-home": "untested",
+  "gm-return-home": "tested",
   "gear-sets-io": "untested",
   "tailscale-play": "untested",
   "port-proxy": "untested",
