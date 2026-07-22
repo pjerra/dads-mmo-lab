@@ -62,9 +62,12 @@ with ~2000 AI playerbots. One window, no terminal needed.*
 - **Settings with guardrails** — XP/gold rates, bot population, message of
   the day; sensible defaults and safe ranges shown for every setting, with a
   one-click reset.
-- **Guided module tuning** — simple on/off settings for popular mods (like a
-  pet-taming NPC or auto-refilling ammo) instead of editing config files by
-  hand.
+- **Module tuning** — every installed server module with a config file gets
+  its own card: friendly switches for the popular knobs first, then a
+  searchable "All settings" list of every key the module knows, with the
+  module author's own notes shown inline. Transmog changes even apply live,
+  no restart. Lua script mods keep their simple curated switches (like
+  auto-refilling ammo) — no raw script editing.
 - **Account-wide sharing** — once installed, share things like achievements,
   gold, mounts, pets and titles across every character on the same account.
 - **Config editor** — full-window editor for module configs with automatic

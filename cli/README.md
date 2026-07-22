@@ -282,6 +282,40 @@ silently ignored (treated as if omitted), rather than rejected.
   `ahbot.character` branch when the character lookup can't reach the DB (or
   returns garbage).
 
+- Direct conf route: `dml wow config set --key conf:<file>.conf:<Key> --value <v> --json`
+  → `{"changed","restart_required","applied":"live"|"restart"|"none"}`.
+  Writes one key of an editable **module** conf in place (comment-preserving;
+  created from its `.dist` on first write). Any conf passing the dynamic
+  module-conf allowlist (see `config files`) is accepted; `worldserver.conf`
+  and `authserver.conf` stay curated-rows-only (`BAD_ARG`), unknown confs are
+  `NOT_FOUND`. Keys are validated `^[A-Za-z0-9_.]+$`, values single-line and
+  ≤200 chars; `AiPlayerbot.DeleteRandomBotAccounts` is denylisted (owned by
+  `wow bots flush`). A matching legacy `AC_*` override is cleaned off
+  override.yml on save. `applied:"live"` only when the module has a VERIFIED
+  live-reload console command (currently mod-transmog → `transmog reload`,
+  fired over SOAP best-effort) and no legacy env still beats the conf;
+  everything else reports `"restart"`.
+
+- `dml wow config pb-keys --json` → `{"source","keys":[{"key","value",
+  "default","line"}]}` — every active `Key = value` line of playerbots.conf
+  (falling back to its `.dist`), the Bot World all-keys browser.
+
+- `dml wow config conf-keys --file <name>.conf --json` →
+  `{"file","source":"conf"|"dist","keys":[{"key","value","default","line",
+  "help"}]}` — pb-keys generalized to any editable module conf (the Module
+  tuning per-module browsers). `default` comes from the `.dist` when both
+  files exist; `help` is the key's comment-block doc parsed from the `.dist`
+  (both the adjacent-block and the shared-doc-block-with-`#    Key.Name`-
+  headers styles; collapsed to one line, capped at 400 chars, `""` when the
+  author documented nothing). Rejects `.env`/the compose override/
+  `worldserver.conf`/`authserver.conf` (`BAD_ARG`) and unknown confs
+  (`NOT_FOUND`).
+
+- `dml wow config tuning-list --json` / `tuning-set --key <module.knob>
+  --value <v> --json` — the curated guided-tuning knobs (conf- and
+  lua-backed); rows carry an additive `file` field naming their backing
+  file. `module list` cpp rows likewise carry an additive `conf_name`.
+
 - `dml wow config raw-read --file <name> --json` → `{"file","content"}` and
   `dml wow config raw-write --file <name> --json` (new content on stdin) →
   `{"written":true,"backup":"<name>.bak"|null}`
