@@ -6,8 +6,12 @@
 // npm `wow-model-viewer`, version 1.5.3, ISC license, Copyright (c) Miorey) --
 // specifically `index.js`/`character_modeling.js`/`wow_model_viewer.js` from
 // that package, as captured verbatim in `.superpowers/sdd/recon-modelviewer.md`
-// (THE authority for every fact below -- see that file for full source
-// extracts, CORS probe results, and the porting verdict this adapter follows).
+// (see that file for full source extracts, CORS probe results, and the
+// original porting verdict). EXCEPTION: the equipment-slot semantics were
+// re-derived 2026-07-22 from a decompile of the live-tree viewer.min.js
+// itself, which proved the reference README's slot table wrong -- see
+// `.superpowers/sdd/model-browser-report.md` (the authority for the slot
+// mapping, meta-path routing, and skip-count behavior in this file).
 // `viewer.min.js` itself is Wowhead/ZAM's own proprietary build, loaded at
 // runtime through the app's `zam` asset proxy -- not vendored here.
 //
@@ -62,48 +66,48 @@ declare global {
   }
 }
 
-// Recon §1.2, README equipment-slot table: the viewer's own 1-22 slot
-// numbering is the standard WoW client inventory-slot enum (1-19) plus 3
-// viewer-internal extras (20/21/22, the "new" chest-robe/mainhand/offhand
-// slots used only as an internal 404-fallback -- see recon §1.2/1.3,
-// `getDisplaySlot()`). AC's EquipmentSlots enum is that same 1-19 numbering,
-// 0-indexed -- so every AC slot the viewer marks "Is displayed: Yes" maps to
-// `acSlot + 1`. Only those rendered slots are listed: neck (AC 1 -> viewer
-// 2), both rings (AC 10/11 -> viewer 11/12) and both trinkets (AC 12/13 ->
-// viewer 13/14) are the viewer's own `NOT_DISPLAYED_SLOTS = [2,11,12,13,14]`
-// and are deliberately absent here.
-export const AC_TO_VIEWER_SLOT: Record<number, number> = {
+// CORRECTED SLOT SEMANTICS (2026-07-22, decompile of the live-tree
+// viewer.min.js -- see .superpowers/sdd/model-browser-report.md, which
+// supersedes the recon's README-derived slot table): the items-array slot
+// vocabulary is the WoW client **InventoryType** enum, NOT the equip-slot
+// enum + 1. The reference README's table ("15=Back, 16=Main Hand,
+// 17=Off Hand, 18=Ranged") is wrong for the real engine -- its own demo
+// cloak `[15, 17238]` silently 404s. Wowhead's own Paperdoll.js (recon
+// `updateItemViewer`) feeds the engine WH.Wow.Item.INVENTORY_TYPE_*
+// constants, and the engine's internal display-slot table (`Er`) and
+// attachment/geoset branches all key off InventoryType.
+//
+// acSlot+1 *coincidentally* equals InventoryType for slots 0-9 and 18,
+// which is why body armor always rendered while back/weapons never did.
+// Fixed (unambiguous) rows only -- chest (AC 4: chest 5 vs robe 20),
+// off hand (AC 16: weapon/held 22 vs shield 14) and ranged (AC 17: bow 15 /
+// thrown 25 / wand-gun 26) depend on the item and are resolved per-item in
+// resolveViewerItems below. Neck (AC 1), rings (10/11), trinkets (12/13)
+// and bags are never displayed by the engine and have no row.
+export const AC_TO_INVENTORY_TYPE: Record<number, number> = {
   0: 1, // Head
   2: 3, // Shoulders
   3: 4, // Body (shirt)
-  4: 5, // Chest
   5: 6, // Waist
   6: 7, // Legs
   7: 8, // Feet
   8: 9, // Wrists
   9: 10, // Hands
-  14: 15, // Back
-  15: 16, // Main Hand
-  16: 17, // Off Hand
-  17: 18, // Ranged
+  14: 16, // Back -> INVENTORY_TYPE_BACK (16, NOT 15 -- 15 is "bow")
+  15: 21, // Main Hand -> INVENTORY_TYPE_MAIN_HAND (right hand, all weapon types)
   18: 19, // Tabard
 };
 
-// Recon §1.1 (`optionsFromModel`): `characterItems.filter(e =>
-// !NOT_DISPLAYED_SLOTS.includes(e[0]))` -- we filter by only ever emitting
-// mapped (i.e. displayed) slots in the first place, plus drop displayid 0
-// (an empty slot; the viewer has nothing to render there).
-export function buildViewerItems(
-  equipped: { slot: number; displayid: number }[],
-): [number, number][] {
-  const items: [number, number][] = [];
-  for (const it of equipped) {
-    if (it.displayid === 0) continue;
-    const viewerSlot = AC_TO_VIEWER_SLOT[it.slot];
-    if (viewerSlot === undefined) continue;
-    items.push([viewerSlot, it.displayid]);
-  }
-  return items;
+// Engine meta-path router (live viewer.min.js `ga()`): the texture-
+// composited body-armor InventoryTypes fetch `meta/armor/{slot}/{id}.json`;
+// EVERY other slot -- all weapons, shields, held, ranged -- fetches
+// `meta/item/{id}.json` with no slot in the path at all.
+const ARMOR_META_SLOTS: ReadonlySet<number> = new Set([1, 3, 4, 5, 6, 7, 8, 9, 10, 16, 19, 20]);
+
+export function viewerMetaUrl(slot: number, displayId: number): string {
+  return ARMOR_META_SLOTS.has(slot)
+    ? `${CONTENT_PATH}meta/armor/${slot}/${displayId}.json`
+    : `${CONTENT_PATH}meta/item/${displayId}.json`;
 }
 
 // Recon §1.1 (`optionsFromModel`): `models: { id: race*2-1+gender, type:
@@ -343,53 +347,118 @@ async function buildCharCustomization(
   return options.length > 0 ? { options } : undefined;
 }
 
-// Recon §1.2 (`getDisplaySlot`, captured source verbatim): the viewer's own
-// internal 404-fallback remaps three slots to "new"-style meta locations --
-// `{ 5: 20, 16: 21, 18: 22 }` (chest -> robe-chest, mainhand -> mainhand(new),
-// offhand -> offhand(new)). Mirrored exactly so the pre-flight probe below
-// checks the same alternate location the viewer itself would try.
-export function viewerFallbackSlot(slot: number): number | null {
-  if (slot === 5) return 20;
-  if (slot === 16) return 21;
-  if (slot === 18) return 22;
+// One pre-flight probe result: `ok` mirrors HTTP 200 vs 404, and when the
+// meta parsed, `inventoryType` carries its `Item.InventoryType` (needed to
+// disambiguate shields vs held off-hands and bow/thrown/wand ranged items).
+// A probe returning null means the probe ITSELF failed (network) -- callers
+// keep the item on a best-guess slot so a transient hiccup never strips gear.
+export interface MetaProbeResult {
+  ok: boolean;
+  inventoryType?: number;
+}
+export type MetaProbe = (url: string) => Promise<MetaProbeResult | null>;
+
+// Resolve one equipped item to its final [InventoryType, displayId] pair,
+// or null when the CDN confirms the meta doesn't exist anywhere the engine
+// would look (custom/GM displayids, and legit items absent from the wrath
+// tree -- e.g. both Warglaives of Azzinoth, displayids 45479/45481, 404 on
+// meta/item/ across every Wowhead tree).
+//
+// This MUST run before construction: the live engine swallows per-item meta
+// 404s (`.catch(() => { t.H = true })` -- the item is just silently
+// invisible), so construction NEVER rejects over a missing item and no
+// after-the-fact retry can detect or fix a wrong slot.
+async function resolveViewerItem(
+  acSlot: number,
+  id: number,
+  probe: MetaProbe,
+): Promise<[number, number] | null> {
+  // Chest (AC 4): plain chests live at meta/armor/5/, robes ONLY at
+  // meta/armor/20/ (e.g. Gamemaster's Robe 22033). The engine maps a passed
+  // slot-20 item onto the chest display slot itself (Er[20] = 5), so the
+  // robe geosets composite correctly.
+  if (acSlot === 4) {
+    const chest = await probe(viewerMetaUrl(5, id));
+    if (chest === null || chest.ok) return [5, id];
+    const robe = await probe(viewerMetaUrl(20, id));
+    if (robe === null || robe.ok) return [20, id];
+    return null;
+  }
+  // Off hand (AC 16): weapons and held frills render at slot 22 (left
+  // palm); shields must pass 14 so the engine uses the shield mount bone
+  // instead. Both route to meta/item/{id}.json -- the meta's own
+  // Item.InventoryType tells them apart.
+  if (acSlot === 16) {
+    const meta = await probe(viewerMetaUrl(22, id));
+    if (meta === null) return [22, id];
+    if (!meta.ok) return null;
+    return [meta.inventoryType === 14 ? 14 : 22, id];
+  }
+  // Ranged (AC 17): pass the meta's own InventoryType (15 bow / 25 thrown /
+  // 26 wand-gun) -- NEVER 18: the engine's display-slot table has no
+  // attachment for 18 (Er[18] = 0), so an 18 loads and then never shows.
+  if (acSlot === 17) {
+    const meta = await probe(viewerMetaUrl(26, id));
+    if (meta === null) return [26, id];
+    if (!meta.ok) return null;
+    const it = meta.inventoryType;
+    return [it === 15 || it === 25 || it === 26 ? it : 26, id];
+  }
+  const invType = AC_TO_INVENTORY_TYPE[acSlot];
+  if (invType === undefined) return null; // never-displayed slot
+  const meta = await probe(viewerMetaUrl(invType, id));
+  if (meta === null || meta.ok) return [invType, id];
   return null;
 }
 
-// Drop items whose display meta doesn't exist on the CDN: custom/GM
-// displayids (server-side items wowhead never had) 404, and ONE missing
-// meta rejects the viewer's entire construction -- the F1 failure mode.
-// probe returns true (meta exists), false (confirmed missing), or null
-// (probe itself failed -- network); unknowns are KEPT so a transient
-// hiccup can't silently strip gear.
-export async function probeRenderableItems(
-  items: [number, number][],
-  probe: (url: string) => Promise<boolean | null>,
-): Promise<[number, number][]> {
-  const kept: [number, number][] = [];
-  for (const [slot, id] of items) {
-    const primary = await probe(`${CONTENT_PATH}meta/armor/${slot}/${id}.json`);
-    if (primary !== false) {
-      kept.push([slot, id]);
-      continue;
-    }
-    const fb = viewerFallbackSlot(slot);
-    if (fb !== null && (await probe(`${CONTENT_PATH}meta/armor/${fb}/${id}.json`)) !== false) {
-      // Keep the item under the FALLBACK slot -- the renderer refetches the
-      // meta itself, so handing it the original slot replays the 404 the
-      // probe just saw and the item is silently dropped. Live case: robes
-      // (chest 5 -> robe 20, e.g. Gamemaster's Robe 22033) and weapons
-      // (16 -> 21 / 18 -> 22, e.g. Warglaive off-hands) only exist on the
-      // CDN under their fallback slot.
-      kept.push([fb, id]);
-    }
-  }
-  return kept;
+// Everything createCharacterViewer needs to construct honestly: the final
+// items array (engine InventoryType vocabulary) plus the count of
+// viewer-eligible equipped items -- `total - items.length` is exactly the
+// skipped-item count the "K of N can't be shown" note reports.
+export interface ResolvedViewerItems {
+  items: [number, number][];
+  total: number;
 }
 
-async function fetchProbe(url: string): Promise<boolean | null> {
+export async function resolveViewerItems(
+  equipped: { slot: number; displayid: number }[],
+  probe: MetaProbe,
+): Promise<ResolvedViewerItems> {
+  // Eligible = a slot the engine displays at all, with a real displayid.
+  // Neck/rings/trinkets and empty slots are not candidates and never count
+  // against the skipped-items note.
+  const candidates = equipped.filter(
+    (it) =>
+      it.displayid !== 0 &&
+      (AC_TO_INVENTORY_TYPE[it.slot] !== undefined ||
+        it.slot === 4 ||
+        it.slot === 16 ||
+        it.slot === 17),
+  );
+  // Per-item probes run concurrently (each item needs at most 2 sequential
+  // fetches); results keep the equipped order.
+  const resolved = await Promise.all(
+    candidates.map((it) => resolveViewerItem(it.slot, it.displayid, probe)),
+  );
+  return {
+    items: resolved.filter((r): r is [number, number] => r !== null),
+    total: candidates.length,
+  };
+}
+
+async function fetchMetaProbe(url: string): Promise<MetaProbeResult | null> {
   try {
     const res = await fetch(url);
-    return res.ok;
+    if (!res.ok) return { ok: false };
+    let inventoryType: number | undefined;
+    try {
+      const j = (await res.json()) as { Item?: { InventoryType?: number } };
+      if (typeof j?.Item?.InventoryType === "number") inventoryType = j.Item.InventoryType;
+    } catch {
+      // A 200 with an unparseable body still counts as "meta exists" --
+      // the InventoryType refinement just degrades to the default slot.
+    }
+    return { ok: true, inventoryType };
   } catch {
     return null;
   }
@@ -417,10 +486,13 @@ export async function geometryAvailable(modelId: number): Promise<boolean> {
 // Pure: the "K of N equipped items can't be shown" caption for the model
 // card (smoke item 6: silently dropped GM/custom items read as a bug).
 // Null when nothing was dropped -- the card then shows no note at all.
+// Wording covers both custom/GM displayids AND legit items Wowhead's data
+// simply lacks (the Warglaives case) -- "no Wowhead model data" is the one
+// honest common cause.
 export function skippedItemsNote(total: number, shown: number): string | null {
   const skipped = total - shown;
   if (total <= 0 || skipped <= 0) return null;
-  return `${skipped} of ${total} equipped item${total === 1 ? "" : "s"} can't be shown in 3D (custom/GM items).`;
+  return `${skipped} of ${total} equipped item${total === 1 ? "" : "s"} can't be shown in 3D (no Wowhead model data).`;
 }
 
 // What createCharacterViewer resolves with: the (untyped) viewer instance
@@ -440,10 +512,13 @@ export interface CharacterViewerResult {
 // The viewer instance stays `unknown` (recon has no documented
 // destroy/teardown API -- see CharacterModel.svelte's guarded call site).
 //
-// Construction runs up to three attempts: full gear first; if that rejects,
-// probe out CDN-missing items (custom/GM gear) and retry; finally retry
-// naked -- a base model beats no model. The container is cleared between
-// attempts so a half-constructed canvas can't stack under the retry.
+// Items are fully resolved BEFORE the single construction: the live engine
+// swallows per-item meta 404s (an unrenderable item is silently invisible,
+// construction never rejects over it), so a catch-driven probe/retry ladder
+// can neither fix wrong slots nor count skips -- the old one was dead code.
+// The pre-flight probes hit the same URLs the engine re-requests, so they
+// also pre-warm the zam proxy cache. One naked retry remains for genuine
+// engine-level failures unrelated to items -- a base model beats no model.
 export async function createCharacterViewer(
   containerId: string,
   doll: PaperdollData,
@@ -480,23 +555,14 @@ export async function createCharacterViewer(
     return await new Viewer(options);
   };
 
-  const allItems = buildViewerItems(doll.equipped);
+  const resolved = await resolveViewerItems(doll.equipped, fetchMetaProbe);
   try {
-    const viewer = await construct(allItems);
-    return { viewer, totalItems: allItems.length, shownItems: allItems.length };
+    const viewer = await construct(resolved.items);
+    return { viewer, totalItems: resolved.total, shownItems: resolved.items.length };
   } catch (e) {
     document.getElementById(containerId)?.replaceChildren();
-    const kept = await probeRenderableItems(allItems, fetchProbe);
-    if (kept.length !== allItems.length) {
-      try {
-        const viewer = await construct(kept);
-        return { viewer, totalItems: allItems.length, shownItems: kept.length };
-      } catch {
-        document.getElementById(containerId)?.replaceChildren();
-      }
-    }
-    if (allItems.length === 0) throw e;
+    if (resolved.items.length === 0) throw e;
     const viewer = await construct([]);
-    return { viewer, totalItems: allItems.length, shownItems: 0 };
+    return { viewer, totalItems: resolved.total, shownItems: 0 };
   }
 }
