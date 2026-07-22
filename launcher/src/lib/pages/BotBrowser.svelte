@@ -234,7 +234,16 @@
             <td class="muted">{className(b.class)}</td>
             <td>{b.level}</td>
             <td class="muted">{zoneName(b.zone)}</td>
-            <td>{b.online ? "●" : ""}</td>
+            <td>
+              <span
+                class="dot"
+                class:on={b.online}
+                class:off={!b.online}
+                role="img"
+                aria-label={b.online ? "online" : "offline"}
+                title={b.online ? "Online" : "Offline"}
+              ></span>
+            </td>
             <td><button onclick={() => openDetail(b)}>{detailBot?.guid === b.guid ? "Hide" : "Details"}</button></td>
           </tr>
           {#if detailBot?.guid === b.guid}
@@ -341,6 +350,11 @@
   button:disabled { opacity: 0.5; cursor: default; }
   button.star { padding: 2px 8px; font-size: 15px; border: none; background: none; color: #6e7681; }
   button.star.faved { color: #d29922; }
+  /* Row online-status dot: same visual language as the sidebar status
+     chip's dot (+page.svelte) -- green = online, red = offline. */
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  .dot.on { background: #3fb950; }
+  .dot.off { background: #f85149; }
   .card.detail { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; margin: 6px 0; }
   .detail-head { display: flex; gap: 12px; align-items: baseline; }
   .gearlist { display: flex; flex-wrap: wrap; gap: 6px 14px; }
