@@ -49,3 +49,28 @@ export function treeRows(tree: Tree): number {
   for (const talent of tree.talents) if (talent.row > maxRow) maxRow = talent.row;
   return maxRow + 1;
 }
+
+// Infer a character's class from its learned talent spells: the class whose
+// trees contain any of them. Needed by the character sheet's gearless
+// (paperdoll NOT_FOUND) path -- the paperdoll is the sheet's only source of
+// a class id, but a leveled naked bot still has talents to show. Talent
+// rank spell ids are class-specific in the wotlk data (verified: zero
+// cross-class duplicates), so a single hit identifies the class; no hits
+// (no talents spent) or -- defensively -- hits in more than one class
+// return null rather than guessing.
+export function inferClassId(
+  spells: number[],
+  treesByClass: Record<string, Tree[]>,
+): number | null {
+  const learned = new Set(spells);
+  let found: number | null = null;
+  for (const [classId, trees] of Object.entries(treesByClass)) {
+    const hit = trees.some((tree) =>
+      tree.talents.some((t) => t.ranks.some((r) => learned.has(r))),
+    );
+    if (!hit) continue;
+    if (found !== null) return null; // ambiguous -- never guess
+    found = Number(classId);
+  }
+  return found;
+}

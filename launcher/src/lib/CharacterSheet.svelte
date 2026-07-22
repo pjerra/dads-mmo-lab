@@ -32,7 +32,7 @@
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
   import { chunkIds, formatEpochDate } from "$lib/progress";
-  import { learnedRank, treePoints, treeRows, type Tree, type Talent } from "$lib/talent-trees";
+  import { inferClassId, learnedRank, treePoints, treeRows, type Tree, type Talent } from "$lib/talent-trees";
   import {
     categoryTree,
     scopeAchievements,
@@ -285,8 +285,18 @@
       void loadEarnedAchievements(name);
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
-      if (err.code === "NOT_FOUND") naked = true;
-      else dollError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      if (err.code === "NOT_FOUND") {
+        // A gearless character is still a real character with talents and
+        // achievements -- fire the same progress fetches as the success
+        // path so the tabbed window renders for it (the old Bot Browser
+        // drawer showed talents for naked bots; regressing that here would
+        // hide a leveled bot's build just because it never saved gear).
+        naked = true;
+        void loadProgress(name);
+        void loadEarnedAchievements(name);
+      } else {
+        dollError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      }
     } finally {
       loadingDoll = false;
     }
@@ -551,9 +561,10 @@
 <div class="sheet" class:compact>
   {#if dollError}
     <div class="error-card"><strong>Couldn't load character gear.</strong><p>{dollError}</p></div>
-  {:else if naked}
-    <p class="muted">No gear saved yet — this character hasn't equipped (or saved) any items.</p>
-  {:else if doll}
+  {:else if doll || naked}
+    <!-- naked (paperdoll NOT_FOUND, normal for ambient bots) still gets the
+         full tabbed window -- talents/achievements exist without gear; only
+         the Character tab swaps the paperdoll for a quiet note. -->
     <div class="tabbed-window">
       <div class="tabstrip">
         <button class:active={activeTab === "character"} onclick={() => setTab("character")}>Character</button>
@@ -562,6 +573,7 @@
       </div>
 
       {#if activeTab === "character"}
+        {#if doll}
         <div class="doll-row">
           <div class="card doll">
             <div class="paperdoll">
@@ -606,6 +618,9 @@
             </div>
           </div>
         </div>
+        {:else}
+          <p class="muted">No gear saved yet — this character hasn't equipped (or saved) any items.</p>
+        {/if}
       {:else if activeTab === "talents"}
         <div class="card talents-card">
           <div class="card-head">
@@ -620,16 +635,25 @@
             <p class="muted">Loading…</p>
           {:else if progress}
             {@const learnedSet = new Set(progress.talents.spells)}
-            {@const trees = talentTreesForClass(doll.class)}
+            <!-- Naked characters have no paperdoll (the sheet's only class
+                 source), so the class is inferred from which class's trees
+                 contain the learned talent spells -- null (no talents
+                 spent) degrades to the note below. -->
+            {@const classId = doll?.class ?? inferClassId(progress.talents.spells, talentTreesByClass)}
+            {@const trees = classId === null ? [] : talentTreesForClass(classId)}
             {@const pointsPerTree = trees.map((t) => treePoints(t, learnedSet))}
-            <p class="muted">
-              {pointsPerTree.reduce((a, b) => a + b, 0)} points — {pointsPerTree.join("/")}
-            </p>
-            <div class="tree-row">
-              {#each trees as tree (tree.id)}
-                {@render treePanel(tree, learnedSet)}
-              {/each}
-            </div>
+            {#if trees.length > 0}
+              <p class="muted">
+                {pointsPerTree.reduce((a, b) => a + b, 0)} points — {pointsPerTree.join("/")}
+              </p>
+              <div class="tree-row">
+                {#each trees as tree (tree.id)}
+                  {@render treePanel(tree, learnedSet)}
+                {/each}
+              </div>
+            {:else}
+              <p class="muted">No talent points spent yet.</p>
+            {/if}
           {/if}
         </div>
       {:else}

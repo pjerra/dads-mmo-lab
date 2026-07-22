@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { learnedRank, treePoints, treeRows, type Talent, type Tree } from "./talent-trees";
+import {
+  inferClassId,
+  learnedRank,
+  treePoints,
+  treeRows,
+  type Talent,
+  type Tree,
+} from "./talent-trees";
 
 // Hand-made mini tree -- deliberately NOT the real 49KB
 // talent-trees-wotlk.json, per the task brief (keep unit tests fast and
@@ -99,5 +106,46 @@ describe("treeRows", () => {
       ],
     };
     expect(treeRows(tree)).toBe(8);
+  });
+});
+
+describe("inferClassId", () => {
+  // Two mini classes -- the character sheet's naked (paperdoll NOT_FOUND)
+  // path uses this to recover the class the missing paperdoll would have
+  // provided, so the Talents tab can still render trees.
+  const warriorTrees: Tree[] = [
+    { id: 161, name: "Arms", talents: [threeRankTalent] },
+    { id: 164, name: "Fury", talents: [oneRankTalent] },
+  ];
+  const mageTrees: Tree[] = [
+    { id: 81, name: "Fire", talents: [{ id: 9, row: 0, col: 0, ranks: [500, 501] }] },
+  ];
+  const byClass: Record<string, Tree[]> = { "1": warriorTrees, "8": mageTrees };
+
+  it("finds the class whose trees contain a learned talent spell", () => {
+    expect(inferClassId([101], byClass)).toBe(1);
+    expect(inferClassId([200], byClass)).toBe(1);
+    expect(inferClassId([501], byClass)).toBe(8);
+  });
+
+  it("matches on any rank of any talent in any of the class's trees", () => {
+    expect(inferClassId([9999, 102], byClass)).toBe(1);
+    expect(inferClassId([500, 501], byClass)).toBe(8);
+  });
+
+  it("returns null when no talents are learned or none match", () => {
+    expect(inferClassId([], byClass)).toBeNull();
+    expect(inferClassId([9999], byClass)).toBeNull();
+  });
+
+  it("returns null (never guesses) if spells match more than one class", () => {
+    // Cannot happen with the real wotlk data (rank spell ids are
+    // class-specific, verified zero cross-class duplicates) -- but if the
+    // data ever regressed, guessing a class would render the WRONG trees.
+    expect(inferClassId([101, 501], byClass)).toBeNull();
+  });
+
+  it("returns null for an empty class map", () => {
+    expect(inferClassId([101], {})).toBeNull();
   });
 });
