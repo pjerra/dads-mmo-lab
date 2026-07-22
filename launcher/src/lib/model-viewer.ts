@@ -592,12 +592,15 @@ export interface SheathValues {
 }
 
 // Pure: the SheatheType for one resolved weapon-slot item. `finalSlot` is
-// the item's resolved engine InventoryType (21 main hand, 22 off-hand
-// weapon, 14 shield, 23 held frill); `meta` carries the item meta JSON's
-// Item.ItemClass/ItemSubClass (null when the meta couldn't be fetched).
+// the item's resolved engine InventoryType (21 main hand, 22 off-hand,
+// 14 shield); `meta` carries the item meta JSON's Item.ItemClass/
+// ItemSubClass/InventoryType (null when the meta couldn't be fetched).
+// NB: resolveViewerItemForId lands every non-shield off-hand at slot 22 --
+// held frills included -- so a frill is recognized by its meta
+// InventoryType (23), never by finalSlot.
 export function sheathTypeForItem(
   finalSlot: number,
-  meta: { itemClass?: number; itemSubClass?: number } | null,
+  meta: { itemClass?: number; itemSubClass?: number; inventoryType?: number } | null,
   entry?: number,
 ): number {
   // The Warglaives of Azzinoth (32837 MH / 32838 OH) are one-hand swords
@@ -605,7 +608,7 @@ export function sheathTypeForItem(
   // CROSSED ON THE BACK -- the iconic look this feature exists for.
   if (entry === 32837 || entry === 32838) return 7;
   if (finalSlot === 14) return 4; // shield -> shield-back mount
-  if (finalSlot === 23) return 0; // held frill: no real sheathed pose
+  if (meta?.inventoryType === 23) return 0; // held frill: no real sheathed pose
   if (meta?.itemClass === 2) {
     const sub = meta.itemSubClass;
     if (sub === 10) return 2; // staff
@@ -619,13 +622,15 @@ export function sheathTypeForItem(
 
 export type ItemMetaFetch = (
   displayId: number,
-) => Promise<{ itemClass?: number; itemSubClass?: number } | null>;
+) => Promise<{ itemClass?: number; itemSubClass?: number; inventoryType?: number } | null>;
 
 // Derive the doll's SheathValues pair from the already-resolved items
-// array. Only the main-hand (21) and off-hand (22/14/23) rows matter --
-// the engine's Ir refinement only ever keys slots 21/22, and shields/held
-// items need no meta fetch at all. The metas fetched here are the exact
-// URLs the pre-flight probes warmed, so this is a local-cache read.
+// array. Only the main-hand (21) and off-hand (22/14) rows matter -- the
+// engine's Ir refinement only ever keys slots 21/22, and shields need no
+// meta fetch at all. Slot-22 rows DO fetch: the meta's ItemClass/
+// InventoryType is what tells an off-hand weapon (hips/back) from a held
+// frill (InventoryType 23 -> type 0). The metas fetched here are the
+// exact URLs the pre-flight probes warmed, so this is a local-cache read.
 export async function deriveSheathValues(
   items: [number, number][],
   equipped: { slot: number; entry?: number }[],
@@ -648,7 +653,7 @@ export async function deriveSheathValues(
       15,
     ),
     typeFor(
-      items.find(([s]) => s === 22 || s === 14 || s === 23),
+      items.find(([s]) => s === 22 || s === 14),
       16,
     ),
   ]);
@@ -666,12 +671,20 @@ export async function deriveSheathValues(
 // asked about). Any failure degrades to null -> generic back position.
 async function fetchItemSheathMeta(
   displayId: number,
-): Promise<{ itemClass?: number; itemSubClass?: number } | null> {
+): Promise<{ itemClass?: number; itemSubClass?: number; inventoryType?: number } | null> {
   try {
     const res = await fetch(`${CONTENT_PATH}meta/item/${displayId}.json`);
     if (!res.ok) return null;
-    const j = (await res.json()) as { Item?: { ItemClass?: number; ItemSubClass?: number } };
-    return j.Item ? { itemClass: j.Item.ItemClass, itemSubClass: j.Item.ItemSubClass } : null;
+    const j = (await res.json()) as {
+      Item?: { ItemClass?: number; ItemSubClass?: number; InventoryType?: number };
+    };
+    return j.Item
+      ? {
+          itemClass: j.Item.ItemClass,
+          itemSubClass: j.Item.ItemSubClass,
+          inventoryType: j.Item.InventoryType,
+        }
+      : null;
   } catch {
     return null;
   }

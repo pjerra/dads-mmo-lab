@@ -462,8 +462,11 @@ describe("sheathTypeForItem", () => {
     expect(sheathTypeForItem(14, null)).toBe(4);
   });
 
-  it("gives held frills no sheathed pose (type 0)", () => {
-    expect(sheathTypeForItem(23, null)).toBe(0);
+  it("gives held frills (resolved slot 22, meta InventoryType 23) no sheathed pose (type 0)", () => {
+    // Production never yields a slot-23 row: resolveViewerItemForId lands
+    // every non-shield off-hand at 22, so a frill is identified by its
+    // meta InventoryType, not by the resolved slot.
+    expect(sheathTypeForItem(22, { itemClass: 4, inventoryType: 23 })).toBe(0);
   });
 
   it("falls back to the generic back position (type 1) when the meta is unavailable", () => {
@@ -473,7 +476,12 @@ describe("sheathTypeForItem", () => {
 });
 
 describe("deriveSheathValues", () => {
-  const fetcherFrom = (answers: Record<number, { itemClass?: number; itemSubClass?: number } | null>) => {
+  const fetcherFrom = (
+    answers: Record<
+      number,
+      { itemClass?: number; itemSubClass?: number; inventoryType?: number } | null
+    >,
+  ) => {
     const asked: number[] = [];
     const fetchMeta = async (displayId: number) => {
       asked.push(displayId);
@@ -530,11 +538,11 @@ describe("deriveSheathValues", () => {
     expect(asked).toEqual([]);
   });
 
-  it("derives a held frill off-hand without a fetch", async () => {
-    const { fetchMeta, asked } = fetcherFrom({});
-    const r = await deriveSheathValues([[23, 600]], [{ slot: 16, entry: 13 }], fetchMeta);
+  it("derives a held frill off-hand (resolved slot 22) from its meta InventoryType", async () => {
+    const { fetchMeta, asked } = fetcherFrom({ 600: { itemClass: 4, inventoryType: 23 } });
+    const r = await deriveSheathValues([[22, 600]], [{ slot: 16, entry: 13 }], fetchMeta);
     expect(r).toEqual({ main: -1, off: 0 });
-    expect(asked).toEqual([]);
+    expect(asked).toEqual([600]);
   });
 
   it("is -1/-1 (nothing to sheathe) for an armor-only or empty doll", async () => {
