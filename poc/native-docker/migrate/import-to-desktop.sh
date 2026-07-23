@@ -18,7 +18,11 @@ done
 command -v docker >/dev/null || { echo "[import] docker.exe not found - is Docker Desktop installed?"; exit 1; }
 docker info >/dev/null 2>&1 || { echo "[import] Docker Desktop engine is not running - start it first"; exit 1; }
 
-DIR="${1:-$HOME/dml-native/wow-playerbots}"
+# NB: the folder name IS the title id the launcher/CLI look up — it must be
+# wow-server-playerbots (same as in the distro), and the compose must keep the
+# standard ac-* container_names, or `dml games list` / every `wow` feature
+# misses the server (found live, 2026-07-24).
+DIR="${1:-$HOME/dml-native/wow-server-playerbots}"
 cd "$DIR" || { echo "[import] export dir not found: $DIR"; exit 1; }
 mkdir -p logs
 P="dml-wow-native"

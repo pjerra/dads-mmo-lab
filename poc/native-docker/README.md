@@ -224,9 +224,17 @@ in the image — so a migration must carry `modules/` too and mount it
 exactly this until the mount was added; nothing else failed.
 
 The migrated runtime lives OUTSIDE the repo at
-`C:\Users\perzi\dml-native\wow-playerbots\` (it contains real server config +
-data). It is a snapshot copy — progress there does not sync back to the distro
-server, and only ONE of the two servers can run at a time (same ports).
+`C:\Users\perzi\dml-native\wow-server-playerbots\` (it contains real server
+config + data). It is a snapshot copy — progress there does not sync back to
+the distro server, and only ONE of the two servers can run at a time (same
+ports).
+
+**Two more migration lessons (found via the launcher's native mode):** the
+runtime folder name IS the title id — it must be `wow-server-playerbots`
+exactly, or `dml games list` (and therefore the whole launcher) misses it; and
+the compose must keep the standard `ac-*` `container_name`s — many `wow` CLI
+arms address containers by those names (`docker exec ac-database ...`), and on
+Docker Desktop's separate engine there is no collision with the distro's.
 
 ## Remaining for a real "native mode" release
 
