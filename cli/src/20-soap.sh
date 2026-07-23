@@ -74,11 +74,16 @@ soap_parse_result() {
 
 # soap_exec <command> -> prints result text; exit 0 ok / 2 fault / 3 auth / 4 unreachable
 soap_exec() {
-    local cmd="$1" body resp code lockdir="$HOME/.dml" lockfd
+    local cmd="$1" body resp code lockdir="$HOME/.dml" lockfd have_flock=0
     mkdir -p "$lockdir"
     body="$(soap_envelope "$cmd")"
     exec {lockfd}>>"$lockdir/soap.lock"
-    flock "$lockfd"
+    # Git Bash on Windows ships no flock(1); skip lock acquisition there
+    # instead of spraying "flock: command not found" on stderr. A no-op lock
+    # on a single-user Windows host is acceptable. When flock exists (the
+    # Linux distro), behavior is unchanged.
+    command -v flock >/dev/null 2>&1 && have_flock=1
+    [[ $have_flock -eq 1 ]] && flock "$lockfd"
     # Guarded assignment: under `set -e` (active in the built dml script) an
     # unguarded `resp="$(...)"` would abort the whole script the instant curl
     # exits non-zero (connection refused, timeout, etc.), before we ever get
@@ -93,7 +98,7 @@ soap_exec() {
     else
         code=$?
     fi
-    flock -u "$lockfd"
+    [[ $have_flock -eq 1 ]] && flock -u "$lockfd"
     exec {lockfd}>&-
     if [[ $code -ne 0 ]]; then
         return 4

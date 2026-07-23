@@ -295,6 +295,19 @@ _check_port_conflicts() {
     done
 }
 
+# True on a native Windows bash (Git Bash / MSYS2 / Cygwin against Docker
+# Desktop) where systemd can never exist, so doctor reports that as
+# informational instead of a failure. Requires BOTH signals -- no systemd
+# runtime dir AND a Windows bash flavor -- so a WSL distro with broken
+# systemd still WARNs exactly as before. DML_SYSTEMD_DIR is a test-only
+# override seam (mirrors DML_GAMES_DIR / DML_YQ_BIN).
+_host_is_native_windows() {
+    [[ -d "${DML_SYSTEMD_DIR:-/run/systemd/system}" ]] && return 1
+    [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && return 0
+    local os; os="$(uname -o 2>/dev/null || true)"
+    [[ "$os" == *Msys* || "$os" == *Cygwin* ]]
+}
+
 # --- machine-readable mode: strip --json from argv anywhere -----------------
 DML_JSON=0
 _args=()
@@ -313,7 +326,11 @@ case "$cmd" in
     echo "[dml] Checking DML environment..."
     errors=0
 
-    if systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; then
+    if _host_is_native_windows; then
+        # Git Bash/Docker Desktop host: systemd can never exist here, so its
+        # absence is informational, not a failure.
+        echo "[ok]  native Windows mode (no systemd needed)"
+    elif systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"; then
         echo "[ok]  systemd is running"
     else
         echo "[WARN] systemd is not running -- from Windows run: wsl --shutdown, then reopen"
@@ -327,7 +344,15 @@ case "$cmd" in
         errors=$((errors + 1))
     fi
 
-    free_kb=$(df /home --output=avail 2>/dev/null | tail -1 | tr -d ' ')
+    # /home is a Linux-ism: on a native Windows host measure the drive
+    # holding the games dir instead. Guarded assignment: under the global
+    # set -e + pipefail an unguarded failing df (e.g. no /home on Git Bash)
+    # would abort doctor mid-run with a bare exit 1.
+    disk_root="/home"
+    _host_is_native_windows && disk_root="${GAMES_DIR%/*}"
+    if ! free_kb=$(df "$disk_root" --output=avail 2>/dev/null | tail -1 | tr -d ' '); then
+        free_kb=""
+    fi
     if [[ "$free_kb" =~ ^[0-9]+$ ]]; then
         free_gb=$(( free_kb / 1024 / 1024 ))
         if (( free_gb >= 20 )); then
@@ -485,7 +510,7 @@ case "$cmd" in
 
   scan)
     _require_docker
-    echo "[dml] Scanning for all running containers in dml-arch..."
+    echo "[dml] Scanning for all running containers in Docker..."
     echo ""
 
     total=$(docker ps -q 2>/dev/null | wc -l | tr -d '[:space:]')
