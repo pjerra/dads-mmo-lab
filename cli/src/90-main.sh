@@ -4331,6 +4331,21 @@ case "$cmd" in
               if [[ -n "$u" ]]; then printf '"%s"' "$(json_escape "$u")"; else printf 'null'; fi
               return 0
             }
+            # head/head_date (additive, module-update round): the installed
+            # clone's last commit as `"head":...,"head_date":...` fields
+            # (short sha + %cs date), both null when the module is not
+            # installed / its dir has no .git. LOCAL git reads only -- list
+            # must stay fast and offline (`module update-check` owns fetching).
+            _mod_head_json() {
+              local mdir="$1" h="" hd=""
+              if [[ -d "$mdir/.git" ]]; then
+                h="$(git -C "$mdir" log -1 --format=%h 2>/dev/null || true)"
+                hd="$(git -C "$mdir" log -1 --format=%cs 2>/dev/null || true)"
+              fi
+              if [[ -n "$h" ]]; then printf '"head":"%s"' "$(json_escape "$h")"; else printf '"head":null'; fi
+              if [[ -n "$hd" ]]; then printf ',"head_date":"%s"' "$(json_escape "$hd")"; else printf ',"head_date":null'; fi
+              return 0
+            }
             cpp='['; first=1
             declare -A _mod_seen=()
             while IFS='|' read -r mk mname murl msql; do
@@ -4346,7 +4361,7 @@ case "$cmd" in
               cname="$(_module_conf_name "$mk")"
               [[ -n "$cname" ]] && cnamej="\"$(json_escape "$cname")\""
               [[ $first -eq 0 ]] && cpp+=','
-              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"conf_name\":$cnamej,\"custom\":false}"
+              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"conf_name\":$cnamej,\"custom\":false,$(_mod_head_json "$sdir/modules/$mk")}"
               first=0
             done < <(_module_registry_cpp)
             if [[ -d "$sdir/modules" ]]; then
@@ -4359,7 +4374,7 @@ case "$cmd" in
                 # Custom clones carry no registry row -- their origin remote
                 # is the best available "project page" link.
                 curl_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
-                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"conf_name\":null,\"custom\":true}"
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"conf_name\":null,\"custom\":true,$(_mod_head_json "${d%/}")}"
               done
             fi
             cpp+=']'
@@ -5235,6 +5250,117 @@ case "$cmd" in
             ndjson_line info "restart the server (Home) to load the new race/class combinations — no rebuild needed"
             ndjson_section_end client-patch ok
             ndjson_done "{\"key\":\"mod-arac\",\"dbc_files\":$dbc_n,\"client_patched\":$client_done,\"restart_required\":true}"
+            ;;
+          update-check)
+            # Per-module update probe (module-update round). Same contract as
+            # the server-level `wow update-check`: one _wow_repo_check_json
+            # object per repo (label = module key), answered as
+            # {"repos":[...]}. Fetches origin per installed cpp clone to
+            # compute behind-counts but never mutates a worktree (no pull, no
+            # stash). lua/sql families are deliberately absent -- they are not
+            # git checkouts under modules/ (lua deploys copies, sql applies
+            # statements), so there is nothing to probe. The custom-clone scan
+            # + dedup mirrors `module list`'s _mod_seen walk.
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."; exit 1
+            fi
+            repos='['; first=1
+            declare -A _upd_seen=()
+            while IFS='|' read -r mk mname murl msql; do
+              [[ -z "$mk" ]] && continue
+              _upd_seen["$mk"]=1
+              _cpp_installed "$sdir" "$mk" || continue
+              [[ $first -eq 0 ]] && repos+=','
+              repos+="$(_wow_repo_check_json "$sdir/modules/$mk" "$mk")"
+              first=0
+            done < <(_module_registry_cpp)
+            if [[ -d "$sdir/modules" ]]; then
+              for d in "$sdir/modules"/*/; do
+                [[ -d "$d/.git" ]] || continue
+                mk="$(basename "$d")"
+                [[ -n "${_upd_seen[$mk]:-}" ]] && continue
+                _valid_cpp_key "$mk" || continue
+                [[ $first -eq 0 ]] && repos+=','
+                repos+="$(_wow_repo_check_json "${d%/}" "$mk")"
+                first=0
+              done
+            fi
+            repos+=']'
+            json_ok "{\"repos\":$repos}"
+            ;;
+          update)
+            # Per-module source update (module-update round). Mirrors the
+            # server-level `wow update` idiom: every gate runs BEFORE any
+            # mutation, then _wow_pull_repo does the patch-backup + stash +
+            # ff-only pull + stash pop (and emits its own ndjson_error on
+            # failure). NO automatic rebuild afterwards -- rebuilds take
+            # 30-90 min, so the Modules page's rebuild banner / `module
+            # rebuild` flow owns compiling the update; the pending mark below
+            # is what lights that banner up.
+            [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-update
+            ukey=""
+            while [[ $# -gt 0 ]]; do
+              case "$1" in
+                --key) _need_flag_val "$1" $#; ukey="$2"; shift 2 ;;
+                *) ndjson_section_end module-update error; ndjson_error BAD_ARG "Unknown flag: $1" ""; exit 1 ;;
+              esac
+            done
+            sdir="$(_wow_server_dir)"
+            if [[ -z "$sdir" ]]; then
+              ndjson_section_end module-update error
+              ndjson_error NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
+            fi
+            # Key shape first -- $ukey lands in a path below, so a malformed
+            # key (../evil) must die before any filesystem look-up.
+            if ! _valid_cpp_key "$ukey"; then
+              ndjson_section_end module-update error
+              ndjson_error BAD_ARG "Invalid module key: $ukey" "Usage: dml wow module update --key mod-<name> --json"; exit 1
+            fi
+            umdir="$sdir/modules/$ukey"
+            if [[ ! -d "$umdir" ]]; then
+              ndjson_section_end module-update error
+              ndjson_error NOT_FOUND "$ukey is not installed" "Install it on the Modules page first."; exit 1
+            fi
+            if [[ ! -d "$umdir/.git" ]]; then
+              ndjson_section_end module-update error
+              ndjson_error GIT_MISSING "$umdir is not a git checkout" "Can't update this module from source."; exit 1
+            fi
+            # Core/module build compat: mod-playerbots tracks the custom
+            # AzerothCore fork -- pulling it alone would desync the pair, so
+            # this arm hard-refuses the key (`wow update` pulls both together).
+            if [[ "$ukey" == mod-playerbots ]]; then
+              ndjson_section_end module-update error
+              ndjson_error BAD_ARG "mod-playerbots cannot be updated on its own" "mod-playerbots updates together with the server core - use Server update (Tools)"; exit 1
+            fi
+            uurl="$(_wow_git_url "$umdir")"
+            if [[ -z "$uurl" ]]; then
+              ndjson_section_end module-update error
+              ndjson_error REMOTE_MISSING "$ukey has no origin remote -- nothing to pull from" "Fix it manually: cd $umdir && git remote add origin <url>"; exit 1
+            fi
+            ubefore="$(_wow_git_head "$umdir")"
+            if ! _wow_pull_repo "$umdir" "$ukey"; then
+              ndjson_section_end module-update error
+              exit 1
+            fi
+            uafter="$(_wow_git_head "$umdir")"
+            uchanged=false; upend=false
+            if [[ "$_WOW_PULL_CHANGED" == true ]]; then
+              uchanged=true
+              # mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- same
+              # sanctioned skip as the install path above: never mark it
+              # rebuild-pending, point at client-patch + restart instead.
+              if [[ "$ukey" == mod-arac ]]; then
+                ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
+              else
+                _rebuild_pending_add "$sdir" "$ukey"
+                upend=true
+                ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on the Modules page."
+              fi
+              ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+            fi
+            ndjson_section_end module-update ok
+            ndjson_done "{\"key\":\"$(json_escape "$ukey")\",\"changed\":$uchanged,\"before\":\"$(json_escape "$ubefore")\",\"after\":\"$(json_escape "$uafter")\",\"pending_rebuild\":$upend}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"
