@@ -45,7 +45,8 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
-  import { moduleUpdates, updateChip, versionLabel } from "$lib/module-updates.svelte";
+  import { moduleBusy } from "$lib/module-busy.svelte";
+  import { moduleUpdates, checkBadge, versionLabel } from "$lib/module-updates.svelte";
   import { canOfferUpdate, repoAfterUpdate, updateDoneNote, updatesWithServer } from "$lib/module-tabs";
   import { openUrl } from "@tauri-apps/plugin-opener";
 
@@ -288,10 +289,12 @@
   // never rebuilds -- on a changed compiled module the CLI marks it
   // rebuild-pending, so the trailing refresh + `onupdated` light the existing
   // rebuild banner up.
-  let updating = $state<string | null>(null);
-
+  // Gated on the SHARED moduleBusy flag (not component state): the Modules
+  // tab stays mounted next to this one, so this pull must also disable its
+  // Install/Remove/Rebuild/Update buttons -- and their streams must disable
+  // this Update -- or two CLI mutations race on the same checkout.
   async function updateModule(key: string) {
-    updating = key;
+    moduleBusy.busy = true;
     error = null;
     note = null;
     beginRun("config");
@@ -314,7 +317,7 @@
       outcomeErr = e;
     } finally {
       taskbarIdle();
-      updating = null;
+      moduleBusy.busy = false;
       await loadServerModules();
       if (outcomeErr || streamErr) {
         const err = (outcomeErr ?? streamErr) as { message?: string; hint?: string };
@@ -384,7 +387,7 @@
         {@const nDirty = cardDirtyCount(m.conf)}
         {@const cpp = cppByKey.get(m.key)}
         {@const ver = versionLabel(cpp?.head, cpp?.head_date)}
-        {@const chip = updateChip(moduleUpdates.repos[m.key]?.behind)}
+        {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
         <div class="card mod-card">
           <button
             class="mod-head"
@@ -397,14 +400,14 @@
             {#if ver}<span class="muted mod-ver">{ver}</span>{/if}
             {#if nDirty > 0}<span class="mod-dirty">{nDirty} unsaved</span>{/if}
           </button>
-          {#if chip}
+          {#if badge}
             <div class="row upd-row">
-              <span class="upd-chip">{chip}</span>
+              <span class="upd-chip {badge.cls}">{badge.text}</span>
               {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
                 <button
                   class="primary"
                   onclick={() => updateModule(m.key)}
-                  disabled={updating !== null || restartState.restarting || featureLocked("module-update")}
+                  disabled={moduleBusy.busy || restartState.restarting || featureLocked("module-update")}
                   title={featureLocked("module-update")
                     ? LOCKED_HINT
                     : "Pull the module's latest source — a rebuild compiles it afterwards"}
@@ -412,7 +415,7 @@
                   Update
                 </button>
               {:else if updatesWithServer(m.key)}
-                <span class="muted">updates with the server (Tools)</span>
+                <span class="muted">updates with the server — use Server update on the Modules tab</span>
               {/if}
             </div>
           {/if}
@@ -640,10 +643,14 @@
   .mod-card .setting, .mod-card .row, .mod-card > input, .mod-card .pb-list { margin-left: 14px; margin-right: 14px; }
   .mod-card .row:last-child { margin-bottom: 12px; }
   .mod-card > p.muted { margin: 4px 14px 0; }
-  /* Update-check chip row (module-update round): amber "Update available"
-     chip in the Modules tab's badge language + the gated Update button. */
+  /* Update-check badge row (module-update round): the Modules tab's badge
+     language ("up to date" / "? behind" / amber "Update available") + the
+     gated Update button. */
   .upd-row { margin-top: 2px; margin-bottom: 8px; }
-  .upd-chip { font-size: 12px; padding: 2px 10px; border-radius: 10px; border: 1px solid #d29922; color: #d29922; }
+  .upd-chip { font-size: 12px; padding: 2px 10px; border-radius: 10px; border: 1px solid #30363d; }
+  .upd-chip.on { color: #3fb950; border-color: #3fb950; }
+  .upd-chip.warn { color: #d29922; border-color: #d29922; }
+  .upd-chip.off { color: #8b949e; }
   .ghlink { background: none; border: none; color: #58a6ff; font-size: 12px; padding: 0; cursor: pointer; }
   .ghlink:hover { text-decoration: underline; }
   .help-toggle { background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 50%; width: 16px; height: 16px; line-height: 1; padding: 0; font-size: 10.5px; margin-left: 6px; cursor: pointer; }

@@ -18,7 +18,7 @@ export const MODULE_TAB_LABELS: Record<ModuleTab, string> = {
 // mod-playerbots tracks the custom AzerothCore fork -- pulling it alone would
 // desync the core/module pair, so the CLI hard-refuses the key and the GUI
 // never offers an Update button for it (a muted "updates with the server"
-// note renders instead, pointing at Server update on the Tools page).
+// note renders instead, pointing at the Modules tab's Server update card).
 export function updatesWithServer(key: string): boolean {
   return key === "mod-playerbots";
 }

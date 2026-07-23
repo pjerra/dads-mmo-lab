@@ -65,3 +65,19 @@ export function updateChip(behind: number | null | undefined): string | null {
   if (behind === null || behind === undefined || behind === 0) return null;
   return `Update available — ${behind} ${behind === 1 ? "commit" : "commits"} behind`;
 }
+
+// Pure: the per-module badge once a check has run -- the Server update
+// card's per-repo language ("up to date" / "? behind" / N behind) so an
+// all-up-to-date check is visibly different from "never checked", and a
+// module whose origin fetch failed (behind null) from an up-to-date one.
+// Null (no badge) before the first check, or for a module the check didn't
+// cover (not installed / no .git).
+export function checkBadge(
+  checked: boolean,
+  repo: ModuleCheckRepo | undefined,
+): { text: string; cls: "on" | "warn" | "off" } | null {
+  if (!checked || !repo) return null;
+  if (repo.behind === null) return { text: "? behind", cls: "off" };
+  if (repo.behind === 0) return { text: "up to date", cls: "on" };
+  return { text: updateChip(repo.behind)!, cls: "warn" };
+}

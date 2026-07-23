@@ -48,7 +48,8 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
-  import { moduleUpdates, runUpdateCheck, updateChip, versionLabel } from "$lib/module-updates.svelte";
+  import { moduleBusy } from "$lib/module-busy.svelte";
+  import { moduleUpdates, runUpdateCheck, checkBadge, versionLabel } from "$lib/module-updates.svelte";
   import {
     MODULE_TABS,
     MODULE_TAB_LABELS,
@@ -71,7 +72,12 @@
   let list: ModuleList | null = $state(null);
   let error: string | null = $state(null);
   let note: string | null = $state(null);
-  let busy = $state(false); // single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/Detect button
+  // Single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/
+  // Detect button. Backed by the SHARED moduleBusy store (not component
+  // state) so a mutation started on the co-mounted Tuning tab also disables
+  // this tab's buttons, and vice versa -- the tabs would otherwise race two
+  // CLI mutations on the same server checkout.
+  const busy = $derived(moduleBusy.busy);
 
   let confirmingRebuild = $state(false);
   let backupChecked = $state(true); // "Back up the server first" defaults ON
@@ -154,7 +160,7 @@
   // Idempotent CLI-side; the NPC only appears after a world restart, which
   // the note passes on.
   async function fixitBattlepassNpc() {
-    busy = true; error = null; note = null;
+    moduleBusy.busy = true; error = null; note = null;
     try {
       const r = await wowModuleFixit("battlepass-npc");
       note = r.already_placed
@@ -163,7 +169,7 @@
     } catch (e) {
       showErr(e);
     } finally {
-      busy = false;
+      moduleBusy.busy = false;
     }
   }
 
@@ -182,7 +188,7 @@
   // per map CLI-side; the NPC only appears after a world restart (the note
   // passes that on). Non-streamed, same shape as fixitBattlepassNpc above.
   async function placeNpc(key: string, label: string) {
-    busy = true; error = null; note = null;
+    moduleBusy.busy = true; error = null; note = null;
     try {
       const r = await wowModulePlaceNpc(key as PlaceNpcKey);
       note = r.already_placed
@@ -191,7 +197,7 @@
     } catch (e) {
       showErr(e);
     } finally {
-      busy = false;
+      moduleBusy.busy = false;
     }
   }
 
@@ -215,7 +221,7 @@
     run: (onEvent: (e: TermEvent) => void) => Promise<void>,
     onDone: (doneData: unknown) => void,
   ) {
-    busy = true; error = null; note = null; beginRun("modules");
+    moduleBusy.busy = true; error = null; note = null; beginRun("modules");
     taskbarBusy();
     let sawDone = false;
     let doneData: unknown;
@@ -235,7 +241,7 @@
       outcomeErr = e;
     } finally {
       taskbarIdle();
-      busy = false;
+      moduleBusy.busy = false;
       await refresh();
       if (outcomeErr) showErr(outcomeErr);
       else if (streamErr) showErr(streamErr);
@@ -298,13 +304,13 @@
   }
 
   async function checkUpdates() {
-    busy = true; updateCheckError = null;
+    moduleBusy.busy = true; updateCheckError = null;
     try {
       updateCheck = await wowUpdateCheck();
     } catch (e) {
       showUpdateCheckErr(e);
     } finally {
-      busy = false;
+      moduleBusy.busy = false;
     }
   }
 
@@ -368,12 +374,12 @@
   }
 
   async function activateConf(key: string) {
-    busy = true; error = null; note = null;
+    moduleBusy.busy = true; error = null; note = null;
     try {
       const r = await wowModuleConfActivate(key);
       note = `Activated ${r.conf_name}.`;
       await refresh();
-    } catch (e) { showErr(e); } finally { busy = false; }
+    } catch (e) { showErr(e); } finally { moduleBusy.busy = false; }
   }
 
   function installLua(m: LuaModule) {
@@ -427,30 +433,30 @@
   }
 
   async function saveClientPath() {
-    busy = true; clientError = null; note = null;
+    moduleBusy.busy = true; clientError = null; note = null;
     try {
       clientPath = await wowClientPathSet(clientPathInput);
       note = `Client folder set — ${clientPath.path}.`;
       clientPathInput = "";
       clientCandidates = null;
-    } catch (e) { clientErr(e); } finally { busy = false; }
+    } catch (e) { clientErr(e); } finally { moduleBusy.busy = false; }
   }
 
   async function detectClientPath() {
-    busy = true; clientError = null;
+    moduleBusy.busy = true; clientError = null;
     try {
       const r = await wowClientPathDetect();
       clientCandidates = r.candidates;
-    } catch (e) { clientErr(e); } finally { busy = false; }
+    } catch (e) { clientErr(e); } finally { moduleBusy.busy = false; }
   }
 
   async function pickClientCandidate(path: string) {
-    busy = true; clientError = null; note = null;
+    moduleBusy.busy = true; clientError = null; note = null;
     try {
       clientPath = await wowClientPathSet(path);
       note = `Client folder set — ${clientPath.path}.`;
       clientCandidates = null;
-    } catch (e) { clientErr(e); } finally { busy = false; }
+    } catch (e) { clientErr(e); } finally { moduleBusy.busy = false; }
   }
 
   // Copy pinned by the brief verbatim -- mod-arac's data is not reverted by
@@ -479,13 +485,13 @@
   }
 
   async function fetchTracking(key: string) {
-    busy = true; repairError = null;
+    moduleBusy.busy = true; repairError = null;
     try {
       tracking = await wowModuleTracking(key);
     } catch (e) {
       showRepairErr(e);
     } finally {
-      busy = false;
+      moduleBusy.busy = false;
     }
   }
 
@@ -514,14 +520,14 @@
       return;
     }
     confirmingRepair = false;
-    busy = true; repairError = null; repairResult = null;
+    moduleBusy.busy = true; repairError = null; repairResult = null;
     try {
       repairResult = await wowModuleRepair(m.key, repairDb, repairMode);
       tracking = await wowModuleTracking(m.key);
     } catch (e) {
       showRepairErr(e);
     } finally {
-      busy = false;
+      moduleBusy.busy = false;
     }
   }
 
@@ -555,8 +561,9 @@
     <h2>Modules</h2>
     <div class="row">
       <!-- Read-only check (git fetch per installed clone, no mutation) --
-           deliberately never feature-locked. Results feed the amber chips
-           here AND on the Tuning tab via the shared module-updates store. -->
+           deliberately never feature-locked. Results feed the per-module
+           badges here AND on the Tuning tab via the shared module-updates
+           store. -->
       <button onclick={() => void runUpdateCheck()} disabled={moduleUpdates.checking}>
         {#if moduleUpdates.checking}<span class="spinner"></span>Checking…{:else}Check for updates{/if}
       </button>
@@ -566,6 +573,11 @@
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if moduleUpdates.lastError}<p class="inline-error">Update check failed: {moduleUpdates.lastError}</p>{/if}
+  {#if moduleUpdates.checked && !moduleUpdates.lastError && Object.keys(moduleUpdates.repos).length === 0}
+    <!-- A check that found zero git module clones is a valid answer -- say
+         so instead of returning the page to its prior state unchanged. -->
+    <p class="muted">Checked — no module source checkouts to compare.</p>
+  {/if}
   {#if note}<p class="muted">{note}</p>{/if}
 
   {#if list && list.rebuild_pending.length > 0}
@@ -599,7 +611,7 @@
     {#if list}
       {#each list.families.cpp as m (m.key)}
         {@const ver = versionLabel(m.head, m.head_date)}
-        {@const chip = updateChip(moduleUpdates.repos[m.key]?.behind)}
+        {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
         <div class="row mrow">
           <div class="mhead">
             <span class="mtitle">
@@ -610,7 +622,7 @@
             {#if ver}<span class="mver">{ver}</span>{/if}
           </div>
           <span class="badge {statusClass(m)}">{statusText(m)}</span>
-          {#if chip}<span class="badge warn">{chip}</span>{/if}
+          {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
           {#if m.conf === "ready"}
             <button
               onclick={() => activateConf(m.key)}
@@ -649,7 +661,7 @@
                 Update
               </button>
             {:else if updatesWithServer(m.key)}
-              <span class="muted">updates with the server (Tools)</span>
+              <span class="muted">updates with the server — use the Server update card below</span>
             {/if}
             {#if m.key === "mod-arac"}
               <button

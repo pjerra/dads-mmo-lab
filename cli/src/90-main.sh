@@ -5331,7 +5331,7 @@ case "$cmd" in
             # this arm hard-refuses the key (`wow update` pulls both together).
             if [[ "$ukey" == mod-playerbots ]]; then
               ndjson_section_end module-update error
-              ndjson_error BAD_ARG "mod-playerbots cannot be updated on its own" "mod-playerbots updates together with the server core - use Server update (Tools)"; exit 1
+              ndjson_error BAD_ARG "mod-playerbots cannot be updated on its own" "mod-playerbots updates together with the server core - use Server update on the Modules page"; exit 1
             fi
             uurl="$(_wow_git_url "$umdir")"
             if [[ -z "$uurl" ]]; then

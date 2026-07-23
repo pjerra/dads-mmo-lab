@@ -175,7 +175,7 @@ origin_gains_commit() {
   run bash "$DML" wow module update --key mod-playerbots --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'BAD_ARG'
-  echo "$output" | grep -q 'use Server update (Tools)'
+  echo "$output" | grep -q 'use Server update on the Modules page'
   [ "$(git -C "$SDIR/modules/mod-playerbots" log -1 --format=%h)" = "$before" ]
   [ ! -f "$SDIR/.dml-rebuild-pending" ]
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { updateChip, versionLabel } from "./module-updates.svelte";
+import { checkBadge, updateChip, versionLabel } from "./module-updates.svelte";
+import type { ModuleCheckRepo } from "./api";
 
 // Version line from the list arm's additive head/head_date fields: absent
 // (older CLI) and null (not installed / no .git) must both degrade quietly.
@@ -40,5 +41,48 @@ describe("updateChip", () => {
   it("uses the plural for several commits behind", () => {
     expect(updateChip(2)).toBe("Update available — 2 commits behind");
     expect(updateChip(374)).toBe("Update available — 374 commits behind");
+  });
+});
+
+// Check badge: null until a check has run (or for a module the check didn't
+// cover), then the Server update card's per-repo language -- so an
+// all-up-to-date check is visibly different from "never checked", and a
+// failed per-repo fetch (behind null) from an up-to-date module.
+describe("checkBadge", () => {
+  const repo = (behind: number | null): ModuleCheckRepo => ({
+    label: "mod-aoe-loot",
+    url: "https://github.com/azerothcore/mod-aoe-loot",
+    branch: "master",
+    head: "abc1234",
+    dirty: 0,
+    behind,
+  });
+
+  it("is null before any check has run, whatever the cached repo says", () => {
+    expect(checkBadge(false, undefined)).toBe(null);
+    expect(checkBadge(false, repo(3))).toBe(null);
+  });
+
+  it("is null for a module the check did not cover (not installed / no .git)", () => {
+    expect(checkBadge(true, undefined)).toBe(null);
+  });
+
+  it("shows a green 'up to date' at behind 0 -- checked is no longer silent", () => {
+    expect(checkBadge(true, repo(0))).toEqual({ text: "up to date", cls: "on" });
+  });
+
+  it("shows a muted '? behind' when the per-repo fetch failed (behind null)", () => {
+    expect(checkBadge(true, repo(null))).toEqual({ text: "? behind", cls: "off" });
+  });
+
+  it("carries the amber update chip text when behind > 0", () => {
+    expect(checkBadge(true, repo(1))).toEqual({
+      text: "Update available — 1 commit behind",
+      cls: "warn",
+    });
+    expect(checkBadge(true, repo(2))).toEqual({
+      text: "Update available — 2 commits behind",
+      cls: "warn",
+    });
   });
 });
