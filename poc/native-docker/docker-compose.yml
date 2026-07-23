@@ -1,0 +1,17 @@
+# Native-Docker PoC stack (spike/docker-desktop-native).
+#
+# A deliberately tiny stand-in "game server": one small long-running container
+# on a non-colliding port. Its only job is to prove the launcher can own a
+# Compose lifecycle (up / ps / down) directly against Docker Desktop on Windows
+# — no dml-arch distro, no bash `dml` middleman. Swap this image for the real
+# AzerothCore services once the orchestration port is underway.
+name: dml-poc
+
+services:
+  game:
+    image: nginx:alpine
+    # No container_name: let Compose name it "dml-poc-game-1" so `ps` shows the
+    # project-scoped naming the launcher keys off.
+    ports:
+      - "8899:80" # avoids the real realm ports (3724 auth / 8085 world)
+    restart: unless-stopped
