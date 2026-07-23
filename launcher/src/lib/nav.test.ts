@@ -24,8 +24,6 @@ describe("NAV", () => {
       "botworld",
       "ahbot",
       "accountwide",
-      "moduletuning",
-      "files",
       "backups",
       "help",
     ]);
@@ -59,14 +57,14 @@ describe("NAV", () => {
   });
 
   it("config section promotes the config views + Backups to sidebar children", () => {
+    // moduletuning/files are gone on purpose -- they live inside the tabbed
+    // Modules page now (module-update round), not the sidebar.
     const cfg = NAV.find((s) => s.section === "Config")!;
     expect(cfg.pages.map((p) => p.id)).toEqual([
       "settings",
       "botworld",
       "ahbot",
       "accountwide",
-      "moduletuning",
-      "files",
       "backups",
     ]);
   });

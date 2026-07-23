@@ -19,6 +19,7 @@
     wowDockerClean,
     wowUpdateCheck,
     wowServerUpdate,
+    wowModuleUpdate,
     type ModuleList,
     type CppModule,
     type LuaModule,
@@ -47,6 +48,25 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
+  import { moduleUpdates, runUpdateCheck, updateChip, versionLabel } from "$lib/module-updates.svelte";
+  import {
+    MODULE_TABS,
+    MODULE_TAB_LABELS,
+    type ModuleTab,
+    canOfferUpdate,
+    repoAfterUpdate,
+    updateDoneNote,
+    updatesWithServer,
+  } from "$lib/module-tabs";
+  import ModuleTuning from "$lib/ModuleTuning.svelte";
+  import ModuleFiles from "$lib/ModuleFiles.svelte";
+
+  // In-page tab strip (module-update round): the old ModuleManager content is
+  // the Modules tab; the Tuning/Config files tabs host the views extracted
+  // from the Config page. All three stay MOUNTED and switch with display:none
+  // so staged edits survive tab switches -- the same state-survival behavior
+  // the Config accordion gave those views.
+  let tab: ModuleTab = $state("modules");
 
   let list: ModuleList | null = $state(null);
   let error: string | null = $state(null);
@@ -305,6 +325,28 @@
     );
   }
 
+  // Per-module source update (module-update round): streams the CLI's
+  // stash-safe pull through the same runStream contract as install/rebuild.
+  // Offered only when the header's Check for updates reported the module a
+  // known number of commits behind; mod-playerbots never gets the button
+  // (it updates with the server core -- see module-tabs.ts).
+  function updateModule(m: CppModule) {
+    return runStream(
+      (onEvent) => wowModuleUpdate(m.key, onEvent),
+      (doneData) => {
+        const d = doneData as
+          | { key?: string; changed?: boolean; after?: string; pending_rebuild?: boolean }
+          | undefined;
+        note = updateDoneNote(d);
+        // The clone now sits at origin's head -- turn the cached amber chip
+        // off (both tabs) without re-running the fetch-everything check.
+        if (d?.after && moduleUpdates.repos[m.key]) {
+          moduleUpdates.repos[m.key] = repoAfterUpdate(moduleUpdates.repos[m.key], d.after);
+        }
+      },
+    );
+  }
+
   function dockerUsageErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
     dockerUsageError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -499,13 +541,31 @@
   }
 </script>
 
-<section class="content">
+<div class="page">
+  <!-- In-page tab strip -- the Dashboard character tabs' visual language
+       (horizontal strip, active = bright text + accent underline). -->
+  <div class="tabstrip">
+    {#each MODULE_TABS as t (t)}
+      <button class:active={tab === t} onclick={() => (tab = t)}>{MODULE_TAB_LABELS[t]}</button>
+    {/each}
+  </div>
+
+<section class="content" style:display={tab === "modules" ? null : "none"}>
   <header class="bar">
     <h2>Modules</h2>
-    <button onclick={refresh} disabled={busy}>Refresh</button>
+    <div class="row">
+      <!-- Read-only check (git fetch per installed clone, no mutation) --
+           deliberately never feature-locked. Results feed the amber chips
+           here AND on the Tuning tab via the shared module-updates store. -->
+      <button onclick={() => void runUpdateCheck()} disabled={moduleUpdates.checking}>
+        {#if moduleUpdates.checking}<span class="spinner"></span>Checking…{:else}Check for updates{/if}
+      </button>
+      <button onclick={refresh} disabled={busy}>Refresh</button>
+    </div>
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
+  {#if moduleUpdates.lastError}<p class="inline-error">Update check failed: {moduleUpdates.lastError}</p>{/if}
   {#if note}<p class="muted">{note}</p>{/if}
 
   {#if list && list.rebuild_pending.length > 0}
@@ -538,6 +598,8 @@
     <h3>C++ modules</h3>
     {#if list}
       {#each list.families.cpp as m (m.key)}
+        {@const ver = versionLabel(m.head, m.head_date)}
+        {@const chip = updateChip(moduleUpdates.repos[m.key]?.behind)}
         <div class="row mrow">
           <div class="mhead">
             <span class="mtitle">
@@ -545,8 +607,10 @@
               {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
             </span>
             {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+            {#if ver}<span class="mver">{ver}</span>{/if}
           </div>
           <span class="badge {statusClass(m)}">{statusText(m)}</span>
+          {#if chip}<span class="badge warn">{chip}</span>{/if}
           {#if m.conf === "ready"}
             <button
               onclick={() => activateConf(m.key)}
@@ -569,13 +633,24 @@
               Install
             </button>
           {:else}
-            <button
-              onclick={() => install(m.key, null, m.name)}
-              disabled={busy || featureLocked("modules-cpp")}
-              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-            >
-              Update
-            </button>
+            <!-- The per-module Update replaces the old always-there reinstall
+                 button (module-update round): it appears only when the check
+                 above reported the module behind, and streams the stash-safe
+                 `module update` instead of install's plain pull. -->
+            {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
+              <button
+                class="primary"
+                onclick={() => updateModule(m)}
+                disabled={busy || featureLocked("module-update")}
+                title={featureLocked("module-update")
+                  ? LOCKED_HINT
+                  : "Pull the module's latest source — a rebuild compiles it afterwards"}
+              >
+                Update
+              </button>
+            {:else if updatesWithServer(m.key)}
+              <span class="muted">updates with the server (Tools)</span>
+            {/if}
             {#if m.key === "mod-arac"}
               <button
                 onclick={() => applyClientPatch(m)}
@@ -994,8 +1069,30 @@
   {/if}
 </section>
 
+  <!-- Both stay MOUNTED while hidden (display:none, not {#if}) so staged
+       edits survive tab switches; `active` gates their lazy loads. -->
+  <div class="panel" style:display={tab === "tuning" ? null : "none"}>
+    <ModuleTuning active={tab === "tuning"} onupdated={refresh} />
+  </div>
+  <div class="panel" style:display={tab === "files" ? null : "none"}>
+    <ModuleFiles active={tab === "files"} />
+  </div>
+</div>
+
 <style>
-  .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  /* The page is a fixed-height column (tab strip + one visible panel) so
+     each panel keeps its own scroll -- .content scrolls exactly as it did
+     before the strip existed. */
+  .page { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+  .tabstrip { display: flex; gap: 4px; border-bottom: 1px solid #30363d; padding: 12px 24px 0; flex-shrink: 0; }
+  .tabstrip button { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 16px; color: #8b949e; font-size: 14px; cursor: pointer; }
+  .tabstrip button.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
+  .tabstrip button:hover:not(.active) { color: #c9d1d9; }
+  .panel { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+  /* The extracted components' own <section class="content"> must fill the
+     panel so their overflow/fill behavior keeps working. */
+  .panel > :global(section) { flex: 1; min-height: 0; }
+  .content { flex: 1; min-height: 0; padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -1009,6 +1106,9 @@
   .mtitle { display: flex; gap: 8px; align-items: baseline; }
   .mname { min-width: 0; }
   .mdesc { color: #8b949e; font-size: 12px; line-height: 1.35; }
+  /* Installed clone's last commit (sha · date), from the list arm's additive
+     head/head_date fields -- muted version line under the description. */
+  .mver { color: #8b949e; font-size: 12px; font-family: Consolas, monospace; }
   .ghlink {
     background: none;
     border: none;
@@ -1042,4 +1142,17 @@
   .chip.untracked { color: #8b949e; }
   .repair-results { display: flex; flex-direction: column; gap: 6px; }
   .usage { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; margin: 0; font-size: 12px; color: #8b949e; overflow-x: auto; white-space: pre; }
+  /* Check-for-updates busy spinner (Tools page's doctor-button pattern). */
+  .spinner {
+    width: 12px;
+    height: 12px;
+    border: 2px solid #30363d;
+    border-top-color: #58a6ff;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+    display: inline-block;
+    vertical-align: -2px;
+    margin-right: 6px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>

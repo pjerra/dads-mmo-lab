@@ -4,10 +4,6 @@
     wowConfigList,
     wowConfigSet,
     wowConfigPbKeys,
-    wowConfigFiles,
-    wowConfigRawRead,
-    wowConfigRawWrite,
-    wowConfigRawReset,
     wowConsoleSend,
     gamesRestart,
     wowBotsFlush,
@@ -15,28 +11,13 @@
     wowModuleList,
     wowAccountwideGet,
     wowAccountwideSet,
-    wowConfigTuningList,
-    wowConfigTuningSet,
-    wowConfigConfKeys,
-    type ConfFile,
     type ConfigSetting,
-    type ConfKey,
-    type CppModule,
     type PbKey,
-    type RawFileName,
     type AccountwideState,
     type AwSubsystem,
-    type ModuleTuning,
   } from "$lib/api";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
-  import {
-    confKeyHint,
-    filterConfKeys,
-    installedConfModules,
-    stagedConfChanges,
-  } from "$lib/conf-keys";
   import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "$lib/config-diff";
-  import { lintConfContent } from "$lib/conf-lint";
   import { applyEvent } from "$lib/terminal-state";
   import { restartState } from "$lib/restart-state.svelte";
   import Terminal from "$lib/Terminal.svelte";
@@ -46,37 +27,21 @@
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   const WOW_ID = "wow-server-playerbots";
-  // Static fallback shown until (or if) `wow config files` answers -- the
-  // real list is dynamic since Batch 1 F3 (every installed module conf).
-  const FALLBACK_FILES: ConfFile[] = [
-    { name: ".env", exists: true, dist: false, readonly: true },
-    { name: "docker-compose.override.yml", exists: true, dist: false, readonly: true },
-    { name: "playerbots.conf", exists: true, dist: true, readonly: false },
-  ];
-  // UI mirror of the CLI's raw-write lock (cli rejects these two names).
-  const READONLY_FILES: RawFileName[] = [".env", "docker-compose.override.yml"];
 
   // The view is now driven by the sidebar (this page has no in-page tab bar).
   // `view` comes from the router as a plain string (the nav page id); `tab`
   // narrows it to a known ConfigTab so all the existing tab logic + lazy-load
   // $effects are unchanged. Switching sidebar items keeps this component
   // mounted (one router {#if}), so edits/lazy-loads persist across views.
-  type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide" | "moduletuning" | "files";
-  const CONFIG_TABS: ConfigTab[] = [
-    "settings",
-    "botworld",
-    "ahbot",
-    "accountwide",
-    "moduletuning",
-    "files",
-  ];
+  // (The old moduletuning/files views moved to the tabbed Modules page --
+  // see ModuleTuning.svelte / ModuleFiles.svelte.)
+  type ConfigTab = "settings" | "botworld" | "ahbot" | "accountwide";
+  const CONFIG_TABS: ConfigTab[] = ["settings", "botworld", "ahbot", "accountwide"];
   const TAB_LABELS: Record<ConfigTab, string> = {
     settings: "Settings",
     botworld: "Bot World",
     ahbot: "Auction House",
     accountwide: "Account-wide",
-    moduletuning: "Module tuning",
-    files: "Module files",
   };
   let { view = "settings" }: { view?: string } = $props();
   let tab = $derived<ConfigTab>(
@@ -87,55 +52,6 @@
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
   let saving = $state(false);
-
-  let file: RawFileName = $state(".env");
-  let fileContent = $state("");
-  let fileLoaded = $state(false);
-  let loadingFile = $state(false);
-  let lastBackup: string | null = $state(null);
-  let confFiles: ConfFile[] = $state(FALLBACK_FILES);
-  let confFilesLoaded = $state(false);
-  let confirmingReset = $state(false);
-  let resetting = $state(false);
-
-  async function loadConfFiles() {
-    try {
-      confFiles = await wowConfigFiles();
-      confFilesLoaded = true;
-      if (!confFiles.some((f) => f.name === file) && confFiles.length > 0) {
-        file = confFiles[0].name;
-      }
-    } catch {
-      // Keep the static fallback -- the picker still works for the basics.
-    }
-  }
-  $effect(() => {
-    if (tab === "files" && !confFilesLoaded) void loadConfFiles();
-  });
-
-  const currentFileMeta = $derived(confFiles.find((f) => f.name === file));
-
-  async function resetFile() {
-    if (!confirmingReset) {
-      confirmingReset = true;
-      return;
-    }
-    confirmingReset = false;
-    resetting = true;
-    error = null;
-    try {
-      const target = file;
-      const r = await wowConfigRawReset(target);
-      restartState.needed = true;
-      if (file === target) await loadFile();
-      lastBackup = r.backup;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    } finally {
-      resetting = false;
-    }
-  }
 
   const buf = termBuf("config");
 
@@ -357,207 +273,6 @@
     if (await reloadAle()) awReloadPending = false;
   }
 
-  // --- Module tuning (rework) -----------------------------------------------
-  // Two sections of collapsible per-module cards (collapsed by default, the
-  // sidebar-accordion caret style):
-  //   Server modules: every INSTALLED C++ module whose conf passes the CLI's
-  //     editable-conf allowlist. Curated rows (the old guided knobs) render
-  //     first inside the owning module's card, then an "All settings" browser
-  //     (the Bot World pb-keys pattern generalized via `config conf-keys`).
-  //   Lua scripts: ONLY the curated lua knobs (Unlimited Ammo, Sit Means
-  //     Rest) -- deliberately NO generic browser for lua (editing arbitrary
-  //     script lines is a footgun), and the section hides entirely when no
-  //     curated-lua module is deployed.
-  // All writes stay locked behind the single [guided-config] flag; browsing
-  // and searching are never locked. Conf changes need a restart unless the
-  // CLI knows the module's live-reload console command (mod-transmog); lua
-  // changes apply with `.reload ale`.
-  let mtSettings = $state<ModuleTuning[]>([]);
-  let mtLoaded = $state(false);
-  let mtEdits: Record<string, string> = $state({});
-  let mtReloadPending = $state(false); // a lua knob changed -> reload ALE to apply
-
-  // Server-modules inputs: module list (installed + conf_name) x config files
-  // (which confs actually exist under env/dist/etc/modules).
-  let smLoaded = $state(false);
-  let smCpp = $state<CppModule[]>([]);
-  let smFiles = $state<ConfFile[]>([]);
-  const smModules = $derived(installedConfModules(smCpp, smFiles));
-
-  // Per-card state, keyed by conf basename (server modules) or by the lua
-  // module name prefixed "lua:" (expand map only).
-  let mtExpand: Record<string, boolean> = $state({}); // collapsed by default
-  let ckKeys: Record<string, ConfKey[]> = $state({});
-  let ckSource: Record<string, string> = $state({});
-  let ckLoaded: Record<string, boolean> = $state({});
-  let ckErr: Record<string, string> = $state({});
-  let ckQuery: Record<string, string> = $state({});
-  let ckEdits: Record<string, Record<string, string>> = $state({});
-  let ckHelpOpen: Record<string, boolean> = $state({}); // "<conf>:<key>" -> inline help shown
-  let mtSavingCard = $state<string | null>(null);
-  const mtSaving = $derived(mtSavingCard !== null);
-
-  async function loadModuleTuning(saved?: string[]) {
-    error = null;
-    try {
-      mtSettings = await wowConfigTuningList();
-      // A per-card save must not wipe the OTHER cards' pending curated edits
-      // -- drop only the just-saved keys (same pattern as the settings tabs).
-      mtEdits = saved ? clearSavedEdits(mtEdits, saved) : {};
-      mtLoaded = true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    }
-  }
-  async function loadServerModules() {
-    try {
-      const [ml, files] = await Promise.all([wowModuleList(), wowConfigFiles()]);
-      smCpp = ml.families.cpp;
-      smFiles = files;
-      smLoaded = true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    }
-  }
-  $effect(() => {
-    if (tab === "moduletuning" && !mtLoaded) void loadModuleTuning();
-  });
-  $effect(() => {
-    if (tab === "moduletuning" && !smLoaded) void loadServerModules();
-  });
-
-  async function loadConfKeys(conf: string) {
-    ckErr[conf] = "";
-    try {
-      const r = await wowConfigConfKeys(conf);
-      ckKeys[conf] = r.keys;
-      ckSource[conf] = r.source;
-      ckEdits[conf] = {};
-      ckLoaded[conf] = true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      ckErr[conf] = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    }
-  }
-  function toggleCard(id: string, conf?: string) {
-    mtExpand[id] = !mtExpand[id];
-    if (conf && mtExpand[id] && !ckLoaded[conf]) void loadConfKeys(conf);
-  }
-
-  // Curated rows grouped where they now render: conf-backend rows inside the
-  // owning server-module card (matched on the conf file name the CLI reports
-  // per row), lua-backend rows as their own cards in the Lua section.
-  function curatedRowsFor(conf: string): ModuleTuning[] {
-    return mtSettings.filter((s) => s.backend === "conf" && s.file === conf);
-  }
-  const luaModules = $derived.by(() => {
-    const order: string[] = [];
-    const byMod = new Map<string, ModuleTuning[]>();
-    for (const s of mtSettings) {
-      if (s.backend !== "lua") continue;
-      if (!byMod.has(s.module)) {
-        byMod.set(s.module, []);
-        order.push(s.module);
-      }
-      byMod.get(s.module)!.push(s);
-    }
-    return order
-      .map((m) => ({
-        name: m,
-        installed: byMod.get(m)!.every((r) => r.installed),
-        rows: byMod.get(m)!,
-      }))
-      .filter((m) => m.installed);
-  });
-
-  function curatedDirty(rows: ModuleTuning[]): string[] {
-    return rows
-      .filter((s) => mtEdits[s.key] !== undefined && mtEdits[s.key] !== s.value)
-      .map((s) => s.key);
-  }
-  function cardStaged(conf: string): { key: string; value: string }[] {
-    return stagedConfChanges(ckKeys[conf] ?? [], ckEdits[conf] ?? {});
-  }
-  function cardDirtyCount(conf: string): number {
-    return curatedDirty(curatedRowsFor(conf)).length + cardStaged(conf).length;
-  }
-  function ckShown(conf: string): ConfKey[] {
-    return filterConfKeys(ckKeys[conf] ?? [], ckQuery[conf] ?? "").slice(0, PB_RENDER_CAP);
-  }
-  function ckMatchCount(conf: string): number {
-    return filterConfKeys(ckKeys[conf] ?? [], ckQuery[conf] ?? "").length;
-  }
-
-  // One save per card: curated rows first (tuning-set keeps their special
-  // validation), then the browser's staged edits (the generalized direct conf
-  // route). `applied:"live"` from a save means the CLI fired the module's
-  // known live-reload command over SOAP (mod-transmog) -- show the calm green
-  // note instead of the restart banner, but only when NO write needs a restart.
-  async function saveModuleCard(conf: string) {
-    mtSavingCard = conf;
-    error = null;
-    liveNote = false;
-    const curated = curatedDirty(curatedRowsFor(conf));
-    try {
-      let anyLive = false;
-      let anyRestart = false;
-      for (const key of curated) {
-        const r = await wowConfigTuningSet(key, mtEdits[key]);
-        if (r.changed && r.restart_required) {
-          restartState.needed = true;
-          anyRestart = true;
-        }
-      }
-      for (const c of cardStaged(conf)) {
-        const r = await wowConfigSet(`conf:${conf}:${c.key}`, c.value);
-        if (r.restart_required) {
-          restartState.needed = true;
-          anyRestart = true;
-        } else if (r.applied === "live") {
-          anyLive = true;
-        }
-      }
-      liveNote = anyLive && !anyRestart && !restartState.needed;
-      await loadModuleTuning(curated);
-      if (ckLoaded[conf]) await loadConfKeys(conf);
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    } finally {
-      mtSavingCard = null;
-    }
-  }
-
-  async function saveLuaCard(mod: { name: string; rows: ModuleTuning[] }) {
-    mtSavingCard = `lua:${mod.name}`;
-    error = null;
-    const dirty = curatedDirty(mod.rows);
-    try {
-      for (const key of dirty) {
-        const r = await wowConfigTuningSet(key, mtEdits[key]);
-        if (r.changed) {
-          if (r.backend === "lua") mtReloadPending = true;
-          if (r.restart_required) restartState.needed = true;
-        }
-      }
-      await loadModuleTuning(dirty);
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    } finally {
-      mtSavingCard = null;
-    }
-  }
-
-  async function mtReloadAle() {
-    // Keep the "reload to apply" banner up when the reload itself failed --
-    // clearing it would tell the user the change is live when it isn't (mirror
-    // of awReloadAle's boolean gate).
-    if (await reloadAle()) mtReloadPending = false;
-  }
-
   async function savePbChanges() {
     pbSaving = true;
     error = null;
@@ -608,19 +323,6 @@
   // other tabs' dirty rows.
   const visibleSettings = $derived(settingsInGroups(settings, visibleGroups));
   const dirty = $derived(dirtyKeys(visibleSettings, edits));
-  const fileReadonly = $derived(
-    confFiles.find((f) => f.name === file)?.readonly ?? READONLY_FILES.includes(file),
-  );
-  // Improvements Batch 3 F4: cheap "does this still look like a .conf?" check
-  // shown live while editing an editable .conf, and gating Save with a one-off
-  // "save anyway" confirm. Only .conf files use Key = Value syntax (the .env /
-  // compose files are read-only), so scope the check to them.
-  const lintIssues = $derived(
-    fileLoaded && !fileReadonly && file.toLowerCase().endsWith(".conf")
-      ? lintConfContent(fileContent)
-      : [],
-  );
-  let lintConfirm = $state(false);
   // Conf-file rows (Batch 1) are a new save mechanism gated behind their own
   // flags -- the Save button locks when ANY dirty row's flag is still locked.
   const saveLocked = $derived(requiredSaveFlags(visibleSettings, dirty).some((f) => featureLocked(f)));
@@ -676,69 +378,6 @@
     } finally {
       saving = false;
     }
-  }
-
-  async function loadFile() {
-    error = null;
-    aleNote = null;
-    fileLoaded = false;
-    lastBackup = null;
-    loadingFile = true;
-    const target = file;
-    try {
-      const r = await wowConfigRawRead(target);
-      if (file === target) {
-        fileContent = r.content;
-        fileLoaded = true;
-      }
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      if (file === target) {
-        error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-      }
-    } finally {
-      loadingFile = false;
-    }
-  }
-
-  async function saveFile(): Promise<boolean> {
-    saving = true;
-    error = null;
-    aleNote = null;
-    try {
-      const targetFile = file;
-      const content = fileContent;
-      const r = await wowConfigRawWrite(targetFile, content);
-      lastBackup = r.backup;
-      restartState.needed = true;
-      return true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-      return false;
-    } finally {
-      saving = false;
-    }
-  }
-
-  // Gate the raw-file Save behind the lint check: the first click on a file
-  // with suspicious lines arms a "save anyway" confirm instead of writing.
-  async function saveFileChecked(): Promise<boolean> {
-    if (lintIssues.length > 0 && !lintConfirm) {
-      lintConfirm = true;
-      return false;
-    }
-    lintConfirm = false;
-    return await saveFile();
-  }
-
-  function saveAndRestartFile(): void {
-    // Arm the lint confirm together with the restart confirm on the FIRST
-    // click, so the restart's second click isn't silently swallowed by an
-    // unconfirmed lint gate (saveAndRestart would call saveFileChecked, which
-    // would otherwise just arm the lint confirm and abort the restart).
-    if (!confirmingRestart && lintIssues.length > 0) lintConfirm = true;
-    void saveAndRestart(saveFileChecked);
   }
 
   async function reloadAle(): Promise<boolean> {
@@ -798,22 +437,9 @@
     }
   }
 
-  function onFileSelect() {
-    // Changing which file is targeted must invalidate whatever was loaded/armed
-    // for the previous file -- otherwise a stale `fileContent` could get written
-    // to the newly selected `file` (or a stale restart confirmation could fire
-    // for content the user never actually confirmed).
-    fileLoaded = false;
-    fileContent = "";
-    lastBackup = null;
-    confirmingRestart = false;
-    confirmingReset = false;
-    lintConfirm = false;
-    aleNote = null;
-  }
 </script>
 
-<section class="content" class:fill={tab === "files" && fileLoaded}>
+<section class="content">
   <header class="bar">
     <h2>{tabLabel}</h2>
   </header>
@@ -1152,308 +778,6 @@
         </div>
       {/if}
     {/if}
-
-  {:else if tab === "moduletuning"}
-    {#if !mtLoaded || !smLoaded}
-      <p class="muted">Loading…</p>
-    {:else}
-      <div class="card testing-card">
-        <p class="muted">
-          Every installed server module with a config file gets a card below — expand one to tune
-          it. Friendly switches come first; <strong>All settings</strong> lists every key the
-          module knows, with the author's own notes. Changes apply after a restart unless the card
-          says otherwise.
-        </p>
-      </div>
-
-      {#if mtReloadPending}
-        <div class="warn-card">
-          <p>Saved — reload the Lua scripts to apply the script (Lua) changes in-game.</p>
-          <div class="row">
-            <button
-              class="primary"
-              onclick={mtReloadAle}
-              disabled={mtSaving || restartState.restarting || featureLocked("guided-config")}
-              title={featureLocked("guided-config") ? LOCKED_HINT : undefined}
-            >
-              Reload Lua scripts
-            </button>
-          </div>
-        </div>
-      {/if}
-      {#if aleNote}<p class="muted">{aleNote}</p>{/if}
-
-      {#if smModules.length > 0}
-        <h3>Server modules</h3>
-        {#each smModules as m (m.key)}
-          {@const curated = curatedRowsFor(m.conf)}
-          {@const nDirty = cardDirtyCount(m.conf)}
-          <div class="card mod-card">
-            <button
-              class="mod-head"
-              aria-expanded={!!mtExpand[m.conf]}
-              onclick={() => toggleCard(m.conf, m.conf)}
-            >
-              <span class="sec-caret">{mtExpand[m.conf] ? "▾" : "▸"}</span>
-              <strong>{m.name}</strong>
-              <span class="muted mod-conf">{m.conf}</span>
-              {#if nDirty > 0}<span class="mod-dirty">{nDirty} unsaved</span>{/if}
-            </button>
-            {#if mtExpand[m.conf]}
-              {#if m.desc}<p class="muted mod-desc">{m.desc}</p>{/if}
-
-              {#each curated as s (s.key)}
-                <div class="setting" class:dirty={mtEdits[s.key] !== undefined && mtEdits[s.key] !== s.value}>
-                  <div class="meta">
-                    <strong>{s.label}</strong>
-                    <span class="muted">{s.explain}</span>
-                  </div>
-                  {#if s.type === "bool"}
-                    <input
-                      type="checkbox"
-                      checked={(mtEdits[s.key] ?? s.value) === "1"}
-                      disabled={mtSaving || restartState.restarting}
-                      onchange={(e) => (mtEdits[s.key] = e.currentTarget.checked ? "1" : "0")}
-                    />
-                  {:else if s.type === "int"}
-                    <input
-                      type="number"
-                      min={s.min}
-                      max={s.max}
-                      step="1"
-                      value={mtEdits[s.key] ?? s.value}
-                      disabled={mtSaving || restartState.restarting}
-                      oninput={(e) => (mtEdits[s.key] = e.currentTarget.value)}
-                    />
-                  {:else}
-                    <input
-                      value={mtEdits[s.key] ?? s.value}
-                      placeholder="e.g. 3,8 (0 = all)"
-                      disabled={mtSaving || restartState.restarting}
-                      oninput={(e) => (mtEdits[s.key] = e.currentTarget.value)}
-                    />
-                  {/if}
-                </div>
-              {/each}
-
-              <h4>All settings</h4>
-              {#if ckErr[m.conf]}
-                <p class="muted">Couldn't read {m.conf}: {ckErr[m.conf]}</p>
-                <div class="row"><button onclick={() => loadConfKeys(m.conf)}>Try again</button></div>
-              {:else if !ckLoaded[m.conf]}
-                <p class="muted">Loading keys…</p>
-              {:else}
-                {#if ckSource[m.conf] === "dist"}
-                  <p class="muted">Showing the module's defaults — the first save creates {m.conf}.</p>
-                {/if}
-                <input
-                  placeholder="Search keys…"
-                  value={ckQuery[m.conf] ?? ""}
-                  oninput={(e) => (ckQuery[m.conf] = e.currentTarget.value)}
-                />
-                <div class="pb-list">
-                  {#each ckShown(m.conf) as k (k.key)}
-                    <div
-                      class="pbrow"
-                      class:dirty={ckEdits[m.conf]?.[k.key] !== undefined && ckEdits[m.conf][k.key] !== k.value}
-                    >
-                      <span class="pbkey" title={confKeyHint(k)}>
-                        {k.key}
-                        {#if k.help}
-                          <button
-                            class="help-toggle"
-                            type="button"
-                            title="What does this do?"
-                            onclick={() => (ckHelpOpen[`${m.conf}:${k.key}`] = !ckHelpOpen[`${m.conf}:${k.key}`])}
-                          >?</button>
-                        {/if}
-                      </span>
-                      <input
-                        class="pbval"
-                        value={ckEdits[m.conf]?.[k.key] ?? k.value}
-                        disabled={mtSaving || restartState.restarting}
-                        oninput={(e) => {
-                          if (!ckEdits[m.conf]) ckEdits[m.conf] = {};
-                          ckEdits[m.conf][k.key] = e.currentTarget.value;
-                        }}
-                      />
-                    </div>
-                    {#if k.help && ckHelpOpen[`${m.conf}:${k.key}`]}
-                      <p class="muted key-help">
-                        {k.help}{#if k.default !== null}&nbsp;(default {k.default}){/if}
-                      </p>
-                    {/if}
-                  {/each}
-                </div>
-                {#if ckMatchCount(m.conf) > PB_RENDER_CAP}
-                  <p class="muted">
-                    Showing the first {PB_RENDER_CAP} of {ckMatchCount(m.conf)} matches — narrow the search.
-                  </p>
-                {:else if ckMatchCount(m.conf) === 0}
-                  <p class="muted">No keys match.</p>
-                {/if}
-              {/if}
-
-              <div class="row">
-                <button
-                  class="primary"
-                  onclick={() => saveModuleCard(m.conf)}
-                  disabled={nDirty === 0 || mtSaving || restartState.restarting || featureLocked("guided-config")}
-                  title={featureLocked("guided-config") ? LOCKED_HINT : undefined}
-                >
-                  Save {nDirty} change{nDirty === 1 ? "" : "s"}
-                </button>
-              </div>
-            {/if}
-          </div>
-        {/each}
-      {/if}
-
-      {#if luaModules.length > 0}
-        <h3>Lua scripts</h3>
-        {#each luaModules as m (m.name)}
-          {@const luaId = `lua:${m.name}`}
-          {@const nDirty = curatedDirty(m.rows).length}
-          <div class="card mod-card">
-            <button
-              class="mod-head"
-              aria-expanded={!!mtExpand[luaId]}
-              onclick={() => toggleCard(luaId)}
-            >
-              <span class="sec-caret">{mtExpand[luaId] ? "▾" : "▸"}</span>
-              <strong>{m.name}</strong>
-              <span class="muted mod-conf">{m.rows[0]?.file ?? ""}</span>
-              {#if nDirty > 0}<span class="mod-dirty">{nDirty} unsaved</span>{/if}
-            </button>
-            {#if mtExpand[luaId]}
-              {#each m.rows as s (s.key)}
-                <div class="setting" class:dirty={mtEdits[s.key] !== undefined && mtEdits[s.key] !== s.value}>
-                  <div class="meta">
-                    <strong>{s.label}</strong>
-                    <span class="muted">{s.explain}</span>
-                  </div>
-                  {#if s.type === "bool"}
-                    <input
-                      type="checkbox"
-                      checked={(mtEdits[s.key] ?? s.value) === "1"}
-                      disabled={mtSaving || restartState.restarting}
-                      onchange={(e) => (mtEdits[s.key] = e.currentTarget.checked ? "1" : "0")}
-                    />
-                  {:else}
-                    <input
-                      type="number"
-                      min={s.min}
-                      max={s.max}
-                      step="1"
-                      value={mtEdits[s.key] ?? s.value}
-                      disabled={mtSaving || restartState.restarting}
-                      oninput={(e) => (mtEdits[s.key] = e.currentTarget.value)}
-                    />
-                  {/if}
-                </div>
-              {/each}
-              <div class="row">
-                <button
-                  class="primary"
-                  onclick={() => saveLuaCard(m)}
-                  disabled={nDirty === 0 || mtSaving || restartState.restarting || featureLocked("guided-config")}
-                  title={featureLocked("guided-config") ? LOCKED_HINT : undefined}
-                >
-                  Save {nDirty} change{nDirty === 1 ? "" : "s"}
-                </button>
-              </div>
-            {/if}
-          </div>
-        {/each}
-      {/if}
-
-      {#if smModules.length === 0 && luaModules.length === 0}
-        <div class="card">
-          <strong>Nothing to tune yet</strong>
-          <p class="muted">
-            No installed module has a config file. Install modules from the
-            <strong>Modules</strong> page, then come back here to tune them.
-          </p>
-        </div>
-      {/if}
-    {/if}
-
-  {:else}
-    <div class="row">
-      <select bind:value={file} onchange={onFileSelect} disabled={saving || restartState.restarting || loadingFile}>
-        {#each confFiles as f (f.name)}
-          <option value={f.name}>{f.name}{!f.exists && f.dist ? " (new — starts from defaults)" : ""}</option>
-        {/each}
-      </select>
-      <button onclick={loadFile} disabled={saving || restartState.restarting || loadingFile}>Open</button>
-    </div>
-    <p class="muted">
-      Edited mod_ale.conf or its Lua scripts on disk?
-      <button
-        onclick={reloadAle}
-        disabled={saving || restartState.restarting || loadingFile || featureLocked("ale-reload")}
-        title={featureLocked("ale-reload") ? LOCKED_HINT : undefined}
-      >
-        Reload ALE scripts
-      </button>
-    </p>
-    {#if aleNote}<p class="muted">{aleNote}</p>{/if}
-    {#if fileLoaded}
-      <textarea
-        rows="18"
-        spellcheck="false"
-        bind:value={fileContent}
-        oninput={() => {
-          confirmingRestart = false;
-          confirmingReset = false;
-          lintConfirm = false;
-        }}
-        readonly={fileReadonly}
-        disabled={saving || restartState.restarting}
-      ></textarea>
-      {#if fileReadonly}
-        <p class="muted">Read-only — locked so a bad edit can't run commands on your PC. Change these via the Settings page.</p>
-      {:else}
-        {#if lintIssues.length > 0}
-          <div class="warn-card">
-            <p>
-              {lintIssues.length} line{lintIssues.length === 1 ? "" : "s"} don't look like
-              <code>Key = Value</code> (line{lintIssues.length === 1 ? "" : "s"}
-              {lintIssues.slice(0, 10).map((i) => i.line).join(", ")}{lintIssues.length > 10 ? "…" : ""}).
-              Check for typos before saving — you can still save if this is intentional.
-            </p>
-          </div>
-        {/if}
-        {#if lastBackup}<p class="muted">Previous version kept as {lastBackup}</p>{/if}
-        <div class="row">
-          <button
-            class="primary"
-            onclick={saveFileChecked}
-            disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
-            title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
-          >
-            {lintConfirm && lintIssues.length > 0 ? "Save anyway — sure?" : "Save"}
-          </button>
-          <button
-            onclick={saveAndRestartFile}
-            disabled={saving || restartState.restarting || resetting || featureLocked("config-edit")}
-            title={featureLocked("config-edit") ? LOCKED_HINT : undefined}
-          >
-            {confirmingRestart ? "This disconnects players — sure?" : "Save & Restart"}
-          </button>
-          {#if currentFileMeta?.dist}
-            <button
-              class="danger"
-              onclick={resetFile}
-              disabled={saving || restartState.restarting || resetting || featureLocked("config-reset")}
-              title={featureLocked("config-reset") ? LOCKED_HINT : undefined}
-            >
-              {confirmingReset ? `Overwrite ${file} with its defaults — sure?` : "Reset to defaults"}
-            </button>
-          {/if}
-        </div>
-      {/if}
-    {/if}
   {/if}
 
   {#if buf.show}
@@ -1463,13 +787,7 @@
 
 <style>
   .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
-  /* Module Configs editor fills the window (user request): with a file
-     open, the page stops scrolling and the textarea takes all free height
-     -- the save/restart rows below it stay pinned and visible. */
-  .content.fill { overflow: hidden; box-sizing: border-box; }
-  .content.fill textarea { flex: 1; min-height: 240px; resize: none; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
-  /* In-page tab bar (was four sidebar entries). */
   .bar h2 { margin: 0; font-size: 18px; }
   h3 { margin: 10px 0 0; font-size: 15px; color: #58a6ff; }
   .setting { display: flex; justify-content: space-between; align-items: center; gap: 16px; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px 14px; }
@@ -1482,8 +800,7 @@
   .reset-link:hover:not(:disabled) { border-color: #58a6ff; color: #c9d1d9; }
   .reset-link:disabled { opacity: 0.4; cursor: default; }
   .charwrap { display: flex; gap: 8px; align-items: center; }
-  input, select, textarea { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
-  textarea { font-family: Consolas, monospace; font-size: 13px; width: 100%; box-sizing: border-box; }
+  input, select { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 8px; }
   .row { display: flex; gap: 10px; align-items: center; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
@@ -1492,27 +809,8 @@
   .muted { color: #8b949e; font-size: 13px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
-  .warn-card code { font-family: Consolas, monospace; font-size: 12.5px; background: #21262d; border-radius: 4px; padding: 1px 5px; }
   .live-card { background: #161b22; border: 1px solid #2ea043; border-radius: 8px; padding: 12px 16px; }
   .danger-card { border-color: #f85149; }
-  /* Module tuning rework: collapsible per-module cards (sidebar-accordion
-     caret style). The header is a full-width transparent button so the whole
-     row toggles; content renders inside the same .card below it. */
-  .mod-card { padding: 0; gap: 0; }
-  .mod-card > :global(*) { margin: 0 14px; }
-  .mod-head { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; background: transparent; border: none; padding: 12px 14px; text-align: left; cursor: pointer; color: #c9d1d9; font-size: 14px; border-radius: 8px; }
-  .mod-head:hover { background: #161b22; }
-  .sec-caret { font-size: 10px; width: 10px; display: inline-block; color: #8b949e; }
-  .mod-conf { font-family: Consolas, monospace; font-size: 12px; }
-  .mod-dirty { margin-left: auto; color: #d29922; font-size: 12px; white-space: nowrap; }
-  .mod-desc { margin-top: 0; }
-  .mod-card h4 { margin: 10px 14px 0; font-size: 13.5px; color: #58a6ff; }
-  .mod-card .setting, .mod-card .row, .mod-card > input, .mod-card .pb-list { margin-left: 14px; margin-right: 14px; }
-  .mod-card .row:last-child { margin-bottom: 12px; }
-  .mod-card > p.muted { margin: 4px 14px 0; }
-  .help-toggle { background: transparent; border: 1px solid #30363d; color: #8b949e; border-radius: 50%; width: 16px; height: 16px; line-height: 1; padding: 0; font-size: 10.5px; margin-left: 6px; cursor: pointer; }
-  .help-toggle:hover { border-color: #58a6ff; color: #c9d1d9; }
-  .key-help { margin: 0 6px 4px; padding-left: 6px; border-left: 2px solid #30363d; font-size: 12.5px; }
   .pb-list { display: flex; flex-direction: column; gap: 4px; max-height: 420px; overflow-y: auto; }
   .pbrow { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 3px 6px; border-radius: 6px; }
   .pbrow.dirty { background: #1c1a10; outline: 1px solid #d29922; }

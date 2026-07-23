@@ -39,14 +39,13 @@ export const NAV = [
   {
     section: "Config",
     // Promoted from the old Config page tabs -> Config view=<id>. Backups is
-    // its own page (Backups component).
+    // its own page (Backups component). The old moduletuning/files entries
+    // moved into the Modules page as in-page tabs (module-update round).
     pages: [
       { id: "settings", label: "Settings" },
       { id: "botworld", label: "Bot World" },
       { id: "ahbot", label: "Auction House" },
       { id: "accountwide", label: "Account-wide" },
-      { id: "moduletuning", label: "Module tuning" },
-      { id: "files", label: "Module files" },
       { id: "backups", label: "Backups" },
     ],
   },
@@ -60,14 +59,7 @@ export type PageId = (typeof NAV)[number]["pages"][number]["id"];
 
 // Page ids that route to the shared Config component (their id == the Config
 // view). Kept here so the router and any nav logic share one source.
-export const CONFIG_VIEWS = [
-  "settings",
-  "botworld",
-  "ahbot",
-  "accountwide",
-  "moduletuning",
-  "files",
-] as const;
+export const CONFIG_VIEWS = ["settings", "botworld", "ahbot", "accountwide"] as const;
 export const BOTS_VIEWS = ["party", "browse"] as const;
 
 export const DEFAULT_PAGE: PageId = "home";
