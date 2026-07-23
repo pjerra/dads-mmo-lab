@@ -1,7 +1,9 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use super::backend::Backend;
 use super::envelope::{decode_wsl_output, parse_envelope, Envelope};
 
 #[derive(Debug)]
@@ -29,6 +31,12 @@ pub const USER: &str = "dml";
 pub struct DmlRunner {
     pub program: OsString,
     pub prefix_args: Vec<String>,
+    /// A directory to prepend to the child's PATH, or None to inherit PATH
+    /// unchanged. Set for the native (Docker Desktop) backend so the child
+    /// `dml` finds `docker.exe` and its credential helpers, which live in the
+    /// Docker Desktop bin dir that is NOT on the machine PATH for a per-user
+    /// install. The WSL backend leaves this None (the distro has its own PATH).
+    pub path_prepend: Option<OsString>,
 }
 
 impl Default for DmlRunner {
@@ -39,14 +47,100 @@ impl Default for DmlRunner {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            path_prepend: None,
         }
     }
 }
 
+/// Git Bash's `bash.exe`, for running the `dml` script natively on Windows.
+/// `DML_BASH` overrides; otherwise the standard Git for Windows locations, then
+/// a bare `bash` on PATH.
+fn find_bash() -> OsString {
+    if let Some(b) = std::env::var_os("DML_BASH") {
+        if !b.is_empty() {
+            return b;
+        }
+    }
+    for c in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+    ] {
+        if Path::new(c).exists() {
+            return OsString::from(c);
+        }
+    }
+    OsString::from("bash")
+}
+
+/// The `dml` bash script to run in native mode. `DML_SCRIPT` points at it (the
+/// repo's `cli/dml` in dev, a bundled copy in a release build); absent, we fall
+/// back to a bare `dml` so the failure is an honest "not found" rather than a
+/// silent wrong target.
+fn find_dml_script() -> String {
+    match std::env::var_os("DML_SCRIPT") {
+        Some(s) if !s.is_empty() => s.to_string_lossy().into_owned(),
+        _ => "dml".to_string(),
+    }
+}
+
+/// The directory holding `docker.exe` (for PATH injection). None when docker is
+/// only resolvable as a bare name on PATH — then the child already has it.
+fn docker_bin_dir() -> Option<PathBuf> {
+    let prog = super::native::docker_program();
+    Path::new(&prog)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+}
+
+/// PATH with `dir` prepended, or None when `dir` is empty. Pure, for testing.
+fn prepend_path(dir: &OsStr, current: Option<OsString>) -> Option<OsString> {
+    if dir.is_empty() {
+        return None;
+    }
+    let mut paths = vec![PathBuf::from(dir)];
+    if let Some(cur) = current {
+        paths.extend(std::env::split_paths(&cur));
+    }
+    std::env::join_paths(paths).ok()
+}
+
 impl DmlRunner {
+    /// Native (Docker Desktop) backend: run the `dml` bash script under Git Bash
+    /// on Windows, with the Docker Desktop bin dir on PATH so its `docker` calls
+    /// reach the engine. No `dml-arch` distro, no bash middleman inside WSL — the
+    /// same `dml` program, just hosted on Windows against Docker Desktop. This is
+    /// the "keep dml as the brain, drop the hand-built distro" path.
+    pub fn native() -> Self {
+        DmlRunner {
+            program: find_bash(),
+            prefix_args: vec![find_dml_script()],
+            path_prepend: docker_bin_dir().map(|p| p.into_os_string()),
+        }
+    }
+
+    /// Construct the runner for the selected backend. Default stays WSL, so the
+    /// app is unchanged until `DML_BACKEND=native` is set.
+    pub fn for_backend(b: Backend) -> Self {
+        match b {
+            Backend::Wsl => Self::default(),
+            Backend::Native => Self::native(),
+        }
+    }
+
+    /// Apply the optional PATH prepend to a command about to be spawned.
+    fn apply_env(&self, cmd: &mut Command) {
+        if let Some(dir) = &self.path_prepend {
+            if let Some(p) = prepend_path(dir, std::env::var_os("PATH")) {
+                cmd.env("PATH", p);
+            }
+        }
+    }
+
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.prefix_args).args(args).arg("--json");
+        self.apply_env(&mut cmd);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -59,6 +153,7 @@ impl DmlRunner {
     fn command_raw(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.prefix_args).args(args);
+        self.apply_env(&mut cmd);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -229,6 +324,7 @@ mod tests {
         DmlRunner {
             program: "cmd.exe".into(),
             prefix_args: vec!["/C".into()],
+            path_prepend: None,
         }
     }
 
@@ -282,7 +378,7 @@ mod tests {
 
     #[test]
     fn run_json_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![] };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None };
         assert!(matches!(r.run_json(&["x"]), Err(RunnerError::Spawn(_))));
     }
 
@@ -355,7 +451,7 @@ mod tests {
 
     #[test]
     fn run_captured_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![] };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None };
         assert!(matches!(r.run_captured(&["x"]), Err(RunnerError::Spawn(_))));
     }
 
@@ -364,6 +460,44 @@ mod tests {
         let r = DmlRunner::default();
         assert!(r.prefix_args.contains(&DISTRO.to_string()));
         assert!(r.prefix_args.contains(&USER.to_string()));
+    }
+
+    #[test]
+    fn default_runner_has_no_path_prepend() {
+        assert!(DmlRunner::default().path_prepend.is_none());
+    }
+
+    #[test]
+    fn for_backend_wsl_is_the_default_wsl_runner() {
+        let r = DmlRunner::for_backend(Backend::Wsl);
+        assert_eq!(r.program, OsString::from("wsl.exe"));
+        assert!(r.path_prepend.is_none());
+    }
+
+    #[test]
+    fn native_runner_runs_dml_script_under_bash() {
+        // Deterministic via the documented overrides.
+        std::env::set_var("DML_BASH", r"C:\fake\bash.exe");
+        std::env::set_var("DML_SCRIPT", "C:/repo/cli/dml");
+        let r = DmlRunner::for_backend(Backend::Native);
+        std::env::remove_var("DML_BASH");
+        std::env::remove_var("DML_SCRIPT");
+        assert_eq!(r.program, OsString::from(r"C:\fake\bash.exe"));
+        assert_eq!(r.prefix_args, vec!["C:/repo/cli/dml".to_string()]);
+    }
+
+    #[test]
+    fn prepend_path_puts_docker_dir_first() {
+        let p = prepend_path(OsStr::new(r"C:\docker\bin"), Some(OsString::from(r"C:\win")))
+            .unwrap();
+        let s = p.to_string_lossy();
+        assert!(s.starts_with(r"C:\docker\bin"));
+        assert!(s.contains(r"C:\win"));
+    }
+
+    #[test]
+    fn prepend_path_empty_dir_is_none() {
+        assert!(prepend_path(OsStr::new(""), Some(OsString::from(r"C:\win"))).is_none());
     }
 
     #[test]

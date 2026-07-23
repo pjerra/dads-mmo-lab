@@ -144,10 +144,55 @@ volume are not here. Bringing the configured server's data + `env/dist/etc`
 config tree across engines is a separate migration (MySQL dump/restore + a
 config copy) — the last mile after orchestration, not part of proving it.
 
-## Recommended next increment (3)
+## Increment 3 — keep `dml`, run it on Windows against Docker Desktop
 
-Wire `Backend::selected()` into the launcher's `games_start` / `games_stop` /
-`games_status` commands so flipping `DML_BACKEND=native` makes the running app
-drive the native stack, and add the data-migration path (dump the distro DB →
-restore into the native volume, copy `env/dist/etc`) so the native server is the
-user's actual world, modules and bots included.
+Decision (2026-07-24): **keep the `dml` brain, drop only the hand-built `dml-arch`
+distro.** `dml` is 7000 lines of battle-tested AC orchestration (stats, config,
+backups, modules, accounts) — reimplementing it in Rust is a huge, risky project
+for little near-term gain. The win is dropping the bespoke distro, not the brain.
+
+The surprise: **`dml` runs on Windows under Git Bash and drives Docker Desktop —
+no distro at all.** Verified live (`docker.exe` on PATH):
+
+```
+bash cli/dml wow server-info --json  -> {"ok":true,"data":{"online":false,...}}   VALID ENVELOPE
+bash cli/dml games list  --json      -> {"ok":true,"data":{"games":[]}}           VALID ENVELOPE
+bash cli/dml wow module list --json  -> {"ok":false,"error":{...}}                VALID ENVELOPE
+bash cli/dml doctor                  -> [ok] Docker Engine is running             (reached Docker Desktop)
+```
+
+The launcher's entire `--json` envelope contract — the thing every feature rides
+on — works natively. So "native mode" is the SAME `dml`, hosted on Windows
+against Docker Desktop, instead of inside the distro.
+
+### Launcher wiring (this increment)
+
+`dml/runner.rs` gained a native construction: `DmlRunner::native()` runs the
+`dml` script under Git Bash (`DmlRunner::for_backend(Backend::Native)`), with the
+Docker Desktop bin dir prepended to the child PATH (so `docker.exe` and its
+credential helpers resolve). Discovery: `DML_BASH` / `DML_SCRIPT` overrides →
+standard Git-for-Windows + repo locations. `lib.rs` builds the app's runner from
+`Backend::selected()`, so `DML_BACKEND=native` flips the whole app onto the
+native path — and the default stays WSL, unchanged. 110 cargo tests green.
+
+### Portability gaps found (the honest to-do list for full native `dml`)
+
+These don't block the envelope contract — they're the polish for a first-class
+Windows `dml`:
+
+- `flock: command not found` — Git Bash has no `flock` (dml uses it for a lock at
+  a couple of spots). Non-fatal today (the lock silently no-ops); needs a shim or
+  a portable lock.
+- `doctor`'s `systemd` check is Linux-only — should be skipped off-Linux.
+- Game-data path assumptions (`$HOME/games`) resolve to a Windows path; the games
+  dir location needs to be explicit in native mode.
+
+## Recommended next increment (4)
+
+Two tracks, both bounded now that the approach is proven:
+1. **Portability polish** — shim `flock`, guard the `systemd`/path checks, so
+   `dml` is a clean first-class Windows citizen (drops the distro entirely).
+2. **Data migration** — dump the distro DB → restore into a Docker-Desktop volume
+   and carry the user's specific worldserver image + `env/dist/etc` across, so the
+   native server is the user's *actual* world (characters, 2500 bots, modules),
+   not a fresh instance.

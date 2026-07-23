@@ -2144,7 +2144,12 @@ async fn games_restart(
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
-            runner: std::sync::Arc::new(DmlRunner::default()),
+            // Backend switch (spike/docker-desktop-native): default WSL, or the
+            // native Docker-Desktop path when DML_BACKEND=native. Same dml brain
+            // either way — native just hosts it on Windows against Docker Desktop.
+            runner: std::sync::Arc::new(DmlRunner::for_backend(
+                crate::dml::backend::selected(),
+            )),
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
         })
