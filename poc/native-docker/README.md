@@ -187,12 +187,51 @@ Windows `dml`:
 - Game-data path assumptions (`$HOME/games`) resolve to a Windows path; the games
   dir location needs to be explicit in native mode.
 
-## Recommended next increment (4)
+## Increment 4 — BOTH tracks done: the user's ACTUAL world runs natively ✅
 
-Two tracks, both bounded now that the approach is proven:
-1. **Portability polish** — shim `flock`, guard the `systemd`/path checks, so
-   `dml` is a clean first-class Windows citizen (drops the distro entirely).
-2. **Data migration** — dump the distro DB → restore into a Docker-Desktop volume
-   and carry the user's specific worldserver image + `env/dist/etc` across, so the
-   native server is the user's *actual* world (characters, 2500 bots, modules),
-   not a fresh instance.
+### Track 1: portability polish (commit cac5fa8)
+
+`dml` is now a first-class Windows citizen: flock shim (no more noise, lock
+no-ops single-user), doctor's systemd check host-aware, `DML_GAMES_DIR`
+documented + tested, scan banner neutral — **plus a fifth fix found live: the
+real cause of doctor's exit-1 on Git Bash was the `/home` disk-space probe
+dying under set -e (no `/home` on Windows), not the systemd WARN.** Native
+doctor now: all `[ok]`, exit 0. bats 730/730; distro behavior byte-identical.
+
+### Track 2: data migration (scripts in `migrate/`)
+
+`migrate/export-from-wsl.sh` (run in the distro) + `migrate/import-to-desktop.sh`
+(run in Git Bash) carry a real server across engines: consistent mysqldump of
+every `acore_*` DB, the client-data volume as tar, the live `env/dist/etc` tree,
+and `docker save` of the EXACT images the server runs. Live result, 2026-07-24:
+
+```
+restored natively:  acore_auth + acore_world + acore_characters + acore_playerbots
+identity check:     2505 characters, Hypeer guid=2502 level 80, 255 accounts
+boot:               mod-playerbots initialized · World Initialized In 0m26s
+                    AzerothCore rev. 52f58186a533+ (Playerbot branch) ready
+live:               Random Bots Stats: 500 online
+end-to-end:         the user logged in with the real WoW client and played —
+                    Hypeer online, 501 connections, zero WSL distro involved
+```
+
+**One migration lesson (the only boot failure):** with
+`Playerbots.Updates.EnableDatabases = 1`, the playerbots DB updater scans
+`/azerothcore/modules/mod-playerbots` at startup and SHUTS DOWN if missing.
+Those module sources live in the server *checkout* (bind-mounted context), not
+in the image — so a migration must carry `modules/` too and mount it
+(`./modules-src:/azerothcore/modules:ro`). The worldserver crash-looped on
+exactly this until the mount was added; nothing else failed.
+
+The migrated runtime lives OUTSIDE the repo at
+`C:\Users\perzi\dml-native\wow-playerbots\` (it contains real server config +
+data). It is a snapshot copy — progress there does not sync back to the distro
+server, and only ONE of the two servers can run at a time (same ports).
+
+## Remaining for a real "native mode" release
+
+- Wire the remaining launcher features through native mode and triage the
+  distro-only ones (WSL RAM/vhdx tools drop; shell opens Git Bash; etc.).
+- Cosmetic: native doctor still says "/home"/"ext4" in disk messages.
+- A migration UI (the scripts are proven; a launcher flow would make it
+  one-click) and a "which server is active" guard against port collisions.
