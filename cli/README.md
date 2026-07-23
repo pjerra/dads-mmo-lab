@@ -314,7 +314,38 @@ silently ignored (treated as if omitted), rather than rejected.
 - `dml wow config tuning-list --json` / `tuning-set --key <module.knob>
   --value <v> --json` — the curated guided-tuning knobs (conf- and
   lua-backed); rows carry an additive `file` field naming their backing
-  file. `module list` cpp rows likewise carry an additive `conf_name`.
+  file. `module list` cpp rows likewise carry an additive `conf_name`, plus
+  (module-update round) `head`/`head_date` — the installed clone's last
+  commit (short sha + `YYYY-MM-DD`), both `null` when not installed / no
+  `.git`; a local git read, offline (`module update-check` below owns
+  fetching).
+
+- `dml wow module update-check --json` → `{"repos":[{"label","url","branch",
+  "head","dirty","behind"}]}` — the Modules page's "Check for updates"
+  button: one git-fetch probe per installed cpp module clone (registry +
+  custom, deduped by key like `module list`'s walk), same shape as the
+  server-level `wow update-check`. Read-only (fetch only, never a
+  pull/stash); `behind` is the commit count behind `origin/<branch>`, `null`
+  when the fetch failed. lua/sql module families are absent — they aren't
+  git checkouts under `modules/` (lua deploys copies, sql applies
+  statements), so there's nothing to probe. Errors: `NOT_FOUND` (WoW
+  Playerbots server not installed).
+
+- `dml wow module update --key <mod-key> --json` → NDJSON stream, terminal
+  `done` data `{"key","changed","before","after","pending_rebuild"}` — the
+  Modules page's per-module Update button (offered only once
+  `update-check` reports it behind): the same patch-backup + stash +
+  ff-only-pull + stash-pop idiom as the server-level `wow update`, with
+  every gate (key shape, installed, has `.git`, has an origin remote)
+  checked before any mutation. No automatic rebuild — a changed pull marks
+  the module rebuild-pending (the existing rebuild banner covers compiling
+  it) **except** `mod-arac`, which ships no C++ (data-only: SQL + DBC +
+  MPQ) and instead needs a client-patch + restart, never a rebuild.
+  `mod-playerbots` always refuses (`BAD_ARG`) — it tracks the custom
+  AzerothCore fork and updates together with the server core via `wow
+  update`, never on its own. Errors: `BAD_ARG` (invalid/refused key),
+  `NOT_FOUND` (server or module not installed), `GIT_MISSING` (module dir
+  has no `.git`), `REMOTE_MISSING` (no origin remote).
 
 - `dml wow config raw-read --file <name> --json` → `{"file","content"}` and
   `dml wow config raw-write --file <name> --json` (new content on stdin) →

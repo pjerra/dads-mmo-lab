@@ -58,14 +58,25 @@ Achievements).
   cache maintenance, an environment doctor, and a one-click WSL shell.
 - **Accounts** — create accounts, set passwords and GM levels, delete
   accounts (with protection for the admin account).
-- **Modules** — 38 server modules across three families (C++ / Lua / SQL)
-  with one-line descriptions and GitHub links: transmog, auction house bot
-  (or the Auction House Bot Plus fork, auto-detected), solocraft, autobalance,
-  1v1 arena, hardcore modes and more. Handles the worldserver rebuild, config
-  activation, install-state repair, Docker disk cleanup and server source
-  updates; modules that add a service NPC (e.g. NPC Beastmaster, Black
-  Market AH) get a one-click "place NPC in capitals" button, and some
-  modules show an inline advisory (e.g. Paragon's unguarded `.test` command).
+- **Modules** — a tabbed page: **Modules** (38 server modules across three
+  families — C++ / Lua / SQL — with one-line descriptions and GitHub links:
+  transmog, auction house bot (or the Auction House Bot Plus fork,
+  auto-detected), solocraft, autobalance, 1v1 arena, hardcore modes and more;
+  each installed C++ module shows its current version (commit sha + date);
+  handles the worldserver rebuild, config activation, install-state repair,
+  Docker disk cleanup, and AzerothCore + playerbots server source updates;
+  modules that add a service NPC (e.g. NPC Beastmaster, Black Market AH) get
+  a one-click "place NPC in capitals" button, and some modules show an
+  inline advisory, e.g. Paragon's unguarded `.test` command), **Tuning**
+  (guided per-module settings, formerly a Config page tab), and **Config
+  files** (full-window conf editor with automatic backups, formerly a Config
+  page tab). A "Check for updates" button fetches every installed module's
+  origin and shows how many commits behind it is; once behind, a locked
+  per-module Update button pulls that module's latest source (stash-safe)
+  and marks it rebuild-required until the next rebuild compiles it in —
+  except mod-arac, which is data-only and needs a client patch + restart
+  instead of a rebuild. mod-playerbots always updates together with the
+  server core via the same tab's Server update card, never on its own.
 
 **Characters**
 - **Character** — an in-game-style character sheet in tabs, auto-loading
@@ -113,11 +124,8 @@ Achievements).
 - **Account-wide** — once the Accountwide Systems module is installed, turn
   on account-wide sharing per system: achievements, currency, gold, mounts,
   pets, playtime, professions, PvP rank, flight paths, titles.
-- **Module tuning** — guided settings for modules like NPC Beastmaster, Learn
-  Spells on Level-up, Unlimited Ammo and Sit Means Rest, without
-  hand-editing conf files.
-- **Module files** — full-window text editor for module conf files, with
-  automatic backups and a sanity check before saving.
+  (Module tuning and Module files moved into the Modules page as its Tuning
+  and Config files tabs — see the Server section above.)
 - **Backups** — one-click snapshots of all characters/accounts/bots (works
   while running, always saves characters first), each with a short content
   summary and a Verify button that checks archive integrity without

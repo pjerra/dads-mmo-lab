@@ -54,24 +54,33 @@ with ~2000 AI playerbots. One window, no terminal needed.*
   and peek at any bot's gear, talents and achievements.
 
 **Server customization**
-- **38 server modules**, one click each, with descriptions and GitHub links:
-  transmog, auction house bot, solocraft, autobalance (group-size scaling),
-  1v1 arena, hardcore/iron-man modes, all-races-all-classes, mount at level
-  1, and more. The app handles the server rebuild and config activation, and
-  can drop a module's extra NPC straight into both capital cities for you.
+- **38 server modules**, in a tabbed Modules page (Modules / Tuning / Config
+  files), one click each, with descriptions, a current version (commit +
+  date) and GitHub links: transmog, auction house bot, solocraft, autobalance
+  (group-size scaling), 1v1 arena, hardcore/iron-man modes,
+  all-races-all-classes, mount at level 1, and more. A "Check for updates"
+  button shows how many commits behind each installed module is; once
+  behind, a per-module Update pulls its latest source (stash-safe) and marks
+  it rebuild-required until the next rebuild compiles it in — except
+  mod-arac, whose data-only update just needs a client patch + restart, not
+  a rebuild. mod-playerbots always updates together with the server core
+  (below), never on its own. The app also handles the server rebuild and
+  config activation, and can drop a module's extra NPC straight into both
+  capital cities for you.
 - **Settings with guardrails** — XP/gold rates, bot population, message of
   the day; sensible defaults and safe ranges shown for every setting, with a
   one-click reset.
-- **Module tuning** — every installed server module with a config file gets
-  its own card: friendly switches for the popular knobs first, then a
-  searchable "All settings" list of every key the module knows, with the
-  module author's own notes shown inline. Transmog changes even apply live,
-  no restart. Lua script mods keep their simple curated switches (like
-  auto-refilling ammo) — no raw script editing.
+- **Module tuning** (Modules page → Tuning tab) — every installed server
+  module with a config file gets its own card: friendly switches for the
+  popular knobs first, then a searchable "All settings" list of every key
+  the module knows, with the module author's own notes shown inline.
+  Transmog changes even apply live, no restart. Lua script mods keep their
+  simple curated switches (like auto-refilling ammo) — no raw script
+  editing.
 - **Account-wide sharing** — once installed, share things like achievements,
   gold, mounts, pets and titles across every character on the same account.
-- **Config editor** — full-window editor for module configs with automatic
-  backups.
+- **Config editor** (Modules page → Config files tab) — full-window editor
+  for module configs with automatic backups.
 - **Accounts** — create logins for family/friends, set passwords and GM
   levels, delete safely.
 - **Backups** — one-click snapshots of every character/account/bot, a quick
