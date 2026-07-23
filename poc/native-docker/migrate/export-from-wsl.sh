@@ -54,6 +54,12 @@ rm -rf "$OUT/etc"
 cp -r "$SDIR/env/dist/etc" "$OUT/etc"
 mkdir -p "$OUT/conf"
 cp "$SDIR/conf/dist/env.ac" "$OUT/conf/env.ac" 2>/dev/null || true
+# CRITICAL: the override carries the REAL runtime settings (SOAP on, bot
+# min/max, rates, the ./modules mount). The confs alone run module DEFAULTS —
+# a migration that skips this file boots a 500-bot 1x-rate server with SOAP
+# off (found live, 2026-07-24). Merge its environment block into the native
+# compose's ac-worldserver.
+cp "$SDIR/docker-compose.override.yml" "$OUT/conf/docker-compose.override.yml.orig" 2>/dev/null || true
 
 echo "[export] saving the exact server images..."
 for img in worldserver authserver db-import client-data; do

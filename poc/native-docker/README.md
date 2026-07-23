@@ -236,6 +236,19 @@ the compose must keep the standard `ac-*` `container_name`s — many `wow` CLI
 arms address containers by those names (`docker exec ac-database ...`), and on
 Docker Desktop's separate engine there is no collision with the distro's.
 
+**The biggest lesson — `docker-compose.override.yml` IS the server's real
+config:** the distro's override carries the environment that makes the server
+the *user's* server — `AC_SOAP_ENABLED/IP/PORT` (without it the launcher says
+"world running but can't reach it"), `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS`
+(without it: 500 default bots instead of 1600–2000), the 3× rate env, and the
+`./modules:/azerothcore/modules` mount (the playerbots-updater crash from the
+first boot — the distro mounts module sources exactly like our fix did). A
+migration that copies confs but not the override boots a defaults server.
+`export-from-wsl.sh` now exports it; merge its environment into the native
+worldserver service. Also: launcher-side SOAP needs `~/.dml/soap.env` copied to
+the Windows home (strip CRs — wsl.exe piping adds them), since native `dml`
+reads `$HOME/.dml/` on Windows.
+
 ## Remaining for a real "native mode" release
 
 - Wire the remaining launcher features through native mode and triage the
