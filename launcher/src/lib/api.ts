@@ -327,6 +327,12 @@ export interface CppModule {
   // conf file. Additive (Module-tuning rework) -- optional so an older
   // deployed CLI without the field can't crash the Modules/Config pages.
   conf_name?: string | null;
+  // The installed clone's last commit: short sha + YYYY-MM-DD commit date
+  // (local git reads only -- update-check owns fetching). Null when the
+  // module isn't installed or its dir has no .git. Additive (module-update
+  // round) -- optional for the same older-CLI reason as conf_name.
+  head?: string | null;
+  head_date?: string | null;
   custom: boolean;
 }
 export interface LuaModule {
@@ -392,6 +398,34 @@ export const wowModuleRebuild = (
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
   return invoke("wow_module_rebuild", { backup, onEvent: ch });
+};
+// Module-update round: one repo object per installed cpp clone with a .git
+// dir (registry + custom), same field shape as the server-level UpdateRepo.
+// An installed mod-playerbots clone IS listed here even though
+// wowModuleUpdate refuses it (it updates with the server core).
+export interface ModuleCheckRepo {
+  label: string;
+  url: string;
+  branch: string;
+  head: string;
+  dirty: number;
+  behind: number | null;
+}
+export interface ModuleUpdateCheck {
+  repos: ModuleCheckRepo[];
+}
+export async function wowModuleUpdateCheck(): Promise<ModuleUpdateCheck> {
+  return await invoke("wow_module_update_check");
+}
+// Per-module source pull (patch backup + stash + ff-only, no auto rebuild).
+// Done event data: { key, changed, before, after, pending_rebuild }.
+export const wowModuleUpdate = (
+  key: string,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_module_update", { key, onEvent: ch });
 };
 // Batch 5 F2: ARAC server-DBC + client-MPQ patch stream (key is allowlisted
 // CLI-side to mod-arac).

@@ -645,6 +645,31 @@ async fn wow_module_rebuild(
     stream_args(vec!["wow".into(), "module".into(), "rebuild".into(), flag.into()], on_event, state).await
 }
 
+// Module-update round: per-module behind-count probe (fetches origin per
+// installed cpp clone CLI-side, never mutates a worktree).
+#[tauri::command]
+async fn wow_module_update_check(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    run_json_cmd(state, vec!["wow".into(), "module".into(), "update-check".into()]).await
+}
+
+// Module-update round: per-module source pull (patch backup + stash +
+// ff-only pull + stash pop, no automatic rebuild). The CLI gates everything
+// before any mutation -- key shape, mod-playerbots refusal, missing .git --
+// so the key passes through as a plain argv value.
+#[tauri::command]
+async fn wow_module_update(
+    key: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    stream_args(
+        vec!["wow".into(), "module".into(), "update".into(), "--key".into(), key],
+        on_event,
+        state,
+    )
+    .await
+}
+
 // Batch 5 F2: ARAC's server-DBC + client-MPQ patch step (CLI allowlists the
 // key to mod-arac; passed through as a plain argv value).
 #[tauri::command]
@@ -2188,6 +2213,8 @@ pub fn run() {
             wow_module_install,
             wow_module_remove,
             wow_module_rebuild,
+            wow_module_update_check,
+            wow_module_update,
             wow_module_conf_activate,
             wow_module_client_patch,
             wow_module_tracking,
