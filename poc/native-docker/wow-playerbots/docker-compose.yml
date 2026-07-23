@@ -86,7 +86,13 @@ services:
       AC_LOGIN_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-password};acore_auth"
       AC_WORLD_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-password};acore_world"
       AC_CHARACTER_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-password};acore_characters"
-      AC_PLAYERBOTS_DATABASE_INFO: "ac-database;3306;root;${DB_ROOT_PASSWORD:-password};acore_playerbots"
+      # NB: no AC_PLAYERBOTS_DATABASE_INFO here — the published stock image has
+      # no playerbots module compiled in, so this template boots a clean vanilla
+      # server (review finding, 2026-07-24). The user's REAL playerbots build
+      # travels via the migration path instead: docker save/load of their exact
+      # locally-relevant images + DB restore + etc bind (see README increment 4)
+      # — that stack keeps the playerbots env because its worldserver has the
+      # module.
     ports:
       - "${WORLD_EXTERNAL_PORT:-8085}:8085"
       - "${SOAP_EXTERNAL_PORT:-7878}:7878"

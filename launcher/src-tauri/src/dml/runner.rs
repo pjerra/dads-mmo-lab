@@ -15,7 +15,10 @@ pub enum RunnerError {
 impl std::fmt::Display for RunnerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunnerError::Spawn(e) => write!(f, "failed to run dml via WSL: {e}"),
+            // Backend-neutral: this error is shared by the WSL and native
+            // runners; backend-specific wording comes from the runner's
+            // host_label/host_hint at the sites that synthesize messages.
+            RunnerError::Spawn(e) => write!(f, "failed to run dml: {e}"),
             RunnerError::BadOutput { raw } => write!(f, "dml produced unexpected output: {raw}"),
         }
     }
@@ -37,6 +40,12 @@ pub struct DmlRunner {
     /// Docker Desktop bin dir that is NOT on the machine PATH for a per-user
     /// install. The WSL backend leaves this None (the distro has its own PATH).
     pub path_prepend: Option<OsString>,
+    /// Short label of the host running dml, used in synthesized diagnostics
+    /// ("wsl" vs "bash") — so native-mode errors never blame WSL
+    /// (review finding, 2026-07-24).
+    pub host_label: &'static str,
+    /// Hint appended to synthesized crash diagnostics, matching the backend.
+    pub host_hint: &'static str,
 }
 
 impl Default for DmlRunner {
@@ -48,6 +57,8 @@ impl Default for DmlRunner {
                 .map(|s| s.to_string())
                 .collect(),
             path_prepend: None,
+            host_label: "wsl",
+            host_hint: "Check WSL: wsl -d dml-arch",
         }
     }
 }
@@ -116,6 +127,8 @@ impl DmlRunner {
             program: find_bash(),
             prefix_args: vec![find_dml_script()],
             path_prepend: docker_bin_dir().map(|p| p.into_os_string()),
+            host_label: "bash",
+            host_hint: "Native mode: check Git Bash and Docker Desktop are installed and the engine is running",
         }
     }
 
@@ -226,8 +239,10 @@ impl DmlRunner {
                 let stderr = stderr.trim();
                 if stderr.is_empty() {
                     RunnerError::Spawn(format!(
-                        "wsl exited with code {} and no output",
-                        out.status.code().unwrap_or(-1)
+                        "{} exited with code {} and no output ({})",
+                        self.host_label,
+                        out.status.code().unwrap_or(-1),
+                        self.host_hint
                     ))
                 } else {
                     RunnerError::Spawn(stderr.to_string())
@@ -304,7 +319,7 @@ impl DmlRunner {
                 "error": {
                     "code": "CLI_CRASH",
                     "message": format!("dml exited with code {code} before finishing"),
-                    "hint": "Check WSL: wsl -d dml-arch"
+                    "hint": self.host_hint
                 }
             }));
         }
@@ -325,6 +340,8 @@ mod tests {
             program: "cmd.exe".into(),
             prefix_args: vec!["/C".into()],
             path_prepend: None,
+            host_label: "wsl",
+            host_hint: "Check WSL: wsl -d dml-arch",
         }
     }
 
@@ -378,7 +395,7 @@ mod tests {
 
     #[test]
     fn run_json_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None, host_label: "wsl", host_hint: "" };
         assert!(matches!(r.run_json(&["x"]), Err(RunnerError::Spawn(_))));
     }
 
@@ -451,7 +468,7 @@ mod tests {
 
     #[test]
     fn run_captured_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None, host_label: "wsl", host_hint: "" };
         assert!(matches!(r.run_captured(&["x"]), Err(RunnerError::Spawn(_))));
     }
 

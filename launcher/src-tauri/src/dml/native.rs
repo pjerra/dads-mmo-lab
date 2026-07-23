@@ -175,8 +175,25 @@ impl NativeDocker {
     /// Parsed `docker compose ps` rows for this project. Compose can emit the
     /// `--format json` payload as either a single JSON array or one JSON object
     /// per line (NDJSON) depending on version — accept both.
+    ///
+    /// A non-zero docker exit is an ERROR, not an empty list: when the Docker
+    /// Desktop engine is down (the most common failure), `compose ps` exits
+    /// non-zero with empty stdout — swallowing that would make `status()`
+    /// report a clean "stopped" and offer Start when the truth is unknown
+    /// (review finding, 2026-07-24).
     pub fn ps(&self) -> std::io::Result<Vec<PsRow>> {
         let out = self.command(&["ps", "--format", "json"]).output()?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!(
+                    "docker compose ps failed (exit {}): {}",
+                    out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ),
+            ));
+        }
         let text = String::from_utf8_lossy(&out.stdout);
         Ok(parse_ps_json(&text))
     }
