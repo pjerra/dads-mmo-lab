@@ -82,10 +82,72 @@ None of that is hard *per se* — but it's the shared DML orchestration layer, s
 it's a team decision (and a good fit for the "small per-game client apps
 attaching to containers" direction), not a launcher-only change.
 
-## Recommended next increment
+## Increment 2 — the REAL acore stack, natively
 
-Point the real acore stack at Docker Desktop: commit a native compose template
-for the WoW-playerbots server, add a `NativeDocker`-backed `games start/stop/
-status` path behind a backend switch, and prove start/stop/status on the real
-images. That's the first slice where the launcher drives an *actual* game
-natively — everything above is the groundwork that makes it a bounded task.
+The toy above proved the plumbing; this increment points the **real** server at
+Docker Desktop.
+
+- **`wow-playerbots/docker-compose.yml`** — the actual acore stack
+  (ac-database / ac-db-import / ac-authserver / ac-worldserver / ac-client-data),
+  re-expressed for Docker Desktop: no `build:` (we pull published images), no
+  host bind mounts (named volumes, self-contained), dev/tools services dropped,
+  DB wiring via the `AC_*_DATABASE_INFO` env vars. `docker compose config`
+  validates it natively and lists all five services.
+- **`dml/backend.rs`** — the single switch point. `Backend::selected()` reads
+  `DML_BACKEND`; default `Wsl` (nothing changes), `DML_BACKEND=native` routes the
+  game lifecycle to `NativeDocker`. Ships dormant and tested, so the port is a
+  routing change at the `games_*` call sites, not a rewrite.
+- **`dml/native.rs`** gained `start()` / `stop()` / `status()` mirroring the WSL
+  `games start/stop/status`, with a pure `game_state()` (running/stopped) so both
+  backends report the same shape.
+
+### Live result (real acore images, on Docker Desktop) ✅
+
+Brought up the auth path (`docker compose -p dml-wow-native up -d ac-authserver`
+→ db → db-import → authserver) on Docker Desktop, engine context `desktop-linux`:
+
+```
+ac-database   running (healthy)     mysql:8.4
+ac-db-import  exited (0)            acore/ac-wotlk-db-import:master   # base SQL import completed
+ac-authserver running               acore/ac-wotlk-authserver:master
+
+authserver log:  Connected to MySQL database at ac-database
+                 DatabasePool 'acore_auth' opened successfully.
+                 Added realm "AzerothCore" at 127.0.0.1:8085.
+
+acore_auth tables = 22        # db-import really populated the real schema
+realmlist rows   = 1
+port 3724 -> 0.0.0.0:3724     # Test-NetConnection 127.0.0.1:3724 = True (reachable from Windows)
+```
+
+The real acore authserver + db-import + MySQL, the real dependency graph (health
+gate + `service_completed_successfully`), a genuinely populated schema, and the
+realm socket listening on the Windows host — all driven by the exact
+`docker compose` commands `native.rs` builds, with **no `dml-arch` distro and no
+bash `dml`**. Then torn down clean (`down -v`); the images stay cached so the
+next native `up` needs no re-pull.
+
+> One bug found and fixed live: a YAML anchor (`*ac-db`) does not expand inside a
+> quoted scalar, so the first run's DB connection string was malformed and
+> db-import failed. The connection strings are now inlined literally (matching
+> the distro's own compose). The dependency ordering was correct from the first
+> run — only the string was wrong.
+
+### What this instance is — and isn't
+
+It is a **clean, real acore server**: the genuine acore images, the real
+db-import populating a real MySQL, the real dependency graph (health gate +
+`service_completed_successfully`) — all driven natively, no `dml-arch`, no bash
+`dml`. It is **not** the user's world: Docker Desktop has its own volume
+namespace, so the DB/characters/2500 bots living in `dml-arch`'s `ac-database`
+volume are not here. Bringing the configured server's data + `env/dist/etc`
+config tree across engines is a separate migration (MySQL dump/restore + a
+config copy) — the last mile after orchestration, not part of proving it.
+
+## Recommended next increment (3)
+
+Wire `Backend::selected()` into the launcher's `games_start` / `games_stop` /
+`games_status` commands so flipping `DML_BACKEND=native` makes the running app
+drive the native stack, and add the data-migration path (dump the distro DB →
+restore into the native volume, copy `env/dist/etc`) so the native server is the
+user's actual world, modules and bots included.

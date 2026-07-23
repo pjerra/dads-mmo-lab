@@ -180,6 +180,37 @@ impl NativeDocker {
         let text = String::from_utf8_lossy(&out.stdout);
         Ok(parse_ps_json(&text))
     }
+
+    /// Normalized lifecycle state for the whole stack, matching the string the
+    /// WSL path's `games status` returns so a caller can treat both backends
+    /// alike: `"running"` if any service container is up, else `"stopped"`.
+    pub fn status(&self) -> std::io::Result<&'static str> {
+        Ok(game_state(&self.ps()?))
+    }
+
+    /// `docker compose up -d`, aliased to the lifecycle verb the launcher uses.
+    pub fn start(&self) -> std::io::Result<std::process::Output> {
+        self.up()
+    }
+
+    /// `docker compose down`, aliased to the lifecycle verb the launcher uses.
+    pub fn stop(&self) -> std::io::Result<std::process::Output> {
+        self.down()
+    }
+}
+
+/// Collapse `ps` rows to the one-word stack state the UI shows. Any container
+/// in a `running` state means the game is up; "restarting" counts as up too
+/// (it is not stopped). Pure, so the mapping is unit-tested without an engine.
+pub fn game_state(rows: &[PsRow]) -> &'static str {
+    let up = rows
+        .iter()
+        .any(|r| matches!(r.state.as_str(), "running" | "restarting"));
+    if up {
+        "running"
+    } else {
+        "stopped"
+    }
 }
 
 /// One container row from `docker compose ps --format json`. Only the fields the
@@ -328,6 +359,24 @@ mod tests {
         // A bare `docker` (no directory) means PATH already resolves it and its
         // sibling helpers — don't rewrite PATH.
         assert!(augmented_path(OsStr::new("docker"), Some(OsString::from(r"C:\Windows"))).is_none());
+    }
+
+    #[test]
+    fn game_state_running_when_any_up() {
+        let rows = vec![
+            PsRow { name: "db".into(), service: "ac-database".into(), state: "running".into(), health: "healthy".into() },
+            PsRow { name: "auth".into(), service: "ac-authserver".into(), state: "exited".into(), health: "".into() },
+        ];
+        assert_eq!(game_state(&rows), "running");
+    }
+
+    #[test]
+    fn game_state_stopped_when_none_up() {
+        let rows = vec![PsRow {
+            name: "db".into(), service: "ac-database".into(), state: "exited".into(), health: "".into(),
+        }];
+        assert_eq!(game_state(&rows), "stopped");
+        assert_eq!(game_state(&[]), "stopped");
     }
 
     #[test]
