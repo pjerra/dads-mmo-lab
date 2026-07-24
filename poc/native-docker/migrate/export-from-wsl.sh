@@ -61,6 +61,13 @@ cp "$SDIR/conf/dist/env.ac" "$OUT/conf/env.ac" 2>/dev/null || true
 # compose's ac-worldserver.
 cp "$SDIR/docker-compose.override.yml" "$OUT/conf/docker-compose.override.yml.orig" 2>/dev/null || true
 
+echo "[export] copying module sources (WITH .git - the CLI's installed-check"
+echo "         is [[ -d modules/<key>/.git ]], and the playerbots DB updater"
+echo "         needs the sources mounted at /azerothcore/modules)..."
+rm -rf "$OUT/modules"
+mkdir -p "$OUT/modules"
+(cd "$SDIR/modules" && tar -cf - .) | (cd "$OUT/modules" && tar -xf -)
+
 echo "[export] saving the exact server images..."
 for img in worldserver authserver db-import client-data; do
   docker save "acore/ac-wotlk-$img:master" | gzip > "$OUT/img-$img.tar.gz"

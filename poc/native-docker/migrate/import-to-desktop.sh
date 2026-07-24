@@ -22,6 +22,13 @@ docker info >/dev/null 2>&1 || { echo "[import] Docker Desktop engine is not run
 # wow-server-playerbots (same as in the distro), and the compose must keep the
 # standard ac-* container_names, or `dml games list` / every `wow` feature
 # misses the server (found live, 2026-07-24).
+#
+# Native `wow config` needs mikefarah yq on Windows: download
+# yq_windows_amd64.exe and set DML_YQ_BIN to it (the launcher's native .bat
+# does). Keep the runtime settings (SOAP/bots/rates env) in a
+# docker-compose.override.yml next to the compose — the config system reads
+# and writes .services.ac-worldserver.environment in THAT file. Module
+# sources must keep their .git dirs (installed-check is modules/<key>/.git).
 DIR="${1:-$HOME/dml-native/wow-server-playerbots}"
 cd "$DIR" || { echo "[import] export dir not found: $DIR"; exit 1; }
 mkdir -p logs
