@@ -172,6 +172,13 @@ export async function wowAccounts(): Promise<Account[]> {
   const data = await invoke<{ accounts: Account[] }>("wow_accounts");
   return data.accounts;
 }
+// NATIVE-MODE fast sibling of wowAccounts: identical Account[] shape, read over a
+// direct MySQL connection in the launcher's Rust core (no bash, no docker exec).
+// Call ONLY when backendMode() === "native"; in wsl mode call wowAccounts.
+export async function wowAccountsRead(): Promise<Account[]> {
+  const data = await invoke<{ accounts: Account[] }>("wow_accounts_read");
+  return data.accounts;
+}
 export async function wowAccountCreate(user: string, pass: string): Promise<{ created: boolean; user: string }> {
   return await invoke("wow_account_create", { user, pass });
 }
@@ -566,6 +573,14 @@ export async function wowTeleportList(search?: string): Promise<TeleLocation[]> 
   const data = await invoke<{ locations: TeleLocation[] }>("wow_teleport_list", { search });
   return data.locations;
 }
+// NATIVE-MODE fast sibling of wowTeleportList: identical TeleLocation[] shape,
+// read over a direct MySQL connection in the launcher's Rust core (the float
+// coordinates are CAST-rendered server-side so they byte-match the CLI). Call
+// ONLY when backendMode() === "native"; in wsl mode call wowTeleportList.
+export async function wowTeleportListRead(search?: string): Promise<TeleLocation[]> {
+  const data = await invoke<{ locations: TeleLocation[] }>("wow_teleport_list_read", { search });
+  return data.locations;
+}
 export async function wowTeleport(
   charName: string,
   to: string,
@@ -858,6 +873,13 @@ export type BotFilters = {
 };
 export async function wowBotsList(f: BotFilters): Promise<BotsPage> {
   return await invoke("wow_bots_list", f);
+}
+// NATIVE-MODE fast sibling of wowBotsList: identical BotsPage shape (same clamp
+// of limit to 1..=200), read over a direct MySQL connection in the launcher's
+// Rust core. Call ONLY when backendMode() === "native"; in wsl mode call
+// wowBotsList.
+export async function wowBotsRead(f: BotFilters): Promise<BotsPage> {
+  return await invoke("wow_bots_read", f);
 }
 export interface PartyMember { guid: number; name: string; class: number; level: number; is_bot: boolean; online: boolean; }
 // spec/spec_applied only present when the add carried a --spec (Batch 5 F5).

@@ -20,18 +20,28 @@
 
 import {
   backendMode,
+  wowAccounts,
+  wowAccountsRead,
+  wowBotsList,
+  wowBotsRead,
   wowConfigFiles,
   wowConfigList,
   wowConfigRead,
   wowConfigTuningList,
   wowModuleList,
   wowModuleRead,
+  wowTeleportList,
+  wowTeleportListRead,
   wowTuningRead,
+  type Account,
   type BackendMode,
+  type BotFilters,
+  type BotsPage,
   type ConfFile,
   type ConfigSetting,
   type ModuleList,
   type ModuleTuning,
+  type TeleLocation,
 } from "./api";
 
 // Pure: the error string every page builds from a thrown DmlErr-ish value
@@ -130,6 +140,27 @@ async function loadModuleList(): Promise<ModuleList> {
 async function loadModuleTuning(): Promise<ModuleTuning[]> {
   const mode = await resolveBackendMode();
   return pickConfigReader(mode) === "read" ? wowTuningRead() : wowConfigTuningList();
+}
+
+// --- Task 3: routed loaders for the simpler DB-backed pages -----------------
+// Same native-vs-wsl router as loadConfigSettings, for the Teleport, Bot Browser
+// and Accounts pages. Native reads each surface over a direct MySQL connection in
+// Rust (no docker exec / fork storm); WSL keeps shelling the CLI. Identical .data
+// shape either way. These pages don't use a createCachedStore (they take live
+// args / mutate often), so the loaders are exported and called directly.
+export async function loadTeleportList(search?: string): Promise<TeleLocation[]> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowTeleportListRead(search) : wowTeleportList(search);
+}
+
+export async function loadBotsPage(f: BotFilters): Promise<BotsPage> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowBotsRead(f) : wowBotsList(f);
+}
+
+export async function loadAccounts(): Promise<Account[]> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowAccountsRead() : wowAccounts();
 }
 
 // The shared page caches. Consumed by:

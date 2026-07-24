@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowTeleportList, wowTeleport, wowTeleportCoords, type TeleLocation } from "$lib/api";
+  import { wowTeleport, wowTeleportCoords, type TeleLocation } from "$lib/api";
+  import { loadTeleportList } from "$lib/page-cache.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
@@ -76,7 +77,7 @@
     loading = true;
     error = null;
     try {
-      locations = await wowTeleportList(search.trim() || undefined);
+      locations = await loadTeleportList(search.trim() || undefined);
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;

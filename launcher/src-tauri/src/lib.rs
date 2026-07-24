@@ -1058,6 +1058,77 @@ async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// Map a native-mode [`crate::dml::db::DbError`] to the [`CmdError`] the frontend
+/// already knows how to render. `code` matches the CLI's `json_err` codes
+/// (`DB_UNREACHABLE` / `DB_QUERY_FAILED`) so a stopped engine reads identically
+/// whether the page went through `dml` or the native reader.
+fn db_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
+    CmdError {
+        code: e.code().to_string(),
+        message: e.to_string(),
+        hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    }
+}
+
+/// NATIVE-MODE fast read of the teleport locations: same shape as
+/// `wow_teleport_list` (`{"locations":[…≤500 rows…]}`), read over a direct MySQL
+/// connection instead of `docker exec ac-database mysql`. Native mode only — WSL
+/// keeps calling `wow_teleport_list`; `backend_mode` tells the frontend which.
+#[tauri::command]
+async fn wow_teleport_list_read(search: Option<String>) -> Result<serde_json::Value, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        crate::dml::pages::read_teleport_list(&cfg, search.as_deref()).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of one bot-browser page: same shape as `wow_bots_list`
+/// (`{total,limit,offset,bots:[…]}`), over a direct MySQL connection. The filter
+/// args mirror `wow_bots_list` exactly (the frontend passes the same values);
+/// `limit` is clamped `1..=200` (default 50) like the CLI so the echoed value
+/// matches. Native mode only.
+#[tauri::command]
+async fn wow_bots_read(
+    name: Option<String>,
+    class: Option<u32>,
+    min_level: Option<u32>,
+    max_level: Option<u32>,
+    online: Option<bool>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<serde_json::Value, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let f = crate::dml::pages::BotFilters {
+            name,
+            class,
+            min_level,
+            max_level,
+            online: online.unwrap_or(false),
+            limit: crate::dml::pages::clamp_limit(limit),
+            offset: offset.unwrap_or(0),
+        };
+        crate::dml::pages::read_bots(&cfg, &f).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the accounts list: same shape as `wow_accounts`
+/// (`{"accounts":[{id,username,gm_level,characters}]}`), over a direct MySQL
+/// connection. Native mode only — WSL keeps calling `wow_accounts`.
+#[tauri::command]
+async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        crate::dml::pages::read_accounts(&cfg).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -2894,6 +2965,9 @@ pub fn run() {
             wow_config_read,
             wow_tuning_read,
             wow_module_read,
+            wow_teleport_list_read,
+            wow_bots_read,
+            wow_accounts_read,
             backend_mode,
             wow_config_set,
             wow_config_tuning_list,

@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowBotsList,
     wowPartyOnline,
     wowPartyRelogin,
     wowGmLevel,
@@ -9,6 +8,7 @@
     type BotsPage,
     type OnlineChar,
   } from "$lib/api";
+  import { loadBotsPage } from "$lib/page-cache.svelte";
   import { className } from "$lib/wow";
   import {
     loadFavs,
@@ -72,7 +72,7 @@
     error = null;
     note = null;
     try {
-      page = await wowBotsList({
+      page = await loadBotsPage({
         name: name.trim() || undefined,
         class: classId === "" ? undefined : Number(classId),
         minLevel: levelFilter(minLevel),

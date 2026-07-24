@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowAccounts,
     wowAccountCreate,
     wowAccountSetPassword,
     wowAccountSetGm,
     wowAccountDelete,
     type Account,
   } from "$lib/api";
+  import { loadAccounts } from "$lib/page-cache.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
 
   const USER_RE = /^[A-Za-z0-9_]{3,20}$/;
@@ -51,7 +51,7 @@
   async function refresh() {
     error = null; confirmingGm = null;
     try {
-      accounts = await wowAccounts();
+      accounts = await loadAccounts();
       ensureGmDefaults();
     } catch (e) { error = fmtErr(e); }
   }

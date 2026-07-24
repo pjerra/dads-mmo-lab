@@ -4,5 +4,6 @@ pub mod db;
 pub mod envelope;
 pub mod modules;
 pub mod native;
+pub mod pages;
 pub mod runner;
 pub mod tuning;
