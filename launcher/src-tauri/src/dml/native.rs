@@ -22,7 +22,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Environment override for the docker executable, so a boxed/portable install
 /// or CI can point at an arbitrary `docker.exe` without patching discovery.
@@ -316,6 +316,145 @@ pub fn parse_ps_json(text: &str) -> Vec<PsRow> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Docker Desktop engine lifecycle (native mode only).
+//
+// In native mode the launcher owns the Docker Desktop engine's up/down around a
+// server start/stop: the engine (and its `docker-desktop` WSL VM) must be up
+// before any `docker compose` runs, and stopping it on server-stop frees the
+// VM's RAM. These helpers are the pure/testable core of that flow — the Tauri
+// command wrappers in `lib.rs` supply the real spawns, clock and event stream.
+// ---------------------------------------------------------------------------
+
+/// How often to re-check the engine while waiting for it to come up (ms).
+pub const ENGINE_POLL_INTERVAL_MS: u64 = 3_000;
+/// How long to wait for the engine to come up before giving up (ms).
+pub const ENGINE_POLL_TIMEOUT_MS: u64 = 180_000;
+
+/// The `docker info` argv used as the "is the engine up?" probe. `--format`
+/// keeps it fast and tiny; `info` talks to the engine over the named pipe and
+/// needs no credential helper, so PATH is left untouched. Pure, so the argv is
+/// asserted in tests without spawning.
+pub fn docker_info_args() -> [&'static str; 3] {
+    ["info", "--format", "{{.ServerVersion}}"]
+}
+
+/// Whether `docker info` succeeds against `program` — the definition of "the
+/// Docker Desktop engine is running". A missing docker.exe, a down engine, or
+/// any non-zero exit all read as not-running. (Impure: real spawn.)
+pub fn engine_running(program: &OsStr) -> bool {
+    let mut cmd = Command::new(program);
+    cmd.args(docker_info_args());
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    matches!(cmd.status(), Ok(s) if s.success())
+}
+
+/// The `docker desktop stop` argv — stops the Docker Desktop engine AND its
+/// `docker-desktop` WSL VM, freeing the VM's RAM. Pure, for tests.
+pub fn docker_desktop_stop_args() -> [&'static str; 2] {
+    ["desktop", "stop"]
+}
+
+/// Run `docker desktop stop` against `program`. Best-effort at the call site: a
+/// non-zero exit or spawn error is a warning, not a hard failure. (Impure.)
+pub fn stop_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
+    let mut cmd = Command::new(program);
+    cmd.args(docker_desktop_stop_args());
+    cmd.stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
+}
+
+/// Launch `program` (the Docker Desktop GUI exe) detached, without a console
+/// window. Returns as soon as the process is spawned — the engine comes up
+/// asynchronously and is waited for separately via [`poll_until_ready`].
+pub fn launch_detached(program: &OsStr) -> std::io::Result<()> {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn().map(|_| ())
+}
+
+/// What to do to satisfy the "engine must be up" prerequisite, decided from two
+/// facts: is the engine already up, and did we find a Docker Desktop.exe to
+/// launch. Pure, so the branch table is unit-tested without spawns.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EnsureDecision {
+    /// Engine already running — nothing to do.
+    AlreadyUp,
+    /// Engine down and no Docker Desktop.exe found — abort (do not compose
+    /// against a dead engine, and there is nothing to start).
+    NoDesktop,
+    /// Engine down but Docker Desktop.exe found — launch it and poll.
+    Launch,
+}
+
+/// Decide how to satisfy the engine prerequisite. See [`EnsureDecision`].
+pub fn ensure_decision(engine_up: bool, desktop_found: bool) -> EnsureDecision {
+    if engine_up {
+        EnsureDecision::AlreadyUp
+    } else if !desktop_found {
+        EnsureDecision::NoDesktop
+    } else {
+        EnsureDecision::Launch
+    }
+}
+
+/// Whether server-stop should also stop the Docker Desktop engine. Only in
+/// native mode, and only when the (default-on) `nativeManageDocker` toggle is
+/// on — `None` means "not passed", which defaults to ON. Pure, for tests.
+pub fn stop_engine_enabled(native: bool, manage_docker: Option<bool>) -> bool {
+    native && manage_docker.unwrap_or(true)
+}
+
+/// How a wait-for-engine loop ended.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PollOutcome {
+    /// The engine became ready; `waited_ms` is how long we waited first.
+    Ready { waited_ms: u64 },
+    /// The budget elapsed without the engine coming up.
+    Timeout { waited_ms: u64 },
+}
+
+/// Poll `ready` until it returns true or the cumulative wait exceeds
+/// `timeout_ms`. Checks immediately (t=0), then sleeps `interval_ms` between
+/// checks via the injected `sleep`. Pure w.r.t. I/O — the caller supplies both
+/// the readiness probe and the sleeper, so tests drive it with a canned
+/// sequence and a no-op (counting) sleeper, exercising the timeout/round
+/// arithmetic without a real engine or real delays.
+pub fn poll_until_ready(
+    interval_ms: u64,
+    timeout_ms: u64,
+    mut ready: impl FnMut() -> bool,
+    mut sleep: impl FnMut(u64),
+) -> PollOutcome {
+    let mut waited = 0u64;
+    loop {
+        if ready() {
+            return PollOutcome::Ready { waited_ms: waited };
+        }
+        if waited >= timeout_ms {
+            return PollOutcome::Timeout { waited_ms: waited };
+        }
+        sleep(interval_ms);
+        waited = waited.saturating_add(interval_ms);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,5 +637,95 @@ mod tests {
         assert!(cands
             .iter()
             .any(|p| p.to_string_lossy().contains("DockerDesktop")));
+    }
+
+    // --- engine lifecycle --------------------------------------------------
+
+    #[test]
+    fn docker_info_args_probe_the_server_version() {
+        assert_eq!(docker_info_args(), ["info", "--format", "{{.ServerVersion}}"]);
+    }
+
+    #[test]
+    fn docker_desktop_stop_args_are_desktop_stop() {
+        assert_eq!(docker_desktop_stop_args(), ["desktop", "stop"]);
+    }
+
+    #[test]
+    fn ensure_decision_already_up_when_engine_running() {
+        // Engine up wins regardless of whether a desktop exe was found.
+        assert_eq!(ensure_decision(true, false), EnsureDecision::AlreadyUp);
+        assert_eq!(ensure_decision(true, true), EnsureDecision::AlreadyUp);
+    }
+
+    #[test]
+    fn ensure_decision_no_desktop_aborts() {
+        // Engine down and nothing to launch -> abort, never compose against a
+        // dead engine.
+        assert_eq!(ensure_decision(false, false), EnsureDecision::NoDesktop);
+    }
+
+    #[test]
+    fn ensure_decision_launch_when_down_but_installed() {
+        assert_eq!(ensure_decision(false, true), EnsureDecision::Launch);
+    }
+
+    #[test]
+    fn stop_engine_enabled_only_native_and_toggle_on() {
+        // Default (None) is ON in native mode.
+        assert!(stop_engine_enabled(true, None));
+        assert!(stop_engine_enabled(true, Some(true)));
+        // Explicitly defeated by the user.
+        assert!(!stop_engine_enabled(true, Some(false)));
+        // WSL mode never stops Docker, whatever the toggle says.
+        assert!(!stop_engine_enabled(false, None));
+        assert!(!stop_engine_enabled(false, Some(true)));
+    }
+
+    #[test]
+    fn poll_ready_immediately_does_not_sleep() {
+        let mut sleeps = 0u32;
+        let out = poll_until_ready(3_000, 180_000, || true, |_| sleeps += 1);
+        assert_eq!(out, PollOutcome::Ready { waited_ms: 0 });
+        assert_eq!(sleeps, 0);
+    }
+
+    #[test]
+    fn poll_ready_after_a_few_rounds() {
+        // false, false, true -> ready on the third check, two sleeps of 3s.
+        let seq = std::cell::Cell::new(0u32);
+        let mut sleeps = 0u32;
+        let out = poll_until_ready(
+            3_000,
+            180_000,
+            || {
+                let n = seq.get();
+                seq.set(n + 1);
+                n >= 2
+            },
+            |_| sleeps += 1,
+        );
+        assert_eq!(out, PollOutcome::Ready { waited_ms: 6_000 });
+        assert_eq!(sleeps, 2);
+    }
+
+    #[test]
+    fn poll_times_out_when_never_ready() {
+        // Never ready: checks at 0,3,6,9s; at 9s waited>=timeout -> Timeout.
+        let mut sleeps = 0u32;
+        let out = poll_until_ready(3_000, 9_000, || false, |ms| {
+            assert_eq!(ms, 3_000);
+            sleeps += 1;
+        });
+        assert_eq!(out, PollOutcome::Timeout { waited_ms: 9_000 });
+        assert_eq!(sleeps, 3);
+    }
+
+    #[test]
+    fn poll_timeout_zero_gives_up_immediately() {
+        let mut sleeps = 0u32;
+        let out = poll_until_ready(3_000, 0, || false, |_| sleeps += 1);
+        assert_eq!(out, PollOutcome::Timeout { waited_ms: 0 });
+        assert_eq!(sleeps, 0);
     }
 }

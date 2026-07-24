@@ -2556,22 +2556,182 @@ async fn games_remove(
     stream_args(args, on_event, state).await
 }
 
+// ---------------------------------------------------------------------------
+// Native-mode Docker Desktop engine lifecycle around start/stop.
+//
+// In native mode the Docker Desktop engine (and its docker-desktop WSL VM) must
+// be up before any `docker compose` runs, so `games_start` ensures it first;
+// and stopping it on `games_stop` frees the VM's RAM, so `games_stop` shuts it
+// down afterwards when the (default-on) `nativeManageDocker` toggle is set. WSL
+// mode does neither — it is byte-for-byte unchanged. The pure decision/poll
+// logic lives in `dml::native`; these wrappers supply the real docker spawns,
+// wall-clock sleeps, and the NDJSON progress stream (envelope `line`/`error`
+// events, the same shape `dml games start/stop` emits).
+// ---------------------------------------------------------------------------
+
+/// Emit engine-lifecycle progress as an envelope `line` event onto the same
+/// stream the games output uses, so the UI terminal shows it inline.
+fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
+    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
+}
+
+/// Native-mode prerequisite for any start: make sure the Docker Desktop engine
+/// is up before compose runs. Emits progress; on an unrecoverable failure it
+/// emits a terminal `error` event AND returns Err so the caller ABORTS instead
+/// of composing against a dead engine. Blocking (real spawns + sleeps) — run
+/// under `spawn_blocking`.
+fn ensure_engine_up_blocking(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
+    use crate::dml::native;
+    let program = native::docker_program();
+    let desktop = native::docker_desktop_program();
+    match native::ensure_decision(native::engine_running(&program), desktop.is_some()) {
+        native::EnsureDecision::AlreadyUp => {
+            engine_line(&emit, "info", "Docker Desktop engine already running.");
+            Ok(())
+        }
+        native::EnsureDecision::NoDesktop => {
+            let msg = "Docker engine is down and Docker Desktop.exe was not found; \
+                       cannot start the engine.";
+            let hint = "Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.";
+            emit(serde_json::json!({"event": "error", "error": {
+                "code": "DOCKER_DESKTOP_MISSING", "message": msg, "hint": hint,
+            }}));
+            Err(CmdError { code: "DOCKER_DESKTOP_MISSING".into(), message: msg.into(), hint: hint.into() })
+        }
+        native::EnsureDecision::Launch => {
+            // desktop is Some here (decision returned Launch).
+            let exe = desktop.expect("Launch decision implies a resolved desktop exe");
+            engine_line(&emit, "info", "Docker engine is down. Starting Docker Desktop...");
+            if let Err(e) = native::launch_detached(&exe) {
+                let msg = format!("Failed to launch Docker Desktop: {e}");
+                emit(serde_json::json!({"event": "error", "error": {
+                    "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
+                }}));
+                return Err(CmdError { code: "DOCKER_DESKTOP_LAUNCH".into(), message: msg, hint: String::new() });
+            }
+            let outcome = native::poll_until_ready(
+                native::ENGINE_POLL_INTERVAL_MS,
+                native::ENGINE_POLL_TIMEOUT_MS,
+                || native::engine_running(&program),
+                |ms| {
+                    engine_line(&emit, "info", "Waiting for Docker Desktop to be ready...");
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                },
+            );
+            match outcome {
+                native::PollOutcome::Ready { .. } => {
+                    engine_line(&emit, "info", "Docker Desktop engine is ready.");
+                    Ok(())
+                }
+                native::PollOutcome::Timeout { waited_ms } => {
+                    let msg = format!(
+                        "Docker Desktop did not become ready within {}s.",
+                        waited_ms / 1000
+                    );
+                    let hint = "Start Docker Desktop manually, wait for it to finish, then retry.";
+                    emit(serde_json::json!({"event": "error", "error": {
+                        "code": "DOCKER_ENGINE_TIMEOUT", "message": msg, "hint": hint,
+                    }}));
+                    Err(CmdError { code: "DOCKER_ENGINE_TIMEOUT".into(), message: msg, hint: hint.into() })
+                }
+            }
+        }
+    }
+}
+
+/// Async wrapper: ensure the engine is up before a native start. Aborts (Err)
+/// when it cannot be brought up.
+async fn ensure_engine_up(on_event: &Channel<serde_json::Value>) -> Result<(), CmdError> {
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_engine_up_blocking(|v| { let _ = ch.send(v); })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Best-effort `docker desktop stop` after a native stop: stops the engine +
+/// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
+/// never fails the server-stop. Blocking — run under `spawn_blocking`.
+fn stop_engine_blocking(emit: impl Fn(serde_json::Value)) {
+    use crate::dml::native;
+    let program = native::docker_program();
+    engine_line(&emit, "info", "Stopping Docker Desktop...");
+    match native::stop_engine(&program) {
+        Ok(out) if out.status.success() => {
+            engine_line(&emit, "info", "Docker Desktop stopped.");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            engine_line(
+                &emit,
+                "warn",
+                format!(
+                    "Could not stop Docker Desktop (exit {}): {}",
+                    out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ),
+            );
+        }
+        Err(e) => {
+            engine_line(&emit, "warn", format!("Could not stop Docker Desktop: {e}"));
+        }
+    }
+}
+
+/// Async wrapper: best-effort stop of the Docker Desktop engine after a native
+/// server-stop. Never returns an error — the server-stop result stands.
+async fn stop_engine_best_effort(on_event: &Channel<serde_json::Value>) {
+    let ch = on_event.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        stop_engine_blocking(|v| { let _ = ch.send(v); })
+    })
+    .await;
+}
+
 #[tauri::command]
 async fn games_start(
     id: String,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
+    if !validate_game_id(&id) {
+        return Err(bad_id(&id));
+    }
+    // NATIVE MODE: the engine is a hard prerequisite (regardless of the manage
+    // toggle) — bring it up first, or abort before touching compose. WSL mode
+    // skips this entirely and behaves exactly as before.
+    if is_native_backend() {
+        ensure_engine_up(&on_event).await?;
+    }
     stream_action("start", id, on_event, state).await
 }
 
 #[tauri::command]
 async fn games_stop(
     id: String,
+    manage_docker: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    stream_action("stop", id, on_event, state).await
+    if !validate_game_id(&id) {
+        return Err(bad_id(&id));
+    }
+    // Decide up front whether we also stop the engine (native + toggle-on).
+    // `manage_docker` is None from a frontend that hasn't wired the toggle,
+    // which defaults ON per `nativeManageDocker`.
+    let stop_docker = crate::dml::native::stop_engine_enabled(is_native_backend(), manage_docker);
+    // Stop the server exactly as today (clone the channel so we can keep
+    // streaming the engine-stop afterwards).
+    let result = stream_action("stop", id, on_event.clone(), state).await;
+    // Then free the VM's RAM by stopping the engine. Best-effort: this runs
+    // even if the server-stop reported an error (the containers die with the
+    // engine anyway), and its own failure only warns — `result` is what the
+    // command returns.
+    if stop_docker {
+        stop_engine_best_effort(&on_event).await;
+    }
+    result
 }
 
 #[tauri::command]
