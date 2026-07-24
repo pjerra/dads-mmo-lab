@@ -2828,6 +2828,34 @@ case "$cmd" in
             out+=']'
             json_ok "{\"settings\":$out}"
             ;;
+          tuning-registry)
+            # Cheap, values-free sibling of `config tuning-list`: emits the
+            # SAME .data.settings[] array with every STATIC registry field
+            # (key, backend, module, label, explain, type, min, max, default,
+            # file) but reads NO values and does NO installed-state check -- no
+            # conf/lua file reads, no yq, no docker, no git. `value` is always
+            # "" and `installed` always false (present so the row shape matches
+            # `tuning-list` exactly). The launcher Rust core fetches this once
+            # and fills value + installed itself, in-process. Like the config
+            # `registry` arm this must stay fast even natively: it sets NO
+            # cfg_sdir and calls NO _cfg_preamble (module tuning never touched
+            # the compose override, so it needs neither).
+            first=1; out='['
+            while IFS='|' read -r mtkey mtbackend mtfile mtconfkey mtmod mtlabel mttype mtmin mtmax mtdef mtexplain; do
+              [[ -z "$mtkey" ]] && continue
+              mtminj="${mtmin:-null}"; mtmaxj="${mtmax:-null}"
+              [[ $first -eq 0 ]] && out+=','
+              json_escape_var "$mtmod"; je_mod="$REPLY"
+              json_escape_var "$mtlabel"; je_label="$REPLY"
+              json_escape_var "$mtexplain"; je_explain="$REPLY"
+              json_escape_var "$mtdef"; je_def="$REPLY"
+              json_escape_var "$mtfile"; je_file="$REPLY"
+              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$je_mod\",\"label\":\"$je_label\",\"explain\":\"$je_explain\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"\",\"default\":\"$je_def\",\"installed\":false,\"file\":\"$je_file\"}"
+              first=0
+            done < <(_mtune_rows)
+            out+=']'
+            json_ok "{\"settings\":$out}"
+            ;;
           tuning-set)
             key=""; value=""
             while [[ $# -gt 0 ]]; do
@@ -4498,6 +4526,62 @@ case "$cmd" in
             sqlj+=']'
             aleready=false; _cpp_installed "$sdir" mod-ale && aleready=true
             json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":$(_rebuild_pending_json "$sdir"),\"ale_ready\":$aleready}"
+            ;;
+          catalog)
+            # Cheap, state-free sibling of `module list`: emits the SAME
+            # .data.families.{cpp,lua,sql}[] arrays with every STATIC registry
+            # field only -- no filesystem probes, no git, no docker, no yq. Every
+            # dynamic per-row field is placeholdered (cpp installed:false,
+            # pending_rebuild:false, conf:"", head:null, head_date:null; lua
+            # cloned:false, deployed:false, warn:null; sql installed:false) and so
+            # are the top-level rebuild_pending ([]) and ale_ready (false). The
+            # launcher Rust core fetches this once and fills the live state
+            # itself, in-process. Sets NO sdir and forks nothing beyond the
+            # registry heredocs -- custom-clone scanning (dir + git reads) is
+            # deliberately omitted; this is registry rows only.
+            # URL -> JSON value (NO-FORK): strip a trailing .git, escape, quote;
+            # empty -> null (mirrors _mod_weburl_json_var from `module list`).
+            cpp='['; first=1
+            while IFS='|' read -r mk mname murl msql; do
+              [[ -z "$mk" ]] && continue
+              cnamej=null
+              _module_conf_name_var "$mk"; cname="$REPLY"
+              [[ -n "$cname" ]] && { json_escape_var "$cname"; cnamej="\"$REPLY\""; }
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              murlx="${murl%.git}"
+              if [[ -n "$murlx" ]]; then json_escape_var "$murlx"; je_url="\"$REPLY\""; else je_url='null'; fi
+              [[ $first -eq 0 ]] && cpp+=','
+              cpp+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"installed\":false,\"pending_rebuild\":false,\"conf\":\"\",\"conf_name\":$cnamej,\"custom\":false,\"head\":null,\"head_date\":null}"
+              first=0
+            done < <(_module_registry_cpp)
+            cpp+=']'
+            lua='['; first=1
+            while IFS='|' read -r mk mname murl; do
+              [[ -z "$mk" ]] && continue
+              lsql=false; _lua_has_sql "$mk" && lsql=true
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              murlx="${murl%.git}"
+              if [[ -n "$murlx" ]]; then json_escape_var "$murlx"; je_url="\"$REPLY\""; else je_url='null'; fi
+              [[ $first -eq 0 ]] && lua+=','
+              lua+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"cloned\":false,\"deployed\":false,\"has_sql\":$lsql,\"warn\":null}"
+              first=0
+            done < <(_module_registry_lua)
+            lua+=']'
+            sqlj='['; first=1
+            while IFS='|' read -r mk mname murl mtype; do
+              [[ -z "$mk" ]] && continue
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              murlx="${murl%.git}"
+              if [[ -n "$murlx" ]]; then json_escape_var "$murlx"; je_url="\"$REPLY\""; else je_url='null'; fi
+              [[ $first -eq 0 ]] && sqlj+=','
+              sqlj+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"type\":\"$mtype\",\"installed\":false}"
+              first=0
+            done < <(_module_registry_sql)
+            sqlj+=']'
+            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":[],\"ale_ready\":false}"
             ;;
           install)
             [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-install
