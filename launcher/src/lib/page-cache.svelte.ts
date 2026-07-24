@@ -8,12 +8,15 @@
 // quietly updates it — first open still loads fresh, re-opens feel instant.
 //
 // Native fast-read routing (spike/docker-desktop-native): in native mode the
-// config settings load through the in-process Rust reader (wowConfigRead,
-// microseconds, no bash/yq, Docker may be closed); in WSL mode it stays on
-// the CLI (wowConfigList) — WSL behavior is byte-identical to today. The
-// module list and tuning list have no Rust fast-read yet (Task 2 covered
-// only `config list`), so those load through the CLI in both modes — the
-// cache still makes their re-open instant.
+// heavy pages load through in-process Rust readers (microseconds, no bash/yq,
+// Docker may be closed); in WSL mode they stay on the CLI — WSL behavior is
+// byte-identical to today. All three now have a native fast-read:
+//   config settings -> wowConfigRead  (else wowConfigList)
+//   module list     -> wowModuleRead  (else wowModuleList)
+//   module tuning   -> wowTuningRead   (else wowConfigTuningList)
+// The Rust readers share the same registry/catalog caches the launcher warms
+// at startup, so the first native open of each page is fast too — not just
+// the cached re-open.
 
 import {
   backendMode,
@@ -22,6 +25,8 @@ import {
   wowConfigRead,
   wowConfigTuningList,
   wowModuleList,
+  wowModuleRead,
+  wowTuningRead,
   type BackendMode,
   type ConfFile,
   type ConfigSetting,
@@ -37,9 +42,11 @@ export function formatLoadError(e: unknown): string {
   return `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
 }
 
-// Pure: which config reader a backend uses. Native gets the fast in-process
-// Rust read; WSL keeps shelling the CLI. Kept separate + tested so the
-// native-vs-wsl decision can't silently drift.
+// Pure: which reader a backend uses. Native gets the fast in-process Rust
+// read; WSL keeps shelling the CLI. Shared by all three heavy pages (config,
+// module list, module tuning) — the native-vs-wsl decision is identical for
+// each, so one tested pure fn drives them all and can't silently drift.
+// "read" = the native Rust sibling (wow*Read); "list" = the CLI command.
 export function pickConfigReader(mode: BackendMode): "read" | "list" {
   return mode === "native" ? "read" : "list";
 }
@@ -109,12 +116,28 @@ async function loadConfigSettings(): Promise<ConfigSetting[]> {
   return pickConfigReader(mode) === "read" ? wowConfigRead() : wowConfigList();
 }
 
+// Same native-vs-wsl router as loadConfigSettings, for the Module list page.
+// Native reads the whole ModuleList off the runtime files via Rust; WSL shells
+// `dml wow module list`. Identical .data shape either way.
+async function loadModuleList(): Promise<ModuleList> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowModuleRead() : wowModuleList();
+}
+
+// Same native-vs-wsl router for the Module tuning tab's settings rows. Native
+// fills each row's value + installed via Rust; WSL shells `dml wow config
+// tuning-list`. Identical ModuleTuning[] shape either way.
+async function loadModuleTuning(): Promise<ModuleTuning[]> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowTuningRead() : wowConfigTuningList();
+}
+
 // The shared page caches. Consumed by:
 //   configSettingsCache -> Config.svelte (Settings/Bot World/Auction tabs)
 //   moduleListCache      -> ModuleManager.svelte (`list`) + ModuleTuning.svelte (server modules)
 //   moduleTuningCache    -> ModuleTuning.svelte (`mtSettings`)
 //   configFilesCache     -> ModuleTuning.svelte (which module confs exist)
 export const configSettingsCache = createCachedStore<ConfigSetting[]>(loadConfigSettings);
-export const moduleListCache = createCachedStore<ModuleList>(wowModuleList);
-export const moduleTuningCache = createCachedStore<ModuleTuning[]>(wowConfigTuningList);
+export const moduleListCache = createCachedStore<ModuleList>(loadModuleList);
+export const moduleTuningCache = createCachedStore<ModuleTuning[]>(loadModuleTuning);
 export const configFilesCache = createCachedStore<ConfFile[]>(wowConfigFiles);
