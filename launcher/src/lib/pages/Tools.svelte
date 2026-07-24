@@ -22,12 +22,18 @@
     zamCacheClear,
     wowCacheStatus,
     wowCacheClean,
+    nativeSetupStatus,
+    startDockerDesktop,
+    nativeYqInstall,
+    nativeSoapCopy,
+    nativeDefenderScript,
     type LanAction,
     type ToolName,
     type RealmlistStatus,
     type WslConfigState,
     type PortCheck,
     type CacheEntry,
+    type NativeSetupStatus,
   } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -45,6 +51,102 @@
   function fmtErr(e: unknown): string {
     const err = e as { message?: string; hint?: string };
     return `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+  }
+
+  // --- Native setup (spike/docker-desktop-native) --------------------------
+  // Read-only checks + one-click fixes for what native mode needs. The whole
+  // card renders only when the backend is native (status.native), so WSL mode
+  // is untouched. The read-only status probe is unlocked; the three MUTATING
+  // fixes ship LOCKED.
+  //
+  // NATIVE_SETUP_LOCKED: there is no existing feature flag that fits these
+  // native-only actions (disk-tools is WSL-side; port-proxy is the MySQL LAN
+  // rule), so a `native-setup` key must be added to features.svelte.ts (owned
+  // by the controller — named in this task's concerns). Until it exists,
+  // featureLocked("native-setup") would fail OPEN (unregistered keys are
+  // unlocked), shipping these UNLOCKED — so gate on an always-true constant.
+  // Replace with featureLocked("native-setup") once the key is registered.
+  const NATIVE_SETUP_LOCKED = true;
+
+  let nativeStatus: NativeSetupStatus | null = $state(null);
+  let nsBusy = $state(false);
+  let nsError: string | null = $state(null);
+  let nsNote: string | null = $state(null);
+  let defenderScriptPath: string | null = $state(null);
+
+  async function loadNativeStatus() {
+    nsBusy = true;
+    nsError = null;
+    try {
+      nativeStatus = await nativeSetupStatus();
+    } catch (e) {
+      nsError = fmtErr(e);
+    } finally {
+      nsBusy = false;
+    }
+  }
+
+  onMount(() => {
+    void loadNativeStatus().catch(() => {});
+  });
+
+  async function startDocker() {
+    nsBusy = true;
+    nsError = null;
+    nsNote = null;
+    try {
+      await startDockerDesktop();
+      nsNote =
+        "Docker Desktop is starting — the engine can take a minute to come up. Re-check once the whale icon settles.";
+    } catch (e) {
+      nsError = fmtErr(e);
+    } finally {
+      nsBusy = false;
+    }
+  }
+
+  async function installYq() {
+    nsBusy = true;
+    nsError = null;
+    nsNote = null;
+    try {
+      const r = await nativeYqInstall();
+      nsNote = `yq installed at ${r.path}.`;
+      await loadNativeStatus();
+    } catch (e) {
+      nsError = fmtErr(e);
+    } finally {
+      nsBusy = false;
+    }
+  }
+
+  async function copySoap() {
+    nsBusy = true;
+    nsError = null;
+    nsNote = null;
+    try {
+      const r = await nativeSoapCopy();
+      nsNote = `SOAP credentials copied to ${r.path}.`;
+      await loadNativeStatus();
+    } catch (e) {
+      nsError = fmtErr(e);
+    } finally {
+      nsBusy = false;
+    }
+  }
+
+  async function makeDefenderScript() {
+    nsBusy = true;
+    nsError = null;
+    nsNote = null;
+    defenderScriptPath = null;
+    try {
+      defenderScriptPath = await nativeDefenderScript();
+    } catch (e) {
+      nsError = fmtErr(e);
+    } finally {
+      nsBusy = false;
+    }
   }
 
   // --- LAN play ------------------------------------------------------------
@@ -695,6 +797,121 @@
   <header class="bar">
     <h2>Tools</h2>
   </header>
+
+  {#if nativeStatus && nativeStatus.native}
+    <div class="card">
+      <h3>Native setup</h3>
+      <p class="muted">
+        Native mode runs the server through Docker Desktop with the CLI under Git Bash — no WSL
+        distro. This checks the few things native mode needs and fixes each with one click.
+      </p>
+      {#if nsError}<p class="inline-error">{nsError}</p>{/if}
+
+      <ul class="check-list">
+        <!-- 1. Docker Desktop engine -->
+        <li>
+          <span class="dot" class:ok={nativeStatus.docker.running} class:bad={!nativeStatus.docker.running}></span>
+          <div class="check-body">
+            <strong>Docker Desktop engine</strong>
+            <span class="muted">
+              {nativeStatus.docker.running
+                ? "Running — the server can start."
+                : "Not responding. The engine must be running for the server to start."}
+            </span>
+          </div>
+          {#if !nativeStatus.docker.running}
+            <button class="primary" onclick={startDocker} disabled={nsBusy}>
+              Start Docker Desktop
+            </button>
+          {/if}
+        </li>
+
+        <!-- 2. yq -->
+        <li>
+          <span class="dot" class:ok={nativeStatus.yq.present} class:bad={!nativeStatus.yq.present}></span>
+          <div class="check-body">
+            <strong>yq (YAML tool)</strong>
+            <span class="muted">
+              {nativeStatus.yq.present
+                ? `Present at ${nativeStatus.yq.path}.`
+                : `Missing — needed to read/write the compose config. Will download to ${nativeStatus.yq.path}.`}
+            </span>
+          </div>
+          {#if !nativeStatus.yq.present}
+            <button
+              onclick={installYq}
+              disabled={nsBusy || NATIVE_SETUP_LOCKED}
+              title={NATIVE_SETUP_LOCKED ? LOCKED_HINT : undefined}
+            >
+              Install yq
+            </button>
+          {/if}
+        </li>
+
+        <!-- 3. SOAP creds -->
+        <li>
+          <span
+            class="dot"
+            class:ok={nativeStatus.soap.present}
+            class:bad={!nativeStatus.soap.present}
+          ></span>
+          <div class="check-body">
+            <strong>SOAP credentials</strong>
+            <span class="muted">
+              {#if nativeStatus.soap.present}
+                Present at {nativeStatus.soap.path}.
+              {:else if nativeStatus.soap.distro_available}
+                Missing — can be copied from the dml-arch distro to {nativeStatus.soap.path}.
+              {:else}
+                Missing, and the dml-arch distro isn't available to copy it from. Add
+                {nativeStatus.soap.path} by hand.
+              {/if}
+            </span>
+          </div>
+          {#if !nativeStatus.soap.present && nativeStatus.soap.distro_available}
+            <button
+              onclick={copySoap}
+              disabled={nsBusy || NATIVE_SETUP_LOCKED}
+              title={NATIVE_SETUP_LOCKED ? LOCKED_HINT : undefined}
+            >
+              Copy SOAP credentials
+            </button>
+          {/if}
+        </li>
+
+        <!-- 4. Defender exclusion (optional speed-up) -->
+        <li>
+          <span class="dot info"></span>
+          <div class="check-body">
+            <strong>Speed up native mode (Defender exclusion)</strong>
+            <span class="muted">
+              Optional. Git Bash forks a new process per command, and Defender scans each one
+              (~165ms/fork). Excluding Git, Docker Desktop and the games dir removes that tax.
+              This writes an elevated script to your Downloads — you right-click it and Run as
+              Administrator.
+            </span>
+          </div>
+          <button
+            onclick={makeDefenderScript}
+            disabled={nsBusy || NATIVE_SETUP_LOCKED}
+            title={NATIVE_SETUP_LOCKED ? LOCKED_HINT : undefined}
+          >
+            Create the exclusion script
+          </button>
+        </li>
+      </ul>
+
+      <div class="row">
+        <button onclick={loadNativeStatus} disabled={nsBusy}>Re-check</button>
+      </div>
+      {#if defenderScriptPath}
+        <p class="notice">
+          Script created: {defenderScriptPath} — right-click it → Run with PowerShell (as admin).
+        </p>
+      {/if}
+      {#if nsNote}<p class="notice">{nsNote}</p>{/if}
+    </div>
+  {/if}
 
   <div class="card">
     <h3>LAN play</h3>
@@ -1399,6 +1616,14 @@
   .rl-state { margin: 0; font-size: 14px; }
   .rl-state.good { color: #3fb950; }
   .rl-state.warn { color: #d29922; }
+  .check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+  .check-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .check-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 220px; }
+  .check-body strong { font-size: 13.5px; color: #f0f6fc; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #6e7681; }
+  .dot.ok { background: #3fb950; }
+  .dot.bad { background: #d29922; }
+  .dot.info { background: #58a6ff; }
   .port-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: #8b949e; }
   .port-list li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
   .port-list .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d1d9; }

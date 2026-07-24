@@ -87,6 +87,61 @@ pub fn docker_program() -> OsString {
     )
 }
 
+/// Environment override for the Docker Desktop APP exe (the `Docker Desktop.exe`
+/// GUI, not the `docker` CLI), used by the "Start Docker Desktop" fix action.
+pub const DOCKER_DESKTOP_ENV: &str = "DML_DOCKER_DESKTOP";
+
+/// Known absolute install locations for `Docker Desktop.exe`, tried in order.
+/// Per-user first (matches this box's `%LOCALAPPDATA%\Programs\DockerDesktop`
+/// install — the same tree `candidate_docker_paths` finds the CLI under), then
+/// the system location.
+fn candidate_docker_desktop_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        out.push(PathBuf::from(&local).join("Programs/DockerDesktop/Docker Desktop.exe"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        out.push(PathBuf::from(&pf).join("Docker/Docker/Docker Desktop.exe"));
+    }
+    if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
+        out.push(PathBuf::from(&pf86).join("Docker/Docker/Docker Desktop.exe"));
+    }
+    out
+}
+
+/// Resolve the Docker Desktop app exe. Order: `DML_DOCKER_DESKTOP` override
+/// (used verbatim) → first candidate the predicate accepts → `None`. Unlike the
+/// CLI resolver there is NO bare-name fallback: `Docker Desktop.exe` is never on
+/// PATH, so a miss means "not found" and the caller declines to launch a guess
+/// rather than spawn something arbitrary. Pure, for testing.
+fn resolve_docker_desktop(
+    env_override: Option<OsString>,
+    candidates: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Option<OsString> {
+    if let Some(ov) = env_override {
+        if !ov.is_empty() {
+            return Some(ov);
+        }
+    }
+    for c in candidates {
+        if exists(c) {
+            return Some(c.clone().into_os_string());
+        }
+    }
+    None
+}
+
+/// The Docker Desktop app exe to launch, resolved against the real environment
+/// and filesystem. `None` when no known install location exists.
+pub fn docker_desktop_program() -> Option<OsString> {
+    resolve_docker_desktop(
+        std::env::var_os(DOCKER_DESKTOP_ENV),
+        &candidate_docker_desktop_paths(),
+        |p| p.exists(),
+    )
+}
+
 /// PATH for the docker child: the docker executable's own directory (which
 /// also holds the credential helpers docker invokes by bare name) prepended to
 /// the current PATH. Returns `None` when `program` has no directory component
@@ -394,6 +449,39 @@ mod tests {
         }];
         assert_eq!(game_state(&rows), "stopped");
         assert_eq!(game_state(&[]), "stopped");
+    }
+
+    #[test]
+    fn docker_desktop_override_wins() {
+        let got = resolve_docker_desktop(
+            Some(OsString::from(r"C:\custom\Docker Desktop.exe")),
+            &[PathBuf::from(r"C:\a\Docker Desktop.exe")],
+            |_| true,
+        );
+        assert_eq!(got, Some(OsString::from(r"C:\custom\Docker Desktop.exe")));
+    }
+
+    #[test]
+    fn docker_desktop_first_existing_candidate_wins() {
+        let cands = vec![
+            PathBuf::from(r"C:\missing\Docker Desktop.exe"),
+            PathBuf::from(r"C:\present\Docker Desktop.exe"),
+        ];
+        let got = resolve_docker_desktop(None, &cands, |p| {
+            p == Path::new(r"C:\present\Docker Desktop.exe")
+        });
+        assert_eq!(got, Some(OsString::from(r"C:\present\Docker Desktop.exe")));
+    }
+
+    #[test]
+    fn docker_desktop_none_when_nothing_exists() {
+        // No bare-name fallback: a miss must be None, never a guessed launch.
+        let got = resolve_docker_desktop(
+            None,
+            &[PathBuf::from(r"C:\missing\Docker Desktop.exe")],
+            |_| false,
+        );
+        assert_eq!(got, None);
     }
 
     #[test]

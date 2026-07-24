@@ -1,4 +1,5 @@
 pub mod dml;
+pub mod nativesetup;
 pub mod power;
 pub mod realmlist;
 pub mod watch;
@@ -1890,6 +1891,299 @@ fn defender_hint() -> Result<serde_json::Value, CmdError> {
     Ok(serde_json::json!({"vhdx_dir": base, "command": command}))
 }
 
+// --- Native-mode setup bootstrap (spike/docker-desktop-native) -------------
+//
+// The Tools "Native setup" card checks (read-only) and one-click-fixes what
+// native mode needs: a running Docker Desktop engine, the `yq` binary, the SOAP
+// creds file, and (optionally) Defender exclusions for fork speed. The status
+// probe is read-only; the three mutating fixes (yq download, soap copy,
+// Defender-script generation) are gated FRONTEND-side behind the native-setup
+// feature lock, matching how every other mutating Tools action is locked (the
+// commands themselves don't re-check the flag — the buttons disable).
+
+/// True when this process selected the native (Docker Desktop) backend.
+fn is_native_backend() -> bool {
+    crate::dml::backend::selected() == crate::dml::backend::Backend::Native
+}
+
+/// Where native mode expects the `yq` exe: `DML_YQ_BIN` verbatim if set, else
+/// `<DML_GAMES_DIR>\tools\yq.exe`, else `<USERPROFILE>\dml-native\tools\yq.exe`.
+fn yq_target_path() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("DML_YQ_BIN") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    let base = std::env::var_os("DML_GAMES_DIR")
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|u| std::path::PathBuf::from(u).join("dml-native"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    base.join("tools").join("yq.exe")
+}
+
+/// The Windows-home `~/.dml/soap.env` path the copy action writes to.
+fn windows_soap_env_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(|u| std::path::PathBuf::from(u).join(".dml").join("soap.env"))
+}
+
+/// Whether `docker info` succeeds against the resolved native docker.exe — the
+/// definition of "the engine is running". A missing docker.exe, a down engine
+/// or any non-zero exit all read as not-running.
+fn docker_info_ok(program: &std::ffi::OsStr) -> bool {
+    let mut cmd = std::process::Command::new(program);
+    // `--format` keeps it fast and tiny; info talks to the engine over the
+    // named pipe and needs no credential helper, so PATH is left untouched.
+    cmd.args(["info", "--format", "{{.ServerVersion}}"]);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    matches!(cmd.status(), Ok(s) if s.success())
+}
+
+/// Whether a WSL distro named `distro` is registered (`wsl --list --quiet`).
+/// Used to decide whether the "Copy SOAP credentials" action can offer to pull
+/// the file out of the distro. Any failure reads as "not available".
+fn wsl_distro_present(distro: &str) -> bool {
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.args(["--list", "--quiet"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd.output() {
+        Ok(o) if o.status.success() => {
+            let text = crate::dml::envelope::decode_wsl_output(&o.stdout);
+            text.lines().any(|l| l.trim() == distro)
+        }
+        _ => false,
+    }
+}
+
+/// Read-only aggregate the Native-setup card loads on mount: which backend is
+/// active plus the pass/fail of each native-mode prerequisite. Never mutates.
+#[tauri::command]
+fn native_setup_status() -> Result<serde_json::Value, CmdError> {
+    let docker_prog = crate::dml::native::docker_program();
+    let docker_running = docker_info_ok(&docker_prog);
+    let dp = std::path::Path::new(&docker_prog);
+    let docker_path =
+        (dp.is_absolute() && dp.exists()).then(|| docker_prog.to_string_lossy().into_owned());
+
+    let yq_path = yq_target_path();
+    let yq_present = yq_path.is_file();
+
+    let soap = windows_soap_env_path();
+    let soap_present = soap.as_ref().map(|p| p.is_file()).unwrap_or(false);
+    let soap_path_str = soap
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let distro_available = wsl_distro_present(crate::dml::runner::DISTRO);
+
+    Ok(serde_json::json!({
+        "native": is_native_backend(),
+        "docker": { "running": docker_running, "path": docker_path },
+        "yq": { "present": yq_present, "path": yq_path.to_string_lossy() },
+        "soap": {
+            "present": soap_present,
+            "path": soap_path_str,
+            "distro_available": distro_available,
+        },
+    }))
+}
+
+/// Launch the Docker Desktop app (the fix for a down engine). Just starts the
+/// GUI exe — no elevation, no engine wait; the card tells the user to re-check
+/// once the engine settles. Errors when Docker Desktop isn't installed.
+#[tauri::command]
+fn start_docker_desktop() -> Result<serde_json::Value, CmdError> {
+    let exe = crate::dml::native::docker_desktop_program().ok_or_else(|| {
+        bad_arg("Could not find Docker Desktop.exe -- is Docker Desktop installed?")
+    })?;
+    let mut cmd = std::process::Command::new(&exe);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.spawn()
+        .map_err(|e| bad_arg(format!("could not launch Docker Desktop: {e}")))?;
+    Ok(serde_json::json!({ "launched": true, "path": exe.to_string_lossy() }))
+}
+
+/// Download the pinned mikefarah `yq` Windows exe into the native tools dir and
+/// verify it is a plausible size (>1MB) before saving. Written tmp-then-rename
+/// so a half-download never leaves a truncated yq.exe at the target. LOCKED
+/// frontend-side behind the native-setup flag.
+#[tauri::command]
+async fn native_yq_install() -> Result<serde_json::Value, CmdError> {
+    let target = yq_target_path();
+    tauri::async_runtime::spawn_blocking(move || {
+        let url = crate::nativesetup::yq_download_url();
+        // Default redirect policy is deliberate: the GitHub release URL 302s to
+        // objects.githubusercontent.com, so (unlike the zam client) we must
+        // FOLLOW redirects to reach the asset bytes.
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|e| bad_arg(format!("could not build HTTP client: {e}")))?;
+        let resp = client
+            .get(&url)
+            .send()
+            .map_err(|e| bad_arg(format!("download failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(bad_arg(format!(
+                "download failed: HTTP {}",
+                resp.status().as_u16()
+            )));
+        }
+        let bytes = resp
+            .bytes()
+            .map_err(|e| bad_arg(format!("download read failed: {e}")))?;
+        if (bytes.len() as u64) < crate::nativesetup::YQ_MIN_BYTES {
+            return Err(bad_arg(format!(
+                "downloaded file is only {} bytes -- expected the yq exe (>1MB); not saving",
+                bytes.len()
+            )));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| bad_arg(format!("could not create {}: {e}", parent.display())))?;
+        }
+        let tmp = target.with_extension("exe.download");
+        std::fs::write(&tmp, &bytes)
+            .map_err(|e| bad_arg(format!("could not write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, &target)
+            .map_err(|e| bad_arg(format!("could not place {}: {e}", target.display())))?;
+        Ok(serde_json::json!({
+            "installed": true,
+            "path": target.to_string_lossy(),
+            "bytes": bytes.len(),
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Copy the SOAP creds file out of the dml-arch distro to the Windows home,
+/// stripping CRs. Only meaningful when the distro exists (the card only offers
+/// the button then). LOCKED frontend-side behind the native-setup flag.
+#[tauri::command]
+async fn native_soap_copy() -> Result<serde_json::Value, CmdError> {
+    let dest = windows_soap_env_path()
+        .ok_or_else(|| bad_arg("USERPROFILE is not set -- cannot locate the Windows home"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("wsl.exe");
+        cmd.args([
+            "-d",
+            crate::dml::runner::DISTRO,
+            "-u",
+            crate::dml::runner::USER,
+            "--",
+            "cat",
+            "/home/dml/.dml/soap.env",
+        ]);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| bad_arg(format!("could not run wsl cat: {e}")))?;
+        if !out.status.success() {
+            let err = crate::dml::envelope::decode_wsl_output(&out.stderr);
+            return Err(bad_arg(format!(
+                "could not read soap.env from the {} distro: {}",
+                crate::dml::runner::DISTRO,
+                err.trim()
+            )));
+        }
+        let cleaned = crate::nativesetup::strip_cr(&crate::dml::envelope::decode_wsl_output(
+            &out.stdout,
+        ));
+        if cleaned.trim().is_empty() {
+            return Err(bad_arg("soap.env in the distro is empty -- nothing to copy"));
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| bad_arg(format!("could not create {}: {e}", parent.display())))?;
+        }
+        std::fs::write(&dest, cleaned.as_bytes())
+            .map_err(|e| bad_arg(format!("could not write {}: {e}", dest.display())))?;
+        Ok(serde_json::json!({ "copied": true, "path": dest.to_string_lossy() }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// The Git install root to exclude — `DML_BASH`'s Git root if that resolves,
+/// else the standard install dir.
+fn git_install_dir() -> String {
+    if let Some(b) = std::env::var_os("DML_BASH") {
+        if !b.is_empty() {
+            if let Some(root) = crate::nativesetup::git_root_from_bash(&b.to_string_lossy()) {
+                return root;
+            }
+        }
+    }
+    r"C:\Program Files\Git".to_string()
+}
+
+/// The Docker Desktop bin dir (holding docker.exe) to exclude, when docker
+/// resolved to an absolute path.
+fn docker_bin_dir_for_exclusion() -> Option<String> {
+    let prog = crate::dml::native::docker_program();
+    let p = std::path::Path::new(&prog);
+    if p.is_absolute() {
+        p.parent().map(|d| d.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
+/// Drop the elevated Defender-exclusion PowerShell script into Downloads and
+/// open Explorer at it — same generate-and-run-as-admin flow as the shrink /
+/// mysql-expose scripts (NO elevation from the app; the header shouts the
+/// right-click-run-as-admin instruction and the WHY). Excludes Git, the Docker
+/// Desktop bin dir, and the games dir. LOCKED frontend-side behind the
+/// native-setup flag.
+#[tauri::command]
+fn native_defender_script() -> Result<String, CmdError> {
+    let profile = std::env::var("USERPROFILE")
+        .map_err(|_| bad_arg("USERPROFILE is not set -- cannot locate Downloads"))?;
+    let mut paths: Vec<String> = vec![git_install_dir()];
+    if let Some(d) = docker_bin_dir_for_exclusion() {
+        paths.push(d);
+    }
+    if let Some(g) = std::env::var_os("DML_GAMES_DIR").filter(|s| !s.is_empty()) {
+        paths.push(g.to_string_lossy().into_owned());
+    }
+    let refs: Vec<&str> = paths.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+
+    let dir = std::path::PathBuf::from(&profile).join("Downloads");
+    let path = dir.join("dml-native-defender-exclusions.ps1");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| bad_arg(format!("could not create {}: {e}", dir.display())))?;
+    std::fs::write(&path, crate::nativesetup::defender_exclusion_script(&refs))
+        .map_err(|e| bad_arg(format!("could not write {}: {e}", path.display())))?;
+    let select = format!("/select,{}", path.display());
+    let mut cmd = std::process::Command::new("explorer");
+    cmd.arg(&select);
+    let _ = cmd.spawn(); // best-effort -- the returned path is shown either way
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // --- Enrichment-cache maintenance (Batch 6 C) ------------------------------
 //
 // Two runtime caches, on two filesystems:
@@ -2300,6 +2594,11 @@ pub fn run() {
             generate_compact_script,
             generate_mysql_proxy_script,
             defender_hint,
+            native_setup_status,
+            start_docker_desktop,
+            native_yq_install,
+            native_soap_copy,
+            native_defender_script,
             save_text_file,
             set_auto_shutdown,
             set_keep_awake,

@@ -1227,6 +1227,41 @@ export async function defenderHint(): Promise<{ vhdx_dir: string | null; command
   return await invoke("defender_hint");
 }
 
+// --- Native-mode setup bootstrap (spike/docker-desktop-native) -------------
+// Read-only status the "Native setup" Tools card loads on mount, plus the
+// one-click fixes. `native` is true only when DML_BACKEND=native — the card
+// renders only then, so WSL mode stays uncluttered. The three mutating fixes
+// (yqInstall / soapCopy / defenderScript) are LOCKED frontend-side behind the
+// native-setup feature lock; startDockerDesktop just launches the app.
+export interface NativeSetupStatus {
+  native: boolean;
+  docker: { running: boolean; path: string | null };
+  yq: { present: boolean; path: string };
+  soap: { present: boolean; path: string; distro_available: boolean };
+}
+
+export async function nativeSetupStatus(): Promise<NativeSetupStatus> {
+  return await invoke("native_setup_status");
+}
+
+export async function startDockerDesktop(): Promise<{ launched: boolean; path: string }> {
+  return await invoke("start_docker_desktop");
+}
+
+export async function nativeYqInstall(): Promise<{ installed: boolean; path: string; bytes: number }> {
+  return await invoke("native_yq_install");
+}
+
+export async function nativeSoapCopy(): Promise<{ copied: boolean; path: string }> {
+  return await invoke("native_soap_copy");
+}
+
+// Writes the elevated Defender-exclusion script into Downloads and opens
+// Explorer at it; returns the script path (run it as Administrator yourself).
+export async function nativeDefenderScript(): Promise<string> {
+  return await invoke("native_defender_script");
+}
+
 // --- Enrichment-cache maintenance (Batch 6 C) ------------------------------
 // Two RUNTIME caches (safe to wipe -- they repopulate on demand): the
 // Windows-side 3D-model/icon cache (zam) and the WSL-side item tooltip/icon
