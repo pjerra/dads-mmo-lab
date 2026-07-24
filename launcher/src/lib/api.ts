@@ -363,6 +363,16 @@ export interface ModuleList {
 export async function wowModuleList(): Promise<ModuleList> {
   return await invoke("wow_module_list");
 }
+// NATIVE-MODE fast sibling of wowModuleList: identical ModuleList shape, but the
+// launcher's Rust core fills every dynamic field (installed/conf/head/date,
+// cloned/deployed/warn, sql installed, rebuild_pending, ale_ready) straight off
+// the runtime files (no bash/fork; only local git reads for installed clones).
+// Call ONLY when backendMode() === "native"; in wsl mode call wowModuleList. The
+// static catalog is fetched once per session and cached in Rust (warmed at
+// startup).
+export async function wowModuleRead(): Promise<ModuleList> {
+  return await invoke("wow_module_read");
+}
 
 export async function wowCommands(): Promise<ModCommands[]> {
   const data = await invoke<{ mods: ModCommands[] }>("wow_commands");
@@ -707,6 +717,16 @@ export interface ModuleTuning {
 }
 export async function wowConfigTuningList(): Promise<ModuleTuning[]> {
   const data = await invoke<{ settings: ModuleTuning[] }>("wow_config_tuning_list");
+  return data.settings;
+}
+// NATIVE-MODE fast sibling of wowConfigTuningList: identical ModuleTuning[]
+// shape, but the launcher's Rust core reads each row's live value + installed
+// state straight off the runtime files (no bash/fork; Docker may be closed).
+// Call ONLY when backendMode() === "native"; in wsl mode call
+// wowConfigTuningList. The static tuning registry is fetched once per session
+// and cached in Rust (and warmed at startup).
+export async function wowTuningRead(): Promise<ModuleTuning[]> {
+  const data = await invoke<{ settings: ModuleTuning[] }>("wow_tuning_read");
   return data.settings;
 }
 export async function wowConfigTuningSet(

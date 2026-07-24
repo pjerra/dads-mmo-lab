@@ -160,6 +160,19 @@ pub fn route_conf(env: &str) -> Option<(String, String)> {
     }
 }
 
+/// Host path of a conf file under a title dir — the free-function form of
+/// `_cfg_conf_path` (40-config.sh:308), shared by the config reader and the
+/// module-tuning reader (`dml::tuning`). worldserver/authserver live directly
+/// in `env/dist/etc`; every other conf (all module confs) under
+/// `env/dist/etc/modules`.
+pub fn conf_path_in(title_dir: &Path, file: &str) -> PathBuf {
+    let etc = title_dir.join("env").join("dist").join("etc");
+    match file {
+        "worldserver.conf" | "authserver.conf" => etc.join(file),
+        _ => etc.join("modules").join(file),
+    }
+}
+
 /// Reads live config VALUES straight off the native runtime files — no bash, no
 /// yq, no fork, no engine. Built once per `wow_config_read` call: the override
 /// env map is parsed up front (single file read); conf files are read lazily and
@@ -202,11 +215,7 @@ impl ConfigReader {
     /// worldserver/authserver live in `env/dist/etc`, every other conf under
     /// `env/dist/etc/modules`.
     fn conf_path(&self, file: &str) -> PathBuf {
-        let etc = self.title_dir.join("env").join("dist").join("etc");
-        match file {
-            "worldserver.conf" | "authserver.conf" => etc.join(file),
-            _ => etc.join("modules").join(file),
-        }
+        conf_path_in(&self.title_dir, file)
     }
 
     /// Quote-stripped value of `key` in `path`, memoising the parsed file. `""`

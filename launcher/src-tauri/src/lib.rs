@@ -44,6 +44,15 @@ pub struct AppState {
     /// reads only the live VALUES itself from disk (see `dml::config`). `None`
     /// until the first native read populates it.
     pub config_registry: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
+    /// Native-mode cache of the STATIC tuning registry rows (`dml wow config
+    /// tuning-registry --json` → `.data.settings[]`, 13 rows). Same one-shot
+    /// contract as `config_registry`: `wow_tuning_read` fetches it once, then
+    /// reads only the live value/installed fields itself (see `dml::tuning`).
+    pub tuning_registry: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
+    /// Native-mode cache of the STATIC module catalog (`dml wow module catalog
+    /// --json` → `.data`). `wow_module_read` fetches it once, then fills every
+    /// dynamic per-row field itself from disk (see `dml::modules`).
+    pub module_catalog: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -933,36 +942,117 @@ async fn wow_config_read(state: State<'_, AppState>) -> Result<serde_json::Value
     let runner = state.runner.clone();
     let cache = state.config_registry.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        // Static registry: fetched at most once per session, then reused. The
-        // lock is held across the one-time CLI fetch so racing first-calls
-        // don't each spawn the CLI.
-        let rows: Vec<serde_json::Value> = {
-            let mut guard = cache
-                .lock()
-                .map_err(|_| CmdError { code: "INTERNAL".into(), message: "config registry cache poisoned".into(), hint: String::new() })?;
-            match guard.as_ref() {
-                Some(rows) => rows.clone(),
-                None => {
-                    let env = runner
-                        .run_json(&["wow", "config", "registry"])
-                        .map_err(CmdError::from)?;
-                    let data = envelope_to_result(env)?;
-                    let rows = data
-                        .get("settings")
-                        .and_then(|v| v.as_array())
-                        .cloned()
-                        .ok_or_else(|| CmdError {
-                            code: "CLI_BAD_OUTPUT".into(),
-                            message: "config registry response missing settings[]".into(),
-                            hint: "Is the dml CLI up to date (has `wow config registry`)?".into(),
-                        })?;
-                    *guard = Some(rows.clone());
-                    rows
-                }
-            }
-        };
+        let rows = fetch_registry_rows(
+            &runner,
+            &cache,
+            &["wow", "config", "registry"],
+            "config registry",
+        )?;
         let mut reader = crate::dml::config::ConfigReader::from_env();
         Ok(reader.assemble(&rows))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Fetch-once-and-cache a `…registry`/`…catalog` arm that returns
+/// `.data.settings[]` as an array of rows. The lock is held across the one-time
+/// CLI fetch so racing first-calls don't each spawn the CLI. Shared by
+/// `wow_config_read`, `wow_tuning_read`, and the startup prefetch.
+fn fetch_registry_rows(
+    runner: &DmlRunner,
+    cache: &Mutex<Option<Vec<serde_json::Value>>>,
+    args: &[&str],
+    label: &str,
+) -> Result<Vec<serde_json::Value>, CmdError> {
+    let mut guard = cache.lock().map_err(|_| CmdError {
+        code: "INTERNAL".into(),
+        message: format!("{label} cache poisoned"),
+        hint: String::new(),
+    })?;
+    if let Some(rows) = guard.as_ref() {
+        return Ok(rows.clone());
+    }
+    let env = runner.run_json(args).map_err(CmdError::from)?;
+    let data = envelope_to_result(env)?;
+    let rows = data
+        .get("settings")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .ok_or_else(|| CmdError {
+            code: "CLI_BAD_OUTPUT".into(),
+            message: format!("{label} response missing settings[]"),
+            hint: "Is the dml CLI up to date?".into(),
+        })?;
+    *guard = Some(rows.clone());
+    Ok(rows)
+}
+
+/// Fetch-once-and-cache the module catalog `.data` object (families +
+/// placeholders). Same locking contract as `fetch_registry_rows`.
+fn fetch_catalog_data(
+    runner: &DmlRunner,
+    cache: &Mutex<Option<serde_json::Value>>,
+) -> Result<serde_json::Value, CmdError> {
+    let mut guard = cache.lock().map_err(|_| CmdError {
+        code: "INTERNAL".into(),
+        message: "module catalog cache poisoned".into(),
+        hint: String::new(),
+    })?;
+    if let Some(data) = guard.as_ref() {
+        return Ok(data.clone());
+    }
+    let env = runner.run_json(&["wow", "module", "catalog"]).map_err(CmdError::from)?;
+    let data = envelope_to_result(env)?;
+    if data.get("families").is_none() {
+        return Err(CmdError {
+            code: "CLI_BAD_OUTPUT".into(),
+            message: "module catalog response missing families".into(),
+            hint: "Is the dml CLI up to date (has `wow module catalog`)?".into(),
+        });
+    }
+    *guard = Some(data.clone());
+    Ok(data)
+}
+
+/// NATIVE-MODE fast read of the module-tuning settings: same shape as
+/// `wow_config_tuning_list` (`{"settings":[…13 rows…]}`) with zero bash/fork on
+/// the hot path. The static registry is fetched once per session and cached;
+/// each row's `value` + `installed` are then read straight off the runtime
+/// files in Rust (see `dml::tuning`). Native mode only — WSL keeps calling
+/// `wow_config_tuning_list`.
+#[tauri::command]
+async fn wow_tuning_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    let cache = state.tuning_registry.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let rows = fetch_registry_rows(
+            &runner,
+            &cache,
+            &["wow", "config", "tuning-registry"],
+            "tuning registry",
+        )?;
+        let mut reader = crate::dml::tuning::TuningReader::from_env();
+        Ok(reader.assemble(&rows))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the module list: same shape as `wow_module_list`
+/// (`{families:{cpp,lua,sql}, rebuild_pending, ale_ready}`) with zero bash/fork
+/// on the hot path (only LOCAL `git` reads for installed clones' head/date). The
+/// static catalog is fetched once per session and cached; every dynamic field
+/// is then filled from the runtime files in Rust (see `dml::modules`). Native
+/// mode only — WSL keeps calling `wow_module_list`.
+#[tauri::command]
+async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    let cache = state.module_catalog.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let catalog = fetch_catalog_data(&runner, &cache)?;
+        let reader = crate::dml::modules::ModuleReader::from_env();
+        Ok(reader.assemble(&catalog))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2516,6 +2606,43 @@ pub fn run() {
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
             config_registry: Arc::new(Mutex::new(None)),
+            tuning_registry: Arc::new(Mutex::new(None)),
+            module_catalog: Arc::new(Mutex::new(None)),
+        })
+        .setup(|app| {
+            // Startup registry prefetch (native mode only): warm the three
+            // static caches (config + tuning + module catalog) off the main
+            // thread so the first Settings/Tuning/Modules open pays no
+            // one-time CLI-fetch wait. NON-BLOCKING and best-effort — every
+            // error is swallowed (the native files may be absent, Docker may
+            // be closed), and it must never delay or panic app startup. In WSL
+            // mode it does nothing: those pages keep calling the CLI directly.
+            if crate::dml::backend::selected() == crate::dml::backend::Backend::Native {
+                let state = app.state::<AppState>();
+                let runner = state.runner.clone();
+                let config_cache = state.config_registry.clone();
+                let tuning_cache = state.tuning_registry.clone();
+                let catalog_cache = state.module_catalog.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let _ = fetch_registry_rows(
+                            &runner,
+                            &config_cache,
+                            &["wow", "config", "registry"],
+                            "config registry",
+                        );
+                        let _ = fetch_registry_rows(
+                            &runner,
+                            &tuning_cache,
+                            &["wow", "config", "tuning-registry"],
+                            "tuning registry",
+                        );
+                        let _ = fetch_catalog_data(&runner, &catalog_cache);
+                    })
+                    .await;
+                });
+            }
+            Ok(())
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -2605,6 +2732,8 @@ pub fn run() {
             wow_entity_info,
             wow_config_list,
             wow_config_read,
+            wow_tuning_read,
+            wow_module_read,
             backend_mode,
             wow_config_set,
             wow_config_tuning_list,
