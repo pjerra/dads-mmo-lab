@@ -631,6 +631,22 @@ export async function wowConfigList(): Promise<ConfigSetting[]> {
   const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_list");
   return data.settings;
 }
+// Which backend the launcher process selected. The frontend router uses this
+// to decide whether to fast-path config reads through Rust (native) or keep
+// shelling the CLI (wsl). Cheap and pure — safe to call on mount and cache.
+export type BackendMode = "native" | "wsl";
+export async function backendMode(): Promise<BackendMode> {
+  return await invoke<BackendMode>("backend_mode");
+}
+// NATIVE-MODE fast sibling of wowConfigList: identical ConfigSetting[] shape,
+// but the launcher's Rust core reads the live values straight off the runtime
+// files (no bash/yq/fork; Docker may be closed). Call this ONLY when
+// backendMode() === "native"; in wsl mode call wowConfigList instead. The
+// static registry is fetched from the CLI once per session and cached in Rust.
+export async function wowConfigRead(): Promise<ConfigSetting[]> {
+  const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_read");
+  return data.settings;
+}
 export async function wowConfigSet(
   key: string,
   value: string,

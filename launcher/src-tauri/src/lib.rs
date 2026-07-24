@@ -38,6 +38,12 @@ pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
     pub install: Arc<Mutex<Option<InstallSlot>>>,
     pub auto_shutdown: Arc<Mutex<AutoShutdownCtl>>,
+    /// Native-mode cache of the STATIC config registry rows (`dml wow config
+    /// registry --json` → `.data.settings[]`). The registry never changes
+    /// within a session, so `wow_config_read` fetches it at most once and then
+    /// reads only the live VALUES itself from disk (see `dml::config`). `None`
+    /// until the first native read populates it.
+    pub config_registry: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -899,6 +905,67 @@ async fn wow_entity_info(
 #[tauri::command]
 async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "config".into(), "list".into()]).await
+}
+
+/// Which orchestration backend this process selected — `"native"` (Docker
+/// Desktop, `DML_BACKEND=native`) or `"wsl"` (default). The single seam the
+/// frontend router (T3) reads to decide whether to call the fast native
+/// `wow_config_read` or the WSL `wow_config_list`. Cheap and pure: no spawn.
+#[tauri::command]
+fn backend_mode() -> &'static str {
+    match crate::dml::backend::selected() {
+        crate::dml::backend::Backend::Native => "native",
+        crate::dml::backend::Backend::Wsl => "wsl",
+    }
+}
+
+/// NATIVE-MODE fast read of the config settings: returns the SAME shape as
+/// `wow_config_list` (`{"settings":[…66 rows…]}`) with zero bash/yq/fork on the
+/// hot path. The static registry is fetched from the CLI ONCE per session (the
+/// only subprocess here, and only on the first call) and cached; every live
+/// `value` is then read directly off the runtime files in Rust (see
+/// `dml::config`). Docker Desktop may be closed — these are pure file reads.
+///
+/// This command is for native mode only. In WSL mode the frontend keeps calling
+/// `wow_config_list`; `backend_mode` tells it which to use.
+#[tauri::command]
+async fn wow_config_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    let runner = state.runner.clone();
+    let cache = state.config_registry.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        // Static registry: fetched at most once per session, then reused. The
+        // lock is held across the one-time CLI fetch so racing first-calls
+        // don't each spawn the CLI.
+        let rows: Vec<serde_json::Value> = {
+            let mut guard = cache
+                .lock()
+                .map_err(|_| CmdError { code: "INTERNAL".into(), message: "config registry cache poisoned".into(), hint: String::new() })?;
+            match guard.as_ref() {
+                Some(rows) => rows.clone(),
+                None => {
+                    let env = runner
+                        .run_json(&["wow", "config", "registry"])
+                        .map_err(CmdError::from)?;
+                    let data = envelope_to_result(env)?;
+                    let rows = data
+                        .get("settings")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .ok_or_else(|| CmdError {
+                            code: "CLI_BAD_OUTPUT".into(),
+                            message: "config registry response missing settings[]".into(),
+                            hint: "Is the dml CLI up to date (has `wow config registry`)?".into(),
+                        })?;
+                    *guard = Some(rows.clone());
+                    rows
+                }
+            }
+        };
+        let mut reader = crate::dml::config::ConfigReader::from_env();
+        Ok(reader.assemble(&rows))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
 #[tauri::command]
@@ -2448,6 +2515,7 @@ pub fn run() {
             )),
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
+            config_registry: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -2536,6 +2604,8 @@ pub fn run() {
             wow_achievements,
             wow_entity_info,
             wow_config_list,
+            wow_config_read,
+            backend_mode,
             wow_config_set,
             wow_config_tuning_list,
             wow_config_tuning_set,
