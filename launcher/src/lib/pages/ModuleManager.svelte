@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowModuleList,
     wowModuleInstall,
     wowModuleRemove,
     wowModuleRebuild,
@@ -61,6 +60,7 @@
   } from "$lib/module-tabs";
   import ModuleTuning from "$lib/ModuleTuning.svelte";
   import ModuleFiles from "$lib/ModuleFiles.svelte";
+  import { moduleListCache } from "$lib/page-cache.svelte";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -69,7 +69,11 @@
   // the Config accordion gave those views.
   let tab: ModuleTab = $state("modules");
 
-  let list: ModuleList | null = $state(null);
+  // Backed by the shared module-list cache (page-cache.svelte) so re-opening
+  // the Modules page renders the last-loaded modules INSTANTLY while refresh()
+  // updates them in the background. The Tuning tab's server-module cards read
+  // the same cache, so an install/remove here is reflected there too.
+  const list = $derived<ModuleList | null>(moduleListCache.store.data);
   let error: string | null = $state(null);
   let note: string | null = $state(null);
   // Single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/
@@ -206,7 +210,9 @@
     confirmingLuaRemove = null; confirmingSqlRemove = null;
     repairOpen = null; confirmingRepair = false;
     confirmingClean = false; confirmingUpdate = false;
-    try { list = await wowModuleList(); ensureBackupDefaults(); } catch (e) { showErr(e); }
+    await moduleListCache.refresh();
+    if (moduleListCache.store.error) error = moduleListCache.store.error;
+    else ensureBackupDefaults();
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
     try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
   }

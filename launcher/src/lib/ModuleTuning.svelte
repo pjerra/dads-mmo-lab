@@ -20,10 +20,7 @@
   // `active` gates the lazy loads the old in-Config `tab` checks gated.
   import {
     wowConfigSet,
-    wowConfigFiles,
     wowConsoleSend,
-    wowModuleList,
-    wowConfigTuningList,
     wowConfigTuningSet,
     wowConfigConfKeys,
     wowModuleUpdate,
@@ -32,6 +29,7 @@
     type CppModule,
     type ModuleTuning,
   } from "$lib/api";
+  import { configFilesCache, moduleListCache, moduleTuningCache } from "$lib/page-cache.svelte";
   import {
     confKeyHint,
     filterConfKeys,
@@ -49,6 +47,7 @@
   import { moduleUpdates, checkBadge, versionLabel } from "$lib/module-updates.svelte";
   import { canOfferUpdate, repoAfterUpdate, updateDoneNote, updatesWithServer } from "$lib/module-tabs";
   import { openUrl } from "@tauri-apps/plugin-opener";
+  import { untrack } from "svelte";
 
   // `onupdated` lets the owning Modules page refresh its own module list
   // after a successful per-module update, so the rebuild banner / pending
@@ -71,16 +70,21 @@
   let aleNote: string | null = $state(null);
   let liveNote = $state(false);
 
-  let mtSettings = $state<ModuleTuning[]>([]);
-  let mtLoaded = $state(false);
+  // All three heavy reads are backed by the shared module-level caches
+  // (page-cache.svelte) so re-opening the Modules → Tuning tab renders the
+  // last-loaded cards INSTANTLY; the activation effects below refresh in the
+  // background. `mtEdits` (staged, unsaved input) stays component-local and is
+  // NEVER wiped by a background refresh -- only by an explicit save/reset.
+  const mtSettings = $derived<ModuleTuning[]>(moduleTuningCache.store.data ?? []);
+  const mtLoaded = $derived(moduleTuningCache.store.loaded);
   let mtEdits: Record<string, string> = $state({});
   let mtReloadPending = $state(false); // a lua knob changed -> reload ALE to apply
 
   // Server-modules inputs: module list (installed + conf_name) x config files
-  // (which confs actually exist under env/dist/etc/modules).
-  let smLoaded = $state(false);
-  let smCpp = $state<CppModule[]>([]);
-  let smFiles = $state<ConfFile[]>([]);
+  // (which confs actually exist under env/dist/etc/modules) -- both cached.
+  const smCpp = $derived<CppModule[]>(moduleListCache.store.data?.families.cpp ?? []);
+  const smFiles = $derived<ConfFile[]>(configFilesCache.store.data ?? []);
+  const smLoaded = $derived(moduleListCache.store.loaded && configFilesCache.store.loaded);
   const smModules = $derived(installedConfModules(smCpp, smFiles));
   // key -> full module row, for the version line + GitHub link per card.
   const cppByKey = $derived(new Map(smCpp.map((c) => [c.key, c])));
@@ -100,35 +104,38 @@
 
   const buf = termBuf("config");
 
+  // Refresh the tuning cache. Used by the activation effect (background) AND
+  // by the save flows -- but only the save flows pass `saved` to clear staged
+  // edits. A background refresh (no `saved`) must NEVER touch mtEdits, or a
+  // tab switch would wipe the user's unsaved input.
   async function loadModuleTuning(saved?: string[]) {
     error = null;
-    try {
-      mtSettings = await wowConfigTuningList();
-      // A per-card save must not wipe the OTHER cards' pending curated edits
-      // -- drop only the just-saved keys (same pattern as the settings tabs).
-      mtEdits = saved ? clearSavedEdits(mtEdits, saved) : {};
-      mtLoaded = true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    await moduleTuningCache.refresh();
+    if (moduleTuningCache.store.error) {
+      error = moduleTuningCache.store.error;
+      return;
     }
+    // A per-card save must not wipe the OTHER cards' pending curated edits --
+    // drop only the just-saved keys (same pattern as the settings tabs).
+    if (saved) mtEdits = clearSavedEdits(mtEdits, saved);
   }
   async function loadServerModules() {
-    try {
-      const [ml, files] = await Promise.all([wowModuleList(), wowConfigFiles()]);
-      smCpp = ml.families.cpp;
-      smFiles = files;
-      smLoaded = true;
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
-    }
+    error = null;
+    await Promise.all([moduleListCache.refresh(), configFilesCache.refresh()]);
+    const e = moduleListCache.store.error ?? configFilesCache.store.error;
+    if (e) error = e;
   }
+  // First activation loads fresh; a re-open renders cached cards immediately
+  // and this refreshes them in the background (single-flight in the cache).
+  // untrack() keeps the effect depending ONLY on `active` -- the load helpers
+  // read the caches' internal `loading`/`error` state synchronously, and
+  // tracking those would turn each refresh into a re-trigger loop.
   $effect(() => {
-    if (active && !mtLoaded) void loadModuleTuning();
-  });
-  $effect(() => {
-    if (active && !smLoaded) void loadServerModules();
+    if (!active) return;
+    untrack(() => {
+      void loadModuleTuning();
+      void loadServerModules();
+    });
   });
   // Switching tabs keeps this component mounted -- one-shot notes must not
   // survive a leave-and-return (mirrors the old in-Config tab-change reset).

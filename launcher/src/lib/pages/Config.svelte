@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
-    wowConfigList,
     wowConfigSet,
     wowConfigPbKeys,
     wowConsoleSend,
@@ -16,6 +15,7 @@
     type AccountwideState,
     type AwSubsystem,
   } from "$lib/api";
+  import { configSettingsCache } from "$lib/page-cache.svelte";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
@@ -48,7 +48,12 @@
     (CONFIG_TABS as string[]).includes(view) ? (view as ConfigTab) : "settings",
   );
   let tabLabel = $derived(TAB_LABELS[tab]);
-  let settings: ConfigSetting[] = $state([]);
+  // Backed by the shared module-level cache (page-cache.svelte): re-opening
+  // this page renders the last-loaded rows INSTANTLY, while load() refreshes
+  // in the background. In native mode the cache's refresh routes through the
+  // fast in-process Rust read (wowConfigRead); in WSL mode it stays on the
+  // CLI (wowConfigList) — identical to today.
+  const settings = $derived<ConfigSetting[]>(configSettingsCache.store.data ?? []);
   let edits: Record<string, string> = $state({});
   let error: string | null = $state(null);
   let saving = $state(false);
@@ -333,14 +338,18 @@
   // (mount / manual) starts from a clean edits map.
   async function load(saved?: string[]) {
     error = null;
-    try {
-      settings = await wowConfigList();
-      edits = saved ? clearSavedEdits(edits, saved) : {};
-    } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+    await configSettingsCache.refresh();
+    if (configSettingsCache.store.error) {
+      // A failed reload keeps the previous rows (the cache retains them) and
+      // leaves `edits` untouched -- same as the old try/catch, which never
+      // reached the edits reset on error.
+      error = configSettingsCache.store.error;
+      return;
     }
+    edits = saved ? clearSavedEdits(edits, saved) : {};
   }
+  // First open loads fresh; a re-open renders the cached rows immediately and
+  // this refreshes them in the background.
   onMount(() => void load());
 
   async function saveSettings(): Promise<boolean> {
