@@ -59,14 +59,11 @@
   // is untouched. The read-only status probe is unlocked; the three MUTATING
   // fixes ship LOCKED.
   //
-  // NATIVE_SETUP_LOCKED: there is no existing feature flag that fits these
-  // native-only actions (disk-tools is WSL-side; port-proxy is the MySQL LAN
-  // rule), so a `native-setup` key must be added to features.svelte.ts (owned
-  // by the controller — named in this task's concerns). Until it exists,
-  // featureLocked("native-setup") would fail OPEN (unregistered keys are
-  // unlocked), shipping these UNLOCKED — so gate on an always-true constant.
-  // Replace with featureLocked("native-setup") once the key is registered.
-  const NATIVE_SETUP_LOCKED = true;
+  // NATIVE_SETUP_LOCKED gates the three mutating native-setup fixes behind the
+  // registered `native-setup` feature flag (added to features.svelte.ts), so
+  // they stay locked until the user enables untested features and smoke-tests
+  // per docs/SMOKE-TESTS.md.
+  const NATIVE_SETUP_LOCKED = featureLocked("native-setup");
 
   let nativeStatus: NativeSetupStatus | null = $state(null);
   let nsBusy = $state(false);
