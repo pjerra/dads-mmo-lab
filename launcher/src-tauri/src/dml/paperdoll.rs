@@ -39,7 +39,7 @@
 use serde_json::{json, Value};
 
 use super::db::{self, Database, DbConfig, DbError, QueryResult};
-use super::pages::{cell_text, num_token, sql_escape};
+use super::pages::{cell_text, num_token};
 
 /// `true` when `name` passes the CLI's `_valid_charname` allowlist
 /// (`^[A-Za-z0-9_]{1,12}$`). The command layer rejects anything else with
@@ -50,36 +50,33 @@ pub fn valid_charname(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// The shared FROM/JOIN/WHERE tail of both paperdoll SELECTs, with `name`
-/// escaped for the single-quoted literal (port of the `pd_join` heredoc).
-fn join_tail(name: &str) -> String {
-    format!(
-        "FROM characters c \
-         JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18 \
-         JOIN item_instance ii ON ii.guid=ci.item \
-         JOIN acore_world.item_template it ON it.entry=ii.itemEntry \
-         WHERE c.name='{}' ORDER BY ci.slot;",
-        sql_escape(name)
-    )
-}
+/// The shared FROM/JOIN/WHERE tail of both paperdoll SELECTs (port of the
+/// `pd_join` heredoc), with `name` as a bound `?` parameter rather than a
+/// spliced-and-escaped literal (finding #1) — the caller ([`read_paperdoll`])
+/// binds the already-[`valid_charname`]-checked name to this placeholder.
+const JOIN_TAIL: &str = "FROM characters c \
+     JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18 \
+     JOIN item_instance ii ON ii.guid=ci.item \
+     JOIN acore_world.item_template it ON it.entry=ii.itemEntry \
+     WHERE c.name=? ORDER BY ci.slot;";
 
-/// The NEW-schema SELECT (discrete appearance columns). 17 columns.
-pub fn new_schema_sql(name: &str) -> String {
+/// The NEW-schema SELECT (discrete appearance columns). 17 columns. `?` binds
+/// to the character name — see [`JOIN_TAIL`].
+pub fn new_schema_sql() -> String {
     format!(
         "SELECT c.name,c.level,c.class,c.money,c.race,c.gender,\
          c.skin,c.face,c.hairStyle,c.hairColor,c.facialStyle,\
-         ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid {}",
-        join_tail(name)
+         ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid {JOIN_TAIL}"
     )
 }
 
-/// The OLD-schema SELECT (packed `playerBytes`/`playerBytes2`). 15 columns.
-pub fn old_schema_sql(name: &str) -> String {
+/// The OLD-schema SELECT (packed `playerBytes`/`playerBytes2`). 15 columns. `?`
+/// binds to the character name — see [`JOIN_TAIL`].
+pub fn old_schema_sql() -> String {
     format!(
         "SELECT c.name,c.level,c.class,c.money,c.race,c.gender,\
          c.playerBytes,c.playerBytes2,\
-         ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid {}",
-        join_tail(name)
+         ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid {JOIN_TAIL}"
     )
 }
 
@@ -192,14 +189,15 @@ fn equipped_item(row: &[String], base: usize) -> Value {
 /// connection/other failure is the [`DbError`] (caller -> `DB_UNREACHABLE`).
 /// `name` must already be [`valid_charname`]-validated by the caller.
 pub fn read_paperdoll(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
-    match db::query(cfg, Database::Characters, &new_schema_sql(name)) {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
+    match db::query_with_params(cfg, Database::Characters, &new_schema_sql(), params.clone()) {
         Ok(res) => Ok(assemble_new(&res)),
         Err(DbError::Query(_)) => {
             // NEW columns absent -> old packed schema. A genuine unreachable-DB
             // error would have been DbError::Unreachable and is propagated above
             // by matching only Query(_) here; the old attempt then surfaces its
             // own error faithfully (both bash attempts error -> DB_UNREACHABLE).
-            let res = db::query(cfg, Database::Characters, &old_schema_sql(name))?;
+            let res = db::query_with_params(cfg, Database::Characters, &old_schema_sql(), params)?;
             Ok(assemble_old(&res))
         }
         Err(e) => Err(e),
@@ -235,15 +233,16 @@ mod tests {
 
     #[test]
     fn sql_contains_join_and_slot_range() {
-        let s = new_schema_sql("Hypeer");
+        let s = new_schema_sql();
         assert!(s.contains("c.skin,c.face,c.hairStyle,c.hairColor,c.facialStyle"));
         assert!(s.contains("ci.slot BETWEEN 0 AND 18"));
         assert!(s.contains("acore_world.item_template it"));
-        assert!(s.contains("WHERE c.name='Hypeer' ORDER BY ci.slot;"));
-        let o = old_schema_sql("O'Brien");
+        // finding #1: the name is a bound `?` parameter, not a spliced literal
+        // -- no character name ever appears in the SQL text itself.
+        assert!(s.contains("WHERE c.name=? ORDER BY ci.slot;"));
+        let o = old_schema_sql();
         assert!(o.contains("c.playerBytes,c.playerBytes2"));
-        // name escaped for the literal.
-        assert!(o.contains("WHERE c.name='O\\'Brien'"));
+        assert!(o.contains("WHERE c.name=? ORDER BY ci.slot;"));
     }
 
     #[test]

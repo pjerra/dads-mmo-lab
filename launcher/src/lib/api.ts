@@ -37,7 +37,7 @@ export async function gamesStatus(id: string): Promise<{ id: string; state: "run
   return await invoke("games_status", { id });
 }
 
-function streamAction(cmd: "games_start" | "games_stop") {
+function streamAction(cmd: "games_start") {
   return (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
     const ch = new Channel<TermEvent>();
     ch.onmessage = onEvent;
@@ -46,7 +46,19 @@ function streamAction(cmd: "games_start" | "games_stop") {
 }
 
 export const gamesStart = streamAction("games_start");
-export const gamesStop = streamAction("games_stop");
+// manageDocker (native mode only, review finding #6): whether this stop should
+// also stop the Docker Desktop engine, passed through as `manage_docker`.
+// Undefined lets the Rust side default ON (dml::native::stop_engine_enabled) --
+// callers that care pass the persisted toolPrefs.manageDocker preference.
+export const gamesStop = (
+  id: string,
+  onEvent: (e: TermEvent) => void,
+  manageDocker?: boolean,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("games_stop", { id, manageDocker, onEvent: ch });
+};
 
 export interface CharacterSummary {
   guid: number;

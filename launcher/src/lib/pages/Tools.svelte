@@ -44,7 +44,12 @@
     autoShutdownLabel,
     setAutoShutdownEnabled,
   } from "$lib/auto-shutdown.svelte";
-  import { toolPrefs, setKeepAwakePref, setLanAutoRefreshPref } from "$lib/tool-prefs.svelte";
+  import {
+    toolPrefs,
+    setKeepAwakePref,
+    setLanAutoRefreshPref,
+    setManageDockerPref,
+  } from "$lib/tool-prefs.svelte";
   import { setKeepAwake } from "$lib/api";
   import { serverStatus } from "$lib/server-status.svelte";
 
@@ -897,6 +902,21 @@
           </button>
         </li>
       </ul>
+
+      <div class="pref-rows">
+        <label class="toggle">
+          <input
+            type="checkbox"
+            checked={toolPrefs.manageDocker}
+            onchange={(e) => setManageDockerPref(e.currentTarget.checked)}
+          />
+          Stop Docker Desktop when the server stops (native mode)
+        </label>
+        <p class="muted">
+          Frees the docker-desktop WSL VM's RAM after Home's Stop button. Turn this off if you
+          run other Docker containers you want to keep alive between server sessions.
+        </p>
+      </div>
 
       <div class="row">
         <button onclick={loadNativeStatus} disabled={nsBusy}>Re-check</button>

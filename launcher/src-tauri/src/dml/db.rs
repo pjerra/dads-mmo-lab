@@ -157,6 +157,19 @@ impl DbConfig {
             // Fail fast when the engine is down rather than hanging the UI: a
             // few seconds is plenty for a loopback connect.
             .tcp_connect_timeout(Some(std::time::Duration::from_secs(5)))
+            // A stalled/wedged engine (connected but not answering) must also
+            // surface as an error instead of hanging the Tauri command
+            // forever -- 30s is generous for a loopback query but still
+            // bounded (review finding, 2026-07-24).
+            .read_timeout(Some(std::time::Duration::from_secs(30)))
+            .write_timeout(Some(std::time::Duration::from_secs(30)))
+            // Pin the session charset explicitly rather than relying on
+            // whatever the handshake negotiates -- cheap defense-in-depth
+            // alongside bound parameters (see dml::pages/dml::paperdoll): a
+            // narrow negotiated charset is the classic precondition for the
+            // multi-byte-escape SQL-injection class that bound params are
+            // meant to close outright (review finding, 2026-07-24).
+            .init(vec!["SET NAMES utf8mb4"])
             .into()
     }
 }
@@ -254,28 +267,54 @@ fn convert_value(v: mysql::Value) -> SqlValue {
 /// Open a connection to `db` using `cfg`. Any failure is [`DbError::Unreachable`]
 /// — connecting IS the reachability probe, so a refused socket, a down engine or
 /// bad creds all read as "the DB could not be reached".
+///
+/// DELIBERATELY opens a fresh TCP connection per call rather than drawing from
+/// a pool (a separate, deferred review finding) — a loopback connect is cheap
+/// relative to the per-`docker exec` cost this module replaces, and every
+/// reader here is one-or-a-few queries per page load, not a hot inner loop.
+/// Pooling stays out of scope for this pass; revisit if a reader's connect
+/// overhead ever shows up in practice.
 pub fn connect(cfg: &DbConfig, db: Database) -> Result<mysql::Conn, DbError> {
     mysql::Conn::new(cfg.opts(db))
         .map_err(|e| DbError::Unreachable(format!("Could not reach the database: {e}")))
 }
 
-/// Run `sql` against `db` and decode the whole result set. Connection failures
-/// map to [`DbError::Unreachable`]; a failure once connected maps to
-/// [`DbError::Query`]. SYNCHRONOUS and BLOCKING — call it inside
-/// [`tauri::async_runtime::spawn_blocking`] (or use [`query_async`]) so it never
-/// blocks the async runtime.
-///
-/// The query runs over the PREPARED (binary) protocol (`exec_iter` with no
-/// params), NOT the text protocol: the text protocol hands every column back as
-/// raw bytes, so an integer column would decode to `Text("5")`; the binary
-/// protocol preserves the server's real column type so integers arrive as
-/// [`SqlValue::Int`] — the "integer columns faithfully" the readers need. Pass a
-/// complete SELECT (no `?` placeholders needed for the readers' fixed queries).
+/// Run `sql` against `db` (no bound parameters) and decode the whole result
+/// set. A thin convenience wrapper over [`query_with_params`] for the readers'
+/// fixed queries (nothing user-controlled spliced in). SYNCHRONOUS and
+/// BLOCKING — see [`query_with_params`] for the full contract.
 pub fn query(cfg: &DbConfig, db: Database, sql: &str) -> Result<QueryResult, DbError> {
+    query_with_params(cfg, db, sql, Vec::<mysql::Value>::new())
+}
+
+/// Run `sql` against `db` with `params` bound to its `?` placeholders (in
+/// order) and decode the whole result set. Connection failures map to
+/// [`DbError::Unreachable`]; a failure once connected (bad SQL, a param-count
+/// mismatch) maps to [`DbError::Query`]. SYNCHRONOUS and BLOCKING — call it
+/// inside [`tauri::async_runtime::spawn_blocking`] (or use [`query_async`]) so
+/// it never blocks the async runtime.
+///
+/// The query runs over the PREPARED (binary) protocol (`exec_iter`), NOT the
+/// text protocol: the text protocol hands every column back as raw bytes, so
+/// an integer column would decode to `Text("5")`; the binary protocol
+/// preserves the server's real column type so integers arrive as
+/// [`SqlValue::Int`] — the "integer columns faithfully" the readers need.
+/// Binding `params` (rather than splicing an escaped string literal into
+/// `sql`) is also the load-bearing SQL-injection defense for every builder
+/// that carries user free-text (teleport search, bot-name prefix, character
+/// name): the driver sends bound values out-of-band from the statement text,
+/// so there is no SQL text for a quote/backslash/charset trick to corrupt,
+/// independent of the connection's `sql_mode`.
+pub fn query_with_params(
+    cfg: &DbConfig,
+    db: Database,
+    sql: &str,
+    params: impl Into<mysql::Params>,
+) -> Result<QueryResult, DbError> {
     use mysql::prelude::Queryable;
     let mut conn = connect(cfg, db)?;
     let mut result = conn
-        .exec_iter(sql, ())
+        .exec_iter(sql, params)
         .map_err(|e| DbError::Query(format!("Query failed: {e}")))?;
 
     let columns: Vec<String> = result
@@ -458,6 +497,34 @@ BLANK=
         assert_eq!(opts.get_db_name().as_deref(), Some("acore_characters"));
     }
 
+    #[test]
+    fn opts_carry_timeouts_and_pin_charset() {
+        // Finding #3/#4: a stalled DB must surface as an error instead of
+        // hanging the Tauri command forever, and the session charset is
+        // pinned explicitly rather than left to negotiation.
+        let cfg = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: "root".into(),
+            password: "password".into(),
+        };
+        let opts = cfg.opts(Database::Characters);
+        assert_eq!(opts.get_tcp_connect_timeout(), Some(std::time::Duration::from_secs(5)));
+        assert_eq!(opts.get_read_timeout(), Some(&std::time::Duration::from_secs(30)));
+        assert_eq!(opts.get_write_timeout(), Some(&std::time::Duration::from_secs(30)));
+        assert_eq!(opts.get_init(), vec!["SET NAMES utf8mb4".to_string()]);
+    }
+
+    #[test]
+    fn query_with_params_accepts_bound_positional_params() {
+        // Pure shape check (no socket): a Vec<mysql::Value> is a valid `impl
+        // Into<mysql::Params>` for query_with_params's signature. The live
+        // roundtrip below covers actual binding against a real server.
+        let params: Vec<mysql::Value> = vec![mysql::Value::from("hi"), mysql::Value::from(5i64)];
+        let as_params: mysql::Params = params.into();
+        assert!(matches!(as_params, mysql::Params::Positional(v) if v.len() == 2));
+    }
+
     /// Live smoke test: only meaningful when the native DB is actually up on
     /// loopback. Gated on a TCP connect to `127.0.0.1:<resolved port>` so the
     /// suite stays green on a box with no server running (it becomes a no-op),
@@ -480,5 +547,15 @@ BLANK=
             .expect("SELECT 1 on a reachable DB");
         assert_eq!(res.columns, vec!["one".to_string()]);
         assert_eq!(res.rows, vec![vec![SqlValue::Int(1)]]);
+
+        // Bound-parameter roundtrip (finding #1): a value containing a quote
+        // and a backslash must come back byte-identical -- proof the driver
+        // is truly binding it rather than splicing it into the statement
+        // text, independent of sql_mode/NO_BACKSLASH_ESCAPES.
+        let tricky = r#"O'Brien\test"#;
+        let params: Vec<mysql::Value> = vec![mysql::Value::from(tricky)];
+        let res = query_with_params(&cfg, Database::Auth, "SELECT ? AS echoed", params)
+            .expect("bound-param SELECT on a reachable DB");
+        assert_eq!(res.rows, vec![vec![SqlValue::Text(tricky.to_string())]]);
     }
 }

@@ -4,9 +4,18 @@
 // exists so a user can opt out once the feature is live. Module-level runes
 // state (restart-state pattern) so the transition logic in
 // server-status.svelte.ts reads the same values the Tools page edits.
+//
+// manageDocker (spike/docker-desktop-native, review finding #6) is a plain
+// preference, NOT behind a feature flag: whether stopping the native-mode
+// server also stops the Docker Desktop engine (frees the docker-desktop WSL
+// VM's RAM). Default ON per the original design intent -- this toggle exists
+// so that default is genuinely defeatable, not hardcoded. Read by Home.svelte
+// and passed through gamesStop as manage_docker; WSL mode ignores it
+// entirely (dml::native::stop_engine_enabled is `native && ...`).
 
 const KEEP_AWAKE_KEY = "dml.keepAwake";
 const LAN_AUTO_KEY = "dml.lanAutoRefresh";
+const MANAGE_DOCKER_KEY = "dml.nativeManageDocker";
 
 // Guarded storage access, same idiom as features.svelte.ts: missing storage
 // (node-environment tests) or a throwing storage (privacy mode) falls back
@@ -32,6 +41,7 @@ function writeStored(key: string, on: boolean): void {
 export const toolPrefs = $state({
   keepAwake: readStored(KEEP_AWAKE_KEY, true),
   lanAutoRefresh: readStored(LAN_AUTO_KEY, true),
+  manageDocker: readStored(MANAGE_DOCKER_KEY, true),
 });
 
 export function setKeepAwakePref(on: boolean): void {
@@ -42,4 +52,9 @@ export function setKeepAwakePref(on: boolean): void {
 export function setLanAutoRefreshPref(on: boolean): void {
   toolPrefs.lanAutoRefresh = on;
   writeStored(LAN_AUTO_KEY, on);
+}
+
+export function setManageDockerPref(on: boolean): void {
+  toolPrefs.manageDocker = on;
+  writeStored(MANAGE_DOCKER_KEY, on);
 }

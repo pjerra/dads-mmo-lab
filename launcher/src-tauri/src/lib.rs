@@ -1059,14 +1059,38 @@ async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value
 }
 
 /// Map a native-mode [`crate::dml::db::DbError`] to the [`CmdError`] the frontend
-/// already knows how to render. `code` matches the CLI's `json_err` codes
-/// (`DB_UNREACHABLE` / `DB_QUERY_FAILED`) so a stopped engine reads identically
-/// whether the page went through `dml` or the native reader.
+/// already knows how to render. Both variants collapse to `DB_UNREACHABLE`,
+/// matching the CLI: every one of these arms (`teleport-list` / `bots list` /
+/// `accounts` / `paperdoll`) reports `DB_UNREACHABLE` for ANY `db_*_query`
+/// failure in `90-main.sh` — the bash has no separate "connected but the query
+/// itself failed" code path, so a native `DbError::Query` (e.g. a genuinely
+/// malformed statement) must still read as `DB_UNREACHABLE` to stay
+/// byte-identical to `dml`. Same collapse [`stats_err_to_cmd`] already does for
+/// the `stats` arm — see its comment for the fuller rationale.
 fn db_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
     CmdError {
-        code: e.code().to_string(),
+        code: "DB_UNREACHABLE".into(),
         message: e.to_string(),
         hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    }
+}
+
+/// Guard every native-mode DB command with the same backend check the frontend
+/// router already uses to decide whether to CALL them: if a stale webview
+/// (backend flipped, or a bug in the router) invokes a native-only command
+/// while this process is on the WSL backend, refuse before ever opening a DB
+/// socket rather than dialing 127.0.0.1 against a database that may not even
+/// be the right one (finding #7).
+fn require_native_backend() -> Result<(), CmdError> {
+    if is_native_backend() {
+        Ok(())
+    } else {
+        Err(CmdError {
+            code: "WRONG_BACKEND".into(),
+            message: "This command is native-mode-only".into(),
+            hint: "The launcher is running in WSL mode; use the WSL sibling command instead."
+                .into(),
+        })
     }
 }
 
@@ -1076,6 +1100,7 @@ fn db_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
 /// keeps calling `wow_teleport_list`; `backend_mode` tells the frontend which.
 #[tauri::command]
 async fn wow_teleport_list_read(search: Option<String>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = crate::dml::db::DbConfig::from_env();
         crate::dml::pages::read_teleport_list(&cfg, search.as_deref()).map_err(db_err_to_cmd)
@@ -1099,6 +1124,30 @@ async fn wow_bots_read(
     limit: Option<u32>,
     offset: Option<u32>,
 ) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    // Validate BEFORE any SQL is built, matching the bash arm's doctrine
+    // (90-main.sh ~3884-3894: `_valid_charname` on --name, an allowlist `case`
+    // on --class) — this is native/WSL behavioral parity for invalid input,
+    // not a defense the bound-parameter query builder in `dml::pages` already
+    // needed (finding #2).
+    if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+        if !crate::dml::paperdoll::valid_charname(n) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Invalid name prefix: {n}"),
+                hint: "1-12 letters/digits/underscore.".into(),
+            });
+        }
+    }
+    if let Some(c) = class {
+        if !crate::dml::pages::valid_bot_class(c) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Invalid class id: {c}"),
+                hint: "1-9 or 11.".into(),
+            });
+        }
+    }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = crate::dml::db::DbConfig::from_env();
         let f = crate::dml::pages::BotFilters {
@@ -1121,6 +1170,7 @@ async fn wow_bots_read(
 /// connection. Native mode only — WSL keeps calling `wow_accounts`.
 #[tauri::command]
 async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = crate::dml::db::DbConfig::from_env();
         crate::dml::pages::read_accounts(&cfg).map_err(db_err_to_cmd)
@@ -1149,6 +1199,7 @@ fn stats_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
 /// `wow_stats`; `backend_mode` tells the frontend which.
 #[tauri::command]
 async fn wow_stats_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = crate::dml::db::DbConfig::from_env();
         crate::dml::stats::read_stats(&cfg).map_err(stats_err_to_cmd)
@@ -1164,6 +1215,7 @@ async fn wow_stats_read() -> Result<serde_json::Value, CmdError> {
 /// `NOT_FOUND`, exactly like the CLI arm. Native mode only.
 #[tauri::command]
 async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
     if !crate::dml::paperdoll::valid_charname(&char_name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
@@ -2846,8 +2898,11 @@ async fn games_stop(
         return Err(bad_id(&id));
     }
     // Decide up front whether we also stop the engine (native + toggle-on).
-    // `manage_docker` is None from a frontend that hasn't wired the toggle,
-    // which defaults ON per `nativeManageDocker`.
+    // The frontend passes the persisted `toolPrefs.manageDocker` preference
+    // (Tools page, "Stop Docker Desktop when the server stops" — default
+    // checked); `None` (a caller that omits it) still defaults ON, same as
+    // the checkbox's default, so nothing regresses if a call site is ever
+    // added that doesn't thread the toggle through.
     let stop_docker = crate::dml::native::stop_engine_enabled(is_native_backend(), manage_docker);
     // Stop the server exactly as today (clone the channel so we can keep
     // streaming the engine-stop afterwards).
@@ -3229,5 +3284,24 @@ mod tests {
         assert!(TAILSCALE_ACTIONS.contains(&"down"));
         assert!(!TAILSCALE_ACTIONS.contains(&"up; rm -rf /"));
         assert!(!TAILSCALE_ACTIONS.contains(&"login"));
+    }
+
+    #[test]
+    fn db_err_to_cmd_collapses_every_variant_to_db_unreachable() {
+        // Finding #5: the bash arms these commands mirror can only ever emit
+        // DB_UNREACHABLE (90-main.sh has no separate "connected but the query
+        // failed" code for teleport-list/bots/accounts/paperdoll), so a native
+        // DbError::Query must collapse to the same code, not surface
+        // DB_QUERY_FAILED and diverge from the CLI.
+        use crate::dml::db::DbError;
+        assert_eq!(db_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
+        assert_eq!(db_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
+    }
+
+    #[test]
+    fn stats_err_to_cmd_collapses_every_variant_to_db_unreachable() {
+        use crate::dml::db::DbError;
+        assert_eq!(stats_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
+        assert_eq!(stats_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
     }
 }

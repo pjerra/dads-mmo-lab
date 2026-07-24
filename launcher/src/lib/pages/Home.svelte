@@ -9,6 +9,7 @@
   import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
+  import { toolPrefs } from "$lib/tool-prefs.svelte";
 
   const WOW_ID = "wow-server-playerbots";
   const ROLE_LABELS: Record<string, string> = {
@@ -125,11 +126,22 @@
         await gamesRestart(WOW_ID, skipSaveallNow(), (e) => {
           buf.term = applyEvent(buf.term, e);
         });
-      } else {
-        const run = action === "start" ? gamesStart : gamesStop;
-        await run(WOW_ID, (e) => {
+      } else if (action === "start") {
+        await gamesStart(WOW_ID, (e) => {
           buf.term = applyEvent(buf.term, e);
         });
+      } else {
+        // manageDocker (native mode only, review finding #6): the persisted
+        // Tools-page preference for whether stopping the server also stops
+        // Docker Desktop. WSL mode ignores it (stop_engine_enabled gates on
+        // native regardless of this value).
+        await gamesStop(
+          WOW_ID,
+          (e) => {
+            buf.term = applyEvent(buf.term, e);
+          },
+          toolPrefs.manageDocker,
+        );
       }
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };

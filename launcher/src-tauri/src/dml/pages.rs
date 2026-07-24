@@ -34,14 +34,6 @@ use serde_json::{json, Value};
 
 use super::db::{self, Database, DbConfig, DbError, QueryResult, SqlValue};
 
-/// Escape a value for a single-quoted SQL string literal — a port of
-/// `sql_escape` (30-db.sh:54): backslash first, then single-quote. Deliberately
-/// does NOT touch `%`/`_`, matching the bash (callers that need LIKE-wildcard
-/// safety escape those separately, exactly like the `bots list` arm does).
-pub fn sql_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
-}
-
 /// The text `mysql -N -B` would print for a cell — the form every bash arm sees
 /// on stdin before it splices/validates. Integers stringify; bytes/text pass
 /// through; SQL `NULL` renders as the literal `NULL` the CLI would show (none of
@@ -77,18 +69,23 @@ fn is_all_digits(s: &str) -> bool {
 
 /// The exact SELECT the `teleport-list` arm runs, with each float coordinate
 /// `CAST(... AS CHAR)` so MySQL renders it identically to the CLI's text-protocol
-/// read (see the module header). `search` empty/None -> `WHERE 1=1` (bash's
-/// `-n "$search"` default); non-empty -> `name LIKE '%<escaped>%'` (LIKE
-/// wildcards in the term are NOT escaped, exactly like the bash).
-pub fn teleport_sql(search: Option<&str>) -> String {
-    let where_clause = match search {
-        Some(s) if !s.is_empty() => format!("name LIKE '%{}%'", sql_escape(s)),
-        _ => "1=1".to_string(),
+/// read (see the module header), plus the bound parameter(s) for its `?`
+/// placeholder(s). `search` empty/None -> `WHERE 1=1` (bash's `-n "$search"`
+/// default), no parameter; non-empty -> `WHERE name LIKE ?` bound to
+/// `%<search>%` (LIKE wildcards in the term are NOT escaped, exactly like the
+/// bash — binding removes the need for string-literal quote/backslash escaping
+/// entirely, since the driver sends the value out-of-band from the statement
+/// text; see [`super::db::query_with_params`]).
+pub fn teleport_sql(search: Option<&str>) -> (String, Vec<mysql::Value>) {
+    let (where_clause, params): (&str, Vec<mysql::Value>) = match search {
+        Some(s) if !s.is_empty() => ("name LIKE ?", vec![mysql::Value::from(format!("%{s}%"))]),
+        _ => ("1=1", Vec::new()),
     };
-    format!(
+    let sql = format!(
         "SELECT name,CAST(position_x AS CHAR),CAST(position_y AS CHAR),CAST(position_z AS CHAR),map \
          FROM game_tele WHERE {where_clause} ORDER BY name LIMIT 500;"
-    )
+    );
+    (sql, params)
 }
 
 /// Assemble `{"locations":[{name,x,y,z,map}]}` from the teleport result set —
@@ -117,7 +114,8 @@ pub fn assemble_teleport(res: &QueryResult) -> Value {
 
 /// Run the teleport read against the live DB and assemble the CLI-identical JSON.
 pub fn read_teleport_list(cfg: &DbConfig, search: Option<&str>) -> Result<Value, DbError> {
-    let res = db::query(cfg, Database::World, &teleport_sql(search))?;
+    let (sql, params) = teleport_sql(search);
+    let res = db::query_with_params(cfg, Database::World, &sql, params)?;
     Ok(assemble_teleport(&res))
 }
 
@@ -146,18 +144,40 @@ pub fn clamp_limit(limit: Option<u32>) -> u32 {
     limit.unwrap_or(50).clamp(1, 200)
 }
 
-/// The shared `WHERE` both bot queries use — a port of the `btwhere` builder.
+/// Allowed WoW class ids, mirroring the bash arm's allowlist `case "$btclass"
+/// in 1|2|3|4|5|6|7|8|9|11)` (90-main.sh ~3891-3894) — 10 has never shipped a
+/// class and is deliberately excluded. The command layer (`wow_bots_read` in
+/// `lib.rs`) rejects anything outside this set with `BAD_ARG` BEFORE a
+/// [`BotFilters`] is even built, matching the bash's validate-before-SQL
+/// doctrine.
+pub const VALID_BOT_CLASSES: [u32; 10] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11];
+
+/// `true` when `class` is one of [`VALID_BOT_CLASSES`].
+pub fn valid_bot_class(class: u32) -> bool {
+    VALID_BOT_CLASSES.contains(&class)
+}
+
+/// The shared `WHERE` both bot queries use, plus its bound parameters in the
+/// SAME order its `?` placeholder(s) appear — a port of the `btwhere` builder.
 /// Bot identity is the authoritative playerbots-table subselect (cross-schema,
-/// fully qualified). A `--name` prefix has its LIKE metacharacters `%`/`_`
-/// escaped with `!` (declared `ESCAPE '!'`) before `sql_escape`, exactly as the
-/// bash does, so a name like `Foo_bar` can't act as a wildcard.
-pub fn bots_where(f: &BotFilters) -> String {
+/// fully qualified, no user input). A `--name` prefix has its LIKE
+/// metacharacters `%`/`_` escaped with `!` (declared `ESCAPE '!'`) exactly as
+/// the bash does — that escaping is LIKE-pattern semantics (stopping a literal
+/// `%`/`_` in the name from acting as a wildcard), not SQL-string escaping, so
+/// it still applies even though the value itself is bound rather than spliced
+/// as a literal. `class`/`min_level`/`max_level` are typed `u32` (already
+/// validated by the command layer — see [`valid_bot_class`] — and never routed
+/// through string escaping), so splicing their decimal form is safe; only the
+/// free-text name needs binding.
+pub fn bots_where(f: &BotFilters) -> (String, Vec<mysql::Value>) {
     let mut w = "c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type \
                  WHERE account_type IN (1,2))"
         .to_string();
+    let mut params: Vec<mysql::Value> = Vec::new();
     if let Some(name) = f.name.as_deref().filter(|n| !n.is_empty()) {
         let like = name.replace('%', "!%").replace('_', "!_");
-        w.push_str(&format!(" AND c.name LIKE '{}%' ESCAPE '!'", sql_escape(&like)));
+        w.push_str(" AND c.name LIKE ? ESCAPE '!'");
+        params.push(mysql::Value::from(format!("{like}%")));
     }
     if let Some(c) = f.class {
         w.push_str(&format!(" AND c.class = {c}"));
@@ -171,23 +191,26 @@ pub fn bots_where(f: &BotFilters) -> String {
     if f.online {
         w.push_str(" AND c.online = 1");
     }
-    w
+    (w, params)
 }
 
-/// `SELECT COUNT(*)` over the filtered bot population (drives the `total`).
-pub fn bots_total_sql(f: &BotFilters) -> String {
-    format!("SELECT COUNT(*) FROM characters c WHERE {};", bots_where(f))
+/// `SELECT COUNT(*)` over the filtered bot population (drives the `total`),
+/// plus its bound parameters.
+pub fn bots_total_sql(f: &BotFilters) -> (String, Vec<mysql::Value>) {
+    let (where_clause, params) = bots_where(f);
+    (format!("SELECT COUNT(*) FROM characters c WHERE {where_clause};"), params)
 }
 
-/// One page of bot rows, ordered/limited/offset exactly like the arm.
-pub fn bots_rows_sql(f: &BotFilters) -> String {
-    format!(
+/// One page of bot rows, ordered/limited/offset exactly like the arm, plus its
+/// bound parameters.
+pub fn bots_rows_sql(f: &BotFilters) -> (String, Vec<mysql::Value>) {
+    let (where_clause, params) = bots_where(f);
+    let sql = format!(
         "SELECT c.guid, c.name, c.class, c.race, c.gender, c.level, c.online, c.zone \
-         FROM characters c WHERE {} ORDER BY c.name LIMIT {} OFFSET {};",
-        bots_where(f),
-        f.limit,
-        f.offset
-    )
+         FROM characters c WHERE {where_clause} ORDER BY c.name LIMIT {} OFFSET {};",
+        f.limit, f.offset
+    );
+    (sql, params)
 }
 
 /// Assemble `{total,limit,offset,bots:[…]}` — a port of the `bots list`
@@ -223,14 +246,16 @@ pub fn assemble_bots(total: &str, limit: u32, offset: u32, rows: &QueryResult) -
 /// Run both bot queries (count then page, same WHERE, same order as the CLI) and
 /// assemble the CLI-identical JSON.
 pub fn read_bots(cfg: &DbConfig, f: &BotFilters) -> Result<Value, DbError> {
-    let total_res = db::query(cfg, Database::Characters, &bots_total_sql(f))?;
+    let (total_sql, total_params) = bots_total_sql(f);
+    let total_res = db::query_with_params(cfg, Database::Characters, &total_sql, total_params)?;
     let total = total_res
         .rows
         .first()
         .and_then(|r| r.first())
         .map(cell_text)
         .unwrap_or_default();
-    let rows = db::query(cfg, Database::Characters, &bots_rows_sql(f))?;
+    let (rows_sql, rows_params) = bots_rows_sql(f);
+    let rows = db::query_with_params(cfg, Database::Characters, &rows_sql, rows_params)?;
     Ok(assemble_bots(&total, f.limit, f.offset, &rows))
 }
 
@@ -327,14 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn sql_escape_matches_bash() {
-        assert_eq!(sql_escape("O'Brien"), "O\\'Brien");
-        assert_eq!(sql_escape("a\\b"), "a\\\\b");
-        // % and _ are deliberately untouched (bash leaves them for LIKE).
-        assert_eq!(sql_escape("Foo%_bar"), "Foo%_bar");
-    }
-
-    #[test]
     fn num_token_parses_and_rejects() {
         assert_eq!(num_token("2502"), json!(2502));
         assert_eq!(num_token("-10964"), json!(-10964));
@@ -346,12 +363,21 @@ mod tests {
 
     #[test]
     fn teleport_sql_default_and_search() {
-        assert!(teleport_sql(None).contains("WHERE 1=1"));
-        assert!(teleport_sql(Some("")).contains("WHERE 1=1"));
-        assert!(teleport_sql(None).contains("CAST(position_x AS CHAR)"));
-        assert!(teleport_sql(None).contains("ORDER BY name LIMIT 500"));
-        let s = teleport_sql(Some("Orgri'mmar"));
-        assert!(s.contains("name LIKE '%Orgri\\'mmar%'"), "got: {s}");
+        let (sql, params) = teleport_sql(None);
+        assert!(sql.contains("WHERE 1=1"));
+        assert!(params.is_empty());
+        let (sql, params) = teleport_sql(Some(""));
+        assert!(sql.contains("WHERE 1=1"));
+        assert!(params.is_empty());
+        let (sql, _) = teleport_sql(None);
+        assert!(sql.contains("CAST(position_x AS CHAR)"));
+        assert!(sql.contains("ORDER BY name LIMIT 500"));
+        // Searched: no literal in the SQL text -- a quote in the term is bound,
+        // not spliced (finding #1). The '%'-wrapped value is the bound param.
+        let (sql, params) = teleport_sql(Some("Orgri'mmar"));
+        assert!(sql.contains("name LIKE ?"), "got: {sql}");
+        assert!(!sql.contains('\''), "search term must not appear in the SQL text: {sql}");
+        assert_eq!(params, vec![mysql::Value::from("%Orgri'mmar%")]);
     }
 
     #[test]
@@ -394,10 +420,12 @@ mod tests {
             limit: 50,
             offset: 0,
         };
+        let (w, p) = bots_where(&base);
         assert_eq!(
-            bots_where(&base),
+            w,
             "c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
         );
+        assert!(p.is_empty());
         let full = BotFilters {
             name: Some("Foo_bar".into()),
             class: Some(5),
@@ -407,17 +435,19 @@ mod tests {
             limit: 50,
             offset: 0,
         };
-        let w = bots_where(&full);
-        // LIKE metachars escaped with ! and declared ESCAPE '!'.
-        assert!(w.contains("AND c.name LIKE 'Foo!_bar%' ESCAPE '!'"), "got: {w}");
+        let (w, p) = bots_where(&full);
+        // LIKE metachars escaped with ! and declared ESCAPE '!'; the value is
+        // bound (finding #1), not spliced as a quoted literal.
+        assert!(w.contains("AND c.name LIKE ? ESCAPE '!'"), "got: {w}");
+        assert_eq!(p, vec![mysql::Value::from("Foo!_bar%")]);
         assert!(w.contains("AND c.class = 5"));
         assert!(w.contains("AND c.level BETWEEN 10 AND 20"));
         assert!(w.ends_with("AND c.online = 1"));
         // min-only / max-only branches.
         let minonly = BotFilters { max_level: None, min_level: Some(7), ..base.clone() };
-        assert!(bots_where(&minonly).contains("AND c.level >= 7"));
+        assert!(bots_where(&minonly).0.contains("AND c.level >= 7"));
         let maxonly = BotFilters { min_level: None, max_level: Some(7), ..base.clone() };
-        assert!(bots_where(&maxonly).contains("AND c.level <= 7"));
+        assert!(bots_where(&maxonly).0.contains("AND c.level <= 7"));
     }
 
     #[test]
@@ -431,9 +461,20 @@ mod tests {
             limit: 25,
             offset: 100,
         };
-        let s = bots_rows_sql(&f);
+        let (s, _) = bots_rows_sql(&f);
         assert!(s.contains("ORDER BY c.name LIMIT 25 OFFSET 100"), "got: {s}");
-        assert!(bots_total_sql(&f).starts_with("SELECT COUNT(*) FROM characters c WHERE"));
+        assert!(bots_total_sql(&f).0.starts_with("SELECT COUNT(*) FROM characters c WHERE"));
+    }
+
+    #[test]
+    fn valid_bot_class_matches_bash_allowlist() {
+        for c in VALID_BOT_CLASSES {
+            assert!(valid_bot_class(c), "class {c} should be valid");
+        }
+        assert!(!valid_bot_class(0));
+        assert!(!valid_bot_class(10)); // never shipped
+        assert!(!valid_bot_class(12));
+        assert!(!valid_bot_class(255));
     }
 
     #[test]
