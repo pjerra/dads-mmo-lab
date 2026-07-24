@@ -60,6 +60,19 @@ origin_gains_commit() {
     | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 }
 
+@test "module list: head + head_date are byte-exact after the single-git-call collapse" {
+  # Pins head/head_date against the SAME format strings _mod_head_json_var
+  # used before it was collapsed from two `git log` forks into one
+  # `--format=%h%x1f%cs`. Any drift in the split would fail here.
+  make_module_repo mod-aoe-loot
+  want_h="$(git -C "$SDIR/modules/mod-aoe-loot" log -1 --format=%h)"
+  want_d="$(git -C "$SDIR/modules/mod-aoe-loot" log -1 --format=%cs)"
+  run bash "$DML" wow module list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-aoe-loot") | .head')" = "$want_h" ]
+  [ "$(echo "$output" | jq -r '.data.families.cpp[] | select(.key=="mod-aoe-loot") | .head_date')" = "$want_d" ]
+}
+
 @test "module list: head/head_date null when not installed or .git missing" {
   mkdir -p "$SDIR/modules/mod-transmog"   # dir present but no .git
   run bash "$DML" wow module list --json

@@ -2311,6 +2311,36 @@ case "$cmd" in
             out+=']'
             json_ok "{\"settings\":$out}"
             ;;
+          registry)
+            # Cheap, values-free sibling of `config list`: emits the SAME
+            # .data.settings[] array with every STATIC field (key, group,
+            # label, explain, type, min, max, default, env, restart_required)
+            # but reads NO values -- no yq fork, no conf-file reads, no motd
+            # DB lookup, no docker. `value` is always "" (present so the row
+            # shape matches `list` exactly). The launcher Rust core fetches
+            # this once and reads only the live values itself, in-process.
+            # This arm must stay fast even natively (a handful of forks): do
+            # NOT add _cfg_preamble here -- it forks/exits on missing yq, and
+            # the registry needs none of that context. restart_required is
+            # reproduced from list's live-ness logic WITHOUT reading values:
+            # every row is restart-to-apply except server.motd (applied live
+            # via MotdMgr over SOAP when `set` runs).
+            first=1; out='['
+            while IFS='|' read -r key group label type minv maxv env def explain; do
+              [[ -z "$key" ]] && continue
+              rreq=true
+              [[ "$key" == "server.motd" ]] && rreq=false
+              minj="${minv:-null}"; maxj="${maxv:-null}"
+              [[ $first -eq 0 ]] && out+=','
+              json_escape_var "$label"; je_label="$REPLY"
+              json_escape_var "$explain"; je_explain="$REPLY"
+              json_escape_var "$def"; je_def="$REPLY"
+              out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$je_label\",\"explain\":\"$je_explain\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"\",\"default\":\"$je_def\",\"restart_required\":$rreq,\"env\":\"$env\"}"
+              first=0
+            done < <(_cfg_rows)
+            out+=']'
+            json_ok "{\"settings\":$out}"
+            ;;
           set)
             key=""; value=""
             while [[ $# -gt 0 ]]; do
@@ -4380,10 +4410,16 @@ case "$cmd" in
             # NO-FORK wrapper (sets REPLY): only the git reads fork now -- the
             # surrounding subshell and json_escape forks are gone.
             _mod_head_json_var() {
-              local mdir="$1" h="" hd="" out
+              local mdir="$1" h="" hd="" out line
               if [[ -d "$mdir/.git" ]]; then
-                h="$(git -C "$mdir" log -1 --format=%h 2>/dev/null || true)"
-                hd="$(git -C "$mdir" log -1 --format=%cs 2>/dev/null || true)"
+                # ONE git subprocess instead of two: short sha and commit date
+                # in a single `log -1`, unit-separated (0x1f never appears in
+                # either field), split in bash. Byte-identical head/head_date.
+                line="$(git -C "$mdir" log -1 --format=%h%x1f%cs 2>/dev/null || true)"
+                if [[ -n "$line" ]]; then
+                  h="${line%%$'\x1f'*}"
+                  hd="${line#*$'\x1f'}"
+                fi
               fi
               if [[ -n "$h" ]]; then json_escape_var "$h"; out="\"head\":\"$REPLY\""; else out='"head":null'; fi
               if [[ -n "$hd" ]]; then json_escape_var "$hd"; out+=",\"head_date\":\"$REPLY\""; else out+=',"head_date":null'; fi
