@@ -69,50 +69,55 @@ EOF
 # consumer does a positional `IFS='|' read` whose LAST variable swallows any
 # trailing remainder, so appending a column would silently corrupt the last
 # field at ten call sites. Unknown key -> empty (callers emit "" then).
-_module_desc() {
+# _module_desc_var <key>: NO-FORK form -- sets the description into the global
+# REPLY (bash parameter expansion only). _module_desc is a thin echo wrapper so
+# existing `$(_module_desc ...)` callers are unchanged; the hot module-list rows
+# call _module_desc_var directly to skip the subshell.
+_module_desc_var() {
     case "$1" in
-      mod-1v1-arena) echo "Adds a 1v1 arena bracket to the arena system -- queue solo duels through the arena NPC." ;;
-      mod-aoe-loot) echo "Loot every nearby corpse with one click, retail-style." ;;
-      mod-ah-bot) echo "Keeps the Auction House stocked and buying: a bot lists and purchases items so the economy works on a solo server." ;;
-      mod-ah-bot-plus) echo "Enhanced Auction House Bot fork: fully customizable, blizzlike pricing by category/quality/item level, conf-only (no SQL). Replaces mod-ah-bot -- install one or the other, not both." ;;
-      mod-autobalance) echo "Scales dungeon/raid mob health and damage to your party size, so any group size can run any instance." ;;
-      mod-ale) echo "The Lua scripting engine (Eluna fork) that powers every script in the Lua/ALE family below -- install this first." ;;
-      mod-player-bot-level-brackets) echo "Spreads the random playerbot population across level ranges you configure, instead of everyone clustering at cap." ;;
-      mod-challenge-modes) echo "Opt-in challenge rulesets per character: Hardcore (death is final), Iron Man, slow-XP and friends, with rewards." ;;
-      mod-custom-login) echo "Gives freshly created characters configurable starter gear, items, and reputation on first login." ;;
-      mod-individual-progression) echo "Each character progresses through Vanilla -> TBC -> WotLK content gates individually, like a personal timeline." ;;
-      mod-junk-to-gold) echo "Automatically sells gray junk for gold the moment you loot it." ;;
-      mod-learn-spells) echo "Class spells are learned automatically on level-up -- no class-trainer visits." ;;
-      mod-npc-beastmaster) echo "A Beastmaster NPC that lets ANY class tame, stable and use hunter pets." ;;
-      mod-quest-loot-party) echo "Quest items drop for every eligible party member at once instead of one at a time." ;;
-      mod-arac) echo "All Races, All Classes: unlocks every race/class combo. After install, click 'Apply client patch' on this row (server DBCs + client Patch-A.MPQ), then restart -- the server part alone is not enough." ;;
-      mod-dungeon-master) echo "Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards." ;;
-      mod-solocraft) echo "Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable." ;;
-      mod-talentbutton) echo "Dual spec from level 10 and a talent-reset button usable anywhere." ;;
-      mod-transmog) echo "Transmogrification NPC: reskin your gear's appearance while keeping its stats." ;;
-      accountwide) echo "Shares achievements, currency, mounts and pets across every character on the same account." ;;
-      activechat) echo "Ambient lore-flavored NPC chatter around the world, so cities feel alive." ;;
-      battlepass) echo "A battle-pass style XP track with tiered rewards for playing." ;;
-      bmah) echo "MoP-style Black Market Auction House with rare/unobtainable items (server script + client addon)." ;;
-      lootpet) echo "Your vanity pet trots around auto-looting nearby corpses for you." ;;
-      paragon) echo "Endless post-80 'paragon' stat progression with client-side UI files." ;;
-      sitmeanrest) echo "Sitting down grants a rest/regen buff; standing or moving strips it." ;;
-      sod) echo "Season-of-Discovery-style phased XP rate bonuses while leveling." ;;
-      unlimitedammo) echo "Hunters never run out: arrows and bullets auto-refill." ;;
-      all-stackables) echo "Raises stack sizes to 200 for everything stackable." ;;
-      baby-mobs) echo "World tweak: all mobs at quarter health/damage/armor -- easy mode." ;;
-      buff-mobs) echo "World tweak: mobs at 2x health, 1.5x damage/armor -- harder world." ;;
-      xbuff-mobs) echo "World tweak: mobs at 4x health, 2x damage/armor -- much harder world." ;;
-      hearthstone-cd) echo "Pick a shorter Hearthstone cooldown (several variants to choose from)." ;;
-      lvl1-mounts) echo "Mount training and riding available from level 1." ;;
-      nerf-mobs) echo "World tweak: mobs at half health, 0.75x damage/armor -- gentler world." ;;
-      npc-teleporter) echo "Adds teleporter NPCs in capitals and starting zones." ;;
-      portals-capitals) echo "Two-way portals connecting all capital cities." ;;
-      rare-drops) echo "About 450 Classic rare-spawn loot tables restored/enriched." ;;
-      *) echo "" ;;
+      mod-1v1-arena) REPLY="Adds a 1v1 arena bracket to the arena system -- queue solo duels through the arena NPC." ;;
+      mod-aoe-loot) REPLY="Loot every nearby corpse with one click, retail-style." ;;
+      mod-ah-bot) REPLY="Keeps the Auction House stocked and buying: a bot lists and purchases items so the economy works on a solo server." ;;
+      mod-ah-bot-plus) REPLY="Enhanced Auction House Bot fork: fully customizable, blizzlike pricing by category/quality/item level, conf-only (no SQL). Replaces mod-ah-bot -- install one or the other, not both." ;;
+      mod-autobalance) REPLY="Scales dungeon/raid mob health and damage to your party size, so any group size can run any instance." ;;
+      mod-ale) REPLY="The Lua scripting engine (Eluna fork) that powers every script in the Lua/ALE family below -- install this first." ;;
+      mod-player-bot-level-brackets) REPLY="Spreads the random playerbot population across level ranges you configure, instead of everyone clustering at cap." ;;
+      mod-challenge-modes) REPLY="Opt-in challenge rulesets per character: Hardcore (death is final), Iron Man, slow-XP and friends, with rewards." ;;
+      mod-custom-login) REPLY="Gives freshly created characters configurable starter gear, items, and reputation on first login." ;;
+      mod-individual-progression) REPLY="Each character progresses through Vanilla -> TBC -> WotLK content gates individually, like a personal timeline." ;;
+      mod-junk-to-gold) REPLY="Automatically sells gray junk for gold the moment you loot it." ;;
+      mod-learn-spells) REPLY="Class spells are learned automatically on level-up -- no class-trainer visits." ;;
+      mod-npc-beastmaster) REPLY="A Beastmaster NPC that lets ANY class tame, stable and use hunter pets." ;;
+      mod-quest-loot-party) REPLY="Quest items drop for every eligible party member at once instead of one at a time." ;;
+      mod-arac) REPLY="All Races, All Classes: unlocks every race/class combo. After install, click 'Apply client patch' on this row (server DBCs + client Patch-A.MPQ), then restart -- the server part alone is not enough." ;;
+      mod-dungeon-master) REPLY="Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards." ;;
+      mod-solocraft) REPLY="Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable." ;;
+      mod-talentbutton) REPLY="Dual spec from level 10 and a talent-reset button usable anywhere." ;;
+      mod-transmog) REPLY="Transmogrification NPC: reskin your gear's appearance while keeping its stats." ;;
+      accountwide) REPLY="Shares achievements, currency, mounts and pets across every character on the same account." ;;
+      activechat) REPLY="Ambient lore-flavored NPC chatter around the world, so cities feel alive." ;;
+      battlepass) REPLY="A battle-pass style XP track with tiered rewards for playing." ;;
+      bmah) REPLY="MoP-style Black Market Auction House with rare/unobtainable items (server script + client addon)." ;;
+      lootpet) REPLY="Your vanity pet trots around auto-looting nearby corpses for you." ;;
+      paragon) REPLY="Endless post-80 'paragon' stat progression with client-side UI files." ;;
+      sitmeanrest) REPLY="Sitting down grants a rest/regen buff; standing or moving strips it." ;;
+      sod) REPLY="Season-of-Discovery-style phased XP rate bonuses while leveling." ;;
+      unlimitedammo) REPLY="Hunters never run out: arrows and bullets auto-refill." ;;
+      all-stackables) REPLY="Raises stack sizes to 200 for everything stackable." ;;
+      baby-mobs) REPLY="World tweak: all mobs at quarter health/damage/armor -- easy mode." ;;
+      buff-mobs) REPLY="World tweak: mobs at 2x health, 1.5x damage/armor -- harder world." ;;
+      xbuff-mobs) REPLY="World tweak: mobs at 4x health, 2x damage/armor -- much harder world." ;;
+      hearthstone-cd) REPLY="Pick a shorter Hearthstone cooldown (several variants to choose from)." ;;
+      lvl1-mounts) REPLY="Mount training and riding available from level 1." ;;
+      nerf-mobs) REPLY="World tweak: mobs at half health, 0.75x damage/armor -- gentler world." ;;
+      npc-teleporter) REPLY="Adds teleporter NPCs in capitals and starting zones." ;;
+      portals-capitals) REPLY="Two-way portals connecting all capital cities." ;;
+      rare-drops) REPLY="About 450 Classic rare-spawn loot tables restored/enriched." ;;
+      *) REPLY="" ;;
     esac
     return 0
 }
+_module_desc() { _module_desc_var "$1"; printf '%s\n' "$REPLY"; return 0; }
 
 # --- validators (exit status IS the signal, like _valid_charname) ----------
 _valid_module_key() { [[ "$1" =~ ^[a-z0-9-]{1,64}$ ]]; }
@@ -159,49 +164,77 @@ _rebuild_pending_json() {
 # Is <key> listed in the rebuild-pending file? (exit status)
 _rebuild_pending_has() { grep -qxF "$2" "$(_rebuild_pending_file "$1")" 2>/dev/null; }
 
-# --- conf names (verbatim table from the manager; custom-login added) ------
-_module_conf_name() {
-    case "$1" in
-        mod-1v1-arena)                  echo "1v1arena.conf" ;;
-        mod-aoe-loot)                   echo "mod_aoe_loot.conf" ;;
-        mod-ah-bot)                     echo "mod_ahbot.conf" ;;
-        mod-ah-bot-plus)                echo "mod_ahbot.conf" ;;
-        mod-autobalance)                echo "AutoBalance.conf" ;;
-        mod-dungeon-master)             echo "mod_dungeon_master.conf" ;;
-        mod-talentbutton)               echo "mod_talentbutton.conf" ;;
-        mod-ale)                        echo "mod_ale.conf" ;;
-        mod-player-bot-level-brackets)  echo "mod_player_bot_level_brackets.conf" ;;
-        mod-challenge-modes)            echo "challenge_modes.conf" ;;
-        mod-custom-login)               echo "mod_customlogin.conf" ;;
-        mod-individual-progression)     echo "individualProgression.conf" ;;
-        mod-learn-spells)               echo "mod_learnspells.conf" ;;
-        mod-npc-beastmaster)            echo "mod_npc_beastmaster.conf" ;;
-        mod-quest-loot-party)           echo "mod-quest-loot-party.conf" ;;
-        mod-solocraft)                  echo "Solocraft.conf" ;;
-        mod-transmog)                   echo "transmog.conf" ;;
-        *)                              echo "" ;;
-    esac
+# NO-FORK batched variant for the module-list emitter: _rebuild_pending_load
+# scans the pending file ONCE (pure bash, zero forks) into a set, then
+# _rebuild_pending_has_mem answers per-row lookups in-process. A per-row
+# `_rebuild_pending_has` grep otherwise forks once per module row even though
+# the file is usually absent. Full-line exact match mirrors grep -qxF.
+declare -gA _MOD_PENDING_SET=()
+_rebuild_pending_load() {
+    _MOD_PENDING_SET=()
+    local f line
+    f="$1/.dml-rebuild-pending"
+    [[ -f "$f" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        _MOD_PENDING_SET["$line"]=1
+    done < "$f"
+    return 0
 }
+_rebuild_pending_has_mem() { [[ -n "${_MOD_PENDING_SET[$1]:-}" ]]; }
+
+# --- conf names (verbatim table from the manager; custom-login added) ------
+# _module_conf_name_var <key>: NO-FORK form -- sets REPLY. _module_conf_name is
+# a thin echo wrapper kept for existing `$(...)` callers.
+_module_conf_name_var() {
+    case "$1" in
+        mod-1v1-arena)                  REPLY="1v1arena.conf" ;;
+        mod-aoe-loot)                   REPLY="mod_aoe_loot.conf" ;;
+        mod-ah-bot)                     REPLY="mod_ahbot.conf" ;;
+        mod-ah-bot-plus)                REPLY="mod_ahbot.conf" ;;
+        mod-autobalance)                REPLY="AutoBalance.conf" ;;
+        mod-dungeon-master)             REPLY="mod_dungeon_master.conf" ;;
+        mod-talentbutton)               REPLY="mod_talentbutton.conf" ;;
+        mod-ale)                        REPLY="mod_ale.conf" ;;
+        mod-player-bot-level-brackets)  REPLY="mod_player_bot_level_brackets.conf" ;;
+        mod-challenge-modes)            REPLY="challenge_modes.conf" ;;
+        mod-custom-login)               REPLY="mod_customlogin.conf" ;;
+        mod-individual-progression)     REPLY="individualProgression.conf" ;;
+        mod-learn-spells)               REPLY="mod_learnspells.conf" ;;
+        mod-npc-beastmaster)            REPLY="mod_npc_beastmaster.conf" ;;
+        mod-quest-loot-party)           REPLY="mod-quest-loot-party.conf" ;;
+        mod-solocraft)                  REPLY="Solocraft.conf" ;;
+        mod-transmog)                   REPLY="transmog.conf" ;;
+        *)                              REPLY="" ;;
+    esac
+    return 0
+}
+_module_conf_name() { _module_conf_name_var "$1"; printf '%s\n' "$REPLY"; return 0; }
 
 # Conf state for a cpp module: none | needs-rebuild | ready | active.
 # .conf.dist appears under modules/<key>/ only after a rebuild for most
 # modules (mod-custom-login ships it in-repo -- same logic covers both).
-_module_conf_state() {
+# _module_conf_state_var is the NO-FORK form (sets REPLY); _module_conf_state
+# is the echo wrapper. Note the `ready`/`needs-rebuild` branch still forks a
+# `find` via _module_conf_dist, but only for the handful of modules whose conf
+# is neither absent nor active.
+_module_conf_state_var() {
     local sdir="$1" key="$2" name dist active
-    name="$(_module_conf_name "$key")"
-    if [[ -z "$name" ]]; then echo "none"; return 0; fi
+    _module_conf_name_var "$key"; name="$REPLY"
+    if [[ -z "$name" ]]; then REPLY="none"; return 0; fi
     active="$sdir/env/dist/etc/modules/$name"
-    if [[ -f "$active" ]]; then echo "active"; return 0; fi
+    if [[ -f "$active" ]]; then REPLY="active"; return 0; fi
     dist="$(_module_conf_dist "$sdir" "$key")"
-    if [[ -n "$dist" ]]; then echo "ready"; else echo "needs-rebuild"; fi
+    if [[ -n "$dist" ]]; then REPLY="ready"; else REPLY="needs-rebuild"; fi
     return 0
 }
+_module_conf_state() { _module_conf_state_var "$1" "$2"; printf '%s\n' "$REPLY"; return 0; }
 
 # Prints the .conf.dist path for a key, or nothing. Expected location
 # first, then a bounded find (manager behavior).
 _module_conf_dist() {
     local sdir="$1" key="$2" name p
-    name="$(_module_conf_name "$key")"
+    _module_conf_name_var "$key"; name="$REPLY"
     [[ -z "$name" ]] && return 0
     p="$sdir/modules/$key/conf/$name.dist"
     if [[ -f "$p" ]]; then printf '%s' "$p"; return 0; fi
@@ -238,16 +271,19 @@ _lua_cloned() { [[ -d "$1/ale_scripts/$2/.git" ]]; }
 # server is opened to others. Uses a single-quoted string (never printf'd
 # through a double-quoted context) so the literal ".test" carries no shell
 # meaning.
-_lua_warn() {
+# NO-FORK form sets REPLY; _lua_warn is the echo wrapper for other callers.
+_lua_warn_var() {
+    REPLY=""
     case "$2" in
         paragon)
             if _lua_deployed "$1" paragon; then
-                printf '%s' 'Heads-up: the Paragon script adds a ".test" chat command with no GM permission check — any player can run it (an upstream debug leftover). Remove or guard it before opening your server to other people.'
+                REPLY='Heads-up: the Paragon script adds a ".test" chat command with no GM permission check — any player can run it (an upstream debug leftover). Remove or guard it before opening your server to other people.'
             fi
             ;;
     esac
     return 0
 }
+_lua_warn() { _lua_warn_var "$1" "$2"; printf '%s' "$REPLY"; return 0; }
 
 _sql_installed() { [[ -f "$1/sql_scripts/installed/$2.installed" ]]; }
 

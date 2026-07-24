@@ -45,6 +45,37 @@ setup() {
   [ "$output" = 'beforeafter' ]
 }
 
+@test "json_escape_var matches json_escape byte-for-byte on a torture string" {
+  local s=$'AB\\C"D\tE\nF\rG<>&héllo\x01\x07\x0b\x0c\x1b\x1fend'
+  json_escape_var "$s"
+  [ "$REPLY" = "$(json_escape "$s")" ]
+}
+
+@test "json_escape_var: backslash and quote runs match json_escape" {
+  local s='a\b"c\\d""'
+  json_escape_var "$s"
+  [ "$REPLY" = "$(json_escape "$s")" ]
+}
+
+@test "json_escape_var: control bytes (escaped and stripped) match json_escape" {
+  local s=$'\x01\x02\x08\x09\x0a\x0b\x0c\x0d\x0e\x1f'
+  json_escape_var "$s"
+  [ "$REPLY" = "$(json_escape "$s")" ]
+}
+
+@test "json_escape_var: unicode and <>& pass through like json_escape" {
+  local s='héllo <b>&amp; ünîcödé ✓'
+  json_escape_var "$s"
+  [ "$REPLY" = "$(json_escape "$s")" ]
+}
+
+@test "json_escape_var: empty and trailing-backslash inputs match json_escape" {
+  json_escape_var ""
+  [ "$REPLY" = "$(json_escape "")" ]
+  json_escape_var 'ends with a backslash\'
+  [ "$REPLY" = "$(json_escape 'ends with a backslash\')" ]
+}
+
 @test "ndjson_line emits a single valid JSON line" {
   run ndjson_line info 'Starting wow...'
   [ "$(echo "$output" | jq -r '.event')" = "line" ]

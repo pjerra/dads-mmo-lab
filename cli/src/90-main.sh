@@ -1428,8 +1428,10 @@ case "$cmd" in
           # world alone died" from "the whole stack was taken down", which
           # is what tells a crash apart from a deliberate stop below.
           [[ "$dc_name" != ac-worldserver && "$dc_state" == running ]] && detail_others_up=true
-          dc_entry="$(printf '{"name":"%s","role":"%s","state":"%s","status":"%s"}' \
-            "$(json_escape "$dc_name")" "$dc_role" "$(json_escape "$dc_state")" "$(json_escape "$dc_status")")"
+          json_escape_var "$dc_name"; je_dc_name="$REPLY"
+          json_escape_var "$dc_state"; je_dc_state="$REPLY"
+          json_escape_var "$dc_status"; je_dc_status="$REPLY"
+          dc_entry="{\"name\":\"$je_dc_name\",\"role\":\"$dc_role\",\"state\":\"$je_dc_state\",\"status\":\"$je_dc_status\"}"
           if [[ -z "$detail_containers" ]]; then detail_containers="$dc_entry"
           else detail_containers="$detail_containers,$dc_entry"; fi
         done <<< "$detail_rows"
@@ -2282,20 +2284,27 @@ case "$cmd" in
               elif _cfg_conf_route "$env"; then
                 # Truthful pre-migration read: while a legacy AC_* override
                 # is still in override.yml it BEATS the conf (env bridge),
-                # so show that value until a save cleans it up.
-                val="$(_cfg_env_read "$(_cfg_env_name_for "$conf_key")")"
+                # so show that value until a save cleans it up. NO-FORK path:
+                # env-name derivation, env read (in-process snapshot) and conf
+                # reads (batched into CFG_CONF_RAW) all return via REPLY, so a
+                # ~65-row list no longer forks hundreds of subshells.
+                _cfg_env_name_for_var "$conf_key"; _cfg_env_read_var "$REPLY"; val="$REPLY"
                 if [[ -z "$val" ]]; then
-                  cpath="$(_cfg_conf_path "$conf_file")"
-                  val="$(_cfg_conf_read "$cpath" "$conf_key")"
-                  [[ -n "$val" ]] || val="$(_cfg_conf_read "$cpath.dist" "$conf_key")"
+                  _cfg_conf_path_var "$conf_file"; cpath="$REPLY"
+                  _cfg_conf_get_var "$cpath" "$conf_key"; val="$REPLY"
+                  [[ -n "$val" ]] || { _cfg_conf_get_var "$cpath.dist" "$conf_key"; val="$REPLY"; }
                 fi
               else
-                val="$(_cfg_env_read "$env")"
+                _cfg_env_read_var "$env"; val="$REPLY"
               fi
               [[ -n "$val" ]] || val="$def"
               minj="${minv:-null}"; maxj="${maxv:-null}"
               [[ $first -eq 0 ]] && out+=','
-              out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$(json_escape "$label")\",\"explain\":\"$(json_escape "$explain")\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$(json_escape "$val")\",\"default\":\"$(json_escape "$def")\",\"restart_required\":$rreq,\"env\":\"$env\"}"
+              json_escape_var "$label"; je_label="$REPLY"
+              json_escape_var "$explain"; je_explain="$REPLY"
+              json_escape_var "$val"; je_val="$REPLY"
+              json_escape_var "$def"; je_def="$REPLY"
+              out+="{\"key\":\"$key\",\"group\":\"$group\",\"label\":\"$je_label\",\"explain\":\"$je_explain\",\"type\":\"$type\",\"min\":$minj,\"max\":$maxj,\"value\":\"$je_val\",\"default\":\"$je_def\",\"restart_required\":$rreq,\"env\":\"$env\"}"
               first=0
             done < <(_cfg_rows)
             _cfg_env_unload_map
@@ -2751,15 +2760,16 @@ case "$cmd" in
               [[ -z "$mtkey" ]] && continue
               mtinstalled=false
               if [[ "$mtbackend" == conf ]]; then
-                mtpath="$(_cfg_conf_path "$mtfile")"
+                _cfg_conf_path_var "$mtfile"; mtpath="$REPLY"
                 # Installed = the module ships its conf, in EITHER form: the
                 # live .conf OR the .conf.dist it deploys with (tuning-set seeds
                 # the live conf from the dist on first write via _cfg_conf_ensure).
                 # Keying off the live .conf alone wrongly reported "not installed"
                 # for a freshly-installed-but-never-tuned module.
                 [[ -f "$mtpath" || -f "$mtpath.dist" ]] && mtinstalled=true
-                mtval="$(_cfg_conf_read "$mtpath" "$mtconfkey")"
-                [[ -n "$mtval" ]] || mtval="$(_cfg_conf_read "$mtpath.dist" "$mtconfkey")"
+                # NO-FORK batched conf read (see _cfg_conf_get_var).
+                _cfg_conf_get_var "$mtpath" "$mtconfkey"; mtval="$REPLY"
+                [[ -n "$mtval" ]] || { _cfg_conf_get_var "$mtpath.dist" "$mtconfkey"; mtval="$REPLY"; }
                 [[ -n "$mtval" ]] || mtval="$mtdef"
               else
                 mtpath="$(_lua_cfg_path "$cfg_sdir" "$mtfile")"
@@ -2776,7 +2786,13 @@ case "$cmd" in
               # `file` (additive, Module-tuning rework): the row's backing
               # file basename so the GUI can render curated conf rows inside
               # the owning module's card.
-              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$(json_escape "$mtmod")\",\"label\":\"$(json_escape "$mtlabel")\",\"explain\":\"$(json_escape "$mtexplain")\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"$(json_escape "$mtval")\",\"default\":\"$(json_escape "$mtdef")\",\"installed\":$mtinstalled,\"file\":\"$(json_escape "$mtfile")\"}"
+              json_escape_var "$mtmod"; je_mod="$REPLY"
+              json_escape_var "$mtlabel"; je_label="$REPLY"
+              json_escape_var "$mtexplain"; je_explain="$REPLY"
+              json_escape_var "$mtval"; je_val="$REPLY"
+              json_escape_var "$mtdef"; je_def="$REPLY"
+              json_escape_var "$mtfile"; je_file="$REPLY"
+              out+="{\"key\":\"$mtkey\",\"backend\":\"$mtbackend\",\"module\":\"$je_mod\",\"label\":\"$je_label\",\"explain\":\"$je_explain\",\"type\":\"$mttype\",\"min\":$mtminj,\"max\":$mtmaxj,\"value\":\"$je_val\",\"default\":\"$je_def\",\"installed\":$mtinstalled,\"file\":\"$je_file\"}"
               first=0
             done < <(_mtune_rows)
             out+=']'
@@ -4349,11 +4365,11 @@ case "$cmd" in
             if [[ -z "$sdir" ]]; then
               json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first."; exit 1
             fi
-            # Web-page URL from a registry clone URL as a JSON value: strip a
-            # trailing .git; empty -> null.
-            _mod_weburl_json() {
+            # Web-page URL from a registry clone URL as a JSON value (NO-FORK,
+            # sets REPLY): strip a trailing .git; empty -> null.
+            _mod_weburl_json_var() {
               local u="${1%.git}"
-              if [[ -n "$u" ]]; then printf '"%s"' "$(json_escape "$u")"; else printf 'null'; fi
+              if [[ -n "$u" ]]; then json_escape_var "$u"; REPLY="\"$REPLY\""; else REPLY='null'; fi
               return 0
             }
             # head/head_date (additive, module-update round): the installed
@@ -4361,32 +4377,42 @@ case "$cmd" in
             # (short sha + %cs date), both null when the module is not
             # installed / its dir has no .git. LOCAL git reads only -- list
             # must stay fast and offline (`module update-check` owns fetching).
-            _mod_head_json() {
-              local mdir="$1" h="" hd=""
+            # NO-FORK wrapper (sets REPLY): only the git reads fork now -- the
+            # surrounding subshell and json_escape forks are gone.
+            _mod_head_json_var() {
+              local mdir="$1" h="" hd="" out
               if [[ -d "$mdir/.git" ]]; then
                 h="$(git -C "$mdir" log -1 --format=%h 2>/dev/null || true)"
                 hd="$(git -C "$mdir" log -1 --format=%cs 2>/dev/null || true)"
               fi
-              if [[ -n "$h" ]]; then printf '"head":"%s"' "$(json_escape "$h")"; else printf '"head":null'; fi
-              if [[ -n "$hd" ]]; then printf ',"head_date":"%s"' "$(json_escape "$hd")"; else printf ',"head_date":null'; fi
+              if [[ -n "$h" ]]; then json_escape_var "$h"; out="\"head\":\"$REPLY\""; else out='"head":null'; fi
+              if [[ -n "$hd" ]]; then json_escape_var "$hd"; out+=",\"head_date\":\"$REPLY\""; else out+=',"head_date":null'; fi
+              REPLY="$out"
               return 0
             }
+            # Batch the rebuild-pending file into a set ONCE (zero forks) so the
+            # per-row lookups below don't grep once per module row.
+            _rebuild_pending_load "$sdir"
             cpp='['; first=1
             declare -A _mod_seen=()
             while IFS='|' read -r mk mname murl msql; do
               [[ -z "$mk" ]] && continue
               _mod_seen["$mk"]=1
               inst=false; _cpp_installed "$sdir" "$mk" && inst=true
-              pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
-              cstate="$(_module_conf_state "$sdir" "$mk")"
+              pend=false; _rebuild_pending_has_mem "$mk" && pend=true
+              _module_conf_state_var "$sdir" "$mk"; cstate="$REPLY"
               # conf_name (additive, Module-tuning rework): the conf basename
               # so the GUI can pair each installed module with its editable
               # conf (config files/conf-keys); null when the module has none.
               cnamej=null
-              cname="$(_module_conf_name "$mk")"
-              [[ -n "$cname" ]] && cnamej="\"$(json_escape "$cname")\""
+              _module_conf_name_var "$mk"; cname="$REPLY"
+              [[ -n "$cname" ]] && { json_escape_var "$cname"; cnamej="\"$REPLY\""; }
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              _mod_weburl_json_var "$murl"; je_url="$REPLY"
+              _mod_head_json_var "$sdir/modules/$mk"; je_head="$REPLY"
               [[ $first -eq 0 ]] && cpp+=','
-              cpp+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"conf_name\":$cnamej,\"custom\":false,$(_mod_head_json "$sdir/modules/$mk")}"
+              cpp+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"installed\":$inst,\"pending_rebuild\":$pend,\"conf\":\"$cstate\",\"conf_name\":$cnamej,\"custom\":false,$je_head}"
               first=0
             done < <(_module_registry_cpp)
             if [[ -d "$sdir/modules" ]]; then
@@ -4395,11 +4421,14 @@ case "$cmd" in
                 mk="$(basename "$d")"
                 [[ -n "${_mod_seen[$mk]:-}" ]] && continue
                 _valid_cpp_key "$mk" || continue
-                pend=false; _rebuild_pending_has "$sdir" "$mk" && pend=true
+                pend=false; _rebuild_pending_has_mem "$mk" && pend=true
                 # Custom clones carry no registry row -- their origin remote
                 # is the best available "project page" link.
                 curl_origin="$(git -C "$d" remote get-url origin 2>/dev/null || true)"
-                cpp+=",{\"key\":\"$mk\",\"name\":\"$(json_escape "$mk")\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$(_mod_weburl_json "$curl_origin"),\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"conf_name\":null,\"custom\":true,$(_mod_head_json "${d%/}")}"
+                json_escape_var "$mk"; je_mk="$REPLY"
+                _mod_weburl_json_var "$curl_origin"; je_url="$REPLY"
+                _mod_head_json_var "${d%/}"; je_head="$REPLY"
+                cpp+=",{\"key\":\"$mk\",\"name\":\"$je_mk\",\"desc\":\"Custom module (cloned from a URL you provided).\",\"url\":$je_url,\"installed\":true,\"pending_rebuild\":$pend,\"conf\":\"none\",\"conf_name\":null,\"custom\":true,$je_head}"
               done
             fi
             cpp+=']'
@@ -4409,10 +4438,13 @@ case "$cmd" in
               cl=false; _lua_cloned "$sdir" "$mk" && cl=true
               dep=false; _lua_deployed "$sdir" "$mk" && dep=true
               lsql=false; _lua_has_sql "$mk" && lsql=true
-              lwarn="$(_lua_warn "$sdir" "$mk")"
-              lwarnjson=null; [[ -n "$lwarn" ]] && lwarnjson="\"$(json_escape "$lwarn")\""
+              _lua_warn_var "$sdir" "$mk"; lwarn="$REPLY"
+              lwarnjson=null; [[ -n "$lwarn" ]] && { json_escape_var "$lwarn"; lwarnjson="\"$REPLY\""; }
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              _mod_weburl_json_var "$murl"; je_url="$REPLY"
               [[ $first -eq 0 ]] && lua+=','
-              lua+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql,\"warn\":$lwarnjson}"
+              lua+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"cloned\":$cl,\"deployed\":$dep,\"has_sql\":$lsql,\"warn\":$lwarnjson}"
               first=0
             done < <(_module_registry_lua)
             lua+=']'
@@ -4420,8 +4452,11 @@ case "$cmd" in
             while IFS='|' read -r mk mname murl mtype; do
               [[ -z "$mk" ]] && continue
               inst=false; _sql_installed "$sdir" "$mk" && inst=true
+              json_escape_var "$mname"; je_name="$REPLY"
+              _module_desc_var "$mk"; json_escape_var "$REPLY"; je_desc="$REPLY"
+              _mod_weburl_json_var "$murl"; je_url="$REPLY"
               [[ $first -eq 0 ]] && sqlj+=','
-              sqlj+="{\"key\":\"$mk\",\"name\":\"$(json_escape "$mname")\",\"desc\":\"$(json_escape "$(_module_desc "$mk")")\",\"url\":$(_mod_weburl_json "$murl"),\"type\":\"$mtype\",\"installed\":$inst}"
+              sqlj+="{\"key\":\"$mk\",\"name\":\"$je_name\",\"desc\":\"$je_desc\",\"url\":$je_url,\"type\":\"$mtype\",\"installed\":$inst}"
               first=0
             done < <(_module_registry_sql)
             sqlj+=']'

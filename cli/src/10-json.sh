@@ -15,6 +15,26 @@ json_escape() {
     printf '%s' "$s" | tr -d '\000-\010\013\014\016-\037'
 }
 
+# NO-FORK sibling of json_escape: same transform, but returns via the global
+# REPLY using ONLY bash parameter expansion (no `printf | tr` pipe, no command
+# substitution). Call it WITHOUT `$()`. Hot per-row emitters use this to avoid
+# a ~165ms process spawn per field on native Git Bash. It MUST stay
+# byte-identical to json_escape -- the bats suite pins that (see json_escape_var
+# torture tests). _JSON_CTRL_CLASS is a glob bracket of exactly the control
+# bytes tr strips (1-8, 11, 12, 14-31; NUL can never appear in a bash string),
+# so `${s//$_JSON_CTRL_CLASS/}` reproduces `tr -d '\000-\010\013\014\016-\037'`.
+_JSON_CTRL_CLASS=$'[\001\002\003\004\005\006\007\010\013\014\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037]'
+json_escape_var() {
+    local s="${1-}"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\r'/\\r}
+    s=${s//$'\t'/\\t}
+    s=${s//$_JSON_CTRL_CLASS/}
+    REPLY=$s
+}
+
 json_ok() {
     local data="${1:-null}"
     printf '{"ok":true,"data":%s}\n' "$data"

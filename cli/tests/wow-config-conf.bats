@@ -195,3 +195,27 @@ EOF
   # field is the authoritative answer)
   [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.honor") | .restart_required')" = "true" ]
 }
+
+@test "config list conf value survives NO-FORK batching (matches _cfg_conf_read: quote strip, indentation, inline text)" {
+  use_mysql_stub
+  cat > "$ETC/worldserver.conf" <<'EOF'
+    Rate.Honor = "3.5"
+Rate.XP.Kill = 2 still counts
+EOF
+  # The batched getter (_cfg_conf_get_var, used by the emitter) must produce
+  # the exact value the old per-row `$(_cfg_conf_read ...)` did.
+  source "$BATS_TEST_DIRNAME/../src/10-json.sh"
+  source "$BATS_TEST_DIRNAME/../src/40-config.sh"
+  cfg_sdir="$GDIR"
+  _cfg_conf_get_var "$ETC/worldserver.conf" "Rate.Honor"; a="$REPLY"
+  [ "$a" = "$(_cfg_conf_read "$ETC/worldserver.conf" Rate.Honor)" ]
+  [ "$a" = "3.5" ]
+  _cfg_conf_get_var "$ETC/worldserver.conf" "Rate.XP.Kill"; b="$REPLY"
+  [ "$b" = "$(_cfg_conf_read "$ETC/worldserver.conf" Rate.XP.Kill)" ]
+  [ "$b" = "2 still counts" ]
+  # ...and the emitted config-list row reflects the same batched value.
+  run bash "$DML" wow config list --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.honor") | .value')" = "3.5" ]
+  [ "$(echo "$output" | jq -r '.data.settings[] | select(.key=="rates.xp_kill") | .value')" = "2 still counts" ]
+}

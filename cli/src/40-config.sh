@@ -26,8 +26,8 @@ _parse_server_info_fields() {
     [[ "$mean" =~ ^[0-9]+$ ]] || mean=null
     [[ "$median" =~ ^[0-9]+$ ]] || median=null
     local vjson=null ujson=null
-    [[ -n "$version" ]] && vjson="\"$(json_escape "$version")\""
-    [[ -n "$uptime" ]] && ujson="\"$(json_escape "$uptime")\""
+    [[ -n "$version" ]] && { json_escape_var "$version"; vjson="\"$REPLY\""; }
+    [[ -n "$uptime" ]] && { json_escape_var "$uptime"; ujson="\"$REPLY\""; }
     printf '"version":%s,"players":%s,"uptime":%s,"mean_ms":%s,"median_ms":%s' \
         "$vjson" "$players" "$ujson" "$mean" "$median"
     return 0
@@ -219,6 +219,20 @@ _cfg_env_read() {
     return 0
 }
 
+# _cfg_env_read_var <ENV>: NO-FORK sibling of _cfg_env_read -- returns via the
+# global REPLY instead of stdout, so hot per-row emitters can call it without a
+# `$()` subshell. When the CFG_ENV_MAP snapshot is loaded (the config-list case)
+# this is pure parameter expansion, zero forks. Falls back to the forking
+# _cfg_env_read only when no snapshot is loaded (identical answer either way).
+_cfg_env_read_var() {
+    if [[ "${CFG_ENV_MAP_LOADED:-0}" == 1 ]]; then
+        REPLY="${CFG_ENV_MAP[$1]:-}"
+        return 0
+    fi
+    REPLY="$(_cfg_env_read "$1")"
+    return 0
+}
+
 # _cfg_env_write <ENV> <value>: merges the key into the EXISTING service
 # (soap-setup's proven pattern -- never a second top-level services: block).
 # strenv() keeps hostile values out of the yq program text entirely.
@@ -299,6 +313,16 @@ _cfg_conf_path() {
     return 0
 }
 
+# _cfg_conf_path_var <file>: NO-FORK sibling of _cfg_conf_path -- returns via
+# the global REPLY so hot emitters skip the `$()` subshell.
+_cfg_conf_path_var() {
+    case "$1" in
+        worldserver.conf|authserver.conf) REPLY="$cfg_sdir/env/dist/etc/$1" ;;
+        *) REPLY="$cfg_sdir/env/dist/etc/modules/$1" ;;
+    esac
+    return 0
+}
+
 # _cfg_conf_ensure <path>: makes sure the conf exists, creating it from its
 # .dist ONCE when only the dist is present (the AC docker layout ships dists;
 # the conf appears on first edit). Returns 1 when neither exists.
@@ -355,6 +379,58 @@ _cfg_conf_read() {
     val="$(_cfg_conf_read_raw "$1" "$2")"
     val="${val%\"}"; val="${val#\"}"
     printf '%s' "$val"
+    return 0
+}
+
+# --- batched, NO-FORK conf reads (hot config-list path) --------------------
+# A per-row `$(_cfg_conf_read file key)` forks ~3 subshells (outer subst ->
+# _cfg_conf_read_raw subst -> awk), so a ~65-row config list forks hundreds of
+# times -- ~165ms each on native Git Bash. _cfg_conf_load_file scans a conf ONCE
+# with a pure-bash `while read` loop (ZERO extra forks) into CFG_CONF_RAW, keyed
+# by "<path>\x1f<Key>" with the RAW (quote-preserved) value, LAST occurrence
+# wins. _cfg_conf_get_var then resolves per-row lookups in-process.
+#
+# The loop reproduces _cfg_conf_read_raw's value semantics EXACTLY for the keys
+# the registry looks up (which are all [A-Za-z0-9_.]+): a line matches when,
+# after stripping a trailing CR and leading blanks, it is `<Key>[blank]*= ...`;
+# the value is everything after the first `=`, trimmed of leading/trailing
+# blanks (spaces and tabs), quotes preserved. That is identical to matching a
+# specific key with _cfg_conf_read_raw, because the awk there also requires the
+# key to sit at column 0 (post leading-trim) immediately followed by optional
+# blanks then `=`, and the pre-`=` token trims to exactly that key. A bats test
+# pins a conf-backed config-list row against the old path.
+declare -gA CFG_CONF_RAW=()
+declare -gA CFG_CONF_FILE_DONE=()
+_cfg_conf_load_file() {
+    [[ -n "${CFG_CONF_FILE_DONE[$1]:-}" ]] && return 0
+    CFG_CONF_FILE_DONE[$1]=1
+    [[ -f "$1" ]] || return 0
+    local line s pre v re_line='^[[:blank:]]*[A-Za-z0-9_.]+[[:blank:]]*='
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        s="${line%$'\r'}"
+        [[ "$s" =~ $re_line ]] || continue
+        [[ "$s" =~ ^[[:blank:]]+ ]] && s="${s#"${BASH_REMATCH[0]}"}"
+        pre="${s%%=*}"
+        v="${s#*=}"
+        [[ "$pre" =~ [[:blank:]]+$ ]] && pre="${pre%"${BASH_REMATCH[0]}"}"
+        [[ "$v" =~ ^[[:blank:]]+ ]] && v="${v#"${BASH_REMATCH[0]}"}"
+        [[ "$v" =~ [[:blank:]]+$ ]] && v="${v%"${BASH_REMATCH[0]}"}"
+        CFG_CONF_RAW["$1"$'\x1f'"$pre"]="$v"
+    done < "$1"
+    return 0
+}
+
+# _cfg_conf_get_var <path> <Key>: NO-FORK equivalent of `$(_cfg_conf_read ...)`.
+# Loads the file into CFG_CONF_RAW on first touch, then resolves in-process and
+# returns the quote-stripped value via REPLY ("" when file or key is absent --
+# same as _cfg_conf_read, so an empty answer still triggers the caller's .dist
+# fallback). Read-only path ONLY: the cache is never invalidated, so mutating
+# code must keep using _cfg_conf_read/_cfg_conf_write.
+_cfg_conf_get_var() {
+    _cfg_conf_load_file "$1"
+    local v="${CFG_CONF_RAW["$1"$'\x1f'"$2"]:-}"
+    v="${v%\"}"; v="${v#\"}"
+    REPLY="$v"
     return 0
 }
 
@@ -527,6 +603,26 @@ _cfg_env_name_for() {
         prev="$c"
     done
     printf 'AC_%s' "${out^^}"
+    return 0
+}
+
+# _cfg_env_name_for_var <ConfKey>: NO-FORK sibling of _cfg_env_name_for --
+# identical derivation, returns via the global REPLY so hot emitters skip the
+# `$()` subshell.
+_cfg_env_name_for_var() {
+    local key="$1" out="" i c prev=""
+    for (( i = 0; i < ${#key}; i++ )); do
+        c="${key:$i:1}"
+        if [[ "$c" == "." ]]; then
+            out+="_"
+        elif [[ "$c" == [A-Z] && "$prev" == [a-z0-9] ]]; then
+            out+="_$c"
+        else
+            out+="$c"
+        fi
+        prev="$c"
+    done
+    REPLY="AC_${out^^}"
     return 0
 }
 
