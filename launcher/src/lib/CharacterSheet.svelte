@@ -18,7 +18,6 @@
 
 <script lang="ts">
   import {
-    wowPaperdoll,
     wowItemInfo,
     wowCharProgress,
     wowEntityInfo,
@@ -29,6 +28,7 @@
     type AchievementEntry,
     type WowheadTooltip,
   } from "$lib/api";
+  import { loadPaperdoll } from "$lib/page-cache.svelte";
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
   import { chunkIds, formatEpochDate } from "$lib/progress";
@@ -295,7 +295,7 @@
     selectedCatId = null;
     achError = null;
     try {
-      doll = await wowPaperdoll(name);
+      doll = await loadPaperdoll(name);
       modelDisplayIds = fetchItemInfo(doll.equipped);
       void loadProgress(name);
       void loadEarnedAchievements(name);

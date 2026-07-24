@@ -30,6 +30,10 @@ import {
   wowConfigTuningList,
   wowModuleList,
   wowModuleRead,
+  wowPaperdoll,
+  wowPaperdollRead,
+  wowStats,
+  wowStatsRead,
   wowTeleportList,
   wowTeleportListRead,
   wowTuningRead,
@@ -41,7 +45,9 @@ import {
   type ConfigSetting,
   type ModuleList,
   type ModuleTuning,
+  type PaperdollData,
   type TeleLocation,
+  type WowStats,
 } from "./api";
 
 // Pure: the error string every page builds from a thrown DmlErr-ish value
@@ -161,6 +167,21 @@ export async function loadBotsPage(f: BotFilters): Promise<BotsPage> {
 export async function loadAccounts(): Promise<Account[]> {
   const mode = await resolveBackendMode();
   return pickConfigReader(mode) === "read" ? wowAccountsRead() : wowAccounts();
+}
+
+// --- Task 4: routed loaders for the COMPLEX DB-backed pages -----------------
+// Same native-vs-wsl router, for the Statistics page (whole stats envelope) and
+// the character paperdoll. Native reads over direct MySQL in Rust (the 18
+// independent stats queries run concurrently); WSL keeps shelling the CLI.
+// Identical .data shape either way.
+export async function loadStats(): Promise<WowStats> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowStatsRead() : wowStats();
+}
+
+export async function loadPaperdoll(charName: string): Promise<PaperdollData> {
+  const mode = await resolveBackendMode();
+  return pickConfigReader(mode) === "read" ? wowPaperdollRead(charName) : wowPaperdoll(charName);
 }
 
 // The shared page caches. Consumed by:

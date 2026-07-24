@@ -1129,6 +1129,63 @@ async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// Map a native-mode stats [`crate::dml::db::DbError`] to a [`CmdError`] whose
+/// code matches the CLI's `stats` arm: that arm reports `DB_UNREACHABLE` for
+/// EVERY payload failure (including a query error on a reachable DB — see the
+/// "honest hint" branch in 90-main.sh), so both DbError variants collapse to
+/// `DB_UNREACHABLE` here to stay byte-identical to `dml wow stats`.
+fn stats_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
+    CmdError {
+        code: "DB_UNREACHABLE".into(),
+        message: e.to_string(),
+        hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    }
+}
+
+/// NATIVE-MODE fast read of the Statistics envelope: the SAME nested `data`
+/// object `wow_stats` emits, assembled from 19 direct-MySQL queries (the 18
+/// independent ones run concurrently) instead of `docker exec ac-database
+/// mysql` × 19 + a per-row fork storm. Native mode only — WSL keeps calling
+/// `wow_stats`; `backend_mode` tells the frontend which.
+#[tauri::command]
+async fn wow_stats_read() -> Result<serde_json::Value, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        crate::dml::stats::read_stats(&cfg).map_err(stats_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of a character paperdoll: same shape as `wow_paperdoll`
+/// (`{name,level,class,race,gender,skin,…,equipped:[…]}`), over a direct MySQL
+/// connection (no SOAP saveall — see the reader's module header). Rejects an
+/// invalid name with `BAD_ARG` and an unknown/gearless character with
+/// `NOT_FOUND`, exactly like the CLI arm. Native mode only.
+#[tauri::command]
+async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdError> {
+    if !crate::dml::paperdoll::valid_charname(&char_name) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid character name: {char_name}"),
+            hint: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        match crate::dml::paperdoll::read_paperdoll(&cfg, &char_name).map_err(db_err_to_cmd)? {
+            Some(v) => Ok(v),
+            None => Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("No such character or no equipped items: {char_name}"),
+                hint: String::new(),
+            }),
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -2968,6 +3025,8 @@ pub fn run() {
             wow_teleport_list_read,
             wow_bots_read,
             wow_accounts_read,
+            wow_stats_read,
+            wow_paperdoll_read,
             backend_mode,
             wow_config_set,
             wow_config_tuning_list,

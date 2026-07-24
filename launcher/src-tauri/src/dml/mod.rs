@@ -5,5 +5,7 @@ pub mod envelope;
 pub mod modules;
 pub mod native;
 pub mod pages;
+pub mod paperdoll;
 pub mod runner;
+pub mod stats;
 pub mod tuning;

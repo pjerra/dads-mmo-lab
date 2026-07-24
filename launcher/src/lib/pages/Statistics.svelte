@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { wowStats, type WowStats } from "$lib/api";
+  import { type WowStats } from "$lib/api";
+  import { loadStats } from "$lib/page-cache.svelte";
   import { serverStatus, containersExist } from "$lib/server-status.svelte";
   import { className } from "$lib/wow";
   import zoneNamesJson from "$lib/zone-names-wotlk.json";
@@ -37,7 +38,7 @@
     if (loading) return;
     loading = true;
     try {
-      stats = await wowStats();
+      stats = await loadStats();
       error = null;
     } catch (e) {
       const err = e as { message?: string; hint?: string };

@@ -277,6 +277,12 @@ export interface WowStats {
 export async function wowStats(): Promise<WowStats> {
   return await invoke("wow_stats");
 }
+// NATIVE-MODE fast sibling of wowStats: identical WowStats shape, assembled from
+// direct-MySQL queries in the launcher's Rust core (no bash, no docker exec).
+// Call ONLY when backendMode() === "native"; in wsl mode call wowStats.
+export async function wowStatsRead(): Promise<WowStats> {
+  return await invoke("wow_stats_read");
+}
 export async function wowDockerUsage(): Promise<{ lines: string[] }> {
   return await invoke("wow_docker_usage");
 }
@@ -598,6 +604,13 @@ export async function wowTeleportCoords(
 }
 export async function wowPaperdoll(charName: string): Promise<PaperdollData> {
   return await invoke("wow_paperdoll", { charName });
+}
+// NATIVE-MODE fast sibling of wowPaperdoll: identical PaperdollData shape, read
+// over a direct MySQL connection in the launcher's Rust core (no bash, no docker
+// exec, no SOAP saveall). Call ONLY when backendMode() === "native"; in wsl mode
+// call wowPaperdoll.
+export async function wowPaperdollRead(charName: string): Promise<PaperdollData> {
+  return await invoke("wow_paperdoll_read", { charName });
 }
 export interface WowheadTooltip {
   name: string;
