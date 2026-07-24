@@ -822,7 +822,11 @@ _bots_counts() {
             else
                 conf="$cfg_sdir/env/dist/etc/modules/playerbots.conf"
                 if [[ -f "$conf" ]]; then
-                    val="$(grep -E '^[[:space:]]*AiPlayerbot\.MaxRandomBots' "$conf" 2>/dev/null | tail -n1)" || true
+                    # Anchor the key with a following `=` so it matches ONLY
+                    # AiPlayerbot.MaxRandomBots and NOT longer keys that share
+                    # the prefix, e.g. AiPlayerbot.MaxRandomBotsPriceChangeInterval
+                    # (= 172800), which `tail -n1` would otherwise pick as "max".
+                    val="$(grep -E '^[[:space:]]*AiPlayerbot\.MaxRandomBots[[:space:]]*=' "$conf" 2>/dev/null | tail -n1)" || true
                     val="${val#*=}"
                     val="${val//[[:space:]]/}"
                     val="${val//\"/}"
