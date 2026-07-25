@@ -340,6 +340,386 @@ pub fn read_accounts(cfg: &DbConfig) -> Result<Value, DbError> {
     Ok(assemble_accounts(&res))
 }
 
+// ---------------------------------------------------------------------------
+// Players online / Party online — mirror the `wow players online` /
+// `wow party online` arms (90-main.sh). Both filter to real (non-bot)
+// characters via the SAME cross-schema playerbots-account subselect, so the
+// WHERE is factored into one constant to avoid duplicating it (per the task
+// brief).
+// ---------------------------------------------------------------------------
+
+/// The shared `WHERE` both "who's online" queries use — real accounts only
+/// (bot accounts, `account_type IN (1,2)` in the playerbots registry, are
+/// excluded), matching the identical clause in both bash arms verbatim.
+const ONLINE_HUMANS_WHERE: &str = "c.online = 1 \
+    AND c.account NOT IN (\
+        SELECT account_id FROM acore_playerbots.playerbots_account_type \
+        WHERE account_type IN (1,2))";
+
+/// The exact SELECT the `players online` arm runs (no bound params — nothing
+/// user-controlled).
+fn players_online_sql() -> String {
+    format!(
+        "SELECT c.name, c.level, c.class, c.zone FROM characters c WHERE {ONLINE_HUMANS_WHERE} \
+         ORDER BY c.name;"
+    )
+}
+
+/// The exact SELECT the `party online` arm runs — same WHERE, different
+/// projection/order (guid, name, class, level).
+fn party_online_sql() -> String {
+    format!(
+        "SELECT c.guid, c.name, c.class, c.level FROM characters c WHERE {ONLINE_HUMANS_WHERE} \
+         ORDER BY c.name;"
+    )
+}
+
+/// Assemble `{"players":[{name,level,class,zone}]}` — a port of the `players
+/// online` while-loop. Rows with an empty name are skipped; `level`/`class`/
+/// `zone` each guard to `0` when non-numeric (the bash guards EVERY
+/// interpolated numeric here, not just zone, to avoid emitting invalid JSON
+/// like `"level":,`).
+pub fn assemble_players_online(res: &QueryResult) -> Value {
+    let mut players = Vec::with_capacity(res.rows.len());
+    for row in &res.rows {
+        if row.len() < 4 {
+            continue;
+        }
+        let name = cell_text(&row[0]);
+        if name.is_empty() {
+            continue;
+        }
+        let lvl = cell_text(&row[1]);
+        let lvl = if is_all_digits(&lvl) { lvl } else { "0".to_string() };
+        let cls = cell_text(&row[2]);
+        let cls = if is_all_digits(&cls) { cls } else { "0".to_string() };
+        let zone = cell_text(&row[3]);
+        let zone = if is_all_digits(&zone) { zone } else { "0".to_string() };
+        players.push(json!({
+            "name": name,
+            "level": num_token(&lvl),
+            "class": num_token(&cls),
+            "zone": num_token(&zone),
+        }));
+    }
+    json!({ "players": players })
+}
+
+/// Assemble `{"online":[{guid,name,class,level}]}` — a port of the `party
+/// online` while-loop. Rows with an empty guid are skipped; unlike `players
+/// online` the bash splices guid/class/level RAW here (no digit guard), so
+/// this mirrors [`assemble_teleport`]'s raw-splice handling instead
+/// (`num_token` degrades non-numeric text to `null`).
+pub fn assemble_party_online(res: &QueryResult) -> Value {
+    let mut online = Vec::with_capacity(res.rows.len());
+    for row in &res.rows {
+        if row.len() < 4 {
+            continue;
+        }
+        let guid = cell_text(&row[0]);
+        if guid.is_empty() {
+            continue;
+        }
+        online.push(json!({
+            "guid": num_token(&guid),
+            "name": cell_text(&row[1]),
+            "class": num_token(&cell_text(&row[2])),
+            "level": num_token(&cell_text(&row[3])),
+        }));
+    }
+    json!({ "online": online })
+}
+
+/// Run the players-online read against the live DB and assemble the
+/// CLI-identical JSON.
+pub fn read_players_online(cfg: &DbConfig) -> Result<Value, DbError> {
+    let res = db::query(cfg, Database::Characters, &players_online_sql())?;
+    Ok(assemble_players_online(&res))
+}
+
+/// Run the party-online read against the live DB and assemble the
+/// CLI-identical JSON.
+pub fn read_party_online(cfg: &DbConfig) -> Result<Value, DbError> {
+    let res = db::query(cfg, Database::Characters, &party_online_sql())?;
+    Ok(assemble_party_online(&res))
+}
+
+// ---------------------------------------------------------------------------
+// Items search — mirrors `wow items search` (90-main.sh `items)` arm) +
+// `build_item_search_sql`/`_items_rows_to_json` (30-db.sh).
+// ---------------------------------------------------------------------------
+
+/// The `items search` filters, matching the CLI's `--name`/`--quality`/
+/// `--min-level`/`--max-level` flags. `name` mirrors `build_item_search_sql`'s
+/// own `[[ -n "$name" ]]` gate (empty -> the filter is simply omitted); the
+/// command layer additionally rejects an empty/whitespace-only name with
+/// `BAD_ARG` BEFORE this is ever built (90-main.sh's own pre-check), so in
+/// practice `name` always arrives non-empty here — this struct still handles
+/// empty faithfully so the builder alone stays a faithful port.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ItemSearchOpts {
+    pub name: String,
+    pub quality: Option<u32>,
+    pub min_level: Option<u32>,
+    pub max_level: Option<u32>,
+}
+
+/// Default `--limit` the arm uses when the frontend doesn't pass one
+/// (`limit=50` in the flag-parsing loop, 90-main.sh `items search`).
+pub const ITEMS_SEARCH_DEFAULT_LIMIT: u32 = 50;
+
+/// Build the exact SELECT `build_item_search_sql` would (30-db.sh:62-70),
+/// with every filter value BOUND rather than spliced (the bash string-escapes
+/// via `sql_escape`; binding is strictly safer and parity-equivalent — see
+/// the module-wide rule in the task brief). Each optional filter appends its
+/// own clause+param ONLY when present, in the same order the bash checks
+/// them (name, quality, min-level, max-level), followed by the `LIMIT ?`
+/// bound to [`ITEMS_SEARCH_DEFAULT_LIMIT`].
+pub fn items_search_sql(opts: &ItemSearchOpts) -> (String, Vec<mysql::Value>) {
+    let mut where_clause = String::from("1=1");
+    let mut params: Vec<mysql::Value> = Vec::new();
+    if !opts.name.is_empty() {
+        where_clause.push_str(" AND name LIKE ?");
+        params.push(mysql::Value::from(format!("%{}%", opts.name)));
+    }
+    if let Some(q) = opts.quality {
+        where_clause.push_str(" AND Quality = ?");
+        params.push(mysql::Value::from(q));
+    }
+    if let Some(minl) = opts.min_level {
+        where_clause.push_str(" AND RequiredLevel >= ?");
+        params.push(mysql::Value::from(minl));
+    }
+    if let Some(maxl) = opts.max_level {
+        where_clause.push_str(" AND RequiredLevel <= ?");
+        params.push(mysql::Value::from(maxl));
+    }
+    let sql = format!(
+        "SELECT entry,name,Quality,ItemLevel,RequiredLevel,class,subclass,InventoryType,displayid \
+         FROM item_template WHERE {where_clause} ORDER BY RequiredLevel, name LIMIT ?;"
+    );
+    params.push(mysql::Value::from(ITEMS_SEARCH_DEFAULT_LIMIT));
+    (sql, params)
+}
+
+/// Assemble `{"items":[{entry,name,quality,item_level,required_level,class,\
+/// subclass,inventory_type,displayid}]}` — a faithful port of
+/// `_items_rows_to_json` (30-db.sh:90-101). Rows with an empty entry are
+/// skipped; every numeric column splices RAW in the bash (no digit guard), so
+/// each is passed through [`num_token`] like [`assemble_teleport`].
+pub fn assemble_items_search(res: &QueryResult) -> Value {
+    let mut items = Vec::with_capacity(res.rows.len());
+    for row in &res.rows {
+        if row.len() < 9 {
+            continue;
+        }
+        let entry = cell_text(&row[0]);
+        if entry.is_empty() {
+            continue;
+        }
+        items.push(json!({
+            "entry": num_token(&entry),
+            "name": cell_text(&row[1]),
+            "quality": num_token(&cell_text(&row[2])),
+            "item_level": num_token(&cell_text(&row[3])),
+            "required_level": num_token(&cell_text(&row[4])),
+            "class": num_token(&cell_text(&row[5])),
+            "subclass": num_token(&cell_text(&row[6])),
+            "inventory_type": num_token(&cell_text(&row[7])),
+            "displayid": num_token(&cell_text(&row[8])),
+        }));
+    }
+    json!({ "items": items })
+}
+
+/// Run the items-search read against the live DB and assemble the
+/// CLI-identical JSON.
+pub fn read_items_search(cfg: &DbConfig, opts: &ItemSearchOpts) -> Result<Value, DbError> {
+    let (sql, params) = items_search_sql(opts);
+    let res = db::query_with_params(cfg, Database::World, &sql, params)?;
+    Ok(assemble_items_search(&res))
+}
+
+// ---------------------------------------------------------------------------
+// Char-progress / Achievements — mirror the `wow char-progress` /
+// `wow achievements` arms (90-main.sh:2135-2169, 2170-2192). Both start with
+// the same guid lookup and share the achievement-row shaping, so those are
+// factored into one lookup + one assembler.
+// ---------------------------------------------------------------------------
+
+const CHAR_GUID_SQL: &str = "SELECT guid FROM characters WHERE name = ? LIMIT 1;";
+const CHAR_TALENT_META_SQL: &str =
+    "SELECT activeTalentGroup, talentGroupsCount FROM characters WHERE guid = ?;";
+const CHAR_ACHIEVEMENT_TOTAL_SQL: &str =
+    "SELECT COUNT(*) FROM character_achievement WHERE guid = ?;";
+const CHAR_ACHIEVEMENT_RECENT_SQL: &str =
+    "SELECT achievement, date FROM character_achievement WHERE guid = ? ORDER BY date DESC LIMIT 10;";
+const CHAR_ACHIEVEMENT_EARNED_SQL: &str =
+    "SELECT achievement, date FROM character_achievement WHERE guid = ? ORDER BY achievement;";
+const CHAR_TALENT_SPELLS_SQL: &str =
+    "SELECT spell FROM character_talent WHERE guid = ? AND (specMask & (1 << ?)) ORDER BY spell;";
+
+/// Extract the character guid from a `CHAR_GUID_SQL` result set, matching the
+/// bash's `[[ "$cguid" =~ ^[0-9]+$ ]]` guard — `None` (NOT_FOUND) unless the
+/// first row's first cell is one-or-more digits.
+fn extract_char_guid(res: &QueryResult) -> Option<i64> {
+    let raw = res.rows.first().and_then(|r| r.first()).map(cell_text).unwrap_or_default();
+    is_all_digits(&raw).then(|| raw.parse().ok()).flatten()
+}
+
+/// Extract `(active_group, groups_count)` from a `CHAR_TALENT_META_SQL`
+/// result, guarding each to the bash's fallback (`agroup` -> `"0"`, `gcount`
+/// -> `"1"`) when non-numeric.
+fn extract_talent_meta(res: &QueryResult) -> (String, String) {
+    let row = res.rows.first();
+    let agroup = row.and_then(|r| r.first()).map(cell_text).unwrap_or_default();
+    let gcount = row.and_then(|r| r.get(1)).map(cell_text).unwrap_or_default();
+    let agroup = if is_all_digits(&agroup) { agroup } else { "0".to_string() };
+    let gcount = if is_all_digits(&gcount) { gcount } else { "1".to_string() };
+    (agroup, gcount)
+}
+
+/// Extract the achievement total from a `CHAR_ACHIEVEMENT_TOTAL_SQL` result,
+/// guarding to `"0"` when non-numeric/missing (the bash's `|| atotal=0` plus
+/// its digit-regex guard).
+fn extract_achievement_total(res: &QueryResult) -> String {
+    let raw = res.rows.first().and_then(|r| r.first()).map(cell_text).unwrap_or_default();
+    if is_all_digits(&raw) { raw } else { "0".to_string() }
+}
+
+/// Assemble a `[{id,date}]` achievement list — shared by `char-progress`'s
+/// "recent 10" and `achievements`' full "earned" set (both bash loops are
+/// byte-identical: skip an empty/non-numeric id, guard `date` to `0` when
+/// non-numeric).
+fn assemble_achievement_entries(res: &QueryResult) -> Vec<Value> {
+    let mut out = Vec::with_capacity(res.rows.len());
+    for row in &res.rows {
+        if row.is_empty() {
+            continue;
+        }
+        let aid = cell_text(&row[0]);
+        if aid.is_empty() || !is_all_digits(&aid) {
+            continue;
+        }
+        let adate = row.get(1).map(cell_text).unwrap_or_default();
+        let adate = if is_all_digits(&adate) { adate } else { "0".to_string() };
+        out.push(json!({ "id": num_token(&aid), "date": num_token(&adate) }));
+    }
+    out
+}
+
+/// Assemble a `spells:[...]` array of raw talent-spell ids — a port of the
+/// `tspells` loop (skip empty/non-numeric ids).
+fn assemble_talent_spells(res: &QueryResult) -> Vec<Value> {
+    let mut out = Vec::with_capacity(res.rows.len());
+    for row in &res.rows {
+        let Some(sid) = row.first().map(cell_text) else { continue };
+        if sid.is_empty() || !is_all_digits(&sid) {
+            continue;
+        }
+        out.push(num_token(&sid));
+    }
+    out
+}
+
+/// Assemble the full `char-progress` envelope from its five already-decoded
+/// pieces — a pure port of the arm's final `json_ok` line.
+pub fn assemble_char_progress(
+    total: &str,
+    recent: Vec<Value>,
+    groups_count: &str,
+    active_group: &str,
+    spells: Vec<Value>,
+) -> Value {
+    json!({
+        "achievements": { "total": num_token(total), "recent": recent },
+        "talents": {
+            "groups_count": num_token(groups_count),
+            "active_group": num_token(active_group),
+            "spells": spells,
+        },
+    })
+}
+
+/// Run the `char-progress` 5-query sequence against the live DB (guid lookup,
+/// talent-group meta, achievement total, recent-10 achievements, active-spec
+/// talent spells — same order as the arm) and assemble the CLI-identical
+/// JSON. `Ok(None)` means "no such character" (NOT_FOUND at the command
+/// layer); the caller is expected to have already validated `name` with
+/// [`super::soap_cmds::valid_charname`].
+pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
+    let guid_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_GUID_SQL,
+        vec![mysql::Value::from(name)],
+    )?;
+    let Some(guid) = extract_char_guid(&guid_res) else {
+        return Ok(None);
+    };
+    let guid_param = mysql::Value::from(guid);
+
+    let meta_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_TALENT_META_SQL,
+        vec![guid_param.clone()],
+    )?;
+    let (active_group, groups_count) = extract_talent_meta(&meta_res);
+
+    let total_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_ACHIEVEMENT_TOTAL_SQL,
+        vec![guid_param.clone()],
+    )?;
+    let total = extract_achievement_total(&total_res);
+
+    let recent_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_ACHIEVEMENT_RECENT_SQL,
+        vec![guid_param.clone()],
+    )?;
+    let recent = assemble_achievement_entries(&recent_res);
+
+    let active_group_num: i64 = active_group.parse().unwrap_or(0);
+    let spells_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_TALENT_SPELLS_SQL,
+        vec![guid_param, mysql::Value::from(active_group_num)],
+    )?;
+    let spells = assemble_talent_spells(&spells_res);
+
+    Ok(Some(assemble_char_progress(&total, recent, &groups_count, &active_group, spells)))
+}
+
+/// Run the `achievements` read (guid lookup + full earned-achievement dump,
+/// ordered by achievement id rather than date) against the live DB and
+/// assemble the CLI-identical JSON. `Ok(None)` means "no such character"
+/// (NOT_FOUND at the command layer), same convention as
+/// [`read_char_progress`].
+pub fn read_achievements(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
+    let guid_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_GUID_SQL,
+        vec![mysql::Value::from(name)],
+    )?;
+    let Some(guid) = extract_char_guid(&guid_res) else {
+        return Ok(None);
+    };
+    let earned_res = db::query_with_params(
+        cfg,
+        Database::Characters,
+        CHAR_ACHIEVEMENT_EARNED_SQL,
+        vec![mysql::Value::from(guid)],
+    )?;
+    let earned = assemble_achievement_entries(&earned_res);
+    Ok(Some(json!({ "earned": earned })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +921,206 @@ mod tests {
         };
         let got = assemble_accounts(&res);
         assert_eq!(got["accounts"][0]["gm_level"], json!(0));
+    }
+
+    // -- players online / party online --------------------------------
+
+    #[test]
+    fn players_online_and_party_online_sql_share_the_where() {
+        let p = players_online_sql();
+        let o = party_online_sql();
+        assert!(p.contains("SELECT c.name, c.level, c.class, c.zone"), "got: {p}");
+        assert!(o.contains("SELECT c.guid, c.name, c.class, c.level"), "got: {o}");
+        for sql in [&p, &o] {
+            assert!(sql.contains("c.online = 1"), "got: {sql}");
+            assert!(
+                sql.contains(
+                    "c.account NOT IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+                ),
+                "got: {sql}"
+            );
+            assert!(sql.contains("ORDER BY c.name;"), "got: {sql}");
+        }
+    }
+
+    #[test]
+    fn assemble_players_online_shapes_rows_and_guards_numerics() {
+        let res = QueryResult {
+            columns: vec![],
+            rows: vec![
+                vec![t("Hypeer"), i(80), i(1), i(12)],
+                // empty name -> skipped
+                vec![t(""), i(1), i(1), i(1)],
+                // non-numeric level/class/zone -> guard to 0
+                vec![t("Weird"), t("NULL"), t(""), t("x")],
+            ],
+        };
+        let got = assemble_players_online(&res);
+        assert_eq!(
+            got,
+            json!({"players":[
+                {"name":"Hypeer","level":80,"class":1,"zone":12},
+                {"name":"Weird","level":0,"class":0,"zone":0}
+            ]})
+        );
+    }
+
+    #[test]
+    fn assemble_party_online_shapes_rows_and_skips_empty_guid() {
+        let res = QueryResult {
+            columns: vec![],
+            rows: vec![
+                vec![i(2502), t("Hypeer"), i(1), i(80)],
+                // empty guid -> skipped
+                vec![t(""), t("X"), i(1), i(1)],
+            ],
+        };
+        let got = assemble_party_online(&res);
+        assert_eq!(got, json!({"online":[{"guid":2502,"name":"Hypeer","class":1,"level":80}]}));
+    }
+
+    // -- items search ---------------------------------------------------
+
+    #[test]
+    fn items_search_sql_no_filters() {
+        let opts = ItemSearchOpts { name: String::new(), ..Default::default() };
+        let (sql, params) = items_search_sql(&opts);
+        assert_eq!(
+            sql,
+            "SELECT entry,name,Quality,ItemLevel,RequiredLevel,class,subclass,InventoryType,displayid \
+             FROM item_template WHERE 1=1 ORDER BY RequiredLevel, name LIMIT ?;"
+        );
+        assert_eq!(params, vec![mysql::Value::from(ITEMS_SEARCH_DEFAULT_LIMIT)]);
+    }
+
+    #[test]
+    fn items_search_sql_name_only() {
+        let opts = ItemSearchOpts { name: "Hearthstone".into(), ..Default::default() };
+        let (sql, params) = items_search_sql(&opts);
+        assert_eq!(
+            sql,
+            "SELECT entry,name,Quality,ItemLevel,RequiredLevel,class,subclass,InventoryType,displayid \
+             FROM item_template WHERE 1=1 AND name LIKE ? ORDER BY RequiredLevel, name LIMIT ?;"
+        );
+        assert_eq!(
+            params,
+            vec![mysql::Value::from("%Hearthstone%"), mysql::Value::from(ITEMS_SEARCH_DEFAULT_LIMIT)]
+        );
+    }
+
+    #[test]
+    fn items_search_sql_all_filters() {
+        let opts = ItemSearchOpts {
+            name: "Sword".into(),
+            quality: Some(4),
+            min_level: Some(10),
+            max_level: Some(60),
+        };
+        let (sql, params) = items_search_sql(&opts);
+        assert_eq!(
+            sql,
+            "SELECT entry,name,Quality,ItemLevel,RequiredLevel,class,subclass,InventoryType,displayid \
+             FROM item_template WHERE 1=1 AND name LIKE ? AND Quality = ? AND RequiredLevel >= ? \
+             AND RequiredLevel <= ? ORDER BY RequiredLevel, name LIMIT ?;"
+        );
+        assert_eq!(
+            params,
+            vec![
+                mysql::Value::from("%Sword%"),
+                mysql::Value::from(4u32),
+                mysql::Value::from(10u32),
+                mysql::Value::from(60u32),
+                mysql::Value::from(ITEMS_SEARCH_DEFAULT_LIMIT),
+            ]
+        );
+    }
+
+    #[test]
+    fn assemble_items_search_shapes_rows_and_skips_empty_entry() {
+        let res = QueryResult {
+            columns: vec![],
+            rows: vec![
+                vec![i(6948), t("Hearthstone"), i(1), i(1), i(1), i(15), i(0), i(0), i(4341)],
+                // empty entry -> skipped
+                vec![t(""), t("X"), i(0), i(0), i(0), i(0), i(0), i(0), i(0)],
+            ],
+        };
+        let got = assemble_items_search(&res);
+        assert_eq!(
+            got,
+            json!({"items":[
+                {"entry":6948,"name":"Hearthstone","quality":1,"item_level":1,"required_level":1,
+                 "class":15,"subclass":0,"inventory_type":0,"displayid":4341}
+            ]})
+        );
+    }
+
+    // -- char-progress / achievements ------------------------------------
+
+    #[test]
+    fn extract_char_guid_parses_or_none() {
+        let ok = QueryResult { columns: vec![], rows: vec![vec![t("2502")]] };
+        assert_eq!(extract_char_guid(&ok), Some(2502));
+        let none = QueryResult { columns: vec![], rows: vec![] };
+        assert_eq!(extract_char_guid(&none), None);
+        let bad = QueryResult { columns: vec![], rows: vec![vec![t("")]] };
+        assert_eq!(extract_char_guid(&bad), None);
+    }
+
+    #[test]
+    fn extract_talent_meta_guards_defaults() {
+        let ok = QueryResult { columns: vec![], rows: vec![vec![i(1), i(2)]] };
+        assert_eq!(extract_talent_meta(&ok), ("1".to_string(), "2".to_string()));
+        let bad = QueryResult { columns: vec![], rows: vec![vec![t("NULL"), t("")]] };
+        assert_eq!(extract_talent_meta(&bad), ("0".to_string(), "1".to_string()));
+        let empty = QueryResult { columns: vec![], rows: vec![] };
+        assert_eq!(extract_talent_meta(&empty), ("0".to_string(), "1".to_string()));
+    }
+
+    #[test]
+    fn extract_achievement_total_guards_to_zero() {
+        let ok = QueryResult { columns: vec![], rows: vec![vec![i(42)]] };
+        assert_eq!(extract_achievement_total(&ok), "42");
+        let bad = QueryResult { columns: vec![], rows: vec![vec![t("NULL")]] };
+        assert_eq!(extract_achievement_total(&bad), "0");
+    }
+
+    #[test]
+    fn assemble_achievement_entries_skips_bad_id_and_guards_date() {
+        let res = QueryResult {
+            columns: vec![],
+            rows: vec![
+                vec![i(6), i(1234567890)],
+                vec![t(""), i(1)],       // empty id -> skipped
+                vec![t("nope"), i(1)],   // non-numeric id -> skipped
+                vec![i(9), t("NULL")],   // non-numeric date -> guarded to 0
+            ],
+        };
+        let got = assemble_achievement_entries(&res);
+        assert_eq!(got, vec![json!({"id":6,"date":1234567890}), json!({"id":9,"date":0})]);
+    }
+
+    #[test]
+    fn assemble_talent_spells_skips_bad_ids() {
+        let res = QueryResult {
+            columns: vec![],
+            rows: vec![vec![i(133)], vec![t("")], vec![t("nope")], vec![i(2050)]],
+        };
+        let got = assemble_talent_spells(&res);
+        assert_eq!(got, vec![json!(133), json!(2050)]);
+    }
+
+    #[test]
+    fn assemble_char_progress_shapes_envelope() {
+        let recent = vec![json!({"id":6,"date":100})];
+        let spells = vec![json!(133), json!(2050)];
+        let got = assemble_char_progress("42", recent, "2", "1", spells);
+        assert_eq!(
+            got,
+            json!({
+                "achievements": {"total":42, "recent":[{"id":6,"date":100}]},
+                "talents": {"groups_count":2, "active_group":1, "spells":[133,2050]},
+            })
+        );
     }
 }

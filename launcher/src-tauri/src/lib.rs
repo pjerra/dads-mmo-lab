@@ -1198,6 +1198,125 @@ async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE fast read of the "who's playing right now" Home card: same
+/// shape as `wow_players_online` (`{"players":[{name,level,class,zone}]}`),
+/// over a direct MySQL connection. Native mode only — WSL keeps calling
+/// `wow_players_online`.
+#[tauri::command]
+async fn wow_players_online_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        crate::dml::pages::read_players_online(&cfg).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of online (non-bot) characters for the party UI:
+/// same shape as `wow_party_online` (`{"online":[{guid,name,class,level}]}`),
+/// over a direct MySQL connection. Native mode only — WSL keeps calling
+/// `wow_party_online`.
+#[tauri::command]
+async fn wow_party_online_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        crate::dml::pages::read_party_online(&cfg).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast item search: same shape as `wow_items_search`
+/// (`{"items":[…]}`), over a direct MySQL connection. Rejects an
+/// empty/whitespace-only `name` with `BAD_ARG` BEFORE any SQL is built,
+/// exactly like the arm's own pre-check (90-main.sh `items search`). Native
+/// mode only — WSL keeps calling `wow_items_search`.
+#[tauri::command]
+async fn wow_items_search_read(
+    name: String,
+    quality: Option<u32>,
+    min_level: Option<u32>,
+    max_level: Option<u32>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if name.trim().is_empty() {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "items search requires a non-empty --name".into(),
+            hint: "Example: dml wow items search --name hearthstone --json".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let opts = crate::dml::pages::ItemSearchOpts { name, quality, min_level, max_level };
+        crate::dml::pages::read_items_search(&cfg, &opts).map_err(db_err_to_cmd)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of a character's achievement/talent summary: same
+/// shape as `wow_char_progress`
+/// (`{"achievements":{total,recent},"talents":{groups_count,active_group,spells}}`),
+/// over a direct MySQL connection (5-query sequence, same order as the arm).
+/// Rejects an invalid name with `BAD_ARG` and an unknown character with
+/// `NOT_FOUND`, exactly like the CLI arm. Native mode only.
+#[tauri::command]
+async fn wow_char_progress_read(char_name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid character name: {char_name}"),
+            hint: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        match crate::dml::pages::read_char_progress(&cfg, &char_name).map_err(db_err_to_cmd)? {
+            Some(v) => Ok(v),
+            None => Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("No such character: {char_name}"),
+                hint: String::new(),
+            }),
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of a character's full earned-achievement list: same
+/// shape as `wow_achievements` (`{"earned":[{id,date}]}`), over a direct
+/// MySQL connection. Rejects an invalid name with `BAD_ARG` and an unknown
+/// character with `NOT_FOUND`, exactly like the CLI arm. Native mode only.
+#[tauri::command]
+async fn wow_achievements_read(char_name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid character name: {char_name}"),
+            hint: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        match crate::dml::pages::read_achievements(&cfg, &char_name).map_err(db_err_to_cmd)? {
+            Some(v) => Ok(v),
+            None => Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("No such character: {char_name}"),
+                hint: String::new(),
+            }),
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// Map a native-mode stats [`crate::dml::db::DbError`] to a [`CmdError`] whose
 /// code matches the CLI's `stats` arm: that arm reports `DB_UNREACHABLE` for
 /// EVERY payload failure (including a query error on a reachable DB — see the
@@ -4755,6 +4874,11 @@ pub fn run() {
             wow_accounts_read,
             wow_stats_read,
             wow_paperdoll_read,
+            wow_players_online_read,
+            wow_party_online_read,
+            wow_items_search_read,
+            wow_char_progress_read,
+            wow_achievements_read,
             backend_mode,
             wow_config_set,
             wow_config_set_native,

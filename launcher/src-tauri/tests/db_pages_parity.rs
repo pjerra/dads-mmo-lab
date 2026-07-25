@@ -29,7 +29,9 @@ use std::time::Duration;
 
 use launcher_lib::dml::db::DbConfig;
 use launcher_lib::dml::pages::{
-    clamp_limit, read_accounts, read_bots, read_teleport_list, BotFilters,
+    clamp_limit, read_accounts, read_achievements, read_bots, read_char_progress,
+    read_items_search, read_players_online, read_party_online, read_teleport_list, BotFilters,
+    ItemSearchOpts,
 };
 
 fn games_dir() -> PathBuf {
@@ -235,4 +237,120 @@ fn accounts_reader_deep_equals_cli() {
     assert_eq!(want["ok"], true, "accounts not ok: {want}");
     let got = read_accounts(&h.cfg).expect("native accounts read");
     assert_eq!(got, want["data"], "accounts reader diverged from `wow accounts`");
+}
+
+#[test]
+fn players_online_reader_deep_equals_cli() {
+    let Some(h) = harness("players online parity") else { return };
+
+    let want =
+        run_dml(&h.bash, &h.script, &h.games, &h.yq, &h.path, &["wow", "players", "online"]);
+    assert_eq!(want["ok"], true, "players online not ok: {want}");
+    let got = read_players_online(&h.cfg).expect("native players-online read");
+    assert_eq!(got, want["data"], "players-online reader diverged from `wow players online`");
+}
+
+#[test]
+fn party_online_reader_deep_equals_cli() {
+    let Some(h) = harness("party online parity") else { return };
+
+    let want = run_dml(&h.bash, &h.script, &h.games, &h.yq, &h.path, &["wow", "party", "online"]);
+    assert_eq!(want["ok"], true, "party online not ok: {want}");
+    let got = read_party_online(&h.cfg).expect("native party-online read");
+    assert_eq!(got, want["data"], "party-online reader diverged from `wow party online`");
+}
+
+#[test]
+fn items_search_reader_deep_equals_cli() {
+    let Some(h) = harness("items search parity") else { return };
+
+    // "Hearthstone" is a safe, universally-present item name.
+    let want = run_dml(
+        &h.bash,
+        &h.script,
+        &h.games,
+        &h.yq,
+        &h.path,
+        &["wow", "items", "search", "--name", "Hearthstone"],
+    );
+    assert_eq!(want["ok"], true, "items search not ok: {want}");
+    let opts = ItemSearchOpts { name: "Hearthstone".into(), quality: None, min_level: None, max_level: None };
+    let got = read_items_search(&h.cfg, &opts).expect("native items-search read");
+    assert_eq!(got, want["data"], "items-search reader diverged from `wow items search`");
+
+    // Exercise the filtered path too (quality + level band).
+    let want = run_dml(
+        &h.bash,
+        &h.script,
+        &h.games,
+        &h.yq,
+        &h.path,
+        &["wow", "items", "search", "--name", "Sword", "--quality", "2", "--min-level", "1", "--max-level", "60"],
+    );
+    assert_eq!(want["ok"], true, "items search (filtered) not ok: {want}");
+    let opts = ItemSearchOpts {
+        name: "Sword".into(),
+        quality: Some(2),
+        min_level: Some(1),
+        max_level: Some(60),
+    };
+    let got = read_items_search(&h.cfg, &opts).expect("native items-search read (filtered)");
+    assert_eq!(got, want["data"], "items-search reader diverged (filtered)");
+}
+
+/// Pick any known character name off a live `dml wow accounts` run — used to
+/// exercise `char-progress`/`achievements` without hardcoding a name that may
+/// not exist on this box. `None` when no account has a character yet.
+fn pick_any_character_name(h: &Harness) -> Option<String> {
+    let accounts =
+        run_dml(&h.bash, &h.script, &h.games, &h.yq, &h.path, &["wow", "accounts"]);
+    accounts["data"]["accounts"].as_array()?.iter().find_map(|acct| {
+        acct["characters"].as_array()?.first()?["name"].as_str().map(str::to_string)
+    })
+}
+
+#[test]
+fn char_progress_reader_deep_equals_cli() {
+    let Some(h) = harness("char-progress parity") else { return };
+    let Some(name) = pick_any_character_name(&h) else {
+        eprintln!("SKIP char-progress parity: no character exists on this box");
+        return;
+    };
+
+    let want = run_dml(
+        &h.bash,
+        &h.script,
+        &h.games,
+        &h.yq,
+        &h.path,
+        &["wow", "char-progress", "--char", &name],
+    );
+    assert_eq!(want["ok"], true, "char-progress not ok: {want}");
+    let got = read_char_progress(&h.cfg, &name)
+        .expect("native char-progress read")
+        .expect("character exists");
+    assert_eq!(got, want["data"], "char-progress reader diverged from `wow char-progress`");
+}
+
+#[test]
+fn achievements_reader_deep_equals_cli() {
+    let Some(h) = harness("achievements parity") else { return };
+    let Some(name) = pick_any_character_name(&h) else {
+        eprintln!("SKIP achievements parity: no character exists on this box");
+        return;
+    };
+
+    let want = run_dml(
+        &h.bash,
+        &h.script,
+        &h.games,
+        &h.yq,
+        &h.path,
+        &["wow", "achievements", "--char", &name],
+    );
+    assert_eq!(want["ok"], true, "achievements not ok: {want}");
+    let got = read_achievements(&h.cfg, &name)
+        .expect("native achievements read")
+        .expect("character exists");
+    assert_eq!(got, want["data"], "achievements reader diverged from `wow achievements`");
 }

@@ -604,7 +604,11 @@ export async function wowItemsSearch(p: {
   minLevel?: number;
   maxLevel?: number;
 }): Promise<ItemRow[]> {
-  const data = await invoke<{ items: ItemRow[] }>("wow_items_search", p);
+  const mode = await resolveBackendMode();
+  const data =
+    mode === "native"
+      ? await invoke<{ items: ItemRow[] }>("wow_items_search_read", p)
+      : await invoke<{ items: ItemRow[] }>("wow_items_search", p);
   return data.items;
 }
 export async function wowMailItem(p: {
@@ -692,13 +696,19 @@ export interface CharProgress {
   talents: { groups_count: number; active_group: number; spells: number[] };
 }
 export async function wowCharProgress(charName: string): Promise<CharProgress> {
-  return await invoke("wow_char_progress", { charName });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_char_progress_read", { charName })
+    : invoke("wow_char_progress", { charName });
 }
 export interface EarnedAchievements {
   earned: AchievementEntry[];
 }
 export async function wowAchievements(charName: string): Promise<EarnedAchievements> {
-  return await invoke("wow_achievements", { charName });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_achievements_read", { charName })
+    : invoke("wow_achievements", { charName });
 }
 export interface EntityInfo {
   id: number;
@@ -909,7 +919,11 @@ export interface OnlineChar { guid: number; name: string; class: number; level: 
 export interface PlayerOnline { name: string; level: number; class: number; zone: number; }
 
 export async function wowPlayersOnline(): Promise<PlayerOnline[]> {
-  const d = await invoke<{ players: PlayerOnline[] }>("wow_players_online");
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ players: PlayerOnline[] }>("wow_players_online_read")
+      : await invoke<{ players: PlayerOnline[] }>("wow_players_online");
   return d.players;
 }
 // Batch 5 F1 (Bot Browser): one page of the random-bot population.
@@ -962,7 +976,11 @@ export interface PartyAddResult {
 }
 
 export async function wowPartyOnline(): Promise<OnlineChar[]> {
-  const d = await invoke<{ online: OnlineChar[] }>("wow_party_online");
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ online: OnlineChar[] }>("wow_party_online_read")
+      : await invoke<{ online: OnlineChar[] }>("wow_party_online");
   return d.online;
 }
 // Read-only: the live premade specs from the deployed playerbots.conf. Empty
