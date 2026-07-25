@@ -85,7 +85,18 @@
     loadViewerScripts()
       .then(() => createCharacterViewer(containerId, doll, displayIds ?? undefined))
       .then((res) => {
-        if (cancelled) return;
+        if (cancelled) {
+          // The effect was re-run (a new doll.name) or torn down while this
+          // viewer was still constructing. Nothing else holds a reference to
+          // it -- `created` is still null, so the cleanup below can't reach
+          // it -- and a ZamModelViewer is a live WebGL context + per-frame
+          // render loop. Destroy it (and clear the container it inserted
+          // into) HERE, or it leaks until WebView2's WebGL-context cap is
+          // exhausted and later models silently fail to render.
+          destroyViewer(res.viewer);
+          document.getElementById(containerId)?.replaceChildren();
+          return;
+        }
         created = res.viewer;
         viewerRef = res.viewer;
         sheathValues = res.sheath;

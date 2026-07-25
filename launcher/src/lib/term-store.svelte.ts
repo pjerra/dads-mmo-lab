@@ -68,6 +68,17 @@ export const consoleStore = $state({
   clearAnchor: null as string[] | null,
 });
 
+// The reply-history sidecar is module-level (survives navigation) and only
+// ever appended -- a long console session would grow it without bound (the
+// visible log pane is a bounded server tail, but this list is not). Cap it to
+// the most recent MAX_CONSOLE_HIST entries on push.
+export const MAX_CONSOLE_HIST = 300;
+export function pushConsoleHist(entry: ConsoleHistEntry): void {
+  const next = [...consoleStore.hist, entry];
+  consoleStore.hist =
+    next.length > MAX_CONSOLE_HIST ? next.slice(-MAX_CONSOLE_HIST) : next;
+}
+
 // Pure: the portion of a freshly-fetched tail that comes AFTER the last
 // occurrence of the anchor line-sequence. [] means "anchor found, nothing
 // new yet"; null means "anchor no longer in the window" (enough new output

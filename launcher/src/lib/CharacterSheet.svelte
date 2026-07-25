@@ -14,6 +14,20 @@
   // (a separate map -- items keep their existing by-entry-number key
   // untouched, so Round E's paperdoll/tooltip behavior is unchanged).
   const entityCache = new Map<string, EntityInfo>();
+
+  // These caches are module-level (app-session lifetime) and hold payloads
+  // that include base64 icon images, so without a ceiling a long Bot Browser
+  // session (every distinct item/spell/achievement ever inspected) grows them
+  // unbounded. Cap with approximate-LRU eviction: a Map keeps insertion order,
+  // so the first key is the oldest -- evict it when full on a fresh insert.
+  const MAX_INFO_CACHE = 800;
+  function cacheSet<K, V>(cache: Map<K, V>, key: K, value: V): void {
+    if (cache.size >= MAX_INFO_CACHE && !cache.has(key)) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, value);
+  }
 </script>
 
 <script lang="ts">
@@ -105,7 +119,7 @@
     try {
       for (const chunk of chunkIds(missing)) {
         const infos = await wowEntityInfo(kind, chunk);
-        for (const info of infos) entityCache.set(`${kind}:${info.id}`, info);
+        for (const info of infos) cacheSet(entityCache, `${kind}:${info.id}`, info);
         entityVersion++;
       }
     } catch {
@@ -264,7 +278,7 @@
     if (missing.length === 0) return Promise.resolve(buildOverrides());
     return wowItemInfo(missing)
       .then((infos) => {
-        for (const info of infos) infoCache.set(info.entry, info);
+        for (const info of infos) cacheSet(infoCache, info.entry, info);
         infoVersion++;
         return buildOverrides();
       })

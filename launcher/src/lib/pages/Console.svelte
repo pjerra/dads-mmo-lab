@@ -2,7 +2,7 @@
   import { onMount, tick } from "svelte";
   import { wowConsoleTail, wowConsoleSend, saveTextFile } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { consoleStore, tailAfterAnchor } from "$lib/term-store.svelte";
+  import { consoleStore, pushConsoleHist, tailAfterAnchor } from "$lib/term-store.svelte";
   import { serverStatus, containersExist } from "$lib/server-status.svelte";
   import { stepRecall, logSeverity, consoleCommands, commandSuggestions } from "$lib/console-input";
   import { CORE_COMMANDS } from "$lib/gm-commands";
@@ -191,7 +191,7 @@
     sending = true;
     try {
       const r = await wowConsoleSend(cmd);
-      consoleStore.hist = [...consoleStore.hist, { command: cmd, result: r.result, error: null }];
+      pushConsoleHist({ command: cmd, result: r.result, error: null });
       command = "";
       histCursor = null;
       histDraft = "";
@@ -199,14 +199,11 @@
       suggIndex = -1;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
-      consoleStore.hist = [
-        ...consoleStore.hist,
-        {
-          command: cmd,
-          result: null,
-          error: `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`,
-        },
-      ];
+      pushConsoleHist({
+        command: cmd,
+        result: null,
+        error: `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`,
+      });
     } finally {
       sending = false;
       await refreshLogs();

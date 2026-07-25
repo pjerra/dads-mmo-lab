@@ -1308,24 +1308,17 @@ fn env_frozen_with(
     ename: &str,
     timeout: std::time::Duration,
 ) -> bool {
-    let program = program.to_os_string();
-    let container = container.to_string();
     let ename_prefix = format!("{ename}=");
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(&program);
-        cmd.args(["inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", &container]);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let out = cmd.output();
-        let _ = tx.send(out);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(out)) if out.status.success() => {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", container]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match output_bounded(cmd, timeout) {
+        Some(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout);
             text.lines().any(|l| l.starts_with(ename_prefix.as_str()))
         }
@@ -3239,37 +3232,58 @@ fn find_tailscale_exe() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Runs `program` with `args`, bounded by `timeout` wall-clock. Same
-/// bounded-subprocess idiom as `env_frozen_with`: the blocking `output()`
-/// call happens on a helper thread so a hung/unresponsive Tailscale daemon
-/// can never stall the GUI past `timeout` -- past the deadline the thread is
-/// left to finish (or hang) on its own rather than being joined. Returns the
-/// combined stdout+stderr (lossy UTF-8) and whether the process exited 0;
-/// `None` on timeout or spawn failure.
-fn run_bounded(program: &std::ffi::OsStr, args: &[&str], timeout: std::time::Duration) -> Option<(bool, String)> {
-    let program = program.to_os_string();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(&program);
-        cmd.args(&args);
-        cmd.stdin(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+/// Spawn `cmd`, wait up to `timeout` wall-clock, and — crucially — **kill and
+/// reap** the child if it overruns instead of abandoning it. The previous
+/// idiom ran a blocking `output()` on a detached helper thread and left it
+/// (and its un-reaped child holding open stdio pipes) alive forever on a hung
+/// `docker`/`tailscale` subprocess; repeated calls against a wedged engine
+/// slowly leaked threads + process handles. Here the child is owned, polled,
+/// and terminated on the deadline. Output is small for every caller (a docker
+/// env list, a tailscale status) so a full drain via `wait_with_output()`
+/// after exit cannot deadlock on the pipe buffer.
+fn output_bounded(mut cmd: std::process::Command, timeout: std::time::Duration) -> Option<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap so it never zombies
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
-        let out = cmd.output();
-        let _ = tx.send(out);
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(out)) => {
-            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&out.stderr));
-            Some((out.status.success(), combined))
-        }
-        _ => None,
     }
+    child.wait_with_output().ok()
+}
+
+/// Runs `program` with `args`, bounded by `timeout` wall-clock (see
+/// `output_bounded` — a hung/unresponsive Tailscale daemon is killed at the
+/// deadline, never abandoned). Returns the combined stdout+stderr (lossy
+/// UTF-8) and whether the process exited 0; `None` on timeout or spawn failure.
+fn run_bounded(program: &std::ffi::OsStr, args: &[&str], timeout: std::time::Duration) -> Option<(bool, String)> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = output_bounded(cmd, timeout)?;
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some((out.status.success(), combined))
 }
 
 /// The bits of `tailscale status --json` this command actually needs, pulled
@@ -4949,6 +4963,33 @@ mod tests {
         assert!(TOOL_NAMES.contains(&"unbound-remove"));
         assert!(!TOOL_NAMES.contains(&"unbound; rm -rf /"));
         assert!(!TOOL_NAMES.contains(&"anything-else"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_bounded_returns_output_for_a_fast_command() {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "echo", "bounded_ok"]);
+        let out = super::output_bounded(cmd, std::time::Duration::from_secs(5))
+            .expect("fast command should return Some");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("bounded_ok"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_bounded_kills_and_returns_none_on_timeout() {
+        // `ping -n 20` runs ~19s; a 300ms bound must return None well before
+        // that, proving the child was killed rather than waited out.
+        let start = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "ping", "-n", "20", "127.0.0.1"]);
+        let out = super::output_bounded(cmd, std::time::Duration::from_millis(300));
+        assert!(out.is_none(), "an overrunning command must time out to None");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must return promptly after the deadline, not wait for the child"
+        );
     }
 
     #[test]
