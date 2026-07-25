@@ -297,6 +297,260 @@ impl ConfigReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// WRITE side (Task B1): comment-preserving conf-file edits + semantic-parity
+// override-YAML env edits. `conf_write` is BYTE-PARITY with `_cfg_conf_write`
+// (comments/spacing/CRLF matter — hand-edited files); `override_env_write`/
+// `override_env_remove` are SEMANTIC-parity with `_cfg_env_write`/
+// `_cfg_env_remove` (the override is machine-generated — see the caveat on
+// `override_env_write`).
+// ---------------------------------------------------------------------------
+
+/// Strip ONE MATCHED pair of surrounding double quotes — a port of
+/// `_cfg_unquote` (40-config.sh:339). Requires BOTH ends to be `"` AND
+/// `len >= 2`; an unbalanced value (`"3` or `3"`) is left untouched. This is
+/// deliberately NOT the same rule as `strip_conf_quotes` (which trims each
+/// side independently, for the READ path's `${v%\"}`/`${v#\"}`) — the WRITE
+/// side's cur/new compare needs the stricter matched-pair rule the bash
+/// oracle actually uses.
+fn unquote_conf_matched(s: &str) -> &str {
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"' {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// RAW (quote-preserved) value of `key` in a conf file — a port of
+/// `_cfg_conf_read_raw` (40-config.sh:352). `""` when the file or key is
+/// absent. Unlike `parse_conf` (whose key gate is a regex character class),
+/// this matches the awk oracle's `index(s, k) == 1` — a LITERAL PREFIX test,
+/// so a `.` in `key` is a literal dot, never a wildcard. Last matching line
+/// wins. Used only by `conf_write`, to see the currently-stored value.
+fn conf_read_raw(path: &Path, key: &str) -> String {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let mut val = String::new();
+    for raw_line in content.split('\n') {
+        let s = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let s = s.trim_start_matches([' ', '\t']);
+        let Some(rest) = s.strip_prefix(key) else { continue };
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let Some(v) = rest.strip_prefix('=') else { continue };
+        val = v.trim_matches([' ', '\t']).to_string();
+    }
+    val
+}
+
+/// Atomic write: write `content` to a sibling temp file (`{path}.tmp.{pid}`),
+/// then rename it over `path`. Any error removes the temp file and
+/// propagates — the original is never truncated or left half-written.
+/// Shared by `conf_write` and the override-YAML writers.
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let mut tmp_os = path.as_os_str().to_os_string();
+    tmp_os.push(format!(".tmp.{}", std::process::id()));
+    let tmp_path = PathBuf::from(tmp_os);
+    if let Err(e) = std::fs::write(&tmp_path, content) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Comment-preserving in-place edit of an AC `.conf`. Returns `Ok(changed)`.
+/// Byte-parity target: `_cfg_conf_write` (40-config.sh:448), the awk oracle.
+///
+/// 1. Read the CURRENT raw (quote-preserved) value via `conf_read_raw`.
+/// 2. Unquote both current and new value with the MATCHED-pair rule
+///    (`unquote_conf_matched`, i.e. `_cfg_unquote`).
+/// 3. No-op (`Ok(false)`, no write at all) when the unquoted values are
+///    equal — a pure quote-toggle write never touches the file.
+/// 4. The output value is (re-)quoted iff the caller passed a quoted
+///    `value` OR the stored line was quoted — so a legitimate edit that
+///    needs quoting (spaces etc.) never silently loses it.
+/// 5. Rewrite every record: the file is split on `'\n'` with a single
+///    trailing empty record dropped (awk's per-record `ORS` model, not
+///    `str::lines()` — this is what makes CRLF / no-trailing-newline byte
+///    parity work). A record whose trimmed form is `<key>[blanks]=...`
+///    (literal prefix, exactly like `conf_read_raw`) is replaced by the
+///    canonical `"{key} = {out_val}"` (every matching duplicate rewritten,
+///    no `\r`); every other record is emitted byte-for-byte unchanged
+///    (keeps its own leading whitespace and trailing `\r`). If the key was
+///    never matched, the canonical line is appended. Output always ends
+///    with exactly one `'\n'`.
+/// 6. Atomic tmp+rename write (`atomic_write`).
+pub fn conf_write(path: &Path, key: &str, value: &str) -> std::io::Result<bool> {
+    let curq = conf_read_raw(path, key);
+    let cur = unquote_conf_matched(&curq);
+    let newq = value;
+    let new = unquote_conf_matched(newq);
+    if cur == new {
+        return Ok(false);
+    }
+    let out_val = if newq != new || curq.as_str() != cur {
+        format!("\"{new}\"")
+    } else {
+        new.to_string()
+    };
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+
+    // Awk's record model: split on '\n', dropping a single trailing empty
+    // record when the content ends in '\n' (so "a\n" is ONE record, not
+    // ["a", ""]). A totally empty file has ZERO records, not one phantom
+    // blank record.
+    let recs: Vec<&str> = if content.is_empty() {
+        Vec::new()
+    } else {
+        let mut v: Vec<&str> = content.split('\n').collect();
+        if content.ends_with('\n') {
+            v.pop();
+        }
+        v
+    };
+
+    let canonical = format!("{key} = {out_val}");
+    let mut done = false;
+    let mut out_lines: Vec<&str> = Vec::with_capacity(recs.len() + 1);
+    for &rec in &recs {
+        let s = rec.strip_suffix('\r').unwrap_or(rec);
+        let s = s.trim_start_matches([' ', '\t']);
+        let is_match = match s.strip_prefix(key) {
+            Some(rest) => rest.trim_start_matches([' ', '\t']).starts_with('='),
+            None => false,
+        };
+        if is_match {
+            out_lines.push(canonical.as_str());
+            done = true;
+        } else {
+            out_lines.push(rec);
+        }
+    }
+    if !done {
+        out_lines.push(canonical.as_str());
+    }
+
+    let mut out_content = out_lines.join("\n");
+    out_content.push('\n');
+
+    atomic_write(path, &out_content)?;
+    Ok(true)
+}
+
+/// Ensure `parent[key]` is a `Mapping`, creating one (or replacing a
+/// non-Mapping value) as needed, and return a mutable reference to it. Used
+/// to auto-vivify the `services.ac-worldserver.environment` nesting.
+fn ensure_yaml_mapping<'a>(
+    parent: &'a mut serde_yaml_ng::Mapping,
+    key: &str,
+) -> &'a mut serde_yaml_ng::Mapping {
+    let needs_insert = !matches!(parent.get(key), Some(serde_yaml_ng::Value::Mapping(_)));
+    if needs_insert {
+        parent.insert(
+            serde_yaml_ng::Value::String(key.to_string()),
+            serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()),
+        );
+    }
+    match parent.get_mut(key) {
+        Some(serde_yaml_ng::Value::Mapping(m)) => m,
+        _ => unreachable!("just ensured a Mapping"),
+    }
+}
+
+/// Set `.services.ac-worldserver.environment[key] = value` in an override
+/// compose YAML, creating the nested maps when absent. Returns `Ok(changed)`.
+/// Semantic-parity target: `_cfg_env_write` (40-config.sh:240).
+///
+/// Compares against the CURRENT value first via the existing
+/// `parse_override_env` reader — an unchanged value is a true no-op
+/// (`Ok(false)`, file untouched), matching the bash oracle's
+/// `[[ "$cur" == "$2" ]] && return 0` short-circuit. The written value is
+/// ALWAYS a YAML string scalar (never int/float/bool), matching yq's
+/// `strenv()` semantics.
+///
+/// KNOWN CAVEAT: `serde_yaml_ng` does not preserve comments and may choose
+/// different scalar quoting than mikefarah `yq` (the bash oracle's engine).
+/// The override file is machine-generated (no hand comments expected), so
+/// this is acceptable — the B3 parity test compares this file SEMANTICALLY
+/// (parsed env-map equality), NOT byte-for-byte, unlike `conf_write`.
+pub fn override_env_write(path: &Path, key: &str, value: &str) -> std::io::Result<bool> {
+    let existing_text = std::fs::read_to_string(path).ok();
+    let cur = existing_text
+        .as_deref()
+        .map(parse_override_env)
+        .unwrap_or_default();
+    if cur.get(key).map(String::as_str) == Some(value) {
+        return Ok(false);
+    }
+
+    let mut doc: serde_yaml_ng::Value = existing_text
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .and_then(|t| serde_yaml_ng::from_str(t).ok())
+        .unwrap_or_else(|| serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()));
+    if !matches!(doc, serde_yaml_ng::Value::Mapping(_)) {
+        doc = serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new());
+    }
+
+    let root = doc.as_mapping_mut().expect("just ensured a Mapping");
+    let services = ensure_yaml_mapping(root, "services");
+    let worldserver = ensure_yaml_mapping(services, "ac-worldserver");
+    let environment = ensure_yaml_mapping(worldserver, "environment");
+    environment.insert(
+        serde_yaml_ng::Value::String(key.to_string()),
+        serde_yaml_ng::Value::String(value.to_string()),
+    );
+
+    let text = serde_yaml_ng::to_string(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, &text)?;
+    Ok(true)
+}
+
+/// Remove `key` from `.services.ac-worldserver.environment` if present.
+/// Idempotent: an absent file, absent section, or absent key are all
+/// `Ok(false)` — never an error. Semantic-parity target: `_cfg_env_remove`
+/// (40-config.sh:276).
+pub fn override_env_remove(path: &Path, key: &str) -> std::io::Result<bool> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let Ok(mut doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else {
+        return Ok(false);
+    };
+    let removed = doc
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut("services"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|services| services.get_mut("ac-worldserver"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|worldserver| worldserver.get_mut("environment"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|environment| environment.remove(key));
+
+    if removed.is_none() {
+        return Ok(false);
+    }
+    let text = serde_yaml_ng::to_string(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, &text)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,5 +749,242 @@ services:
         assert_eq!(s["restart_required"], true);
         assert_eq!(s["env"], "conf:Rate.XP.Kill");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- conf_write ----------------------------------------------------
+
+    /// Fresh scratch file per test, auto-removed on drop.
+    struct TmpConf(PathBuf);
+    impl TmpConf {
+        fn new(name: &str, content: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("dml-cfgwrite-test-{}-{}", std::process::id(), name));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("test.conf");
+            std::fs::write(&path, content).unwrap();
+            TmpConf(path)
+        }
+        fn read(&self) -> String {
+            std::fs::read_to_string(&self.0).unwrap()
+        }
+    }
+    impl Drop for TmpConf {
+        fn drop(&mut self) {
+            if let Some(dir) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    #[test]
+    fn conf_write_existing_key_sets_new_value() {
+        let f = TmpConf::new(
+            "existing",
+            "# a comment\nRate.XP.Kill = 1\nRate.Honor = 1\n",
+        );
+        let changed = conf_write(&f.0, "Rate.XP.Kill", "2").unwrap();
+        assert!(changed);
+        assert_eq!(
+            f.read(),
+            "# a comment\nRate.XP.Kill = 2\nRate.Honor = 1\n"
+        );
+    }
+
+    #[test]
+    fn conf_write_pure_quote_toggle_is_noop() {
+        let f = TmpConf::new("quotetoggle", "Foo = \"bar\"\nOther = 1\n");
+        let before = f.read();
+        let changed = conf_write(&f.0, "Foo", "bar").unwrap();
+        assert!(!changed);
+        assert_eq!(f.read(), before, "file must be byte-identical after a no-op");
+        // No tmp file left behind.
+        let mut tmp_os = f.0.as_os_str().to_os_string();
+        tmp_os.push(format!(".tmp.{}", std::process::id()));
+        assert!(!PathBuf::from(tmp_os).exists());
+    }
+
+    #[test]
+    fn conf_write_quotes_new_value_when_caller_quotes() {
+        let f = TmpConf::new("quotepres", "Foo = bar\n");
+        let changed = conf_write(&f.0, "Foo", "\"baz qux\"").unwrap();
+        assert!(changed);
+        assert_eq!(f.read(), "Foo = \"baz qux\"\n");
+    }
+
+    #[test]
+    fn conf_write_appends_when_key_absent() {
+        let f = TmpConf::new("append", "Existing.Key = 1\n");
+        let changed = conf_write(&f.0, "NewKey", "5").unwrap();
+        assert!(changed);
+        assert_eq!(f.read(), "Existing.Key = 1\nNewKey = 5\n");
+    }
+
+    #[test]
+    fn conf_write_duplicate_active_lines_both_rewritten() {
+        let f = TmpConf::new(
+            "dup",
+            "Rate.XP.Kill = 1\nOther = 1\nRate.XP.Kill = 1\n",
+        );
+        let changed = conf_write(&f.0, "Rate.XP.Kill", "2").unwrap();
+        assert!(changed);
+        assert_eq!(
+            f.read(),
+            "Rate.XP.Kill = 2\nOther = 1\nRate.XP.Kill = 2\n"
+        );
+    }
+
+    #[test]
+    fn conf_write_weird_spacing_rewritten_canonical() {
+        let f = TmpConf::new("spacing", "  Rate.XP.Kill=1\nOther = 1\n");
+        let changed = conf_write(&f.0, "Rate.XP.Kill", "2").unwrap();
+        assert!(changed);
+        assert_eq!(f.read(), "Rate.XP.Kill = 2\nOther = 1\n");
+    }
+
+    #[test]
+    fn conf_write_crlf_line_loses_cr_others_keep_it() {
+        let f = TmpConf::new("crlf", "A = x\r\nFoo = 1\r\nB = y\r\n");
+        let changed = conf_write(&f.0, "Foo", "2").unwrap();
+        assert!(changed);
+        assert_eq!(f.read(), "A = x\r\nFoo = 2\nB = y\r\n");
+    }
+
+    #[test]
+    fn conf_write_no_trailing_newline_gains_one() {
+        let f = TmpConf::new("notrail", "A = 1");
+        let changed = conf_write(&f.0, "A", "2").unwrap();
+        assert!(changed);
+        assert_eq!(f.read(), "A = 2\n");
+    }
+
+    #[test]
+    fn conf_write_missing_file_creates_it_with_appended_line() {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-cfgwrite-test-{}-missing", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("absent.conf");
+        assert!(!path.exists());
+        let changed = conf_write(&path, "NewKey", "5").unwrap();
+        assert!(changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "NewKey = 5\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- override_env_write / override_env_remove -----------------------
+
+    fn tmp_override_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-envwrite-test-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("docker-compose.override.yml")
+    }
+
+    #[test]
+    fn override_env_write_new_key_into_minimal_override() {
+        let path = tmp_override_path("newkey");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        // Other keys survive.
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_same_value_is_noop() {
+        let path = tmp_override_path("samevalue");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_RATE_XP_KILL: \"3\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(!changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_creates_full_nesting_from_absent_file() {
+        let path = tmp_override_path("absent");
+        assert!(!path.exists());
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_present_key_removes_it() {
+        let path = tmp_override_path("removepresent");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_RATE_XP_KILL: \"3\"\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let removed = override_env_remove(&path, "AC_RATE_XP_KILL").unwrap();
+        assert!(removed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert!(!m.contains_key("AC_RATE_XP_KILL"));
+        // Other key survives.
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_absent_key_is_noop() {
+        let path = tmp_override_path("removeabsent");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let removed = override_env_remove(&path, "AC_DOES_NOT_EXIST").unwrap();
+        assert!(!removed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_absent_file_is_noop_not_error() {
+        let path = tmp_override_path("removenofile");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // Directory doesn't exist at all -> read fails -> Ok(false), never an error.
+        let removed = override_env_remove(&path, "AC_SOAP_IP").unwrap();
+        assert!(!removed);
+    }
+
+    #[test]
+    fn override_env_write_preserves_other_top_level_keys() {
+        let path = tmp_override_path("othertopkeys");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    volumes:\n      - ./modules:/azerothcore/modules\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The volumes list under the same service survives the edit.
+        assert!(text.contains("volumes"));
+        assert!(text.contains("azerothcore/modules"));
+        let m = parse_override_env(&text);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
