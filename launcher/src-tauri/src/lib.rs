@@ -1659,15 +1659,22 @@ async fn wow_gm_return_home(char_name: String, state: State<'_, AppState>) -> Re
 // matching `90-main.sh` arm emits. Coords-teleport / return-home (A2c) and
 // MOTD/announce (Subsystem B) are NOT here.
 //
-// FAULT-TEXT PARITY. `dml::soap_cmds::outcome_to_result_raw`/
-// `_decoded` cover the two arms that use their exact (already-approved)
-// generic text -- `wow_console_send_native` (raw) and the `wow_account_*_native`
-// family (decoded). Every other arm below has its own `case "$rc" in` block
-// in the bash oracle with wording that differs from those two generic
-// mappers (a different SOAP_AUTH message, a fixed non-decoded fault string,
-// or a different hint) -- those get a small local mapper each, copied
-// verbatim from the arm's `json_err` calls rather than reusing the generic
-// ones, per the brief's "match the exact fault hints per arm" instruction.
+// FAULT-TEXT PARITY. Every arm below has its own `case "$rc" in` block in
+// the bash oracle, and several of them differ from the two generic mappers
+// in `dml::soap_cmds` (`outcome_to_result_raw`/`_decoded`) on at least one
+// branch (a different SOAP_AUTH message, a fixed non-decoded fault string,
+// a different SOAP_UNREACHABLE message/hint, or a different hint) -- those
+// get a small local mapper each, copied verbatim from the arm's `json_err`
+// calls rather than reusing the generic ones, per the brief's "match the
+// exact fault hints per arm" instruction. `account_result` (the `account`
+// arm, `90-main.sh:1999-2010`) reuses `outcome_to_result_decoded` for its
+// Ok/Fault/Auth branches (those three match byte-for-byte) but overrides
+// Unreachable with the arm's own `Could not reach SOAP at $(soap_url)` /
+// `Is the worldserver running?` wording. `console_send_result` (the
+// `console-send` arm, `90-main.sh:1736-1746` -- the true oracle for
+// `wow_console_send_native`/`wowConsoleSend`, NOT `soap-exec`) copies that
+// arm's case block verbatim, including its entity-decode of both the Ok and
+// Fault paths and its whitespace-only empty-command check.
 // -----------------------------------------------------------------------
 
 /// `SoapOutcome -> CmdError` matching `_party_fire`'s exact case block
@@ -1925,22 +1932,53 @@ fn split_mail_items(items: &str) -> Vec<&str> {
     }
 }
 
+/// `SoapOutcome -> CmdError` for the `console-send` arm (`90-main.sh:1736-
+/// 1746`) -- the true bash sibling of `wow_console_send_native` (both are
+/// what `wowConsoleSend()` in `api.ts` calls for the Console tab, native vs
+/// WSL). Unlike the generic `outcome_to_result_raw`, this arm entity-decodes
+/// BOTH the Ok result and the Fault text, and uses its own SOAP_UNREACHABLE
+/// wording (`Could not reach SOAP at $(soap_url)` / mentions `soap-setup`).
+fn console_send_result(o: crate::dml::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(crate::dml::soap_cmds::soap_text_decode(&t)),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            hint: "The worldserver rejected the command.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: format!("Could not reach SOAP at {soap_url}"),
+            hint: "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup".into(),
+        }),
+    }
+}
+
 /// NATIVE-MODE: the free-text console/SOAP command box, wired to the
-/// `soap-exec` oracle (`90-main.sh:1389-1404`) -- same generic raw-fault
-/// mapping `dml wow soap-exec` uses (not the separate `console-send` arm,
-/// which additionally entity-decodes the Ok path; the launcher's console
-/// tab is this command's only caller and never needed that decode).
+/// `console-send` oracle (`90-main.sh:1725-1746`) -- the arm
+/// `wow_console_send`/`wowConsoleSend` actually shells in WSL mode
+/// (`dml wow console-send --command ...`, see `wow_console_send` above),
+/// NOT `soap-exec` -- so this keeps native and WSL mode byte-identical for
+/// the same Console-tab action. The empty-command check mirrors bash's
+/// whitespace-only test (`[[ -z "${cmd//[[:space:]]/}" ]]`), not a plain
+/// `is_empty()`, so a command that's e.g. all spaces is also rejected.
 #[tauri::command]
 async fn wow_console_send_native(
     command: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if command.is_empty() {
+    if command.trim().is_empty() {
         return Err(CmdError {
             code: "BAD_ARG".into(),
-            message: "Missing console command".into(),
-            hint: "Usage: dml wow soap-exec \"<command>\" --json".into(),
+            message: "console-send requires a non-empty --command".into(),
+            hint: "Example: dml wow console-send --command \"server info\" --json".into(),
         });
     }
     let lock = state.soap_lock.clone();
@@ -1948,11 +1986,30 @@ async fn wow_console_send_native(
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::dml::soap::SoapConfig::load();
         let outcome = crate::dml::soap::exec(&cfg, &command);
-        let result = crate::dml::soap_cmds::outcome_to_result_raw(outcome)?;
+        let result = console_send_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "result": result }))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// `SoapOutcome -> CmdError` for the `account` arm's catch-all case block
+/// (`90-main.sh:1999-2010`), shared by create/set-password/set-gm/delete.
+/// Ok/Fault/Auth match `outcome_to_result_decoded` byte-for-byte (both use
+/// the same decoded-fault / "SOAP authentication failed" text), but this
+/// arm's Unreachable branch has its own wording -- `Could not reach SOAP at
+/// $(soap_url)` / `Is the worldserver running?` -- instead of the generic
+/// mapper's `Could not reach the server` / `Is it running?`.
+fn account_result(o: crate::dml::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: format!("Could not reach SOAP at {soap_url}"),
+            hint: "Is the worldserver running?".into(),
+        }),
+        other => crate::dml::soap_cmds::outcome_to_result_decoded(other),
+    }
 }
 
 /// NATIVE-MODE account create (`90-main.sh:1952-2010`, `asub == create`).
@@ -1969,7 +2026,7 @@ async fn wow_account_create_native(
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::dml::soap::SoapConfig::load();
         let outcome = crate::dml::soap::exec(&cfg, &cmd);
-        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "created": true, "user": user }))
     })
     .await
@@ -1991,7 +2048,7 @@ async fn wow_account_set_password_native(
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::dml::soap::SoapConfig::load();
         let outcome = crate::dml::soap::exec(&cfg, &cmd);
-        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "password_set": true, "user": user }))
     })
     .await
@@ -2016,7 +2073,7 @@ async fn wow_account_set_gm_native(
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::dml::soap::SoapConfig::load();
         let outcome = crate::dml::soap::exec(&cfg, &cmd);
-        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "gm_set": true, "user": user, "level": level }))
     })
     .await
@@ -2037,7 +2094,7 @@ async fn wow_account_delete_native(
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = crate::dml::soap::SoapConfig::load();
         let outcome = crate::dml::soap::exec(&cfg, &cmd);
-        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "deleted": true, "user": user }))
     })
     .await
@@ -4176,6 +4233,84 @@ mod tests {
         let e = teleport_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
         assert_eq!(e.message, "Could not reach the server");
         assert_eq!(e.hint, "");
+    }
+
+    // -- Subsystem-A review fixes: account_result / console_send_result -----
+
+    #[test]
+    fn account_result_ok_passes_through() {
+        assert_eq!(
+            account_result(SoapOutcome::Ok("Account created.".into()), "http://x/").unwrap(),
+            "Account created."
+        );
+    }
+
+    #[test]
+    fn account_result_fault_matches_decoded_oracle() {
+        let e = account_result(SoapOutcome::Fault("a&lt;b".into()), "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a<b");
+        assert_eq!(e.hint, "The worldserver rejected the command.");
+    }
+
+    #[test]
+    fn account_result_auth_matches_decoded_oracle() {
+        let e = account_result(SoapOutcome::Auth, "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+    }
+
+    #[test]
+    fn account_result_unreachable_uses_the_account_arms_own_wording() {
+        // 90-main.sh:2009 -- the account arm's catch-all `*)` branch, NOT the
+        // generic outcome_to_result_decoded's Unreachable text.
+        let e = account_result(SoapOutcome::Unreachable("boom".into()), "http://127.0.0.1:7878/")
+            .unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach SOAP at http://127.0.0.1:7878/");
+        assert_eq!(e.hint, "Is the worldserver running?");
+    }
+
+    #[test]
+    fn console_send_result_ok_is_entity_decoded() {
+        // 90-main.sh:1741 -- console-send decodes BOTH the Ok and Fault text,
+        // unlike the generic outcome_to_result_raw the soap-exec arm uses.
+        assert_eq!(
+            console_send_result(SoapOutcome::Ok("a&lt;b".into()), "http://x/").unwrap(),
+            "a<b"
+        );
+    }
+
+    #[test]
+    fn console_send_result_fault_is_entity_decoded() {
+        let e = console_send_result(SoapOutcome::Fault("a&lt;b".into()), "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a<b");
+        assert_eq!(e.hint, "The worldserver rejected the command.");
+    }
+
+    #[test]
+    fn console_send_result_auth_matches_console_send_arm() {
+        let e = console_send_result(SoapOutcome::Auth, "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+    }
+
+    #[test]
+    fn console_send_result_unreachable_matches_console_send_arm_not_soap_exec() {
+        // 90-main.sh:1745 -- console-send's own Unreachable wording (mentions
+        // soap-setup), distinct from both the generic mapper and soap-exec's
+        // arm (which has the same text here, but a different Auth hint).
+        let e = console_send_result(SoapOutcome::Unreachable("boom".into()), "http://127.0.0.1:7878/")
+            .unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach SOAP at http://127.0.0.1:7878/");
+        assert_eq!(
+            e.hint,
+            "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup"
+        );
     }
 
     #[test]
