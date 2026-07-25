@@ -551,6 +551,169 @@ pub fn override_env_remove(path: &Path, key: &str) -> std::io::Result<bool> {
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// `wow_config_set_native` (Task B2a) — pure routing/path/validation helpers.
+// The Tauri command itself (`lib.rs`) orchestrates these plus the SOAP/DB
+// side effects; everything below is filesystem-shape logic ported straight
+// from the `set)` case (`90-main.sh:2344-2561`) and its `40-config.sh`
+// dependents, kept here so it is unit-testable without Tauri or a server.
+// ---------------------------------------------------------------------------
+
+/// The direct-route (`conf:...`) conf files that stay curated-rows-only — a
+/// port of the `set)` case's core-conf `case` guard (`90-main.sh:2367-2372`).
+pub fn is_core_conf_file(file: &str) -> bool {
+    matches!(
+        file,
+        "worldserver.conf" | "authserver.conf" | ".env" | "docker-compose.override.yml"
+    )
+}
+
+/// Direct-route conf-key shape gate — `^[A-Za-z0-9_.]+$` (`90-main.sh:2373`).
+pub fn is_valid_direct_conf_key(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+}
+
+/// The one direct-route conf key `wow bots flush` owns — setting it by hand
+/// arms a persistent boot-time wipe. Port of the denylist `case`
+/// (`90-main.sh:2382-2388`).
+pub const DENYLISTED_DIRECT_CONF_KEY: &str = "AiPlayerbot.DeleteRandomBotAccounts";
+
+/// Whether `key` is the denylisted direct-route conf key.
+pub fn is_denylisted_direct_key(key: &str) -> bool {
+    key == DENYLISTED_DIRECT_CONF_KEY
+}
+
+/// Single-line gate for a direct-route conf value (`90-main.sh:2389-2391`):
+/// rejects any value containing `\n` or `\r`.
+pub fn is_single_line(value: &str) -> bool {
+    !value.contains('\n') && !value.contains('\r')
+}
+
+/// Max-length gate for a direct-route conf value (`90-main.sh:2392-2394`):
+/// `<= 200` chars (matches bash `${#value}`, a character count).
+pub fn within_max_len(value: &str, max: usize) -> bool {
+    value.chars().count() <= max
+}
+
+/// Module-conf name shape gate — the traversal guard from `_cfg_file_path`
+/// (`40-config.sh:645-659`): `^[A-Za-z0-9_.-]+\.conf$`. No slash can match
+/// this charset, so the name can never leave the modules dir.
+pub fn is_module_conf_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.ends_with(".conf")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+/// Direct-route module-conf host path — the module-conf arm of `_cfg_file_path`
+/// (`40-config.sh:645-659`; the fixed `worldserver.conf`/`authserver.conf`/
+/// `.env`/override arms are unreachable here because the `set` command's
+/// core-conf `case` already rejects those file names before this is called).
+/// `None` when the name fails the shape gate, or when neither the conf nor
+/// its `.dist` exists under `env/dist/etc/modules/`.
+pub fn direct_conf_path(title_dir: &Path, name: &str) -> Option<PathBuf> {
+    if !is_module_conf_name(name) {
+        return None;
+    }
+    let p = title_dir.join("env").join("dist").join("etc").join("modules").join(name);
+    let mut dist_os = p.as_os_str().to_os_string();
+    dist_os.push(".dist");
+    if p.exists() || PathBuf::from(dist_os).exists() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+/// Port of `_cfg_conf_ensure` (`40-config.sh:326-334`): seed the live conf
+/// from its `.dist` (`cp {p}.dist {p}`) when only the `.dist` exists. Returns
+/// `Ok(true)` when the conf exists afterward (already there, or just seeded),
+/// `Ok(false)` when neither the conf nor its `.dist` exists (nothing to seed
+/// from — the caller reports `NOT_FOUND`, never a write attempt).
+pub fn conf_ensure(path: &Path) -> std::io::Result<bool> {
+    if path.exists() {
+        return Ok(true);
+    }
+    let mut dist_os = path.as_os_str().to_os_string();
+    dist_os.push(".dist");
+    let dist = PathBuf::from(dist_os);
+    if !dist.exists() {
+        return Ok(false);
+    }
+    std::fs::copy(&dist, path)?;
+    Ok(true)
+}
+
+/// The owning module's VERIFIED live-reload console command for a conf file,
+/// or `None` when none is known — a port of `_conf_reload_cmd`
+/// (`40-config.sh:578-584`). Deliberately tiny: only `transmog.conf` has a
+/// verified reload command; everything else stays restart-to-apply.
+pub fn conf_reload_cmd(file: &str) -> Option<&'static str> {
+    match file {
+        "transmog.conf" => Some("transmog reload"),
+        _ => None,
+    }
+}
+
+/// Shape-gated unsigned-decimal range check for `type: float` registry rows —
+/// a port of `_float_in_range` (`40-config.sh:630-633`): the value must match
+/// `^[0-9]+([.][0-9]+)?$` (no sign, no exponent) before it is even parsed,
+/// then must fall within `[min, max]`.
+pub fn float_in_range(value: &str, min: f64, max: f64) -> bool {
+    if !is_unsigned_decimal_shape(value) {
+        return false;
+    }
+    match value.parse::<f64>() {
+        Ok(v) => v >= min && v <= max,
+        Err(_) => false,
+    }
+}
+
+fn is_unsigned_decimal_shape(s: &str) -> bool {
+    let mut parts = s.splitn(2, '.');
+    let int_part = parts.next().unwrap_or("");
+    if int_part.is_empty() || !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if let Some(frac) = parts.next() {
+        if frac.is_empty() || !frac.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Shape-gated unsigned-integer range check for `type: int` registry rows —
+/// a port of the `set)` case's int arm (`90-main.sh:2450-2452`): the value
+/// must match `^[0-9]+$` then fall within `[min, max]`.
+pub fn int_in_range(value: &str, min: i64, max: i64) -> bool {
+    if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    match value.parse::<i64>() {
+        Ok(v) => v >= min && v <= max,
+        Err(_) => false,
+    }
+}
+
+/// `type: bool` registry-row shape check — a port of the `set)` case's bool
+/// arm (`90-main.sh:2454-2456`): exactly `"0"` or `"1"`.
+pub fn is_bool01(value: &str) -> bool {
+    value == "0" || value == "1"
+}
+
+/// `type: text` registry-row sanitizer — a port of the `set)` case's text arm
+/// (`90-main.sh:2458-2460`): every `"` is REMOVED (not escaped), and every
+/// `\n`/`\r` becomes a single space.
+pub fn sanitize_text_value(value: &str) -> String {
+    value
+        .chars()
+        .filter(|&c| c != '"')
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -966,6 +1129,164 @@ services:
         // Directory doesn't exist at all -> read fails -> Ok(false), never an error.
         let removed = override_env_remove(&path, "AC_SOAP_IP").unwrap();
         assert!(!removed);
+    }
+
+    // -- B2a: direct-route (`conf:`) validation -------------------------
+
+    #[test]
+    fn direct_route_parses_bare_and_module_conf_keys() {
+        // Brief's exact examples.
+        assert_eq!(
+            route_conf("conf:playerbots.conf:AiPlayerbot.Foo"),
+            Some(("playerbots.conf".into(), "AiPlayerbot.Foo".into()))
+        );
+        assert_eq!(
+            route_conf("conf:Rate.XP.Kill"),
+            Some(("worldserver.conf".into(), "Rate.XP.Kill".into()))
+        );
+    }
+
+    #[test]
+    fn is_core_conf_file_rejects_the_curated_only_four() {
+        assert!(is_core_conf_file("worldserver.conf"));
+        assert!(is_core_conf_file("authserver.conf"));
+        assert!(is_core_conf_file(".env"));
+        assert!(is_core_conf_file("docker-compose.override.yml"));
+        assert!(!is_core_conf_file("playerbots.conf"));
+        assert!(!is_core_conf_file("mod_ahbot.conf"));
+    }
+
+    #[test]
+    fn direct_conf_key_shape_rejects_anything_outside_the_charset() {
+        assert!(is_valid_direct_conf_key("AiPlayerbot.MaxRandomBots"));
+        assert!(is_valid_direct_conf_key("Rate_XP.Kill123"));
+        assert!(!is_valid_direct_conf_key(""));
+        assert!(!is_valid_direct_conf_key("Has Space"));
+        assert!(!is_valid_direct_conf_key("Has;Semicolon"));
+        assert!(!is_valid_direct_conf_key("Has/Slash"));
+    }
+
+    #[test]
+    fn denylist_flags_only_the_bot_flush_owned_key() {
+        assert!(is_denylisted_direct_key("AiPlayerbot.DeleteRandomBotAccounts"));
+        assert!(!is_denylisted_direct_key("AiPlayerbot.MaxRandomBots"));
+    }
+
+    #[test]
+    fn single_line_and_max_len_gates() {
+        assert!(is_single_line("plain value"));
+        assert!(!is_single_line("line1\nline2"));
+        assert!(!is_single_line("carriage\rreturn"));
+        assert!(within_max_len(&"x".repeat(200), 200));
+        assert!(!within_max_len(&"x".repeat(201), 200));
+    }
+
+    #[test]
+    fn module_conf_name_shape_is_the_traversal_guard() {
+        // No slash can ever match the charset, so these can't escape the
+        // modules dir regardless of what the filesystem existence check does.
+        assert!(!is_module_conf_name("../evil.conf"));
+        assert!(!is_module_conf_name("a/b.conf"));
+        assert!(!is_module_conf_name("mod_foo"));
+        assert!(is_module_conf_name("mod_foo.conf"));
+        assert!(is_module_conf_name("playerbots.conf"));
+    }
+
+    #[test]
+    fn direct_conf_path_rejects_traversal_and_requires_existence() {
+        let dir = std::env::temp_dir().join(format!("dml-directconf-test-{}", std::process::id()));
+        let modules = dir.join("env").join("dist").join("etc").join("modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("real.conf"), "A = 1\n").unwrap();
+        std::fs::write(modules.join("dist_only.conf.dist"), "A = 1\n").unwrap();
+
+        // Traversal-shaped names are rejected before any filesystem check.
+        assert_eq!(direct_conf_path(&dir, "../evil.conf"), None);
+        assert_eq!(direct_conf_path(&dir, "a/b.conf"), None);
+        // Shape-valid but nothing on disk (conf or .dist) -> None.
+        assert_eq!(direct_conf_path(&dir, "ghost.conf"), None);
+        // Live conf exists.
+        assert_eq!(direct_conf_path(&dir, "real.conf"), Some(modules.join("real.conf")));
+        // Only the .dist exists -> the LIVE path is still returned (caller
+        // seeds it via conf_ensure).
+        assert_eq!(direct_conf_path(&dir, "dist_only.conf"), Some(modules.join("dist_only.conf")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conf_ensure_seeds_from_dist_once_and_reports_neither_present() {
+        let dir = std::env::temp_dir().join(format!("dml-confensure-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("mod_foo.conf");
+        let dist = dir.join("mod_foo.conf.dist");
+
+        // Neither exists.
+        assert_eq!(conf_ensure(&live).unwrap(), false);
+
+        // Only .dist -> seeded.
+        std::fs::write(&dist, "AiPlayerbot.Foo = 1\n").unwrap();
+        assert_eq!(conf_ensure(&live).unwrap(), true);
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "AiPlayerbot.Foo = 1\n");
+
+        // Already exists -> no-op true, dist untouched.
+        std::fs::write(&live, "AiPlayerbot.Foo = 2\n").unwrap();
+        assert_eq!(conf_ensure(&live).unwrap(), true);
+        assert_eq!(std::fs::read_to_string(&live).unwrap(), "AiPlayerbot.Foo = 2\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conf_reload_cmd_only_transmog_is_known() {
+        assert_eq!(conf_reload_cmd("transmog.conf"), Some("transmog reload"));
+        assert_eq!(conf_reload_cmd("playerbots.conf"), None);
+        assert_eq!(conf_reload_cmd("worldserver.conf"), None);
+        assert_eq!(conf_reload_cmd("mod_ahbot.conf"), None);
+    }
+
+    // -- B2a: curated-row value validation -------------------------------
+
+    #[test]
+    fn float_in_range_rejects_bad_shape_and_out_of_range() {
+        assert!(float_in_range("3", 0.5, 20.0));
+        assert!(float_in_range("0.5", 0.5, 20.0));
+        assert!(float_in_range("20", 0.5, 20.0));
+        assert!(!float_in_range("20.1", 0.5, 20.0));
+        assert!(!float_in_range("0.4", 0.5, 20.0));
+        // Shape rejects: sign, exponent, trailing dot, empty.
+        assert!(!float_in_range("-1", 0.5, 20.0));
+        assert!(!float_in_range("1e5", 0.5, 20.0));
+        assert!(!float_in_range("1.", 0.5, 20.0));
+        assert!(!float_in_range("", 0.5, 20.0));
+    }
+
+    #[test]
+    fn int_in_range_rejects_bad_shape_and_out_of_range() {
+        assert!(int_in_range("500", 0, 3000));
+        assert!(int_in_range("0", 0, 3000));
+        assert!(int_in_range("3000", 0, 3000));
+        assert!(!int_in_range("3001", 0, 3000));
+        assert!(!int_in_range("-1", 0, 3000));
+        assert!(!int_in_range("1.5", 0, 3000));
+        assert!(!int_in_range("", 0, 3000));
+    }
+
+    #[test]
+    fn is_bool01_accepts_only_0_or_1() {
+        assert!(is_bool01("0"));
+        assert!(is_bool01("1"));
+        assert!(!is_bool01("2"));
+        assert!(!is_bool01("true"));
+        assert!(!is_bool01(""));
+    }
+
+    #[test]
+    fn sanitize_text_value_strips_quotes_and_replaces_newlines() {
+        assert_eq!(sanitize_text_value("plain"), "plain");
+        assert_eq!(sanitize_text_value("has \"quotes\""), "has quotes");
+        assert_eq!(sanitize_text_value("line1\nline2"), "line1 line2");
+        assert_eq!(sanitize_text_value("cr\rlf\n"), "cr lf ");
     }
 
     #[test]
