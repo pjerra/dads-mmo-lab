@@ -731,11 +731,17 @@ export async function wowConfigRead(): Promise<ConfigSetting[]> {
   const data = await invoke<{ settings: ConfigSetting[] }>("wow_config_read");
   return data.settings;
 }
+// Task B3: native mode routes to the SOAP/file-backed `_native` sibling
+// (Task B2a); WSL mode keeps shelling `dml` byte-identically. Same pattern
+// as the A3 write routing.
 export async function wowConfigSet(
   key: string,
   value: string,
 ): Promise<{ changed: boolean; restart_required: boolean; applied?: "live" | "restart" | "none" }> {
-  return await invoke("wow_config_set", { key, value });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_set_native", { key, value })
+    : await invoke("wow_config_set", { key, value });
 }
 export interface PbKey {
   key: string;
@@ -803,6 +809,7 @@ export async function wowTuningRead(): Promise<ModuleTuning[]> {
   const data = await invoke<{ settings: ModuleTuning[] }>("wow_tuning_read");
   return data.settings;
 }
+// Task B3: same native/WSL routing as wowConfigSet above.
 export async function wowConfigTuningSet(
   key: string,
   value: string,
@@ -814,7 +821,10 @@ export async function wowConfigTuningSet(
   applied: "restart" | "reload-ale" | "none";
   reload?: string;
 }> {
-  return await invoke("wow_config_tuning_set", { key, value });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_tuning_set_native", { key, value })
+    : await invoke("wow_config_tuning_set", { key, value });
 }
 
 // --- Account-wide sharing configurator (overnight Batch 1) -----------------
