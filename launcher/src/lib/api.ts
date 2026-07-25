@@ -228,11 +228,15 @@ export async function wowAccountDelete(user: string): Promise<{ deleted: boolean
     ? invoke("wow_account_delete_native", { user })
     : invoke("wow_account_delete", { user });
 }
+// Task B2: native mode routes to the direct SOAP/docker/DB `_read` siblings
+// (`dml::status`); WSL mode keeps shelling `dml` byte-identically.
 export async function wowServerInfo(): Promise<ServerInfo> {
-  return await invoke("wow_server_info");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_server_info_read") : invoke("wow_server_info");
 }
 export async function wowServerDetail(): Promise<ServerDetail> {
-  return await invoke("wow_server_detail");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_server_detail_read") : invoke("wow_server_detail");
 }
 // --- Statistics page (`dml wow stats`): one read-only envelope ------------
 export interface StatsLevelBucket {
@@ -353,7 +357,10 @@ export interface ConsoleTail {
   lines: string[];
 }
 export async function wowConsoleTail(lines?: number): Promise<ConsoleTail> {
-  return await invoke("wow_console_tail", { lines });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_console_tail_read", { lines })
+    : invoke("wow_console_tail", { lines });
 }
 export async function wowConsoleSend(command: string): Promise<{ result: string }> {
   const mode = await resolveBackendMode();

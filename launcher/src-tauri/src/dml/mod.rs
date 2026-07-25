@@ -10,4 +10,5 @@ pub mod runner;
 pub mod soap;
 pub mod soap_cmds;
 pub mod stats;
+pub mod status;
 pub mod tuning;

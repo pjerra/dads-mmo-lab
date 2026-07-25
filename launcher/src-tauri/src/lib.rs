@@ -1376,6 +1376,73 @@ async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdE
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE fast read of the Home status card's SOAP snapshot: same shape
+/// as `wow_server_info`
+/// (`{online,version,players,uptime,mean_ms,median_ms}`), firing SOAP `server
+/// info` directly instead of shelling `dml`. Down/faulted -> `online:false`
+/// (an answer, not an error); only a SOAP auth failure is a hard
+/// `SOAP_AUTH` error. Native mode only — WSL keeps calling `wow_server_info`.
+#[tauri::command]
+async fn wow_server_info_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::soap::SoapConfig::load();
+        crate::dml::status::read_server_info(&cfg).map_err(|_| CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the Home status card's full composite: same
+/// shape as `wow_server_detail`
+/// (`{verdict,exit_code,containers,world_ready,soap,bots,ports}`), assembled
+/// from direct `docker`/SOAP/MySQL calls (see `dml::status`) instead of
+/// shelling `dml`. Polled on an interval by the frontend, so every I/O call
+/// underneath is bounded — never hangs. Native mode only — WSL keeps calling
+/// `wow_server_detail`.
+#[tauri::command]
+async fn wow_server_detail_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let program = crate::dml::native::docker_program();
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let mut reader = crate::dml::config::ConfigReader::from_env();
+        Ok(crate::dml::status::read_server_detail(&program, &soap_cfg, &db_cfg, &mut reader))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the Console page's log tail: same shape as
+/// `wow_console_tail` (`{available,lines}`), via a direct bounded `docker
+/// logs --tail` instead of shelling `dml`. `--lines` defaults to 200 and is
+/// validated 1-1000 BEFORE any docker call, exactly like the CLI arm's own
+/// pre-check (`90-main.sh` `console-tail)`). Native mode only — WSL keeps
+/// calling `wow_console_tail`.
+#[tauri::command]
+async fn wow_console_tail_read(lines: Option<u32>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let lines = lines.unwrap_or(200);
+    if !(1..=1000).contains(&lines) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "--lines must be 1-1000".into(),
+            hint: "Usage: dml wow console-tail [--lines N] --json".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let program = crate::dml::native::docker_program();
+        Ok(crate::dml::status::read_console_tail(&program, lines))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -4879,6 +4946,9 @@ pub fn run() {
             wow_items_search_read,
             wow_char_progress_read,
             wow_achievements_read,
+            wow_server_info_read,
+            wow_server_detail_read,
+            wow_console_tail_read,
             backend_mode,
             wow_config_set,
             wow_config_set_native,
