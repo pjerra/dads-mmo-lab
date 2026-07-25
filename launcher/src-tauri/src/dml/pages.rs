@@ -667,12 +667,18 @@ pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, D
     )?;
     let (active_group, groups_count) = extract_talent_meta(&meta_res);
 
+    // The achievement-total, recent-achievements, and talent-spells queries
+    // degrade gracefully on failure (matches `90-main.sh:2135-2169`'s
+    // `atotal="$(db_chars_query ...)" || atotal=0` and the recent/spells
+    // loops' `db_chars_query "..." || true`) -- only the guid lookup above
+    // and the talent-group-meta query are hard DB_UNREACHABLE errors.
     let total_res = db::query_with_params(
         cfg,
         Database::Characters,
         CHAR_ACHIEVEMENT_TOTAL_SQL,
         vec![guid_param.clone()],
-    )?;
+    )
+    .unwrap_or_else(|_| QueryResult { columns: vec![], rows: vec![] });
     let total = extract_achievement_total(&total_res);
 
     let recent_res = db::query_with_params(
@@ -680,7 +686,8 @@ pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, D
         Database::Characters,
         CHAR_ACHIEVEMENT_RECENT_SQL,
         vec![guid_param.clone()],
-    )?;
+    )
+    .unwrap_or_else(|_| QueryResult { columns: vec![], rows: vec![] });
     let recent = assemble_achievement_entries(&recent_res);
 
     let active_group_num: i64 = active_group.parse().unwrap_or(0);
@@ -689,7 +696,8 @@ pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, D
         Database::Characters,
         CHAR_TALENT_SPELLS_SQL,
         vec![guid_param, mysql::Value::from(active_group_num)],
-    )?;
+    )
+    .unwrap_or_else(|_| QueryResult { columns: vec![], rows: vec![] });
     let spells = assemble_talent_spells(&spells_res);
 
     Ok(Some(assemble_char_progress(&total, recent, &groups_count, &active_group, spells)))
@@ -710,12 +718,16 @@ pub fn read_achievements(cfg: &DbConfig, name: &str) -> Result<Option<Value>, Db
     let Some(guid) = extract_char_guid(&guid_res) else {
         return Ok(None);
     };
+    // Matches `90-main.sh:2170-2192`'s `db_chars_query "..." || true`: a
+    // failure here degrades to `earned:[]` inside an `ok:true` envelope --
+    // only the guid lookup above is a hard DB_UNREACHABLE error.
     let earned_res = db::query_with_params(
         cfg,
         Database::Characters,
         CHAR_ACHIEVEMENT_EARNED_SQL,
         vec![mysql::Value::from(guid)],
-    )?;
+    )
+    .unwrap_or_else(|_| QueryResult { columns: vec![], rows: vec![] });
     let earned = assemble_achievement_entries(&earned_res);
     Ok(Some(json!({ "earned": earned })))
 }
