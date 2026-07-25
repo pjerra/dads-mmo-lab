@@ -3178,16 +3178,305 @@ async fn wow_lan_public_ip(state: State<'_, AppState>) -> Result<serde_json::Val
     run_json_cmd(state, vec!["wow".into(), "lan".into(), "public-ip".into()]).await
 }
 
+// --- Native Tailscale (spike/docker-desktop-native) -------------------------
+//
+// The WSL arm (`dml wow tailscale <action>`, 90-main.sh:5891+) does everything
+// through `sudo -n pacman|systemctl|iptables` -- none of which exist on
+// Windows, so in native mode that arm hits the real `sudo.exe` and dies on
+// `-n` (the reported bug). There is no distro to sudo into on native mode:
+// the free Windows Tailscale app installs `tailscale.exe` and does its own
+// browser-based login with NO sudo, no daemon-enable step, no iptables --
+// the app owns all of that itself. So native mode drives `tailscale.exe`
+// directly and maps its output into the SAME JSON shapes the WSL arm returns
+// (api.ts:1226-1245), so the frontend needs no branching.
+
+/// Known absolute install locations for the Windows Tailscale CLI, tried
+/// before falling back to a bare `tailscale.exe` resolved off PATH. Unlike
+/// `dml::native::candidate_docker_paths` there is no LOCALAPPDATA candidate --
+/// Tailscale's Windows installer is machine-wide, not per-user.
+fn candidate_tailscale_paths() -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        out.push(std::path::PathBuf::from(&pf).join("Tailscale").join("tailscale.exe"));
+    }
+    if let Some(pf) = std::env::var_os("ProgramW6432") {
+        out.push(std::path::PathBuf::from(&pf).join("Tailscale").join("tailscale.exe"));
+    }
+    out
+}
+
+/// Pure resolver: first candidate the predicate accepts, else `None`. No bare
+/// -PATH fallback here (that needs a real process spawn) -- keeps this half
+/// unit-testable with a fake candidate list and predicate, same shape as
+/// `dml::native::resolve_docker_program`.
+fn resolve_tailscale_from_candidates(
+    candidates: &[std::path::PathBuf],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    candidates.iter().find(|c| exists(c)).cloned()
+}
+
+/// Windows Tailscale CLI. Default install is
+/// `%ProgramFiles%\Tailscale\tailscale.exe`; falls back to `%ProgramW6432%`
+/// (same binary, seen on some 32-on-64 shells), then a bare `tailscale.exe`
+/// probed off PATH (`tailscale.exe version`, bounded, output discarded --
+/// only the exit code matters). `None` when none of those pan out; the
+/// caller treats that as "not installed" rather than guessing a path.
+fn find_tailscale_exe() -> Option<std::path::PathBuf> {
+    if let Some(p) = resolve_tailscale_from_candidates(&candidate_tailscale_paths(), |p| p.exists()) {
+        return Some(p);
+    }
+    let mut cmd = std::process::Command::new("tailscale.exe");
+    cmd.arg("version");
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    if matches!(cmd.status(), Ok(s) if s.success()) {
+        return Some(std::path::PathBuf::from("tailscale.exe"));
+    }
+    None
+}
+
+/// Runs `program` with `args`, bounded by `timeout` wall-clock. Same
+/// bounded-subprocess idiom as `env_frozen_with`: the blocking `output()`
+/// call happens on a helper thread so a hung/unresponsive Tailscale daemon
+/// can never stall the GUI past `timeout` -- past the deadline the thread is
+/// left to finish (or hang) on its own rather than being joined. Returns the
+/// combined stdout+stderr (lossy UTF-8) and whether the process exited 0;
+/// `None` on timeout or spawn failure.
+fn run_bounded(program: &std::ffi::OsStr, args: &[&str], timeout: std::time::Duration) -> Option<(bool, String)> {
+    let program = program.to_os_string();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(&args);
+        cmd.stdin(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output();
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(out)) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            Some((out.status.success(), combined))
+        }
+        _ => None,
+    }
+}
+
+/// The bits of `tailscale status --json` this command actually needs, pulled
+/// out with `serde_json::Value` field lookups rather than a full typed
+/// struct (the real payload has many more fields we don't care about).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TsStatusFields {
+    backend_state: Option<String>,
+    ip: Option<String>,
+}
+
+/// Pure JSON parse: `BackendState` -> backend_state; the first `100.x`
+/// address in `TailscaleIPs` (checked at the top level, then under `Self` --
+/// real payloads carry it in both places, and the brief that drove this
+/// command only names `Self.TailscaleIPs`) -> ip. Any parse failure (bad
+/// JSON, missing fields) reads as "unknown", never a panic.
+fn parse_tailscale_status_json(raw: &str) -> TsStatusFields {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return TsStatusFields::default();
+    };
+    let backend_state = v.get("BackendState").and_then(|x| x.as_str()).map(str::to_string);
+    let find_ip = |arr: &serde_json::Value| -> Option<String> {
+        arr.as_array()?
+            .iter()
+            .find_map(|e| e.as_str().filter(|s| s.starts_with("100.")))
+            .map(str::to_string)
+    };
+    let ip = v
+        .get("TailscaleIPs")
+        .and_then(find_ip)
+        .or_else(|| v.get("Self").and_then(|s| s.get("TailscaleIPs")).and_then(find_ip));
+    TsStatusFields { backend_state, ip }
+}
+
+/// Pure: pulls the first-time Tailscale login URL out of `tailscale up`'s
+/// combined stdout+stderr. Prefers a `login.tailscale.com` URL (what the
+/// real CLI prints); falls back to the first bare `https://` URL so a
+/// differently-worded CLI version still surfaces something clickable.
+/// Mirrors 90-main.sh's two-stage `grep -oE`.
+fn extract_tailscale_auth_url(text: &str) -> Option<String> {
+    // The path charset the brief's regex uses AFTER the literal scheme
+    // prefix: `[A-Za-z0-9./_-]`. The prefix itself carries `:` (`https://`),
+    // which is why the scan only applies this filter to what comes after it
+    // -- applying it to the whole match (prefix included) would cut the
+    // string off right after "https" on the `:`.
+    fn is_url_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '/' | '_' | '-')
+    }
+    fn scan(text: &str, prefix: &str) -> Option<String> {
+        let start = text.find(prefix)?;
+        let after_prefix = start + prefix.len();
+        let rest = &text[after_prefix..];
+        let end = rest.find(|c: char| !is_url_char(c)).unwrap_or(rest.len());
+        Some(text[start..after_prefix + end].to_string())
+    }
+    scan(text, "https://login.tailscale.com/").or_else(|| scan(text, "https://"))
+}
+
+/// First `100.x` line in `tailscale ip -4`'s output. Mirrors the WSL arm's
+/// `head -1` + `^100\.` filter.
+fn first_tailnet_ip(text: &str) -> Option<String> {
+    text.lines().map(str::trim).find(|l| l.starts_with("100.")).map(str::to_string)
+}
+
+/// Last `n` bytes of `s` (char-boundary safe), newlines flattened to spaces --
+/// mirrors bash's `tail -c 400 | tr -d '\r' | tr '\n' ' '` so the error hint
+/// reads the same on both backends.
+fn tail_str(s: &str, n: usize) -> String {
+    let mut start = s.len().saturating_sub(n);
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn tailscale_not_installed_err() -> CmdError {
+    CmdError {
+        code: "NOT_INSTALLED".into(),
+        message: "Tailscale isn't installed on Windows".into(),
+        hint: "Install the free Windows app from tailscale.com/download, then click Refresh status.".into(),
+    }
+}
+
+fn tailscale_install_native() -> Result<serde_json::Value, CmdError> {
+    if find_tailscale_exe().is_some() {
+        Ok(serde_json::json!({"installed": true, "already": true}))
+    } else {
+        Err(tailscale_not_installed_err())
+    }
+}
+
+/// Read-only, so a missing/unreachable Tailscale reads as an answer, never
+/// an error -- mirrors how the WSL server-info treats "down" as an answer.
+fn tailscale_status_native() -> serde_json::Value {
+    let Some(exe) = find_tailscale_exe() else {
+        return serde_json::json!({
+            "connected": false,
+            "ip": null,
+            "backend_state": "not-installed",
+            "status_text": "Tailscale is not installed on Windows.",
+        });
+    };
+    match run_bounded(exe.as_os_str(), &["status", "--json"], std::time::Duration::from_secs(5)) {
+        Some((_ok, raw)) => {
+            let fields = parse_tailscale_status_json(&raw);
+            let connected = fields.backend_state.as_deref() == Some("Running") && fields.ip.is_some();
+            let status_text = match (&fields.backend_state, &fields.ip) {
+                (Some(bs), Some(ip)) => format!("{bs} \u{2014} {ip}"),
+                (Some(bs), None) => bs.clone(),
+                (None, _) => "Tailscale status unavailable.".to_string(),
+            };
+            serde_json::json!({
+                "connected": connected,
+                "ip": fields.ip,
+                "backend_state": fields.backend_state,
+                "status_text": status_text,
+            })
+        }
+        None => serde_json::json!({
+            "connected": false,
+            "ip": null,
+            "backend_state": "unreachable",
+            "status_text": "Could not read Tailscale status (timed out).",
+        }),
+    }
+}
+
+fn tailscale_up_native() -> Result<serde_json::Value, CmdError> {
+    let Some(exe) = find_tailscale_exe() else {
+        return Err(tailscale_not_installed_err());
+    };
+    let (_ok, raw) = run_bounded(exe.as_os_str(), &["up", "--timeout=8s"], std::time::Duration::from_secs(15))
+        .unwrap_or_else(|| (false, String::new()));
+    let auth_url = extract_tailscale_auth_url(&raw);
+    let ip = run_bounded(exe.as_os_str(), &["ip", "-4"], std::time::Duration::from_secs(5))
+        .and_then(|(_, out)| first_tailnet_ip(&out));
+    let connected = ip.is_some() && auth_url.is_none();
+    if !connected && auth_url.is_none() {
+        let tail = tail_str(&raw, 400);
+        return Err(CmdError {
+            code: "TAILSCALE_UP_FAILED".into(),
+            message: "Could not start Tailscale login".into(),
+            hint: if tail.is_empty() {
+                "Is Tailscale running? Try Install, then Log in again.".into()
+            } else {
+                tail
+            },
+        });
+    }
+    Ok(serde_json::json!({
+        "connected": connected,
+        "auth_url": auth_url,
+        "ip": ip,
+        "daemon": "windows-app",
+        "firewall": "n/a",
+    }))
+}
+
+/// Best-effort, always `{"down":true}`: down is idempotent from the user's
+/// POV (already-down, not-installed, and a real `tailscale.exe down` failure
+/// all leave the same "not connected" end state), and there is nothing
+/// actionable left to offer beyond "log in again" from Up.
+fn tailscale_down_native() -> serde_json::Value {
+    if let Some(exe) = find_tailscale_exe() {
+        let _ = run_bounded(exe.as_os_str(), &["down"], std::time::Duration::from_secs(8));
+    }
+    serde_json::json!({"down": true})
+}
+
+fn native_tailscale_blocking(action: &str) -> Result<serde_json::Value, CmdError> {
+    match action {
+        "install" => tailscale_install_native(),
+        "status" => Ok(tailscale_status_native()),
+        "up" => tailscale_up_native(),
+        "down" => Ok(tailscale_down_native()),
+        // Unreachable: `wow_tailscale` checks TAILSCALE_ACTIONS before calling in.
+        other => Err(bad_arg(format!("invalid tailscale action: {other:?}"))),
+    }
+}
+
+async fn native_tailscale(action: &str) -> Result<serde_json::Value, CmdError> {
+    let action = action.to_string();
+    tauri::async_runtime::spawn_blocking(move || native_tailscale_blocking(&action))
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// Batch 5 (overnight): Tailscale "Play Together" -- `wow tailscale
 /// install|up|status|down`. The action arrives from the webview, so it is
 /// checked against a closed allowlist before it becomes an argv token (same
-/// doctrine as wow_lan). Each arm is a captured JSON envelope; `up` uses a
-/// bounded `--timeout` CLI-side so this never hangs waiting on the browser
-/// login.
+/// doctrine as wow_lan). WSL mode is unchanged -- each arm is a captured JSON
+/// envelope from `dml`, `up` bounded by a `--timeout` CLI-side so this never
+/// hangs waiting on the browser login. Native mode (spike/docker-desktop-
+/// native) has no distro to shell into -- `dml wow tailscale` sudo's into
+/// pacman/systemd/iptables, none of which exist on Windows -- so it drives
+/// the Windows Tailscale app's `tailscale.exe` directly instead, mapping its
+/// output into the same JSON shapes.
 #[tauri::command]
 async fn wow_tailscale(action: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     if !TAILSCALE_ACTIONS.contains(&action.as_str()) {
         return Err(bad_arg(format!("invalid tailscale action: {action:?}")));
+    }
+    if is_native_backend() {
+        return native_tailscale(&action).await;
     }
     run_json_cmd(state, vec!["wow".into(), "tailscale".into(), action]).await
 }
@@ -4673,6 +4962,126 @@ mod tests {
         assert!(TAILSCALE_ACTIONS.contains(&"down"));
         assert!(!TAILSCALE_ACTIONS.contains(&"up; rm -rf /"));
         assert!(!TAILSCALE_ACTIONS.contains(&"login"));
+    }
+
+    // --- Native Tailscale (spike/docker-desktop-native) --------------------
+
+    #[test]
+    fn find_tailscale_exe_candidate_resolver_returns_none_when_nothing_exists() {
+        // Pure half only -- `find_tailscale_exe()` itself also probes a bare
+        // `tailscale.exe` on PATH, which is environment-dependent (this dev
+        // box genuinely has Tailscale installed at the default path), so the
+        // "absent" case is proven against the injectable resolver instead,
+        // same doctrine as `dml::native`'s `resolve_docker_program` tests.
+        let cands = vec![
+            std::path::PathBuf::from(r"C:\missing\Tailscale\tailscale.exe"),
+            std::path::PathBuf::from(r"C:\also-missing\Tailscale\tailscale.exe"),
+        ];
+        let got = resolve_tailscale_from_candidates(&cands, |_| false);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn find_tailscale_exe_candidate_resolver_picks_first_existing() {
+        let cands = vec![
+            std::path::PathBuf::from(r"C:\missing\Tailscale\tailscale.exe"),
+            std::path::PathBuf::from(r"C:\present\Tailscale\tailscale.exe"),
+        ];
+        let got = resolve_tailscale_from_candidates(&cands, |p| {
+            p == std::path::Path::new(r"C:\present\Tailscale\tailscale.exe")
+        });
+        assert_eq!(got, Some(std::path::PathBuf::from(r"C:\present\Tailscale\tailscale.exe")));
+    }
+
+    #[test]
+    fn parses_tailscale_status_json_running_and_connected() {
+        let raw = r#"{
+            "Version": "1.66.0",
+            "BackendState": "Running",
+            "TailscaleIPs": ["100.101.102.103", "fd7a:115c:a1e0::1"],
+            "Self": {"TailscaleIPs": ["100.101.102.103"]}
+        }"#;
+        let fields = parse_tailscale_status_json(raw);
+        assert_eq!(fields.backend_state.as_deref(), Some("Running"));
+        assert_eq!(fields.ip.as_deref(), Some("100.101.102.103"));
+    }
+
+    #[test]
+    fn parses_tailscale_status_json_falls_back_to_self_ips() {
+        // Some payload shapes carry TailscaleIPs only under Self.
+        let raw = r#"{"BackendState":"Running","Self":{"TailscaleIPs":["100.64.0.5"]}}"#;
+        let fields = parse_tailscale_status_json(raw);
+        assert_eq!(fields.ip.as_deref(), Some("100.64.0.5"));
+    }
+
+    #[test]
+    fn parses_tailscale_status_json_needs_login_has_no_ip() {
+        let raw = r#"{"BackendState":"NeedsLogin","TailscaleIPs":[]}"#;
+        let fields = parse_tailscale_status_json(raw);
+        assert_eq!(fields.backend_state.as_deref(), Some("NeedsLogin"));
+        assert_eq!(fields.ip, None);
+    }
+
+    #[test]
+    fn parses_tailscale_status_json_garbage_input_is_unknown_not_a_panic() {
+        let fields = parse_tailscale_status_json("not json at all");
+        assert_eq!(fields, TsStatusFields::default());
+    }
+
+    #[test]
+    fn tailscale_status_connected_requires_both_running_and_an_ip() {
+        // Mirrors the brief's `connected = backend_state=="Running" &&
+        // ip.is_some()` -- Running with no IP yet (mid-login) must NOT read
+        // as connected.
+        let running_no_ip = TsStatusFields { backend_state: Some("Running".into()), ip: None };
+        let connected = running_no_ip.backend_state.as_deref() == Some("Running") && running_no_ip.ip.is_some();
+        assert!(!connected);
+
+        let running_with_ip =
+            TsStatusFields { backend_state: Some("Running".into()), ip: Some("100.1.2.3".into()) };
+        let connected = running_with_ip.backend_state.as_deref() == Some("Running") && running_with_ip.ip.is_some();
+        assert!(connected);
+    }
+
+    #[test]
+    fn extracts_auth_url_from_tailscale_up_output() {
+        let out = "\nTo authenticate, visit:\n\n\thttps://login.tailscale.com/a/abc123\n\n";
+        assert_eq!(
+            extract_tailscale_auth_url(out).as_deref(),
+            Some("https://login.tailscale.com/a/abc123")
+        );
+    }
+
+    #[test]
+    fn extracts_auth_url_falls_back_to_bare_https() {
+        let out = "Please visit: https://example.com/some/path?query=dropped and finish there";
+        // The query string isn't URL_CHARS-safe, so it stops before `?` --
+        // matches the bash grep -oE's own charset.
+        assert_eq!(extract_tailscale_auth_url(out).as_deref(), Some("https://example.com/some/path"));
+    }
+
+    #[test]
+    fn extracts_auth_url_none_when_already_authenticated() {
+        let out = "Success.\n";
+        assert_eq!(extract_tailscale_auth_url(out), None);
+    }
+
+    #[test]
+    fn first_tailnet_ip_picks_the_100_address() {
+        assert_eq!(first_tailnet_ip("100.101.102.103\n"), Some("100.101.102.103".to_string()));
+        assert_eq!(first_tailnet_ip("  100.64.0.1  \nfd7a::1\n"), Some("100.64.0.1".to_string()));
+        assert_eq!(first_tailnet_ip("fd7a::1\n"), None);
+        assert_eq!(first_tailnet_ip(""), None);
+    }
+
+    #[test]
+    fn tail_str_flattens_and_bounds_output() {
+        let long = "a".repeat(500);
+        let got = tail_str(&long, 400);
+        assert_eq!(got.len(), 400);
+
+        let multiline = "line one\r\nline two\r\nline three";
+        assert_eq!(tail_str(multiline, 4000), "line one line two line three");
     }
 
     #[test]
