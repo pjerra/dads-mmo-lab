@@ -53,6 +53,13 @@ pub struct AppState {
     /// --json` → `.data`). `wow_module_read` fetches it once, then fills every
     /// dynamic per-row field itself from disk (see `dml::modules`).
     pub module_catalog: Arc<Mutex<Option<serde_json::Value>>>,
+    /// Serializes every native-mode SOAP call (Task A2b, carried forward from
+    /// the A1 review): the worldserver's SOAP listener runs on the single
+    /// world thread, and `dml` (bash) already serializes its own SOAP calls
+    /// under a `~/.dml/soap.lock` file lock for the same reason. Held only
+    /// across the `soap::exec` call inside each native SOAP command's
+    /// `spawn_blocking` closure -- see e.g. `wow_console_send_native`.
+    pub soap_lock: Arc<std::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1641,6 +1648,556 @@ async fn wow_gm_return_home(char_name: String, state: State<'_, AppState>) -> Re
     run_json_cmd(state, vec!["wow".into(), "gm".into(), "return-home".into(), "--char".into(), char_name]).await
 }
 
+// -----------------------------------------------------------------------
+// Native SOAP commands (Task A2b) -- native siblings of the `dml`-backed
+// account/gm/mail/teleport/console-send writes above. Each validates via the
+// pure builders in `dml::soap_cmds` (A2a), fires over `dml::soap::exec`
+// inside `spawn_blocking` (network -- must never run on the async runtime
+// thread) under `AppState::soap_lock` (the worldserver's SOAP listener runs
+// on a single world thread, same reason bash serializes under
+// `~/.dml/soap.lock`), then wraps the result in the SAME JSON shape the
+// matching `90-main.sh` arm emits. Coords-teleport / return-home (A2c) and
+// MOTD/announce (Subsystem B) are NOT here.
+//
+// FAULT-TEXT PARITY. `dml::soap_cmds::outcome_to_result_raw`/
+// `_decoded` cover the two arms that use their exact (already-approved)
+// generic text -- `wow_console_send_native` (raw) and the `wow_account_*_native`
+// family (decoded). Every other arm below has its own `case "$rc" in` block
+// in the bash oracle with wording that differs from those two generic
+// mappers (a different SOAP_AUTH message, a fixed non-decoded fault string,
+// or a different hint) -- those get a small local mapper each, copied
+// verbatim from the arm's `json_err` calls rather than reusing the generic
+// ones, per the brief's "match the exact fault hints per arm" instruction.
+// -----------------------------------------------------------------------
+
+/// `SoapOutcome -> CmdError` matching `_party_fire`'s exact case block
+/// (`cli/src/50-party.sh:67-79`) -- used by the bridge-backed gm ops
+/// (gold/heal/revive/summon), which all fire through `_party_fire`. `label`
+/// is the short noun `_party_fire`'s caller passes as its `$2` (e.g. "gold",
+/// "heal", "revive", "summon"), spliced into the fixed fault message. Unlike
+/// the generic mappers, the SOAP_FAULT text here is NEVER the server's own
+/// fault string -- bash's `_party_fire` discards `$out` entirely on rc=2.
+fn party_fire_result(o: crate::dml::soap::SoapOutcome, label: &str) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(_) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: format!("The {label} command was rejected"),
+            hint: "Deploy the server bridges (bridge-setup) and restart the server first.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// `SoapOutcome -> CmdError` for `gm level` (`90-main.sh:3509-3516`): the
+/// stock `.character level` command. The fault case is a FIXED message (not
+/// the server's fault text -- bash discards `$out` on rc=2), and the auth
+/// message is "SOAP auth failed" (shorter than the generic mappers'
+/// "SOAP authentication failed" -- this arm's own wording, not a typo).
+fn gm_level_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(_) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: "The level command was rejected".into(),
+            hint: "Does the character exist? The server said no.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// `SoapOutcome -> CmdError` for `gm at-login` (`90-main.sh:3595-3601`): the
+/// stock `character <flag>` command. The fault text IS the server's own
+/// (decoded) fault string here, unlike `gm_level_result` -- but the auth
+/// message is still the shorter "SOAP auth failed" this arm-family uses.
+fn gm_at_login_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            hint: "The worldserver rejected the command.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// `SoapOutcome -> CmdError` for `mail-item` (`90-main.sh:1828-1833`): RAW
+/// (undecoded) fault text, its own hint, and empty-hint auth/a different
+/// unreachable hint than the generic mappers.
+fn mail_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: t,
+            hint: "The server rejected the mail command.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: String::new(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Run: dml wow soap-setup, then start the server.".into(),
+        }),
+    }
+}
+
+/// `SoapOutcome -> CmdError` for `teleport` (`90-main.sh:1888-1893`): RAW
+/// (undecoded) fault text with its own hint; empty-hint auth/unreachable.
+fn teleport_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: t,
+            hint: "Unknown location? See dml wow teleport-list.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: String::new(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: String::new(),
+        }),
+    }
+}
+
+/// `NOT_FOUND` for an offline character, matching `_gm_require_online`
+/// (`cli/src/55-gm.sh:9-14`) exactly.
+fn not_online_err(player: &str) -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: format!("Character not online: {player}"),
+        hint: "This action needs the character logged in. (Set level works offline.)".into(),
+    }
+}
+
+/// Whether `player` is currently online -- a native-mode port of
+/// `_gm_require_online`/`_party_online_guid` (`cli/src/55-gm.sh:9-14`,
+/// `cli/src/50-party.sh:46-49`): a `characters` row with `online=1`. Any
+/// query failure reads as "not online", matching bash: `_party_online_guid`
+/// redirects `db_chars_query`'s stderr to `/dev/null` and always `return`s 0,
+/// so a DB error there surfaces as an empty guid (== not online) rather than
+/// a separate DB_UNREACHABLE branch -- this mirrors that swallow rather than
+/// inventing a new error path the oracle doesn't have.
+fn char_is_online(cfg: &crate::dml::db::DbConfig, player: &str) -> bool {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(player)];
+    crate::dml::db::query_with_params(
+        cfg,
+        crate::dml::db::Database::Characters,
+        "SELECT guid FROM characters WHERE name=? AND online=1 LIMIT 1",
+        params,
+    )
+    .map(|res| !res.rows.is_empty())
+    .unwrap_or(false)
+}
+
+/// Split a mail `--items` CSV the way bash's `IFS=',' read -ra specs <<<
+/// "$items"` does: an EMPTY string splits to ZERO fields (bash's word
+/// splitting produces no fields for empty input), unlike Rust's
+/// `"".split(',')` which yields one empty-string field -- that mismatch
+/// would turn an empty `items` arg into a "Malformed item spec: " BAD_ARG
+/// instead of the oracle's "Provide 1-12 items…" one, so the empty case is
+/// special-cased. Any other input (including doubled/trailing commas, which
+/// bash also turns into empty fields) splits exactly like `str::split`.
+fn split_mail_items(items: &str) -> Vec<&str> {
+    if items.is_empty() {
+        Vec::new()
+    } else {
+        items.split(',').collect()
+    }
+}
+
+/// NATIVE-MODE: the free-text console/SOAP command box, wired to the
+/// `soap-exec` oracle (`90-main.sh:1389-1404`) -- same generic raw-fault
+/// mapping `dml wow soap-exec` uses (not the separate `console-send` arm,
+/// which additionally entity-decodes the Ok path; the launcher's console
+/// tab is this command's only caller and never needed that decode).
+#[tauri::command]
+async fn wow_console_send_native(
+    command: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if command.is_empty() {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "Missing console command".into(),
+            hint: "Usage: dml wow soap-exec \"<command>\" --json".into(),
+        });
+    }
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &command);
+        let result = crate::dml::soap_cmds::outcome_to_result_raw(outcome)?;
+        Ok(serde_json::json!({ "result": result }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE account create (`90-main.sh:1952-2010`, `asub == create`).
+#[tauri::command]
+async fn wow_account_create_native(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::account_create_cmd(&user, &pass)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        Ok(serde_json::json!({ "created": true, "user": user }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE account set-password (`90-main.sh:1952-2010`, `asub ==
+/// set-password`).
+#[tauri::command]
+async fn wow_account_set_password_native(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::account_set_password_cmd(&user, &pass)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        Ok(serde_json::json!({ "password_set": true, "user": user }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE account set-gm (`90-main.sh:1952-2010`, `asub == set-gm`).
+/// `level` arrives as a number over IPC; stringified before the A2a builder
+/// (which only regex-matches it, same as bash) so out-of-`0..=3` values
+/// still fail with the exact BAD_ARG the CLI gives.
+#[tauri::command]
+async fn wow_account_set_gm_native(
+    user: String,
+    level: u8,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let level_str = level.to_string();
+    let cmd = crate::dml::soap_cmds::account_set_gm_cmd(&user, &level_str)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        Ok(serde_json::json!({ "gm_set": true, "user": user, "level": level }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE account delete (`90-main.sh:1952-2010`, `asub == delete`) --
+/// the admin-account refusal happens inside `account_delete_cmd` (A2a).
+#[tauri::command]
+async fn wow_account_delete_native(
+    user: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::account_delete_cmd(&user)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        crate::dml::soap_cmds::outcome_to_result_decoded(outcome)?;
+        Ok(serde_json::json!({ "deleted": true, "user": user }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `.character level` (`90-main.sh:3493-3517`) -- stock AC
+/// command, works for OFFLINE characters too (no online precondition).
+#[tauri::command]
+async fn wow_gm_level_native(
+    player: String,
+    level: i32,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_level_cmd(&player, level)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        gm_level_result(outcome)?;
+        Ok(serde_json::json!({ "leveled": true, "player": player, "level": level }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `character <flag>` (`90-main.sh:3579-3601`) -- stock AC
+/// per-character at-next-login flag, works for OFFLINE characters too.
+#[tauri::command]
+async fn wow_gm_at_login_native(
+    player: String,
+    flag: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_at_login_cmd(&player, &flag)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        gm_at_login_result(outcome)?;
+        Ok(serde_json::json!({ "applied": true, "player": player, "flag": flag }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `dml_gm_money` bridge command (`90-main.sh:3519-3537`) --
+/// REQUIRES the character online (`_gm_require_online`), checked BEFORE the
+/// SOAP fire, same order as the oracle.
+#[tauri::command]
+async fn wow_gm_gold_native(
+    player: String,
+    gold: i32,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_gold_cmd(&player, gold)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        if !char_is_online(&cfg, &player) {
+            return Err(not_online_err(&player));
+        }
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "gold")?;
+        Ok(serde_json::json!({ "gold_set": true, "player": player, "gold": gold }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `dml_gm_health` bridge command (`90-main.sh:3538-3545`) --
+/// REQUIRES the character online, checked BEFORE the SOAP fire.
+#[tauri::command]
+async fn wow_gm_heal_native(
+    player: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_heal_cmd(&player)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        if !char_is_online(&cfg, &player) {
+            return Err(not_online_err(&player));
+        }
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "heal")?;
+        Ok(serde_json::json!({ "healed": true, "player": player }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `dml_gm_revive` bridge command (`90-main.sh:3546-3552`) --
+/// REQUIRES the character online, checked BEFORE the SOAP fire.
+#[tauri::command]
+async fn wow_gm_revive_native(
+    player: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_revive_cmd(&player)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        if !char_is_online(&cfg, &player) {
+            return Err(not_online_err(&player));
+        }
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "revive")?;
+        Ok(serde_json::json!({ "revived": true, "player": player }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `dml_summon_npc` bridge command (`90-main.sh:3554-3577`).
+/// Order matches the oracle exactly: validate -> creature_template
+/// existence+name lookup (World DB) -> online check (Characters DB) -> SOAP
+/// fire -> success with the looked-up NPC name.
+#[tauri::command]
+async fn wow_gm_summon_native(
+    player: String,
+    entry: i32,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::gm_summon_cmd(&player, entry)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
+        let npc_res = crate::dml::db::query_with_params(
+            &cfg,
+            crate::dml::db::Database::World,
+            "SELECT name FROM creature_template WHERE entry=? LIMIT 1",
+            params,
+        )
+        .map_err(|_e| CmdError {
+            code: "DB_UNREACHABLE".into(),
+            message: "Could not check the creature entry".into(),
+            hint: "Is ac-database running?".into(),
+        })?;
+        let npc_name: Option<String> =
+            npc_res.rows.first().and_then(|r| r.first()).and_then(|v| match v {
+                crate::dml::db::SqlValue::Text(s) => Some(s.clone()),
+                crate::dml::db::SqlValue::Int(i) => Some(i.to_string()),
+                crate::dml::db::SqlValue::Null => None,
+            });
+        let npc_name = match npc_name {
+            Some(n) if !n.is_empty() => n,
+            _ => {
+                return Err(CmdError {
+                    code: "NOT_FOUND".into(),
+                    message: format!("No creature with entry {entry}"),
+                    hint: "Check the id (creature_template.entry).".into(),
+                })
+            }
+        };
+        if !char_is_online(&cfg, &player) {
+            return Err(not_online_err(&player));
+        }
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "summon")?;
+        Ok(serde_json::json!({
+            "summoned": true,
+            "player": player,
+            "entry": entry,
+            "npc": npc_name,
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `.send items` mail (`90-main.sh:1785-1833`). `items` is a CSV
+/// of `id:count` specs (see `split_mail_items`); `subject`/`body` default the
+/// same as the CLI's own flag defaults.
+#[tauri::command]
+async fn wow_mail_item_native(
+    to: String,
+    items: String,
+    subject: Option<String>,
+    body: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let specs = split_mail_items(&items);
+    let attachments = specs.len();
+    let subject = subject.unwrap_or_else(|| "Dad's MMO Lab".into());
+    let body = body.unwrap_or_else(|| "Enjoy!".into());
+    let cmd = crate::dml::soap_cmds::mail_items_cmd(&to, &specs, &subject, &body)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        mail_result(outcome)?;
+        Ok(serde_json::json!({ "sent": true, "to": to, "attachments": attachments }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `teleport name` (`90-main.sh:1852-1893`).
+#[tauri::command]
+async fn wow_teleport_native(
+    char_name: String,
+    to: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::soap_cmds::teleport_name_cmd(&char_name, &to)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        teleport_result(outcome)?;
+        Ok(serde_json::json!({ "teleported": true, "char": char_name, "to": to }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_party_preset_show(name: String, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "party".into(), "preset-show".into(), "--name".into(), name]).await
@@ -2951,6 +3508,7 @@ pub fn run() {
             config_registry: Arc::new(Mutex::new(None)),
             tuning_registry: Arc::new(Mutex::new(None)),
             module_catalog: Arc::new(Mutex::new(None)),
+            soap_lock: Arc::new(Mutex::new(())),
         })
         .setup(|app| {
             // Startup registry prefetch (native mode only): warm the three
@@ -3127,6 +3685,19 @@ pub fn run() {
             wow_gm_summon,
             wow_gm_at_login,
             wow_gm_return_home,
+            wow_console_send_native,
+            wow_account_create_native,
+            wow_account_set_password_native,
+            wow_account_set_gm_native,
+            wow_account_delete_native,
+            wow_gm_level_native,
+            wow_gm_at_login_native,
+            wow_gm_gold_native,
+            wow_gm_heal_native,
+            wow_gm_revive_native,
+            wow_gm_summon_native,
+            wow_mail_item_native,
+            wow_teleport_native,
             wow_lan,
             wow_lan_public_ip,
             wow_tailscale,
@@ -3303,5 +3874,166 @@ mod tests {
         use crate::dml::db::DbError;
         assert_eq!(stats_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
         assert_eq!(stats_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
+    }
+
+    // -- Task A2b: native SOAP command fault-mapping helpers -----------------
+    // Network-touching command bodies aren't unit-testable (no live server --
+    // see the task brief), so these tests cover the pure `SoapOutcome ->
+    // CmdError` mappers + the mail CSV-split helper, which carry all the
+    // per-arm parity logic.
+
+    use crate::dml::soap::SoapOutcome;
+
+    #[test]
+    fn party_fire_result_ok_passes_through() {
+        assert_eq!(party_fire_result(SoapOutcome::Ok("done".into()), "gold").unwrap(), "done");
+    }
+
+    #[test]
+    fn party_fire_result_fault_uses_fixed_label_message_not_server_text() {
+        let e = party_fire_result(SoapOutcome::Fault("server said no".into()), "gold").unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "The gold command was rejected");
+        assert_eq!(
+            e.hint,
+            "Deploy the server bridges (bridge-setup) and restart the server first."
+        );
+    }
+
+    #[test]
+    fn party_fire_result_fault_label_varies_per_caller() {
+        for label in ["gold", "heal", "revive", "summon"] {
+            let e = party_fire_result(SoapOutcome::Fault("x".into()), label).unwrap_err();
+            assert_eq!(e.message, format!("The {label} command was rejected"));
+        }
+    }
+
+    #[test]
+    fn party_fire_result_auth_uses_shorter_message() {
+        let e = party_fire_result(SoapOutcome::Auth, "gold").unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP auth failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+    }
+
+    #[test]
+    fn party_fire_result_unreachable() {
+        let e = party_fire_result(SoapOutcome::Unreachable("boom".into()), "gold").unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "Is it running?");
+    }
+
+    #[test]
+    fn gm_level_result_ok_passes_through() {
+        assert_eq!(gm_level_result(SoapOutcome::Ok("ok".into())).unwrap(), "ok");
+    }
+
+    #[test]
+    fn gm_level_result_fault_is_fixed_message_ignoring_server_text() {
+        let e = gm_level_result(SoapOutcome::Fault("whatever the server said".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "The level command was rejected");
+        assert_eq!(e.hint, "Does the character exist? The server said no.");
+    }
+
+    #[test]
+    fn gm_level_result_auth_uses_shorter_message() {
+        let e = gm_level_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP auth failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+    }
+
+    #[test]
+    fn gm_level_result_unreachable() {
+        let e = gm_level_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "Is it running?");
+    }
+
+    #[test]
+    fn gm_at_login_result_fault_decodes_server_text() {
+        let e = gm_at_login_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a<b");
+        assert_eq!(e.hint, "The worldserver rejected the command.");
+    }
+
+    #[test]
+    fn gm_at_login_result_auth_uses_shorter_message() {
+        let e = gm_at_login_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP auth failed");
+    }
+
+    #[test]
+    fn mail_result_fault_is_raw_not_decoded() {
+        let e = mail_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a&lt;b");
+        assert_eq!(e.hint, "The server rejected the mail command.");
+    }
+
+    #[test]
+    fn mail_result_auth_has_empty_hint() {
+        let e = mail_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "");
+    }
+
+    #[test]
+    fn mail_result_unreachable_hint() {
+        let e = mail_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "Run: dml wow soap-setup, then start the server.");
+    }
+
+    #[test]
+    fn teleport_result_fault_is_raw_not_decoded() {
+        let e = teleport_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.message, "a&lt;b");
+        assert_eq!(e.hint, "Unknown location? See dml wow teleport-list.");
+    }
+
+    #[test]
+    fn teleport_result_auth_and_unreachable_have_empty_hints() {
+        let e = teleport_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "");
+        let e = teleport_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "");
+    }
+
+    #[test]
+    fn not_online_err_matches_oracle_text() {
+        let e = not_online_err("Testen");
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "Character not online: Testen");
+        assert_eq!(
+            e.hint,
+            "This action needs the character logged in. (Set level works offline.)"
+        );
+    }
+
+    #[test]
+    fn split_mail_items_empty_string_is_zero_fields() {
+        // Rust's "".split(',') yields one empty field; bash's `IFS=','
+        // read -ra` on empty input yields zero. Must special-case to match.
+        let got: Vec<&str> = split_mail_items("");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn split_mail_items_splits_on_commas() {
+        assert_eq!(split_mail_items("6948:1,2589:5"), vec!["6948:1", "2589:5"]);
+    }
+
+    #[test]
+    fn split_mail_items_single_spec_no_comma() {
+        assert_eq!(split_mail_items("6948:1"), vec!["6948:1"]);
     }
 }
