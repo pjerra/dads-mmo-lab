@@ -1801,6 +1801,84 @@ fn teleport_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError>
     }
 }
 
+/// `SoapOutcome -> CmdError` for `gm return-home`'s ONLINE arm
+/// (`90-main.sh:3629-3634`, Task A2c): decoded fault text (the SAME decode
+/// `gm_at_login_result` uses) but a return-home-specific fault hint about
+/// combat/flight-path; "SOAP auth failed" (the shorter wording this arm
+/// family uses, like `gm_level_result`/`gm_at_login_result`); generic
+/// unreachable.
+fn return_home_online_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            hint: "The character can't be teleported in combat or on a flight path -- try again once it is idle."
+                .into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// One faction capital: the fixed teleport/DB-write target for
+/// `gm return-home` (`90-main.sh:3614-3621`). `name`/`map`/coords are FIXED
+/// LITERALS -- never derived from user input; only the character lookup
+/// (`player`, `race`) that picks WHICH capital is user-influenced, and that
+/// influence is limited to a closed 10-race case match.
+struct Capital {
+    name: &'static str,
+    map: i32,
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+/// `characters.race` -> faction capital, matching the oracle's exact case
+/// block byte-for-byte: Alliance races `1,3,4,7,11` -> Stormwind (map 0);
+/// Horde races `2,5,6,8,10` -> Orgrimmar (map 1); anything else (e.g. race 9
+/// = goblin, which owns no faction capital in this map) -> `None`, matching
+/// bash's `*)` fallthrough.
+fn faction_capital(race: u8) -> Option<Capital> {
+    match race {
+        1 | 3 | 4 | 7 | 11 => Some(Capital { name: "Stormwind", map: 0, x: -8819.3, y: 636.2, z: 94.1 }),
+        2 | 5 | 6 | 8 | 10 => Some(Capital { name: "Orgrimmar", map: 1, x: 1609.2, y: -4407.7, z: 17.5 }),
+        _ => None,
+    }
+}
+
+/// `gm return-home`'s character lookup (`90-main.sh:3616-3617`). A named
+/// const (not an inline literal) so the exact SQL text is unit-testable
+/// (brief's "SQL builder test" requirement) independent of the live-DB path.
+const RETURN_HOME_SELECT_SQL: &str = "SELECT guid, race, online FROM characters WHERE name = ? LIMIT 1";
+
+/// `gm return-home`'s OFFLINE-arm position write (`90-main.sh:3648-3649`).
+/// Same reasoning as [`RETURN_HOME_SELECT_SQL`].
+const RETURN_HOME_UPDATE_SQL: &str =
+    "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?";
+
+/// Decode one `characters`-row cell to `i64`, tolerating both the binary
+/// protocol's native `Int`/`UInt` decode and (defensively) a text fallback --
+/// `guid`/`race`/`online` are all integer columns, but [`db::SqlValue`]'s
+/// `Text` variant is the safe catch-all for anything the driver didn't map to
+/// `Int`.
+fn sql_row_int(v: Option<&crate::dml::db::SqlValue>) -> Option<i64> {
+    match v {
+        Some(crate::dml::db::SqlValue::Int(i)) => Some(*i),
+        Some(crate::dml::db::SqlValue::Text(s)) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
 /// `NOT_FOUND` for an offline character, matching `_gm_require_online`
 /// (`cli/src/55-gm.sh:9-14`) exactly.
 fn not_online_err(player: &str) -> CmdError {
@@ -2193,6 +2271,97 @@ async fn wow_teleport_native(
         let outcome = crate::dml::soap::exec(&cfg, &cmd);
         teleport_result(outcome)?;
         Ok(serde_json::json!({ "teleported": true, "char": char_name, "to": to }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `gm return-home` (`90-main.sh:3603-3654`, Task A2c). Sends a
+/// character to its faction capital: ONLINE -> the same `.teleport name`
+/// SOAP fire [`wow_teleport_native`] uses (capital name is a fixed literal,
+/// never user input); OFFLINE -> a direct `characters`-table position
+/// UPDATE, the FIRST db-write path in the native core (see [`crate::dml::db::execute`]).
+/// Order matches the oracle exactly: validate -> lookup (guid/race/online)
+/// -> faction-capital case match -> online branch.
+#[tauri::command]
+async fn wow_gm_return_home_native(
+    player: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(bad_arg(format!("Invalid player name: {player}")));
+    }
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let params: Vec<mysql::Value> = vec![mysql::Value::from(player.as_str())];
+        let res = crate::dml::db::query_with_params(
+            &cfg,
+            crate::dml::db::Database::Characters,
+            RETURN_HOME_SELECT_SQL,
+            params,
+        )
+        .map_err(db_err_to_cmd)?;
+        let row = res.rows.first().ok_or_else(|| CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("No such character: {player}"),
+            hint: String::new(),
+        })?;
+        let guid = sql_row_int(row.first()).filter(|g| *g >= 0).ok_or_else(|| CmdError {
+            code: "DB_UNREACHABLE".into(),
+            message: "Unexpected character lookup result".into(),
+            hint: String::new(),
+        })?;
+        let race_num = sql_row_int(row.get(1)).unwrap_or(-1);
+        let online = sql_row_int(row.get(2)).unwrap_or(0);
+
+        let race_u8 = u8::try_from(race_num).unwrap_or(u8::MAX);
+        let capital = faction_capital(race_u8).ok_or_else(|| CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("Could not determine the faction of {player} (race {race_num})"),
+            hint: String::new(),
+        })?;
+
+        if online == 1 {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let soap_cfg = crate::dml::soap::SoapConfig::load();
+            let cmd = format!("teleport name {player} {}", capital.name);
+            let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+            return_home_online_result(outcome)?;
+            Ok(serde_json::json!({
+                "sent_home": true,
+                "player": player,
+                "capital": capital.name,
+                "via": "teleport",
+            }))
+        } else {
+            let guid = guid as u64;
+            let update_params: Vec<mysql::Value> = vec![
+                mysql::Value::from(capital.x),
+                mysql::Value::from(capital.y),
+                mysql::Value::from(capital.z),
+                mysql::Value::from(capital.map),
+                mysql::Value::from(guid),
+            ];
+            crate::dml::db::execute(
+                &cfg,
+                crate::dml::db::Database::Characters,
+                RETURN_HOME_UPDATE_SQL,
+                update_params,
+            )
+            .map_err(|_e| CmdError {
+                code: "DB_UNREACHABLE".into(),
+                message: "Could not update the character's position".into(),
+                hint: "Is ac-database running?".into(),
+            })?;
+            Ok(serde_json::json!({
+                "sent_home": true,
+                "player": player,
+                "capital": capital.name,
+                "via": "db",
+            }))
+        }
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -3685,6 +3854,7 @@ pub fn run() {
             wow_gm_summon,
             wow_gm_at_login,
             wow_gm_return_home,
+            wow_gm_return_home_native,
             wow_console_send_native,
             wow_account_create_native,
             wow_account_set_password_native,
@@ -4035,5 +4205,101 @@ mod tests {
     #[test]
     fn split_mail_items_single_spec_no_comma() {
         assert_eq!(split_mail_items("6948:1"), vec!["6948:1"]);
+    }
+
+    // --- Task A2c: gm return-home ---------------------------------------
+
+    #[test]
+    fn faction_capital_alliance_races_map_to_stormwind() {
+        for race in [1u8, 3, 4, 7, 11] {
+            let cap = faction_capital(race).unwrap_or_else(|| panic!("race {race} should map"));
+            assert_eq!(cap.name, "Stormwind");
+            assert_eq!(cap.map, 0);
+            assert_eq!(cap.x, -8819.3);
+            assert_eq!(cap.y, 636.2);
+            assert_eq!(cap.z, 94.1);
+        }
+    }
+
+    #[test]
+    fn faction_capital_horde_races_map_to_orgrimmar() {
+        for race in [2u8, 5, 6, 8, 10] {
+            let cap = faction_capital(race).unwrap_or_else(|| panic!("race {race} should map"));
+            assert_eq!(cap.name, "Orgrimmar");
+            assert_eq!(cap.map, 1);
+            assert_eq!(cap.x, 1609.2);
+            assert_eq!(cap.y, -4407.7);
+            assert_eq!(cap.z, 17.5);
+        }
+    }
+
+    #[test]
+    fn faction_capital_non_capital_race_is_none() {
+        // Race 9 = goblin -- not a faction-capital owner in this map,
+        // matching the oracle's `*)` fallthrough.
+        assert!(faction_capital(9).is_none());
+        assert!(faction_capital(0).is_none());
+        assert!(faction_capital(255).is_none());
+    }
+
+    #[test]
+    fn return_home_select_sql_is_exact() {
+        assert_eq!(
+            RETURN_HOME_SELECT_SQL,
+            "SELECT guid, race, online FROM characters WHERE name = ? LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn return_home_update_sql_is_exact() {
+        assert_eq!(
+            RETURN_HOME_UPDATE_SQL,
+            "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?"
+        );
+    }
+
+    #[test]
+    fn sql_row_int_reads_int_and_text_variants() {
+        use crate::dml::db::SqlValue;
+        assert_eq!(sql_row_int(Some(&SqlValue::Int(42))), Some(42));
+        assert_eq!(sql_row_int(Some(&SqlValue::Text("7".into()))), Some(7));
+        assert_eq!(sql_row_int(Some(&SqlValue::Text("nope".into()))), None);
+        assert_eq!(sql_row_int(Some(&SqlValue::Null)), None);
+        assert_eq!(sql_row_int(None), None);
+    }
+
+    #[test]
+    fn return_home_online_result_ok_passes_through() {
+        assert_eq!(
+            return_home_online_result(SoapOutcome::Ok("done".into())).unwrap(),
+            "done"
+        );
+    }
+
+    #[test]
+    fn return_home_online_result_fault_decodes_with_combat_hint() {
+        let e = return_home_online_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a<b");
+        assert_eq!(
+            e.hint,
+            "The character can't be teleported in combat or on a flight path -- try again once it is idle."
+        );
+    }
+
+    #[test]
+    fn return_home_online_result_auth_uses_shorter_message() {
+        let e = return_home_online_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP auth failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+    }
+
+    #[test]
+    fn return_home_online_result_unreachable() {
+        let e = return_home_online_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "Is it running?");
     }
 }

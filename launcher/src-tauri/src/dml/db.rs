@@ -333,6 +333,27 @@ pub fn query_with_params(
     Ok(QueryResult { columns, rows })
 }
 
+/// Execute a write (UPDATE/INSERT/DELETE) with bound params over the prepared
+/// (binary) protocol and return the affected row count. Bound params keep
+/// user data out of the SQL text -- same injection rationale as
+/// [`query_with_params`], just for `exec_drop` instead of `exec_iter`. This is
+/// the FIRST write path in the native core (Task A2c, `gm return-home`'s
+/// offline arm): every reader above only ever `SELECT`s. SYNCHRONOUS and
+/// BLOCKING like [`query_with_params`] -- call it inside
+/// [`tauri::async_runtime::spawn_blocking`].
+pub fn execute(
+    cfg: &DbConfig,
+    db: Database,
+    sql: &str,
+    params: impl Into<mysql::Params>,
+) -> Result<u64, DbError> {
+    use mysql::prelude::Queryable;
+    let mut conn = connect(cfg, db)?;
+    conn.exec_drop(sql, params)
+        .map_err(|e| DbError::Query(format!("Query failed: {e}")))?;
+    Ok(conn.affected_rows())
+}
+
 /// Async convenience wrapper: runs [`query`] on the blocking pool so a Tauri
 /// command can `.await` it. Takes owned args because the closure outlives the
 /// caller's stack frame.
@@ -513,6 +534,23 @@ BLANK=
         assert_eq!(opts.get_read_timeout(), Some(&std::time::Duration::from_secs(30)));
         assert_eq!(opts.get_write_timeout(), Some(&std::time::Duration::from_secs(30)));
         assert_eq!(opts.get_init(), vec!["SET NAMES utf8mb4".to_string()]);
+    }
+
+    #[test]
+    fn execute_accepts_bound_positional_params() {
+        // Pure shape check (no socket), mirroring
+        // query_with_params_accepts_bound_positional_params below -- the
+        // live roundtrip for an actual write isn't testable without a
+        // reachable, mutable DB (server down; see the A2c brief).
+        let params: Vec<mysql::Value> = vec![
+            mysql::Value::from(-8819.3f64),
+            mysql::Value::from(636.2f64),
+            mysql::Value::from(94.1f64),
+            mysql::Value::from(0i64),
+            mysql::Value::from(12345u64),
+        ];
+        let as_params: mysql::Params = params.into();
+        assert!(matches!(as_params, mysql::Params::Positional(v) if v.len() == 5));
     }
 
     #[test]
