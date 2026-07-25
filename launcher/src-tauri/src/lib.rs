@@ -1652,6 +1652,124 @@ async fn wow_config_set_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+// ---------------------------------------------------------------------------
+// `wow_config_tuning_set_native` (Task B2b) — native port of
+// `dml wow config tuning-set` (`90-main.sh:2859-2934`, the `tuning-set)` case).
+// Looks up the row in the cached tuning registry (the same one-shot cache
+// `wow_tuning_read` populates), validates by `type` (shared by BOTH
+// backends, exactly like the oracle validates once before branching), then
+// writes it: `conf` backend is fully native (mirrors `config_set_curated`'s
+// conf-write tail almost verbatim, minus the ahbot/bots.population
+// special-case companion writes that don't apply to tuning rows); `lua`
+// backend defers to the CLI -- see the TODO on that arm below.
+// ---------------------------------------------------------------------------
+
+/// `dml wow config tuning-set` port (`90-main.sh:2859-2934`, Task B2b).
+/// Native-only.
+#[tauri::command]
+async fn wow_config_tuning_set_native(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let runner = state.runner.clone();
+    let cache = state.tuning_registry.clone();
+    let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let rows = fetch_registry_rows(
+            &runner,
+            &cache,
+            &["wow", "config", "tuning-registry"],
+            "tuning registry",
+        )?;
+        let row = rows
+            .iter()
+            .find(|r| r.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+            .ok_or_else(|| {
+                cfgset_err(
+                    "NOT_FOUND",
+                    format!("Unknown tuning setting: {key}"),
+                    "See: dml wow config tuning-list --json",
+                )
+            })?;
+
+        let backend = row.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+        let file = row.get("file").and_then(|v| v.as_str()).unwrap_or("");
+        let ty = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        let label = row.get("label").and_then(|v| v.as_str()).unwrap_or(key.as_str());
+        let module = row.get("module").and_then(|v| v.as_str()).unwrap_or("");
+        let min = row.get("min").and_then(|v| v.as_i64()).unwrap_or(0);
+        let max = row.get("max").and_then(|v| v.as_i64()).unwrap_or(0);
+        // The registry JSON carries no `confkey` column (Task 1's cheap
+        // sibling arm deliberately omits it); `tuning_confkey` is the source
+        // of truth, kept in lock-step with `_mtune_rows` by `tuning.rs`'s own
+        // parity test. Every row the registry can ever emit has an entry
+        // here, so this is unreachable in practice -- defensive, not a real
+        // oracle branch.
+        let confkey = crate::dml::tuning::tuning_confkey(&key).ok_or_else(|| {
+            cfgset_err(
+                "NOT_FOUND",
+                format!("Unknown tuning setting: {key}"),
+                "See: dml wow config tuning-list --json",
+            )
+        })?;
+
+        let norm_value = crate::dml::tuning::validate_tuning_value(ty, &value, label, min, max)
+            .map_err(|msg| cfgset_err("BAD_ARG", msg, ""))?;
+
+        if backend == "lua" {
+            // TODO: native lua-tuning writer (deferred). Porting
+            // `_lua_cfg_write` + `_mtune_to_lua` (the `.lua` assignment
+            // editor with re-verify, `40-config.sh:969-1019`) is out of scope
+            // for this pass -- only 2 of 13 tuning rows are lua-backend
+            // (unlimitedammo.enabled, sitmeansrest.*'s file is also lua but
+            // that's 4 rows total; still a small minority). Shell the
+            // existing CLI so lua-backend rows keep working (byte-parity,
+            // since `dml` does the actual write) without porting the lua
+            // editor tonight. The CLI re-validates independently; the
+            // validation above still runs first so a bad value fails fast
+            // without a subprocess, and to keep both backends going through
+            // one shared validation path exactly like the oracle does.
+            let env = runner
+                .run_json(&["wow", "config", "tuning-set", "--key", &key, "--value", &value])
+                .map_err(CmdError::from)?;
+            return envelope_to_result(env);
+        }
+
+        // backend == "conf" -- same `_cfg_conf_path` resolution as B2a's
+        // curated route (`conf_path_in`: worldserver/authserver.conf under
+        // `env/dist/etc/`, else `env/dist/etc/modules/{file}`).
+        let cpath = crate::dml::config::conf_path_in(&title_dir, file);
+        let ensured = crate::dml::config::conf_ensure(&cpath)
+            .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
+        if !ensured {
+            return Err(cfgset_err(
+                "NOT_INSTALLED",
+                format!("{module} is not installed"),
+                format!("Install {module} from the Modules page first, then reopen this page."),
+            ));
+        }
+        let changed = crate::dml::config::conf_write(&cpath, confkey, &norm_value)
+            .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
+
+        Ok(if changed {
+            serde_json::json!({
+                "key": key, "backend": "conf", "changed": true,
+                "restart_required": true, "applied": "restart",
+            })
+        } else {
+            serde_json::json!({
+                "key": key, "backend": "conf", "changed": false,
+                "restart_required": false, "applied": "none",
+            })
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_pb_keys(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "config".into(), "pb-keys".into()]).await
@@ -4292,6 +4410,7 @@ pub fn run() {
             wow_config_set_native,
             wow_config_tuning_list,
             wow_config_tuning_set,
+            wow_config_tuning_set_native,
             wow_config_conf_keys,
             wow_config_raw_read,
             wow_config_pb_keys,

@@ -112,6 +112,64 @@ pub fn lua_cfg_read(content: &str, key: &str) -> String {
     found.unwrap_or_default()
 }
 
+/// Validate + normalize a `tuning-set` value against its row's `type`/`min`/
+/// `max` — a faithful port of the validation switch in the `tuning-set)` case
+/// (90-main.sh:2879-2895), used by [`super::super::wow_config_tuning_set_native`]
+/// (Task B2b) for BOTH backends (the oracle validates once, before branching
+/// on `conf`/`lua`). `min`/`max` are only consulted for `type == "int"` (the
+/// other two types have no range). On success returns the value to WRITE:
+/// `int` is leading-zero-stripped (`"007"` -> `"7"`, matching bash's
+/// `$((10#$value))` arithmetic-expansion normalization); `bool`/`list` (and
+/// any unknown type, which the registry never emits) pass through unchanged.
+/// On failure returns the exact oracle `BAD_ARG` message text (the shape
+/// check and the range check share one message for `int`, exactly like the
+/// oracle — both read `{label} must be a whole number between {min} and
+/// {max}, got: {value}`).
+pub fn validate_tuning_value(
+    ty: &str,
+    value: &str,
+    label: &str,
+    min: i64,
+    max: i64,
+) -> Result<String, String> {
+    match ty {
+        "bool" => {
+            if value == "0" || value == "1" {
+                Ok(value.to_string())
+            } else {
+                Err(format!("{label} takes 1 (on) or 0 (off), got: {value}"))
+            }
+        }
+        "int" => {
+            let shape_ok = !value.is_empty() && value.chars().all(|c| c.is_ascii_digit());
+            let parsed = if shape_ok { value.parse::<i64>().ok() } else { None };
+            match parsed {
+                Some(n) if n >= min && n <= max => Ok(n.to_string()),
+                _ => Err(format!(
+                    "{label} must be a whole number between {min} and {max}, got: {value}"
+                )),
+            }
+        }
+        "list" => {
+            // ^[0-9]+(,[0-9]+)*$: every comma-separated part non-empty digits
+            // only -- rejects leading/trailing/doubled commas via the
+            // explicit `!part.is_empty()` check (an empty string vacuously
+            // passes `.all()` over its (zero) chars, so that guard is load
+            // bearing, not redundant).
+            let ok = !value.is_empty()
+                && value.split(',').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+            if ok {
+                Ok(value.to_string())
+            } else {
+                Err(format!(
+                    "{label} must be comma-separated numbers (e.g. 3,8) or 0 for all, got: {value}"
+                ))
+            }
+        }
+        _ => Ok(value.to_string()),
+    }
+}
+
 /// Reads live tuning VALUES + installed-state straight off the native runtime
 /// files. Conf reads are memoised (parse-once per file); lua files are small
 /// and read on demand.
@@ -377,5 +435,57 @@ mod tests {
         assert_eq!(s["default"], "1");
         assert_eq!(s["file"], "mod_learnspells.conf");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_tuning_value_bool_accepts_only_0_or_1() {
+        assert_eq!(validate_tuning_value("bool", "0", "Enable auto-learn", 0, 0), Ok("0".to_string()));
+        assert_eq!(validate_tuning_value("bool", "1", "Enable auto-learn", 0, 0), Ok("1".to_string()));
+        assert_eq!(
+            validate_tuning_value("bool", "2", "Enable auto-learn", 0, 0),
+            Err("Enable auto-learn takes 1 (on) or 0 (off), got: 2".to_string())
+        );
+        assert_eq!(
+            validate_tuning_value("bool", "true", "Enable auto-learn", 0, 0),
+            Err("Enable auto-learn takes 1 (on) or 0 (off), got: true".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_tuning_value_int_strips_leading_zeros_and_checks_range() {
+        // "007" with range [0,100] -> accepted, normalized to "7".
+        assert_eq!(validate_tuning_value("int", "007", "Minimum level", 0, 100), Ok("7".to_string()));
+        assert_eq!(validate_tuning_value("int", "0", "Minimum level", 0, 100), Ok("0".to_string()));
+        assert_eq!(validate_tuning_value("int", "100", "Minimum level", 0, 100), Ok("100".to_string()));
+    }
+
+    #[test]
+    fn validate_tuning_value_int_rejects_out_of_range_shape_and_negative() {
+        let want = "Minimum level must be a whole number between 0 and 100, got: 101".to_string();
+        assert_eq!(validate_tuning_value("int", "101", "Minimum level", 0, 100), Err(want));
+        // Non-digit shape.
+        let want2 = "Minimum level must be a whole number between 0 and 100, got: abc".to_string();
+        assert_eq!(validate_tuning_value("int", "abc", "Minimum level", 0, 100), Err(want2));
+        // Negative sign fails the digit-only shape gate.
+        let want3 = "Minimum level must be a whole number between 0 and 100, got: -5".to_string();
+        assert_eq!(validate_tuning_value("int", "-5", "Minimum level", 0, 100), Err(want3));
+        // Empty value.
+        let want4 = "Minimum level must be a whole number between 0 and 100, got: ".to_string();
+        assert_eq!(validate_tuning_value("int", "", "Minimum level", 0, 100), Err(want4));
+    }
+
+    #[test]
+    fn validate_tuning_value_list_accepts_csv_rejects_bad_shape() {
+        assert_eq!(validate_tuning_value("list", "0", "Allowed classes", 0, 0), Ok("0".to_string()));
+        assert_eq!(validate_tuning_value("list", "3,8", "Allowed classes", 0, 0), Ok("3,8".to_string()));
+        let want = "Allowed classes must be comma-separated numbers (e.g. 3,8) or 0 for all, got: 3,,8"
+            .to_string();
+        assert_eq!(validate_tuning_value("list", "3,,8", "Allowed classes", 0, 0), Err(want));
+        let want2 = "Allowed classes must be comma-separated numbers (e.g. 3,8) or 0 for all, got: 3,8,"
+            .to_string();
+        assert_eq!(validate_tuning_value("list", "3,8,", "Allowed classes", 0, 0), Err(want2));
+        let want3 = "Allowed classes must be comma-separated numbers (e.g. 3,8) or 0 for all, got: "
+            .to_string();
+        assert_eq!(validate_tuning_value("list", "", "Allowed classes", 0, 0), Err(want3));
     }
 }
