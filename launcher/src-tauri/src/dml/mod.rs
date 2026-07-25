@@ -8,5 +8,6 @@ pub mod pages;
 pub mod paperdoll;
 pub mod runner;
 pub mod soap;
+pub mod soap_cmds;
 pub mod stats;
 pub mod tuning;
