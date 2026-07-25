@@ -30,6 +30,7 @@ pub struct SoapConfig {
 
 /// Classification of a SOAP `executeCommand` call — mirrors `soap_exec`'s
 /// bash return codes: 0 -> `Ok`, 2 -> `Fault`, 3 -> `Auth`, 4 -> `Unreachable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SoapOutcome {
     /// rc 0 — the `<result>` inner text, RAW (no entity decoding; see the
     /// module-level CONTROLLER DECISION).
