@@ -1,5 +1,14 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type { LiveSpec } from "./party-specs";
+// Task A3: native-vs-WSL write routing. `resolveBackendMode` is memoized
+// once per process in page-cache.svelte.ts (a cheap Rust read, constant for
+// the process lifetime) -- reused here so every routed write below pays at
+// most one IPC call for the mode, not one per write. NB this makes api.ts
+// and page-cache.svelte.ts mutually-importing; that's fine under ESM (both
+// sides only reference function bindings, never evaluated at module-init
+// time), but keep it in mind if page-cache.svelte.ts ever grows a
+// module-level side effect that runs before its exports are initialized.
+import { resolveBackendMode } from "./page-cache.svelte";
 export type { LiveSpec };
 
 export interface DmlErr {
@@ -191,17 +200,33 @@ export async function wowAccountsRead(): Promise<Account[]> {
   const data = await invoke<{ accounts: Account[] }>("wow_accounts_read");
   return data.accounts;
 }
+// Task A3: native mode routes to the SOAP-backed `_native` siblings (Task
+// A2b); WSL mode keeps shelling `dml` byte-identically. Universal routing
+// (native->Rust for WSL too, over SOAP-over-TCP) is a safe future flip once
+// live-smoked -- see the plan's A4 decision note.
 export async function wowAccountCreate(user: string, pass: string): Promise<{ created: boolean; user: string }> {
-  return await invoke("wow_account_create", { user, pass });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_account_create_native", { user, pass })
+    : invoke("wow_account_create", { user, pass });
 }
 export async function wowAccountSetPassword(user: string, pass: string): Promise<{ password_set: boolean; user: string }> {
-  return await invoke("wow_account_set_password", { user, pass });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_account_set_password_native", { user, pass })
+    : invoke("wow_account_set_password", { user, pass });
 }
 export async function wowAccountSetGm(user: string, level: number): Promise<{ gm_set: boolean; user: string; level: number }> {
-  return await invoke("wow_account_set_gm", { user, level });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_account_set_gm_native", { user, level })
+    : invoke("wow_account_set_gm", { user, level });
 }
 export async function wowAccountDelete(user: string): Promise<{ deleted: boolean; user: string }> {
-  return await invoke("wow_account_delete", { user });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_account_delete_native", { user })
+    : invoke("wow_account_delete", { user });
 }
 export async function wowServerInfo(): Promise<ServerInfo> {
   return await invoke("wow_server_info");
@@ -331,7 +356,10 @@ export async function wowConsoleTail(lines?: number): Promise<ConsoleTail> {
   return await invoke("wow_console_tail", { lines });
 }
 export async function wowConsoleSend(command: string): Promise<{ result: string }> {
-  return await invoke("wow_console_send", { command });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_console_send_native", { command })
+    : invoke("wow_console_send", { command });
 }
 
 export interface ModCommands {
@@ -585,7 +613,8 @@ export async function wowMailItem(p: {
   subject?: string;
   body?: string;
 }): Promise<{ sent: boolean; to: string; attachments: number }> {
-  return await invoke("wow_mail_item", p);
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_mail_item_native", p) : invoke("wow_mail_item", p);
 }
 export async function wowTeleportList(search?: string): Promise<TeleLocation[]> {
   const data = await invoke<{ locations: TeleLocation[] }>("wow_teleport_list", { search });
@@ -603,8 +632,13 @@ export async function wowTeleport(
   charName: string,
   to: string,
 ): Promise<{ teleported: boolean; char: string; to: string }> {
-  return await invoke("wow_teleport", { charName, to });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_teleport_native", { charName, to })
+    : invoke("wow_teleport", { charName, to });
 }
+// wowTeleportCoords has no `_native` sibling (deferred, out of scope for
+// Task A3) -- stays WSL-only/unchanged.
 export async function wowTeleportCoords(
   charName: string,
   map: number,
@@ -971,30 +1005,49 @@ export interface GmReviveResult { revived: boolean; player: string; }
 export interface GmSummonResult { summoned: boolean; player: string; entry: number; npc: string; }
 
 export async function wowGmLevel(player: string, level: number): Promise<GmLevelResult> {
-  return await invoke("wow_gm_level", { player, level });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_gm_level_native", { player, level })
+    : invoke("wow_gm_level", { player, level });
 }
 export async function wowGmGold(player: string, gold: number): Promise<GmGoldResult> {
-  return await invoke("wow_gm_gold", { player, gold });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_gm_gold_native", { player, gold })
+    : invoke("wow_gm_gold", { player, gold });
 }
 export async function wowGmHeal(player: string): Promise<GmHealResult> {
-  return await invoke("wow_gm_heal", { player });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_gm_heal_native", { player }) : invoke("wow_gm_heal", { player });
 }
 export async function wowGmRevive(player: string): Promise<GmReviveResult> {
-  return await invoke("wow_gm_revive", { player });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_gm_revive_native", { player }) : invoke("wow_gm_revive", { player });
 }
 export async function wowGmSummon(player: string, entry: number): Promise<GmSummonResult> {
-  return await invoke("wow_gm_summon", { player, entry });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_gm_summon_native", { player, entry })
+    : invoke("wow_gm_summon", { player, entry });
 }
 export async function wowGmAtLogin(
   player: string,
   flag: "rename" | "customize" | "changerace" | "changefaction",
 ): Promise<{ applied: boolean; player: string; flag: string }> {
-  return await invoke("wow_gm_at_login", { player, flag });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_gm_at_login_native", { player, flag })
+    : invoke("wow_gm_at_login", { player, flag });
 }
 // Batch 4 C: send a stuck character to their hearth/home (`.unstuck … inn`).
-// Works for offline characters too.
+// Works for offline characters too. NB the native command's arg is named
+// `player` (not `charName` like the WSL command / A2c report) -- both sides
+// take the same character name string, just a different invoke key.
 export async function wowGmReturnHome(charName: string): Promise<{ sent_home: boolean; player: string }> {
-  return await invoke("wow_gm_return_home", { charName });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_gm_return_home_native", { player: charName })
+    : invoke("wow_gm_return_home", { charName });
 }
 
 export interface BotcmdResult { sent: boolean; player: string; bot: string; action: string; }
