@@ -345,13 +345,23 @@ fn conf_read_raw(path: &Path, key: &str) -> String {
     val
 }
 
-/// Atomic write: write `content` to a sibling temp file (`{path}.tmp.{pid}`),
-/// then rename it over `path`. Any error removes the temp file and
-/// propagates — the original is never truncated or left half-written.
-/// Shared by `conf_write` and the override-YAML writers.
+/// Atomic write: write `content` to a sibling temp file
+/// (`{path}.tmp.{pid}.{seq}`), then rename it over `path`. Any error removes
+/// the temp file and propagates — the original is never truncated or left
+/// half-written. Shared by `conf_write` and the override-YAML writers.
+///
+/// The bash oracle's equivalent tmp name (`$1.tmp.$$`) is naturally unique
+/// per call because every `dml wow config set` invocation forks a fresh bash
+/// process. This app is long-lived — every conf-write shares ONE pid for the
+/// whole session — so the pid alone would let two concurrent writes to the
+/// same conf file collide on the same tmp path. `NEXT_TMP_SEQ` restores
+/// per-call uniqueness without relying on the pid at all.
+static NEXT_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    let seq = NEXT_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp_os = path.as_os_str().to_os_string();
-    tmp_os.push(format!(".tmp.{}", std::process::id()));
+    tmp_os.push(format!(".tmp.{}.{}", std::process::id(), seq));
     let tmp_path = PathBuf::from(tmp_os);
     if let Err(e) = std::fs::write(&tmp_path, content) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -484,6 +494,18 @@ fn ensure_yaml_mapping<'a>(
 /// The override file is machine-generated (no hand comments expected), so
 /// this is acceptable — the B3 parity test compares this file SEMANTICALLY
 /// (parsed env-map equality), NOT byte-for-byte, unlike `conf_write`.
+///
+/// SAFETY: a fresh minimal document is only ever built when the file is
+/// genuinely absent or blank — the bash oracle's `yq -i` on an existing file
+/// that fails to parse leaves the file untouched, and this must too. An
+/// existing, non-blank file that fails to parse as YAML (or parses but its
+/// root isn't a mapping — a shape that could never have come from THIS
+/// writer) is an error, never silently replaced: doing otherwise would
+/// discard every other service/volume/env-var already in the file. Mirrors
+/// `override_env_remove`'s "can't make sense of it -> don't touch it" stance,
+/// just surfaced as an `Err` here (a write caller has to know its edit was
+/// NOT applied; `remove`'s equivalent no-op is safe because it has nothing to
+/// apply).
 pub fn override_env_write(path: &Path, key: &str, value: &str) -> std::io::Result<bool> {
     let existing_text = std::fs::read_to_string(path).ok();
     let cur = existing_text
@@ -494,13 +516,26 @@ pub fn override_env_write(path: &Path, key: &str, value: &str) -> std::io::Resul
         return Ok(false);
     }
 
-    let mut doc: serde_yaml_ng::Value = existing_text
-        .as_deref()
-        .filter(|t| !t.trim().is_empty())
-        .and_then(|t| serde_yaml_ng::from_str(t).ok())
-        .unwrap_or_else(|| serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()));
+    let mut doc: serde_yaml_ng::Value = match existing_text.as_deref() {
+        Some(t) if !t.trim().is_empty() => serde_yaml_ng::from_str(t).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} exists but is not valid YAML; refusing to overwrite it: {e}",
+                    path.display()
+                ),
+            )
+        })?,
+        _ => serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()),
+    };
     if !matches!(doc, serde_yaml_ng::Value::Mapping(_)) {
-        doc = serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} exists but its root is not a YAML mapping; refusing to overwrite it",
+                path.display()
+            ),
+        ));
     }
 
     let root = doc.as_mapping_mut().expect("just ensured a Mapping");
@@ -558,6 +593,33 @@ pub fn override_env_remove(path: &Path, key: &str) -> std::io::Result<bool> {
 // from the `set)` case (`90-main.sh:2344-2561`) and its `40-config.sh`
 // dependents, kept here so it is unit-testable without Tauri or a server.
 // ---------------------------------------------------------------------------
+
+/// Whether the WoW Playerbots title is installed — a port of `_wow_server_dir`
+/// (`90-main.sh:106-110`) reduced to the boolean the `set`/`tuning-set`
+/// preamble actually needs (the oracle only ever checks `[[ -z "$cfg_sdir" ]]`
+/// here, never uses the resolved path itself). Mirrors `_has_compose`
+/// (`90-main.sh:9-15`) + `_resolve_compose_dir` (`90-main.sh:61-71`): the
+/// title's base dir must exist, and either it or its first subdir carrying a
+/// compose file counts as installed.
+pub fn wow_server_installed(title_dir: &Path) -> bool {
+    fn has_compose(dir: &Path) -> bool {
+        ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
+            .iter()
+            .any(|name| dir.join(name).is_file())
+    }
+    if !title_dir.is_dir() {
+        return false;
+    }
+    if has_compose(title_dir) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(title_dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| entry.path().is_dir() && has_compose(&entry.path()))
+}
 
 /// The direct-route (`conf:...`) conf files that stay curated-rows-only — a
 /// port of the `set)` case's core-conf `case` guard (`90-main.sh:2367-2372`).
@@ -1034,6 +1096,64 @@ services:
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Regression for the shared-pid tmp-name collision (`atomic_write` used
+    /// to name its scratch file `{path}.tmp.{pid}` only — constant for the
+    /// whole process — so two concurrent writers to the SAME conf file raced
+    /// on the SAME tmp path). Fires many overlapping writers at one file from
+    /// different threads (all sharing this process's pid, exactly like two
+    /// Tauri commands would) and asserts every completed write left the file
+    /// holding exactly one clean, complete value — never empty, truncated, or
+    /// a mix of two writers' bytes.
+    #[test]
+    fn conf_write_concurrent_writers_never_tear_the_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-cfgwrite-test-{}-concurrent", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = std::sync::Arc::new(dir.join("racy.conf"));
+        std::fs::write(&*path, "A = 0\n").unwrap();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let path = std::sync::Arc::clone(&path);
+                std::thread::spawn(move || {
+                    for n in 0..25 {
+                        let _ = conf_write(&path, "A", &format!("{}", i * 100 + n));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let text = std::fs::read_to_string(&*path).unwrap();
+        // Exactly one well-formed "A = <n>" line, never torn/duplicated/empty.
+        let lines: Vec<&str> = text.split('\n').filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 1, "file was torn by a racing writer: {text:?}");
+        assert!(
+            regex_like_a_equals_number(lines[0]),
+            "final line is not a clean `A = <number>`: {:?}",
+            lines[0]
+        );
+        // No leftover tmp files (every writer's tmp got renamed or cleaned up).
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "leftover tmp files: {leftover:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Minimal shape check for the concurrency test above — no regex crate in
+    /// this workspace, so just walk the expected `A = <digits>` shape by hand.
+    fn regex_like_a_equals_number(line: &str) -> bool {
+        let Some(rest) = line.strip_prefix("A = ") else { return false };
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    }
+
     // -- override_env_write / override_env_remove -----------------------
 
     fn tmp_override_path(name: &str) -> PathBuf {
@@ -1086,6 +1206,29 @@ services:
         let m = parse_override_env(&text);
         assert_eq!(m.len(), 1);
         assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_refuses_to_clobber_unparseable_existing_file() {
+        let path = tmp_override_path("badyaml");
+        let before = "services: [this is not\n  a valid yaml mapping\n";
+        std::fs::write(&path, before).unwrap();
+        let err = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // File is untouched -- nothing else in it was discarded.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_refuses_to_clobber_non_mapping_root() {
+        let path = tmp_override_path("nonmapping");
+        let before = "- just\n- a\n- list\n";
+        std::fs::write(&path, before).unwrap();
+        let err = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1144,6 +1287,34 @@ services:
             route_conf("conf:Rate.XP.Kill"),
             Some(("worldserver.conf".into(), "Rate.XP.Kill".into()))
         );
+    }
+
+    #[test]
+    fn wow_server_installed_requires_dir_and_a_compose_file() {
+        let dir = std::env::temp_dir().join(format!("dml-serverinstalled-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Absent entirely -> not installed.
+        assert!(!wow_server_installed(&dir));
+
+        // Exists but no compose file anywhere -> not installed.
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!wow_server_installed(&dir));
+
+        // Compose file directly in the title dir (the real install layout).
+        std::fs::write(dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+        assert!(wow_server_installed(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Compose file only in a subdir -> still installed (oracle's
+        // `_resolve_compose_dir` subdir fallback).
+        let sub = dir.join("wow-server-playerbots");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("compose.yaml"), "services: {}\n").unwrap();
+        assert!(wow_server_installed(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

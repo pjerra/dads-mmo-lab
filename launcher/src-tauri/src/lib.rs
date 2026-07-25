@@ -60,6 +60,18 @@ pub struct AppState {
     /// across the `soap::exec` call inside each native SOAP command's
     /// `spawn_blocking` closure -- see e.g. `wow_console_send_native`.
     pub soap_lock: Arc<std::sync::Mutex<()>>,
+    /// Serializes every native-mode conf/override-YAML WRITE (`wow config
+    /// set` and `wow config tuning-set`'s conf backend). The bash oracle gets
+    /// per-invocation tmp-file uniqueness for free because each `dml` call is
+    /// its own forked process; this app is long-lived, so two conf-writing
+    /// commands landing on the same target file from two different Svelte
+    /// pages (e.g. Settings and Module Tuning both touching
+    /// `mod_ahbot.conf`) could otherwise interleave their read-modify-write
+    /// cycles. Held for the whole write (not just the final rename) across
+    /// each command's `spawn_blocking` closure -- mirrors `soap_lock`'s
+    /// single-global-mutex shape, just scoped to config writes instead of
+    /// SOAP calls.
+    pub config_lock: Arc<std::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1462,6 +1474,18 @@ fn config_set_curated(
     let min_disp = row.get("min").cloned().unwrap_or(serde_json::Value::Null);
     let max_disp = row.get("max").cloned().unwrap_or(serde_json::Value::Null);
 
+    // `_cfg_preamble` (`40-config.sh:161-174`), inlined: the oracle resolves
+    // `cfg_sdir` right after parsing the row and BEFORE any type/range
+    // validation (`90-main.sh:2440-2445`), so a not-installed server always
+    // wins over a bad value with the SAME top-level verdict the oracle gives.
+    if !crate::dml::config::wow_server_installed(title_dir) {
+        return Err(cfgset_err(
+            "NOT_FOUND",
+            "WoW Playerbots server not installed",
+            "Install it first, then re-run.",
+        ));
+    }
+
     let mut value = raw_value.to_string();
     match kind {
         "float" => {
@@ -1639,9 +1663,14 @@ async fn wow_config_set_native(
     let runner = state.runner.clone();
     let cache = state.config_registry.clone();
     let soap_lock = state.soap_lock.clone();
+    let config_lock = state.config_lock.clone();
     let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        // Serializes against every other native conf/override write (Settings
+        // AND Module Tuning can both target the same conf file) -- see the
+        // doc comment on `AppState::config_lock`.
+        let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
         if key.starts_with("conf:") {
             return config_set_direct(&title_dir, &key, &value, &soap_lock);
         }
@@ -1675,9 +1704,13 @@ async fn wow_config_tuning_set_native(
     require_native_backend()?;
     let runner = state.runner.clone();
     let cache = state.tuning_registry.clone();
+    let config_lock = state.config_lock.clone();
     let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        // Serializes against every other native conf/override write -- see
+        // the doc comment on `AppState::config_lock`.
+        let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
         let rows = fetch_registry_rows(
             &runner,
             &cache,
@@ -1736,6 +1769,22 @@ async fn wow_config_tuning_set_native(
                 .run_json(&["wow", "config", "tuning-set", "--key", &key, "--value", &value])
                 .map_err(CmdError::from)?;
             return envelope_to_result(env);
+        }
+
+        // `_wow_server_dir` re-check (`90-main.sh:2888-2892`): the oracle runs
+        // this AFTER type/range validation but BEFORE either backend branch
+        // (it feeds the lua branch's `_lua_cfg_path` too, at 2913) -- for the
+        // conf backend specifically, that puts it before `_cfg_conf_ensure`'s
+        // own NOT_INSTALLED check, so a not-installed server reports the
+        // oracle's uniform "server not installed" rather than "{module} is
+        // not installed". The lua branch above already shelled out to the CLI
+        // before we get here, so it gets this same check for free.
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfgset_err(
+                "NOT_FOUND",
+                "WoW Playerbots server not installed",
+                "Install it first, then re-run.",
+            ));
         }
 
         // backend == "conf" -- same `_cfg_conf_path` resolution as B2a's
@@ -4274,6 +4323,7 @@ pub fn run() {
             tuning_registry: Arc::new(Mutex::new(None)),
             module_catalog: Arc::new(Mutex::new(None)),
             soap_lock: Arc::new(Mutex::new(())),
+            config_lock: Arc::new(Mutex::new(())),
         })
         .setup(|app| {
             // Startup registry prefetch (native mode only): warm the three
@@ -5029,6 +5079,9 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             let modules = dir.join("env").join("dist").join("etc").join("modules");
             std::fs::create_dir_all(&modules).unwrap();
+            // Marks the title as "installed" for `wow_server_installed`'s
+            // compose-file check, matching a real title dir.
+            std::fs::write(dir.join("docker-compose.yml"), "services: {}\n").unwrap();
             TmpTitleDir(dir)
         }
         fn modules_dir(&self) -> std::path::PathBuf {
@@ -5174,6 +5227,67 @@ mod tests {
         assert_eq!(e.code, "NOT_FOUND");
         assert_eq!(e.message, "Unknown setting: no.such.key");
         assert_eq!(e.hint, "See: dml wow config list --json");
+    }
+
+    #[test]
+    fn config_set_curated_not_found_when_server_not_installed() {
+        // A title dir that doesn't exist at all -- `wow_server_installed`
+        // must fail closed, mirroring `_wow_server_dir` (`90-main.sh:106-110`)
+        // returning empty when `$GAMES_DIR/wow-server-playerbots` is absent.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-at-all", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row("rates.xp_kill", "float", 0.5.into(), 20.into(), "conf:Rate.XP.Kill", "XP")];
+        let e = config_set_curated(&missing_dir, "rates.xp_kill", "3", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+        assert_eq!(e.hint, "Install it first, then re-run.");
+    }
+
+    #[test]
+    fn config_set_curated_not_installed_check_wins_over_bad_arg() {
+        // Server not installed AND the value is out of range -- the oracle's
+        // `_cfg_preamble` (`90-main.sh:2443`) runs BEFORE the type/range
+        // switch (`90-main.sh:2445`), so the top-level verdict must be
+        // NOT_FOUND, never BAD_ARG.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-badval", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row(
+            "rates.xp_kill",
+            "float",
+            0.5.into(),
+            20.into(),
+            "conf:Rate.XP.Kill",
+            "XP from kills",
+        )];
+        let e = config_set_curated(&missing_dir, "rates.xp_kill", "999.9", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+    }
+
+    #[test]
+    fn config_set_curated_motd_not_found_when_server_not_installed() {
+        // The `server.motd` sub-branch has no conf-write of its own (it goes
+        // straight to SOAP) -- confirm it still gets the install-check gate
+        // instead of ever reaching the SOAP call.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-motd", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row(
+            "server.motd",
+            "text",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "-",
+            "Message of the day",
+        )];
+        let e = config_set_curated(&missing_dir, "server.motd", "hi", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
     }
 
     #[test]
