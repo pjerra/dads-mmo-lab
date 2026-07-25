@@ -5,6 +5,7 @@
     createCharacterViewer,
     loadViewerScripts,
     readSheathedPref,
+    releaseGlContexts,
     skippedItemsNote,
     writeSheathedPref,
     type SheathValues,
@@ -94,7 +95,9 @@
           // into) HERE, or it leaks until WebView2's WebGL-context cap is
           // exhausted and later models silently fail to render.
           destroyViewer(res.viewer);
-          document.getElementById(containerId)?.replaceChildren();
+          const container = document.getElementById(containerId);
+          releaseGlContexts(container);
+          container?.replaceChildren();
           return;
         }
         created = res.viewer;
@@ -123,12 +126,14 @@
       sheathValues = null;
       destroyViewer(created);
       // destroyViewer is best-effort (no documented destroy API upstream --
-      // see above), so it can silently no-op and leave the old canvas/WebGL
-      // context sitting in the DOM. Forcibly clearing the container's
-      // children guarantees the next createCharacterViewer() call starts
-      // from an empty container instead of stacking a new canvas on top of
-      // a leaked one across character switches.
-      document.getElementById(containerId)?.replaceChildren();
+      // see above), so it can silently no-op. Critically, the engine's render
+      // loop keeps running even after the canvas is detached, so force-lose
+      // the WebGL context(s) to actually stop the GPU work (the Bot Browser
+      // "fans spin up" symptom), THEN clear the container so the next
+      // createCharacterViewer() starts from an empty node.
+      const container = document.getElementById(containerId);
+      releaseGlContexts(container);
+      container?.replaceChildren();
     };
   });
 </script>

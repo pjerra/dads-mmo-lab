@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AC_TO_INVENTORY_TYPE,
   applyViewerSheath,
@@ -6,6 +6,7 @@ import {
   deriveSheathValues,
   displayIdCandidates,
   readSheathedPref,
+  releaseGlContexts,
   resolveViewerItems,
   sheathTypeForItem,
   skippedItemsNote,
@@ -628,5 +629,30 @@ describe("buildCharacterModelId", () => {
     expect(buildCharacterModelId(2, 1)).toBe(4); // orc female -- meta character/4.json Race=2 Gender=1
     expect(buildCharacterModelId(8, 1)).toBe(16); // troll female -- meta character/16.json
     expect(buildCharacterModelId(1, 0)).toBe(1); // human male
+  });
+});
+
+describe("releaseGlContexts", () => {
+  it("loses the WebGL context of each canvas so the render loop stops spinning the GPU", () => {
+    const loseContext = vi.fn();
+    const gl = {
+      getExtension: (name: string) => (name === "WEBGL_lose_context" ? { loseContext } : null),
+    };
+    // getContext returns the existing context only for the type it was created
+    // with (here webgl2) and null for the others -- exactly the real behavior.
+    const canvas = { getContext: (t: string) => (t === "webgl2" ? gl : null) };
+    const container = { querySelectorAll: () => [canvas] } as unknown as HTMLElement;
+    releaseGlContexts(container);
+    expect(loseContext).toHaveBeenCalledTimes(1);
+  });
+
+  it("is a safe no-op for a null container", () => {
+    expect(() => releaseGlContexts(null)).not.toThrow();
+  });
+
+  it("does not throw when a canvas exposes no WebGL context", () => {
+    const canvas = { getContext: () => null };
+    const container = { querySelectorAll: () => [canvas] } as unknown as HTMLElement;
+    expect(() => releaseGlContexts(container)).not.toThrow();
   });
 });

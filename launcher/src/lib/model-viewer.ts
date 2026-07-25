@@ -839,3 +839,41 @@ export async function createCharacterViewer(
     return { viewer, totalItems: resolved.total, shownItems: 0, sheath: { main: -1, off: -1 } };
   }
 }
+
+/**
+ * Force-release the WebGL context(s) of any `<canvas>` inside `container`.
+ *
+ * The ZamModelViewer engine exposes no captured destroy/dispose API and keeps
+ * its OWN reference to the canvas plus a per-frame `requestAnimationFrame`
+ * render loop, so simply removing the canvas from the DOM does NOT stop the
+ * GPU work -- the loop keeps rendering to a detached canvas. Browsing many
+ * characters (Bot Browser) would otherwise leave a pile of live render loops
+ * spinning the GPU (the "fans spin up" symptom). `WEBGL_lose_context` frees
+ * the GPU-side context; any surviving loop then renders to a lost context,
+ * which is a cheap no-op. Best-effort + fully guarded: WebGL may be absent
+ * (tests/headless) and losing an already-lost context is harmless.
+ */
+export function releaseGlContexts(container: HTMLElement | null | undefined): void {
+  if (!container) return;
+  container.querySelectorAll("canvas").forEach((canvas) => {
+    // getContext returns the EXISTING context for the type the canvas was
+    // created with and null for the others (it never makes a second context
+    // on the same canvas), so probe the likely types and act on the first hit.
+    for (const type of ["webgl2", "webgl", "experimental-webgl"]) {
+      let gl: unknown = null;
+      try {
+        gl = canvas.getContext(type);
+      } catch {
+        gl = null;
+      }
+      if (gl && typeof (gl as WebGLRenderingContext).getExtension === "function") {
+        try {
+          (gl as WebGLRenderingContext).getExtension("WEBGL_lose_context")?.loseContext();
+        } catch {
+          // best-effort teardown only
+        }
+        break;
+      }
+    }
+  });
+}
