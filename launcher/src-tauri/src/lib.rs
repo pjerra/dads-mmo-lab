@@ -3226,17 +3226,14 @@ fn find_tailscale_exe() -> Option<std::path::PathBuf> {
     if let Some(p) = resolve_tailscale_from_candidates(&candidate_tailscale_paths(), |p| p.exists()) {
         return Some(p);
     }
-    let mut cmd = std::process::Command::new("tailscale.exe");
-    cmd.arg("version");
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
-    if matches!(cmd.status(), Ok(s) if s.success()) {
+    let ok = run_bounded(
+        std::ffi::OsStr::new("tailscale.exe"),
+        &["version"],
+        std::time::Duration::from_secs(3),
+    )
+    .map(|(ok, _)| ok)
+    .unwrap_or(false);
+    if ok {
         return Some(std::path::PathBuf::from("tailscale.exe"));
     }
     None
