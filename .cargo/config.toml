@@ -1,0 +1,6 @@
+# Cargo defaults `jobs` to the logical CPU count. On a 32-thread machine that
+# fans out to ~32 concurrent link.exe processes at 0.5-1.2 GB each and pins RAM
+# at 100% (builds get slower, not faster). 8 leaves headroom for WSL2 and the
+# editor. Raise it if you build on a box with more free memory.
+[build]
+jobs = 8

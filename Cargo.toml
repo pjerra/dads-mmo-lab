@@ -6,3 +6,12 @@ members = [
     "crates/dml-wow-cli",
     "launcher/src-tauri",
 ]
+
+# PDB generation dominates linker memory and time on Windows. Backtraces keep
+# file/line info; dependencies get no debug info since we don't step into them.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
