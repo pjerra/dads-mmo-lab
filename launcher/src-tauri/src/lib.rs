@@ -336,6 +336,71 @@ fn auto_shutdown_watcher(
     }
 }
 
+// --- Automatic "Auto (6h)" interval backup watcher --------------------------
+//
+// A second always-on background watcher (native mode only), started once at
+// app setup (see `run()`'s `.setup()`) -- same "plain OS thread + sleep loop"
+// shape as `auto_shutdown_watcher` above, just with no enable/disable toggle:
+// there is no UI control for this one, so it runs for the app's whole
+// lifetime with no generation tracking to race. Fires a chars-only dump named
+// `backup::AUTO_INTERVAL_NAME` whenever `backup::should_run_interval_backup`
+// says it's due (world running + >=6h since the last one); best-effort and
+// silent on failure (`eprintln!` only, never `emit`/panic) -- this is
+// unattended housekeeping nobody is watching a terminal for, so it must never
+// surface as a user-facing error or crash the app.
+
+/// One [`crate::dml::backup::INTERVAL_CHECK_SECS`] (30 min) tick: reads/
+/// updates `last_run` in place. Split out from [`interval_backup_watcher`]
+/// so the real docker/db work is easy to reason about independent of the
+/// sleep loop around it.
+fn interval_backup_tick(last_run: &Arc<Mutex<Option<u64>>>) {
+    use crate::dml::{backup, db, maint, native, status};
+
+    let program = native::docker_program();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    // `container_running` degrades to `false` on any docker-down/timeout
+    // failure (see its own doc comment), so no separate `docker_engine_up`
+    // probe is needed here -- an unreachable engine already reads as "not up".
+    let world_up = status::container_running(&program, "ac-worldserver", maint::PROBE_TIMEOUT);
+
+    let last = *last_run.lock().unwrap_or_else(|e| e.into_inner());
+    if !backup::should_run_interval_backup(last, now, world_up) {
+        return;
+    }
+
+    let Some(bdir) = backup::backup_dir() else { return };
+    if std::fs::create_dir_all(&bdir).is_err() {
+        return;
+    }
+    let db_cfg = db::DbConfig::from_env();
+    let file_name = backup::new_backup_file_name(false);
+    let out_path = bdir.join(&file_name);
+    match backup::dump_to(&program, &db_cfg.password, false, &out_path) {
+        Ok(()) => {
+            backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_INTERVAL_NAME));
+            let _ = backup::prune(&bdir);
+            // Only advance the clock on SUCCESS -- a failed dump leaves
+            // `last_run` untouched so the very next 30-min tick retries,
+            // rather than silently waiting a further 6h for another chance.
+            *last_run.lock().unwrap_or_else(|e| e.into_inner()) = Some(now);
+        }
+        Err(e) => {
+            eprintln!("[dml] interval auto-backup failed: {e}");
+        }
+    }
+}
+
+/// The watcher loop itself — spawned once from `run()`'s `.setup()` (native
+/// mode only) and never stopped. `last_run` starts pre-seeded from whatever
+/// [`crate::dml::backup::latest_auto_interval_backup_unix`] found on disk, so
+/// a relaunch doesn't restart the 6h clock at zero.
+fn interval_backup_watcher(last_run: Arc<Mutex<Option<u64>>>) {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(crate::dml::backup::INTERVAL_CHECK_SECS));
+        interval_backup_tick(&last_run);
+    }
+}
+
 // --- Realmlist check + one-click fix (Batch 2 F7) ---------------------------
 //
 // No paths cross IPC: all three commands resolve the realmlist location from
@@ -8910,6 +8975,46 @@ fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::V
     serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
 }
 
+/// Automatic pre-stop/-restart safety dump (see `dml::lifecycle::
+/// lifecycle_steps_for_mode`'s doc comment for why this always runs before
+/// the sequence's first `down`): if `ac-database` isn't running there is
+/// nothing to dump — skipped silently, no line at all, matching every other
+/// best-effort backup call site's "DB unreachable -> no sidecar" doctrine.
+/// A dump failure only warns and returns — an automatic backup must NEVER
+/// block a stop/restart the user asked for. Chars-only (no `--include-world`,
+/// same as the bots-flush safety dump above), named `backup::AUTO_STOP_NAME`
+/// so the Backups page can tell it apart from a manual one. Feeds the SAME
+/// keep-10 prune pool as every other backup (see the `dml::backup` "Automatic
+/// backups" section doc comment).
+fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serde_json::Value)) {
+    use crate::dml::{backup, db, maint, status};
+
+    if !status::container_running(docker_program, "ac-database", maint::PROBE_TIMEOUT) {
+        return;
+    }
+    let Some(bdir) = backup::backup_dir() else { return };
+    if std::fs::create_dir_all(&bdir).is_err() {
+        return;
+    }
+
+    gl_line(emit, "info", "automatic backup before stop...");
+    let db_cfg = db::DbConfig::from_env();
+    let file_name = backup::new_backup_file_name(false);
+    let out_path = bdir.join(&file_name);
+    match backup::dump_to(docker_program, &db_cfg.password, false, &out_path) {
+        Ok(()) => {
+            backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_STOP_NAME));
+            gl_line(emit, "info", format!("automatic backup saved: {file_name}"));
+            for p in backup::prune(&bdir) {
+                gl_line(emit, "info", format!("pruned old backup: {p}"));
+            }
+        }
+        Err(errtail) => {
+            gl_line(emit, "warn", format!("automatic backup failed -- continuing: {errtail}"));
+        }
+    }
+}
+
 /// The blocking flow itself (real docker spawns) — run under
 /// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
 fn games_lifecycle_native_blocking(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
@@ -8938,6 +9043,14 @@ fn games_lifecycle_native_blocking(mode: &str, id: String, skip_saveall: bool, e
         emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
         emit(gl_error("DOCKER_DOWN", "Docker is not running.", "Try: dml doctor"));
         return;
+    }
+
+    // Automatic pre-down safety backup -- stop/restart only, BEFORE anything
+    // below touches compose (see `lifecycle::lifecycle_steps_for_mode`'s doc
+    // comment for the pure "backup precedes the first down" invariant this
+    // mirrors). Best-effort: never aborts the stop/restart.
+    if mode == "stop" || mode == "restart" {
+        auto_backup_before_stop(&docker_program, &emit);
     }
 
     // Self-heal an interrupted `wow bots flush` -- start+restart only (a
@@ -9233,6 +9346,17 @@ pub fn run() {
                     })
                     .await;
                 });
+
+                // Automatic "Auto (6h)" interval backup watcher (see the
+                // `interval_backup_watcher` doc comment above): started once,
+                // runs for the app's whole lifetime, no UI toggle. Seed
+                // `last_run` from whatever's already on disk so a relaunch
+                // doesn't restart the 6h clock at zero.
+                let last_run = Arc::new(Mutex::new(
+                    crate::dml::backup::backup_dir()
+                        .and_then(|d| crate::dml::backup::latest_auto_interval_backup_unix(&d)),
+                ));
+                std::thread::spawn(move || interval_backup_watcher(last_run));
             }
             Ok(())
         })

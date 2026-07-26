@@ -519,6 +519,116 @@ pub fn read_summary(meta_path: &Path) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Automatic backups: the STOP/RESTART pre-down safety dump and the 6h
+// background-interval dump `lib.rs` fires in native mode (see
+// `games_lifecycle_native_blocking` and the interval watcher started from
+// `run()`'s `.setup()`). Both are chars-only, named via the fixed literals
+// below, and feed the SAME keep-`DML_BACKUP_KEEP` (default 10) prune pool as
+// every manual backup — the file itself is a standard `wow-<ts>.sql.gz`, so
+// the CLI's own `_backup_prune` (bash) matches and prunes it exactly like
+// any other backup if the user ever runs `dml` directly against the same
+// `~/.dml/backups` dir.
+// ---------------------------------------------------------------------------
+
+/// The `.meta` `"name"` (backup display names) the pre-stop/-restart safety
+/// dump is written with — see `lib.rs`'s `auto_backup_before_stop`.
+pub const AUTO_STOP_NAME: &str = "Auto (stop)";
+/// The `.meta` `"name"` the 6h background-interval dump is written with —
+/// see `lib.rs`'s `interval_backup_tick`.
+pub const AUTO_INTERVAL_NAME: &str = "Auto (6h)";
+
+/// How long the interval-backup watcher waits between fires — 6 hours.
+pub const INTERVAL_BACKUP_SECS: u64 = 6 * 60 * 60;
+/// How often the watcher WAKES to re-check the threshold above — far shorter
+/// than [`INTERVAL_BACKUP_SECS`] itself so the actual fire time only ever
+/// lags the 6h mark by this bounded amount, never longer.
+pub const INTERVAL_CHECK_SECS: u64 = 30 * 60;
+
+/// The interval-backup watcher's should-I-fire-now decision, pure: `false`
+/// whenever the world isn't running (nothing to dump, and firing mid-restart
+/// would race the stop/restart safety dump above), else `true` iff
+/// `now_unix` is at least [`INTERVAL_BACKUP_SECS`] past `last_run_unix`.
+/// `None` (no interval backup this process has fired yet, AND none was found
+/// on disk at startup — see [`latest_auto_interval_backup_unix`]) counts as
+/// "due", so a fresh install's first eligible tick fires right away instead
+/// of waiting a further 6h on top of however long the app has already been
+/// open.
+pub fn should_run_interval_backup(last_run_unix: Option<u64>, now_unix: u64, world_up: bool) -> bool {
+    if !world_up {
+        return false;
+    }
+    match last_run_unix {
+        None => true,
+        Some(t) => now_unix.saturating_sub(t) >= INTERVAL_BACKUP_SECS,
+    }
+}
+
+/// Inverse of [`civil_from_days`] (Howard Hinnant, public domain,
+/// http://howardhinnant.github.io/date_algorithms.html): days since the Unix
+/// epoch for a proleptic-Gregorian civil `(year, month, day)`. Pure.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = (y - era * 400) as u64; // [0, 399]
+    let mp = if m > 2 { m - 3 } else { m + 9 }; // [0, 11]
+    let doy = (153 * mp as u64 + 2) / 5 + d as u64 - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe as i64 - 719_468
+}
+
+/// Inverse of [`utc_from_unix`]: Unix seconds for a UTC civil date/time. Pure.
+fn unix_from_utc(y: i64, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> u64 {
+    let days = days_from_civil(y, m, d);
+    (days * 86_400 + hh as i64 * 3600 + mm as i64 * 60 + ss as i64) as u64
+}
+
+/// The `(year, month, day, hour, min, sec)` a [`valid_backup_name`]-shaped
+/// file name encodes, or `None` if it isn't shaped that way. Same
+/// byte-offset discipline as [`parse_created`] (never `&str` range-slicing at
+/// fixed offsets — see that function's doc comment for why).
+fn parse_backup_datetime(name: &str) -> Option<(i64, u32, u32, u32, u32, u32)> {
+    if !valid_backup_name(name) || name.len() < 19 {
+        return None;
+    }
+    let bytes = name.as_bytes();
+    let d = std::str::from_utf8(&bytes[4..12]).ok()?;
+    let t = std::str::from_utf8(&bytes[13..19]).ok()?;
+    Some((d[0..4].parse().ok()?, d[4..6].parse().ok()?, d[6..8].parse().ok()?, t[0..2].parse().ok()?, t[2..4].parse().ok()?, t[4..6].parse().ok()?))
+}
+
+/// A [`valid_backup_name`]-shaped file name's timestamp as Unix seconds, or
+/// `None` if it isn't shaped that way. Composes [`parse_backup_datetime`]
+/// with [`unix_from_utc`].
+fn backup_unix_secs(name: &str) -> Option<u64> {
+    let (y, mo, da, hh, mi, se) = parse_backup_datetime(name)?;
+    Some(unix_from_utc(y, mo, da, hh, mi, se))
+}
+
+/// The newest existing [`AUTO_INTERVAL_NAME`]-named backup's UTC creation
+/// time, or `None` if there isn't one — seeds the interval-backup watcher's
+/// in-memory last-run clock at app startup (`lib.rs`) so a relaunch doesn't
+/// immediately re-fire a fresh dump 30 minutes later just because the
+/// in-process timer restarted at zero. Scans every `.meta` sidecar under
+/// `dir` directly (not [`list_backups`]'s already-parsed rows) so this stays
+/// usable standalone in tests without a full `BackupEntry` round trip;
+/// [`sql_gz_names_desc`]'s newest-first order means the FIRST name whose
+/// sidecar matches wins. Missing/unreadable `dir` degrades to `None` (matches
+/// [`sql_gz_names_desc`]'s own "can't read -> empty" fallback).
+pub fn latest_auto_interval_backup_unix(dir: &Path) -> Option<u64> {
+    for name in sql_gz_names_desc(dir) {
+        let path = dir.join(&name);
+        let summary = read_summary(&meta_path_for(&path));
+        if summary.get("name").and_then(Value::as_str) != Some(AUTO_INTERVAL_NAME) {
+            continue;
+        }
+        if let Some(ts) = backup_unix_secs(&name) {
+            return Some(ts);
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // `backup create`'s dump half — `_backup_dump_to` (`60-backup.sh:51-63`).
 // ---------------------------------------------------------------------------
 
@@ -1099,6 +1209,81 @@ mod tests {
     fn default_backup_name_counts_plus_one() {
         assert_eq!(default_backup_name(0), "Backup #1");
         assert_eq!(default_backup_name(9), "Backup #10");
+    }
+
+    // -- automatic backups: should_run_interval_backup / date inverse ----------
+
+    #[test]
+    fn should_run_interval_backup_world_down_never_fires() {
+        assert!(!should_run_interval_backup(None, 1_000_000, false));
+        assert!(!should_run_interval_backup(Some(0), 1_000_000, false));
+    }
+
+    #[test]
+    fn should_run_interval_backup_no_prior_run_fires_immediately_when_world_up() {
+        assert!(should_run_interval_backup(None, 1_700_000_000, true));
+    }
+
+    #[test]
+    fn should_run_interval_backup_threshold_matrix() {
+        let now = 1_700_000_000u64;
+        // Just under 6h: not due yet.
+        assert!(!should_run_interval_backup(Some(now - (INTERVAL_BACKUP_SECS - 1)), now, true));
+        // Exactly 6h: due.
+        assert!(should_run_interval_backup(Some(now - INTERVAL_BACKUP_SECS), now, true));
+        // Well past 6h: due.
+        assert!(should_run_interval_backup(Some(now - INTERVAL_BACKUP_SECS * 3), now, true));
+        // A moment ago: not due.
+        assert!(!should_run_interval_backup(Some(now - 60), now, true));
+    }
+
+    #[test]
+    fn unix_from_utc_matches_format_utc_compact_round_trip() {
+        // Round-trip every known fixture `format_utc_compact` already covers.
+        for secs in [0u64, 1_700_000_000, 1_709_164_800] {
+            let (y, m, d, hh, mm, ss) = utc_from_unix(secs);
+            assert_eq!(unix_from_utc(y, m, d, hh, mm, ss), secs, "secs={secs}");
+        }
+    }
+
+    #[test]
+    fn backup_unix_secs_reads_the_filename_timestamp() {
+        assert_eq!(backup_unix_secs("wow-20231114-221320.sql.gz"), Some(1_700_000_000));
+        assert_eq!(backup_unix_secs("wow-20231114-221320-full.sql.gz"), Some(1_700_000_000));
+        assert_eq!(backup_unix_secs("not-a-backup"), None);
+    }
+
+    #[test]
+    fn latest_auto_interval_backup_unix_finds_the_newest_matching_sidecar() {
+        let d = tmp_dir("auto-interval-latest");
+        for (f, name) in [
+            ("wow-20260101-000000.sql.gz", Some(AUTO_INTERVAL_NAME)),
+            ("wow-20260201-000000.sql.gz", Some("Backup #1")), // a manual backup in between -- must be skipped
+            ("wow-20260301-000000.sql.gz", Some(AUTO_INTERVAL_NAME)),
+        ] {
+            std::fs::write(d.join(f), b"x").unwrap();
+            if let Some(n) = name {
+                std::fs::write(meta_path_for(&d.join(f)), format!("{}\n", format_summary_line(1, 1, None, Some(n)))).unwrap();
+            }
+        }
+        let got = latest_auto_interval_backup_unix(&d);
+        assert_eq!(got, backup_unix_secs("wow-20260301-000000.sql.gz"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn latest_auto_interval_backup_unix_none_when_no_sidecar_matches() {
+        let d = tmp_dir("auto-interval-none");
+        std::fs::write(d.join("wow-20260101-000000.sql.gz"), b"x").unwrap();
+        assert_eq!(latest_auto_interval_backup_unix(&d), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn latest_auto_interval_backup_unix_missing_dir_is_none() {
+        let d = tmp_dir("auto-interval-missing");
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(latest_auto_interval_backup_unix(&d), None);
     }
 
     // -- dump args / err_tail --------------------------------------------------

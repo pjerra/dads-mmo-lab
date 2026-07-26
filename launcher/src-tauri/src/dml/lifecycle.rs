@@ -363,6 +363,26 @@ pub fn compose_sequence_for_mode(mode: &str) -> Vec<Vec<&'static str>> {
 /// of silently swallowing the option.
 pub const SKIP_SAVEALL_NOTE: &str = "faster-restart requested -- the native compose path has no separate pre-stop saveall to skip; the graceful `docker compose down` already saves characters on shutdown.";
 
+/// The ordered HIGH-LEVEL steps `lib.rs`'s `games_lifecycle_native_blocking`
+/// runs for `mode` -- `"backup"` = the automatic chars-only pre-down safety
+/// dump (`backup::AUTO_STOP_NAME`, `lib.rs`'s `auto_backup_before_stop`),
+/// `"down"`/`"up"` = one [`compose_sequence_for_mode`] step. Exists so the
+/// invariant "the automatic backup always runs before the FIRST `down`" is a
+/// pure, independently-testable fact rather than only visible by reading
+/// `lib.rs`'s call order -- `games_lifecycle_native_blocking` is itself only
+/// integration-testable (it shells real `docker`), same doctrine as every
+/// other pure-primitives-here/orchestration-in-lib.rs split in this module.
+/// `start` has no backup step (nothing is stopping, so there is nothing to
+/// snapshot first).
+pub fn lifecycle_steps_for_mode(mode: &str) -> Vec<&'static str> {
+    match mode {
+        "start" => vec!["up"],
+        "restart" => vec!["backup", "down", "up"],
+        "stop" => vec!["backup", "down"],
+        _ => vec![],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,6 +710,30 @@ mod tests {
     fn is_compose_down_distinguishes_up_from_down() {
         assert!(is_compose_down(&compose_down_argv()));
         assert!(!is_compose_down(&compose_up_argv()));
+    }
+
+    // -- automatic-backup step ordering ---------------------------------------
+
+    #[test]
+    fn lifecycle_steps_backup_always_precedes_the_first_down() {
+        for mode in ["stop", "restart"] {
+            let steps = lifecycle_steps_for_mode(mode);
+            let backup_pos = steps.iter().position(|s| *s == "backup").unwrap_or_else(|| panic!("mode={mode} has no backup step"));
+            let down_pos = steps.iter().position(|s| *s == "down").unwrap_or_else(|| panic!("mode={mode} has no down step"));
+            assert!(backup_pos < down_pos, "mode={mode} steps={steps:?}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_steps_start_has_no_backup_step() {
+        assert_eq!(lifecycle_steps_for_mode("start"), vec!["up"]);
+    }
+
+    #[test]
+    fn lifecycle_steps_exact_sequences() {
+        assert_eq!(lifecycle_steps_for_mode("stop"), vec!["backup", "down"]);
+        assert_eq!(lifecycle_steps_for_mode("restart"), vec!["backup", "down", "up"]);
+        assert!(lifecycle_steps_for_mode("bogus").is_empty());
     }
 
     #[test]
