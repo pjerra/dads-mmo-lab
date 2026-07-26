@@ -581,6 +581,144 @@ async fn wow_docker_clean(
     stream_args(vec!["wow".into(), "docker-clean".into(), "--level".into(), level.to_string()], on_event, state).await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `docker-clean` (Chunk 4a): faithful port of the `docker-clean)`
+// arm (`90-main.sh:1519-1591`). Same NDJSON vocabulary + contract as
+// `wow_world_restart_native`. Every docker call here is best-effort past the
+// initial NOT_FOUND/DOCKER_DOWN gates (a partial clean is still useful,
+// matching the bash's own doctrine) — `docker builder prune -af`/`docker
+// image prune -af` are captured-then-split (NOT the live streaming
+// `run_streamed_unbounded` module rebuild uses below; the bash itself
+// captures the WHOLE output into a variable first, then loops it, so this is
+// the byte-faithful shape). Native mode only — WSL keeps calling
+// `wow_docker_clean` (the sibling above).
+// ---------------------------------------------------------------------------
+
+const DOCKER_CLEAN_SECTION: &str = "docker-clean";
+
+fn wow_docker_clean_native_blocking(level: u8, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native, status};
+
+    emit(modmgr::section_start(DOCKER_CLEAN_SECTION));
+
+    if !(1..=3).contains(&level) {
+        emit(modmgr::section_end(DOCKER_CLEAN_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BAD_ARG",
+            "Level must be 1, 2, or 3",
+            "Usage: dml wow docker-clean --level 1|2|3 --json",
+        ));
+        return;
+    }
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(DOCKER_CLEAN_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(modmgr::section_end(DOCKER_CLEAN_SECTION, "error"));
+        emit(modmgr::error_event("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "protecting the database volume..."));
+    let mut up_cmd = std::process::Command::new(&docker_program);
+    up_cmd.current_dir(&sdir).args(["compose", "up", "-d", "ac-database"]);
+    status::windows_no_window(&mut up_cmd);
+    if !matches!(status::output_bounded_draining(up_cmd, lifecycle::COMPOSE_UP_TIMEOUT), Some(o) if o.status.success()) {
+        emit(modmgr::line_event("warn", "could not start ac-database -- continuing"));
+    }
+
+    emit(modmgr::line_event("info", "stopping worldserver..."));
+    let mut stop_cmd = std::process::Command::new(&docker_program);
+    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
+    status::windows_no_window(&mut stop_cmd);
+    if !matches!(status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT), Some(o) if o.status.success())
+    {
+        emit(modmgr::line_event("warn", "could not stop worldserver -- continuing"));
+    }
+
+    emit(modmgr::line_event("info", "pruning build cache..."));
+    let builder_run = destructive::run_captured(&docker_program, &["builder", "prune", "-af"], destructive::PRUNE_TIMEOUT);
+    for line in &builder_run.lines {
+        emit(modmgr::line_event("info", line.clone()));
+    }
+    if !builder_run.success {
+        let code = builder_run.code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+        emit(modmgr::line_event("warn", format!("build cache prune exited {code} -- may already be empty")));
+    }
+
+    if level >= 2 {
+        emit(modmgr::line_event("info", "identifying build volume..."));
+        let project = destructive::sanitize_project_no_underscore(&destructive::basename(&sdir));
+        let mut ls_cmd = std::process::Command::new(&docker_program);
+        ls_cmd.args(["volume", "ls", "--format", "{{.Name}}"]);
+        status::windows_no_window(&mut ls_cmd);
+        let names: Vec<String> = match status::output_bounded_draining(ls_cmd, destructive::QUICK_OP_TIMEOUT) {
+            Some(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).collect()
+            }
+            _ => Vec::new(),
+        };
+        match destructive::find_build_volume(&names, &project).map(str::to_string) {
+            Some(vol) => {
+                emit(modmgr::line_event("info", format!("removing build volume: {vol}")));
+                let mut rm_cmd = std::process::Command::new(&docker_program);
+                rm_cmd.args(["volume", "rm", &vol]);
+                status::windows_no_window(&mut rm_cmd);
+                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
+                {
+                    emit(modmgr::line_event("info", "build volume removed -- CMake cache cleared."));
+                } else {
+                    emit(modmgr::line_event("warn", format!("could not remove {vol} (may still be in use)")));
+                }
+            }
+            None => {
+                emit(modmgr::line_event(
+                    "info",
+                    format!("no build volume found matching '{project}*build' -- nothing to remove"),
+                ));
+            }
+        }
+    }
+
+    if level >= 3 {
+        emit(modmgr::line_event("info", "pruning unused images..."));
+        let image_run = destructive::run_captured(&docker_program, &["image", "prune", "-af"], destructive::PRUNE_TIMEOUT);
+        for line in &image_run.lines {
+            emit(modmgr::line_event("info", line.clone()));
+        }
+        if !image_run.success {
+            let code = image_run.code.map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+            emit(modmgr::line_event("warn", format!("image prune exited {code}")));
+        }
+    }
+
+    emit(modmgr::line_event("info", "Next rebuild will be a full recompile (30-90 min)."));
+    emit(modmgr::section_end(DOCKER_CLEAN_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({"level": level, "cleaned": true})));
+}
+
+/// NATIVE-MODE `wow docker-clean` — see the module comment above. Native
+/// mode only — WSL keeps calling `wow_docker_clean`.
+#[tauri::command]
+async fn wow_docker_clean_native(level: u8, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_docker_clean_native_blocking(level, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn wow_update_check(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "update-check".into()]).await
@@ -906,6 +1044,109 @@ async fn wow_module_remove_native(
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         wow_module_remove_native_blocking(family, key, backup, db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `module rebuild` (Chunk 4a): faithful port of the `rebuild)`
+// case (`90-main.sh:4967-5008`). Same NDJSON vocabulary as `wow_world_
+// restart_native`/the Chunk 3a module commands just above; the ONE new shape
+// here is the build step itself — `docker compose up -d --build` streams
+// LIVE via `destructive::run_streamed_unbounded` (see that function's doc
+// comment) rather than the bounded/captured-then-split pattern every other
+// docker call in this codebase uses, because a first-time AzerothCore
+// rebuild can run 30-90 minutes and the UI needs to see progress as it
+// happens, not just at the end. Native mode only — WSL keeps calling
+// `wow_module_rebuild` (the `dml`-shelling sibling above).
+// ---------------------------------------------------------------------------
+
+const MODULE_REBUILD_SECTION: &str = "module-rebuild";
+
+fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
+
+    emit(modmgr::section_start(MODULE_REBUILD_SECTION));
+
+    let Some(do_backup) = backup else {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BAD_ARG",
+            "Pick --backup or --no-backup",
+            "Module SQL lands during the rebuild -- decide explicitly.",
+        ));
+        return;
+    };
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    if do_backup {
+        // Same helper `wow update`'s --backup gate uses (Chunk 3b) --
+        // world-INCLUSIVE (module/core SQL lands during the rebuild), a
+        // faithful port of `_module_backup_now` (`70-modules.sh:294-312`).
+        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+            emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+            emit(modmgr::error_event("BACKUP_FAILED", "Safety backup failed -- rebuild not started", ""));
+            return;
+        }
+    }
+
+    emit(modmgr::line_event("info", "stopping worldserver..."));
+    let mut stop_cmd = std::process::Command::new(&docker_program);
+    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
+    crate::dml::status::windows_no_window(&mut stop_cmd);
+    // Best-effort, swallowed like the bash arm's unchecked `|| true`.
+    let _ = crate::dml::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
+
+    emit(modmgr::line_event(
+        "info",
+        format!("building (this can take 30-90 minutes; full log: {}/rebuild.log)...", sdir.display()),
+    ));
+    let log_path = sdir.join("rebuild.log");
+    let status = destructive::run_streamed_unbounded(&docker_program, &["compose", "up", "-d", "--build"], &sdir, &log_path, |line| {
+        emit(modmgr::line_event("info", line));
+    });
+
+    if !matches!(&status, Some(s) if s.success()) {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BUILD_FAILED",
+            "worldserver rebuild failed",
+            &format!("Full log: {}/rebuild.log", sdir.display()),
+        ));
+        return;
+    }
+
+    modmgr::rebuild_pending_clear(&sdir);
+    emit(modmgr::section_end(MODULE_REBUILD_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({"rebuilt": true})));
+}
+
+/// NATIVE-MODE `wow module rebuild` — see the module comment above. Native
+/// mode only — WSL keeps calling `wow_module_rebuild`.
+#[tauri::command]
+async fn wow_module_rebuild_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_module_rebuild_native_blocking(backup, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -6122,6 +6363,163 @@ async fn games_remove(
 }
 
 // ---------------------------------------------------------------------------
+// NATIVE-MODE `games remove` (Chunk 4a): faithful port of the `remove)` arm
+// (`90-main.sh:1184-1309`) + its shared helpers `_title_row`/
+// `_title_installed`/`_resolve_compose_dir`/`_compose_server_images`
+// (`dml::destructive`, `dml::lifecycle`). Same NDJSON vocabulary as
+// `wow_world_restart_native`. Traversal guard FIRST: `id` must EXACT-match
+// the static 6-row title registry before any path is built from it. The
+// Tauri command hardcodes confirm=true (the typed-id UI IS the user gate,
+// matching the WSL sibling's hardcoded `--yes` above) — the CONFIRM_REQUIRED
+// gate is still ported inside the blocking function for parity/testability,
+// same posture the task brief calls for on `bots flush`'s CONFIRM logic.
+// Native mode only — WSL keeps calling `games_remove` (the sibling above).
+// ---------------------------------------------------------------------------
+
+const GAMES_REMOVE_SECTION: &str = "games-remove";
+
+fn games_remove_native_blocking(
+    id: String,
+    keep_data: bool,
+    remove_images: bool,
+    confirm: bool,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::{destructive, lifecycle, native, status};
+
+    emit(crate::dml::modmgr::section_start(GAMES_REMOVE_SECTION));
+
+    let Some(row) = destructive::title_row(&id) else {
+        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::dml::modmgr::error_event("BAD_ARG", format!("Unknown title: {id}"), ""));
+        return;
+    };
+
+    let games_dir = lifecycle::games_dir_from_env();
+    let home = crate::dml::home_dir();
+    if !destructive::title_installed(&games_dir, home.as_deref(), &id) {
+        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::dml::modmgr::error_event("NOT_FOUND", format!("{id} is not installed"), ""));
+        return;
+    }
+
+    if !confirm {
+        let targets = destructive::removal_targets(&games_dir, home.as_deref(), &id, row.launcher);
+        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::dml::modmgr::error_event(
+            "CONFIRM_REQUIRED",
+            format!("Removing {id} deletes: {targets}"),
+            "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept.",
+        ));
+        return;
+    }
+
+    let tdir = if games_dir.join(&id).is_dir() {
+        games_dir.join(&id)
+    } else {
+        home.as_deref().map(|h| h.join(&id)).unwrap_or_else(|| games_dir.join(&id))
+    };
+    let tcompose = lifecycle::resolve_compose_dir(&tdir);
+
+    let docker_program = native::docker_program();
+
+    if let Some(compose_dir) = &tcompose {
+        emit(crate::dml::modmgr::line_event("info", format!("stopping {id}...")));
+        let mut down_cmd = std::process::Command::new(&docker_program);
+        down_cmd.current_dir(compose_dir).args(["compose", "down"]);
+        status::windows_no_window(&mut down_cmd);
+        let _ = status::output_bounded_draining(down_cmd, destructive::QUICK_OP_TIMEOUT);
+    }
+
+    // --- client-data volume (Batch 3 F13c parity) ---------------------------
+    if let Some(compose_dir) = &tcompose {
+        if destructive::compose_declares_client_data(compose_dir) {
+            let tvol = destructive::client_data_volume_name(compose_dir);
+            if keep_data {
+                emit(crate::dml::modmgr::line_event(
+                    "info",
+                    format!("keeping the downloaded game data volume ({tvol}, ~6 GB) for a faster reinstall"),
+                ));
+            } else {
+                let mut rm_cmd = std::process::Command::new(&docker_program);
+                rm_cmd.args(["volume", "rm", &tvol]);
+                status::windows_no_window(&mut rm_cmd);
+                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
+                {
+                    emit(crate::dml::modmgr::line_event("info", format!("removed game data volume {tvol}")));
+                } else {
+                    emit(crate::dml::modmgr::line_event(
+                        "warn",
+                        format!("could not remove game data volume {tvol} (may not exist or still in use)"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- server docker images (Batch 6 B parity) ----------------------------
+    if remove_images {
+        if let Some(compose_dir) = &tcompose {
+            let images = destructive::compose_server_images(compose_dir);
+            let mut removed_count = 0;
+            for img in &images {
+                let mut rm_cmd = std::process::Command::new(&docker_program);
+                rm_cmd.args(["image", "rm", img]);
+                status::windows_no_window(&mut rm_cmd);
+                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
+                {
+                    emit(crate::dml::modmgr::line_event("info", format!("removed server image {img}")));
+                    removed_count += 1;
+                } else {
+                    emit(crate::dml::modmgr::line_event(
+                        "warn",
+                        format!("could not remove image {img} (in use by another title, or already gone)"),
+                    ));
+                }
+            }
+            if removed_count == 0 {
+                emit(crate::dml::modmgr::line_event("info", "no server images to remove"));
+            }
+        }
+    } else if tcompose.is_some() {
+        emit(crate::dml::modmgr::line_event(
+            "info",
+            "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)",
+        ));
+    }
+
+    destructive::remove_title_fs(&games_dir, home.as_deref(), &id, row.launcher);
+
+    emit(crate::dml::modmgr::line_event("info", "removed (backups under ~/.dml are kept)"));
+    emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "ok"));
+    emit(crate::dml::modmgr::done_event(serde_json::json!({"id": id, "removed": true})));
+}
+
+/// NATIVE-MODE `games remove` — see the module comment above. Native mode
+/// only — WSL keeps calling `games_remove` (the sibling above). `confirm` is
+/// ALWAYS `true` here (the typed-id UI is the gate, matching the WSL
+/// sibling's hardcoded `--yes`) — no parameter exposes it, so a stray caller
+/// can never accidentally skip the confirmation UI ever existed for.
+#[tauri::command]
+async fn games_remove_native(
+    id: String,
+    keep_data: Option<bool>,
+    remove_images: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        games_remove_native_blocking(id, keep_data.unwrap_or(false), remove_images.unwrap_or(false), true, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Native-mode Docker Desktop engine lifecycle around start/stop.
 //
 // In native mode the Docker Desktop engine (and its docker-desktop WSL VM) must
@@ -6734,6 +7132,7 @@ pub fn run() {
             games_install_input,
             games_install_cancel,
             games_remove,
+            games_remove_native,
             games_start,
             games_stop,
             games_restart,
@@ -6753,6 +7152,7 @@ pub fn run() {
             wow_stats,
             wow_docker_usage,
             wow_docker_clean,
+            wow_docker_clean_native,
             wow_update_check,
             wow_server_update,
             wow_update_native,
@@ -6765,6 +7165,7 @@ pub fn run() {
             wow_module_remove,
             wow_module_remove_native,
             wow_module_rebuild,
+            wow_module_rebuild_native,
             wow_module_update_check,
             wow_module_update,
             wow_module_update_native,

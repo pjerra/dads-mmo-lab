@@ -330,10 +330,16 @@ export async function wowDockerUsage(): Promise<{ lines: string[] }> {
   const mode = await resolveBackendMode();
   return mode === "native" ? invoke("wow_docker_usage_read") : invoke("wow_docker_usage");
 }
-export const wowDockerClean = (level: number, onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 4a): `wow_docker_clean_native` drives `docker
+// compose`/`docker builder|image prune`/`docker volume` directly (no `dml`
+// shell-out) -- same level/Channel contract either way.
+export const wowDockerClean = async (level: number, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_docker_clean", { level, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_docker_clean_native", { level, onEvent: ch })
+    : invoke("wow_docker_clean", { level, onEvent: ch });
 };
 export interface UpdateRepo {
   label: "AzerothCore" | "mod-playerbots";
@@ -486,13 +492,19 @@ export const wowModuleRemove = async (
     ? invoke("wow_module_remove_native", { family, key, backup, onEvent: ch })
     : invoke("wow_module_remove", { family, key, backup, onEvent: ch });
 };
-export const wowModuleRebuild = (
+// Native-mode routing (Chunk 4a): `wow_module_rebuild_native` streams
+// `docker compose up -d --build` LIVE (no `dml` shell-out) -- same
+// backup/Channel contract either way.
+export const wowModuleRebuild = async (
   backup: boolean,
   onEvent: (e: TermEvent) => void,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_rebuild", { backup, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_rebuild_native", { backup, onEvent: ch })
+    : invoke("wow_module_rebuild", { backup, onEvent: ch });
 };
 // Module-update round: one repo object per installed cpp clone with a .git
 // dir (registry + custom), same field shape as the server-level UpdateRepo.
@@ -1319,7 +1331,11 @@ export async function gamesInstallCancel(): Promise<void> {
 // later reinstall skips the big download.
 // removeImages (Batch 6 B): ALSO delete the AzerothCore/MySQL docker images
 // (~3-5 GB) the title used. Default off -- kept for a fast reinstall.
-export const gamesRemove = (
+// Native-mode routing (Chunk 4a): `games_remove_native` hardcodes the same
+// confirm=true semantics as this WSL sibling's hardcoded `--yes` (the
+// typed-id UI is the user gate either way) -- same keepData/removeImages/
+// Channel contract.
+export const gamesRemove = async (
   id: string,
   onEvent: (e: TermEvent) => void,
   keepData?: boolean,
@@ -1327,7 +1343,10 @@ export const gamesRemove = (
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("games_remove", { id, keepData, removeImages, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("games_remove_native", { id, keepData, removeImages, onEvent: ch })
+    : invoke("games_remove", { id, keepData, removeImages, onEvent: ch });
 };
 
 // --- LAN / doctor / tool-install / shell (Round Q Tools page) --------------

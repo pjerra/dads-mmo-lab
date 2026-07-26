@@ -284,6 +284,15 @@ pub fn rebuild_pending_add(sdir: &Path, key: &str) -> std::io::Result<()> {
     write!(file, "{key}\n")
 }
 
+/// `_rebuild_pending_clear` (`70-modules.sh:148`): `rm -f
+/// <sdir>/.dml-rebuild-pending` — the WHOLE marker file, not a per-key
+/// removal (a full `module rebuild` recompiles everything pending at once).
+/// Best-effort: a missing/unremovable file is silently ignored, matching
+/// `rm -f`.
+pub fn rebuild_pending_clear(sdir: &Path) {
+    let _ = std::fs::remove_file(sdir.join(".dml-rebuild-pending"));
+}
+
 // ---------------------------------------------------------------------------
 // Shared "line" ndjson event — identical shape regardless of which section
 // (module-install/-update/-remove) is emitting it (`{"event":"line",

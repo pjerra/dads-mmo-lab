@@ -8,6 +8,7 @@ pub mod clientpath;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod destructive;
 pub mod envelope;
 pub mod iteminfo;
 pub mod lan;
