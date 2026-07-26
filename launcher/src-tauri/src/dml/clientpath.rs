@@ -110,6 +110,54 @@ pub fn detect_client(roots: &[PathBuf]) -> Vec<String> {
     out
 }
 
+/// Why [`write_client_path`] refused to write — mirrors the two `json_err`
+/// exits in the bash `client-path set)` arm (`90-main.sh:5577-5579`), plus
+/// an `Io` variant for a state-dir/write failure the bash arm can't hit the
+/// same way (its `~` always resolves under bash).
+#[derive(Debug)]
+pub enum ClientPathSetError {
+    /// `dir` doesn't exist — `BAD_PATH` in the bash oracle.
+    BadPath(String),
+    /// `dir` exists but fails [`valid_client_dir`] — `NOT_CLIENT` in the
+    /// bash oracle.
+    NotClient(String),
+    /// Couldn't create the state dir or write the file.
+    Io(String),
+}
+
+/// `client-path set` (`90-main.sh:5564-5579`) core, given an explicit
+/// `target_file` (dependency-injected for testability; [`set_client_path`]
+/// supplies the real `~/.dml/client-path`). **NATIVE DECISION**: `dir` is
+/// stored EXACTLY as given — no `/mnt/c` translation (`_client_win_to_wsl`
+/// has no native equivalent; a native folder picker already returns a
+/// native Windows path). Overwrites the file (single line + `\n`, mirroring
+/// the bash `printf '%s\n' "$cpath" > "$f"`), creating the parent dir first.
+pub fn write_client_path(dir: &Path, target_file: &Path) -> Result<Value, ClientPathSetError> {
+    if !dir.is_dir() {
+        return Err(ClientPathSetError::BadPath(format!("No such folder: {}", dir.display())));
+    }
+    if !valid_client_dir(dir) {
+        return Err(ClientPathSetError::NotClient(
+            "That folder doesn't look like a WoW client".to_string(),
+        ));
+    }
+    if let Some(parent) = target_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| ClientPathSetError::Io(e.to_string()))?;
+    }
+    let path_str = dir.display().to_string();
+    std::fs::write(target_file, format!("{path_str}\n")).map_err(|e| ClientPathSetError::Io(e.to_string()))?;
+    Ok(json!({"path": path_str, "valid": true}))
+}
+
+/// `client-path set`: writes to the real `~/.dml/client-path` via
+/// [`client_path_file`], then [`write_client_path`].
+pub fn set_client_path(dir: &Path) -> Result<Value, ClientPathSetError> {
+    let target = client_path_file().ok_or_else(|| {
+        ClientPathSetError::Io("could not resolve the DML state directory (USERPROFILE/HOME not set)".to_string())
+    })?;
+    write_client_path(dir, &target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +242,68 @@ mod tests {
         assert_eq!(roots, vec![a.clone(), b.clone()]);
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    // -- write_client_path ---------------------------------------------------
+
+    #[test]
+    fn write_client_path_valid_dir_writes_file_and_reports_valid() {
+        let base = tmp("set-ok");
+        let client_dir = base.join("MyClient");
+        std::fs::create_dir_all(client_dir.join("Interface")).unwrap();
+        let state_dir = base.join(".dml");
+        let target = state_dir.join("client-path");
+        let v = write_client_path(&client_dir, &target).unwrap();
+        assert_eq!(v["path"], client_dir.display().to_string());
+        assert_eq!(v["valid"], true);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), format!("{}\n", client_dir.display()));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_client_path_creates_missing_parent_dir() {
+        let base = tmp("set-mkdir");
+        let client_dir = base.join("MyClient");
+        std::fs::create_dir_all(client_dir.join("Interface")).unwrap();
+        let target = base.join("nested").join("state").join("client-path");
+        assert!(!target.parent().unwrap().exists());
+        write_client_path(&client_dir, &target).unwrap();
+        assert!(target.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_client_path_nonexistent_dir_is_bad_path() {
+        let base = tmp("set-badpath");
+        let missing = base.join("does-not-exist");
+        let target = base.join(".dml").join("client-path");
+        let err = write_client_path(&missing, &target);
+        assert!(matches!(err, Err(ClientPathSetError::BadPath(_))));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn write_client_path_dir_without_client_markers_is_not_client() {
+        let base = tmp("set-notclient");
+        let plain_dir = base.join("SomeFolder");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        let target = base.join(".dml").join("client-path");
+        let err = write_client_path(&plain_dir, &target);
+        assert!(matches!(err, Err(ClientPathSetError::NotClient(_))));
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn write_client_path_overwrites_existing_file() {
+        let base = tmp("set-overwrite");
+        let client_dir = base.join("MyClient");
+        std::fs::create_dir_all(client_dir.join("Interface")).unwrap();
+        let target = base.join(".dml").join("client-path");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "C:\\stale\\old\\path\n").unwrap();
+        write_client_path(&client_dir, &target).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), format!("{}\n", client_dir.display()));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

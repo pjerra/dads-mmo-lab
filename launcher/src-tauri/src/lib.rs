@@ -1631,6 +1631,59 @@ async fn wow_cache_status_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE `wow cache-clean` (Chunk 2 task 1): same shape as
+/// `wow_cache_clean` (`{"wiped":true,"freed_bytes","path"}`), a plain
+/// `std::fs::remove_dir_all` instead of shelling `rm -rf`. PRESERVES the
+/// suffix-guard safety invariant byte-for-byte in spirit — see
+/// `dml::cachestatus::passes_wipe_guard`'s doc comment — this can NEVER nuke
+/// `~/.dml` itself. Native mode only.
+#[tauri::command]
+async fn wow_cache_clean_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        crate::dml::cachestatus::clean_cache().map_err(|e| match e {
+            crate::dml::cachestatus::CacheCleanError::Guard(m) => {
+                CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
+            }
+            crate::dml::cachestatus::CacheCleanError::Wipe(m) => {
+                CmdError { code: "WIPE_FAILED".into(), message: m, hint: String::new() }
+            }
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `wow client-path set` (Chunk 2 task 2): same shape as
+/// `wow_client_path_set` (`{"path","valid":true}`). **NATIVE DECISION**:
+/// stores the WINDOWS path exactly as given — skips the WSL
+/// `_client_win_to_wsl` (`/mnt/c`) translation, since native has no WSL
+/// filesystem and a native folder picker already hands back a native path.
+/// Native mode only.
+#[tauri::command]
+async fn wow_client_path_set_native(path: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        crate::dml::clientpath::set_client_path(std::path::Path::new(&path)).map_err(|e| match e {
+            crate::dml::clientpath::ClientPathSetError::BadPath(m) => CmdError {
+                code: "BAD_PATH".into(),
+                message: m,
+                hint: "Check the folder exists and try again.".into(),
+            },
+            crate::dml::clientpath::ClientPathSetError::NotClient(m) => CmdError {
+                code: "NOT_CLIENT".into(),
+                message: m,
+                hint: "Expected Wow.exe or an Interface folder inside it.".into(),
+            },
+            crate::dml::clientpath::ClientPathSetError::Io(m) => {
+                CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
+            }
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// NATIVE-MODE fast public-IP lookup: same shape as `wow_lan_public_ip`
 /// (`{"public_ip": …|null}`), via `reqwest::blocking` instead of shelling
 /// `curl`. Never errors — an unreachable network degrades to `null`,
@@ -2353,6 +2406,73 @@ async fn wow_accountwide_set(
         args.push(v);
     }
     run_json_cmd(state, args).await
+}
+
+/// NATIVE-MODE fast read of the account-wide sharing state (Chunk 2 task 5):
+/// same shape as `wow_accountwide_get`. A `NOT_FOUND` server-not-installed
+/// check happens here (matching `90-main.sh:4110-4113`); "accountwide isn't
+/// deployed" is NOT an error — see `dml::accountwide::build_get`'s doc
+/// comment. Native mode only.
+#[tauri::command]
+async fn wow_accountwide_get_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "WoW Playerbots server not installed".into(),
+                hint: "Install it first.".into(),
+            });
+        };
+        Ok(crate::dml::accountwide::build_get(&server_dir))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast write of one account-wide sharing flag (Chunk 2 task 5):
+/// same shapes as `wow_accountwide_set` (generic-flag and reputation
+/// pick-one, see `dml::accountwide::set_flag`'s doc comment). `--value`/
+/// flag-shape validation happens HERE, before the server-dir resolve,
+/// matching the bash arm's ordering (`90-main.sh:4149-4155` before
+/// `4156-4163`) — `set_flag` re-validates too, so this is belt-and-braces,
+/// not the only gate. Serialized under `AppState::config_lock` — same
+/// concurrent-native-fs-write hazard as a conf write. Native mode only.
+#[tauri::command]
+async fn wow_accountwide_set_native(
+    key: String,
+    value: String,
+    variant: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if value != "on" && value != "off" {
+        return Err(CmdError { code: "BAD_ARG".into(), message: "--value must be on or off".into(), hint: String::new() });
+    }
+    if !crate::dml::accountwide::valid_flag(&key) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid flag name: {key}"),
+            hint: "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json".into(),
+        });
+    }
+    let config_lock = state.config_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "WoW Playerbots server not installed".into(),
+                hint: "Install it first.".into(),
+            });
+        };
+        crate::dml::accountwide::set_flag(&server_dir, &key, &value, variant.as_deref())
+            .map_err(|e| CmdError { code: e.code.into(), message: e.message, hint: e.hint })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
 // Flush & rebuild the ambient bot population. The typed "flush" ack is
@@ -5565,6 +5685,7 @@ pub fn run() {
             zam_cache_clear,
             wow_cache_status,
             wow_cache_clean,
+            wow_cache_clean_native,
             wow_accounts,
             wow_account_create,
             wow_account_set_password,
@@ -5594,6 +5715,7 @@ pub fn run() {
             wow_module_place_npc,
             wow_client_path_get,
             wow_client_path_set,
+            wow_client_path_set_native,
             wow_client_path_detect,
             wow_items_search,
             wow_mail_item,
@@ -5647,6 +5769,8 @@ pub fn run() {
             wow_config_raw_write,
             wow_accountwide_get,
             wow_accountwide_set,
+            wow_accountwide_get_native,
+            wow_accountwide_set_native,
             wow_bots_flush,
             wow_ahbot_repair,
             wow_party_setup,

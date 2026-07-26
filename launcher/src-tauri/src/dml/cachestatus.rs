@@ -59,6 +59,65 @@ pub fn read_cache_status() -> Value {
     }]})
 }
 
+/// Why [`clean_cache_at`] refused/failed — mirrors the two `json_err` exits
+/// in the bash `cache-clean)` arm (`90-main.sh:1613,1622`).
+#[derive(Debug)]
+pub enum CacheCleanError {
+    /// The path failed the safety guard (or couldn't be resolved at all) —
+    /// `INTERNAL` in the bash oracle ("refusing to wipe unexpected cache
+    /// path").
+    Guard(String),
+    /// `remove_dir_all` itself failed — `WIPE_FAILED` in the bash oracle.
+    Wipe(String),
+}
+
+/// Component-wise port of the bash `case "$ccpath" in */.dml/wowhead-cache)
+/// ;; esac` suffix guard (`90-main.sh:1614-1617`): the ONLY defense against
+/// ever wiping `~/.dml` itself (which also holds non-cache state like
+/// `client-path`). A literal string-suffix check doesn't translate cleanly
+/// across path-separator conventions, so this checks the same INVARIANT via
+/// path components instead — `path`'s own name must be exactly
+/// `wowhead-cache` and its parent's name must be exactly `.dml` — which is
+/// the native equivalent of "ends in /.dml/wowhead-cache".
+fn passes_wipe_guard(path: &Path) -> bool {
+    path.file_name().is_some_and(|f| f == "wowhead-cache")
+        && path.parent().and_then(Path::file_name).is_some_and(|f| f == ".dml")
+}
+
+/// `cache-clean` core (`90-main.sh:1609-1628`): wipes `path` — but ONLY
+/// after [`passes_wipe_guard`] passes. `freed_bytes` is measured via
+/// [`scan`] BEFORE delete, matching the bash oracle's `du -sb` immediately
+/// before `rm -rf`. A missing dir is a no-op success (`wiped:true,
+/// freed_bytes:0`), matching the bash arm's `if [[ -d "$ccpath" ]]` guard
+/// around the whole delete+measure step.
+pub fn clean_cache_at(path: &Path) -> Result<Value, CacheCleanError> {
+    if !passes_wipe_guard(path) {
+        return Err(CacheCleanError::Guard(format!(
+            "refusing to wipe unexpected cache path: {}",
+            path.display()
+        )));
+    }
+    let path_str = path.display().to_string();
+    let present = path.is_dir();
+    let freed = if present { scan(path).0 } else { 0 };
+    if present {
+        std::fs::remove_dir_all(path)
+            .map_err(|e| CacheCleanError::Wipe(format!("could not remove the cache dir: {e}")))?;
+    }
+    Ok(json!({"wiped": true, "freed_bytes": freed, "path": path_str}))
+}
+
+/// `cache-clean`: resolves the real `~/.dml/wowhead-cache` via [`cache_dir`],
+/// then [`clean_cache_at`].
+pub fn clean_cache() -> Result<Value, CacheCleanError> {
+    let path = cache_dir().ok_or_else(|| {
+        CacheCleanError::Guard(
+            "could not resolve the DML state directory (USERPROFILE/HOME not set)".to_string(),
+        )
+    })?;
+    clean_cache_at(&path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +165,52 @@ mod tests {
         assert!(caches[0]["present"].is_boolean());
         assert!(caches[0]["bytes"].is_u64());
         assert!(caches[0]["files"].is_u64());
+    }
+
+    // -- clean_cache_at ----------------------------------------------------
+
+    #[test]
+    fn passes_wipe_guard_requires_exact_parent_and_name() {
+        assert!(passes_wipe_guard(Path::new("/home/x/.dml/wowhead-cache")));
+        assert!(!passes_wipe_guard(Path::new("/home/x/.dml")));
+        assert!(!passes_wipe_guard(Path::new("/home/x/.dml/other-cache")));
+        assert!(!passes_wipe_guard(Path::new("/home/x/notdml/wowhead-cache")));
+        assert!(!passes_wipe_guard(Path::new("/")));
+    }
+
+    #[test]
+    fn clean_cache_at_refuses_a_path_that_fails_the_guard() {
+        let bad = tmp("guard-bad"); // parent is temp_dir, not literally ".dml"
+        std::fs::create_dir_all(&bad).unwrap();
+        let err = clean_cache_at(&bad);
+        assert!(matches!(err, Err(CacheCleanError::Guard(_))));
+        // Refused BEFORE any delete -- the dir must still exist.
+        assert!(bad.is_dir());
+        let _ = std::fs::remove_dir_all(&bad);
+    }
+
+    #[test]
+    fn clean_cache_at_wipes_present_dir_and_reports_freed_bytes() {
+        let dml = tmp("wipe-ok").join(".dml");
+        let cache = dml.join("wowhead-cache");
+        std::fs::create_dir_all(cache.join("icons")).unwrap();
+        std::fs::write(cache.join("icons").join("a.jpg"), "12345").unwrap(); // 5 bytes
+        let v = clean_cache_at(&cache).unwrap();
+        assert_eq!(v["wiped"], true);
+        assert_eq!(v["freed_bytes"], 5);
+        assert!(!cache.exists());
+        // Sibling (the ".dml" dir itself) must survive.
+        assert!(dml.is_dir());
+        let _ = std::fs::remove_dir_all(&dml);
+    }
+
+    #[test]
+    fn clean_cache_at_missing_dir_is_a_noop_success() {
+        let dml = tmp("wipe-missing").join(".dml");
+        let cache = dml.join("wowhead-cache");
+        assert!(!cache.exists());
+        let v = clean_cache_at(&cache).unwrap();
+        assert_eq!(v["wiped"], true);
+        assert_eq!(v["freed_bytes"], 0);
     }
 }

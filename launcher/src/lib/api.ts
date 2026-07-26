@@ -610,7 +610,10 @@ export async function wowClientPathGet(): Promise<ClientPath> {
     : await invoke("wow_client_path_get");
 }
 export async function wowClientPathSet(path: string): Promise<ClientPath> {
-  return await invoke("wow_client_path_set", { path });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_client_path_set_native", { path })
+    : await invoke("wow_client_path_set", { path });
 }
 export async function wowClientPathDetect(): Promise<{ candidates: string[] }> {
   const mode = await resolveBackendMode();
@@ -894,14 +897,20 @@ export interface AccountwideState {
   reputation: AwReputation;
 }
 export async function wowAccountwideGet(): Promise<AccountwideState> {
-  return await invoke("wow_accountwide_get");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_accountwide_get_native")
+    : await invoke("wow_accountwide_get");
 }
 export async function wowAccountwideSet(
   key: string,
   value: "on" | "off",
   variant?: "default" | "custom",
 ): Promise<{ key: string; value: "on" | "off"; changed: boolean; reload: string; variant?: string }> {
-  return await invoke("wow_accountwide_set", { key, value, variant });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_accountwide_set_native", { key, value, variant })
+    : await invoke("wow_accountwide_set", { key, value, variant });
 }
 export async function wowConfigRawRead(
   file: RawFileName,
@@ -1523,7 +1532,10 @@ export async function wowCacheStatus(): Promise<{ caches: CacheEntry[] }> {
     : await invoke("wow_cache_status");
 }
 export async function wowCacheClean(): Promise<{ wiped: boolean; freed_bytes: number; path: string }> {
-  return await invoke("wow_cache_clean");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_cache_clean_native")
+    : await invoke("wow_cache_clean");
 }
 
 // --- Keep-awake sleep block (Batch 2 F6) -----------------------------------

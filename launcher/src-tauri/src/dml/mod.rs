@@ -1,3 +1,4 @@
+pub mod accountwide;
 pub mod backend;
 pub mod backup;
 pub mod cachestatus;
