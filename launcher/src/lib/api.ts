@@ -1245,7 +1245,10 @@ export async function wowPartyPresetSave(player: string, name: string): Promise<
     : invoke("wow_party_preset_save", { player, name });
 }
 export async function wowPartyPresetList(): Promise<PresetInfo[]> {
-  const d = await invoke<{ presets: PresetInfo[] }>("wow_party_preset_list");
+  const mode = await resolveBackendMode();
+  const d = await (mode === "native"
+    ? invoke<{ presets: PresetInfo[] }>("wow_party_preset_list_native")
+    : invoke<{ presets: PresetInfo[] }>("wow_party_preset_list"));
   return d.presets;
 }
 export async function wowPartyPresetDelete(name: string): Promise<{ deleted: boolean; name: string }> {

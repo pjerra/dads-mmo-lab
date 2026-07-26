@@ -5956,6 +5956,23 @@ async fn wow_party_preset_save_native(player: String, name: String) -> Result<se
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE `party preset-list` (`90-main.sh:3322-3337`) — read-only, no
+/// player/name argument to validate.
+#[tauri::command]
+async fn wow_party_preset_list_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        let dir = preset_dir_or_internal_err()?;
+        let presets: Vec<serde_json::Value> = crate::dml::party::list_presets(&dir)
+            .into_iter()
+            .map(|p| serde_json::json!({"name": p.name, "bots": p.bots}))
+            .collect();
+        Ok(serde_json::json!({"presets": presets}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// NATIVE-MODE `party preset-delete` (`90-main.sh:3339-3347`).
 #[tauri::command]
 async fn wow_party_preset_delete_native(name: String) -> Result<serde_json::Value, CmdError> {
@@ -9375,6 +9392,7 @@ pub fn run() {
             wow_party_preset_save,
             wow_party_preset_save_native,
             wow_party_preset_list,
+            wow_party_preset_list_native,
             wow_party_preset_delete,
             wow_party_preset_delete_native,
             wow_party_preset_load,

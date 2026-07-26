@@ -287,6 +287,41 @@ pub fn parse_preset_classes(content: &str) -> Vec<String> {
     content.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
+/// One `preset-list` row (`90-main.sh:3322-3337`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PresetInfo {
+    pub name: String,
+    pub bots: usize,
+}
+
+/// `preset-list` (`90-main.sh:3322-3337`): every [`valid_preset_name`] FILE
+/// (not subdir) directly under `dir`, sorted by name ascending — matching
+/// `glob(3)`'s default sort order, which the oracle's unsorted
+/// `for f in "$pdir"/*` relies on (bash does not pass `GLOB_NOSORT`) — each
+/// paired with its non-blank line count (the oracle's `grep -c .`, which is
+/// the same count [`parse_preset_classes`] would yield). A missing `dir`
+/// degrades to an empty list, matching the oracle's `[[ -d "$pdir" ]]` guard;
+/// an unreadable file degrades to a 0 count, matching `grep -c . "$f" \
+/// 2>/dev/null || cnt=0`.
+pub fn list_presets(dir: &Path) -> Vec<PresetInfo> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| valid_preset_name(n))
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            let content = std::fs::read_to_string(dir.join(&name)).unwrap_or_default();
+            let bots = parse_preset_classes(&content).len();
+            PresetInfo { name, bots }
+        })
+        .collect()
+}
+
 /// `preset-import`'s `--classes` CSV split + per-token validation
 /// (`90-main.sh:3461-3469`): the empty-string precheck happens first (its
 /// own message), then EVERY token must be a valid class BEFORE any write —
@@ -510,5 +545,57 @@ mod tests {
     fn preset_path_joins_dir_and_name() {
         let dir = std::path::PathBuf::from("/home/x/.dml/party-presets");
         assert_eq!(preset_path(&dir, "myPreset"), dir.join("myPreset"));
+    }
+
+    // -- list_presets -------------------------------------------------
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dml-party-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn list_presets_shape_sorted_with_bot_counts() {
+        let d = tmp_dir("list");
+        std::fs::write(d.join("raiders"), "warrior\npriest\nmage\n").unwrap();
+        std::fs::write(d.join("duo"), "warrior\npriest\n").unwrap();
+        // Invalid name (would fail _valid_preset_name) -- must be skipped.
+        std::fs::write(d.join("bad name"), "warrior\n").unwrap();
+        // A subdirectory -- must be skipped ([[ -f "$f" ]] guard).
+        std::fs::create_dir_all(d.join("subdir")).unwrap();
+
+        let presets = list_presets(&d);
+        assert_eq!(
+            presets,
+            vec![
+                PresetInfo { name: "duo".to_string(), bots: 2 },
+                PresetInfo { name: "raiders".to_string(), bots: 3 },
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_presets_drops_blank_lines_from_bot_count() {
+        let d = tmp_dir("blank-lines");
+        std::fs::write(d.join("gappy"), "warrior\n\npriest\n\n").unwrap();
+        assert_eq!(list_presets(&d), vec![PresetInfo { name: "gappy".to_string(), bots: 2 }]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_presets_empty_dir_is_empty() {
+        let d = tmp_dir("empty");
+        assert!(list_presets(&d).is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_presets_missing_dir_is_empty() {
+        let d = tmp_dir("missing");
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(list_presets(&d).is_empty());
     }
 }
