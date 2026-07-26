@@ -993,10 +993,15 @@ export const wowWorldRestart = async (
 };
 // Flush & rebuild the ambient bot population (Batch 1 F4). The CLI enforces
 // --yes plus the typed ack itself; the GUI's typed-confirm gates calling this.
-export const wowBotsFlush = (onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 4b): `wow_bots_flush_native` drives the same
+// arm/restart/disarm/rebuild sequence directly (no `dml` shell-out) -- same
+// no-parameter/Channel contract either way; the typed-"flush" UI is the gate
+// on both backends.
+export const wowBotsFlush = async (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_bots_flush", { onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_bots_flush_native", { onEvent: ch }) : invoke("wow_bots_flush", { onEvent: ch });
 };
 
 export interface OnlineChar { guid: number; name: string; class: number; level: number; }
@@ -1270,10 +1275,17 @@ export const wowBackupCreate = async (onEvent: (e: TermEvent) => void, includeWo
     ? invoke("wow_backup_create_native", { includeWorld, onEvent: ch })
     : invoke("wow_backup_create", { includeWorld, onEvent: ch });
 };
-export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 4b): `wow_backup_restore_native` drives the
+// stop -> pre-restore safety dump -> streamed gunzip-import -> start sequence
+// directly (no `dml` shell-out) -- same file/Channel contract either way; no
+// `--yes` on either backend, the launcher's own two-click confirm is the gate.
+export const wowBackupRestore = async (file: string, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_backup_restore", { file, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_backup_restore_native", { file, onEvent: ch })
+    : invoke("wow_backup_restore", { file, onEvent: ch });
 };
 
 // --- Auction House repair (Batch 4 F14) ------------------------------------

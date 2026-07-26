@@ -21,6 +21,7 @@ pub mod native;
 pub mod pages;
 pub mod paperdoll;
 pub mod party_specs;
+pub mod restore;
 pub mod runner;
 pub mod soap;
 pub mod soap_cmds;

@@ -2940,6 +2940,275 @@ async fn wow_bots_flush(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `wow bots flush` (Chunk 4b, Part 2): faithful port of the
+// `flush)` arm (`90-main.sh:3945-4093`) + `_flush_restart_authworld`
+// (`40-config.sh:698-726`) — the second of the two scariest commands in the
+// product. Same NDJSON vocabulary as `wow_world_restart_native`. THE GUARD:
+// `dml::lifecycle::FlushGuard` is the Rust analogue of the bash arm's EXIT +
+// signal traps (see that struct's doc comment for the full trap-mapping
+// rationale) — construct it AFTER the marker/flag-arm decision is reached,
+// and call `.disarm()` only once the flag is ALREADY back at 0 on disk, right
+// before the rebuild restart. No `--yes`/`--ack` parameters exist on this
+// command: the launcher's typed-"flush" UI is the gate, unchanged from the
+// WSL sibling `wow_bots_flush` above. Native mode only.
+// ---------------------------------------------------------------------------
+
+const BOTS_FLUSH_SECTION: &str = "bots-flush";
+
+/// One `_flush_restart_authworld` outcome (`40-config.sh:698-726`): `Ready`
+/// (rc 0), `ComposeFailed` (rc 1 — a `compose stop`/`compose up` call
+/// itself failed), or `Timeout` (rc 2 — the world never came back inside
+/// `DML_READY_TIMEOUT_SECS`).
+enum FlushRestartOutcome {
+    Ready,
+    ComposeFailed,
+    Timeout,
+}
+
+/// `_flush_restart_authworld` (`40-config.sh:698-726`): one staged auth+world
+/// restart, reused for BOTH the bot-deletion boot and the rebuild boot (only
+/// `label` differs, feeding the "still waiting" progress line). Reuses the
+/// exact same timeout/heartbeat pure helpers `wow_world_restart_native_
+/// blocking` already established (`wr_ready_timeout_secs`/`wr_timeout_
+/// exceeded`/`wr_should_note_wait`) and `status::world_ready` for the
+/// readiness poll — no duplicate polling logic.
+fn flush_restart_authworld(
+    program: &std::ffi::OsStr,
+    sdir: &std::path::Path,
+    soap_lock: &Arc<Mutex<()>>,
+    label: &str,
+    emit: &impl Fn(serde_json::Value),
+) -> FlushRestartOutcome {
+    use crate::dml::{lifecycle, maint, modmgr, soap, status};
+
+    emit(modmgr::line_event("info", "saving all characters (best effort)..."));
+    {
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        let _ = soap::exec(&cfg, "saveall");
+    }
+
+    emit(modmgr::line_event("info", format!("stopping auth + world ({label})...")));
+    let mut stop_cmd = std::process::Command::new(program);
+    stop_cmd.current_dir(sdir).args(["compose", "stop", "-t", "180", "ac-worldserver", "ac-authserver"]);
+    status::windows_no_window(&mut stop_cmd);
+    if !matches!(status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT), Some(o) if o.status.success())
+    {
+        return FlushRestartOutcome::ComposeFailed;
+    }
+
+    emit(modmgr::line_event("info", "starting auth + world (compose, no deps)..."));
+    let mut up_cmd = std::process::Command::new(program);
+    // `--no-deps` is deliberate (matches the oracle exactly): skips the
+    // db-import/client-data one-shot init containers, which only need to run
+    // once, ever.
+    up_cmd.current_dir(sdir).args(["compose", "up", "-d", "--no-deps", "ac-authserver", "ac-worldserver"]);
+    status::windows_no_window(&mut up_cmd);
+    if !matches!(status::output_bounded_draining(up_cmd, lifecycle::COMPOSE_UP_TIMEOUT), Some(o) if o.status.success())
+    {
+        return FlushRestartOutcome::ComposeFailed;
+    }
+
+    emit(modmgr::line_event("info", format!("waiting for the world ({label})...")));
+    let timeout_secs = wr_ready_timeout_secs();
+    let t0 = std::time::Instant::now();
+    let mut last_note: u64 = 0;
+    loop {
+        if status::world_ready(program, maint::PROBE_TIMEOUT) {
+            return FlushRestartOutcome::Ready;
+        }
+        let elapsed = t0.elapsed().as_secs();
+        if wr_timeout_exceeded(elapsed, timeout_secs) {
+            return FlushRestartOutcome::Timeout;
+        }
+        if wr_should_note_wait(elapsed, last_note) {
+            last_note = elapsed;
+            emit(modmgr::line_event(
+                "info",
+                format!("still waiting (~{}m) - deleting/creating thousands of bots takes a while...", elapsed / 60),
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// The blocking flow itself (real docker/SOAP/fs I/O) — run under
+/// `spawn_blocking`. Order mirrors the oracle top-to-bottom: docker up? ->
+/// server installed? -> playerbots.conf ensured? -> (1) chars-only safety
+/// backup (hard-fail, nothing changed yet) -> (2) arm (marker then flag) ->
+/// (3) restart #1 (the wipe happens during this boot) -> (4)+(5) disarm
+/// (flag back to 0, remove marker) BEFORE the rebuild restart -> (6) restart
+/// #2 (rebuild) -> (7) done.
+fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{backup, config::ConfigReader, lifecycle, maint, modmgr, native};
+
+    emit(modmgr::section_start(BOTS_FLUSH_SECTION));
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    let conf_path = lifecycle::flush_conf_path(&sdir);
+    match crate::dml::config::conf_ensure(&conf_path) {
+        Ok(true) => {}
+        Ok(false) => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event("NOT_FOUND", "playerbots.conf not found (nor its .dist)", "Is the WoW server fully installed?"));
+            return;
+        }
+        Err(_) => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event("NOT_FOUND", "playerbots.conf not found (nor its .dist)", "Is the WoW server fully installed?"));
+            return;
+        }
+    }
+
+    let t0 = std::time::Instant::now();
+
+    // (1) safety backup FIRST -- a failed dump aborts before any destructive
+    // step, nothing has changed yet. Deliberately CHARS-ONLY (no
+    // --include-world): matches `_backup_dump_to ... 0` exactly, NOT the
+    // world-inclusive `modmgr::module_backup_now` module install/update/
+    // rebuild use -- a bot flush never touches `acore_world`.
+    emit(modmgr::line_event("info", "backing up characters, bots and accounts first..."));
+    let Some(bdir) = backup::backup_dir() else {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", ""));
+        return;
+    };
+    if std::fs::create_dir_all(&bdir).is_err() {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", ""));
+        return;
+    }
+    let bfile = backup::new_backup_file_name(false);
+    let bpath = bdir.join(&bfile);
+    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, false, &bpath) {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", &errtail));
+        return;
+    }
+    emit(modmgr::line_event("info", format!("backup created: {bfile}")));
+    for p in backup::prune(&bdir) {
+        emit(modmgr::line_event("info", format!("pruned old backup: {p}")));
+    }
+
+    // (2) arm: marker FIRST (best-effort, inside FlushGuard::arm), then the
+    // conf flag itself -- see `FlushGuard`'s doc comment for the full
+    // trap-mapping rationale. From this point on, ANY early return (or a
+    // panic) restores the flag + removes the marker via `Drop`, unless
+    // `guard.disarm()` has already run.
+    let marker_path = lifecycle::flush_marker_path(&sdir);
+    let guard = lifecycle::FlushGuard::arm(conf_path.clone(), marker_path);
+    if crate::dml::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "1").is_err() {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event("WRITE_FAILED", "Could not write playerbots.conf", ""));
+        return; // guard still armed -> Drop restores 0 + removes the marker.
+    }
+    emit(modmgr::line_event("info", "delete flag armed - restarting so the server wipes the random bots..."));
+
+    // (3) restart #1: the wipe happens during this boot.
+    match flush_restart_authworld(&docker_program, &sdir, &soap_lock, "bot deletion", &emit) {
+        FlushRestartOutcome::Ready => {}
+        FlushRestartOutcome::ComposeFailed => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event(
+                "RESTART_FAILED",
+                "Could not restart the server for bot deletion",
+                "The delete flag was restored to 0. Check the server from Home.",
+            ));
+            return; // guard still armed -> Drop restores 0 + removes the marker.
+        }
+        FlushRestartOutcome::Timeout => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event(
+                "TIMEOUT",
+                "Timed out waiting for the world during bot deletion",
+                "The delete flag was restored to 0. Check the server from Home, then try again.",
+            ));
+            return; // guard still armed -> Drop restores 0 + removes the marker.
+        }
+    }
+
+    // (4)+(5): bots are gone -- put the flag back BEFORE the rebuild
+    // restart, or the next boot would wipe them again. Disarm the guard only
+    // once this write has actually succeeded.
+    emit(modmgr::line_event("info", "bots deleted - restoring the setting..."));
+    if crate::dml::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "0").is_err() {
+        emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+        emit(modmgr::error_event(
+            "WRITE_FAILED",
+            "Could not restore playerbots.conf - fix AiPlayerbot.DeleteRandomBotAccounts back to 0 by hand before the next restart",
+            "",
+        ));
+        return; // guard still armed -> Drop retries the write + removes the marker anyway.
+    }
+    guard.disarm();
+
+    // (6) restart #2: the server recreates the population from the current
+    // Bot World settings during this boot. The guard is already disarmed --
+    // nothing left here can wipe the flag back on.
+    emit(modmgr::line_event("info", "restarting again to rebuild the bot population (this is the long part)..."));
+    match flush_restart_authworld(&docker_program, &sdir, &soap_lock, "bot rebuild", &emit) {
+        FlushRestartOutcome::Ready => {}
+        FlushRestartOutcome::ComposeFailed => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event(
+                "RESTART_FAILED",
+                "Could not restart the server for the rebuild",
+                "Start it from Home - the delete flag is already back at 0.",
+            ));
+            return;
+        }
+        FlushRestartOutcome::Timeout => {
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event(
+                "TIMEOUT",
+                "Timed out waiting for the world during the rebuild",
+                "The bots may still be logging in - check Home before retrying.",
+            ));
+            return;
+        }
+    }
+
+    // (7) done.
+    let elapsed_secs = t0.elapsed().as_secs();
+    emit(modmgr::section_end(BOTS_FLUSH_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({
+        "flushed": true, "backup": bfile, "elapsed_secs": elapsed_secs,
+    })));
+}
+
+/// NATIVE-MODE `wow bots flush` — see the module comment above. No `--yes`/
+/// `--ack` parameters exist on either backend: the launcher's typed-"flush"
+/// confirm UI is the gate, unchanged from `wow_bots_flush`. Native mode only.
+#[tauri::command]
+async fn wow_bots_flush_native(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let soap_lock = state.soap_lock.clone();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        wow_bots_flush_native_blocking(soap_lock, db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn wow_config_raw_reset(
     file: String,
@@ -4895,6 +5164,150 @@ async fn wow_backup_delete_native(file: String) -> Result<serde_json::Value, Cmd
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `backup restore` (Chunk 4b, Part 1): faithful port of the
+// `restore)` arm (`90-main.sh:3786-3855`) — the CLI's ONE sanctioned
+// whole-DB-overwrite write path. Same NDJSON vocabulary as `wow_world_
+// restart_native`/`wow_backup_create_native_blocking`; the ONE new subprocess
+// shape is `dml::restore::stream_restore`'s gunzip-into-`docker exec … mysql`
+// stdin pipe (see that module's doc comment). No `--yes`/confirm parameter
+// exists on either side (the two-click UI is the gate, same as the WSL
+// sibling `wow_backup_restore` above). Native mode only — WSL keeps calling
+// `wow_backup_restore`.
+// ---------------------------------------------------------------------------
+
+const BACKUP_RESTORE_SECTION: &str = "backup-restore";
+
+/// The blocking flow itself (real docker/SOAP/fs I/O) — run under
+/// `spawn_blocking`. Order mirrors the oracle top-to-bottom: name-shape gate
+/// -> backup file exists? -> server installed? -> saveall (best-effort) ->
+/// stop world+auth (hard-fail: "Nothing was changed") -> pre-restore safety
+/// dump (hard-fail: restart best-effort + "nothing was restored") -> the
+/// import itself (hard-fail: server LEFT STOPPED, no auto-restart) -> start
+/// world+auth (soft-fail: warn only) -> done.
+fn wow_backup_restore_native_blocking(
+    file: String,
+    soap_lock: Arc<Mutex<()>>,
+    db_cfg: crate::dml::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::{backup, config::ConfigReader, lifecycle, maint, modmgr, native, restore, soap, status};
+
+    emit(modmgr::section_start(BACKUP_RESTORE_SECTION));
+
+    if !backup::valid_backup_name(&file) {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("BAD_ARG", format!("Invalid backup name: {file}"), ""));
+        return;
+    }
+
+    let Some(bdir) = backup::backup_dir() else {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("INTERNAL", "Could not resolve the backups directory", ""));
+        return;
+    };
+    let bpath = bdir.join(&file);
+    if !bpath.is_file() {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", format!("No backup named {file}"), ""));
+        return;
+    }
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+
+    emit(modmgr::line_event("info", "stopping the game server..."));
+    // Flush characters before the stop so the pre-restore safety dump
+    // contains everyone's latest state (best-effort) — `90-main.sh:3812-3816`.
+    {
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        let _ = soap::exec(&cfg, "saveall");
+    }
+    let mut stop_cmd = std::process::Command::new(&docker_program);
+    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver", "ac-authserver"]);
+    status::windows_no_window(&mut stop_cmd);
+    if !matches!(status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT), Some(o) if o.status.success())
+    {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("BACKUP_FAILED", "Could not stop the server", "Nothing was changed."));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "taking a pre-restore safety backup..."));
+    let (safety, include_world) = restore::prerestore_name(&file);
+    let safety_path = bdir.join(&safety);
+    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, include_world, &safety_path) {
+        let _ = errtail; // bash discards the tail here too -- fixed hint text only.
+        let mut start_cmd = std::process::Command::new(&docker_program);
+        start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
+        status::windows_no_window(&mut start_cmd);
+        let _ = status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT);
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BACKUP_FAILED",
+            "Safety backup failed -- nothing was restored",
+            "The server was started again.",
+        ));
+        return;
+    }
+
+    emit(modmgr::line_event("info", format!("restoring {file}...")));
+    let import_ok = matches!(restore::stream_restore(&docker_program, &db_cfg.password, &bpath), Ok(r) if r.success());
+    if !import_ok {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BACKUP_FAILED",
+            "Import failed -- the server was LEFT STOPPED",
+            &format!("Your pre-restore state is saved as {safety}. Restore it, or start the server manually once resolved."),
+        ));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "starting the game server..."));
+    let mut start_cmd = std::process::Command::new(&docker_program);
+    start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
+    status::windows_no_window(&mut start_cmd);
+    if !matches!(status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT), Some(o) if o.status.success())
+    {
+        emit(modmgr::line_event("warn", "server start failed -- start it from Home"));
+    }
+
+    emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({
+        "restored": true, "file": file, "safety_backup": safety,
+    })));
+}
+
+/// NATIVE-MODE `backup restore` — see the module comment above. No `--yes`
+/// exists on either backend: the launcher's two-click confirm UI is the
+/// gate, unchanged from `wow_backup_restore`. Native mode only.
+#[tauri::command]
+async fn wow_backup_restore_native(
+    file: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let soap_lock = state.soap_lock.clone();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        wow_backup_restore_native_blocking(file, soap_lock, db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -7234,6 +7647,7 @@ pub fn run() {
             wow_accountwide_get_native,
             wow_accountwide_set_native,
             wow_bots_flush,
+            wow_bots_flush_native,
             wow_ahbot_repair,
             wow_ahbot_repair_native,
             wow_party_setup,
@@ -7264,6 +7678,7 @@ pub fn run() {
             wow_backup_list_native,
             wow_backup_validate_native,
             wow_backup_delete_native,
+            wow_backup_restore_native,
             wow_bridge_setup,
             wow_bridge_setup_native,
             wow_gm_level,

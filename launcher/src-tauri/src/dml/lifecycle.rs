@@ -98,6 +98,94 @@ pub fn flush_heal_flag(compose_dir: &Path) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// `wow bots flush` (Chunk 4b): the arm/disarm guard + the confirm gate. Same
+// marker/conf paths as the heal helpers just above -- BYTE-COMPATIBLE with
+// both the bash CLI (`40-config.sh:707-785`) and the Chunk 3b native heal:
+// same marker file name, same conf key, same conf path.
+// ---------------------------------------------------------------------------
+
+/// `_flush`'s confirm gate (`90-main.sh:3963`): `btconfirm != 1 || btack !=
+/// "flush"` negated. Ported for parity of the error path even though the
+/// shipped Tauri command hardcodes `confirm=true`/`ack="flush"` (the
+/// launcher's own typed-"flush" UI is the actual gate) -- same posture as
+/// `games remove`'s ported-but-unreachable CONFIRM_REQUIRED check (Chunk 4a).
+pub fn bots_flush_confirmed(confirm: bool, ack: &str) -> bool {
+    confirm && ack == "flush"
+}
+
+/// RAII arm/disarm guard for the bots-flush delete-flag window (Chunk 4b) —
+/// the Rust analogue of the bash arm's EXIT + HUP/INT/TERM/PIPE traps
+/// (`_flush_restore_flag`/`_flush_restore_flag_signal`, `40-config.sh:739-
+/// 754`).
+///
+/// TRAP -> RUST MAPPING. Rust has no signal-trap mechanism to port 1:1, but
+/// `Drop` is the load-bearing analogue: it fires on every unwind path a bash
+/// EXIT trap fires on too -- a normal `return`, an early `?`-propagated
+/// error, AND a panic (so long as the panic unwinds rather than aborts,
+/// which is this workspace's default `panic = "unwind"`). The ONE thing
+/// neither bash's trap NOR this `Drop` can catch is an untrappable SIGKILL or
+/// a power cut -- bash closes that gap with the on-disk marker + a heal on
+/// the next start/restart/flush, and this guard closes it the exact same
+/// way: [`arm`] writes the SAME marker file [`flush_heal_flag`] already
+/// checks for (already ported, Chunk 3b), so a process that dies here with
+/// no chance to run ANY Rust code at all still gets healed on the next boot.
+///
+/// USAGE: construct via [`FlushGuard::arm`] (marker written FIRST, matching
+/// the bash comment "a crash between the marker and the conf write only
+/// costs a redundant reset to 0" -- so the caller's own
+/// `AiPlayerbot.DeleteRandomBotAccounts=1` conf_write happens immediately
+/// after, not inside `arm` itself, keeping WRITE_FAILED reporting the
+/// caller's job). Call [`FlushGuard::disarm`] only once the flag has ALREADY
+/// been written back to `0` by the caller AND the guard's job is done (bash's
+/// steps "(4)+(5)", right before the rebuild restart) -- `disarm` marks the
+/// guard inert and removes the marker; a `Drop` on a still-armed guard (any
+/// return path before that point) performs the conf-restore-to-0 + marker-
+/// removal itself, unconditionally, exactly like the bash trap's own
+/// `_flush_restore_flag` (which also retries the conf write even if the
+/// caller's own write already failed, and always removes the marker
+/// regardless of that retry's outcome).
+pub struct FlushGuard {
+    conf: PathBuf,
+    marker: PathBuf,
+    armed: bool,
+}
+
+impl FlushGuard {
+    /// `: > "$(_flush_marker_for "$pbflush")" 2>/dev/null || true`
+    /// (`90-main.sh:4022`): best-effort marker write -- a failure here (rare;
+    /// e.g. a permissions issue) is swallowed, matching the bash's own `||
+    /// true`, and does NOT stop the flow from arming (the guard is still
+    /// useful even without the on-disk breadcrumb: the in-process `Drop`
+    /// still covers every non-SIGKILL death).
+    pub fn arm(conf: PathBuf, marker: PathBuf) -> Self {
+        let _ = std::fs::write(&marker, b"");
+        Self { conf, marker, armed: true }
+    }
+
+    /// Bash's steps "(4)+(5)": the caller has ALREADY written the conf flag
+    /// back to `0` itself (so it can report its own `WRITE_FAILED` on that
+    /// specific step if it fails, matching the oracle) -- `disarm` just
+    /// removes the marker and tells `Drop` there is nothing left to do,
+    /// mirroring `rm -f "$(_flush_marker_for ...)"; FLUSH_RESTORE_CONF=""`.
+    pub fn disarm(mut self) {
+        self.armed = false;
+        let _ = std::fs::remove_file(&self.marker);
+    }
+}
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // `_flush_restore_flag` (`40-config.sh:739-744`): best-effort restore
+        // + best-effort marker removal, in that order, both unconditional.
+        let _ = super::config::conf_write(&self.conf, "AiPlayerbot.DeleteRandomBotAccounts", "0");
+        let _ = std::fs::remove_file(&self.marker);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Port-conflict check -- `_check_port_conflicts` (`90-main.sh:255-296`).
 // Best-effort / warn-only: every path here degrades to "no warning" rather
 // than failing the start. The DB port (3306) gets a silent host-port remap
@@ -329,6 +417,117 @@ mod tests {
         assert_eq!(note.as_deref(), Some(FLUSH_HEAL_NOTE));
         assert!(!flush_marker_path(&dir).is_file());
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -- bots-flush confirm gate ---------------------------------------------
+
+    #[test]
+    fn bots_flush_confirmed_requires_both_flag_and_exact_ack() {
+        assert!(bots_flush_confirmed(true, "flush"));
+        assert!(!bots_flush_confirmed(false, "flush"));
+        assert!(!bots_flush_confirmed(true, "FLUSH"));
+        assert!(!bots_flush_confirmed(true, ""));
+        assert!(!bots_flush_confirmed(false, ""));
+    }
+
+    // -- FlushGuard: arm/disarm/Drop as a state sequence ----------------------
+
+    fn flush_guard_fixture(name: &str) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("dml-lifecycle-test-flushguard-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conf = dir.join("playerbots.conf");
+        std::fs::write(&conf, "AiPlayerbot.DeleteRandomBotAccounts = 0\n").unwrap();
+        let marker = dir.join(".dml-bot-flush-armed");
+        (dir, conf, marker)
+    }
+
+    #[test]
+    fn flush_guard_arm_writes_the_marker_immediately() {
+        let (dir, conf, marker) = flush_guard_fixture("arm-writes-marker");
+        assert!(!marker.is_file());
+        let _guard = FlushGuard::arm(conf, marker.clone());
+        assert!(marker.is_file(), "arm() must write the marker before the caller's own conf write");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flush_guard_drop_restores_flag_and_removes_marker_when_still_armed() {
+        // Simulates: arm() -> caller sets the flag to "1" -> some early
+        // return/error BEFORE disarm() is ever reached (e.g. the restart
+        // failed) -- the guard going out of scope must be the ONLY thing
+        // that restores the flag, matching bash's EXIT-trap safety net.
+        let (dir, conf, marker) = flush_guard_fixture("drop-restores");
+        {
+            let _guard = FlushGuard::arm(conf.clone(), marker.clone());
+            super::super::config::conf_write(&conf, "AiPlayerbot.DeleteRandomBotAccounts", "1").unwrap();
+            let live = std::fs::read_to_string(&conf).unwrap();
+            assert!(live.contains("= 1"), "live: {live}");
+            // guard drops here, at end of this inner scope, WITHOUT disarm().
+        }
+        let restored = std::fs::read_to_string(&conf).unwrap();
+        assert!(restored.contains("= 0"), "Drop must restore the flag to 0; got: {restored}");
+        assert!(!marker.is_file(), "Drop must remove the marker");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flush_guard_disarm_then_drop_touches_nothing_further() {
+        // Simulates the happy path: arm -> set flag to 1 -> restart succeeds
+        // -> caller restores the flag to 0 itself -> disarm(). A SECOND,
+        // out-of-band flag write made AFTER disarm (standing in for restart
+        // #2's own activity) must survive untouched -- disarm's guard is
+        // truly inert, not merely "restore skipped this once".
+        let (dir, conf, marker) = flush_guard_fixture("disarm-then-drop");
+        let guard = FlushGuard::arm(conf.clone(), marker.clone());
+        super::super::config::conf_write(&conf, "AiPlayerbot.DeleteRandomBotAccounts", "1").unwrap();
+        super::super::config::conf_write(&conf, "AiPlayerbot.DeleteRandomBotAccounts", "0").unwrap();
+        guard.disarm();
+        assert!(!marker.is_file(), "disarm() must remove the marker");
+
+        // Stand-in for restart #2 changing something unrelated afterward --
+        // must remain exactly as this test left it (no guard is watching).
+        super::super::config::conf_write(&conf, "AiPlayerbot.DeleteRandomBotAccounts", "1").unwrap();
+        let after = std::fs::read_to_string(&conf).unwrap();
+        assert!(after.contains("= 1"), "a disarmed guard must never touch the conf again; got: {after}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flush_guard_drop_fires_on_panic_unwind() {
+        // Proves the `?`/early-return analogy extends to an actual panic:
+        // the guard's Drop must still run during unwind and heal the flag,
+        // exactly like bash's EXIT trap firing on a `set -e` death.
+        let (dir, conf, marker) = flush_guard_fixture("panic-unwind");
+        let conf_for_panic = conf.clone();
+        let marker_for_panic = marker.clone();
+        let result = std::panic::catch_unwind(move || {
+            let _guard = FlushGuard::arm(conf_for_panic.clone(), marker_for_panic);
+            super::super::config::conf_write(&conf_for_panic, "AiPlayerbot.DeleteRandomBotAccounts", "1").unwrap();
+            panic!("simulated failure mid-flush, after arming");
+        });
+        assert!(result.is_err(), "the panic must have actually happened");
+
+        let restored = std::fs::read_to_string(&conf).unwrap();
+        assert!(restored.contains("= 0"), "Drop must fire during unwind; got: {restored}");
+        assert!(!marker.is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn flush_guard_drop_is_a_noop_when_conf_file_is_gone() {
+        // A missing conf at drop time (e.g. the title was uninstalled mid-
+        // flush) must not panic -- `conf_write`'s own `NotFound` handling
+        // degrades to "create it fresh"; the guard's Drop swallows any
+        // outcome either way (`let _ =`), so this just proves no panic.
+        let (dir, conf, marker) = flush_guard_fixture("conf-gone");
+        std::fs::remove_file(&conf).unwrap();
+        {
+            let _guard = FlushGuard::arm(conf.clone(), marker.clone());
+        }
+        assert!(!marker.is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
