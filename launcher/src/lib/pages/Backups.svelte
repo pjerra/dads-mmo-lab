@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { wowBackupCreate, wowBackupList, wowBackupDelete, wowBackupRestore, wowBackupValidate, type BackupInfo, type BackupValidation } from "$lib/api";
+  import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
@@ -15,6 +16,10 @@
   let streaming = $state(false);     // create/restore streaming ops
   let confirming: { kind: "restore" | "delete"; file: string } | null = $state(null);
   let includeWorld = $state(false);
+  // Backup display names: the optional "Name" input next to Create. Native
+  // mode only -- the CLI has no --name flag, so this is disabled under WSL.
+  let backupName = $state("");
+  let backendMode: "native" | "wsl" | null = $state(null);
   // Batch 4 A: per-file verify verdicts (gzip integrity + SQL sanity).
   let verdicts: Record<string, BackupValidation> = $state({});
   let validating = $state(false);
@@ -36,12 +41,16 @@
     error = null; confirming = null;
     try { backups = await wowBackupList(); } catch (e) { showErr(e); }
   }
-  onMount(refresh);
+  onMount(() => {
+    resolveBackendMode().then((m) => { backendMode = m; });
+    refresh();
+  });
 
   // Streaming outcomes derive from done/error EVENTS, never promise
   // resolution -- streaming promises resolve even when the CLI fails.
   async function backupNow() {
     streaming = true; error = null; note = null; beginRun("backups"); taskbarBusy();
+    const nameArg = backupName.trim() || undefined;
     let doneFile: string | null = null; let doneSize = 0;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
@@ -54,7 +63,7 @@
         } else if (e.event === "error") {
           streamErr = (e as { error?: { message?: string; hint?: string } }).error ?? {};
         }
-      }, includeWorld);
+      }, includeWorld, nameArg);
     } catch (e) { outcomeErr = e; }
     finally {
       taskbarIdle();
@@ -62,7 +71,7 @@
       await refresh();
       if (outcomeErr) showErr(outcomeErr);
       else if (streamErr) showErr(streamErr);
-      else if (doneFile) note = `Backed up — ${doneFile} (${human(doneSize)}).`;
+      else if (doneFile) { note = `Backed up — ${doneFile} (${human(doneSize)}).`; backupName = ""; }
     }
   }
 
@@ -139,6 +148,15 @@
     >
       Back up now
     </button>
+    <input
+      type="text"
+      class="name-input"
+      placeholder="Backup name (optional)"
+      maxlength={40}
+      bind:value={backupName}
+      disabled={busy || streaming || backendMode === "wsl"}
+      title={backendMode === "wsl" ? "Names are a native-mode feature" : undefined}
+    />
     <span class="muted">Works while the server is running.</span>
   </div>
   <label class="row">
@@ -154,7 +172,10 @@
       {#each backups as b (b.file)}
         <div class="bentry">
           <div class="row brow">
-            <span>{b.created} <span class="muted">({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span></span>
+            <span title={b.file}>
+              <span class="bname">{b.name ?? "Backup"}</span>
+              <span class="muted">· {b.created} ({human(b.size)}{b.file.includes("-prerestore") ? " · safety backup" : ""}{b.world ? " · includes world" : ""})</span>
+            </span>
             <button
               onclick={() => verifyBackup(b.file)}
               disabled={busy || streaming || validating || featureLocked("backup-validate")}
@@ -217,4 +238,15 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; font-size: 13px; margin: 0; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+  .bname { color: #ffffff; }
+  .name-input {
+    background: #0d1117;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    width: 220px;
+  }
+  .name-input:disabled { opacity: 0.5; cursor: default; }
 </style>

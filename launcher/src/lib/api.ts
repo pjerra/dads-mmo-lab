@@ -1298,7 +1298,12 @@ export const wowBridgeSetup = async (onEvent: (e: TermEvent) => void): Promise<v
 // Batch 4: a lightweight per-snapshot content summary recorded at backup
 // time (a `.meta` sidecar). Older backups predate it, so `summary` is null.
 export interface BackupSummary { characters: number; accounts: number; bots: number | null; }
-export interface BackupInfo { file: string; size: number; created: string; world: boolean; summary: BackupSummary | null; }
+// Backup display names: the sidecar's optional user-typed (or
+// auto-generated "Backup #N" / "Auto (stop)" / "Auto (6h)") label.
+// `name` is `undefined` under WSL (the CLI's own `backup list` row has no
+// such key at all) and `null` on a legacy native sidecar written before this
+// field existed -- callers should treat both the same way (no name).
+export interface BackupInfo { file: string; size: number; created: string; world: boolean; summary: BackupSummary | null; name?: string | null; }
 
 // Native-mode routing (Chunk 2, task C2a): `create`/`list`/`validate`/
 // `delete` all have native siblings (direct `docker exec … mysqldump` +
@@ -1336,12 +1341,15 @@ export async function wowBackupValidate(file: string): Promise<BackupValidation>
     ? invoke("wow_backup_validate_native", { file })
     : invoke("wow_backup_validate", { file });
 }
-export const wowBackupCreate = async (onEvent: (e: TermEvent) => void, includeWorld?: boolean): Promise<void> => {
+// `name` (backup display names) is native-only: the CLI has no `--name`
+// flag, so the WSL invoke below never receives one -- Backups.svelte hides/
+// disables the name input in WSL mode accordingly.
+export const wowBackupCreate = async (onEvent: (e: TermEvent) => void, includeWorld?: boolean, name?: string): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
   const mode = await resolveBackendMode();
   return mode === "native"
-    ? invoke("wow_backup_create_native", { includeWorld, onEvent: ch })
+    ? invoke("wow_backup_create_native", { includeWorld, name, onEvent: ch })
     : invoke("wow_backup_create", { includeWorld, onEvent: ch });
 };
 // Native-mode routing (Chunk 4b): `wow_backup_restore_native` drives the

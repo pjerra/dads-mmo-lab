@@ -6723,8 +6723,19 @@ fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_j
 /// `wow world-restart` streamed-command convention (see
 /// `wow_world_restart_native_blocking`): every return path emits its own
 /// terminal event(s) first, so the caller never needs to synthesize one. A
-/// port of the `backup create` arm (`90-main.sh:3662-3707`).
-fn wow_backup_create_native_blocking(include_world: bool, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+/// port of the `backup create` arm (`90-main.sh:3662-3707`), extended with
+/// the optional display `name` (backup display names) the CLI has no
+/// `--name` flag for — `raw_name` is whatever the webview's text input sent
+/// (untrusted, unsanitized), sanitized/bounded here via `backup::
+/// sanitize_backup_name`; `None`/empty/all-stripped falls back to `backup::
+/// default_backup_name`, numbered off however many `.sql.gz` files already
+/// exist in `bdir` at this point -- BEFORE the dump below creates a new one.
+fn wow_backup_create_native_blocking(
+    include_world: bool,
+    raw_name: Option<String>,
+    db_cfg: crate::dml::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
     use crate::dml::{backup, maint, native};
 
     emit(bc_event_section_start());
@@ -6747,6 +6758,9 @@ fn wow_backup_create_native_blocking(include_world: bool, db_cfg: crate::dml::db
         return;
     }
 
+    let resolved_name = backup::sanitize_backup_name(raw_name.as_deref().unwrap_or(""))
+        .unwrap_or_else(|| backup::default_backup_name(backup::sql_gz_names_desc(&bdir).len()));
+
     let file_name = backup::new_backup_file_name(include_world);
     let out_path = bdir.join(&file_name);
 
@@ -6764,8 +6778,9 @@ fn wow_backup_create_native_blocking(include_world: bool, db_cfg: crate::dml::db
     let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
     // Batch 4: content-summary sidecar -- best-effort, never blocks/fails
     // the backup (matches `_backup_write_meta`'s own swallow-everything
-    // contract).
-    backup::write_meta(&db_cfg, &out_path);
+    // contract). Batch (backup display names): now also carries the
+    // resolved display name.
+    backup::write_meta(&db_cfg, &out_path, Some(&resolved_name));
 
     let pruned = backup::prune(&bdir);
     for p in &pruned {
@@ -6780,10 +6795,13 @@ fn wow_backup_create_native_blocking(include_world: bool, db_cfg: crate::dml::db
 /// backup create` (see `wow_backup_create_native_blocking`'s doc comment),
 /// via a direct `docker exec … mysqldump` + `flate2` gzip instead of
 /// shelling `dml`/`gzip`. Native mode only — WSL keeps calling
-/// `wow_backup_create`.
+/// `wow_backup_create`. `name` (backup display names) is native-only for the
+/// same reason: the CLI has no `--name` flag, so the WSL sibling never
+/// receives one (see `api.ts`'s `wowBackupCreate`).
 #[tauri::command]
 async fn wow_backup_create_native(
     include_world: Option<bool>,
+    name: Option<String>,
     on_event: Channel<serde_json::Value>,
 ) -> Result<(), CmdError> {
     require_native_backend()?;
@@ -6792,7 +6810,7 @@ async fn wow_backup_create_native(
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let db_cfg = crate::dml::db::DbConfig::from_env();
-        wow_backup_create_native_blocking(include_world.unwrap_or(false), db_cfg, |v| {
+        wow_backup_create_native_blocking(include_world.unwrap_or(false), name, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -6801,9 +6819,11 @@ async fn wow_backup_create_native(
     Ok(())
 }
 
-/// NATIVE-MODE fast `backup list`: same shape as `wow_backup_list`
-/// (`{"backups":[{file,size,created,world,summary}]}`), a plain `std::fs`
-/// directory scan instead of shelling `dml`. Native mode only.
+/// NATIVE-MODE fast `backup list`: same shape as `wow_backup_list` plus a
+/// `name` field (`{"backups":[{file,size,created,world,summary,name}]}` —
+/// backup display names; `null` on a legacy sidecar, same as `summary` is
+/// `null` on a missing one), a plain `std::fs` directory scan instead of
+/// shelling `dml`. Native mode only.
 #[tauri::command]
 async fn wow_backup_list_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
@@ -6815,6 +6835,7 @@ async fn wow_backup_list_native() -> Result<serde_json::Value, CmdError> {
             .into_iter()
             .map(|e| serde_json::json!({
                 "file": e.file, "size": e.size, "created": e.created, "world": e.world, "summary": e.summary,
+                "name": e.name,
             }))
             .collect();
         Ok(serde_json::json!({ "backups": backups }))

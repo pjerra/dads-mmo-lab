@@ -172,6 +172,50 @@ pub fn meta_path_for(sql_gz_path: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// User-facing display name (backup display names): distinct from
+// `valid_backup_name` above, which validates the FILE name -- the on-disk
+// `.sql.gz` identity delete/restore key off, and which is NEVER user-typed.
+// This is the optional free-text label a user can attach at create time,
+// stored in the `.meta` sidecar (see `format_summary_line`'s doc comment for
+// the exact on-disk shape, extended with a trailing `"name"` field below).
+// ---------------------------------------------------------------------------
+
+/// Sanitize + bound a user-typed backup name: strip `"` and `\` (the sidecar
+/// is a hand-formatted JSON string literal, not built via `serde_json` — see
+/// the module doc comment on why — so nothing here may ever hand
+/// [`format_summary_line`] an embedded `"` or a `\` that would need real JSON
+/// escaping, which the hand-rolled writer does not do), replace `\n`/`\r`
+/// each with a single space (same "replace, not delete, so words don't glue
+/// together" rule `soap_cmds::sanitize_mail_text` / `config::
+/// sanitize_text_value` already use for other free-text fields), then trim
+/// and cap at 40 chars. `None` when the result is empty (no name typed, or
+/// one that sanitized down to nothing) — the caller's cue to fall back to
+/// [`default_backup_name`].
+pub fn sanitize_backup_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|&c| c != '"' && c != '\\')
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.chars().take(40).collect())
+    }
+}
+
+/// The default display name for a backup created with no explicit `name`:
+/// `Backup #N`, where `N` is one more than however many `.sql.gz` files
+/// already sit in the backups dir at create time (`existing_sql_gz_count` —
+/// the caller's own [`sql_gz_names_desc`] count, taken BEFORE the new file is
+/// written). Pure so the numbering is independently testable without a real
+/// backups directory.
+pub fn default_backup_name(existing_sql_gz_count: usize) -> String {
+    format!("Backup #{}", existing_sql_gz_count + 1)
+}
+
+// ---------------------------------------------------------------------------
 // UTC timestamp — `date -u +%Y%m%d-%H%M%S` (`90-main.sh:3676`), hand-rolled
 // (no date/time crate is a dependency of this workspace) via Howard
 // Hinnant's `civil_from_days` (public domain,
@@ -281,10 +325,28 @@ pub struct BackupEntry {
     pub created: String,
     pub world: bool,
     pub summary: Value,
+    /// The sidecar's optional display name (backup display names), or `None`
+    /// on a legacy sidecar (WSL-written, or a native one that predates this
+    /// field) — split out of `summary` so that object's shape stays exactly
+    /// `{characters,accounts,bots}` for every existing consumer.
+    pub name: Option<String>,
+}
+
+/// Pulls the `"name"` key out of a parsed summary `Value` (if it's an object
+/// carrying one) and removes it from the object in place, so [`list_backups`]
+/// can surface it as `BackupEntry::name` while keeping `summary` itself in
+/// its original `{characters,accounts,bots}` shape. A no-op on `Value::Null`
+/// (legacy/missing sidecar) or an object without the key.
+fn split_name_field(mut summary: Value) -> (Value, Option<String>) {
+    let name = match &mut summary {
+        Value::Object(map) => map.remove("name").and_then(|v| v.as_str().map(str::to_string)),
+        _ => None,
+    };
+    (summary, name)
 }
 
 /// `backup list` (`90-main.sh:3709-3729`): every [`valid_backup_name`] entry
-/// under `dir`, newest first, each with its size/created/world/summary
+/// under `dir`, newest first, each with its size/created/world/summary/name
 /// fields. Missing `dir` degrades to an empty list (matches the bash's
 /// `[[ -d "$bdir" ]]` guard).
 pub fn list_backups(dir: &Path) -> Vec<BackupEntry> {
@@ -299,8 +361,8 @@ pub fn list_backups(dir: &Path) -> Vec<BackupEntry> {
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let created = parse_created(&f).unwrap_or_default();
             let world = is_full_name(&f);
-            let summary = read_summary(&meta_path_for(&path));
-            BackupEntry { file: f, size, created, world, summary }
+            let (summary, name) = split_name_field(read_summary(&meta_path_for(&path)));
+            BackupEntry { file: f, size, created, world, summary, name }
         })
         .collect()
 }
@@ -327,12 +389,22 @@ fn scalar_i64(res: &db::QueryResult) -> Option<i64> {
 }
 
 /// The exact compact literal a `.meta` sidecar holds:
-/// `{"characters":N,"accounts":N,"bots":M}` or `{"characters":N,"accounts":N,"bots":null}`.
+/// `{"characters":N,"accounts":N,"bots":M}` or `{"characters":N,"accounts":N,"bots":null}`,
+/// with an OPTIONAL trailing `,"name":"..."` field (backup display names) when
+/// `name` is `Some` — appended after `bots`, never inserted between the
+/// original three fields, so every pre-existing sidecar (and every reader
+/// that only ever saw the 3-field shape) keeps working unchanged. `name` is
+/// assumed already [`sanitize_backup_name`]-clean (no `"`/`\`, no raw
+/// `\n`/`\r`) — this function does no sanitizing of its own, same division of
+/// labor as the three integer fields (validated by their callers, not here).
 /// Hand-built (not via `serde_json::Value`) so the key order is guaranteed —
 /// see the module doc comment for why that matters.
-pub fn format_summary_line(chars: i64, accounts: i64, bots: Option<i64>) -> String {
+pub fn format_summary_line(chars: i64, accounts: i64, bots: Option<i64>, name: Option<&str>) -> String {
     let bots_str = bots.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string());
-    format!("{{\"characters\":{chars},\"accounts\":{accounts},\"bots\":{bots_str}}}")
+    match name {
+        Some(n) => format!("{{\"characters\":{chars},\"accounts\":{accounts},\"bots\":{bots_str},\"name\":\"{n}\"}}"),
+        None => format!("{{\"characters\":{chars},\"accounts\":{accounts},\"bots\":{bots_str}}}"),
+    }
 }
 
 /// `_backup_summary_json` (`60-backup.sh:81-93`): live `{characters,accounts,
@@ -342,15 +414,18 @@ pub fn compute_summary(cfg: &DbConfig) -> Option<Value> {
     let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
     let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
     let bots = db::query(cfg, Database::Characters, SUMMARY_BOTS_SQL).ok().and_then(|r| scalar_i64(&r));
-    serde_json::from_str(&format_summary_line(chars, accounts, bots)).ok()
+    serde_json::from_str(&format_summary_line(chars, accounts, bots, None)).ok()
 }
 
-/// `_backup_write_meta` (`60-backup.sh:97-102`): best-effort — a failed
+/// `_backup_write_meta` (`60-backup.sh:97-102`), extended with the optional
+/// display `name` (backup display names — always `None` for the CLI's own
+/// writer, which this ports, and for every non-create call site that predates
+/// this field, e.g. the pre-restore safety dump): best-effort — a failed
 /// summary read (DB unreachable, query error) silently writes no sidecar and
 /// never fails the caller's backup.
-pub fn write_meta(cfg: &DbConfig, sql_gz_path: &Path) {
+pub fn write_meta(cfg: &DbConfig, sql_gz_path: &Path, name: Option<&str>) {
     let Some((chars, accounts, bots)) = compute_summary_parts(cfg) else { return };
-    let line = format_summary_line(chars, accounts, bots);
+    let line = format_summary_line(chars, accounts, bots, name);
     let _ = std::fs::write(meta_path_for(sql_gz_path), format!("{line}\n"));
 }
 
@@ -373,11 +448,39 @@ fn parse_digits(s: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Scans `s` for a (possibly backslash-escaped) JSON string body up to its
+/// closing unescaped `"`, returning whatever follows that quote. Good enough
+/// for [`valid_summary_line`]'s optional trailing `name` field:
+/// [`sanitize_backup_name`] already strips `"`/`\` from every name this
+/// module itself writes, so the escape handling here never fires on our own
+/// output — it exists only so a hand-edited or foreign sidecar with an
+/// escaped quote can't make the scan overrun into (and wrongly match) the
+/// rest of the line. Byte-indexed, not `&str`-sliced, at every step except
+/// the final `&s[i + 1..]` — safe because that slice only ever fires right
+/// after matching the single-byte ASCII `b'"'`, which is always a char
+/// boundary (same discipline as [`valid_backup_name`]'s doc comment).
+fn skip_json_string_body(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return Some(&s[i + 1..]),
+            b'\\' => i += 2,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// `_backup_summary_read`'s regex, hand-rolled:
-/// `^\{"characters":[0-9]+,"accounts":[0-9]+,"bots":([0-9]+|null)\}$`. Exact
-/// literal shape only — NOT "any JSON object with these keys" (a
-/// pretty-printed or reordered sidecar is rejected, same as the bash regex
-/// would reject it).
+/// `^\{"characters":[0-9]+,"accounts":[0-9]+,"bots":([0-9]+|null)\}$`, PLUS
+/// an optional trailing `,"name":"..."}` (backup display names — see
+/// [`format_summary_line`]'s doc comment on why it's appended rather than
+/// reordering the first three fields). Still the exact literal shape only —
+/// NOT "any JSON object with these keys" (a pretty-printed or reordered
+/// sidecar is rejected, same as the bash regex would reject it); the `name`
+/// suffix is optional specifically because every sidecar bash ever writes,
+/// and every sidecar written before this field existed, lacks it.
 fn valid_summary_line(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("{\"characters\":") else { return false };
     let Some((_, rest)) = parse_digits(rest) else { return false };
@@ -390,6 +493,13 @@ fn valid_summary_line(s: &str) -> bool {
         r
     } else {
         return false;
+    };
+    let rest = match rest.strip_prefix(",\"name\":\"") {
+        Some(r) => match skip_json_string_body(r) {
+            Some(r2) => r2,
+            None => return false,
+        },
+        None => rest,
     };
     rest == "}"
 }
@@ -884,8 +994,20 @@ mod tests {
 
     #[test]
     fn format_summary_line_matches_bash_shape() {
-        assert_eq!(format_summary_line(5, 3, Some(2)), r#"{"characters":5,"accounts":3,"bots":2}"#);
-        assert_eq!(format_summary_line(5, 3, None), r#"{"characters":5,"accounts":3,"bots":null}"#);
+        assert_eq!(format_summary_line(5, 3, Some(2), None), r#"{"characters":5,"accounts":3,"bots":2}"#);
+        assert_eq!(format_summary_line(5, 3, None, None), r#"{"characters":5,"accounts":3,"bots":null}"#);
+    }
+
+    #[test]
+    fn format_summary_line_appends_name_after_bots_without_reordering() {
+        assert_eq!(
+            format_summary_line(5, 3, Some(2), Some("My Backup")),
+            r#"{"characters":5,"accounts":3,"bots":2,"name":"My Backup"}"#
+        );
+        assert_eq!(
+            format_summary_line(0, 0, None, Some("Auto (6h)")),
+            r#"{"characters":0,"accounts":0,"bots":null,"name":"Auto (6h)"}"#
+        );
     }
 
     #[test]
@@ -902,10 +1024,23 @@ mod tests {
     }
 
     #[test]
+    fn valid_summary_line_accepts_the_optional_trailing_name_field() {
+        assert!(valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2,"name":"Backup #3"}"#));
+        assert!(valid_summary_line(r#"{"characters":0,"accounts":0,"bots":null,"name":"Auto (6h)"}"#));
+        // Empty name is still a well-formed string value.
+        assert!(valid_summary_line(r#"{"characters":0,"accounts":0,"bots":null,"name":""}"#));
+        // Malformed name suffixes are rejected, same as any other shape drift.
+        assert!(!valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2,"name":"unterminated}"#));
+        assert!(!valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2,"name":"ok"}extra"#));
+        assert!(!valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2,"name":123}"#));
+        assert!(!valid_summary_line(r#"{"characters":5,"accounts":3,"name":"ok","bots":2}"#));
+    }
+
+    #[test]
     fn read_summary_round_trips_through_write_and_missing_file_is_null() {
         let d = tmp_dir("summary");
         let sidecar = d.join("wow-20260101-000000.sql.gz.meta");
-        std::fs::write(&sidecar, format!("{}\n", format_summary_line(7, 4, Some(1)))).unwrap();
+        std::fs::write(&sidecar, format!("{}\n", format_summary_line(7, 4, Some(1), None))).unwrap();
         assert_eq!(read_summary(&sidecar), json!({"characters":7,"accounts":4,"bots":1}));
 
         let missing = d.join("nope.sql.gz.meta");
@@ -918,9 +1053,52 @@ mod tests {
     }
 
     #[test]
+    fn read_summary_round_trips_a_name_field_too() {
+        let d = tmp_dir("summary-name");
+        let sidecar = d.join("wow-20260101-000000.sql.gz.meta");
+        std::fs::write(&sidecar, format!("{}\n", format_summary_line(7, 4, Some(1), Some("Before module install")))).unwrap();
+        assert_eq!(
+            read_summary(&sidecar),
+            json!({"characters":7,"accounts":4,"bots":1,"name":"Before module install"})
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn meta_path_for_appends_literal_suffix() {
         let p = PathBuf::from(r"C:\backups\wow-20260101-000000.sql.gz");
         assert_eq!(meta_path_for(&p), PathBuf::from(r"C:\backups\wow-20260101-000000.sql.gz.meta"));
+    }
+
+    // -- backup display names: sanitize_backup_name / default_backup_name ------
+
+    #[test]
+    fn sanitize_backup_name_strips_quotes_backslash_and_newlines() {
+        assert_eq!(sanitize_backup_name("My Backup").as_deref(), Some("My Backup"));
+        assert_eq!(sanitize_backup_name("  padded  ").as_deref(), Some("padded"));
+        assert_eq!(sanitize_backup_name("a\"b\\c").as_deref(), Some("abc"));
+        assert_eq!(sanitize_backup_name("line1\nline2\rline3").as_deref(), Some("line1 line2 line3"));
+    }
+
+    #[test]
+    fn sanitize_backup_name_empty_or_all_whitespace_or_all_stripped_is_none() {
+        assert_eq!(sanitize_backup_name(""), None);
+        assert_eq!(sanitize_backup_name("   "), None);
+        assert_eq!(sanitize_backup_name("\"\"\"\n\r"), None);
+    }
+
+    #[test]
+    fn sanitize_backup_name_truncates_to_40_chars() {
+        let raw = "x".repeat(100);
+        let got = sanitize_backup_name(&raw).unwrap();
+        assert_eq!(got.chars().count(), 40);
+        assert_eq!(got, "x".repeat(40));
+    }
+
+    #[test]
+    fn default_backup_name_counts_plus_one() {
+        assert_eq!(default_backup_name(0), "Backup #1");
+        assert_eq!(default_backup_name(9), "Backup #10");
     }
 
     // -- dump args / err_tail --------------------------------------------------
@@ -1169,7 +1347,7 @@ mod tests {
         std::fs::write(d.join("wow-20260201-000000-full.sql.gz"), b"bb").unwrap();
         std::fs::write(
             meta_path_for(&d.join("wow-20260201-000000-full.sql.gz")),
-            format!("{}\n", format_summary_line(1, 1, Some(0))),
+            format!("{}\n", format_summary_line(1, 1, Some(0), None)),
         )
         .unwrap();
         // Not a valid backup name -- must be skipped entirely.
@@ -1181,9 +1359,32 @@ mod tests {
         assert!(entries[0].world);
         assert_eq!(entries[0].size, 2);
         assert_eq!(entries[0].summary, json!({"characters":1,"accounts":1,"bots":0}));
+        // Legacy sidecar (no name field) -- surfaces as None, matching a
+        // pre-feature backup exactly.
+        assert_eq!(entries[0].name, None);
         assert_eq!(entries[1].file, "wow-20260101-000000.sql.gz");
         assert!(!entries[1].world);
         assert_eq!(entries[1].summary, Value::Null);
+        assert_eq!(entries[1].name, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_backups_surfaces_name_and_strips_it_out_of_summary() {
+        let d = tmp_dir("list-name");
+        std::fs::write(d.join("wow-20260101-000000.sql.gz"), b"aaaa").unwrap();
+        std::fs::write(
+            meta_path_for(&d.join("wow-20260101-000000.sql.gz")),
+            format!("{}\n", format_summary_line(2, 1, Some(0), Some("My Backup"))),
+        )
+        .unwrap();
+
+        let entries = list_backups(&d);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name.as_deref(), Some("My Backup"));
+        // `summary` keeps its original 3-field shape -- `name` lives only on
+        // `BackupEntry::name`, not duplicated inside `summary` too.
+        assert_eq!(entries[0].summary, json!({"characters":2,"accounts":1,"bots":0}));
         let _ = std::fs::remove_dir_all(&d);
     }
 
