@@ -324,8 +324,11 @@ export async function wowStats(): Promise<WowStats> {
 export async function wowStatsRead(): Promise<WowStats> {
   return await invoke("wow_stats_read");
 }
+// Task C starter: native mode routes to the direct docker/git `_read`
+// siblings (`dml::maint`); WSL mode keeps shelling `dml` byte-identically.
 export async function wowDockerUsage(): Promise<{ lines: string[] }> {
-  return await invoke("wow_docker_usage");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_docker_usage_read") : invoke("wow_docker_usage");
 }
 export const wowDockerClean = (level: number, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
@@ -345,7 +348,8 @@ export interface UpdateCheck {
   note?: string;
 }
 export async function wowUpdateCheck(): Promise<UpdateCheck> {
-  return await invoke("wow_update_check");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_update_check_read") : invoke("wow_update_check");
 }
 export const wowServerUpdate = (backup: boolean, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
@@ -1297,9 +1301,12 @@ export interface PortCheck {
   ports: PortBinding[];
 }
 
-// Read-only diagnostic: how Docker publishes the game/DB ports.
+// Read-only diagnostic: how Docker publishes the game/DB ports. Native mode
+// routes to the direct `docker port` `_read` sibling (`dml::maint`); WSL
+// mode keeps shelling `dml` byte-identically.
 export async function wowPortCheck(): Promise<PortCheck> {
-  return await invoke("wow_port_check");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_port_check_read") : invoke("wow_port_check");
 }
 
 export async function dmlDoctor(): Promise<string> {

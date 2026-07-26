@@ -1443,6 +1443,92 @@ async fn wow_console_tail_read(lines: Option<u32>) -> Result<serde_json::Value, 
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE fast read of the Tools page's Docker disk-usage card: same
+/// `{"lines":[...]}"` shape as `wow_docker_usage`, via a direct bounded
+/// `docker system df` instead of shelling `dml`. `docker info` down is a
+/// hard `DOCKER_DOWN` error (matching the CLI arm's own gate — unlike
+/// `server-detail`, this verb does NOT treat "down" as data). Native mode
+/// only — WSL keeps calling `wow_docker_usage`.
+#[tauri::command]
+async fn wow_docker_usage_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let program = crate::dml::native::docker_program();
+        crate::dml::maint::read_docker_usage(&program).map_err(|_| CmdError {
+            code: "DOCKER_DOWN".into(),
+            message: "Docker is not running".into(),
+            hint: "Start Docker Desktop, then retry.".into(),
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the Tools/LAN port diagnostic: same envelope
+/// shape as `wow_port_check`, via direct bounded `docker port` probes plus
+/// a `.env` read instead of shelling `dml`. Gates mirror the CLI arm:
+/// `NOT_FOUND` when the WoW Playerbots title isn't installed, `DOCKER_DOWN`
+/// when the engine isn't up. Native mode only — WSL keeps calling
+/// `wow_port_check`.
+#[tauri::command]
+async fn wow_port_check_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "WoW Playerbots server not installed".into(),
+                hint: "Install it first.".into(),
+            });
+        };
+        let program = crate::dml::native::docker_program();
+        if !crate::dml::maint::docker_engine_up(&program, crate::dml::maint::PROBE_TIMEOUT) {
+            return Err(CmdError {
+                code: "DOCKER_DOWN".into(),
+                message: "Docker is not running".into(),
+                hint: "Start the server first, then re-check.".into(),
+            });
+        }
+        Ok(crate::dml::maint::read_port_check(&program, &server_dir, crate::dml::maint::PROBE_TIMEOUT))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the Tools/Updates page's behind-count check:
+/// same envelope shape as `wow_update_check`, via direct bounded `git
+/// fetch --quiet origin` + `git rev-list --count` instead of shelling
+/// `dml`. NEVER mutates the worktree (no pull/stash). Gates mirror the CLI
+/// arm: `NOT_FOUND` when the title isn't installed, `GIT_MISSING` when the
+/// resolved dir isn't a git checkout. Native mode only — WSL keeps calling
+/// `wow_update_check`.
+#[tauri::command]
+async fn wow_update_check_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "WoW Playerbots server not installed".into(),
+                hint: "Install it first, then re-run.".into(),
+            });
+        };
+        if !crate::dml::maint::is_git_checkout(&server_dir) {
+            return Err(CmdError {
+                code: "GIT_MISSING".into(),
+                message: format!("{} is not a git checkout", server_dir.display()),
+                hint: "Can't check for updates.".into(),
+            });
+        }
+        let program = std::ffi::OsString::from("git");
+        Ok(crate::dml::maint::read_update_check(&program, &server_dir))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -4949,6 +5035,9 @@ pub fn run() {
             wow_server_info_read,
             wow_server_detail_read,
             wow_console_tail_read,
+            wow_docker_usage_read,
+            wow_port_check_read,
+            wow_update_check_read,
             backend_mode,
             wow_config_set,
             wow_config_set_native,

@@ -2,6 +2,7 @@ pub mod backend;
 pub mod config;
 pub mod db;
 pub mod envelope;
+pub mod maint;
 pub mod modules;
 pub mod native;
 pub mod pages;

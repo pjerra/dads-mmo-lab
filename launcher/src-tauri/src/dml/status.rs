@@ -55,7 +55,7 @@ fn is_digits(s: &str) -> bool {
 /// `CREATE_NO_WINDOW` on Windows so a status poll never flashes a console —
 /// the same flag every other native docker-shelling call in this codebase
 /// sets (see `dml::native`/`lib.rs::run_bounded`).
-fn windows_no_window(cmd: &mut Command) {
+pub(crate) fn windows_no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -82,7 +82,12 @@ fn windows_no_window(cmd: &mut Command) {
 /// accumulated log output deadlocked the read). This variant drains both
 /// pipes on background threads WHILE polling for exit, so the child can
 /// never block on a full buffer, no matter the output size.
-fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+///
+/// `pub(crate)` (Task C starter): `dml::maint`'s docker-usage/port-check/
+/// update-check reads shell out too (`docker system df`, `docker port`,
+/// `git fetch`) and reuse this same drain-while-polling runner rather than
+/// duplicating it or risking the `crate::output_bounded` deadlock above.
+pub(crate) fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
