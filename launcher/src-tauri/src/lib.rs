@@ -707,6 +707,213 @@ async fn wow_module_update(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `module install`/`module update`/`module remove` (Chunk 3a) —
+// same NDJSON vocabulary as `wow_world_restart_native`: every domain failure
+// travels IN the stream (`section_end{status:"error"}` + `error`), the
+// command itself still resolves `Ok(())`. Faithful ports of the arms in
+// `cli/src/90-main.sh` (install 4586-4841, update 5472-5544, remove 4842-
+// 4966) — the actual per-family/-verb logic lives in `dml::modmgr`
+// (registries, validators, git/mysql subprocess primitives, and the
+// `install_cpp`/`install_lua`/`install_sql`/`remove_cpp`/`remove_lua`/
+// `remove_sql`/`update_module` orchestration functions, each of which emits
+// its OWN `section_end`+`error` on failure); these three `_blocking`
+// functions are the thin per-command wrapper (resolve the server dir, pick
+// the family fn, wrap a success `Ok` in `section_end("ok")`+`done`) that
+// mirrors `wow_world_restart_native_blocking`'s shape. Native mode only —
+// WSL keeps calling `wow_module_install`/`wow_module_update`/`wow_module_
+// remove` (the `dml`-shelling siblings just above).
+// ---------------------------------------------------------------------------
+
+fn wow_module_install_native_blocking(
+    family: String,
+    key: Option<String>,
+    url: Option<String>,
+    backup: Option<bool>,
+    variant: Option<String>,
+    db_cfg: crate::dml::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+
+    emit(modmgr::section_start(modmgr::SECTION_INSTALL));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    // Two DIFFERENT executables: cpp install/update and every family's
+    // clone step shell out to `git` (PATH-resolved, same convention as
+    // `maint`'s `update-check`); the lua/sql families' SQL apply + safety
+    // backup shell out to the resolved Docker Desktop `docker` binary. A
+    // module install/remove/update NEVER hands the wrong one to the wrong
+    // subprocess (a `docker` binary invoked as `git` would just fail every
+    // git call, and vice versa) -- see `dml::modmgr::install_lua`/
+    // `install_sql`'s doc comments for which family touches which.
+    let git_program = std::ffi::OsString::from("git");
+    let docker_program = native::docker_program();
+    let result = match family.as_str() {
+        "cpp" => modmgr::install_cpp(&git_program, &sdir, key.as_deref(), url.as_deref(), backup, &emit),
+        "lua" => {
+            let client_path = modmgr::effective_client_path();
+            modmgr::install_lua(
+                &git_program,
+                &docker_program,
+                &sdir,
+                key.as_deref().unwrap_or(""),
+                url.as_deref(),
+                backup,
+                &db_cfg.password,
+                client_path.as_deref(),
+                &emit,
+            )
+        }
+        "sql" => modmgr::install_sql(
+            &git_program,
+            &docker_program,
+            &sdir,
+            key.as_deref().unwrap_or(""),
+            url.as_deref(),
+            backup,
+            variant.as_deref(),
+            &db_cfg.password,
+            &emit,
+        ),
+        other => {
+            emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
+            return;
+        }
+    };
+
+    if let Ok(data) = result {
+        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module install` — see the module comment above. Native
+/// mode only — WSL keeps calling `wow_module_install`.
+#[tauri::command]
+async fn wow_module_install_native(
+    family: String,
+    key: Option<String>,
+    url: Option<String>,
+    backup: Option<bool>,
+    variant: Option<String>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_module_install_native_blocking(family, key, url, backup, variant, db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+fn wow_module_update_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{config::ConfigReader, maint, modmgr};
+
+    emit(modmgr::section_start(modmgr::SECTION_UPDATE));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    // `module update` is pure git -- no docker at all (see `update_module`'s
+    // doc comment).
+    let git_program = std::ffi::OsString::from("git");
+    if let Ok(data) = modmgr::update_module(&git_program, &sdir, &key, &emit) {
+        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module update` — see the module comment above. Native
+/// mode only — WSL keeps calling `wow_module_update`.
+#[tauri::command]
+async fn wow_module_update_native(key: String, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_module_update_native_blocking(key, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+fn wow_module_remove_native_blocking(
+    family: String,
+    key: String,
+    backup: Option<bool>,
+    db_cfg: crate::dml::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+
+    emit(modmgr::section_start(modmgr::SECTION_REMOVE));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
+        return;
+    };
+
+    let program = native::docker_program();
+    let result = match family.as_str() {
+        "cpp" => modmgr::remove_cpp(&sdir, &key, backup, &emit),
+        "lua" => modmgr::remove_lua(&sdir, &key, backup, &emit),
+        "sql" => modmgr::remove_sql(&program, &sdir, &key, backup, &db_cfg.password, &emit),
+        other => {
+            emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
+            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
+            return;
+        }
+    };
+
+    if let Ok(data) = result {
+        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module remove` — see the module comment above. Native
+/// mode only — WSL keeps calling `wow_module_remove`.
+#[tauri::command]
+async fn wow_module_remove_native(
+    family: String,
+    key: String,
+    backup: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_module_remove_native_blocking(family, key, backup, db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 // Batch 5 F2: ARAC's server-DBC + client-MPQ patch step (CLI allowlists the
 // key to mod-arac; passed through as a plain argv value).
 #[tauri::command]
@@ -6231,10 +6438,13 @@ pub fn run() {
             wow_module_list,
             wow_commands,
             wow_module_install,
+            wow_module_install_native,
             wow_module_remove,
+            wow_module_remove_native,
             wow_module_rebuild,
             wow_module_update_check,
             wow_module_update,
+            wow_module_update_native,
             wow_module_conf_activate,
             wow_module_client_patch,
             wow_module_tracking,

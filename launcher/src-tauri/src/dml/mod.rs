@@ -13,6 +13,7 @@ pub mod iteminfo;
 pub mod lan;
 pub mod lanip;
 pub mod maint;
+pub mod modmgr;
 pub mod modules;
 pub mod native;
 pub mod pages;

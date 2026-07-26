@@ -447,7 +447,11 @@ export async function wowCommands(): Promise<ModCommands[]> {
   return data.mods;
 }
 
-export const wowModuleInstall = (
+// Chunk 3a: native-mode module install/update/remove are fully native
+// STREAMED commands (no `dml` subprocess) -- same Channel signature as the
+// WSL sibling, routed via resolveBackendMode() like wowWorldRestart/
+// wowBridgeSetup above.
+export const wowModuleInstall = async (
   family: string,
   key: string | null,
   url: string | null,
@@ -457,9 +461,12 @@ export const wowModuleInstall = (
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_install", { family, key, url, backup, variant, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_install_native", { family, key, url, backup, variant, onEvent: ch })
+    : invoke("wow_module_install", { family, key, url, backup, variant, onEvent: ch });
 };
-export const wowModuleRemove = (
+export const wowModuleRemove = async (
   family: string,
   key: string,
   onEvent: (e: TermEvent) => void,
@@ -467,7 +474,10 @@ export const wowModuleRemove = (
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_remove", { family, key, backup, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_remove_native", { family, key, backup, onEvent: ch })
+    : invoke("wow_module_remove", { family, key, backup, onEvent: ch });
 };
 export const wowModuleRebuild = (
   backup: boolean,
@@ -496,14 +506,19 @@ export async function wowModuleUpdateCheck(): Promise<ModuleUpdateCheck> {
   return await invoke("wow_module_update_check");
 }
 // Per-module source pull (patch backup + stash + ff-only, no auto rebuild).
-// Done event data: { key, changed, before, after, pending_rebuild }.
-export const wowModuleUpdate = (
+// Done event data: { key, changed, before, after, pending_rebuild }. Native
+// mode runs this fully in Rust (no `dml` subprocess) via `dml::modmgr::
+// update_module` -- same Channel signature either way.
+export const wowModuleUpdate = async (
   key: string,
   onEvent: (e: TermEvent) => void,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_update", { key, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_update_native", { key, onEvent: ch })
+    : invoke("wow_module_update", { key, onEvent: ch });
 };
 // Batch 5 F2: ARAC server-DBC + client-MPQ patch stream (key is allowlisted
 // CLI-side to mod-arac).
