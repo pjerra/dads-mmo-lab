@@ -67,27 +67,47 @@ pub fn backup_keep_from_env() -> usize {
 // Name validation / parsing — `_valid_backup_name` (`60-backup.sh:26`).
 // ---------------------------------------------------------------------------
 
-fn ascii_digits(s: &str, n: usize) -> bool {
-    s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
+fn ascii_digits(b: &[u8]) -> bool {
+    b.iter().all(|c| c.is_ascii_digit())
 }
 
 /// `_valid_backup_name`: `^wow-[0-9]{8}-[0-9]{6}(-full)?(-prerestore)?\.sql\.gz$`,
 /// hand-rolled (no `regex` crate in this workspace — same convention as
 /// `status::strip_ansi`). Gates every verb in this module: list/validate/
 /// delete all refuse a name that doesn't match this shape.
+///
+/// Works entirely on `name.as_bytes()` with plain index/slice arithmetic —
+/// NOT `&str` range-slicing at these fixed offsets — because a raw byte
+/// slice never panics on a misaligned boundary (it just fails the
+/// ASCII-digit check, same as the bash regex simply failing to match). A
+/// `&str` slice at a fixed byte offset, by contrast, panics if that offset
+/// lands inside a multi-byte UTF-8 character, which a crafted name (e.g. one
+/// containing `\u{e9}`) can trigger. Same doctrine as
+/// `dml::lan::matches_172_second_octet`, which indexes `addr.as_bytes()` for
+/// exactly this reason.
 pub fn valid_backup_name(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix("wow-") else { return false };
-    if rest.len() < 8 || !ascii_digits(&rest[..8], 8) {
+    let bytes = name.as_bytes();
+    const PREFIX: &[u8] = b"wow-";
+    if !bytes.starts_with(PREFIX) {
         return false;
     }
-    let Some(rest) = rest[8..].strip_prefix('-') else { return false };
-    if rest.len() < 6 || !ascii_digits(&rest[..6], 6) {
+    let mut i = PREFIX.len();
+    if bytes.len() < i + 8 || !ascii_digits(&bytes[i..i + 8]) {
         return false;
     }
-    let mut rest = &rest[6..];
-    rest = rest.strip_prefix("-full").unwrap_or(rest);
-    rest = rest.strip_prefix("-prerestore").unwrap_or(rest);
-    rest == ".sql.gz"
+    i += 8;
+    if bytes.get(i) != Some(&b'-') {
+        return false;
+    }
+    i += 1;
+    if bytes.len() < i + 6 || !ascii_digits(&bytes[i..i + 6]) {
+        return false;
+    }
+    i += 6;
+    let rest = &bytes[i..];
+    let rest = rest.strip_prefix(b"-full").unwrap_or(rest);
+    let rest = rest.strip_prefix(b"-prerestore").unwrap_or(rest);
+    rest == b".sql.gz"
 }
 
 /// `bw` (`90-main.sh:3719-3720`): a `world` (whole-server, `--include-world`)
@@ -103,12 +123,19 @@ pub fn is_full_name(name: &str) -> bool {
 /// digits — a port of the bash's `${f:4:8}` / `${f:13:6}` substring slices.
 /// `None` if `name` isn't [`valid_backup_name`]-shaped (defensive; callers
 /// always check first).
+///
+/// Slices `name.as_bytes()` at the fixed offsets, not the `&str` itself —
+/// raw byte indexing can never panic on a misaligned UTF-8 boundary (see
+/// [`valid_backup_name`]'s doc comment for why that hazard is real here even
+/// though [`valid_backup_name`] has already been checked: defense in depth,
+/// not reliance on the caller having gotten that gate exactly right).
 pub fn parse_created(name: &str) -> Option<String> {
     if !valid_backup_name(name) || name.len() < 19 {
         return None;
     }
-    let d = &name[4..12];
-    let t = &name[13..19];
+    let bytes = name.as_bytes();
+    let d = std::str::from_utf8(&bytes[4..12]).ok()?;
+    let t = std::str::from_utf8(&bytes[13..19]).ok()?;
     Some(format!("{}-{}-{} {}:{}:{}", &d[0..4], &d[4..6], &d[6..8], &t[0..2], &t[2..4], &t[4..6]))
 }
 
@@ -574,6 +601,35 @@ mod tests {
         assert!(!valid_backup_name("wow-20260726-143022-prerestore-full.sql.gz")); // wrong order
         assert!(!valid_backup_name("xwow-20260726-143022.sql.gz"));
         assert!(!valid_backup_name("wow-20260726-143022.sql.gzX"));
+    }
+
+    #[test]
+    fn valid_backup_name_never_panics_on_multibyte_utf8_at_fixed_offsets() {
+        // Regression for the byte-offset-vs-char-boundary hazard: a
+        // multi-byte UTF-8 char straddling one of the old fixed &str-slice
+        // offsets (7/8, 12/13, 18/19 -- see the doc comment) used to panic
+        // with "byte index N is not a char boundary". Byte-slice indexing
+        // must instead simply fail the ASCII-digit check and return false.
+        // 2-byte char (U+00E9 'é') straddling the date block's tail.
+        assert!(!valid_backup_name("wow-1234567\u{e9}-143022.sql.gz"));
+        // 2-byte char straddling the boundary right after the date block.
+        assert!(!valid_backup_name("wow-12345678\u{e9}143022.sql.gz"));
+        // 2-byte char straddling the time block's tail.
+        assert!(!valid_backup_name("wow-20260726-14302\u{e9}.sql.gz"));
+        // 2-byte char straddling the boundary right after the time block.
+        assert!(!valid_backup_name("wow-20260726-143022\u{e9}sql.gz"));
+        // Multi-byte char right at the very front (prefix check).
+        assert!(!valid_backup_name("\u{e9}wow-20260726-143022.sql.gz"));
+        // 3-byte (€) and 4-byte (😀) forms too, not just 2-byte.
+        assert!(!valid_backup_name("wow-1234567\u{20ac}-143022.sql.gz"));
+        assert!(!valid_backup_name("wow-1234567\u{1f600}-143022.sql.gz"));
+    }
+
+    #[test]
+    fn parse_created_never_panics_on_multibyte_utf8() {
+        assert_eq!(parse_created("wow-1234567\u{e9}-143022.sql.gz"), None);
+        assert_eq!(parse_created("wow-20260726-14302\u{e9}.sql.gz"), None);
+        assert_eq!(parse_created("wow-1234567\u{1f600}-143022.sql.gz"), None);
     }
 
     #[test]
