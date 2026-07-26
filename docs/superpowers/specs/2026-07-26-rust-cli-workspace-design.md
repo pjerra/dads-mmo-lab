@@ -89,9 +89,11 @@ playerbots, it goes in `dml-wow`.
   stdout (streaming commands print NDJSON events as they happen).
 - Exit code 0 on `ok`, non-zero with an error envelope otherwise — same
   contract the bash `dml --json` established.
-- `dml-wow install` shells out to the existing bash installer script and
-  streams its output as NDJSON `line` events. On Windows this requires Git
-  Bash; if missing, fail with a message saying exactly that. The installers
+- `dml-wow install` shells out to the existing bash installer script in
+  interactive stdio passthrough (the installers prompt the user; wrapping
+  them in NDJSON would starve the prompts — amended 2026-07-26 during
+  planning). On Windows this requires Git Bash; if missing, fail with a
+  message saying exactly that. The installers
   stay bash on purpose (standing verdict: the install scripts ARE the
   product; porting them is explicitly out of scope).
 
