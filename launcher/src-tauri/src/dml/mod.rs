@@ -12,6 +12,7 @@ pub mod envelope;
 pub mod iteminfo;
 pub mod lan;
 pub mod lanip;
+pub mod lifecycle;
 pub mod maint;
 pub mod modmgr;
 pub mod modules;

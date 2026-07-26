@@ -6268,6 +6268,10 @@ async fn games_start(
     // skips this entirely and behaves exactly as before.
     if is_native_backend() {
         ensure_engine_up(&on_event).await?;
+        // Chunk 3b: native mode replaces the inner `dml` shell-out with
+        // direct compose orchestration (see `games_lifecycle_native_blocking`
+        // below) -- the engine-ensure-up wrapping just above is unchanged.
+        return run_games_lifecycle_native("start", id, false, on_event).await;
     }
     stream_action("start", id, on_event, state).await
 }
@@ -6290,8 +6294,14 @@ async fn games_stop(
     // added that doesn't thread the toggle through.
     let stop_docker = crate::dml::native::stop_engine_enabled(is_native_backend(), manage_docker);
     // Stop the server exactly as today (clone the channel so we can keep
-    // streaming the engine-stop afterwards).
-    let result = stream_action("stop", id, on_event.clone(), state).await;
+    // streaming the engine-stop afterwards). Chunk 3b: native mode replaces
+    // the inner `dml` shell-out with direct compose orchestration -- the
+    // engine-stop wrapping below is unchanged either way.
+    let result = if is_native_backend() {
+        run_games_lifecycle_native("stop", id, false, on_event.clone()).await
+    } else {
+        stream_action("stop", id, on_event.clone(), state).await
+    };
     // Then free the VM's RAM by stopping the engine. Best-effort: this runs
     // even if the server-stop reported an error (the containers die with the
     // engine anyway), and its own failure only warns — `result` is what the
@@ -6312,13 +6322,325 @@ async fn games_restart(
     if !validate_game_id(&id) {
         return Err(bad_id(&id));
     }
+    let skip = skip_saveall.unwrap_or(false);
+    // Chunk 3b: native mode replaces the inner `dml` shell-out with direct
+    // compose orchestration. No engine-lifecycle wrapping here (matches
+    // today's WSL sibling: a restart assumes the server -- and so the
+    // engine -- is already up; only cold `start` brings Docker Desktop up).
+    if is_native_backend() {
+        return run_games_lifecycle_native("restart", id, skip, on_event).await;
+    }
     // --no-saveall = the GUI's "faster restart" option (skip the redundant
     // pre-stop saveall; the graceful stop still saves on shutdown).
     let mut args: Vec<String> = vec!["games".into(), "restart".into(), id];
-    if skip_saveall.unwrap_or(false) {
+    if skip {
         args.push("--no-saveall".into());
     }
     stream_args(args, on_event, state).await
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `games start`/`stop`/`restart` compose orchestration (Chunk
+// 3b) — same NDJSON vocabulary + contract as `wow_world_restart_native`:
+// every domain failure travels IN the stream (`section_end{status:"error"}`
+// + `error`), this function itself never "fails" (the three commands above
+// resolve `Ok(())` regardless). A faithful port of `_games_start_impl`
+// (`90-main.sh:194-253`, covers BOTH `start` and `restart`) + the `stop)`
+// arm (`90-main.sh:1111-1132`). Pure primitives (title/compose-dir
+// resolution, the flush-heal decision, the port-conflict line builder, the
+// per-mode compose argv sequence) live in `dml::lifecycle`; this is the thin
+// per-command orchestration wrapper, mirroring `wow_world_restart_native_
+// blocking`'s shape. NOT gated on `require_native_backend()` — unlike
+// `wow_world_restart_native` these aren't `_native`-suffixed siblings; the
+// THREE CALLERS (`games_start`/`games_stop`/`games_restart` above) already
+// branch on `is_native_backend()` themselves (that's where the Docker-
+// Desktop-engine wrapping lives), so this only ever runs in native mode.
+//
+// KEY FACT (verified live): the native title dir has no `dml-start.sh`, so
+// this always takes the bash arm's ELSE branch -- pure `docker compose`
+// orchestration, never `bash ./dml-start.sh`. If a future title dir grows
+// one, there is no bash host here to run it.
+// ---------------------------------------------------------------------------
+
+fn gl_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
+    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
+}
+
+fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
+}
+
+/// The blocking flow itself (real docker spawns) — run under
+/// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
+fn games_lifecycle_native_blocking(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{lifecycle, maint, native, status};
+
+    emit(serde_json::json!({"event": "section_start", "name": mode}));
+
+    let title_dir = lifecycle::title_dir_for_id(&id);
+    if !title_dir.is_dir() {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error("NOT_FOUND", format!("Title not found: {id}"), "Run: dml games list --json"));
+        return;
+    }
+    let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) else {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error(
+            "NO_COMPOSE",
+            format!("No compose file found in {id} or its subdirectories."),
+            &format!("Reinstall the title or check {}", title_dir.display()),
+        ));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error("DOCKER_DOWN", "Docker is not running.", "Try: dml doctor"));
+        return;
+    }
+
+    // Self-heal an interrupted `wow bots flush` -- start+restart only (a
+    // `stop` never boots the server, so there is nothing to heal against
+    // before it runs). THIS GUARD PREVENTS A BOT-WIPE ON BOOT.
+    if mode == "start" || mode == "restart" {
+        if let Some(note) = lifecycle::flush_heal_flag(&compose_dir) {
+            gl_line(&emit, "warn", note);
+        }
+    }
+
+    // Cold starts only: on a restart the ports are (expectedly) held by this
+    // server's own still-running containers, so the check would cry wolf.
+    if mode == "start" {
+        for line in lifecycle::check_port_conflicts(&compose_dir, lifecycle::port_listening) {
+            gl_line(&emit, "warn", line);
+        }
+    }
+
+    if mode == "restart" && skip_saveall {
+        gl_line(&emit, "info", lifecycle::SKIP_SAVEALL_NOTE);
+    }
+
+    let mut rc: Result<(), i32> = Ok(());
+    for argv in lifecycle::compose_sequence_for_mode(mode) {
+        let is_down = lifecycle::is_compose_down(&argv);
+        gl_line(
+            &emit,
+            "info",
+            if is_down { "stopping containers (docker compose down)..." } else { "starting containers (docker compose up -d)..." },
+        );
+        let timeout = if is_down { lifecycle::COMPOSE_DOWN_TIMEOUT } else { lifecycle::COMPOSE_UP_TIMEOUT };
+        let mut cmd = std::process::Command::new(&docker_program);
+        cmd.current_dir(&compose_dir).args(argv);
+        status::windows_no_window(&mut cmd);
+        rc = match status::output_bounded_draining(cmd, timeout) {
+            Some(out) if out.status.success() => Ok(()),
+            Some(out) => Err(out.status.code().unwrap_or(-1)),
+            None => Err(-1),
+        };
+        if rc.is_err() {
+            break;
+        }
+    }
+
+    match rc {
+        Ok(()) => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "ok"}));
+            let state = if mode == "stop" { "stopped" } else { "running" };
+            emit(serde_json::json!({"event": "done", "data": {"id": id, "state": state}}));
+        }
+        Err(code) if mode == "stop" => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+            emit(gl_error("STOP_FAILED", format!("{id} failed to stop (exit {code})"), &format!("Try: dml kill {id}")));
+        }
+        Err(code) => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+            emit(gl_error(
+                "START_FAILED",
+                format!("{id} failed to {mode} (exit {code})"),
+                "Check logs: docker compose logs, or dml doctor",
+            ));
+        }
+    }
+}
+
+/// Async wrapper shared by `games_start`/`games_stop`/`games_restart`'s
+/// native branch: spawns [`games_lifecycle_native_blocking`] and joins it.
+/// Domain failures already traveled in the event stream, so this resolves
+/// `Ok(())` unless the blocking task itself panicked.
+async fn run_games_lifecycle_native(
+    mode: &'static str,
+    id: String,
+    skip_saveall: bool,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        games_lifecycle_native_blocking(mode, id, skip_saveall, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `wow update` (server self-update, Chunk 3b) — oracle
+// `90-main.sh:5645-5732` + `_wow_pull_repo`/`_wow_remote_ok`/`_wow_git_branch`
+// (`70-modules.sh:843,850,872-933`, ported in `dml::modmgr`, Chunk 3a).
+// STREAMED, same NDJSON vocabulary as `wow_world_restart_native`. A brand
+// new `_native` sibling (unlike `games_start`/`stop`/`restart` above, WSL's
+// `wow_server_update` has no engine-lifecycle wrapping to preserve) —
+// `require_native_backend()` gates it, matching every other `_native`
+// command. Fail-closed gates run IN ORDER, before any mutation: server dir
+// -> `.git` checkout -> AzerothCore remote -> mod-playerbots remote (only if
+// present) -> branch -> explicit `--backup`/`--no-backup` (see
+// `dml::modmgr::update_gate_order` for the same order, pure + unit-tested).
+// ---------------------------------------------------------------------------
+
+const WOW_UPDATE_SECTION: &str = "server-update";
+
+fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+
+    emit(serde_json::json!({"event": "section_start", "name": WOW_UPDATE_SECTION}));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(gl_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    if !modmgr::is_git_checkout(&sdir) {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(gl_error("GIT_MISSING", format!("{} is not a git checkout", sdir.display()), "Can't update from source."));
+        return;
+    }
+
+    let git_program = std::ffi::OsString::from("git");
+
+    // AzerothCore must be the custom mod-playerbots fork on the Playerbot
+    // branch -- pulling upstream azerothcore/azerothcore-wotlk here would
+    // break the playerbots integration. No override: hard error.
+    let acurl = modmgr::git_remote_url(&git_program, &sdir);
+    if !modmgr::wow_remote_ok(&acurl, "mod-playerbots/azerothcore-wotlk") {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(gl_error(
+            "REMOTE_MISMATCH",
+            "AzerothCore origin is not the expected Playerbots fork",
+            &format!(
+                "found: {} -- pulling upstream AzerothCore would break Playerbots. Fix the remote manually, then retry.",
+                if acurl.is_empty() { "<none>" } else { acurl.as_str() }
+            ),
+        ));
+        return;
+    }
+
+    let moddir = sdir.join("modules").join("mod-playerbots");
+    let pb_present = modmgr::is_git_checkout(&moddir);
+    if pb_present {
+        let pburl = modmgr::git_remote_url(&git_program, &moddir);
+        if !modmgr::wow_remote_ok(&pburl, "mod-playerbots/mod-playerbots") {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            emit(gl_error(
+                "REMOTE_MISMATCH",
+                "mod-playerbots origin is not the expected fork",
+                &format!("found: {}", if pburl.is_empty() { "<none>" } else { pburl.as_str() }),
+            ));
+            return;
+        }
+    }
+
+    let acbranch = modmgr::git_branch(&git_program, &sdir);
+    if acbranch != "Playerbot" {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(gl_error("BRANCH_MISMATCH", format!("AzerothCore checkout is on branch '{acbranch}' (expected 'Playerbot')"), ""));
+        return;
+    }
+
+    let Some(do_backup) = backup else {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(gl_error(
+            "BAD_ARG",
+            "Pick --backup or --no-backup",
+            "New core revisions can run DB migrations at next start -- decide explicitly.",
+        ));
+        return;
+    };
+
+    if do_backup {
+        let docker_program = native::docker_program();
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            emit(gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
+            return;
+        }
+    }
+
+    let mut changed = false;
+
+    let ac_before = modmgr::git_short_head(&git_program, &sdir);
+    let ac_pull_changed = match modmgr::wow_pull_repo(&git_program, &sdir, "AzerothCore", &emit) {
+        Ok(c) => c,
+        Err(()) => {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            return;
+        }
+    };
+    let ac_after = modmgr::git_short_head(&git_program, &sdir);
+    if ac_pull_changed {
+        changed = true;
+    }
+    let ac_summary = modmgr::pull_summary(&ac_before, &ac_after);
+
+    let pb_summary = if pb_present {
+        let pb_before = modmgr::git_short_head(&git_program, &moddir);
+        let pb_pull_changed = match modmgr::wow_pull_repo(&git_program, &moddir, "mod-playerbots", &emit) {
+            Ok(c) => c,
+            Err(()) => {
+                emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+                return;
+            }
+        };
+        let pb_after = modmgr::git_short_head(&git_program, &moddir);
+        if pb_pull_changed {
+            changed = true;
+        }
+        modmgr::pull_summary(&pb_before, &pb_after)
+    } else {
+        gl_line(&emit, "warn", "modules/mod-playerbots not found -- skipping module update.");
+        "skipped".to_string()
+    };
+
+    if changed {
+        let _ = modmgr::rebuild_pending_add(&sdir, "core-update");
+        gl_line(&emit, "info", "Rebuild required to compile the update -- use the rebuild banner on this page.");
+    }
+
+    emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "ok"}));
+    emit(serde_json::json!({"event": "done", "data": {"changed": changed, "ac": ac_summary, "playerbots": pb_summary}}));
+}
+
+/// NATIVE-MODE `wow update` (server self-update). Native mode only -- WSL
+/// keeps calling `wow_server_update` (the `dml`-shelling sibling above).
+/// `backup: None` reaches the arm's own `BAD_ARG` gate (the frontend always
+/// passes an explicit `true`/`false`, matching WSL's plain-`bool` sibling —
+/// `None` only reaches a future/alternate caller that omits the choice).
+#[tauri::command]
+async fn wow_update_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_update_native_blocking(backup, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -6433,6 +6755,7 @@ pub fn run() {
             wow_docker_clean,
             wow_update_check,
             wow_server_update,
+            wow_update_native,
             wow_console_tail,
             wow_console_send,
             wow_module_list,

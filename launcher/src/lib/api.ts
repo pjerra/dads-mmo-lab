@@ -351,10 +351,17 @@ export async function wowUpdateCheck(): Promise<UpdateCheck> {
   const mode = await resolveBackendMode();
   return mode === "native" ? invoke("wow_update_check_read") : invoke("wow_update_check");
 }
-export const wowServerUpdate = (backup: boolean, onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 3b): the native command emits its ndjson
+// events directly (no `dml` subprocess, faithful port of the `wow update`
+// arm's fail-closed gates) -- same `backup` boolean either way. WSL mode is
+// byte-for-byte unchanged.
+export const wowServerUpdate = async (backup: boolean, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_server_update", { backup, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_update_native", { backup, onEvent: ch })
+    : invoke("wow_server_update", { backup, onEvent: ch });
 };
 export interface ConsoleTail {
   available: boolean;

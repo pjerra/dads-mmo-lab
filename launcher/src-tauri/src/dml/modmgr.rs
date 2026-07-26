@@ -385,14 +385,80 @@ pub fn is_git_checkout(dir: &Path) -> bool {
     dir.join(".git").is_dir()
 }
 
-/// `_wow_git_url` (`70-modules.sh:842`).
-fn git_remote_url(program: &OsStr, dir: &Path) -> String {
+/// `_wow_git_url` (`70-modules.sh:842`). `pub`: reused by `wow_update_native`
+/// (Chunk 3b, `lib.rs`) for the AzerothCore/mod-playerbots remote gates.
+pub fn git_remote_url(program: &OsStr, dir: &Path) -> String {
     git_field(program, dir, &["remote", "get-url", "origin"])
 }
 
-/// `_wow_git_head` (`70-modules.sh:844`).
-fn git_short_head(program: &OsStr, dir: &Path) -> String {
+/// `_wow_git_head` (`70-modules.sh:844`). `pub`: reused by `wow_update_native`
+/// for the before/after summary (same pattern [`update_module`] uses below).
+pub fn git_short_head(program: &OsStr, dir: &Path) -> String {
     git_field(program, dir, &["rev-parse", "--short", "HEAD"])
+}
+
+/// `_wow_git_branch` (`70-modules.sh:843`). `pub`: reused by
+/// `wow_update_native`'s `BRANCH_MISMATCH` gate (`90-main.sh:5688-5693`).
+pub fn git_branch(program: &OsStr, dir: &Path) -> String {
+    git_field(program, dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+}
+
+/// `_wow_remote_ok` (`70-modules.sh:850`): does a remote URL point at the
+/// expected fork? Old installs may still point at the pre-rename
+/// `liyunfan1223` org -- GitHub redirects those, so they're accepted too
+/// (ported verbatim, including that fallback).
+pub fn wow_remote_ok(url: &str, expected_substr: &str) -> bool {
+    url.contains(expected_substr) || url.contains("liyunfan1223")
+}
+
+/// `_WOW_PULL_SUMMARY`'s assembly (`70-modules.sh:927-931`): `"up to date"`
+/// when the short HEAD didn't move, else `"<before> -> <after>"`.
+pub fn pull_summary(before: &str, after: &str) -> String {
+    if before == after {
+        "up to date".to_string()
+    } else {
+        format!("{before} -> {after}")
+    }
+}
+
+/// Which gate rejects first, given already-computed synthetic state -- a
+/// pure, unit-testable mirror of the `wow update` arm's fail-closed gate
+/// ORDER (`90-main.sh:5645-5732`: server dir -> git checkout -> AzerothCore
+/// remote -> mod-playerbots remote (only if the module is present) -> branch
+/// -> explicit `--backup`/`--no-backup`). `None` means every gate passed (the
+/// real function proceeds to the backup + pull steps). The real
+/// `wow_update_native_blocking` (`lib.rs`) evaluates the SAME conditions in
+/// the SAME order directly (each with its own message/hint) rather than
+/// calling this helper -- it exists so that order is independently asserted
+/// against synthetic states without a live git checkout.
+pub fn update_gate_order(
+    server_dir_exists: bool,
+    is_git_checkout: bool,
+    ac_remote_ok: bool,
+    pb_present: bool,
+    pb_remote_ok: bool,
+    branch_is_playerbot: bool,
+    backup_choice: Option<bool>,
+) -> Option<&'static str> {
+    if !server_dir_exists {
+        return Some("NOT_FOUND");
+    }
+    if !is_git_checkout {
+        return Some("GIT_MISSING");
+    }
+    if !ac_remote_ok {
+        return Some("REMOTE_MISMATCH");
+    }
+    if pb_present && !pb_remote_ok {
+        return Some("REMOTE_MISMATCH");
+    }
+    if !branch_is_playerbot {
+        return Some("BRANCH_MISMATCH");
+    }
+    if backup_choice.is_none() {
+        return Some("BAD_ARG");
+    }
+    None
 }
 
 fn git_clone_depth1(program: &OsStr, url: &str, dest: &Path) -> bool {
@@ -2190,5 +2256,80 @@ mod tests {
         assert!(paragon_migration_skip("some_example.sql"));
         assert!(!paragon_migration_skip("02_add_column.sql"));
         assert!(!paragon_migration_skip("01_create_database.sql")); // caller special-cases this one separately, but the predicate itself doesn't skip it
+    }
+
+    // -- wow_remote_ok / pull_summary (Chunk 3b self-update primitives) ---------
+
+    #[test]
+    fn wow_remote_ok_matches_expected_substring() {
+        assert!(wow_remote_ok("https://github.com/mod-playerbots/azerothcore-wotlk.git", "mod-playerbots/azerothcore-wotlk"));
+        assert!(wow_remote_ok("git@github.com:mod-playerbots/mod-playerbots.git", "mod-playerbots/mod-playerbots"));
+        assert!(!wow_remote_ok("https://github.com/azerothcore/azerothcore-wotlk.git", "mod-playerbots/azerothcore-wotlk"));
+    }
+
+    #[test]
+    fn wow_remote_ok_accepts_legacy_liyunfan1223_org() {
+        // Old installs may still point at the pre-rename org; GitHub redirects
+        // those, so they're accepted even though the substring doesn't match.
+        assert!(wow_remote_ok("https://github.com/liyunfan1223/mod-playerbots.git", "mod-playerbots/mod-playerbots"));
+    }
+
+    #[test]
+    fn wow_remote_ok_empty_url_rejected() {
+        assert!(!wow_remote_ok("", "mod-playerbots/azerothcore-wotlk"));
+    }
+
+    #[test]
+    fn pull_summary_up_to_date_when_unchanged() {
+        assert_eq!(pull_summary("abc1234", "abc1234"), "up to date");
+    }
+
+    #[test]
+    fn pull_summary_before_arrow_after_when_changed() {
+        assert_eq!(pull_summary("abc1234", "def5678"), "abc1234 -> def5678");
+    }
+
+    // -- update_gate_order (Chunk 3b self-update gate ORDER) --------------------
+
+    #[test]
+    fn update_gate_order_all_pass_is_none() {
+        assert_eq!(update_gate_order(true, true, true, true, true, true, Some(true)), None);
+        assert_eq!(update_gate_order(true, true, true, false, true, true, Some(false)), None);
+    }
+
+    #[test]
+    fn update_gate_order_not_found_first() {
+        // Every other input is deliberately also-failing, to prove NOT_FOUND
+        // wins regardless -- it is checked first.
+        assert_eq!(update_gate_order(false, false, false, true, false, false, None), Some("NOT_FOUND"));
+    }
+
+    #[test]
+    fn update_gate_order_git_missing_before_remote_checks() {
+        assert_eq!(update_gate_order(true, false, false, true, false, false, None), Some("GIT_MISSING"));
+    }
+
+    #[test]
+    fn update_gate_order_ac_remote_mismatch_before_branch_and_backup() {
+        assert_eq!(update_gate_order(true, true, false, false, true, false, None), Some("REMOTE_MISMATCH"));
+    }
+
+    #[test]
+    fn update_gate_order_pb_remote_mismatch_only_when_pb_present() {
+        // pb absent -> its own remote check is skipped entirely, so a "bad"
+        // pb_remote_ok=false doesn't matter.
+        assert_eq!(update_gate_order(true, true, true, false, false, true, Some(true)), None);
+        // pb present + bad remote -> rejected.
+        assert_eq!(update_gate_order(true, true, true, true, false, true, Some(true)), Some("REMOTE_MISMATCH"));
+    }
+
+    #[test]
+    fn update_gate_order_branch_mismatch_before_backup_choice() {
+        assert_eq!(update_gate_order(true, true, true, false, true, false, None), Some("BRANCH_MISMATCH"));
+    }
+
+    #[test]
+    fn update_gate_order_bad_arg_when_backup_choice_missing() {
+        assert_eq!(update_gate_order(true, true, true, false, true, true, None), Some("BAD_ARG"));
     }
 }
