@@ -38,10 +38,14 @@ pub fn title_dir_for_id(id: &str) -> PathBuf {
     games_dir_from_env().join(id)
 }
 
+/// The four canonical compose filenames, in the fixed scan order both
+/// `_has_compose` (`90-main.sh:9-15`) and `_compose_running`
+/// (`90-main.sh:17-24`) use.
+const COMPOSE_FILE_CANDIDATES: [&str; 4] =
+    ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
+
 fn has_compose(dir: &Path) -> bool {
-    ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"]
-        .iter()
-        .any(|name| dir.join(name).is_file())
+    COMPOSE_FILE_CANDIDATES.iter().any(|name| dir.join(name).is_file())
 }
 
 /// `_resolve_compose_dir` (`90-main.sh:61-71`): the title dir itself if it
@@ -54,6 +58,32 @@ pub fn resolve_compose_dir(title_dir: &Path) -> Option<PathBuf> {
     }
     let entries = std::fs::read_dir(title_dir).ok()?;
     entries.flatten().map(|e| e.path()).find(|p| p.is_dir() && has_compose(p))
+}
+
+// ---------------------------------------------------------------------------
+// `games status` (Part 5a) -- `_compose_running` (`90-main.sh:17-24`), the
+// docker-ps-derived running/stopped classification the `games status` arm
+// feeds into its `state` field (`90-main.sh:1074-1091`).
+// ---------------------------------------------------------------------------
+
+/// The first compose filename present in `dir`, in `_compose_running`'s
+/// exact scan order (SAME order `has_compose` already used to establish
+/// `dir` carries ONE of these four). `None` only if `dir` somehow lost its
+/// compose file between `resolve_compose_dir` and this call (a live
+/// TOCTOU race, not a real code path) -- the caller then reports 0 running
+/// containers without ever invoking docker, matching `_compose_running`'s
+/// own `[[ -z "$compose_file" ]] && echo 0` short-circuit.
+pub fn compose_file_name(dir: &Path) -> Option<&'static str> {
+    COMPOSE_FILE_CANDIDATES.into_iter().find(|name| dir.join(name).is_file())
+}
+
+/// Parse `docker compose -f <file> ps --status running -q` stdout into a
+/// running-container count — a port of `_compose_running`'s tail pipeline
+/// (`| wc -l`, `90-main.sh:23`): the `-q` flag prints one container ID per
+/// running container, one per line, so every non-empty (non-whitespace-only)
+/// line counts as one.
+pub fn count_running_ids(ps_out: &str) -> usize {
+    ps_out.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +405,36 @@ mod tests {
         std::fs::create_dir_all(dir.join("subdir")).unwrap();
         assert_eq!(resolve_compose_dir(&dir), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -- Part 5a: compose_file_name / count_running_ids (`games status`) --
+
+    #[test]
+    fn compose_file_name_scan_order_and_absence() {
+        let dir = std::env::temp_dir().join(format!("dml-lifecycle-test-cfn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(compose_file_name(&dir), None);
+
+        // Lower-priority name only.
+        std::fs::write(dir.join("compose.yaml"), "").unwrap();
+        assert_eq!(compose_file_name(&dir), Some("compose.yaml"));
+
+        // Higher-priority name added -> scan order picks it first.
+        std::fs::write(dir.join("docker-compose.yml"), "").unwrap();
+        assert_eq!(compose_file_name(&dir), Some("docker-compose.yml"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn count_running_ids_counts_nonblank_lines() {
+        assert_eq!(count_running_ids(""), 0);
+        assert_eq!(count_running_ids("\n\n"), 0);
+        assert_eq!(count_running_ids("abc123\n"), 1);
+        assert_eq!(count_running_ids("abc123\ndef456\n"), 2);
+        // A trailing/whitespace-only line never counts as a container.
+        assert_eq!(count_running_ids("abc123\n   \n"), 1);
     }
 
     // -- flush-heal decision ------------------------------------------------

@@ -358,7 +358,7 @@ fn conf_read_raw(path: &Path, key: &str) -> String {
 /// per-call uniqueness without relying on the pid at all.
 static NEXT_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     let seq = NEXT_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut tmp_os = path.as_os_str().to_os_string();
     tmp_os.push(format!(".tmp.{}.{}", std::process::id(), seq));
@@ -686,6 +686,273 @@ pub fn direct_conf_path(title_dir: &Path, name: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Sibling `<path>.dist` — the `.dist` half of the raw-read/raw-reset/
+/// raw-write allowlist checks (`90-main.sh:2701,2724,2746` etc, all of which
+/// spell `"$fpath.dist"` inline). Factored out so every call site derives the
+/// same path the same way.
+pub fn dist_sibling(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".dist");
+    PathBuf::from(os)
+}
+
+/// Sibling `<path>.bak` — the automatic backup raw-reset/raw-write take
+/// before overwriting an existing file (`90-main.sh:2727,2769`: `cp -p
+/// "$fpath" "$fpath.bak"`).
+pub fn bak_sibling(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".bak");
+    PathBuf::from(os)
+}
+
+/// Full editable-file path resolution — a faithful port of `_cfg_file_path`
+/// (`40-config.sh:645-659`), the traversal guard shared by raw-read/
+/// raw-write/raw-reset (Part 5a) AND (via [`direct_conf_path`], already the
+/// module-conf arm of this same bash function) `wow config set`'s direct
+/// route. `.env`/the compose override/`worldserver.conf`/`authserver.conf`
+/// are FIXED names, resolved unconditionally — exactly like the bash arms,
+/// which never `return 1` for these four; existence is the CALLER's problem.
+/// Any other name falls to [`direct_conf_path`]: it must be
+/// `^[A-Za-z0-9_.-]+\.conf$` (no slash can ever match, so this is the
+/// traversal guard) AND have a conf OR its `.dist` already on disk under
+/// `env/dist/etc/modules/`.
+pub fn cfg_file_path(title_dir: &Path, name: &str) -> Option<PathBuf> {
+    match name {
+        ".env" => Some(title_dir.join(".env")),
+        "docker-compose.override.yml" => Some(title_dir.join("docker-compose.override.yml")),
+        "worldserver.conf" | "authserver.conf" => {
+            Some(title_dir.join("env").join("dist").join("etc").join(name))
+        }
+        _ => direct_conf_path(title_dir, name),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pb-keys / conf-keys (Part 5a): the searchable all-keys browsers. Shared
+// row-shape logic + the `_conf_help_lines` comment-doc extractor.
+// ---------------------------------------------------------------------------
+
+/// Whether leading-blank-trimmed `s` starts with `<key>[ \t]*=` — the ONE
+/// key-detection gate every awk helper in `40-config.sh` shares
+/// (`_cfg_conf_load_file`/`_pb_kv_lines`/`_conf_help_lines`'s
+/// `^[A-Za-z0-9_.]+[ \t]*=`). Returns `(key, value_after_eq)`, where
+/// `value_after_eq` still carries ITS OWN leading/trailing blanks — callers
+/// trim per their own needs (some want the raw value, `_conf_help_lines`
+/// never needs it at all).
+fn match_key_eq(s: &str) -> Option<(&str, &str)> {
+    let key_len = s
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '.'))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    if key_len == 0 {
+        return None;
+    }
+    let key = &s[..key_len];
+    let after = s[key_len..].trim_start_matches([' ', '\t']);
+    let value = after.strip_prefix('=')?;
+    Some((key, value))
+}
+
+/// Every active `Key = value` line as `(key, value, 1-based line number)` —
+/// a port of `_pb_kv_lines` (`40-config.sh:484-500`) PLUS the pb-keys/
+/// conf-keys arms' own dedup loop (`90-main.sh:2581-2584`/`2641-2644`):
+/// duplicate keys keep their FIRST position in the returned `Vec`, but the
+/// LAST occurrence's value/line wins (bash associative-array overwrite,
+/// walked in file order).
+pub fn kv_rows(content: &str) -> Vec<(String, String, usize)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut vals: HashMap<String, (String, usize)> = HashMap::new();
+    for (idx, raw_line) in content.split('\n').enumerate() {
+        let lineno = idx + 1;
+        let s = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let s = s.trim_start_matches([' ', '\t']);
+        let Some((key, after_eq)) = match_key_eq(s) else { continue };
+        let value = after_eq.trim_matches([' ', '\t']).to_string();
+        if !vals.contains_key(key) {
+            order.push(key.to_string());
+        }
+        vals.insert(key.to_string(), (value, lineno));
+    }
+    order
+        .into_iter()
+        .map(|k| {
+            let (v, l) = vals.remove(&k).expect("key was just pushed to order from the same map");
+            (k, v, l)
+        })
+        .collect()
+}
+
+/// One row of the pb-keys/conf-keys browser.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyBrowserRow {
+    pub key: String,
+    pub value: String,
+    pub default: Option<String>,
+    pub line: usize,
+}
+
+/// Shared row assembly for pb-keys (`90-main.sh:2562-2606`) and conf-keys
+/// (`90-main.sh:2607-2669`) — the two arms are otherwise IDENTICAL in this
+/// part of their logic (conf-keys additionally attaches `help`, assembled
+/// separately). `src_content` is the file actually being shown (the live
+/// conf if it exists, else its `.dist`); `src_is_dist` is whether that shown
+/// file IS the `.dist` (no live conf yet). Default-value derivation
+/// (`dv=`/`90-main.sh:2592-2597,2657-2662`): when `src_is_dist`, default
+/// equals the row's OWN value (nothing else to compare against); otherwise
+/// default is the SAME key's value in `dist_content` (only supplied by the
+/// caller when the `.dist` actually exists on disk) — `None` when that key
+/// is absent from the dist (bash's `${_pb_def[$k]+x}` EXISTENCE test, not a
+/// non-empty check: a dist row with an empty value still counts as present).
+pub fn key_browser_rows(src_content: &str, dist_content: Option<&str>, src_is_dist: bool) -> Vec<KeyBrowserRow> {
+    let dist_map: HashMap<String, String> = match dist_content {
+        Some(c) => kv_rows(c).into_iter().map(|(k, v, _)| (k, v)).collect(),
+        None => HashMap::new(),
+    };
+    kv_rows(src_content)
+        .into_iter()
+        .map(|(key, value, line)| {
+            let default =
+                if src_is_dist { Some(value.clone()) } else { dist_map.get(&key).cloned() };
+            KeyBrowserRow { key, value, default, line }
+        })
+        .collect()
+}
+
+/// Per-key comment-block help text, in file order — a faithful port of
+/// `_conf_help_lines` (`40-config.sh:517-570`), the conf-keys browser's doc
+/// extractor. Two documentation styles both feed the SAME output:
+///
+///  - an ADJACENT block directly above a key (blank lines between block and
+///    key are fine; a fresh block after a blank/other line never bleeds
+///    into a later one — see `buf` resets below);
+///  - a SHARED doc block where one contiguous comment run documents many
+///    keys, each introduced by its own `#    Key.Name` header line (the
+///    `hdr` map) — this wins over the adjacent block when both exist for
+///    the same key, and can appear ANYWHERE in the file relative to the
+///    key's own assignment line (even after it), since both passes scan the
+///    WHOLE file.
+///
+/// Decoration-only comment lines (bare `#`, `####`) contribute nothing;
+/// real key names cannot double as prose (pass 1 first collects every key
+/// this file actually assigns, so a header-shaped comment only counts as a
+/// header when it names one of THOSE keys). Each help string is squeezed
+/// (whitespace runs -> one space), capped at 400 chars, and keys with no
+/// help at all are omitted from the result.
+pub fn conf_help_lines(content: &str) -> Vec<(String, String)> {
+    // Pass 1: the keys this conf actually assigns, in first-seen order.
+    let mut korder: Vec<String> = Vec::new();
+    let mut keyseen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for raw_line in content.split('\n') {
+        let s = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let s = s.trim_start_matches([' ', '\t']);
+        if let Some((key, _)) = match_key_eq(s) {
+            if keyseen.insert(key.to_string()) {
+                korder.push(key.to_string());
+            }
+        }
+    }
+
+    // Pass 2: adjacent blocks (`buf`) + per-key header slices (`hdr`).
+    #[derive(PartialEq)]
+    enum Prev {
+        Start,
+        Comment,
+        Blank,
+        Key,
+        Other,
+    }
+    let mut prev = Prev::Start;
+    let mut buf = String::new();
+    let mut cap = String::new();
+    let mut hdr: HashMap<String, String> = HashMap::new();
+    let mut adj: HashMap<String, String> = HashMap::new();
+
+    for raw_line in content.split('\n') {
+        let s = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let t = s.trim_start_matches([' ', '\t']);
+        if let Some(hashes_stripped) = Some(t).filter(|t| t.starts_with('#')) {
+            let txt = comment_text(hashes_stripped);
+            if prev != Prev::Comment {
+                buf.clear();
+            }
+            if keyseen.contains(&txt) {
+                cap = txt;
+            } else if !txt.is_empty() && txt.chars().any(|c| c.is_ascii_alphanumeric()) {
+                if !cap.is_empty() {
+                    let e = hdr.entry(cap.clone()).or_default();
+                    if e.is_empty() {
+                        *e = txt.clone();
+                    } else {
+                        e.push(' ');
+                        e.push_str(&txt);
+                    }
+                }
+                if buf.is_empty() {
+                    buf = txt;
+                } else {
+                    buf.push(' ');
+                    buf.push_str(&txt);
+                }
+            }
+            prev = Prev::Comment;
+        } else if t.is_empty() {
+            cap.clear();
+            prev = Prev::Blank;
+        } else if let Some((key, _)) = match_key_eq(t) {
+            if !buf.is_empty() {
+                adj.insert(key.to_string(), buf.clone());
+            }
+            buf.clear();
+            cap.clear();
+            prev = Prev::Key;
+        } else {
+            buf.clear();
+            cap.clear();
+            prev = Prev::Other;
+        }
+    }
+
+    let mut out = Vec::new();
+    for k in korder {
+        let mut h = hdr.get(&k).cloned().unwrap_or_default();
+        if h.is_empty() {
+            h = adj.get(&k).cloned().unwrap_or_default();
+        }
+        if h.chars().count() > 400 {
+            h = h.chars().take(400).collect();
+        }
+        if !h.is_empty() {
+            out.push((k, h));
+        }
+    }
+    out
+}
+
+/// Comment-text extraction for one `#`-led line — `sub(/^#+[ \t]*/,"",txt)`
+/// then `sub(/[ \t]+$/,"",txt)` then `gsub(/[ \t]+/," ",txt)`: strip the
+/// leading run of `#`s and any blanks right after, trim trailing blanks,
+/// then squeeze every remaining internal blank run to one space.
+fn comment_text(t: &str) -> String {
+    let after_hash = t.trim_start_matches('#');
+    let after_hash = after_hash.trim_start_matches([' ', '\t']);
+    let trimmed = after_hash.trim_end_matches([' ', '\t']);
+    let mut out = String::with_capacity(trimmed.len());
+    let mut prev_space = false;
+    for c in trimmed.chars() {
+        if c == ' ' || c == '\t' {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out
 }
 
 /// Port of `_cfg_conf_ensure` (`40-config.sh:326-334`): seed the live conf
@@ -1478,5 +1745,215 @@ services:
         assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
         assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- Part 5a: dist_sibling / bak_sibling / cfg_file_path --------------
+
+    #[test]
+    fn dist_and_bak_sibling_append_suffix() {
+        let p = Path::new("/a/b/playerbots.conf");
+        assert_eq!(dist_sibling(p), PathBuf::from("/a/b/playerbots.conf.dist"));
+        assert_eq!(bak_sibling(p), PathBuf::from("/a/b/playerbots.conf.bak"));
+    }
+
+    #[test]
+    fn cfg_file_path_fixed_names_never_fail() {
+        let dir = std::env::temp_dir().join(format!("dml-cfgfilepath-fixed-{}", std::process::id()));
+        // None of these exist on disk -- the fixed arms resolve unconditionally.
+        assert_eq!(cfg_file_path(&dir, ".env"), Some(dir.join(".env")));
+        assert_eq!(
+            cfg_file_path(&dir, "docker-compose.override.yml"),
+            Some(dir.join("docker-compose.override.yml"))
+        );
+        assert_eq!(
+            cfg_file_path(&dir, "worldserver.conf"),
+            Some(dir.join("env").join("dist").join("etc").join("worldserver.conf"))
+        );
+        assert_eq!(
+            cfg_file_path(&dir, "authserver.conf"),
+            Some(dir.join("env").join("dist").join("etc").join("authserver.conf"))
+        );
+    }
+
+    #[test]
+    fn cfg_file_path_module_conf_delegates_to_direct_conf_path() {
+        let dir = std::env::temp_dir().join(format!("dml-cfgfilepath-mod-{}", std::process::id()));
+        let modules = dir.join("env").join("dist").join("etc").join("modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("playerbots.conf"), "A = 1\n").unwrap();
+        assert_eq!(cfg_file_path(&dir, "playerbots.conf"), Some(modules.join("playerbots.conf")));
+        // Traversal-shaped / nonexistent module confs still fail through
+        // direct_conf_path's own guards.
+        assert_eq!(cfg_file_path(&dir, "../evil.conf"), None);
+        assert_eq!(cfg_file_path(&dir, "ghost.conf"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Part 5a: kv_rows (pb-keys / conf-keys row parser) ----------------
+
+    #[test]
+    fn kv_rows_dedup_keeps_first_position_last_value_and_line() {
+        let content = "\
+# a comment
+Rate.XP.Kill = 1\r
+  Indented.Key\t=\t\"quoted value\"
+Dup.Key = first
+Other = mid
+Dup.Key = second
+";
+        let rows = kv_rows(content);
+        let keys: Vec<&str> = rows.iter().map(|(k, _, _)| k.as_str()).collect();
+        // First-seen order: Dup.Key appears once, at its FIRST position.
+        assert_eq!(keys, vec!["Rate.XP.Kill", "Indented.Key", "Dup.Key", "Other"]);
+        let dup = rows.iter().find(|(k, _, _)| k == "Dup.Key").unwrap();
+        // Last occurrence's value AND line number win.
+        assert_eq!(dup.1, "second");
+        assert_eq!(dup.2, 6);
+        let indented = rows.iter().find(|(k, _, _)| k == "Indented.Key").unwrap();
+        assert_eq!(indented.1, "\"quoted value\"");
+        assert_eq!(indented.2, 3);
+    }
+
+    #[test]
+    fn kv_rows_skips_non_assignment_lines() {
+        let content = "# comment\nNot A Key = skip\n\n=leadingeq\nReal.Key = 1\n";
+        let rows = kv_rows(content);
+        assert_eq!(rows, vec![("Real.Key".to_string(), "1".to_string(), 5)]);
+    }
+
+    // -- Part 5a: key_browser_rows (shared pb-keys/conf-keys default logic) -
+
+    #[test]
+    fn key_browser_rows_src_is_dist_defaults_to_own_value() {
+        let src = "AiPlayerbot.MaxRandomBots = 500\n";
+        let rows = key_browser_rows(src, None, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, "500");
+        assert_eq!(rows[0].default.as_deref(), Some("500"));
+    }
+
+    #[test]
+    fn key_browser_rows_conf_over_dist_fills_default_from_dist() {
+        let src = "AiPlayerbot.MaxRandomBots = 800\nLive.Only = 1\n";
+        let dist = "AiPlayerbot.MaxRandomBots = 500\n";
+        let rows = key_browser_rows(src, Some(dist), false);
+        let max_bots = rows.iter().find(|r| r.key == "AiPlayerbot.MaxRandomBots").unwrap();
+        assert_eq!(max_bots.value, "800");
+        assert_eq!(max_bots.default.as_deref(), Some("500"));
+        // A key the live conf added that the dist never had -> default null.
+        let live_only = rows.iter().find(|r| r.key == "Live.Only").unwrap();
+        assert_eq!(live_only.default, None);
+    }
+
+    #[test]
+    fn key_browser_rows_no_dist_content_is_all_null_defaults() {
+        let rows = key_browser_rows("A = 1\n", None, false);
+        assert_eq!(rows[0].default, None);
+    }
+
+    #[test]
+    fn key_browser_rows_dist_key_present_with_empty_value_counts_as_present() {
+        // Bash's `${_pb_def[$k]+x}` is an EXISTENCE test, not non-empty --
+        // an empty dist value still counts as "there is a default".
+        let src = "Blank.Val = 1\n";
+        let dist = "Blank.Val =\n";
+        let rows = key_browser_rows(src, Some(dist), false);
+        assert_eq!(rows[0].default.as_deref(), Some(""));
+    }
+
+    // -- Part 5a: conf_help_lines (awk-oracle-verified fixtures) ----------
+    //
+    // Each fixture's expected output was captured by running the ACTUAL
+    // `_conf_help_lines` awk function (copied verbatim from 40-config.sh)
+    // against the same text via `gawk` on this dev box -- these are not
+    // hand-guessed expectations.
+
+    #[test]
+    fn conf_help_lines_adjacent_and_shared_doc_block_styles() {
+        let content = "\
+# Adjacent block style
+# Multiplier for XP gains
+# second line of same block
+Rate.XP.Kill = 1
+
+# Header doc block style
+#    AiPlayerbot.MaxRandomBots
+# Max number of bots
+# more text
+#    AiPlayerbot.MinRandomBots
+# Min number of bots
+AiPlayerbot.MaxRandomBots = 500
+AiPlayerbot.MinRandomBots = 100
+
+# decoration only
+####
+NoHelp.Key = 1
+";
+        let help = conf_help_lines(content);
+        assert_eq!(
+            help,
+            vec![
+                (
+                    "Rate.XP.Kill".to_string(),
+                    "Adjacent block style Multiplier for XP gains second line of same block".to_string()
+                ),
+                ("AiPlayerbot.MaxRandomBots".to_string(), "Max number of bots more text".to_string()),
+                ("AiPlayerbot.MinRandomBots".to_string(), "Min number of bots".to_string()),
+                ("NoHelp.Key".to_string(), "decoration only".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn conf_help_lines_pure_decoration_yields_no_help() {
+        let content = "\
+####
+#
+Bare.Key = 1
+
+# text before blank line
+# more text
+
+BlankBroken.Key = 1
+";
+        let help = conf_help_lines(content);
+        // Bare.Key's only preceding comments are pure decoration -> omitted
+        // entirely (not even an empty-string entry).
+        assert_eq!(
+            help,
+            vec![("BlankBroken.Key".to_string(), "text before blank line more text".to_string())]
+        );
+    }
+
+    #[test]
+    fn conf_help_lines_crlf_and_header_redeclared_later_wins() {
+        let content = "# Doc for A\r\nA.Key = 1\r\n\r\n#    A.Key\r\n# repeated header later\r\nB.Key = 2\r\n";
+        let help = conf_help_lines(content);
+        // The header block AFTER the key (re-naming A.Key) wins over the
+        // earlier adjacent block, and its trailing prose also becomes
+        // B.Key's adjacent-block help (buf accumulates every non-header
+        // comment line in the run, regardless of which key `cap` names).
+        assert_eq!(
+            help,
+            vec![
+                ("A.Key".to_string(), "repeated header later".to_string()),
+                ("B.Key".to_string(), "repeated header later".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn conf_help_lines_caps_at_400_chars() {
+        let long_word = "x".repeat(500);
+        let content = format!("# {long_word}\nLong.Key = 1\n");
+        let help = conf_help_lines(&content);
+        assert_eq!(help.len(), 1);
+        assert_eq!(help[0].0, "Long.Key");
+        assert_eq!(help[0].1.chars().count(), 400);
+    }
+
+    #[test]
+    fn conf_help_lines_empty_content_is_empty() {
+        assert_eq!(conf_help_lines(""), Vec::new());
     }
 }

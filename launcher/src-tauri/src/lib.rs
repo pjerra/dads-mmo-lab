@@ -488,12 +488,64 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
     if !validate_game_id(&id) {
         return Err(bad_id(&id));
     }
+    // Part 5a: native mode answers this itself (title-dir + compose-file
+    // resolution + a bounded `docker compose ps` probe, no `dml` subprocess)
+    // -- same "branch inside the shared command" shape as
+    // `games_start`/`games_stop`/`games_restart` below, not a `_native`
+    // sibling (this command has no engine-lifecycle wrapping to preserve).
+    if is_native_backend() {
+        let id_for_blocking = id.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            games_status_native_blocking(&id_for_blocking, &crate::dml::lifecycle::games_dir_from_env())
+        })
+        .await
+        .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    }
     let runner = state.runner.clone();
     tauri::async_runtime::spawn_blocking(move || runner.run_json(&["games", "status", &id]))
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
         .map_err(CmdError::from)
         .and_then(envelope_to_result)
+}
+
+/// NATIVE-MODE `games status <id>` (`90-main.sh:1074-1091`, Part 5a):
+/// title-dir existence -> `_resolve_compose_dir` -> (if resolved)
+/// `_compose_running`'s `docker compose -f <file> ps --status running -q`
+/// probe. Read-only; never mutates anything. A title with no resolvable
+/// compose dir reports `"stopped"` WITHOUT ever invoking docker (matches the
+/// oracle's own `[[ -n "$compose_dir" ]] &&` short-circuit) -- and a
+/// down/absent docker engine degrades the same way (`output_bounded_draining`
+/// returning `None`, or an empty/failed `ps` -> zero running ids -> stopped).
+fn games_status_native_blocking(id: &str, games_dir: &std::path::Path) -> Result<serde_json::Value, CmdError> {
+    use crate::dml::{lifecycle, native, status};
+
+    let title_dir = games_dir.join(id);
+    if !title_dir.is_dir() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("Title not found: {id}"),
+            hint: "Run: dml games list --json".into(),
+        });
+    }
+
+    let mut state = "stopped";
+    if let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) {
+        if let Some(name) = lifecycle::compose_file_name(&compose_dir) {
+            let program = native::docker_program();
+            let mut cmd = std::process::Command::new(&program);
+            cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
+            cmd.args(["ps", "--status", "running", "-q"]);
+            status::windows_no_window(&mut cmd);
+            if let Some(out) = status::output_bounded_draining(cmd, std::time::Duration::from_secs(5)) {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if lifecycle::count_running_ids(&text) > 0 {
+                    state = "running";
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({ "id": id, "state": state }))
 }
 
 #[tauri::command]
@@ -2800,6 +2852,156 @@ async fn wow_config_files(state: State<'_, AppState>) -> Result<serde_json::Valu
     run_json_cmd(state, vec!["wow".into(), "config".into(), "files".into()]).await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `config raw-read`/`raw-reset`/`raw-write` + `pb-keys`/
+// `conf-keys` (Part 5a). Shared `_cfg_preamble` equivalent: every arm below
+// needs the WoW Playerbots title installed (native has no yq dependency to
+// check -- `wow_config_set_native`'s routes already established that a
+// native `_cfg_preamble` port is just the dir check). Read paths take no
+// lock; the two writers (raw-reset/raw-write) take `config_lock`, same as
+// `wow_config_set_native` -- Settings/Modules/raw-editor writes must never
+// interleave on the same conf file.
+// ---------------------------------------------------------------------------
+
+fn cfg_installed_err() -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: "WoW Playerbots server not installed".into(),
+        hint: "Install it first, then re-run.".into(),
+    }
+}
+
+fn cfg_not_editable_err(fname: &str) -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: format!("Not an editable file: {fname}"),
+        hint: "See: dml wow config files --json".into(),
+    }
+}
+
+/// `[[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }`
+/// -- shared verbatim by the raw-read/raw-reset/raw-write arms
+/// (`90-main.sh:2695,2714,2735`; NOTE the EMPTY hint here, unlike conf-keys'
+/// own missing-file message which carries a "See: ..." hint).
+fn cfg_missing_file_err() -> CmdError {
+    CmdError { code: "BAD_ARG".into(), message: "Missing --file <name>".into(), hint: String::new() }
+}
+
+/// NATIVE-MODE `config pb-keys` (`90-main.sh:2562-2606`, Part 5a): every
+/// active `Key = value` line of `playerbots.conf` (falling back to its
+/// `.dist` when the conf doesn't exist yet), each with its own `.dist`
+/// default when both files exist -- see [`crate::dml::config::key_browser_rows`]'s
+/// doc comment for the exact default-derivation rule.
+#[tauri::command]
+async fn wow_config_pb_keys_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfg_installed_err());
+        }
+        let pbconf =
+            title_dir.join("env").join("dist").join("etc").join("modules").join("playerbots.conf");
+        let pbdist = crate::dml::config::dist_sibling(&pbconf);
+
+        let (pbsrc, src_is_dist) =
+            if pbconf.is_file() { (pbconf, false) } else { (pbdist.clone(), true) };
+        if !pbsrc.is_file() {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "playerbots.conf not found (nor its .dist)".into(),
+                hint: "Is the WoW server fully installed?".into(),
+            });
+        }
+        let src_content = std::fs::read_to_string(&pbsrc).unwrap_or_default();
+        let dist_content = (!src_is_dist && pbdist.is_file())
+            .then(|| std::fs::read_to_string(&pbdist).unwrap_or_default());
+
+        let rows = crate::dml::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
+        let keys: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| serde_json::json!({ "key": r.key, "value": r.value, "default": r.default, "line": r.line }))
+            .collect();
+        let source = if src_is_dist { "playerbots.conf.dist" } else { "playerbots.conf" };
+        Ok(serde_json::json!({ "source": source, "keys": keys }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `config conf-keys` (`90-main.sh:2607-2669`, Part 5a):
+/// `pb-keys` generalized to any editable module conf, plus each key's
+/// comment-block help from the `.dist` ([`crate::dml::config::conf_help_lines`]).
+#[tauri::command]
+async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        if file.is_empty() {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: "Missing --file <name>".into(),
+                hint: "See: dml wow config files --json".into(),
+            });
+        }
+        // Order matches the oracle exactly (`90-main.sh:2624-2635`): the
+        // installed-server check runs BEFORE the core-conf-name rejection.
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfg_installed_err());
+        }
+        if matches!(
+            file.as_str(),
+            ".env" | "docker-compose.override.yml" | "worldserver.conf" | "authserver.conf"
+        ) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Not a module conf: {file}"),
+                hint: "Core server settings live in the curated list: dml wow config list --json".into(),
+            });
+        }
+        let ckpath = crate::dml::config::direct_conf_path(&title_dir, &file).ok_or_else(|| CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("Not an editable module conf: {file}"),
+            hint: "See: dml wow config files --json".into(),
+        })?;
+        let ckdist = crate::dml::config::dist_sibling(&ckpath);
+        let (cksrc, src_is_dist) =
+            if ckpath.is_file() { (ckpath, false) } else { (ckdist.clone(), true) };
+        let src_content = std::fs::read_to_string(&cksrc).unwrap_or_default();
+        let dist_exists = ckdist.is_file();
+        let dist_content =
+            (!src_is_dist && dist_exists).then(|| std::fs::read_to_string(&ckdist).unwrap_or_default());
+
+        let rows = crate::dml::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
+
+        // Help source: the `.dist` when it exists, else the live conf itself
+        // (`90-main.sh:2650-2651`). When `cksrc` IS the dist already
+        // (`src_is_dist`), reuse `src_content` instead of re-reading the
+        // same file.
+        let help_content = if src_is_dist {
+            src_content.clone()
+        } else if dist_exists {
+            dist_content.clone().unwrap_or_else(|| std::fs::read_to_string(&ckdist).unwrap_or_default())
+        } else {
+            src_content.clone()
+        };
+        let help_map: std::collections::HashMap<String, String> =
+            crate::dml::config::conf_help_lines(&help_content).into_iter().collect();
+
+        let keys: Vec<serde_json::Value> = rows
+            .into_iter()
+            .map(|r| {
+                let help = help_map.get(&r.key).cloned().unwrap_or_default();
+                serde_json::json!({ "key": r.key, "value": r.value, "default": r.default, "line": r.line, "help": help })
+            })
+            .collect();
+        let source = if src_is_dist { "dist" } else { "conf" };
+        Ok(serde_json::json!({ "file": file, "source": source, "keys": keys }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 // Guided module tuning (overnight Batch 3): plain-JSON read/write of the
 // curated activator knobs for a few optional modules (NPC Beastmaster + Learn
 // Spells via their .conf; Unlimited Ammo + Sit Means Rest via their deployed
@@ -3242,6 +3444,191 @@ async fn wow_config_raw_write(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
     .map_err(CmdError::from)
     .and_then(envelope_to_result)
+}
+
+/// NATIVE-MODE `config raw-reset` (`90-main.sh:2708-2731`, Part 5a):
+/// re-copy `<name>.conf.dist` over the live conf, backing up an existing
+/// conf first (`<name>.bak`). `.env`/the compose override have no `.dist`
+/// and are rejected up front, exactly like the oracle.
+#[tauri::command]
+async fn wow_config_raw_reset_native(
+    file: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let config_lock = state.config_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        if file.is_empty() {
+            return Err(cfg_missing_file_err());
+        }
+        let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfg_installed_err());
+        }
+        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+            .ok_or_else(|| cfg_not_editable_err(&file))?;
+        if matches!(file.as_str(), ".env" | "docker-compose.override.yml") {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: "That file has no defaults to reset to".into(),
+                hint: String::new(),
+            });
+        }
+        let dist = crate::dml::config::dist_sibling(&fpath);
+        if !dist.is_file() {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("No {file}.dist to reset from"),
+                hint: String::new(),
+            });
+        }
+        let mut backup = serde_json::Value::Null;
+        if fpath.is_file() {
+            let bak = crate::dml::config::bak_sibling(&fpath);
+            std::fs::copy(&fpath, &bak).map_err(|e| CmdError {
+                code: "WRITE_FAILED".into(),
+                message: format!("Could not write {file}: {e}"),
+                hint: String::new(),
+            })?;
+            backup = serde_json::Value::String(format!("{file}.bak"));
+        }
+        std::fs::copy(&dist, &fpath).map_err(|e| CmdError {
+            code: "WRITE_FAILED".into(),
+            message: format!("Could not write {file}: {e}"),
+            hint: String::new(),
+        })?;
+        Ok(serde_json::json!({ "reset": true, "file": file, "backup": backup }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// The oracle's `raw-read` arm never reads the file directly -- it captures
+/// it through a `$(cat "$fpath")` command substitution
+/// (`90-main.sh:2702,2706`), and POSIX command substitution strips EVERY
+/// trailing newline from the captured text (not just one). A plain
+/// `std::fs::read_to_string` keeps the file's real trailing newline(s), so
+/// without this the native reader would hand back one extra `\n` at EOF for
+/// any conf that (like every conf in this codebase) ends in a newline --
+/// caught live by `part5a_parity.rs`.
+fn strip_command_sub_trailing_newlines(s: &str) -> &str {
+    s.trim_end_matches('\n')
+}
+
+/// NATIVE-MODE `config raw-read` (`90-main.sh:2692-2707`, Part 5a): read an
+/// allowlisted file, falling back to its `.dist` when only that exists yet
+/// (the first save then creates the real conf via raw-write).
+#[tauri::command]
+async fn wow_config_raw_read_native(file: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        if file.is_empty() {
+            return Err(cfg_missing_file_err());
+        }
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfg_installed_err());
+        }
+        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+            .ok_or_else(|| cfg_not_editable_err(&file))?;
+        let dist = crate::dml::config::dist_sibling(&fpath);
+        if !fpath.is_file() && dist.is_file() {
+            let content = std::fs::read_to_string(&dist).unwrap_or_default();
+            return Ok(serde_json::json!({
+                "file": file,
+                "source": "dist",
+                "content": strip_command_sub_trailing_newlines(&content),
+            }));
+        }
+        if !fpath.is_file() {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("File does not exist yet: {file}"),
+                hint: String::new(),
+            });
+        }
+        let content = std::fs::read_to_string(&fpath).unwrap_or_default();
+        Ok(serde_json::json!({
+            "file": file,
+            "source": "conf",
+            "content": strip_command_sub_trailing_newlines(&content),
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `config raw-write` (`90-main.sh:2733-2774`, Part 5a):
+/// full-file write with the arm's exact guards, in the SAME order as the
+/// oracle -- override-YAML syntax validation happens BEFORE the `.env`/
+/// override read-only rejection (so submitting broken YAML for the override
+/// reports "not valid YAML", never "read-only"), tmp+rename atomic, with an
+/// automatic `.bak` of any existing file.
+#[tauri::command]
+async fn wow_config_raw_write_native(
+    file: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let config_lock = state.config_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        if file.is_empty() {
+            return Err(cfg_missing_file_err());
+        }
+        let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if !crate::dml::config::wow_server_installed(&title_dir) {
+            return Err(cfg_installed_err());
+        }
+        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+            .ok_or_else(|| cfg_not_editable_err(&file))?;
+
+        if file == "docker-compose.override.yml"
+            && serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content).is_err()
+        {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: "That is not valid YAML - not saved".into(),
+                hint: "Fix the syntax and save again.".into(),
+            });
+        }
+        // SECURITY: same posture as `_cfg_file_path`'s writable module-conf
+        // allowlist -- `.env`/the compose override are readable (raw-read)
+        // but NOT writable here (see `cli/src/90-main.sh:2752-2765`'s own
+        // comment for the exact rationale: this + `games restart` would let
+        // the editor drive host command execution).
+        if matches!(file.as_str(), ".env" | "docker-compose.override.yml") {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: "That file is read-only in the editor".into(),
+                hint: "Change these settings from the Settings tab; .env and the compose override can't be overwritten here.".into(),
+            });
+        }
+
+        if let Some(parent) = fpath.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut backup = serde_json::Value::Null;
+        if fpath.is_file() {
+            let bak = crate::dml::config::bak_sibling(&fpath);
+            std::fs::copy(&fpath, &bak).map_err(|e| CmdError {
+                code: "WRITE_FAILED".into(),
+                message: format!("Could not write {file}: {e}"),
+                hint: String::new(),
+            })?;
+            backup = serde_json::Value::String(format!("{file}.bak"));
+        }
+        crate::dml::config::atomic_write(&fpath, &content).map_err(|e| CmdError {
+            code: "WRITE_FAILED".into(),
+            message: format!("Could not write {file}: {e}"),
+            hint: String::new(),
+        })?;
+        Ok(serde_json::json!({ "written": true, "backup": backup }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
 // Save-dialog + write in one command: the webview supplies only a suggested
@@ -3795,6 +4182,115 @@ async fn wow_teleport_coords(
         ],
     )
     .await
+}
+
+/// `teleport-coords`'s SELECT lookup — `90-main.sh:1920`. A named const (not
+/// an inline literal) purely so the exact SQL text is unit-testable, same
+/// convention as `RETURN_HOME_SELECT_SQL`/`RETURN_HOME_UPDATE_SQL`.
+const TELEPORT_COORDS_SELECT_SQL: &str = "SELECT guid, online FROM characters WHERE name = ? LIMIT 1";
+/// `teleport-coords`'s position UPDATE — `90-main.sh:1929`.
+const TELEPORT_COORDS_UPDATE_SQL: &str =
+    "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?";
+
+/// `CHAR_ONLINE` — `90-main.sh:1925-1928`, byte-identical message/hint.
+fn char_online_err(char_name: &str) -> CmdError {
+    CmdError {
+        code: "CHAR_ONLINE".into(),
+        message: format!("Character must be logged out: {char_name}"),
+        hint: "Character must be logged out.".into(),
+    }
+}
+
+/// NATIVE-MODE `wow teleport-coords` (`90-main.sh:1895-1933`, Part 5a).
+/// UNLIKE `teleport`/`gm return-home`, this arm NEVER calls SOAP -- an
+/// ONLINE character is REJECTED (`CHAR_ONLINE`), not teleported live: a
+/// running worldserver holds its own in-memory position and would clobber
+/// this direct write on the character's next auto-save/logout. Order
+/// matches the oracle exactly: validate char/map/x/y/z -> lookup
+/// (guid, online) -> reject if online -> UPDATE. THIRD sanctioned direct
+/// `characters` write (see `dml::db`/`gm_return_home`'s doc comments) --
+/// same table, same `orientation=0` convention, same guid-keyed WHERE.
+#[tauri::command]
+async fn wow_teleport_coords_native(
+    char_name: String,
+    map: u32,
+    x: f64,
+    y: f64,
+    z: f64,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+        return Err(bad_arg(format!("Invalid character name: {char_name}")));
+    }
+    if !crate::dml::soap_cmds::valid_map_id(map) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid map id: {map}"),
+            hint: "A map id is 1-3 digits, e.g. --map 0 for Eastern Kingdoms.".into(),
+        });
+    }
+    // Message text matches the oracle's exactly (`90-main.sh:1917-1919`):
+    // "Invalid coordinate: $value", the SAME wording for all three axes --
+    // it never names which one failed, just echoes the bad value.
+    for v in [x, y, z] {
+        if !crate::dml::soap_cmds::valid_coord(v) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Invalid coordinate: {v}"),
+                hint: "Coordinates are plain numbers with a magnitude of 20000 or less.".into(),
+            });
+        }
+    }
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let params: Vec<mysql::Value> = vec![mysql::Value::from(char_name.as_str())];
+        let res = crate::dml::db::query_with_params(
+            &cfg,
+            crate::dml::db::Database::Characters,
+            TELEPORT_COORDS_SELECT_SQL,
+            params,
+        )
+        .map_err(db_err_to_cmd)?;
+        let row = res.rows.first().ok_or_else(|| CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("No such character: {char_name}"),
+            hint: String::new(),
+        })?;
+        let guid = sql_row_int(row.first()).filter(|g| *g >= 0).ok_or_else(|| CmdError {
+            code: "DB_UNREACHABLE".into(),
+            message: "Unexpected character lookup result".into(),
+            hint: String::new(),
+        })?;
+        let online = sql_row_int(row.get(1)).unwrap_or(0);
+        if online != 0 {
+            return Err(char_online_err(&char_name));
+        }
+
+        let update_params: Vec<mysql::Value> = vec![
+            mysql::Value::from(x),
+            mysql::Value::from(y),
+            mysql::Value::from(z),
+            mysql::Value::from(map),
+            mysql::Value::from(guid as u64),
+        ];
+        crate::dml::db::execute(&cfg, crate::dml::db::Database::Characters, TELEPORT_COORDS_UPDATE_SQL, update_params)
+            .map_err(|_e| CmdError {
+                code: "DB_UNREACHABLE".into(),
+                message: "Could not update the character's position".into(),
+                hint: "Is ac-database running?".into(),
+            })?;
+        Ok(serde_json::json!({
+            "teleported": true,
+            "char": char_name,
+            "map": map,
+            "x": x,
+            "y": y,
+            "z": z,
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
 #[tauri::command]
@@ -7597,6 +8093,7 @@ pub fn run() {
             wow_teleport_list,
             wow_teleport,
             wow_teleport_coords,
+            wow_teleport_coords_native,
             wow_paperdoll,
             wow_item_info,
             wow_char_progress,
@@ -7637,11 +8134,16 @@ pub fn run() {
             wow_config_tuning_set,
             wow_config_tuning_set_native,
             wow_config_conf_keys,
+            wow_config_conf_keys_native,
             wow_config_raw_read,
+            wow_config_raw_read_native,
             wow_config_pb_keys,
+            wow_config_pb_keys_native,
             wow_config_files,
             wow_config_raw_reset,
+            wow_config_raw_reset_native,
             wow_config_raw_write,
+            wow_config_raw_write_native,
             wow_accountwide_get,
             wow_accountwide_set,
             wow_accountwide_get_native,
@@ -8428,6 +8930,82 @@ mod tests {
         assert_eq!(e.code, "SOAP_UNREACHABLE");
         assert_eq!(e.message, "Could not reach the server");
         assert_eq!(e.hint, "Is it running?");
+    }
+
+    // --- Part 5a: `strip_command_sub_trailing_newlines` (`config raw-read`) -
+
+    #[test]
+    fn cfg_missing_file_err_has_empty_hint() {
+        // Unlike conf-keys' own missing-file message, raw-read/raw-reset/
+        // raw-write all carry an EMPTY hint (`90-main.sh:2695,2714,2735`).
+        let e = cfg_missing_file_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Missing --file <name>");
+        assert_eq!(e.hint, "");
+    }
+
+    #[test]
+    fn strip_command_sub_trailing_newlines_strips_every_trailing_newline() {
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n"), "A = 1");
+        // Command substitution strips EVERY trailing newline, not just one.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n\n\n"), "A = 1");
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1"), "A = 1");
+        assert_eq!(strip_command_sub_trailing_newlines(""), "");
+        // Only trailing -- interior blank lines are untouched.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n\nB = 2\n"), "A = 1\n\nB = 2");
+        // CR right before the final \n is not itself a newline char -- left alone.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\r\n"), "A = 1\r");
+    }
+
+    // --- Part 5a: `wow_teleport_coords_native` / `games_status` ---------
+
+    #[test]
+    fn teleport_coords_select_sql_is_exact() {
+        assert_eq!(TELEPORT_COORDS_SELECT_SQL, "SELECT guid, online FROM characters WHERE name = ? LIMIT 1");
+    }
+
+    #[test]
+    fn teleport_coords_update_sql_is_exact() {
+        assert_eq!(
+            TELEPORT_COORDS_UPDATE_SQL,
+            "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?"
+        );
+    }
+
+    #[test]
+    fn char_online_err_matches_oracle_message_and_hint() {
+        let e = char_online_err("Kaldric");
+        assert_eq!(e.code, "CHAR_ONLINE");
+        assert_eq!(e.message, "Character must be logged out: Kaldric");
+        assert_eq!(e.hint, "Character must be logged out.");
+    }
+
+    #[test]
+    fn games_status_native_reports_not_found_for_missing_title() {
+        // Takes `games_dir` as an explicit parameter (not read from
+        // `DML_GAMES_DIR`) specifically so this test never touches a
+        // process-global env var -- `cargo test` runs this crate's tests in
+        // one process, and mutating `DML_GAMES_DIR` would race every OTHER
+        // test that reads it via `ConfigReader::title_dir_from_env`/
+        // `lifecycle::games_dir_from_env` concurrently (see the caution in
+        // `dml::lifecycle`'s own test module header).
+        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = games_status_native_blocking("wow-server-playerbots", &dir).unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
+        assert_eq!(err.message, "Title not found: wow-server-playerbots");
+    }
+
+    #[test]
+    fn games_status_native_reports_stopped_when_no_compose_dir() {
+        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-nocompose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("some-title")).unwrap();
+        // A title dir that exists but carries no compose file anywhere ->
+        // `_compose_running` is never even invoked; state is "stopped".
+        let out = games_status_native_blocking("some-title", &dir).unwrap();
+        assert_eq!(out, serde_json::json!({ "id": "some-title", "state": "stopped" }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- Task B2a: `wow_config_set_native` --------------------------------

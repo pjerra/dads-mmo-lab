@@ -699,8 +699,9 @@ export async function wowTeleport(
     ? invoke("wow_teleport_native", { charName, to })
     : invoke("wow_teleport", { charName, to });
 }
-// wowTeleportCoords has no `_native` sibling (deferred, out of scope for
-// Task A3) -- stays WSL-only/unchanged.
+// Part 5a: native mode routes to the DB-only `_native` sibling (never SOAP --
+// see the Rust doc comment on `wow_teleport_coords_native`); WSL mode keeps
+// shelling `dml` byte-identically.
 export async function wowTeleportCoords(
   charName: string,
   map: number,
@@ -708,7 +709,10 @@ export async function wowTeleportCoords(
   y: number,
   z: number,
 ): Promise<{ teleported: boolean; char: string; map: number; x: number; y: number; z: number }> {
-  return await invoke("wow_teleport_coords", { charName, map, x, y, z });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_teleport_coords_native", { charName, map, x, y, z })
+    : await invoke("wow_teleport_coords", { charName, map, x, y, z });
 }
 export async function wowPaperdoll(charName: string): Promise<PaperdollData> {
   return await invoke("wow_paperdoll", { charName });
@@ -831,7 +835,10 @@ export interface PbKey {
   line: number;
 }
 export async function wowConfigPbKeys(): Promise<{ source: string; keys: PbKey[] }> {
-  return await invoke("wow_config_pb_keys");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_pb_keys_native")
+    : await invoke("wow_config_pb_keys");
 }
 // Module-tuning rework: pb-keys generalized to any editable module conf.
 // `help` is the key's comment-block doc parsed from the conf's .dist ("" when
@@ -846,7 +853,10 @@ export interface ConfKey {
 export async function wowConfigConfKeys(
   file: string,
 ): Promise<{ file: string; source: "conf" | "dist"; keys: ConfKey[] }> {
-  return await invoke("wow_config_conf_keys", { file });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_conf_keys_native", { file })
+    : await invoke("wow_config_conf_keys", { file });
 }
 export async function wowConfigFiles(): Promise<ConfFile[]> {
   const data = await invoke<{ files: ConfFile[] }>("wow_config_files");
@@ -949,18 +959,27 @@ export async function wowAccountwideSet(
 export async function wowConfigRawRead(
   file: RawFileName,
 ): Promise<{ file: string; source?: "conf" | "dist"; content: string }> {
-  return await invoke("wow_config_raw_read", { file });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_raw_read_native", { file })
+    : await invoke("wow_config_raw_read", { file });
 }
 export async function wowConfigRawReset(
   file: RawFileName,
 ): Promise<{ reset: boolean; file: string; backup: string | null }> {
-  return await invoke("wow_config_raw_reset", { file });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_raw_reset_native", { file })
+    : await invoke("wow_config_raw_reset", { file });
 }
 export async function wowConfigRawWrite(
   file: RawFileName,
   content: string,
 ): Promise<{ written: boolean; backup: string | null }> {
-  return await invoke("wow_config_raw_write", { file, content });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_config_raw_write_native", { file, content })
+    : await invoke("wow_config_raw_write", { file, content });
 }
 // skipSaveall = the "faster restart" option: skip the redundant pre-stop
 // saveall (the graceful stop still saves characters on shutdown).

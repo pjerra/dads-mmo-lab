@@ -60,6 +60,25 @@ fn len_and_charset(s: &str, min: usize, max: usize, allowed: impl Fn(char) -> bo
     len >= min && len <= max && s.chars().all(allowed)
 }
 
+/// Map-id counterpart of `wow teleport-coords`'s `^[0-9]{1,3}$` gate
+/// (`90-main.sh:1916`). The native command receives an already-parsed `u32`
+/// (not a raw CLI string), so "1-3 digits" reduces to the numeric range it
+/// actually encodes: `0..=999`.
+pub fn valid_map_id(map: u32) -> bool {
+    map <= 999
+}
+
+/// Coordinate counterpart of `_valid_coord`'s magnitude cap
+/// (`90-main.sh:123-126`): `|v| <= 20000` (bash's `awk ... exit (v>20000)`
+/// rejects only STRICTLY greater, so exactly 20000 is allowed). NaN/infinite
+/// are rejected outright. The native command receives an already-parsed
+/// `f64`, so `_valid_coord`'s digit-COUNT half of the regex
+/// (`^-?[0-9]{1,5}(\.[0-9]+)?$`) is moot: any finite value within this
+/// magnitude cap already has at most 5 integer digits.
+pub fn valid_coord(v: f64) -> bool {
+    v.is_finite() && v.abs() <= 20000.0
+}
+
 // ---------------------------------------------------------------------
 // Local error helper.
 // ---------------------------------------------------------------------
@@ -395,6 +414,30 @@ mod tests {
         assert!(valid_tele_name("Deeprun_Tram-1"));
         assert!(!valid_tele_name("")); // + quantifier requires >=1
         assert!(!valid_tele_name("bad name")); // space not allowed
+    }
+
+    // -- valid_map_id / valid_coord (teleport-coords, Part 5a) ------------
+
+    #[test]
+    fn valid_map_id_boundaries() {
+        assert!(valid_map_id(0));
+        assert!(valid_map_id(1));
+        assert!(valid_map_id(999));
+        assert!(!valid_map_id(1000));
+        assert!(!valid_map_id(u32::MAX));
+    }
+
+    #[test]
+    fn valid_coord_magnitude_cap_is_inclusive() {
+        assert!(valid_coord(0.0));
+        assert!(valid_coord(-4421.94));
+        assert!(valid_coord(20000.0));
+        assert!(valid_coord(-20000.0));
+        assert!(!valid_coord(20000.1));
+        assert!(!valid_coord(-20000.1));
+        assert!(!valid_coord(f64::NAN));
+        assert!(!valid_coord(f64::INFINITY));
+        assert!(!valid_coord(f64::NEG_INFINITY));
     }
 
     // -- account_create_cmd / account_set_password_cmd ----------------------
