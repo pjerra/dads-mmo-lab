@@ -5561,20 +5561,31 @@ fn char_name_by_guid(cfg: &crate::dml::db::DbConfig, guid: i64) -> Option<String
 
 /// The bot-members-of-a-party names query, shared by `dismiss-all` and
 /// `preset-load`'s kick phase ([`crate::dml::party::BOT_MEMBER_NAMES_SQL`]).
-fn bot_member_names(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<String> {
+/// Unlike `party_online_guid`/`group_member_guids`/`char_name_by_guid`
+/// (which swallow query failure exactly like the oracle's own `2>/dev/null`
+/// helpers do), a failure here MUST surface: `dismiss-all`'s bash caller
+/// explicitly checks this query and exits `DB_UNREACHABLE "Could not read
+/// the party"` on failure (`90-main.sh:3195-3196`) rather than treating an
+/// unreachable DB as "zero bots" -- so this returns `Result`, not a
+/// silently-emptied `Vec`.
+fn bot_member_names(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
     crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_NAMES_SQL, params)
         .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
-        .unwrap_or_default()
+        .map_err(|_| db_unreachable_err("Could not read the party"))
 }
 
 /// `preset-save`'s bot-classes query ([`crate::dml::party::
-/// BOT_MEMBER_CLASSES_SQL`]).
-fn bot_member_classes(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<i64> {
+/// BOT_MEMBER_CLASSES_SQL`]). Same doctrine as `bot_member_names`: the
+/// oracle's `preset-save` caller checks this query and exits
+/// `DB_UNREACHABLE "Could not read the party"` on failure
+/// (`90-main.sh:3302-3303`), so a query error must propagate rather than be
+/// swallowed into an empty (and thus falsely "no bots to save") list.
+fn bot_member_classes(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
     crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_CLASSES_SQL, params)
         .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
-        .unwrap_or_default()
+        .map_err(|_| db_unreachable_err("Could not read the party"))
 }
 
 /// `_party_wait_new_member` (`50-party.sh:85-101`): poll up to
@@ -5766,7 +5777,7 @@ async fn wow_party_dismiss_all_native(
         let db_cfg = crate::dml::db::DbConfig::from_env();
         let pguid = party_online_guid(&db_cfg, &player)
             .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
-        let bots = bot_member_names(&db_cfg, pguid);
+        let bots = bot_member_names(&db_cfg, pguid)?;
         let soap_cfg = crate::dml::soap::SoapConfig::load();
         let (mut dismissed, mut attempted) = (0i64, 0i64);
         let mut last_err: Option<CmdError> = None;
@@ -5922,7 +5933,7 @@ async fn wow_party_preset_save_native(player: String, name: String) -> Result<se
         let db_cfg = crate::dml::db::DbConfig::from_env();
         let pguid = party_online_guid(&db_cfg, &player)
             .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
-        let names: Vec<String> = bot_member_classes(&db_cfg, pguid)
+        let names: Vec<String> = bot_member_classes(&db_cfg, pguid)?
             .into_iter()
             .filter_map(crate::dml::party_specs::class_name_from_id)
             .map(str::to_string)
@@ -6069,8 +6080,12 @@ fn wow_party_preset_load_native_blocking(
 
     let soap_cfg = crate::dml::soap::SoapConfig::load();
 
-    // Kick phase (replace semantics): every current bot goes.
-    for b in bot_member_names(&db_cfg, pguid) {
+    // Kick phase (replace semantics): every current bot goes. Byte-faithful
+    // swallow here (unlike `dismiss-all`/`preset-save`'s propagation): bash's
+    // own `kicklist="$(db_chars_query ...)" || kicklist=""` at
+    // `90-main.sh:3383` silently treats a query failure as "nothing to kick"
+    // too.
+    for b in bot_member_names(&db_cfg, pguid).unwrap_or_default() {
         if !crate::dml::soap_cmds::valid_charname(&b) {
             continue;
         }
