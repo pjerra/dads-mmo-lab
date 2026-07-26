@@ -2354,6 +2354,214 @@ async fn wow_world_restart(
     stream_args(args, on_event, state).await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `world-restart` (Task: world-restart-native) — the first fully
+// native STREAMED action: it emits `on_event` NDJSON events DIRECTLY (no
+// `dml` subprocess at all), rather than forwarding a WSL child's stream like
+// `stream_args`/`stream_action` above. A faithful port of `90-main.sh:1657-
+// 1724`'s `world-restart)` arm — same order, messages, and error codes. WSL
+// mode is untouched: it keeps calling `wow_world_restart` (the sibling just
+// above), which shells `dml wow world-restart` as always.
+//
+// Every domain failure (NOT_FOUND/DOCKER_DOWN/NOT_RUNNING/RESTART_FAILED/
+// READY_TIMEOUT) travels IN the event stream as `section_end{status:"error"}`
+// + `error`, exactly like a `dml` failure would -- the command itself still
+// resolves `Ok(())` for those; only a genuinely unexpected internal failure
+// (the blocking task panicking) surfaces as a rejected promise.
+// ---------------------------------------------------------------------------
+
+/// Bounded timeout for `docker restart -t 300 ac-worldserver`: must exceed
+/// the 300s graceful-stop window the flag itself requests, or the bound
+/// would kill the graceful stop it's supposed to be waiting out.
+const WORLD_RESTART_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(330);
+
+fn wr_event_section_start() -> serde_json::Value {
+    serde_json::json!({"event": "section_start", "name": "world-restart"})
+}
+
+fn wr_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"event": "line", "level": level, "text": text.into()})
+}
+
+fn wr_event_section_end(status: &str) -> serde_json::Value {
+    serde_json::json!({"event": "section_end", "name": "world-restart", "status": status})
+}
+
+fn wr_event_done() -> serde_json::Value {
+    serde_json::json!({"event": "done", "data": {
+        "restarted": "world-only",
+        "note": "settings changes were NOT applied -- use full Restart for that",
+    }})
+}
+
+fn wr_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {
+        "code": code, "message": message.into(), "hint": hint,
+    }})
+}
+
+/// Both containers must already be running for a world-only restart to
+/// proceed — a port of the precondition gate at `90-main.sh:1686-1689`. A
+/// `docker restart` on a STOPPED container STARTS it, which on a fully
+/// stopped stack would boot the worldserver alone against a down database
+/// and hang until `READY_TIMEOUT` (~30 min); requiring both up first turns
+/// that into an instant, correct `NOT_RUNNING` answer instead.
+fn wr_preconditions_ok(world_running: bool, db_running: bool) -> bool {
+    world_running && db_running
+}
+
+/// `90-main.sh:1716`'s `(( wr_elapsed - wr_note >= 60 ))` cadence check, pure
+/// (elapsed/last-note in whole seconds; `saturating_sub` since `elapsed` is
+/// always `>= last_note` in the real loop, but a pure function shouldn't
+/// panic on out-of-order test input).
+fn wr_should_note_wait(elapsed_secs: u64, last_note_secs: u64) -> bool {
+    elapsed_secs.saturating_sub(last_note_secs) >= 60
+}
+
+/// `90-main.sh:1718`'s "still waiting" progress line text.
+fn wr_wait_note_text(elapsed_secs: u64) -> String {
+    format!("still waiting (~{}m) - bots respawning takes a while...", elapsed_secs / 60)
+}
+
+/// `90-main.sh:1712`'s `(( wr_elapsed >= wr_timeout ))` timeout check, pure.
+fn wr_timeout_exceeded(elapsed_secs: u64, timeout_secs: u64) -> bool {
+    elapsed_secs >= timeout_secs
+}
+
+/// `DML_READY_TIMEOUT_SECS`, default 1800s — `90-main.sh:1709`'s
+/// `"${DML_READY_TIMEOUT_SECS:-1800}"`. Any unset/unparseable value falls
+/// back to the same default (matches bash's parameter-expansion fallback,
+/// which never validates the override either).
+fn wr_ready_timeout_secs() -> u64 {
+    std::env::var("DML_READY_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800)
+}
+
+/// The blocking flow itself (real docker/SOAP I/O + wall-clock sleeps) — run
+/// under `spawn_blocking`. `emit` sends one NDJSON event per call; every
+/// return path emits its own terminal event(s) first, so the caller never
+/// needs to synthesize one. `soap_lock` serializes the `saveall` SOAP call
+/// against any other native SOAP command in flight, same discipline as
+/// `wow_console_send_native`.
+fn wow_world_restart_native_blocking(
+    no_saveall: bool,
+    soap_lock: Arc<Mutex<()>>,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::{config::ConfigReader, maint, native, soap, status};
+
+    emit(wr_event_section_start());
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    if maint::resolve_server_dir(&title_dir).is_none() {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    }
+
+    let program = native::docker_program();
+    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    let world_running = status::container_running(&program, "ac-worldserver", maint::PROBE_TIMEOUT);
+    let db_running = status::container_running(&program, "ac-database", maint::PROBE_TIMEOUT);
+    if !wr_preconditions_ok(world_running, db_running) {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error(
+            "NOT_RUNNING",
+            "The server is not running",
+            "A world-only restart needs the world server and database already up. Start the server (full Start) first.",
+        ));
+        return;
+    }
+
+    emit(wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"));
+
+    if no_saveall {
+        emit(wr_event_line(
+            "info",
+            "skipping pre-stop saveall (faster) -- the graceful stop still saves characters on shutdown",
+        ));
+    } else {
+        emit(wr_event_line("info", "saving all characters (best effort)..."));
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        // Best-effort: outcome (Ok/Fault/Auth/Unreachable) is deliberately
+        // ignored, matching the bash's `soap_exec 'saveall' >/dev/null 2>&1
+        // || true`.
+        let _ = soap::exec(&cfg, "saveall");
+    }
+
+    emit(wr_event_line("info", "restarting the world server (graceful stop, up to 300s)..."));
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(["restart", "-t", "300", "ac-worldserver"]);
+    status::windows_no_window(&mut cmd);
+    let restart_ok =
+        matches!(status::output_bounded_draining(cmd, WORLD_RESTART_STOP_TIMEOUT), Some(out) if out.status.success());
+    if !restart_ok {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error(
+            "RESTART_FAILED",
+            "docker restart failed for ac-worldserver",
+            "Is the server installed and started? Check: dml doctor",
+        ));
+        return;
+    }
+
+    emit(wr_event_line("info", "waiting for the world to come back..."));
+    let timeout_secs = wr_ready_timeout_secs();
+    let t0 = std::time::Instant::now();
+    let mut last_note: u64 = 0;
+    loop {
+        if status::world_ready(&program, maint::PROBE_TIMEOUT) {
+            break;
+        }
+        let elapsed = t0.elapsed().as_secs();
+        if wr_timeout_exceeded(elapsed, timeout_secs) {
+            emit(wr_event_section_end("error"));
+            emit(wr_event_error(
+                "READY_TIMEOUT",
+                format!("The world did not come back within {timeout_secs}s"),
+                "Check the Console logs; a full Restart may be needed.",
+            ));
+            return;
+        }
+        if wr_should_note_wait(elapsed, last_note) {
+            last_note = elapsed;
+            emit(wr_event_line("info", wr_wait_note_text(elapsed)));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    emit(wr_event_section_end("ok"));
+    emit(wr_event_done());
+}
+
+/// NATIVE-MODE fast world-only restart: same flow/messages/codes as `dml wow
+/// world-restart` (see `wow_world_restart_native_blocking`'s doc comment),
+/// via direct `docker`/SOAP calls instead of shelling `dml`. Native mode
+/// only — WSL keeps calling `wow_world_restart`.
+#[tauri::command]
+async fn wow_world_restart_native(
+    on_event: Channel<serde_json::Value>,
+    no_saveall: bool,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let soap_lock = state.soap_lock.clone();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_world_restart_native_blocking(no_saveall, soap_lock, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn wow_party_add(player: String, class: String, gender: Option<String>, spec: Option<String>, state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     let mut a: Vec<String> = vec!["wow".into(),"party".into(),"add".into(),"--player".into(),player,"--class".into(),class];
@@ -5060,6 +5268,7 @@ pub fn run() {
             wow_players_online,
             wow_bots_list,
             wow_world_restart,
+            wow_world_restart_native,
             wow_party_add,
             wow_party_list,
             wow_party_kick,
@@ -6168,5 +6377,109 @@ mod tests {
             crate::dml::config::parse_override_env(&text).get("AC_MADE_UP").map(String::as_str),
             Some("5")
         );
+    }
+
+    // -- native world-restart: event-shape builders --------------------------
+    // Task: world-restart-native. Assert the EXACT ndjson event shapes the
+    // frontend's terminal-state.ts parses (see the task brief) -- these are
+    // pure, so no docker/soap I/O is exercised.
+
+    #[test]
+    fn wr_event_section_start_shape() {
+        assert_eq!(wr_event_section_start(), serde_json::json!({"event":"section_start","name":"world-restart"}));
+    }
+
+    #[test]
+    fn wr_event_line_shape() {
+        assert_eq!(
+            wr_event_line("info", "saving all characters (best effort)..."),
+            serde_json::json!({"event":"line","level":"info","text":"saving all characters (best effort)..."})
+        );
+        assert_eq!(
+            wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"),
+            serde_json::json!({"event":"line","level":"warn","text":"world-only restart does NOT apply settings changes -- use full Restart for that"})
+        );
+    }
+
+    #[test]
+    fn wr_event_section_end_shape() {
+        assert_eq!(
+            wr_event_section_end("ok"),
+            serde_json::json!({"event":"section_end","name":"world-restart","status":"ok"})
+        );
+        assert_eq!(
+            wr_event_section_end("error"),
+            serde_json::json!({"event":"section_end","name":"world-restart","status":"error"})
+        );
+    }
+
+    #[test]
+    fn wr_event_done_shape() {
+        assert_eq!(
+            wr_event_done(),
+            serde_json::json!({"event":"done","data":{
+                "restarted":"world-only",
+                "note":"settings changes were NOT applied -- use full Restart for that",
+            }})
+        );
+    }
+
+    #[test]
+    fn wr_event_error_shape() {
+        assert_eq!(
+            wr_event_error("NOT_RUNNING", "The server is not running", "Start the server (full Start) first."),
+            serde_json::json!({"event":"error","error":{
+                "code":"NOT_RUNNING",
+                "message":"The server is not running",
+                "hint":"Start the server (full Start) first.",
+            }})
+        );
+    }
+
+    // -- native world-restart: pure decision logic ----------------------------
+
+    #[test]
+    fn wr_preconditions_ok_requires_both_running() {
+        assert!(wr_preconditions_ok(true, true));
+        assert!(!wr_preconditions_ok(true, false));
+        assert!(!wr_preconditions_ok(false, true));
+        assert!(!wr_preconditions_ok(false, false));
+    }
+
+    #[test]
+    fn wr_should_note_wait_60s_cadence() {
+        assert!(!wr_should_note_wait(0, 0));
+        assert!(!wr_should_note_wait(59, 0));
+        assert!(wr_should_note_wait(60, 0));
+        assert!(wr_should_note_wait(125, 60));
+        assert!(!wr_should_note_wait(119, 60));
+        assert!(wr_should_note_wait(120, 60));
+    }
+
+    #[test]
+    fn wr_wait_note_text_formats_minutes() {
+        assert_eq!(wr_wait_note_text(60), "still waiting (~1m) - bots respawning takes a while...");
+        assert_eq!(wr_wait_note_text(125), "still waiting (~2m) - bots respawning takes a while...");
+        assert_eq!(wr_wait_note_text(0), "still waiting (~0m) - bots respawning takes a while...");
+    }
+
+    #[test]
+    fn wr_timeout_exceeded_boundary() {
+        assert!(!wr_timeout_exceeded(1799, 1800));
+        assert!(wr_timeout_exceeded(1800, 1800));
+        assert!(wr_timeout_exceeded(1801, 1800));
+    }
+
+    #[test]
+    fn wr_ready_timeout_secs_defaults_and_reads_env() {
+        std::env::remove_var("DML_READY_TIMEOUT_SECS");
+        assert_eq!(wr_ready_timeout_secs(), 1800);
+        std::env::set_var("DML_READY_TIMEOUT_SECS", "60");
+        assert_eq!(wr_ready_timeout_secs(), 60);
+        // Unparseable override falls back to the default, same as bash's
+        // parameter expansion never validating the env var either.
+        std::env::set_var("DML_READY_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(wr_ready_timeout_secs(), 1800);
+        std::env::remove_var("DML_READY_TIMEOUT_SECS");
     }
 }

@@ -425,6 +425,33 @@ pub fn world_exit_code(program: &OsStr, timeout: Duration) -> Option<i64> {
     parse_exit_code(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Parse a `docker inspect -f '{{.State.Running}}'` result: the FIRST line
+/// only, compared literally against `"true"` — a port of the world-restart
+/// precondition's own bash idiom (`90-main.sh:1684-1688`:
+/// `wr_wrun="${wr_wrun%%$'\n'*}"` then `[[ "$wr_wrun" != true ]]`). Anything
+/// else (empty, "false", multi-line garbage, an error message) is `false` —
+/// same "can't tell -> not running" fallback `container_running` below relies
+/// on for a failed/timed-out `docker inspect`.
+pub fn parse_running(raw: &str) -> bool {
+    raw.lines().next().unwrap_or("") == "true"
+}
+
+/// Live "is this container running" probe (bounded) — a port of the
+/// world-restart precondition's two `docker inspect -f '{{.State.Running}}'`
+/// calls (`90-main.sh:1684-1685`). `pub(crate)`: consumed by `lib.rs`'s
+/// `wow_world_restart_native` (Task: native world-restart). Any failure/
+/// timeout degrades to `false` (matches the bash's `2>/dev/null || true` —
+/// an unreadable/absent container is not a running one).
+pub(crate) fn container_running(program: &OsStr, name: &str, timeout: Duration) -> bool {
+    let mut cmd = Command::new(program);
+    cmd.args(["inspect", "-f", "{{.State.Running}}", name]);
+    windows_no_window(&mut cmd);
+    match output_bounded_draining(cmd, timeout) {
+        Some(out) => parse_running(&String::from_utf8_lossy(&out.stdout)),
+        None => false,
+    }
+}
+
 /// The four-state (five-string) verdict machine — a faithful port of the
 /// `detail_verdict` derivation (`90-main.sh:1454-1492`). `exit_code` must
 /// already be the CALLER's decision of "is there a usable exit code to
@@ -874,6 +901,25 @@ Update time diff:\r
         assert_eq!(parse_exit_code(""), None);
         assert_eq!(parse_exit_code("not-a-number\n"), None);
         assert_eq!(parse_exit_code("-1\n"), None);
+    }
+
+    // -- parse_running (world-restart precondition) --------------------------
+
+    #[test]
+    fn parse_running_true_first_line_only() {
+        assert!(parse_running("true\n"));
+        assert!(parse_running("true"));
+        // Only the FIRST line matters (matches the bash `${x%%$'\n'*}` trim).
+        assert!(parse_running("true\nfalse\n"));
+    }
+
+    #[test]
+    fn parse_running_false_or_garbage_or_empty() {
+        assert!(!parse_running("false\n"));
+        assert!(!parse_running(""));
+        assert!(!parse_running("Error: No such container: ac-worldserver\n"));
+        // No trim -- trailing whitespace on the line makes it not literally "true".
+        assert!(!parse_running("true \n"));
     }
 
     // -- compute_verdict -----------------------------------------------------

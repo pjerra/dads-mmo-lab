@@ -909,13 +909,21 @@ export const gamesRestart = (
 };
 // Batch 3 F11f: world-only restart -- faster, but does NOT apply settings
 // changes (docker restart keeps creation-time env; full Restart owns that).
-export const wowWorldRestart = (
+// Native-mode routing (world-restart-native task): the native command emits
+// its ndjson events DIRECTLY (no `dml` subprocess), so it takes `noSaveall`
+// instead of the WSL sibling's `skipSaveall` -- same boolean, renamed to
+// match the Rust command's param name (mirrors the CLI's `--no-saveall`
+// flag). WSL mode is byte-for-byte unchanged.
+export const wowWorldRestart = async (
   skipSaveall: boolean,
   onEvent: (e: TermEvent) => void,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_world_restart", { skipSaveall, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_world_restart_native", { noSaveall: skipSaveall, onEvent: ch })
+    : invoke("wow_world_restart", { skipSaveall, onEvent: ch });
 };
 // Flush & rebuild the ambient bot population (Batch 1 F4). The CLI enforces
 // --yes plus the typed ack itself; the GUI's typed-confirm gates calling this.
