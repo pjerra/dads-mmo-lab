@@ -830,6 +830,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "dml-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dml-wow"
+version = "0.1.0"
+dependencies = [
+ "dml-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dml-wow-cli"
+version = "0.1.0"
+dependencies = [
+ "dml-core",
+ "dml-wow",
+ "serde_json",
+]
+
+[[package]]
 name = "dom_query"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

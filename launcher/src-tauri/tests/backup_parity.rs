@@ -241,7 +241,7 @@ fn native_created_backup_is_readable_and_deletable_by_bash() {
 
     backup::dump_to(&program, &cfg.password, false, &out_path)
         .unwrap_or_else(|e| panic!("native dump_to failed against the live DB: {e}"));
-    backup::write_meta(&cfg, &out_path, None);
+    backup::write_meta(&cfg, &out_path);
     let expected_size = std::fs::metadata(&out_path).expect("stat native backup").len();
     assert!(expected_size > 0);
 
