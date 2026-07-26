@@ -42,4 +42,9 @@ base64 = "0.22.1"
 # `rust_backend`/miniz_oxide, no OpenSSL/C dep), so making it a direct dep
 # doesn't shift anything else in Cargo.lock.
 flate2 = "1"
+# module repair's `mark` mode (dml::moduletail, Chunk 5 Part 5b): hashes a
+# module's .sql file the SAME way the bash oracle's `sha1sum` does, so the
+# `updates` tracking row's hash matches what AzerothCore's own db-import
+# would have written. Pure Rust, no C/OpenSSL dependency.
+sha1 = "0.10"
 

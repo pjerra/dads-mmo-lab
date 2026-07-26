@@ -1299,6 +1299,535 @@ async fn wow_module_place_npc(
     .await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE module update-check / conf-activate / tracking / repair /
+// fixit / place-npc / client-patch (Chunk 5, Part 5b). Faithful ports of the
+// matching sub-arms of `cli/src/90-main.sh`'s `module)` case (conf-activate
+// 5026-5050, tracking 5052-5106, repair 5107-5180, fixit 5181-5253,
+// place-npc 5254-5345, client-patch 5346-5432, update-check 5434-5470). Pure
+// lookups/parses/SQL text live in `dml::moduletail`; DB reads/writes go
+// through `db::query_with_params`/`db::execute` (bound params) except the
+// handful of genuinely multi-statement fixit SQL blocks, which reuse
+// `modmgr::mysql_run_stmt` (docker exec -e) — see that function's doc
+// comment for why the `mysql` crate can't run those.
+// ---------------------------------------------------------------------------
+
+fn not_found_err(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: message.into(), hint: hint.into() }
+}
+
+fn db_unreachable_err(message: impl Into<String>) -> CmdError {
+    CmdError { code: "DB_UNREACHABLE".into(), message: message.into(), hint: "Is ac-database running?".into() }
+}
+
+/// The resolved WoW Playerbots server dir, or the arm's own `NOT_FOUND`
+/// (`90-main.sh`'s recurring `[[ -z "$sdir" ]] && { json_err NOT_FOUND
+/// "WoW Playerbots server not installed" … }`).
+fn require_server_dir(hint: &str) -> Result<std::path::PathBuf, CmdError> {
+    let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+    crate::dml::maint::resolve_server_dir(&title_dir)
+        .ok_or_else(|| not_found_err("WoW Playerbots server not installed", hint))
+}
+
+/// One row's `COUNT(*)` decoded as `i64` (defaulting to 0 on anything odd —
+/// every caller only ever asks "is this nonzero").
+fn count_result(res: crate::dml::db::QueryResult) -> i64 {
+    sql_row_int(res.rows.first().and_then(|r| r.first())).unwrap_or(0)
+}
+
+/// NATIVE-MODE `module update-check` (`90-main.sh:5434-5470`).
+#[tauri::command]
+async fn wow_module_update_check_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let sdir = require_server_dir("Install it first, then re-run.")?;
+        let program = std::ffi::OsString::from("git");
+        Ok(crate::dml::moduletail::module_update_check(&program, &sdir))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `module conf-activate` (`90-main.sh:5026-5050`).
+#[tauri::command]
+async fn wow_module_conf_activate_native(
+    key: String,
+    force: Option<bool>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::modules::valid_cpp_key(&key) {
+        return Err(bad_arg("Invalid module key"));
+    }
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let sdir = require_server_dir("")?;
+        let Some(conf_name) = crate::dml::moduletail::module_conf_name(&key) else {
+            return Err(CmdError { code: "NO_CONF".into(), message: format!("{key} has no standard conf file"), hint: String::new() });
+        };
+        let active = sdir.join("env").join("dist").join("etc").join("modules").join(conf_name);
+        if active.is_file() && !force {
+            return Err(CmdError {
+                code: "EXISTS".into(),
+                message: format!("Active conf already exists: {conf_name}"),
+                hint: "Pass --force to overwrite with defaults.".into(),
+            });
+        }
+        let Some(dist) = crate::dml::moduletail::module_conf_dist_path(&sdir, &key) else {
+            return Err(CmdError {
+                code: "NEEDS_REBUILD".into(),
+                message: format!("No {conf_name}.dist yet"),
+                hint: "The .dist appears after a worldserver rebuild with the module present.".into(),
+            });
+        };
+        if let Some(parent) = active.parent() {
+            std::fs::create_dir_all(parent).map_err(io_internal_err)?;
+        }
+        std::fs::copy(&dist, &active).map_err(io_internal_err)?;
+        Ok(serde_json::json!({"key": key, "activated": true, "conf_name": conf_name}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `module tracking` (`90-main.sh:5052-5106`): read-only,
+/// per-db (world/characters/auth) LIKE-diagnosis plus a per-discovered-file
+/// exact-tracked check.
+#[tauri::command]
+async fn wow_module_tracking_native(key: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::modules::valid_cpp_key(&key) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid module key: {key}"), hint: String::new() });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let sdir = require_server_dir("")?;
+        if !crate::dml::modmgr::cpp_installed(&sdir, &key) {
+            return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
+        }
+        let (stripped, term1) = crate::dml::moduletail::tracking_like_terms(&key);
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let mut dbs = serde_json::Map::new();
+        for db_short in ["world", "characters", "auth"] {
+            let db = crate::dml::moduletail::database_for_short(db_short).expect("closed 3-value list");
+            let params: Vec<mysql::Value> =
+                vec![mysql::Value::from(format!("%{stripped}%")), mysql::Value::from(format!("%{term1}%"))];
+            let res = crate::dml::db::query_with_params(&cfg, db, crate::dml::moduletail::TRACKING_LIKE_SQL, params)
+                .map_err(|e| db_unreachable_err(format!("Could not reach the {db_short} database: {e}")))?;
+            let tracked_rows: Vec<String> = res.rows.iter().filter_map(|r| cell_string(r.first())).collect();
+
+            let mut files_json = Vec::new();
+            for f in crate::dml::moduletail::module_discover_sql_files(&sdir, &key, db_short) {
+                if !crate::dml::moduletail::valid_module_sql_filename(&f) {
+                    continue;
+                }
+                let params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
+                let cnt = crate::dml::db::query_with_params(&cfg, db, crate::dml::moduletail::TRACKING_EXACT_COUNT_SQL, params)
+                    .map(count_result)
+                    .unwrap_or(0);
+                files_json.push(serde_json::json!({"name": f, "tracked": cnt > 0}));
+            }
+            dbs.insert(db_short.to_string(), serde_json::json!({"tracked_rows": tracked_rows, "files": files_json}));
+        }
+        Ok(serde_json::json!({"key": key, "dbs": serde_json::Value::Object(dbs)}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `module repair` (`90-main.sh:5107-5180`): the FOURTH
+/// sanctioned direct MySQL write (see `db.rs`/`backup.rs` headers) — INSERT/
+/// DELETE on the `updates` tracking tables ONLY, via bound-param `db::
+/// execute`. Every filename is validated BEFORE any SQL runs, matching the
+/// oracle's abort-before-mutation contract.
+#[tauri::command]
+async fn wow_module_repair_native(
+    key: String,
+    db: String,
+    mode: String,
+    files: Option<String>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::modules::valid_cpp_key(&key) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid module key: {key}"), hint: String::new() });
+    }
+    if !matches!(db.as_str(), "world" | "characters" | "auth") {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid --db: {db}"), hint: "Use world, characters, or auth.".into() });
+    }
+    if !matches!(mode.as_str(), "mark" | "clear") {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid --mode: {mode}"), hint: "Use mark or clear.".into() });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let sdir = require_server_dir("")?;
+        if !crate::dml::modmgr::cpp_installed(&sdir, &key) {
+            return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
+        }
+        let file_list: Vec<String> = match &files {
+            Some(f) => f.split_whitespace().map(str::to_string).collect(),
+            None => crate::dml::moduletail::module_discover_sql_files(&sdir, &key, &db),
+        };
+        for f in &file_list {
+            if !crate::dml::moduletail::valid_module_sql_filename(f) {
+                return Err(CmdError {
+                    code: "BAD_ARG".into(),
+                    message: format!("Invalid filename: {f}"),
+                    hint: "Filenames must match ^[A-Za-z0-9._-]+\\.sql$ (no slashes).".into(),
+                });
+            }
+        }
+        let database = crate::dml::moduletail::database_for_short(&db).expect("validated above");
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let mut results = Vec::new();
+        for f in file_list {
+            let res = if mode == "mark" {
+                match crate::dml::moduletail::find_module_sql_file(&sdir, &key, &f) {
+                    None => "file_missing",
+                    Some(path) => {
+                        let bytes = std::fs::read(&path).map_err(io_internal_err)?;
+                        let hash = {
+                            use sha1::Digest;
+                            let mut hasher = sha1::Sha1::new();
+                            hasher.update(&bytes);
+                            let digest = hasher.finalize();
+                            digest.iter().map(|b| format!("{b:02X}")).collect::<String>()
+                        };
+                        let params: Vec<mysql::Value> =
+                            vec![mysql::Value::from(&f), mysql::Value::from(&hash), mysql::Value::from(&hash)];
+                        crate::dml::db::execute(&cfg, database, crate::dml::moduletail::REPAIR_MARK_SQL, params)
+                            .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
+                        "marked"
+                    }
+                }
+            } else {
+                let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
+                let cnt = crate::dml::db::query_with_params(&cfg, database, crate::dml::moduletail::REPAIR_CLEAR_COUNT_SQL, cnt_params)
+                    .map_err(|e| db_unreachable_err(format!("Could not reach the {db} database: {e}")))
+                    .map(count_result)?;
+                if cnt == 0 {
+                    "not_tracked"
+                } else {
+                    let del_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
+                    crate::dml::db::execute(&cfg, database, crate::dml::moduletail::REPAIR_CLEAR_DELETE_SQL, del_params)
+                        .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
+                    "cleared"
+                }
+            };
+            results.push(serde_json::json!({"file": f, "result": res}));
+        }
+        Ok(serde_json::json!({"key": key, "db": db, "mode": mode, "results": results}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// One capital's `(map, x, y, z, o)` spawn-if-missing step, shared by fixit
+/// and place-npc: reads the current spawn count, inserts only if it's zero,
+/// returns whether a spawn was just placed.
+fn ensure_capital_spawn(
+    cfg: &crate::dml::db::DbConfig,
+    entry: u32,
+    map: u32,
+    x: f64,
+    y: f64,
+    z: f64,
+    o: f64,
+) -> Result<bool, CmdError> {
+    let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(map)];
+    let cnt = crate::dml::db::query_with_params(cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_SPAWN_COUNT_SQL, cnt_params)
+        .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
+        .map(count_result)?;
+    if cnt > 0 {
+        return Ok(false);
+    }
+    let ins_params: Vec<mysql::Value> = vec![
+        mysql::Value::from(entry),
+        mysql::Value::from(map),
+        mysql::Value::from(x),
+        mysql::Value::from(y),
+        mysql::Value::from(z),
+        mysql::Value::from(o),
+    ];
+    crate::dml::db::execute(cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_SPAWN_INSERT_SQL, ins_params)
+        .map_err(|_| CmdError {
+            code: "SQL_FAILED".into(),
+            message: format!("Could not insert the spawn for map {map}"),
+            hint: "Is ac-database running?".into(),
+        })?;
+    Ok(true)
+}
+
+/// NATIVE-MODE `module fixit battlepass-npc` (`90-main.sh:5181-5253`).
+#[tauri::command]
+async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if key != "battlepass-npc" {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Unknown fixit: {key}"),
+            hint: "Available: battlepass-npc".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        use crate::dml::moduletail as mt;
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let entry = mt::BATTLEPASS_NPC_ENTRY;
+
+        let sw_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(0u32)];
+        let bp_sw = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, sw_params)
+            .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
+            .map(count_result)?;
+        let og_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(1u32)];
+        let bp_og = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, og_params)
+            .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
+            .map(count_result)?;
+        if bp_sw > 0 && bp_og > 0 {
+            return Ok(serde_json::json!({
+                "key": "battlepass-npc", "already_placed": true, "template": "exists",
+                "spawns_placed": 0, "restart_required": false,
+                "note": "The Battle Pass NPC is already placed in both capitals.",
+            }));
+        }
+
+        let tcnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
+        let tcnt = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
+            .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
+            .map(count_result)?;
+
+        let template = if tcnt == 0 {
+            let docker_program = crate::dml::native::docker_program();
+            if !crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_TEMPLATE_INSERT_SQL) {
+                return Err(CmdError {
+                    code: "SQL_FAILED".into(),
+                    message: "Could not create the Battle Pass NPC template".into(),
+                    hint: "Is ac-database running?".into(),
+                });
+            }
+            // Schema-adaptive model/scale statements: best-effort, matching the oracle's own `|| true`.
+            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_SCALE_UPDATE_SQL);
+            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_DELETE_SQL);
+            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_INSERT_SQL);
+            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODELID1_UPDATE_SQL);
+            "created"
+        } else {
+            "exists"
+        };
+
+        let mut placed = 0;
+        for &(map, x, y, z, o) in mt::BATTLEPASS_CAPITALS.iter() {
+            if ensure_capital_spawn(&cfg, entry, map, x, y, z, o)? {
+                placed += 1;
+            }
+        }
+        Ok(serde_json::json!({
+            "key": "battlepass-npc", "already_placed": false, "template": template,
+            "spawns_placed": placed, "restart_required": true,
+            "note": "Restart the world server for the NPC to appear (Stormwind trade district + Orgrimmar Valley of Strength).",
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `module place-npc` (`90-main.sh:5254-5345`).
+#[tauri::command]
+async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::moduletail::valid_place_npc_key(&key) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("place-npc does not support: {key}"),
+            hint: "Eligible: mod-1v1-arena, mod-transmog, mod-npc-beastmaster, bmah".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let sdir = require_server_dir("Install it first.")?;
+        let installed = if key == "bmah" {
+            crate::dml::modmgr::lua_deployed(&sdir, "bmah")
+        } else {
+            sdir.join("modules").join(&key).is_dir()
+        };
+        if !installed {
+            return Err(not_found_err(format!("{key} is not installed"), "Install it on the Modules page first."));
+        }
+        let specs = crate::dml::moduletail::npc_coord_specs(&key);
+        if specs.is_empty() {
+            return Err(CmdError {
+                code: "NO_COORDS".into(),
+                message: format!("No capital coordinates defined for {key}"),
+                hint: "This module has no ready-made spawn block.".into(),
+            });
+        }
+        let entry = specs[0].entry;
+        let cfg = crate::dml::db::DbConfig::from_env();
+        let tcnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
+        let tcnt = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
+            .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
+            .map(count_result)?;
+        if tcnt == 0 {
+            return Err(CmdError {
+                code: "NO_TEMPLATE".into(),
+                message: format!("The NPC template (entry {entry}) does not exist yet"),
+                hint: "Install and rebuild the module (cpp) or deploy it (Lua) so its NPC exists, then try again.".into(),
+            });
+        }
+        let mut placed = 0;
+        let mut maps = Vec::new();
+        for spec in &specs {
+            let did = ensure_capital_spawn(&cfg, spec.entry, spec.map, spec.x, spec.y, spec.z, spec.o)?;
+            if did {
+                placed += 1;
+            }
+            maps.push(serde_json::json!({"map": spec.map, "placed": did}));
+        }
+        let already = placed == 0;
+        let note = if placed > 0 {
+            format!("Placed the NPC in {placed} capital(s). Restart the world server (Home) for it to appear.")
+        } else {
+            "The NPC is already placed in both capitals.".to_string()
+        };
+        Ok(serde_json::json!({
+            "key": key, "entry": entry, "maps": maps, "spawns_placed": placed,
+            "already_placed": already, "restart_required": placed > 0, "note": note,
+        }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+const CLIENT_PATCH_SECTION: &str = "client-patch";
+
+/// `module client-patch`'s full orchestration (`90-main.sh:5346-5432`, `--key
+/// mod-arac` only): copy every server DBC into the running worldserver's
+/// data volume via a throwaway `docker run` container, then best-effort
+/// copy `Patch-A.MPQ` into the saved client folder's `Data/`. Streamed
+/// NDJSON — same vocabulary as `wow_module_install_native_blocking`.
+fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::modmgr::{done_event, error_event, line_event, section_end, section_start};
+    use crate::dml::moduletail as mt;
+
+    emit(section_start(CLIENT_PATCH_SECTION));
+
+    if key != "mod-arac" {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event(
+            "BAD_ARG",
+            "client-patch supports only --key mod-arac",
+            "Other modules ship no client patch step.",
+        ));
+        return;
+    }
+
+    let sdir = match require_server_dir("Install it first.") {
+        Ok(d) => d,
+        Err(e) => {
+            emit(section_end(CLIENT_PATCH_SECTION, "error"));
+            emit(error_event(&e.code, e.message, &e.hint));
+            return;
+        }
+    };
+    if !crate::dml::modmgr::cpp_installed(&sdir, "mod-arac") {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event("NOT_INSTALLED", "mod-arac is not installed", "Install it on the Modules page first."));
+        return;
+    }
+    let mdir = sdir.join("modules").join("mod-arac");
+    let dbcsrc = mdir.join("patch-contents").join("DBFilesContent");
+    if !dbcsrc.is_dir() {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        let hint = format!("Expected {} -- try Update on the Modules page to refresh the clone.", dbcsrc.display());
+        emit(error_event("NOT_FOUND", "DBC files not found in the mod-arac clone", &hint));
+        return;
+    }
+
+    let docker_program = crate::dml::native::docker_program();
+    let (vol, used_fallback) = mt::resolve_client_data_volume(&docker_program);
+    if used_fallback {
+        emit(line_event(
+            "warn",
+            format!("could not resolve the data volume from the worldserver container -- using the default name {vol}"),
+        ));
+    }
+
+    let dbc_files = mt::dbc_source_files(&mdir);
+    let mut dbc_n = 0u32;
+    for f in &dbc_files {
+        let bn = f.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        emit(line_event("info", format!("copying {bn} into the server data volume...")));
+        if !mt::docker_copy_dbc_into_volume(&docker_program, &vol, f, &bn) {
+            emit(section_end(CLIENT_PATCH_SECTION, "error"));
+            emit(error_event("COPY_FAILED", format!("Could not copy {bn} into the data volume"), "Is Docker running?"));
+            return;
+        }
+        dbc_n += 1;
+    }
+    if dbc_n == 0 {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event(
+            "NOT_FOUND",
+            format!("No .dbc files found in {}", dbcsrc.display()),
+            "Try Update on the Modules page to refresh the clone.",
+        ));
+        return;
+    }
+    emit(line_event("info", format!("{dbc_n} server DBC files installed")));
+
+    let client_path = crate::dml::modmgr::effective_client_path();
+    let mut client_done = false;
+    match client_path {
+        None => emit(line_event(
+            "warn",
+            "no client folder set — skipped Patch-A.MPQ (set it on the Modules page, then re-run this)",
+        )),
+        Some(cpath) => {
+            let mpq = mdir.join("Patch-A.MPQ");
+            if !mpq.is_file() {
+                emit(line_event(
+                    "warn",
+                    format!("Patch-A.MPQ not found in the mod-arac clone — try Update on the Modules page, or copy it manually into {}/Data/", mdir.display()),
+                ));
+            } else {
+                emit(line_event("info", "installing Patch-A.MPQ into the client Data folder..."));
+                let dest = cpath.join("Data").join("Patch-A.MPQ");
+                if std::fs::copy(&mpq, &dest).is_ok() {
+                    client_done = true;
+                    emit(line_event("info", "Patch-A.MPQ installed"));
+                } else {
+                    emit(line_event(
+                        "warn",
+                        format!("could not copy Patch-A.MPQ — copy {} into <client>/Data/ manually", mpq.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    emit(line_event(
+        "info",
+        "restart the server (Home) to load the new race/class combinations — no rebuild needed",
+    ));
+    emit(section_end(CLIENT_PATCH_SECTION, "ok"));
+    emit(done_event(serde_json::json!({
+        "key": "mod-arac", "dbc_files": dbc_n, "client_patched": client_done, "restart_required": true,
+    })));
+}
+
+/// NATIVE-MODE `module client-patch` — see
+/// [`wow_module_client_patch_native_blocking`].
+#[tauri::command]
+async fn wow_module_client_patch_native(
+    key: String,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_module_client_patch_native_blocking(key, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn wow_client_path_get(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "client-path".into(), "get".into()]).await
@@ -4972,6 +5501,657 @@ async fn wow_gm_summon_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE party add/kick/dismiss-all/relogin/botcmd + preset save/
+// delete/load/show/import (Chunk 5, Part 5b). Faithful ports of the matching
+// sub-arms of `cli/src/90-main.sh`'s `party)` case (3067-3483). Pure
+// validators/builders/SQL text live in `dml::party`; every DB read below is
+// bound-param over `db::query_with_params` (Characters DB — same schema
+// `party online`/`party list`/the gm bridge commands already read), every
+// SOAP fire reuses `party_fire_result` (== `_party_fire`'s exact case
+// block), and `preset-load` follows the SAME ndjson vocabulary as
+// `wow_module_install_native_blocking`/`wow_world_restart_native_blocking`.
+// ---------------------------------------------------------------------------
+
+/// `NOT_FOUND` for an offline character in a `party`-family arm — same code
+/// as `not_online_err` (gm) but with a CALLER-SUPPLIED hint, since each
+/// `party` sub-arm's oracle spells a slightly different one (`90-main.sh`:
+/// add "Log the character into the game first, then try again.";
+/// dismiss-all/preset-save/preset-load "Log the character into the game
+/// first."; botcmd's bot-side check "The bot must be in the world -- is it
+/// still in your party?").
+fn party_not_online_err(who: &str, hint: &str) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: format!("Character not online: {who}"), hint: hint.into() }
+}
+
+/// `_party_online_guid` (`50-party.sh:46-49`) over a direct MySQL
+/// connection. Any query failure reads as "not online" (`None`), matching
+/// the bash's own `2>/dev/null` swallow — same doctrine as `char_is_online`.
+fn party_online_guid(cfg: &crate::dml::db::DbConfig, name: &str) -> Option<i64> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
+    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::ONLINE_GUID_SQL, params)
+        .ok()
+        .and_then(|res| sql_row_int(res.rows.first().and_then(|r| r.first())))
+}
+
+/// `_party_group_member_guids` (`50-party.sh:52-55`).
+fn group_member_guids(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<i64> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::GROUP_MEMBER_GUIDS_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
+        .unwrap_or_default()
+}
+
+fn cell_string(v: Option<&crate::dml::db::SqlValue>) -> Option<String> {
+    match v {
+        Some(crate::dml::db::SqlValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        Some(crate::dml::db::SqlValue::Int(i)) => Some(i.to_string()),
+        _ => None,
+    }
+}
+
+/// Bot's name-by-guid lookup after a successful join (`90-main.sh:3102,
+/// 3417`).
+fn char_name_by_guid(cfg: &crate::dml::db::DbConfig, guid: i64) -> Option<String> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(guid)];
+    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::CHAR_NAME_BY_GUID_SQL, params)
+        .ok()
+        .and_then(|res| cell_string(res.rows.first().and_then(|r| r.first())))
+}
+
+/// The bot-members-of-a-party names query, shared by `dismiss-all` and
+/// `preset-load`'s kick phase ([`crate::dml::party::BOT_MEMBER_NAMES_SQL`]).
+fn bot_member_names(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<String> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_NAMES_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
+        .unwrap_or_default()
+}
+
+/// `preset-save`'s bot-classes query ([`crate::dml::party::
+/// BOT_MEMBER_CLASSES_SQL`]).
+fn bot_member_classes(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<i64> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_CLASSES_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
+        .unwrap_or_default()
+}
+
+/// `_party_wait_new_member` (`50-party.sh:85-101`): poll up to
+/// `poll_tries_from_env()` times (sleeping `poll_sleep_from_env()` between)
+/// for a group member guid that wasn't in `before`. The per-iteration
+/// membership test is [`crate::dml::party::find_new_member`] (pure,
+/// unit-tested); this wrapper owns only the retry/sleep mechanics.
+fn wait_new_member(cfg: &crate::dml::db::DbConfig, pguid: i64, before: &[i64]) -> Option<i64> {
+    let before_set: std::collections::HashSet<i64> = before.iter().copied().collect();
+    let tries = crate::dml::party::poll_tries_from_env();
+    let sleep = crate::dml::party::poll_sleep_from_env();
+    for i in 0..tries {
+        let now = group_member_guids(cfg, pguid);
+        if let Some(g) = crate::dml::party::find_new_member(&now, pguid, &before_set) {
+            return Some(g);
+        }
+        if i + 1 < tries && !sleep.is_zero() {
+            std::thread::sleep(sleep);
+        }
+    }
+    None
+}
+
+/// `_party_spec_names` (`50-party.sh:151-165`) read straight off the
+/// deployed playerbots.conf (or its `.dist`) via the already-native `party_
+/// specs` reader — the single source of truth `wow_party_specs_read` also
+/// uses. `None` when no conf is deployed at all (the caller then falls back
+/// to `valid_bot_spec`'s static mirror), matching `_party_pb_conf`'s own
+/// "nothing deployed" case.
+fn live_spec_names(title_dir: &std::path::Path) -> Option<Vec<String>> {
+    let (conf_path, _source) = crate::dml::party_specs::find_conf(title_dir)?;
+    let content = std::fs::read_to_string(&conf_path).ok()?;
+    Some(
+        crate::dml::party_specs::parse_spec_rows(&content)
+            .into_iter()
+            .map(|r| r.name)
+            .filter(|n| !n.is_empty())
+            .collect(),
+    )
+}
+
+/// `SoapOutcome -> Result<String, CmdError>` for `dismiss-all`'s "every fire
+/// failed" case (`90-main.sh:3224-3231`): SAME code/hint table as
+/// `party_fire_result`, but the FAULT message is the arm's own fixed "Every
+/// dismiss was rejected" (not "The dismiss command was rejected" —
+/// `dismiss-all` has no single "the" command, it fires one per bot).
+fn dismiss_fire_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
+    use crate::dml::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(_) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: "Every dismiss was rejected".into(),
+            hint: "Deploy the server bridges (bridge-setup) and restart the server first.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// NATIVE-MODE `party add` (`90-main.sh:3067-3130`). Validates + (if given) a
+/// live-checked `--spec` BEFORE ever touching the DB/SOAP; the online-guid
+/// lookup, pre-fire member snapshot, SOAP fire, new-member poll, and the
+/// post-join spec whispers all run inside the one `spawn_blocking` closure,
+/// same ordering as the oracle.
+#[tauri::command]
+async fn wow_party_add_native(
+    player: String,
+    class: String,
+    gender: Option<String>,
+    spec: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let gender = gender.unwrap_or_default();
+    let cmd = crate::dml::party::party_add_cmd(&player, &class, &gender)?;
+    let spec = spec.filter(|s| !s.is_empty());
+    if let Some(s) = &spec {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let live = live_spec_names(&title_dir);
+        if !crate::dml::party::valid_bot_spec(s, live.as_deref()) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Unknown spec: {s}"),
+                hint: "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list.".into(),
+            });
+        }
+    }
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let pguid = party_online_guid(&db_cfg, &player)
+            .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first, then try again."))?;
+        let before = group_member_guids(&db_cfg, pguid);
+        {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let soap_cfg = crate::dml::soap::SoapConfig::load();
+            let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+            party_fire_result(outcome, "add")?;
+        }
+        let Some(newguid) = wait_new_member(&db_cfg, pguid, &before) else {
+            return Ok(if let Some(s) = &spec {
+                serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
+            } else {
+                serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Spawned but not attached yet -- give it a moment and Refresh."})
+            });
+        };
+        let Some(botname) = char_name_by_guid(&db_cfg, newguid) else {
+            return Ok(if let Some(s) = &spec {
+                serde_json::json!({"added":true,"joined":true,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
+            } else {
+                serde_json::json!({"added":true,"joined":true,"bot":null,"note":null})
+            });
+        };
+        if let Some(s) = &spec {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            let soap_cfg = crate::dml::soap::SoapConfig::load();
+            let o1 = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::spec_whisper_cmd(&player, &botname, s));
+            party_fire_result(o1, "spec")?;
+            let o2 = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::autogear_whisper_cmd(&player, &botname));
+            party_fire_result(o2, "spec")?;
+            Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null,"spec":s,"spec_applied":true}))
+        } else {
+            Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null}))
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party kick` (`90-main.sh:3158-3181`): uninvite (hard fire,
+/// `_party_fire`-mapped) then a best-effort master `logout` whisper (its
+/// failure only flips `dismissed` to `false`, never aborts the command —
+/// matches the 2026-07-22 smoke fix this arm's own comment documents).
+#[tauri::command]
+async fn wow_party_kick_native(
+    player: String,
+    bot: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid player name: {player}"),
+            hint: "Kick needs --player (the bot's master) so the bot can also be dismissed.".into(),
+        });
+    }
+    let cmd = crate::dml::party::party_uninvite_cmd(&bot)?;
+    let logout_cmd = crate::dml::party::party_logout_whisper_cmd(&player, &bot)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "kick")?;
+        let dismissed = matches!(crate::dml::soap::exec(&soap_cfg, &logout_cmd), crate::dml::soap::SoapOutcome::Ok(_));
+        Ok(serde_json::json!({"kicked": true, "dismissed": dismissed}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party dismiss-all` (`90-main.sh:3182-3234`): best-effort
+/// uninvite+logout PER bot (one unreachable bot must not strand the rest of
+/// the party); `dismissed` counts only successful uninvite fires — an
+/// EVERY-fire failure (`attempted>0 && dismissed==0`) reports the LAST
+/// failure's mapped error instead of a fabricated success (the 2026-07-22
+/// review finding this arm's own comment documents).
+#[tauri::command]
+async fn wow_party_dismiss_all_native(
+    player: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
+    }
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let pguid = party_online_guid(&db_cfg, &player)
+            .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
+        let bots = bot_member_names(&db_cfg, pguid);
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let (mut dismissed, mut attempted) = (0i64, 0i64);
+        let mut last_err: Option<CmdError> = None;
+        let mut names = Vec::new();
+        for b in bots {
+            if !crate::dml::soap_cmds::valid_charname(&b) {
+                continue;
+            }
+            attempted += 1;
+            let outcome = {
+                let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                crate::dml::soap::exec(&soap_cfg, &format!("dml_uninvite {b}"))
+            };
+            match dismiss_fire_result(outcome) {
+                Ok(_) => {
+                    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+                    dismissed += 1;
+                    names.push(b);
+                }
+                Err(e) => {
+                    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+                    last_err = Some(e);
+                }
+            }
+        }
+        if attempted > 0 && dismissed == 0 {
+            return Err(last_err.expect("attempted>0 && dismissed==0 implies at least one recorded failure"));
+        }
+        Ok(serde_json::json!({"dismissed": dismissed, "attempted": attempted, "bots": names}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party relogin` (`90-main.sh:3235-3247`).
+#[tauri::command]
+async fn wow_party_relogin_native(
+    player: String,
+    bot: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let cmd = crate::dml::party::party_relogin_cmd(&player, &bot)?;
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "relogin")?;
+        Ok(serde_json::json!({"relogged": true}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party botcmd` (`90-main.sh:3249-3282`): validate player/bot
+/// names, THEN build the fixed whisper tail (the `spec` action's own
+/// non-empty + live-validity checks happen here, in that order, matching
+/// the oracle), THEN require BOTH player and bot online (bot's own
+/// NOT_FOUND hint differs from every other party arm's), THEN fire.
+#[tauri::command]
+async fn wow_party_botcmd_native(
+    player: String,
+    bot: String,
+    action: String,
+    spec: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
+    }
+    if !crate::dml::soap_cmds::valid_charname(&bot) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid bot name: {bot}"), hint: String::new() });
+    }
+    let wmsg = if let Some(tail) = crate::dml::party::botcmd_fixed_tail(&action) {
+        tail.to_string()
+    } else if action == "spec" {
+        let spec_val = spec.filter(|s| !s.is_empty()).ok_or_else(|| CmdError {
+            code: "BAD_ARG".into(),
+            message: "Action spec requires --spec <name>".into(),
+            hint: "e.g. --spec 'frost pve'".into(),
+        })?;
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let live = live_spec_names(&title_dir);
+        if !crate::dml::party::valid_bot_spec(&spec_val, live.as_deref()) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Unknown spec: {spec_val}"),
+                hint: "A premade spec name like 'frost pve'.".into(),
+            });
+        }
+        crate::dml::party::spec_action_wmsg(&spec_val)
+    } else {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid action: {action}"),
+            hint: "One of: gear talents maintain spec".into(),
+        });
+    };
+    let lock = state.soap_lock.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        if party_online_guid(&db_cfg, &player).is_none() {
+            return Err(party_not_online_err(&player, "Log the character into the game first."));
+        }
+        if party_online_guid(&db_cfg, &bot).is_none() {
+            return Err(party_not_online_err(&bot, "The bot must be in the world -- is it still in your party?"));
+        }
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let outcome = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {bot} {wmsg}"));
+        party_fire_result(outcome, "botcmd")?;
+        Ok(serde_json::json!({"sent": true, "player": player, "bot": bot, "action": action}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+fn preset_dir_or_internal_err() -> Result<std::path::PathBuf, CmdError> {
+    crate::dml::party::preset_dir().ok_or_else(|| CmdError {
+        code: "INTERNAL".into(),
+        message: "could not resolve the DML state directory (USERPROFILE/HOME not set)".into(),
+        hint: String::new(),
+    })
+}
+
+fn preset_not_found(name: &str) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: format!("No preset named {name}"), hint: String::new() }
+}
+
+fn io_internal_err(e: std::io::Error) -> CmdError {
+    CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() }
+}
+
+/// NATIVE-MODE `party preset-save` (`90-main.sh:3283-3321`).
+#[tauri::command]
+async fn wow_party_preset_save_native(player: String, name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
+    }
+    if !crate::dml::party::valid_preset_name(&name) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid preset name: {name}"),
+            hint: "Letters, digits, - and _ (max 32).".into(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let pguid = party_online_guid(&db_cfg, &player)
+            .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
+        let names: Vec<String> = bot_member_classes(&db_cfg, pguid)
+            .into_iter()
+            .filter_map(crate::dml::party_specs::class_name_from_id)
+            .map(str::to_string)
+            .collect();
+        if names.is_empty() {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "Party has no bots to save".into(),
+                hint: "Add some bots first.".into(),
+            });
+        }
+        let dir = preset_dir_or_internal_err()?;
+        std::fs::create_dir_all(&dir).map_err(io_internal_err)?;
+        let path = crate::dml::party::preset_path(&dir, &name);
+        let overwrote = path.is_file();
+        std::fs::write(&path, crate::dml::party::preset_file_content(&names)).map_err(io_internal_err)?;
+        Ok(serde_json::json!({"saved": true, "name": name, "bots": names, "overwrote": overwrote}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party preset-delete` (`90-main.sh:3339-3347`).
+#[tauri::command]
+async fn wow_party_preset_delete_native(name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::party::valid_preset_name(&name) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let dir = preset_dir_or_internal_err()?;
+        let path = crate::dml::party::preset_path(&dir, &name);
+        if !path.is_file() {
+            return Err(preset_not_found(&name));
+        }
+        std::fs::remove_file(&path).map_err(io_internal_err)?;
+        Ok(serde_json::json!({"deleted": true, "name": name}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party preset-show` (`90-main.sh:3436-3449`).
+#[tauri::command]
+async fn wow_party_preset_show_native(name: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::party::valid_preset_name(&name) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let dir = preset_dir_or_internal_err()?;
+        let path = crate::dml::party::preset_path(&dir, &name);
+        if !path.is_file() {
+            return Err(preset_not_found(&name));
+        }
+        let content = std::fs::read_to_string(&path).map_err(io_internal_err)?;
+        let classes = crate::dml::party::parse_preset_classes(&content);
+        Ok(serde_json::json!({"name": name, "classes": classes}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE `party preset-import` (`90-main.sh:3450-3483`): every token
+/// validated (via [`crate::dml::party::parse_import_classes`]) BEFORE any
+/// filesystem write, matching the oracle's abort-before-mutation contract.
+#[tauri::command]
+async fn wow_party_preset_import_native(
+    name: String,
+    classes: String,
+    force: Option<bool>,
+) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if !crate::dml::party::valid_preset_name(&name) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid preset name: {name}"),
+            hint: "Letters, digits, - and _ (max 32).".into(),
+        });
+    }
+    let parsed = crate::dml::party::parse_import_classes(&classes)?;
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let dir = preset_dir_or_internal_err()?;
+        let path = crate::dml::party::preset_path(&dir, &name);
+        if path.is_file() && !force {
+            return Err(CmdError {
+                code: "EXISTS".into(),
+                message: format!("Preset already exists: {name}"),
+                hint: "Pass --force to overwrite.".into(),
+            });
+        }
+        std::fs::create_dir_all(&dir).map_err(io_internal_err)?;
+        std::fs::write(&path, crate::dml::party::preset_file_content(&parsed)).map_err(io_internal_err)?;
+        Ok(serde_json::json!({"imported": true, "name": name, "classes": parsed}))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+const PRESET_LOAD_SECTION: &str = "preset-load";
+
+/// `party preset-load`'s full orchestration (`90-main.sh:3348-3435`): kick
+/// phase (replace semantics — every current bot goes, best-effort per bot)
+/// then a join phase (one `dml_addclass` + new-member poll per preset
+/// class line, talents/gear whispers on a successful join). Streamed NDJSON
+/// (`section_start`/`line`/`section_end`/`done`/`error`) — same vocabulary
+/// as `wow_module_install_native_blocking`.
+fn wow_party_preset_load_native_blocking(
+    player: String,
+    name: String,
+    lock: Arc<std::sync::Mutex<()>>,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::dml::modmgr::{done_event, error_event, line_event, section_end, section_start};
+
+    emit(section_start(PRESET_LOAD_SECTION));
+
+    let dir = match preset_dir_or_internal_err() {
+        Ok(d) => d,
+        Err(e) => {
+            emit(section_end(PRESET_LOAD_SECTION, "error"));
+            emit(error_event(&e.code, e.message, &e.hint));
+            return;
+        }
+    };
+    let path = crate::dml::party::preset_path(&dir, &name);
+    if !path.is_file() {
+        emit(section_end(PRESET_LOAD_SECTION, "error"));
+        emit(error_event("NOT_FOUND", format!("No preset named {name}"), ""));
+        return;
+    }
+
+    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let Some(pguid) = party_online_guid(&db_cfg, &player) else {
+        emit(section_end(PRESET_LOAD_SECTION, "error"));
+        emit(error_event(
+            "NOT_FOUND",
+            format!("Character not online: {player}"),
+            "Log the character into the game first.",
+        ));
+        return;
+    };
+
+    let soap_cfg = crate::dml::soap::SoapConfig::load();
+
+    // Kick phase (replace semantics): every current bot goes.
+    for b in bot_member_names(&db_cfg, pguid) {
+        if !crate::dml::soap_cmds::valid_charname(&b) {
+            continue;
+        }
+        let kicked_ok = {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(crate::dml::soap::exec(&soap_cfg, &format!("dml_uninvite {b}")), crate::dml::soap::SoapOutcome::Ok(_))
+        };
+        emit(line_event(if kicked_ok { "info" } else { "warn" }, if kicked_ok { format!("kicked {b}") } else { format!("could not kick {b}") }));
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+    }
+
+    // Join phase: one addclass + new-member poll per preset class line.
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let (mut requested, mut joined) = (0u32, 0u32);
+    for cls in crate::dml::party::parse_preset_classes(&content) {
+        if !crate::dml::party::valid_bot_class(&cls) {
+            emit(line_event("warn", format!("skipping unknown class: {cls}")));
+            continue;
+        }
+        requested += 1;
+        let before = group_member_guids(&db_cfg, pguid);
+        let fired_ok = {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(
+                crate::dml::soap::exec(&soap_cfg, &format!("dml_addclass {player} {cls}")),
+                crate::dml::soap::SoapOutcome::Ok(_)
+            )
+        };
+        if !fired_ok {
+            emit(line_event("warn", format!("add {cls} was rejected")));
+            continue;
+        }
+        match wait_new_member(&db_cfg, pguid, &before) {
+            Some(g) => {
+                joined += 1;
+                match char_name_by_guid(&db_cfg, g) {
+                    Some(bname) => {
+                        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::talents_autopick_whisper_cmd(&player, &bname));
+                        let _ = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::autogear_whisper_cmd(&player, &bname));
+                        emit(line_event("info", format!("{bname} joined -- talents + gear applied")));
+                    }
+                    None => emit(line_event("info", format!("a {cls} joined"))),
+                }
+            }
+            None => emit(line_event("warn", format!("{cls} did not attach in time"))),
+        }
+    }
+
+    emit(section_end(PRESET_LOAD_SECTION, "ok"));
+    emit(done_event(serde_json::json!({"loaded": true, "requested": requested, "joined": joined})));
+}
+
+/// NATIVE-MODE `party preset-load` — see [`wow_party_preset_load_native_blocking`].
+#[tauri::command]
+async fn wow_party_preset_load_native(
+    player: String,
+    name: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    if !crate::dml::soap_cmds::valid_charname(&player) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
+    }
+    if !crate::dml::party::valid_preset_name(&name) {
+        return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
+    }
+    let lock = state.soap_lock.clone();
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        wow_party_preset_load_native_blocking(player, name, lock, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
 /// NATIVE-MODE `.send items` mail (`90-main.sh:1785-1833`). `items` is a CSV
 /// of `id:count` specs (see `split_mail_items`); `subject`/`body` default the
 /// same as the CLI's own flag defaults.
@@ -8076,14 +9256,21 @@ pub fn run() {
             wow_module_rebuild,
             wow_module_rebuild_native,
             wow_module_update_check,
+            wow_module_update_check_native,
             wow_module_update,
             wow_module_update_native,
             wow_module_conf_activate,
+            wow_module_conf_activate_native,
             wow_module_client_patch,
+            wow_module_client_patch_native,
             wow_module_tracking,
+            wow_module_tracking_native,
             wow_module_repair,
+            wow_module_repair_native,
             wow_module_fixit,
+            wow_module_fixit_native,
             wow_module_place_npc,
+            wow_module_place_npc_native,
             wow_client_path_get,
             wow_client_path_set,
             wow_client_path_set_native,
@@ -8160,17 +9347,27 @@ pub fn run() {
             wow_world_restart,
             wow_world_restart_native,
             wow_party_add,
+            wow_party_add_native,
             wow_party_list,
             wow_party_kick,
+            wow_party_kick_native,
             wow_party_dismiss_all,
+            wow_party_dismiss_all_native,
             wow_party_relogin,
+            wow_party_relogin_native,
             wow_party_botcmd,
+            wow_party_botcmd_native,
             wow_party_preset_save,
+            wow_party_preset_save_native,
             wow_party_preset_list,
             wow_party_preset_delete,
+            wow_party_preset_delete_native,
             wow_party_preset_load,
+            wow_party_preset_load_native,
             wow_party_preset_show,
+            wow_party_preset_show_native,
             wow_party_preset_import,
+            wow_party_preset_import_native,
             wow_backup_create,
             wow_backup_list,
             wow_backup_delete,

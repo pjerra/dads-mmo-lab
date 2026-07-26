@@ -522,7 +522,8 @@ export interface ModuleUpdateCheck {
   repos: ModuleCheckRepo[];
 }
 export async function wowModuleUpdateCheck(): Promise<ModuleUpdateCheck> {
-  return await invoke("wow_module_update_check");
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_module_update_check_native") : invoke("wow_module_update_check");
 }
 // Per-module source pull (patch backup + stash + ff-only, no auto rebuild).
 // Done event data: { key, changed, before, after, pending_rebuild }. Native
@@ -541,19 +542,25 @@ export const wowModuleUpdate = async (
 };
 // Batch 5 F2: ARAC server-DBC + client-MPQ patch stream (key is allowlisted
 // CLI-side to mod-arac).
-export const wowModuleClientPatch = (
+export const wowModuleClientPatch = async (
   key: string,
   onEvent: (e: TermEvent) => void,
 ): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_module_client_patch", { key, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_client_patch_native", { key, onEvent: ch })
+    : invoke("wow_module_client_patch", { key, onEvent: ch });
 };
 export async function wowModuleConfActivate(
   key: string,
   force?: boolean,
 ): Promise<{ key: string; activated: boolean; conf_name: string }> {
-  return await invoke("wow_module_conf_activate", { key, force });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_conf_activate_native", { key, force })
+    : invoke("wow_module_conf_activate", { key, force });
 }
 
 export interface TrackingFile {
@@ -576,7 +583,8 @@ export interface ModuleTracking {
 }
 
 export async function wowModuleTracking(key: string): Promise<ModuleTracking> {
-  return await invoke("wow_module_tracking", { key });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_module_tracking_native", { key }) : invoke("wow_module_tracking", { key });
 }
 
 export interface RepairResult {
@@ -594,10 +602,13 @@ export interface ModuleRepair {
 export async function wowModuleRepair(
   key: string,
   db: "world" | "characters" | "auth",
-  mode: "mark" | "clear",
+  repairMode: "mark" | "clear",
   files?: string,
 ): Promise<ModuleRepair> {
-  return await invoke("wow_module_repair", { key, db, mode, files });
+  const backendMode = await resolveBackendMode();
+  return backendMode === "native"
+    ? invoke("wow_module_repair_native", { key, db, mode: repairMode, files })
+    : invoke("wow_module_repair", { key, db, mode: repairMode, files });
 }
 
 // Batch 3 F13b: canned one-shot module fixes (currently only the missing
@@ -612,7 +623,8 @@ export interface ModuleFixit {
 }
 
 export async function wowModuleFixit(key: "battlepass-npc"): Promise<ModuleFixit> {
-  return await invoke("wow_module_fixit", { key });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_module_fixit_native", { key }) : invoke("wow_module_fixit", { key });
 }
 
 // Batch 2 (overnight): spawn an installed NPC-mod's creature in both capitals
@@ -630,7 +642,10 @@ export interface ModulePlaceNpc {
   note: string;
 }
 export async function wowModulePlaceNpc(key: PlaceNpcKey): Promise<ModulePlaceNpc> {
-  return await invoke("wow_module_place_npc", { key });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_module_place_npc_native", { key })
+    : invoke("wow_module_place_npc", { key });
 }
 
 export interface ClientPath {
@@ -1108,7 +1123,10 @@ export async function wowPartyAdd(
   gender?: string,
   spec?: string,
 ): Promise<PartyAddResult> {
-  return await invoke("wow_party_add", { player, class: className, gender, spec });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_add_native", { player, class: className, gender, spec })
+    : invoke("wow_party_add", { player, class: className, gender, spec });
 }
 export async function wowPartyList(player: string): Promise<PartyMember[]> {
   const d = await invoke<{ members: PartyMember[] }>("wow_party_list", { player });
@@ -1120,7 +1138,8 @@ export async function wowPartyKick(
   player: string,
   bot: string,
 ): Promise<{ kicked: boolean; dismissed: boolean }> {
-  return await invoke("wow_party_kick", { player, bot });
+  const mode = await resolveBackendMode();
+  return mode === "native" ? invoke("wow_party_kick_native", { player, bot }) : invoke("wow_party_kick", { player, bot });
 }
 // `dismissed` counts bots whose uninvite fire actually succeeded (the CLI
 // errors out instead when EVERY fire failed); `attempted` is the party's
@@ -1128,10 +1147,16 @@ export async function wowPartyKick(
 export async function wowPartyDismissAll(
   player: string,
 ): Promise<{ dismissed: number; attempted: number; bots: string[] }> {
-  return await invoke("wow_party_dismiss_all", { player });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_dismiss_all_native", { player })
+    : invoke("wow_party_dismiss_all", { player });
 }
 export async function wowPartyRelogin(player: string, bot: string): Promise<{ relogged: boolean }> {
-  return await invoke("wow_party_relogin", { player, bot });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_relogin_native", { player, bot })
+    : invoke("wow_party_relogin", { player, bot });
 }
 // Native-mode routing (Chunk 2, task C2c item 4): `wow_bridge_setup_native`
 // backs BOTH this and `wowBridgeSetup` below -- they are aliases for the
@@ -1208,32 +1233,54 @@ export async function wowPartyBotcmd(
   action: "gear" | "talents" | "maintain" | "spec",
   spec?: string,
 ): Promise<BotcmdResult> {
-  return await invoke("wow_party_botcmd", { player, bot, action, spec });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_botcmd_native", { player, bot, action, spec })
+    : invoke("wow_party_botcmd", { player, bot, action, spec });
 }
 export async function wowPartyPresetSave(player: string, name: string): Promise<PresetSaveResult> {
-  return await invoke("wow_party_preset_save", { player, name });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_preset_save_native", { player, name })
+    : invoke("wow_party_preset_save", { player, name });
 }
 export async function wowPartyPresetList(): Promise<PresetInfo[]> {
   const d = await invoke<{ presets: PresetInfo[] }>("wow_party_preset_list");
   return d.presets;
 }
 export async function wowPartyPresetDelete(name: string): Promise<{ deleted: boolean; name: string }> {
-  return await invoke("wow_party_preset_delete", { name });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_preset_delete_native", { name })
+    : invoke("wow_party_preset_delete", { name });
 }
-export const wowPartyPresetLoad = (player: string, name: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+export const wowPartyPresetLoad = async (
+  player: string,
+  name: string,
+  onEvent: (e: TermEvent) => void,
+): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_party_preset_load", { player, name, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_preset_load_native", { player, name, onEvent: ch })
+    : invoke("wow_party_preset_load", { player, name, onEvent: ch });
 };
 export async function wowPartyPresetShow(name: string): Promise<{ name: string; classes: string[] }> {
-  return await invoke("wow_party_preset_show", { name });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_preset_show_native", { name })
+    : invoke("wow_party_preset_show", { name });
 }
 export async function wowPartyPresetImport(
   name: string,
   classes: string,
   force?: boolean,
 ): Promise<{ imported: boolean; name: string; classes: string[] }> {
-  return await invoke("wow_party_preset_import", { name, classes, force });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_party_preset_import_native", { name, classes, force })
+    : invoke("wow_party_preset_import", { name, classes, force });
 }
 
 export const wowBridgeSetup = async (onEvent: (e: TermEvent) => void): Promise<void> => {

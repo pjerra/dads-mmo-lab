@@ -1,0 +1,514 @@
+//! Native-mode **party add/kick/dismiss-all/relogin/botcmd** + **preset
+//! save/delete/load/show/import** (Chunk 5, Part 5b). Faithful port of
+//! `cli/src/50-party.sh`'s helpers plus the matching sub-arms of the `party)`
+//! case in `cli/src/90-main.sh:3067-3483`.
+//!
+//! ARCHITECTURE. Pure command-string builders, validators, bound-param SQL
+//! text, and preset-file (de)serialization live here — no SOAP/DB/Tauri.
+//! `lib.rs` wires these to `soap::exec`/`db::query_with_params`/`std::fs`,
+//! the same split `dml::soap_cmds` (SOAP builders) and `dml::modmgr`
+//! (module orchestration primitives) already use. `party online`/`party
+//! specs`/`party list` are OUT of scope here — they were ported earlier
+//! (task D1a: `pages::read_party_online`, `party_specs`) and this task's own
+//! `dismiss-all`/`preset-save`/`preset-load` reuse their bot-membership SQL
+//! shape, not their code.
+
+use std::path::{Path, PathBuf};
+
+use crate::CmdError;
+
+use super::soap_cmds::valid_charname;
+
+fn bad_arg(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
+    CmdError { code: "BAD_ARG".into(), message: message.into(), hint: hint.into() }
+}
+
+// ---------------------------------------------------------------------
+// Validators — `_valid_preset_name`/`_valid_bot_class`/`_valid_bot_spec`
+// (`50-party.sh:117,124-129,208-231`).
+// ---------------------------------------------------------------------
+
+/// `_valid_preset_name`: `^[A-Za-z0-9_-]{1,32}$`.
+pub fn valid_preset_name(s: &str) -> bool {
+    let n = s.chars().count();
+    (1..=32).contains(&n) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// `_valid_bot_class`: the class set `party add --class` accepts.
+/// Deathknight (class id 6) is deliberately excluded — see
+/// `party_specs::class_name_from_id`'s matching exclusion.
+pub fn valid_bot_class(s: &str) -> bool {
+    matches!(
+        s,
+        "warrior" | "paladin" | "hunter" | "rogue" | "priest" | "shaman" | "mage" | "warlock" | "druid"
+    )
+}
+
+/// `_valid_bot_spec`'s injection guard (`50-party.sh:211`):
+/// `^[a-z][a-z ]*$` — lowercase words + spaces only, non-empty.
+pub fn valid_bot_spec_shape(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_lowercase() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c == ' ')
+}
+
+/// Static fallback spec-name mirror — the `_valid_bot_spec` fallback case
+/// block (`50-party.sh:216-230`), used ONLY when no playerbots.conf is
+/// deployed (verified against the shipped defaults, 2026-07-19; "bear pvp"/
+/// "frostfire pvp" deliberately do NOT exist — do not "complete the
+/// symmetry", per the bash comment this mirrors).
+pub const FALLBACK_SPEC_NAMES: &[&str] = &[
+    "arms pve", "arms pvp", "fury pve", "fury pvp", "prot pve", "prot pvp",
+    "holy pve", "holy pvp", "ret pve", "ret pvp",
+    "bm pve", "bm pvp", "mm pve", "mm pvp", "surv pve", "surv pvp",
+    "as pve", "as pvp", "combat pve", "combat pvp", "subtlety pve", "subtlety pvp",
+    "disc pve", "disc pvp", "shadow pve", "shadow pvp",
+    "ele pve", "ele pvp", "enh pve", "enh pvp", "resto pve", "resto pvp",
+    "arcane pve", "arcane pvp", "fire pve", "fire pvp", "frost pve", "frost pvp", "frostfire pve",
+    "affli pve", "affli pvp", "demo pve", "demo pvp", "destro pve", "destro pvp",
+    "balance pve", "balance pvp", "bear pve", "cat pve", "cat pvp",
+];
+
+/// `_valid_bot_spec` (`50-party.sh:208-231`): the shape guard first, then
+/// membership against `live_names` (the deployed conf's
+/// `AiPlayerbot.PremadeSpecName.*` values — the caller resolves these via
+/// `party_specs::find_conf` + `parse_spec_rows`) when non-empty, else the
+/// static [`FALLBACK_SPEC_NAMES`] mirror.
+pub fn valid_bot_spec(want: &str, live_names: Option<&[String]>) -> bool {
+    if !valid_bot_spec_shape(want) {
+        return false;
+    }
+    match live_names {
+        Some(names) if !names.is_empty() => names.iter().any(|n| n == want),
+        _ => FALLBACK_SPEC_NAMES.contains(&want),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Command-string builders — `party add`/`kick`/`dismiss-all`/`relogin`/
+// `botcmd` (`90-main.sh:3067-3282`). Online-guid lookups, the new-member
+// poll, and DB member-list reads are orchestration (live in `lib.rs`), not
+// pure builders.
+// ---------------------------------------------------------------------
+
+fn validate_player(player: &str) -> Result<(), CmdError> {
+    if !valid_charname(player) {
+        return Err(bad_arg(format!("Invalid player name: {player}"), ""));
+    }
+    Ok(())
+}
+
+fn validate_bot(bot: &str) -> Result<(), CmdError> {
+    if !valid_charname(bot) {
+        return Err(bad_arg(format!("Invalid bot name: {bot}"), ""));
+    }
+    Ok(())
+}
+
+/// `party add`'s pre-SOAP validation + bridge command (`90-main.sh:3067-
+/// 3083`). `gender` must be `""`/`"male"`/`"female"`.
+pub fn party_add_cmd(player: &str, class: &str, gender: &str) -> Result<String, CmdError> {
+    validate_player(player)?;
+    if !valid_bot_class(class) {
+        return Err(bad_arg(
+            format!("Invalid class: {class}"),
+            "One of: warrior paladin hunter rogue priest shaman mage warlock druid",
+        ));
+    }
+    match gender {
+        "" | "male" | "female" => {}
+        _ => return Err(bad_arg(format!("Invalid gender: {gender}"), "male or female")),
+    }
+    let mut cmd = format!("dml_addclass {player} {class}");
+    if !gender.is_empty() {
+        cmd.push(' ');
+        cmd.push_str(gender);
+    }
+    Ok(cmd)
+}
+
+/// `party kick`'s uninvite fire (`90-main.sh:3158-3177`).
+pub fn party_uninvite_cmd(bot: &str) -> Result<String, CmdError> {
+    validate_bot(bot)?;
+    Ok(format!("dml_uninvite {bot}"))
+}
+
+/// The master `logout` whisper `kick`/`dismiss-all`/`preset-load` fire after
+/// an uninvite (best-effort at every call site — its own failure never
+/// aborts the caller, matching the oracle's unchecked `|| true`).
+pub fn party_logout_whisper_cmd(player: &str, bot: &str) -> Result<String, CmdError> {
+    validate_player(player)?;
+    validate_bot(bot)?;
+    Ok(format!("dml_whisper {player} {bot} logout"))
+}
+
+/// `party relogin` (`90-main.sh:3235-3247`).
+pub fn party_relogin_cmd(player: &str, bot: &str) -> Result<String, CmdError> {
+    validate_player(player)?;
+    validate_bot(bot)?;
+    Ok(format!("dml_login {player} {bot}"))
+}
+
+/// `party botcmd`'s closed action allowlist (`90-main.sh:3265-3274`) for the
+/// THREE fixed (no-argument) actions. `None` for `"spec"` (needs a live conf
+/// lookup the caller owns — see [`valid_bot_spec`]/[`spec_action_wmsg`]) and
+/// for anything else (the caller reports `BAD_ARG "Invalid action: …"`).
+pub fn botcmd_fixed_tail(action: &str) -> Option<&'static str> {
+    match action {
+        "gear" => Some("autogear"),
+        "talents" => Some("talents autopick"),
+        "maintain" => Some("maintenance"),
+        _ => None,
+    }
+}
+
+/// The `action == "spec"` whisper tail, once `spec` has already passed the
+/// non-empty + live-validity checks at the call site (`90-main.sh:3269-
+/// 3273`).
+pub fn spec_action_wmsg(spec: &str) -> String {
+    format!("talents spec {spec}")
+}
+
+/// `preset-load`'s per-class bridge fire (`90-main.sh:3410`) — same shape as
+/// [`party_add_cmd`] but with no gender/spec (the replace flow never carries
+/// either).
+pub fn preset_load_addclass_cmd(player: &str, class: &str) -> Result<String, CmdError> {
+    validate_player(player)?;
+    Ok(format!("dml_addclass {player} {class}"))
+}
+
+/// Post-join whisper pair — `talents autopick` then `autogear`
+/// (`90-main.sh:3419-3420`, `preset-load`'s per-bot finish).
+pub fn talents_autopick_whisper_cmd(player: &str, botname: &str) -> String {
+    format!("dml_whisper {player} {botname} talents autopick")
+}
+pub fn autogear_whisper_cmd(player: &str, botname: &str) -> String {
+    format!("dml_whisper {player} {botname} autogear")
+}
+/// The optional post-`party add` spec whisper pair (`90-main.sh:3109-3111`).
+pub fn spec_whisper_cmd(player: &str, botname: &str, spec: &str) -> String {
+    format!("dml_whisper {player} {botname} talents spec {spec}")
+}
+
+// ---------------------------------------------------------------------
+// SQL — bound-param text only; the actual `db::query_with_params` calls
+// happen in `lib.rs` (this module stays DB-connection-free, matching
+// `soap_cmds`).
+// ---------------------------------------------------------------------
+
+/// `_party_online_guid` (`50-party.sh:46-49`).
+pub const ONLINE_GUID_SQL: &str = "SELECT guid FROM characters WHERE name=? AND online=1 LIMIT 1";
+
+/// `_party_group_member_guids` (`50-party.sh:52-55`).
+pub const GROUP_MEMBER_GUIDS_SQL: &str =
+    "SELECT memberGuid FROM group_member WHERE guid=(SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1)";
+
+/// The bot-members-of-a-party query shared BYTE-IDENTICALLY by `dismiss-all`
+/// (`90-main.sh:3189-3194`) and `preset-load`'s kick phase (`90-main.sh:3377-
+/// 3382`).
+pub const BOT_MEMBER_NAMES_SQL: &str = "SELECT c.name \
+     FROM group_member gm \
+     JOIN characters c ON c.guid = gm.memberGuid \
+     WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
+       AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) \
+     ORDER BY c.name";
+
+/// `preset-save`'s bot-class query (`90-main.sh:3296-3301`) — same JOIN
+/// shape as [`BOT_MEMBER_NAMES_SQL`] but selects `c.class` (no name needed
+/// for a class-only preset).
+pub const BOT_MEMBER_CLASSES_SQL: &str = "SELECT c.class \
+     FROM group_member gm \
+     JOIN characters c ON c.guid = gm.memberGuid \
+     WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
+       AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) \
+     ORDER BY c.name";
+
+/// Bot name-by-guid lookup after a successful join (`90-main.sh:3102,3417`).
+pub const CHAR_NAME_BY_GUID_SQL: &str = "SELECT name FROM characters WHERE guid=? LIMIT 1";
+
+// ---------------------------------------------------------------------
+// New-member poll — `_party_wait_new_member` (`50-party.sh:85-101`).
+// ---------------------------------------------------------------------
+
+/// One iteration's membership test: the first guid in `members_now` (a fresh
+/// DB read, in query order) that is neither `pguid` itself nor already in
+/// `before` (the pre-fire snapshot). `None` means no new member showed up
+/// THIS iteration — the caller retries up to [`poll_tries_from_env`] times.
+pub fn find_new_member(members_now: &[i64], pguid: i64, before: &std::collections::HashSet<i64>) -> Option<i64> {
+    members_now.iter().copied().find(|&g| g != pguid && !before.contains(&g))
+}
+
+/// `DML_PARTY_POLL_TRIES` (default 12) — env override, same convention as
+/// `backup::backup_keep_from_env`.
+pub fn poll_tries_from_env() -> u32 {
+    std::env::var("DML_PARTY_POLL_TRIES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(12)
+}
+
+/// `DML_PARTY_POLL_SLEEP` (default 0.5s) — env override, fractional seconds
+/// allowed (matching the bash's `sleep "$slp"`).
+pub fn poll_sleep_from_env() -> std::time::Duration {
+    std::env::var("DML_PARTY_POLL_SLEEP")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(std::time::Duration::from_secs_f64)
+        .unwrap_or(std::time::Duration::from_millis(500))
+}
+
+// ---------------------------------------------------------------------
+// Preset file management — `_preset_dir` + preset-save/-list/-delete/-load/
+// -show/-import (`90-main.sh:3283-3483`). One class name per line,
+// LF-terminated, no header/metadata.
+// ---------------------------------------------------------------------
+
+/// `_preset_dir` (`50-party.sh:114`): `~/.dml/party-presets`.
+pub fn preset_dir() -> Option<PathBuf> {
+    super::dml_home_dir().map(|h| h.join("party-presets"))
+}
+
+pub fn preset_path(dir: &Path, name: &str) -> PathBuf {
+    dir.join(name)
+}
+
+/// Preset FILE CONTENT for `preset-save`/`preset-import`: one class name per
+/// line, LF-terminated (`printf '%s' "$names"` where `$names` was itself
+/// built as `"$cname"$'\n'` per bot — i.e. every line, including the last,
+/// ends in `\n`, and there is no extra trailing blank line beyond that).
+pub fn preset_file_content(classes: &[String]) -> String {
+    classes.iter().map(|c| format!("{c}\n")).collect()
+}
+
+/// Parse a preset file's raw content into its class-name lines, dropping
+/// any blank line (`[[ -z "$cls" ]] && continue`, shared by preset-load's
+/// read loop and preset-show, `90-main.sh:3405-3406,3443-3444`).
+pub fn parse_preset_classes(content: &str) -> Vec<String> {
+    content.split('\n').filter(|l| !l.is_empty()).map(str::to_string).collect()
+}
+
+/// `preset-import`'s `--classes` CSV split + per-token validation
+/// (`90-main.sh:3461-3469`): the empty-string precheck happens first (its
+/// own message), then EVERY token must be a valid class BEFORE any write —
+/// the first invalid token's error is returned and nothing is written,
+/// matching the oracle's abort-before-any-fs-mutation contract.
+pub fn parse_import_classes(classes: &str) -> Result<Vec<String>, CmdError> {
+    if classes.is_empty() {
+        return Err(bad_arg(
+            "Missing --classes <comma-separated list>",
+            "One of: warrior paladin hunter rogue priest shaman mage warlock druid",
+        ));
+    }
+    let mut out = Vec::new();
+    for c in classes.split(',') {
+        if !valid_bot_class(c) {
+            return Err(bad_arg(
+                format!("Invalid class: {c}"),
+                "One of: warrior paladin hunter rogue priest shaman mage warlock druid",
+            ));
+        }
+        out.push(c.to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- valid_preset_name -------------------------------------------------
+
+    #[test]
+    fn valid_preset_name_boundaries() {
+        assert!(!valid_preset_name(""));
+        assert!(valid_preset_name("a"));
+        assert!(valid_preset_name(&"a".repeat(32)));
+        assert!(!valid_preset_name(&"a".repeat(33)));
+        assert!(valid_preset_name("my-preset_1"));
+        assert!(!valid_preset_name("bad name"));
+        assert!(!valid_preset_name("../evil"));
+    }
+
+    // -- valid_bot_class -------------------------------------------------
+
+    #[test]
+    fn valid_bot_class_excludes_deathknight_and_unknowns() {
+        for c in ["warrior", "paladin", "hunter", "rogue", "priest", "shaman", "mage", "warlock", "druid"] {
+            assert!(valid_bot_class(c), "{c} should be valid");
+        }
+        assert!(!valid_bot_class("deathknight"));
+        assert!(!valid_bot_class("Warrior"));
+        assert!(!valid_bot_class(""));
+    }
+
+    // -- valid_bot_spec_shape / valid_bot_spec -------------------------------
+
+    #[test]
+    fn valid_bot_spec_shape_rejects_uppercase_and_symbols() {
+        assert!(valid_bot_spec_shape("frost pve"));
+        assert!(!valid_bot_spec_shape("Frost pve"));
+        assert!(!valid_bot_spec_shape("frost-pve"));
+        assert!(!valid_bot_spec_shape(""));
+        assert!(!valid_bot_spec_shape(" frost"));
+    }
+
+    #[test]
+    fn valid_bot_spec_uses_live_names_when_present() {
+        let live = vec!["custom spec".to_string()];
+        assert!(valid_bot_spec("custom spec", Some(&live)));
+        // Not in the live list, and live list is non-empty -> fallback NOT consulted.
+        assert!(!valid_bot_spec("frost pve", Some(&live)));
+    }
+
+    #[test]
+    fn valid_bot_spec_falls_back_to_static_mirror_when_no_live_conf() {
+        assert!(valid_bot_spec("frost pve", None));
+        assert!(valid_bot_spec("frost pve", Some(&[])));
+        assert!(!valid_bot_spec("bear pvp", None)); // deliberately absent
+        assert!(!valid_bot_spec("nonsense", None));
+    }
+
+    // -- party_add_cmd -------------------------------------------------
+
+    #[test]
+    fn party_add_cmd_happy_path_no_gender() {
+        assert_eq!(party_add_cmd("Testen", "warrior", "").unwrap(), "dml_addclass Testen warrior");
+    }
+
+    #[test]
+    fn party_add_cmd_with_gender() {
+        assert_eq!(party_add_cmd("Testen", "priest", "female").unwrap(), "dml_addclass Testen priest female");
+    }
+
+    #[test]
+    fn party_add_cmd_rejects_bad_player_class_gender() {
+        assert_eq!(party_add_cmd("bad name", "warrior", "").unwrap_err().code, "BAD_ARG");
+        assert_eq!(party_add_cmd("Testen", "deathknight", "").unwrap_err().code, "BAD_ARG");
+        assert_eq!(party_add_cmd("Testen", "warrior", "other").unwrap_err().code, "BAD_ARG");
+    }
+
+    // -- party_uninvite_cmd / party_logout_whisper_cmd / party_relogin_cmd --
+
+    #[test]
+    fn party_uninvite_cmd_happy_path() {
+        assert_eq!(party_uninvite_cmd("Botty").unwrap(), "dml_uninvite Botty");
+    }
+
+    #[test]
+    fn party_logout_whisper_cmd_happy_path() {
+        assert_eq!(party_logout_whisper_cmd("Testen", "Botty").unwrap(), "dml_whisper Testen Botty logout");
+    }
+
+    #[test]
+    fn party_relogin_cmd_happy_path() {
+        assert_eq!(party_relogin_cmd("Testen", "Botty").unwrap(), "dml_login Testen Botty");
+    }
+
+    #[test]
+    fn party_relogin_cmd_rejects_invalid_names() {
+        assert_eq!(party_relogin_cmd("bad name", "Botty").unwrap_err().code, "BAD_ARG");
+        assert_eq!(party_relogin_cmd("Testen", "bad name").unwrap_err().code, "BAD_ARG");
+    }
+
+    // -- botcmd_fixed_tail / spec_action_wmsg -------------------------------
+
+    #[test]
+    fn botcmd_fixed_tail_gear_talents_maintain() {
+        assert_eq!(botcmd_fixed_tail("gear"), Some("autogear"));
+        assert_eq!(botcmd_fixed_tail("talents"), Some("talents autopick"));
+        assert_eq!(botcmd_fixed_tail("maintain"), Some("maintenance"));
+    }
+
+    #[test]
+    fn botcmd_fixed_tail_none_for_spec_and_unknown() {
+        assert_eq!(botcmd_fixed_tail("spec"), None);
+        assert_eq!(botcmd_fixed_tail("dance"), None);
+    }
+
+    #[test]
+    fn spec_action_wmsg_builds_tail() {
+        assert_eq!(spec_action_wmsg("frost pve"), "talents spec frost pve");
+    }
+
+    // -- find_new_member -------------------------------------------------
+
+    #[test]
+    fn find_new_member_finds_first_guid_not_in_before_or_self() {
+        let before: std::collections::HashSet<i64> = [1, 2].into_iter().collect();
+        assert_eq!(find_new_member(&[1, 2, 3], 1, &before), Some(3));
+        assert_eq!(find_new_member(&[1, 2], 1, &before), None);
+        assert_eq!(find_new_member(&[], 1, &before), None);
+    }
+
+    // -- poll_tries_from_env / poll_sleep_from_env ------------------------
+
+    #[test]
+    fn poll_tries_from_env_default_is_twelve() {
+        std::env::remove_var("DML_PARTY_POLL_TRIES");
+        assert_eq!(poll_tries_from_env(), 12);
+    }
+
+    #[test]
+    fn poll_sleep_from_env_default_is_half_second() {
+        std::env::remove_var("DML_PARTY_POLL_SLEEP");
+        assert_eq!(poll_sleep_from_env(), std::time::Duration::from_millis(500));
+    }
+
+    // -- preset file content / parse -------------------------------------
+
+    #[test]
+    fn preset_file_content_lf_terminates_every_line() {
+        let classes = vec!["warrior".to_string(), "priest".to_string()];
+        assert_eq!(preset_file_content(&classes), "warrior\npriest\n");
+    }
+
+    #[test]
+    fn preset_file_content_empty_is_empty() {
+        assert_eq!(preset_file_content(&[]), "");
+    }
+
+    #[test]
+    fn parse_preset_classes_drops_blank_lines() {
+        assert_eq!(
+            parse_preset_classes("warrior\n\npriest\n"),
+            vec!["warrior".to_string(), "priest".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_preset_classes_roundtrips_with_preset_file_content() {
+        let classes = vec!["warrior".to_string(), "mage".to_string(), "druid".to_string()];
+        let content = preset_file_content(&classes);
+        assert_eq!(parse_preset_classes(&content), classes);
+    }
+
+    // -- parse_import_classes -------------------------------------------------
+
+    #[test]
+    fn parse_import_classes_happy_path() {
+        assert_eq!(
+            parse_import_classes("warrior,priest,mage").unwrap(),
+            vec!["warrior".to_string(), "priest".to_string(), "mage".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_import_classes_rejects_empty() {
+        let e = parse_import_classes("").unwrap_err();
+        assert_eq!(e.message, "Missing --classes <comma-separated list>");
+    }
+
+    #[test]
+    fn parse_import_classes_rejects_first_bad_token_before_any_success() {
+        let e = parse_import_classes("warrior,deathknight,priest").unwrap_err();
+        assert_eq!(e.message, "Invalid class: deathknight");
+    }
+
+    // -- preset_path -------------------------------------------------
+
+    #[test]
+    fn preset_path_joins_dir_and_name() {
+        let dir = std::path::PathBuf::from("/home/x/.dml/party-presets");
+        assert_eq!(preset_path(&dir, "myPreset"), dir.join("myPreset"));
+    }
+}
