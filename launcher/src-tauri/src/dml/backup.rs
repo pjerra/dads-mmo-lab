@@ -6,13 +6,31 @@
 //! WHY THIS EXISTS. WSL/`dml` drives `docker exec ac-database mysqldump …
 //! | gzip > ~/.dml/backups/wow-<ts>.sql.gz` via bash. Native mode has no bash
 //! to pipe through, so this module does the same two things directly in
-//! Rust: [`dump_to`] shells `docker exec … mysqldump` (bounded, pipe-draining
-//! — see [`super::status::output_bounded_draining`]'s own doc comment for why
-//! a *draining* runner is required for a call that can move many MB/GB of
-//! stdout) and gzips the captured bytes with `flate2` instead of piping to a
-//! `gzip` process. Everything else (name validation, prune, summary sidecar,
-//! validate, delete) is plain `std::fs` + a hand-rolled decompress-and-scan,
-//! no shelling at all.
+//! Rust: [`dump_to`] shells `docker exec … mysqldump` and gzips its stdout
+//! with `flate2` instead of piping to a `gzip` process. Everything else (name
+//! validation, prune, summary sidecar, validate, delete) is plain `std::fs` +
+//! a hand-rolled decompress-and-scan, no shelling at all.
+//!
+//! `dump_to` STREAMS, IT NEVER BUFFERS THE WHOLE DUMP. A `--include-world`
+//! dump can be many GB of stdout — [`dump_to`] is also the pre-restore SAFETY
+//! dump inside `wow_backup_restore_native` (`lib.rs`), so an earlier
+//! fully-buffered `Vec<u8>` capture (`status::output_bounded_draining`, fine
+//! for the small bounded reads it was designed for — see that function's own
+//! doc comment) meant an OOM here could kill the whole Tauri process while
+//! the game server was stopped, with no recovery. [`dump_to`] instead spawns
+//! the child with piped stdout/stderr directly (not via `output_bounded_
+//! draining`) and reads stdout in fixed chunks straight into a
+//! `flate2::write::GzEncoder<File>` writing the `.tmp` sibling — at no point
+//! does more than one chunk of the dump exist in memory, however large the
+//! whole thing is. Stderr is drained concurrently on its own thread into a
+//! capped tail buffer (only the last [`err_tail`]-sized slice is ever
+//! reported, so the cap costs nothing). The overall `DUMP_TIMEOUT` deadline
+//! is enforced by the MAIN thread polling `try_wait()` and killing the child
+//! on overrun — the exact same drain-while-polling shape [`super::status::
+//! output_bounded_draining`]'s doc comment describes, just with the "drain"
+//! half doing real work (gzip-encoding to disk) instead of only buffering.
+//! Mirrors [`super::restore::stream_restore`]'s chunked-read/concurrent-drain
+//! discipline for the opposite (import) direction.
 //!
 //! SIX SANCTIONED DIRECT MYSQL WRITES. `backup restore` (out of scope for
 //! this task — see `60-backup.sh`'s header comment) is the CLI's one
@@ -43,13 +61,13 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde_json::{json, Value};
 
 use super::db::{self, Database, DbConfig};
-use super::status::{output_bounded_draining, windows_no_window};
+use super::status::windows_no_window;
 
 /// `_backup_dir` (`60-backup.sh:23`): `~/.dml/backups`.
 pub fn backup_dir() -> Option<PathBuf> {
@@ -423,42 +441,170 @@ pub fn mysqldump_args(password: &str, include_world: bool) -> Vec<String> {
 }
 
 /// `tail -c 160 "$out.err" | tr -d '\r\n"\\'` (`90-main.sh:3683`), applied
-/// directly to the captured stderr bytes (native has no `.err` file — the
-/// bytes are already in memory from the draining runner).
+/// directly to the captured stderr tail (native has no `.err` file — the
+/// bytes are already in memory, drained concurrently by [`dump_to`] into a
+/// [`STDERR_TAIL_CAP`]-bounded buffer; since only the last 160 bytes of
+/// *that* buffer are ever used, the cap changes nothing this function sees).
 fn err_tail(stderr: &[u8]) -> String {
     let start = stderr.len().saturating_sub(160);
     String::from_utf8_lossy(&stderr[start..]).chars().filter(|c| !matches!(c, '\r' | '\n' | '"' | '\\')).collect()
 }
 
-/// `_backup_dump_to` (`60-backup.sh:51-63`): run the dump, gzip the captured
-/// stdout, atomic tmp+rename into `out_path`. `Err` carries the
-/// [`err_tail`]-trimmed stderr on a dump failure (mirrors the bash's
-/// `errtail` the caller reports as `BACKUP_FAILED`'s hint) or a plain I/O
-/// message on a local gzip/rename failure. No partial file is ever left at
-/// `out_path` on failure (tmp is written first, `.tmp` cleaned up on error).
-pub fn dump_to(program: &OsStr, password: &str, include_world: bool, out_path: &Path) -> Result<(), String> {
-    let mut cmd = Command::new(program);
-    cmd.args(mysqldump_args(password, include_world));
-    windows_no_window(&mut cmd);
-    let out = output_bounded_draining(cmd, DUMP_TIMEOUT)
-        .ok_or_else(|| "mysqldump timed out or the docker command could not be started".to_string())?;
-    if !out.status.success() {
-        return Err(err_tail(&out.stderr));
+/// Read/write chunk size for [`dump_to`]'s streaming copy loop — same order
+/// of magnitude as [`super::restore::stream_into`]'s 64 KiB import chunk,
+/// picked from the "64-256 KiB" band called out in the hardening spec for
+/// this rewrite.
+const DUMP_CHUNK_SIZE: usize = 128 * 1024;
+
+/// Hard cap on the stderr tail [`dump_to`] keeps in memory while draining the
+/// dump's stderr pipe concurrently. Far larger than [`err_tail`] ever reads
+/// (160 bytes) — this exists only so a pathologically chatty `mysqldump`
+/// can't grow the buffer without bound the way the old fully-buffered
+/// capture implicitly allowed; the *content* [`err_tail`] sees is identical
+/// either way, since this cap always keeps the newest bytes (see
+/// [`push_bounded_tail`]).
+const STDERR_TAIL_CAP: usize = 64 * 1024;
+
+/// Append `chunk` to `buf`, then trim from the FRONT (oldest bytes) if `buf`
+/// now exceeds `cap` — keeps only the newest `cap` bytes, same shape as a
+/// ring buffer but simpler since stderr for a `mysqldump` run is small by
+/// construction (this only ever fires in a pathological case).
+fn push_bounded_tail(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) {
+    buf.extend_from_slice(chunk);
+    if buf.len() > cap {
+        let excess = buf.len() - cap;
+        buf.drain(0..excess);
     }
+}
+
+/// `_backup_dump_to` (`60-backup.sh:51-63`): run the dump, gzip its stdout
+/// STREAMED (never buffered whole — see the module doc comment), atomic
+/// tmp+rename into `out_path`. `Err` carries the [`err_tail`]-trimmed stderr
+/// on a dump failure (mirrors the bash's `errtail` the caller reports as
+/// `BACKUP_FAILED`'s hint), the same combined "timed out or could not be
+/// started" message on a spawn failure or a [`DUMP_TIMEOUT`] overrun, or a
+/// plain I/O message on a local gzip/rename failure. No partial file is ever
+/// left at `out_path` on failure (tmp is written first, `.tmp` cleaned up on
+/// error) — this holds even when the child dies mid-stream.
+///
+/// Thin wrapper over [`dump_stream`] (same split as [`super::restore::
+/// stream_restore`] over `stream_into`): this keeps the real `docker exec …
+/// mysqldump` argv AND the real [`DUMP_TIMEOUT`] fixed, while `dump_stream`
+/// itself is generic over program/args/timeout so the streaming engine can
+/// be exercised in tests against a harmless `cmd.exe` child and a
+/// millisecond-scale deadline instead.
+pub fn dump_to(program: &OsStr, password: &str, include_world: bool, out_path: &Path) -> Result<(), String> {
+    dump_stream(program, &mysqldump_args(password, include_world), out_path, DUMP_TIMEOUT)
+}
+
+/// The generic streaming-pipe engine behind [`dump_to`] — see that
+/// function's doc comment for the split's rationale.
+fn dump_stream(program: &OsStr, args: &[String], out_path: &Path, timeout: Duration) -> Result<(), String> {
+    const START_OR_TIMEOUT_ERR: &str = "mysqldump timed out or the docker command could not be started";
+
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    windows_no_window(&mut cmd);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|_| START_OR_TIMEOUT_ERR.to_string())?;
+    let mut stdout = child.stdout.take().expect("stdout was piped");
+    let mut stderr = child.stderr.take().expect("stderr was piped");
 
     let tmp = append_suffix(out_path, ".tmp");
-    let write_result = (|| -> std::io::Result<()> {
-        use std::io::Write;
-        let f = std::fs::File::create(&tmp)?;
+    let tmp_for_writer = tmp.clone();
+
+    // Drain stderr on its own thread, concurrently with the stdout-copy
+    // thread below and this thread's deadline poll — same anti-deadlock
+    // discipline `restore::stream_into`'s doc comment explains (a chatty
+    // child can otherwise fill an unread pipe and block).
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8 * 1024];
+        loop {
+            match std::io::Read::read(&mut stderr, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => push_bounded_tail(&mut buf, &chunk[..n], STDERR_TAIL_CAP),
+            }
+        }
+        buf
+    });
+
+    // THE load-bearing streaming loop: fixed-size chunks, read from the
+    // child's stdout pipe -> gzip-encode -> write to the `.tmp` file, repeat.
+    // At no point does this hold more than one [`DUMP_CHUNK_SIZE`] chunk of
+    // the dump in memory, however many GB `mysqldump` ultimately emits.
+    let stdout_handle = std::thread::spawn(move || -> std::io::Result<()> {
+        let f = std::fs::File::create(&tmp_for_writer)?;
         let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
-        enc.write_all(&out.stdout)?;
+        let mut chunk = [0u8; DUMP_CHUNK_SIZE];
+        loop {
+            let n = std::io::Read::read(&mut stdout, &mut chunk)?;
+            if n == 0 {
+                break;
+            }
+            std::io::Write::write_all(&mut enc, &chunk[..n])?;
+        }
         enc.finish()?;
         Ok(())
-    })();
+    });
+
+    // Deadline enforcement lives on THIS thread, exactly like `status::
+    // output_bounded_draining`: poll `try_wait()` (never blocking on the
+    // pipes ourselves), and kill+reap the child on overrun. Killing closes
+    // both pipes, which unblocks the two reader threads above (EOF/broken
+    // pipe) well before their joins below — same reasoning as that
+    // function's own doc comment on why the join afterward isn't itself an
+    // unbounded wait.
+    let deadline = std::time::Instant::now() + timeout;
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    timed_out = true;
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                timed_out = true;
+                break None;
+            }
+        }
+    };
+
+    let write_result = stdout_handle
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "the dump-writer thread panicked")));
+    let stderr_buf = stderr_handle.join().unwrap_or_default();
+
+    // Priority mirrors the pre-streaming code's error classification order:
+    // a timeout/never-exited child beats everything else, then a nonzero
+    // exit (reported via `err_tail`, ignoring whatever partial bytes the
+    // writer thread saw — a killed/failed child's stdout is never a dump
+    // worth keeping), then a local write/rename failure, then success.
+    if timed_out {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(START_OR_TIMEOUT_ERR.to_string());
+    }
+    let Some(status) = status else {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(START_OR_TIMEOUT_ERR.to_string());
+    };
+    if !status.success() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err_tail(&stderr_buf));
+    }
     if let Err(e) = write_result {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("could not write the gzip archive: {e}"));
     }
+
     std::fs::rename(&tmp, out_path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("could not finalize the backup file: {e}")
@@ -809,6 +955,109 @@ mod tests {
         assert_eq!(err_tail(b"a\r\nb\"c\\d"), "abcd");
         let long = vec![b'x'; 500];
         assert_eq!(err_tail(&long).len(), 160);
+    }
+
+    // -- dump_stream: real subprocess, no docker dependency ---------------------
+    //
+    // These exercise the FULL streaming engine (spawn -> chunked stdout read
+    // -> gzip-encode-to-disk -> concurrent stderr drain -> deadline poll ->
+    // reap) against `cmd.exe`-provided stand-ins instead of `docker exec …
+    // mysqldump` — mirrors `dml::restore::tests`'s `stream_into` coverage for
+    // the opposite (import) direction.
+
+    #[test]
+    fn dump_stream_real_multichunk_child_round_trips_through_gzip() {
+        // A real `cmd.exe /c type <file>` child streams a payload comfortably
+        // larger than several `DUMP_CHUNK_SIZE` chunks to stdout, proving the
+        // read/gzip-encode loop's chunk boundaries never drop or corrupt
+        // bytes -- not just a single small in-memory buffer.
+        let d = tmp_dir("dump-stream-multichunk");
+        let src = d.join("payload.txt");
+        let mut payload = String::new();
+        for i in 0..20_000 {
+            payload.push_str(&format!("INSERT INTO characters VALUES ({i});\n"));
+        }
+        assert!(payload.len() > DUMP_CHUNK_SIZE * 3, "payload too small to force multiple chunks");
+        std::fs::write(&src, payload.as_bytes()).unwrap();
+
+        let out = d.join("wow-20260101-000000.sql.gz");
+        dump_stream(
+            OsStr::new("cmd.exe"),
+            &["/c".to_string(), "type".to_string(), src.display().to_string()],
+            &out,
+            DUMP_TIMEOUT,
+        )
+        .unwrap();
+
+        assert!(out.is_file());
+        assert!(!append_suffix(&out, ".tmp").exists(), "the .tmp sibling must be gone after a successful rename");
+
+        let decompressed = gzip_decompress_to_vec(&out).unwrap();
+        let got = String::from_utf8_lossy(&decompressed).replace("\r\n", "\n");
+        assert_eq!(got, payload, "content must survive the chunked read -> gzip -> decompress round trip exactly");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dump_stream_kills_and_reports_timeout_when_the_child_overruns_the_deadline() {
+        // `cmd.exe /c "for /L %i in (1,0,2) do @rem"` is an infinite loop
+        // BUILT INTO cmd.exe itself (a zero increment never terminates the
+        // `for /L`) -- deliberately NOT `ping`/`timeout`/anything that shells
+        // out to a separate .exe: a grandchild process inherits the same
+        // piped stdout handle, and Windows `TerminateProcess` only kills the
+        // process it's given, not its descendants, so killing just the
+        // immediate `cmd.exe` would leave that grandchild holding the pipe
+        // open -- our reader thread would then block on it for however long
+        // THAT process keeps running, silently defeating the timeout this
+        // test is supposed to exercise (confirmed live with `ping -n 60`: the
+        // call didn't return for the full ~60s despite the child being
+        // "killed" well before). A loop with no subprocess at all sidesteps
+        // that trap: killing `cmd.exe` directly closes its own stdout handle,
+        // so the reader thread sees EOF immediately.
+        let d = tmp_dir("dump-stream-timeout");
+        let out = d.join("wow-20260101-000000.sql.gz");
+
+        let start = std::time::Instant::now();
+        let err = dump_stream(
+            OsStr::new("cmd.exe"),
+            &["/c".to_string(), "for /L %i in (1,0,2) do @rem".to_string()],
+            &out,
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "err={err}");
+        // The kill must land close to the deadline, not after running
+        // indefinitely (this loop would otherwise never exit on its own).
+        assert!(start.elapsed() < Duration::from_secs(10), "elapsed={:?}", start.elapsed());
+
+        assert!(!out.exists(), "no partial/renamed file may be left behind on a timeout");
+        assert!(!append_suffix(&out, ".tmp").exists(), "the .tmp sibling must be cleaned up on a timeout");
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn dump_stream_nonzero_exit_reports_err_tail_and_removes_tmp() {
+        // A real child that writes to stderr then exits nonzero -- proving
+        // the concurrently-drained stderr buffer actually reaches `err_tail`
+        // and the `.tmp` file never survives a failed dump.
+        let d = tmp_dir("dump-stream-nonzero");
+        let out = d.join("wow-20260101-000000.sql.gz");
+
+        let err = dump_stream(
+            OsStr::new("cmd.exe"),
+            &["/c".to_string(), "echo dump failed badly 1>&2 & exit 5".to_string()],
+            &out,
+            DUMP_TIMEOUT,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("dump failed badly"), "err={err}");
+        assert!(!out.exists());
+        assert!(!append_suffix(&out, ".tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     // -- validate: pure classify + marker scan ----------------------------------
