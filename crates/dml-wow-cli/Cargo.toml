@@ -1,0 +1,15 @@
+[package]
+name = "dml-wow-cli"
+version = "0.1.0"
+description = "WoW CLI tool for DML"
+license = "AGPL-3.0-only"
+edition = "2021"
+
+[dependencies]
+dml-core = { path = "../dml-core" }
+dml-wow = { path = "../dml-wow" }
+serde_json = "1"
+
+[[bin]]
+name = "dml-wow"
+path = "src/main.rs"

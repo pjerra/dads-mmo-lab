@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dml-core",
+    "crates/dml-wow",
+    "crates/dml-wow-cli",
+    "launcher/src-tauri",
+]
