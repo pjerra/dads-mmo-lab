@@ -439,7 +439,11 @@ export async function wowModuleRead(): Promise<ModuleList> {
 }
 
 export async function wowCommands(): Promise<ModCommands[]> {
-  const data = await invoke<{ mods: ModCommands[] }>("wow_commands");
+  const mode = await resolveBackendMode();
+  const data =
+    mode === "native"
+      ? await invoke<{ mods: ModCommands[] }>("wow_commands_read")
+      : await invoke<{ mods: ModCommands[] }>("wow_commands");
   return data.mods;
 }
 
@@ -600,13 +604,19 @@ export interface ClientPath {
   valid: boolean;
 }
 export async function wowClientPathGet(): Promise<ClientPath> {
-  return await invoke("wow_client_path_get");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_client_path_read")
+    : await invoke("wow_client_path_get");
 }
 export async function wowClientPathSet(path: string): Promise<ClientPath> {
   return await invoke("wow_client_path_set", { path });
 }
 export async function wowClientPathDetect(): Promise<{ candidates: string[] }> {
-  return await invoke("wow_client_path_detect");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_client_path_detect_read")
+    : await invoke("wow_client_path_detect");
 }
 
 export async function wowItemsSearch(p: {
@@ -1005,7 +1015,11 @@ export async function wowPartyOnline(): Promise<OnlineChar[]> {
 // Read-only: the live premade specs from the deployed playerbots.conf. Empty
 // when the server isn't installed (the UI then falls back to its static maps).
 export async function wowPartySpecs(): Promise<LiveSpec[]> {
-  const d = await invoke<{ source: string; specs: LiveSpec[] }>("wow_party_specs");
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ source: string; specs: LiveSpec[] }>("wow_party_specs_read")
+      : await invoke<{ source: string; specs: LiveSpec[] }>("wow_party_specs");
   return d.specs;
 }
 export async function wowPartyAdd(
@@ -1252,7 +1266,11 @@ export async function wowLan(action: LanAction, ip?: string, internet?: boolean)
 // Best-effort public IPv4 (Batch 4 F15) -- null means "couldn't tell",
 // never an error.
 export async function wowLanPublicIp(): Promise<string | null> {
-  const d = await invoke<{ public_ip: string | null }>("wow_lan_public_ip");
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ public_ip: string | null }>("wow_lan_public_ip_read")
+      : await invoke<{ public_ip: string | null }>("wow_lan_public_ip");
   return d.public_ip;
 }
 
@@ -1468,7 +1486,10 @@ export async function zamCacheClear(): Promise<{ cleared: boolean; freed_bytes: 
   return await invoke("zam_cache_clear");
 }
 export async function wowCacheStatus(): Promise<{ caches: CacheEntry[] }> {
-  return await invoke("wow_cache_status");
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? await invoke("wow_cache_status_read")
+    : await invoke("wow_cache_status");
 }
 export async function wowCacheClean(): Promise<{ wiped: boolean; freed_bytes: number; path: string }> {
   return await invoke("wow_cache_clean");

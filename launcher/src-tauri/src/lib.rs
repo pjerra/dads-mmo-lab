@@ -1529,6 +1529,123 @@ async fn wow_update_check_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+// --- Task D1a: 5 small native-mode reads ------------------------------------
+// commands / party-specs / client-path (get+detect) / cache-status /
+// lan-public-ip. Each is a faithful port of its `cli/src/90-main.sh` arm
+// (see the `dml::{commands,party_specs,clientpath,cachestatus,lanip}`
+// module doc comments for the exact source lines). Native mode only — WSL
+// keeps calling the un-suffixed sibling command.
+
+/// NATIVE-MODE fast read of the in-game command reference: same shape as
+/// `wow_commands` (`{"mods":[{key,name,text}]}`). The static per-mod text
+/// blocks are ported verbatim in `dml::commands::cmd_block_for`;
+/// install-state comes from the same `ModuleReader` `wow_module_read` uses;
+/// the module catalog is the same session-cached fetch `wow_module_read`
+/// shares. `NOT_FOUND` when the WoW Playerbots title isn't installed,
+/// matching the CLI arm.
+#[tauri::command]
+async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let runner = state.runner.clone();
+    let cache = state.module_catalog.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        if crate::dml::maint::resolve_server_dir(&title_dir).is_none() {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "WoW Playerbots server not installed".into(),
+                hint: "Install it first.".into(),
+            });
+        }
+        let catalog = fetch_catalog_data(&runner, &cache)?;
+        let reader = crate::dml::modules::ModuleReader::from_env();
+        let modules_dir = title_dir.join("modules");
+        Ok(crate::dml::commands::assemble_commands(&catalog, &reader, &modules_dir))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the live playerbots premade specs: same shape
+/// as `wow_party_specs` (`{"source","specs":[{class_id,class,specno,name,
+/// link,tree}]}`), parsed straight off the deployed `playerbots.conf` (or
+/// its `.dist`). `NOT_FOUND` ("playerbots.conf not found (nor its .dist)")
+/// when neither exists, matching the CLI arm's single error path.
+#[tauri::command]
+async fn wow_party_specs_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let Some((conf_path, source)) = crate::dml::party_specs::find_conf(&title_dir) else {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: "playerbots.conf not found (nor its .dist)".into(),
+                hint: "Is the WoW server fully installed?".into(),
+            });
+        };
+        let content = std::fs::read_to_string(&conf_path).unwrap_or_default();
+        Ok(crate::dml::party_specs::build_specs_value(&content, source))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the saved WoW client path: same shape as
+/// `wow_client_path_get` (`{"path","valid"}`). `client-path set` stays a
+/// WSL/CLI write (out of scope for this read chunk).
+#[tauri::command]
+async fn wow_client_path_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        Ok(crate::dml::clientpath::read_client_path())
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast client-detect scan: same shape as `wow_client_path_
+/// detect` (`{"candidates":[...]}`). Windows-native scan roots (no WSL
+/// `/mnt/*` here) — see `dml::clientpath`'s module doc comment.
+#[tauri::command]
+async fn wow_client_path_detect_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        let roots = crate::dml::clientpath::default_scan_roots();
+        let candidates = crate::dml::clientpath::detect_client(&roots);
+        Ok(serde_json::json!({ "candidates": candidates }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of the wowhead item-info cache size: same shape as
+/// `wow_cache_status` (`{"caches":[{key,label,path,present,bytes,files}]}`),
+/// via a plain `std::fs` walk instead of shelling `du`/`find`.
+#[tauri::command]
+async fn wow_cache_status_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        Ok(crate::dml::cachestatus::read_cache_status())
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast public-IP lookup: same shape as `wow_lan_public_ip`
+/// (`{"public_ip": …|null}`), via `reqwest::blocking` instead of shelling
+/// `curl`. Never errors — an unreachable network degrades to `null`,
+/// matching the CLI arm.
+#[tauri::command]
+async fn wow_lan_public_ip_read() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        let ip = crate::dml::lanip::fetch_public_ip();
+        Ok(serde_json::json!({ "public_ip": ip }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -5246,6 +5363,12 @@ pub fn run() {
             wow_docker_usage_read,
             wow_port_check_read,
             wow_update_check_read,
+            wow_commands_read,
+            wow_party_specs_read,
+            wow_client_path_read,
+            wow_client_path_detect_read,
+            wow_cache_status_read,
+            wow_lan_public_ip_read,
             backend_mode,
             wow_config_set,
             wow_config_set_native,

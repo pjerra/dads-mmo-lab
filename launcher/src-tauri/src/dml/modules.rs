@@ -149,7 +149,9 @@ impl ModuleReader {
     }
 
     /// `_cpp_installed` (70-modules.sh:138): `modules/<key>/.git` is a dir.
-    fn cpp_installed(&self, key: &str) -> bool {
+    /// `pub(crate)`: also reused by `dml::commands::assemble_commands` (task
+    /// D1a) for the same install-state gate `commands` needs.
+    pub(crate) fn cpp_installed(&self, key: &str) -> bool {
         self.modules_dir().join(key).join(".git").is_dir()
     }
 
@@ -201,7 +203,9 @@ impl ModuleReader {
     }
 
     /// `_lua_cloned` (70-modules.sh:264): `ale_scripts/<key>/.git` is a dir.
-    fn lua_cloned(&self, key: &str) -> bool {
+    /// `pub(crate)`: also reused by `dml::commands::assemble_commands` (task
+    /// D1a).
+    pub(crate) fn lua_cloned(&self, key: &str) -> bool {
         self.title_dir.join("ale_scripts").join(key).join(".git").is_dir()
     }
 
@@ -233,7 +237,9 @@ impl ModuleReader {
     }
 
     /// `_sql_installed` (70-modules.sh:288): the `.installed` marker exists.
-    fn sql_installed(&self, key: &str) -> bool {
+    /// `pub(crate)`: also reused by `dml::commands::assemble_commands` (task
+    /// D1a).
+    pub(crate) fn sql_installed(&self, key: &str) -> bool {
         self.title_dir
             .join("sql_scripts")
             .join("installed")
