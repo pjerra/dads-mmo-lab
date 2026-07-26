@@ -179,12 +179,23 @@ fn soap_parity_when_reachable() {
     let create_cmd = format!("account create {user} {pass}");
     let delete_cmd = format!("account delete {user}");
 
-    // Clean slate (ignore result), then create once so the account exists.
+    // Ensure the account EXISTS (the precondition for the duplicate-create
+    // parity check below). Best-effort pre-clean, then create. EITHER outcome
+    // is a valid setup state: Ok = we just created it; a Fault containing
+    // "already exist" = a prior run left it behind (Windows reuses PIDs across
+    // the session's many parity runs, and SOAP account-delete can lag) -- the
+    // account still exists, which is all the dup-create check needs. Only a
+    // genuinely different outcome (Auth/Unreachable/other Fault) is a failure.
     let _ = exec(&cfg, &delete_cmd);
     let setup = exec(&cfg, &create_cmd);
+    let exists = match &setup {
+        SoapOutcome::Ok(_) => true,
+        SoapOutcome::Fault(t) => t.to_lowercase().contains("already exist"),
+        _ => false,
+    };
     assert!(
-        matches!(setup, SoapOutcome::Ok(_)),
-        "setup: creating throwaway account {user} should succeed, got {setup:?}"
+        exists,
+        "setup: throwaway account {user} should be creatable or already exist, got {setup:?}"
     );
 
     // Duplicate create -> identical Fault + identical fault TEXT on both.
