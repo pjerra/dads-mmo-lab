@@ -319,6 +319,41 @@ mod tests {
         assert!(drain_lines(&mut buf, b"").is_empty());
     }
 
+    // -- real-subprocess test plumbing: same fixture-file convention as
+    // `runner.rs`'s `fixture_runner`/`fixture(name)` (Task 3) -- a `.cmd`
+    // fixture on Windows, an `.sh` sibling everywhere else, so these tests
+    // never hardcode `cmd.exe` and can run on `ubuntu-latest` CI (Task 16).
+
+    #[cfg(windows)]
+    const FIXTURE_EXT: &str = "cmd";
+    #[cfg(not(windows))]
+    const FIXTURE_EXT: &str = "sh";
+
+    fn fixture(name: &str) -> String {
+        format!("{}/tests/fixtures/{}.{}", env!("CARGO_MANIFEST_DIR"), name, FIXTURE_EXT)
+    }
+
+    #[cfg(windows)]
+    fn shell_program() -> &'static str {
+        "cmd"
+    }
+    #[cfg(not(windows))]
+    fn shell_program() -> &'static str {
+        "sh"
+    }
+
+    /// Windows runs the fixture via `cmd /C <path>`; everywhere else `sh
+    /// <path>` interprets the script directly (no `+x` needed — the path is
+    /// an argument to `sh`, never exec'd on its own).
+    #[cfg(windows)]
+    fn shell_args(fixture_path: &str) -> Vec<&str> {
+        vec!["/C", fixture_path]
+    }
+    #[cfg(not(windows))]
+    fn shell_args(fixture_path: &str) -> Vec<&str> {
+        vec![fixture_path]
+    }
+
     // -- run_streamed_unbounded (real spawn, real log file, no docker needed) --
 
     #[test]
@@ -326,16 +361,17 @@ mod tests {
         let dir = tmp_dir("streamed-cmd");
         let log_path = dir.join("out.log");
         let mut lines: Vec<String> = Vec::new();
-        // `cmd /C` on Windows runs a tiny multi-line, nonzero-exit program
-        // without depending on docker being present at all.
+        // `streamed_two_lines` prints "one" then "two" then exits 3 -- a
+        // tiny multi-line, nonzero-exit program with no docker dependency.
+        let path = fixture("streamed_two_lines");
         let status = run_streamed_unbounded(
-            OsStr::new("cmd"),
-            &["/C", "echo one& echo two& exit /b 3"],
+            OsStr::new(shell_program()),
+            &shell_args(&path),
             &dir,
             &log_path,
             |line| lines.push(line.to_string()),
         );
-        let status = status.expect("cmd.exe must spawn on Windows CI");
+        let status = status.expect("the fixture shell must spawn");
         assert_eq!(status.code(), Some(3));
         assert!(lines.iter().any(|l| l.trim() == "one"));
         assert!(lines.iter().any(|l| l.trim() == "two"));
@@ -350,7 +386,8 @@ mod tests {
         let dir = tmp_dir("streamed-truncate");
         let log_path = dir.join("out.log");
         std::fs::write(&log_path, "OLD CONTENT THAT MUST NOT SURVIVE\n").unwrap();
-        let _ = run_streamed_unbounded(OsStr::new("cmd"), &["/C", "echo fresh"], &dir, &log_path, |_| {});
+        let path = fixture("streamed_fresh");
+        let _ = run_streamed_unbounded(OsStr::new(shell_program()), &shell_args(&path), &dir, &log_path, |_| {});
         let logged = std::fs::read_to_string(&log_path).unwrap();
         assert!(!logged.contains("OLD CONTENT"));
         assert!(logged.contains("fresh"));
@@ -361,12 +398,14 @@ mod tests {
 
     #[test]
     fn run_captured_real_command_success_and_failure() {
-        let ok = run_captured(OsStr::new("cmd"), &["/C", "echo hi"], Duration::from_secs(10));
+        let hi_path = fixture("captured_hi");
+        let ok = run_captured(OsStr::new(shell_program()), &shell_args(&hi_path), Duration::from_secs(10));
         assert!(ok.success);
         assert_eq!(ok.code, Some(0));
         assert_eq!(ok.lines, vec!["hi".to_string()]);
 
-        let bad = run_captured(OsStr::new("cmd"), &["/C", "exit /b 7"], Duration::from_secs(10));
+        let exit7_path = fixture("captured_exit7");
+        let bad = run_captured(OsStr::new(shell_program()), &shell_args(&exit7_path), Duration::from_secs(10));
         assert!(!bad.success);
         assert_eq!(bad.code, Some(7));
     }
