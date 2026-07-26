@@ -32,4 +32,8 @@ serde_yaml_ng = "0.10.0"
 # launcher connects to Docker Desktop's DB over loopback, unencrypted) so there
 # is no OpenSSL/native-tls C dependency to satisfy on Windows.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "derive", "buffer-pool"] }
+# item-info/entity-info icon bytes -> icon_b64 (dml::iteminfo, task D1b). Pinned
+# to the version already resolved transitively (reqwest/mysql), so adding it
+# as a direct dep doesn't shift anything else in Cargo.lock.
+base64 = "0.22.1"
 

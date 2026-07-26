@@ -704,8 +704,15 @@ export interface ItemInfo {
   // server's displayid has no Wowhead model data (e.g. the Warglaives).
   display_id?: number;
 }
+// NATIVE-MODE fast sibling of wow_item_info: same {items:[...]} shape, read
+// via direct reqwest + the shared ~/.dml/wowhead-cache disk cache in the
+// launcher's Rust core (dml::iteminfo) instead of shelling `dml`.
 export async function wowItemInfo(entries: number[]): Promise<ItemInfo[]> {
-  const d = await invoke<{ items: ItemInfo[] }>("wow_item_info", { entries });
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ items: ItemInfo[] }>("wow_item_info_read", { entries })
+      : await invoke<{ items: ItemInfo[] }>("wow_item_info", { entries });
   return d.items;
 }
 export interface AchievementEntry {
@@ -738,8 +745,14 @@ export interface EntityInfo {
   icon_b64?: string | null;
   wowhead?: WowheadTooltip;
 }
+// NATIVE-MODE fast sibling of wow_entity_info: same {entities:[...]} shape,
+// same dml::iteminfo machinery as wowItemInfo above (no local/DB fallback).
 export async function wowEntityInfo(kind: "spell" | "achievement", ids: number[]): Promise<EntityInfo[]> {
-  const d = await invoke<{ entities: EntityInfo[] }>("wow_entity_info", { kind, ids });
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ entities: EntityInfo[] }>("wow_entity_info_read", { kind, ids })
+      : await invoke<{ entities: EntityInfo[] }>("wow_entity_info", { kind, ids });
   return d.entities;
 }
 export async function wowConfigList(): Promise<ConfigSetting[]> {

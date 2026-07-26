@@ -1646,6 +1646,78 @@ async fn wow_lan_public_ip_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE fast read of item tooltip/icon info: same shape as
+/// `wow_item_info` (`{"items":[{entry,source,icon,icon_b64,wowhead?,name?,
+/// quality?,tooltip_html?,display_id?}]}`), via direct `reqwest` + the SAME
+/// `~/.dml/wowhead-cache` disk cache the bash CLI reads/writes (so a cache
+/// warmed by either backend is reused by the other), with a local
+/// `item_template` DB fallback for custom/unknown-to-wowhead items. `
+/// --entries` max 25 enforced here (`BAD_ARG`), matching the CLI arm;
+/// duplicates deduped preserving first-seen order (`dml::iteminfo::
+/// dedupe_preserve_order`). Never hard-fails on network/DB trouble --
+/// degradation is per-item, exactly like `_iteminfo_one`. Native mode only.
+#[tauri::command]
+async fn wow_item_info_read(entries: Vec<u32>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if entries.len() > 25 {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "--entries max 25 ids per call".into(),
+            hint: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let Some(cache_root) = crate::dml::cachestatus::cache_dir() else {
+            return Err(CmdError {
+                code: "INTERNAL".into(),
+                message: "Could not resolve the wowhead cache directory".into(),
+                hint: String::new(),
+            });
+        };
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        Ok(crate::dml::iteminfo::read_item_info(&cache_root, Some(&db_cfg), &entries))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast read of spell/achievement tooltip/icon info: same shape
+/// as `wow_entity_info` (`{"entities":[{id,source,icon,icon_b64,wowhead?}]}`),
+/// same wowhead+cache machinery as [`wow_item_info_read`] but NO local/DB
+/// fallback (unknown -> `{"id":N,"source":"unavailable"}`). `--kind` must be
+/// `spell` or `achievement` and `--ids` max 25, both `BAD_ARG` like the CLI
+/// arm. Native mode only.
+#[tauri::command]
+async fn wow_entity_info_read(kind: String, ids: Vec<u32>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    if kind != "spell" && kind != "achievement" {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "--kind must be spell or achievement".into(),
+            hint: String::new(),
+        });
+    }
+    if ids.len() > 25 {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "--ids max 25 per call".into(),
+            hint: String::new(),
+        });
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let Some(cache_root) = crate::dml::cachestatus::cache_dir() else {
+            return Err(CmdError {
+                code: "INTERNAL".into(),
+                message: "Could not resolve the wowhead cache directory".into(),
+                hint: String::new(),
+            });
+        };
+        Ok(crate::dml::iteminfo::read_entity_info(&cache_root, &kind, &ids))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_config_set(
     key: String,
@@ -5369,6 +5441,8 @@ pub fn run() {
             wow_client_path_detect_read,
             wow_cache_status_read,
             wow_lan_public_ip_read,
+            wow_item_info_read,
+            wow_entity_info_read,
             backend_mode,
             wow_config_set,
             wow_config_set_native,

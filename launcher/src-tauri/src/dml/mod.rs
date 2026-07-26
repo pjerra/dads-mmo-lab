@@ -5,6 +5,7 @@ pub mod commands;
 pub mod config;
 pub mod db;
 pub mod envelope;
+pub mod iteminfo;
 pub mod lanip;
 pub mod maint;
 pub mod modules;
