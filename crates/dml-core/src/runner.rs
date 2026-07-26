@@ -3,8 +3,8 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::backend::Backend;
-use super::envelope::{decode_wsl_output, parse_envelope, Envelope};
+use crate::backend::Backend;
+use crate::envelope::{decode_wsl_output, parse_envelope, Envelope};
 
 #[derive(Debug)]
 pub enum RunnerError {
@@ -97,7 +97,7 @@ fn find_dml_script() -> String {
 /// The directory holding `docker.exe` (for PATH injection). None when docker is
 /// only resolvable as a bare name on PATH — then the child already has it.
 fn docker_bin_dir() -> Option<PathBuf> {
-    let prog = super::native::docker_program();
+    let prog = crate::docker::docker_program();
     Path::new(&prog)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -335,6 +335,7 @@ fn is_terminal(v: &serde_json::Value) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     fn fixture_runner() -> DmlRunner {
         DmlRunner {
             program: "cmd.exe".into(),
@@ -344,28 +345,43 @@ mod tests {
             host_hint: "Check WSL: wsl -d dml-arch",
         }
     }
+    #[cfg(not(windows))]
+    fn fixture_runner() -> DmlRunner {
+        DmlRunner {
+            program: "sh".into(),
+            prefix_args: vec![],
+            path_prepend: None,
+            host_label: "wsl",
+            host_hint: "Check WSL: wsl -d dml-arch",
+        }
+    }
+
+    #[cfg(windows)]
+    const FIXTURE_EXT: &str = "cmd";
+    #[cfg(not(windows))]
+    const FIXTURE_EXT: &str = "sh";
 
     fn fixture(name: &str) -> String {
-        format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+        format!("{}/tests/fixtures/{}.{}", env!("CARGO_MANIFEST_DIR"), name, FIXTURE_EXT)
     }
 
     #[test]
     fn run_json_parses_ok_envelope() {
-        let env = fixture_runner().run_json(&[&fixture("ok.cmd")]).unwrap();
+        let env = fixture_runner().run_json(&[&fixture("ok")]).unwrap();
         assert!(env.ok);
         assert_eq!(env.data["games"][0]["id"], "wow-server-playerbots");
     }
 
     #[test]
     fn run_json_returns_error_envelope_as_ok_false() {
-        let env = fixture_runner().run_json(&[&fixture("err.cmd")]).unwrap();
+        let env = fixture_runner().run_json(&[&fixture("err")]).unwrap();
         assert!(!env.ok);
         assert_eq!(env.error.unwrap().code, "NOT_FOUND");
     }
 
     #[test]
     fn run_json_garbage_is_bad_output() {
-        match fixture_runner().run_json(&[&fixture("garbage.cmd")]) {
+        match fixture_runner().run_json(&[&fixture("garbage")]) {
             Err(RunnerError::BadOutput { raw }) => assert!(raw.contains("not json")),
             other => panic!("expected BadOutput, got {other:?}"),
         }
@@ -373,7 +389,7 @@ mod tests {
 
     #[test]
     fn run_json_empty_stdout_nonzero_exit_is_spawn_error() {
-        match fixture_runner().run_json(&[&fixture("wsl_down.cmd")]) {
+        match fixture_runner().run_json(&[&fixture("wsl_down")]) {
             Err(RunnerError::Spawn(msg)) => assert!(
                 msg.contains("dml-arch"),
                 "expected spawn message to mention dml-arch, got: {msg}"
@@ -384,7 +400,7 @@ mod tests {
 
     #[test]
     fn run_json_bad_output_carries_parse_detail() {
-        match fixture_runner().run_json(&[&fixture("garbage.cmd")]) {
+        match fixture_runner().run_json(&[&fixture("garbage")]) {
             Err(RunnerError::BadOutput { raw }) => {
                 assert!(raw.contains("not json"));
                 assert!(raw.contains("unparseable"));
@@ -410,7 +426,7 @@ mod tests {
     fn run_stream_forwards_events_in_order() {
         let mut seen: Vec<serde_json::Value> = vec![];
         let code = fixture_runner()
-            .run_stream(&[&fixture("stream_ok.cmd")], |v| seen.push(v))
+            .run_stream(&[&fixture("stream_ok")], |v| seen.push(v))
             .unwrap();
         assert_eq!(code, 0);
         assert_eq!(seen.len(), 4);
@@ -423,7 +439,7 @@ mod tests {
     fn run_stream_synthesizes_error_on_silent_crash() {
         let mut seen: Vec<serde_json::Value> = vec![];
         let code = fixture_runner()
-            .run_stream(&[&fixture("stream_crash.cmd")], |v| seen.push(v))
+            .run_stream(&[&fixture("stream_crash")], |v| seen.push(v))
             .unwrap();
         assert_eq!(code, 3);
         let last = seen.last().unwrap();
@@ -435,7 +451,7 @@ mod tests {
     #[test]
     fn run_json_with_stdin_delivers_input_to_the_child() {
         let env = fixture_runner()
-            .run_json_with_stdin(&[&fixture("stdin_echo.cmd")], "hello world")
+            .run_json_with_stdin(&[&fixture("stdin_echo")], "hello world")
             .unwrap();
         assert!(env.ok);
         assert_eq!(env.data["echo"], "hello world");
@@ -445,7 +461,7 @@ mod tests {
     fn spawn_interactive_round_trips_stdin() {
         use std::io::{Read, Write};
         let r = fixture_runner();
-        let mut child = r.spawn_interactive(&[&fixture("interactive_echo.cmd")]).unwrap();
+        let mut child = r.spawn_interactive(&[&fixture("interactive_echo")]).unwrap();
         let mut stdin = child.stdin.take().unwrap();
         stdin.write_all(b"hello\r\n").unwrap();
         drop(stdin);
@@ -460,7 +476,7 @@ mod tests {
     #[test]
     fn run_captured_combines_stdout_and_stderr_regardless_of_exit_code() {
         let text = fixture_runner()
-            .run_captured(&[&fixture("captured_mixed.cmd")])
+            .run_captured(&[&fixture("captured_mixed")])
             .unwrap();
         assert!(text.contains("stdout line"), "missing stdout in: {text:?}");
         assert!(text.contains("stderr line"), "missing stderr in: {text:?}");
@@ -522,7 +538,7 @@ mod tests {
         // garbage.cmd prints a non-JSON line and exits 0 → wrapped line + CLI_CRASH-free
         let mut seen: Vec<serde_json::Value> = vec![];
         let code = fixture_runner()
-            .run_stream(&[&fixture("garbage.cmd")], |v| seen.push(v))
+            .run_stream(&[&fixture("garbage")], |v| seen.push(v))
             .unwrap();
         assert_eq!(code, 0);
         assert_eq!(seen[0]["event"], "line");

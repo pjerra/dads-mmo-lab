@@ -24,7 +24,7 @@ pub mod paperdoll;
 pub mod party;
 pub mod party_specs;
 pub mod restore;
-pub mod runner;
+pub use dml_core::runner;
 pub mod soap;
 pub mod soap_cmds;
 pub mod stats;
