@@ -1,6 +1,8 @@
 pub mod accountwide;
+pub mod ahbot;
 pub mod backend;
 pub mod backup;
+pub mod bridge;
 pub mod cachestatus;
 pub mod clientpath;
 pub mod commands;
@@ -8,6 +10,7 @@ pub mod config;
 pub mod db;
 pub mod envelope;
 pub mod iteminfo;
+pub mod lan;
 pub mod lanip;
 pub mod maint;
 pub mod modules;

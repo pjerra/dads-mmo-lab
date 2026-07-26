@@ -1075,10 +1075,17 @@ export async function wowPartyDismissAll(
 export async function wowPartyRelogin(player: string, bot: string): Promise<{ relogged: boolean }> {
   return await invoke("wow_party_relogin", { player, bot });
 }
-export const wowPartySetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 2, task C2c item 4): `wow_bridge_setup_native`
+// backs BOTH this and `wowBridgeSetup` below -- they are aliases for the
+// identical bash arm (`bridge-setup|party-setup|setup)`), so one native
+// command covers both call sites.
+export const wowPartySetup = async (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_party_setup", { onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_bridge_setup_native", { onEvent: ch })
+    : invoke("wow_party_setup", { onEvent: ch });
 };
 
 export interface GmLevelResult { leveled: boolean; player: string; level: number; }
@@ -1171,10 +1178,13 @@ export async function wowPartyPresetImport(
   return await invoke("wow_party_preset_import", { name, classes, force });
 }
 
-export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
+export const wowBridgeSetup = async (onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_bridge_setup", { onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_bridge_setup_native", { onEvent: ch })
+    : invoke("wow_bridge_setup", { onEvent: ch });
 };
 
 // Batch 4: a lightweight per-snapshot content summary recorded at backup
@@ -1236,10 +1246,16 @@ export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void):
 // Streams the `wow ahbot repair` NDJSON flow (character lookup + conf writes;
 // creating the bot's account/character stays a manual user step, surfaced in
 // the stream's done payload).
-export const wowAhbotRepair = (charName: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+// Native-mode routing (Chunk 2, task C2c item 8): `wow_ahbot_repair_native`
+// ports the same flow directly (direct DB lookup + `dml::config::conf_write`
+// + SOAP), no `dml` shell-out.
+export const wowAhbotRepair = async (charName: string, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_ahbot_repair", { charName, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_ahbot_repair_native", { charName, onEvent: ch })
+    : invoke("wow_ahbot_repair", { charName, onEvent: ch });
 };
 
 export interface TitleInfo {
@@ -1299,8 +1315,15 @@ export type LanAction = "on" | "off" | "status" | "refresh";
 // Text-mode CLI output (dml lan / dml doctor print plain status lines, not
 // a JSON envelope) -- both return the raw combined stdout+stderr as a string
 // for display in a <pre>, same shape either way.
+//
+// Native-mode routing (Chunk 2, task C2c item 3): `wow_lan_native` is
+// AC-only (direct MySQL against acore_auth.realmlist, no `docker exec`) --
+// same text shape, so this needs no branching beyond which command to call.
 export async function wowLan(action: LanAction, ip?: string, internet?: boolean): Promise<string> {
-  return await invoke("wow_lan", { action, ip, internet });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_lan_native", { action, ip, internet })
+    : invoke("wow_lan", { action, ip, internet });
 }
 
 // Best-effort public IPv4 (Batch 4 F15) -- null means "couldn't tell",
