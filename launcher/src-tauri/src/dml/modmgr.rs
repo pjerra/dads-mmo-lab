@@ -1792,6 +1792,11 @@ pub fn remove_lua(sdir: &Path, key: &str, backup: Option<bool>, emit: &dyn Fn(Va
         ));
         return Err(());
     }
+    if lua_row(key).is_none() {
+        emit(section_end(SECTION_REMOVE, "error"));
+        emit(error_event("BAD_ARG", format!("Unknown lua script: {key}"), ""));
+        return Err(());
+    }
     if !lua_cloned(sdir, key) && !lua_deployed(sdir, key) {
         emit(section_end(SECTION_REMOVE, "error"));
         emit(error_event("NOT_FOUND", format!("Lua script not installed: {key}"), ""));
@@ -2079,6 +2084,40 @@ mod tests {
         std::fs::write(lua.join("BMAH.lua"), "").unwrap();
         assert!(lua_deployed(&d, "bmah"));
         assert!(!lua_deployed(&d, "unknown-key"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- remove_lua key gate (path-traversal regression) --------------------------
+
+    #[test]
+    fn remove_lua_rejects_unregistered_key_before_touching_any_path() {
+        let d = tmp_dir("remove-lua-guard");
+        // Simulate the server dir being a git checkout, like the real WoW
+        // server dir always is.
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::write(d.join("sentinel"), "still here").unwrap();
+
+        let noop = |_ev: Value| {};
+        let result = remove_lua(&d, "..", None, &noop);
+        assert!(result.is_err());
+        // The sdir and its .git must survive untouched -- this key must never
+        // reach `rm_rf`.
+        assert!(d.join(".git").is_dir());
+        assert!(d.join("sentinel").is_file());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn remove_lua_rejects_key_not_in_registry_even_if_dirs_happen_to_exist() {
+        let d = tmp_dir("remove-lua-guard-unknown");
+        std::fs::create_dir_all(d.join("ale_scripts").join("not-a-real-key").join(".git")).unwrap();
+
+        let noop = |_ev: Value| {};
+        let result = remove_lua(&d, "not-a-real-key", None, &noop);
+        assert!(result.is_err());
+        assert!(d.join("ale_scripts").join("not-a-real-key").is_dir());
+
         let _ = std::fs::remove_dir_all(&d);
     }
 
