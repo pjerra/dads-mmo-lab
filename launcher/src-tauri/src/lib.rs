@@ -74,12 +74,7 @@ pub struct AppState {
     pub config_lock: Arc<std::sync::Mutex<()>>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CmdError {
-    pub code: String,
-    pub message: String,
-    pub hint: String,
-}
+pub use dml_core::error::CmdError;
 
 impl From<RunnerError> for CmdError {
     fn from(e: RunnerError) -> Self {

@@ -43,9 +43,48 @@ pub fn decode_wsl_output(bytes: &[u8]) -> String {
     }
 }
 
+use serde_json::Value;
+
+/// Emit-side `{ok:true,data}` envelope — the exact shape `cli/src/10-json.sh`
+/// emits and `parse_envelope` reads.
+pub fn ok_envelope(data: Value) -> Value {
+    serde_json::json!({ "ok": true, "data": data })
+}
+
+/// Emit-side `{ok:false,error:{code,message,hint}}` envelope.
+pub fn error_envelope(code: &str, message: &str, hint: &str) -> Value {
+    serde_json::json!({ "ok": false, "error": { "code": code, "message": message, "hint": hint } })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ok_envelope_shape() {
+        let v = ok_envelope(serde_json::json!({"version": "0.1.0"}));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["data"]["version"], "0.1.0");
+        assert!(v.get("error").is_none());
+    }
+
+    #[test]
+    fn error_envelope_shape_matches_bash_contract() {
+        let v = error_envelope("NOT_FOUND", "Title not found: nope", "Run games list");
+        assert_eq!(v["ok"], false);
+        assert_eq!(v["error"]["code"], "NOT_FOUND");
+        assert_eq!(v["error"]["message"], "Title not found: nope");
+        assert_eq!(v["error"]["hint"], "Run games list");
+        assert!(v.get("data").is_none());
+    }
+
+    #[test]
+    fn round_trip_error_envelope_through_parser() {
+        let v = error_envelope("X", "y", "");
+        let env = parse_envelope(&v.to_string()).unwrap();
+        assert!(!env.ok);
+        assert_eq!(env.error.unwrap().code, "X");
+    }
 
     #[test]
     fn parses_ok_envelope() {

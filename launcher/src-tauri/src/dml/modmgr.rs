@@ -301,30 +301,20 @@ pub fn rebuild_pending_clear(sdir: &Path) {
 // near-duplicate. `section_start`/`section_end`/`done`/`error` DO carry a
 // section name, so those stay local to their `lib.rs` orchestration
 // function, matching `wow_world_restart_native_blocking`'s convention.
+//
+// The constructors themselves are game-agnostic and now live in
+// `dml_core::events`; re-exported here so every existing
+// `modmgr::section_start(...)`-shaped call site (in this module and in
+// `lib.rs`) keeps resolving unchanged.
 // ---------------------------------------------------------------------------
 
-pub fn line_event(level: &str, text: impl Into<String>) -> Value {
-    serde_json::json!({"event": "line", "level": level, "text": text.into()})
-}
+pub use dml_core::events::{done_event, error_event, line_event, section_end, section_start};
 
 /// Section names — `ndjson_section_start`'s `$1` in each arm
 /// (`90-main.sh:4587,4843,5481`).
 pub const SECTION_INSTALL: &str = "module-install";
 pub const SECTION_REMOVE: &str = "module-remove";
 pub const SECTION_UPDATE: &str = "module-update";
-
-pub fn section_start(name: &str) -> Value {
-    serde_json::json!({"event": "section_start", "name": name})
-}
-pub fn section_end(name: &str, status: &str) -> Value {
-    serde_json::json!({"event": "section_end", "name": name, "status": status})
-}
-pub fn done_event(data: Value) -> Value {
-    serde_json::json!({"event": "done", "data": data})
-}
-pub fn error_event(code: &str, message: impl Into<String>, hint: &str) -> Value {
-    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
-}
 
 /// `_client_path` (`70-modules.sh:317-325`): the saved WoW client folder,
 /// but ONLY while it still exists as a directory on disk — deliberately NOT
