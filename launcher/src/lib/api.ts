@@ -1173,12 +1173,24 @@ export const wowBridgeSetup = (onEvent: (e: TermEvent) => void): Promise<void> =
 export interface BackupSummary { characters: number; accounts: number; bots: number | null; }
 export interface BackupInfo { file: string; size: number; created: string; world: boolean; summary: BackupSummary | null; }
 
+// Native-mode routing (Chunk 2, task C2a): `create`/`list`/`validate`/
+// `delete` all have native siblings (direct `docker exec … mysqldump` +
+// `flate2` gzip / plain `std::fs`, no `dml` shell-out); `restore` stays
+// WSL-only (out of scope for this task -- see `dml::backup`'s module doc
+// comment on why restore is the one sanctioned whole-DB-overwrite path).
 export async function wowBackupList(): Promise<BackupInfo[]> {
-  const d = await invoke<{ backups: BackupInfo[] }>("wow_backup_list");
+  const mode = await resolveBackendMode();
+  const d =
+    mode === "native"
+      ? await invoke<{ backups: BackupInfo[] }>("wow_backup_list_native")
+      : await invoke<{ backups: BackupInfo[] }>("wow_backup_list");
   return d.backups;
 }
 export async function wowBackupDelete(file: string): Promise<{ deleted: boolean; file: string }> {
-  return await invoke("wow_backup_delete", { file });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_backup_delete_native", { file })
+    : invoke("wow_backup_delete", { file });
 }
 export interface BackupValidation {
   valid: boolean;
@@ -1192,12 +1204,18 @@ export interface BackupValidation {
 // Batch 4 A: verify a backup before restoring it (gzip integrity + a light
 // SQL-sanity scan for the character/account tables). Read-only, no server.
 export async function wowBackupValidate(file: string): Promise<BackupValidation> {
-  return await invoke("wow_backup_validate", { file });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_backup_validate_native", { file })
+    : invoke("wow_backup_validate", { file });
 }
-export const wowBackupCreate = (onEvent: (e: TermEvent) => void, includeWorld?: boolean): Promise<void> => {
+export const wowBackupCreate = async (onEvent: (e: TermEvent) => void, includeWorld?: boolean): Promise<void> => {
   const ch = new Channel<TermEvent>();
   ch.onmessage = onEvent;
-  return invoke("wow_backup_create", { includeWorld, onEvent: ch });
+  const mode = await resolveBackendMode();
+  return mode === "native"
+    ? invoke("wow_backup_create_native", { includeWorld, onEvent: ch })
+    : invoke("wow_backup_create", { includeWorld, onEvent: ch });
 };
 export const wowBackupRestore = (file: string, onEvent: (e: TermEvent) => void): Promise<void> => {
   const ch = new Channel<TermEvent>();

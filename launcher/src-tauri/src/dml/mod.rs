@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod backup;
 pub mod cachestatus;
 pub mod clientpath;
 pub mod commands;

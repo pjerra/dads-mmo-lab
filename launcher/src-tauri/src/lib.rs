@@ -3787,6 +3787,196 @@ async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, 
     stream_args(vec!["wow".into(), "backup".into(), "restore".into(), "--file".into(), file], on_event, state).await
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE backup family (Chunk 2, task C2a): `backup create` (streamed),
+// `list`/`validate`/`delete` (plain JSON). Faithful port of `90-main.sh:
+// 3662-3785` + `60-backup.sh` via `dml::backup` -- direct `docker exec …
+// mysqldump` + `flate2` gzip instead of shelling `dml`/`gzip`. `backup
+// restore` stays WSL-only (out of scope for this task; see `60-backup.sh`'s
+// header comment on why restore is the one sanctioned whole-DB-overwrite
+// write path).
+// ---------------------------------------------------------------------------
+
+fn bc_event_section_start() -> serde_json::Value {
+    serde_json::json!({"event": "section_start", "name": "backup-create"})
+}
+
+fn bc_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"event": "line", "level": level, "text": text.into()})
+}
+
+fn bc_event_section_end(status: &str) -> serde_json::Value {
+    serde_json::json!({"event": "section_end", "name": "backup-create", "status": status})
+}
+
+fn bc_event_done(file: &str, size: u64, world: bool, pruned: &[String]) -> serde_json::Value {
+    serde_json::json!({"event": "done", "data": {
+        "file": file, "size": size, "world": world, "pruned": pruned,
+    }})
+}
+
+fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {
+        "code": code, "message": message.into(), "hint": hint,
+    }})
+}
+
+/// The blocking flow itself (real docker exec + gzip I/O) — run under
+/// `spawn_blocking`. `emit` sends one NDJSON event per call, matching the
+/// `wow world-restart` streamed-command convention (see
+/// `wow_world_restart_native_blocking`): every return path emits its own
+/// terminal event(s) first, so the caller never needs to synthesize one. A
+/// port of the `backup create` arm (`90-main.sh:3662-3707`).
+fn wow_backup_create_native_blocking(include_world: bool, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use crate::dml::{backup, maint, native};
+
+    emit(bc_event_section_start());
+
+    let program = native::docker_program();
+    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    let Some(bdir) = backup::backup_dir() else {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("INTERNAL", "Could not resolve the backups directory", ""));
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&bdir) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("INTERNAL", format!("Could not create the backups directory: {e}"), ""));
+        return;
+    }
+
+    let file_name = backup::new_backup_file_name(include_world);
+    let out_path = bdir.join(&file_name);
+
+    emit(bc_event_line(
+        "info",
+        if include_world { "backing up characters, bots, accounts and world..." } else { "backing up characters, bots and accounts..." },
+    ));
+
+    if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("BACKUP_FAILED", "mysqldump failed", &errtail));
+        return;
+    }
+
+    let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    // Batch 4: content-summary sidecar -- best-effort, never blocks/fails
+    // the backup (matches `_backup_write_meta`'s own swallow-everything
+    // contract).
+    backup::write_meta(&db_cfg, &out_path);
+
+    let pruned = backup::prune(&bdir);
+    for p in &pruned {
+        emit(bc_event_line("info", format!("pruned old backup: {p}")));
+    }
+
+    emit(bc_event_section_end("ok"));
+    emit(bc_event_done(&file_name, size, include_world, &pruned));
+}
+
+/// NATIVE-MODE fast `backup create`: same flow/messages/codes as `dml wow
+/// backup create` (see `wow_backup_create_native_blocking`'s doc comment),
+/// via a direct `docker exec … mysqldump` + `flate2` gzip instead of
+/// shelling `dml`/`gzip`. Native mode only — WSL keeps calling
+/// `wow_backup_create`.
+#[tauri::command]
+async fn wow_backup_create_native(
+    include_world: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    // No shared AppState needed (unlike world-restart's SOAP lock): backup
+    // create only ever touches docker/fs, so this command takes no `State`.
+    let ch = on_event.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let db_cfg = crate::dml::db::DbConfig::from_env();
+        wow_backup_create_native_blocking(include_world.unwrap_or(false), db_cfg, |v| {
+            let _ = ch.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    Ok(())
+}
+
+/// NATIVE-MODE fast `backup list`: same shape as `wow_backup_list`
+/// (`{"backups":[{file,size,created,world,summary}]}`), a plain `std::fs`
+/// directory scan instead of shelling `dml`. Native mode only.
+#[tauri::command]
+async fn wow_backup_list_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
+        let Some(bdir) = crate::dml::backup::backup_dir() else {
+            return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
+        };
+        let backups: Vec<serde_json::Value> = crate::dml::backup::list_backups(&bdir)
+            .into_iter()
+            .map(|e| serde_json::json!({
+                "file": e.file, "size": e.size, "created": e.created, "world": e.world, "summary": e.summary,
+            }))
+            .collect();
+        Ok(serde_json::json!({ "backups": backups }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Shared `--file` gate for `backup validate`/`delete`: [`crate::dml::backup::valid_backup_name`]
+/// (`BAD_ARG`) then on-disk existence (`NOT_FOUND`) — a port of both arms'
+/// identical two-step guard (`90-main.sh:3733,3735,3756,3758`).
+fn require_backup_file(bdir: &std::path::Path, file: &str) -> Result<std::path::PathBuf, CmdError> {
+    if !crate::dml::backup::valid_backup_name(file) {
+        return Err(bad_arg(format!("Invalid backup name: {file}")));
+    }
+    let path = bdir.join(file);
+    if !path.is_file() {
+        return Err(CmdError { code: "NOT_FOUND".into(), message: format!("No backup named {file}"), hint: String::new() });
+    }
+    Ok(path)
+}
+
+/// NATIVE-MODE fast `backup validate`: same shape as `wow_backup_validate`
+/// (`{valid,file,size,gzip_ok,sql_ok,markers,detail}`), a local gzip
+/// decompress + marker scan instead of shelling `gzip -t`/`gunzip`/`grep`.
+/// Native mode only.
+#[tauri::command]
+async fn wow_backup_validate_native(file: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let Some(bdir) = crate::dml::backup::backup_dir() else {
+            return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
+        };
+        let path = require_backup_file(&bdir, &file)?;
+        let result = crate::dml::backup::validate_backup(&path);
+        Ok(crate::dml::backup::validate_result_json(&file, &result))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// NATIVE-MODE fast `backup delete`: same shape as `wow_backup_delete`
+/// (`{"deleted":true,"file"}`), a plain `std::fs::remove_file` instead of
+/// shelling `dml`. Native mode only.
+#[tauri::command]
+async fn wow_backup_delete_native(file: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let Some(bdir) = crate::dml::backup::backup_dir() else {
+            return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
+        };
+        require_backup_file(&bdir, &file)?;
+        crate::dml::backup::delete_backup(&bdir, &file);
+        Ok(serde_json::json!({ "deleted": true, "file": file }))
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 #[tauri::command]
 async fn wow_lan(
     action: String,
@@ -5483,6 +5673,10 @@ pub fn run() {
             wow_backup_delete,
             wow_backup_validate,
             wow_backup_restore,
+            wow_backup_create_native,
+            wow_backup_list_native,
+            wow_backup_validate_native,
+            wow_backup_delete_native,
             wow_bridge_setup,
             wow_gm_level,
             wow_gm_gold,

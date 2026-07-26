@@ -1,0 +1,918 @@
+//! Native-mode whole-server **backups** (spike: `spike/docker-desktop-native`,
+//! Task C2a): `backup create` (streamed), `backup list`/`validate`/`delete`
+//! (plain JSON). Faithful port of `cli/src/90-main.sh:3662-3785` +
+//! `cli/src/60-backup.sh`.
+//!
+//! WHY THIS EXISTS. WSL/`dml` drives `docker exec ac-database mysqldump …
+//! | gzip > ~/.dml/backups/wow-<ts>.sql.gz` via bash. Native mode has no bash
+//! to pipe through, so this module does the same two things directly in
+//! Rust: [`dump_to`] shells `docker exec … mysqldump` (bounded, pipe-draining
+//! — see [`super::status::output_bounded_draining`]'s own doc comment for why
+//! a *draining* runner is required for a call that can move many MB/GB of
+//! stdout) and gzips the captured bytes with `flate2` instead of piping to a
+//! `gzip` process. Everything else (name validation, prune, summary sidecar,
+//! validate, delete) is plain `std::fs` + a hand-rolled decompress-and-scan,
+//! no shelling at all.
+//!
+//! SIX SANCTIONED DIRECT MYSQL WRITES. `backup restore` (out of scope for
+//! this task — see `60-backup.sh`'s header comment) is the CLI's one
+//! sanctioned whole-DB-overwrite path; nothing here writes character data.
+//! `write_meta`'s summary counts are read-only `SELECT COUNT(*)` queries via
+//! [`super::db::query`], same as `dml::status`'s `bots_online`.
+//!
+//! ON-DISK FORMAT IS SHARED WITH WSL. The `~/.dml/backups` directory and its
+//! `.sql.gz`/`.meta` files are backend-agnostic: a backup created by WSL
+//! `dml` must validate/list/delete correctly under native mode and vice
+//! versa. That is why [`format_summary_line`] builds the meta sidecar text
+//! by hand (`{"characters":N,"accounts":N,"bots":M|null}`, exact key order)
+//! rather than via `serde_json::Value`'s `Display` — `serde_json`'s `Map` is
+//! NOT built with the `preserve_order` feature in this workspace (no
+//! `indexmap` in `Cargo.lock` under `serde_json`'s own dependency list), so
+//! serializing a `json!({"characters":...,"accounts":...,"bots":...})` value
+//! would emit keys in **alphabetical** order (`accounts`, `bots`,
+//! `characters`) — bytes [`read_summary`]'s own regex-equivalent parser (a
+//! port of `_backup_summary_read`) would then reject, silently degrading
+//! every native-written sidecar to `null`. Writing the literal string sidesteps
+//! that trap entirely; reading is likewise a hand-rolled character scan (not
+//! `serde_json::from_str` + shape-check) so it validates the exact compact
+//! form a bash `printf` or this writer produces, not just "any valid JSON
+//! object with these keys" — same doctrine as the CLI's own regex gate.
+//!
+//! NATIVE-MODE-ONLY by convention: WSL keeps calling `dml`; the Tauri command
+//! layer (`lib.rs`) gates every entry point on `require_native_backend()`.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::db::{self, Database, DbConfig};
+use super::status::{output_bounded_draining, windows_no_window};
+
+/// `_backup_dir` (`60-backup.sh:23`): `~/.dml/backups`.
+pub fn backup_dir() -> Option<PathBuf> {
+    super::dml_home_dir().map(|h| h.join("backups"))
+}
+
+/// Keep the newest N backups — `DML_BACKUP_KEEP`, default 10 (`60-backup.sh:33`).
+/// Any unset/unparseable value falls back to the default, same convention as
+/// `lib.rs`'s `wr_ready_timeout_secs`.
+pub fn backup_keep_from_env() -> usize {
+    std::env::var("DML_BACKUP_KEEP").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(10)
+}
+
+// ---------------------------------------------------------------------------
+// Name validation / parsing — `_valid_backup_name` (`60-backup.sh:26`).
+// ---------------------------------------------------------------------------
+
+fn ascii_digits(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `_valid_backup_name`: `^wow-[0-9]{8}-[0-9]{6}(-full)?(-prerestore)?\.sql\.gz$`,
+/// hand-rolled (no `regex` crate in this workspace — same convention as
+/// `status::strip_ansi`). Gates every verb in this module: list/validate/
+/// delete all refuse a name that doesn't match this shape.
+pub fn valid_backup_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("wow-") else { return false };
+    if rest.len() < 8 || !ascii_digits(&rest[..8], 8) {
+        return false;
+    }
+    let Some(rest) = rest[8..].strip_prefix('-') else { return false };
+    if rest.len() < 6 || !ascii_digits(&rest[..6], 6) {
+        return false;
+    }
+    let mut rest = &rest[6..];
+    rest = rest.strip_prefix("-full").unwrap_or(rest);
+    rest = rest.strip_prefix("-prerestore").unwrap_or(rest);
+    rest == ".sql.gz"
+}
+
+/// `bw` (`90-main.sh:3719-3720`): a `world` (whole-server, `--include-world`)
+/// snapshot has `-full` in its name, with or without a trailing
+/// `-prerestore`. Caller's responsibility to have already checked
+/// [`valid_backup_name`].
+pub fn is_full_name(name: &str) -> bool {
+    name.ends_with("-full.sql.gz") || name.ends_with("-full-prerestore.sql.gz")
+}
+
+/// `created` (`90-main.sh:3717-3718`): `"YYYY-MM-DD HH:MM:SS"` sliced
+/// straight out of the (already-validated) file name's fixed date/time
+/// digits — a port of the bash's `${f:4:8}` / `${f:13:6}` substring slices.
+/// `None` if `name` isn't [`valid_backup_name`]-shaped (defensive; callers
+/// always check first).
+pub fn parse_created(name: &str) -> Option<String> {
+    if !valid_backup_name(name) || name.len() < 19 {
+        return None;
+    }
+    let d = &name[4..12];
+    let t = &name[13..19];
+    Some(format!("{}-{}-{} {}:{}:{}", &d[0..4], &d[4..6], &d[6..8], &t[0..2], &t[2..4], &t[4..6]))
+}
+
+/// `"$out.tmp"` / `"<file>.meta"` — literal suffix append on the OS string
+/// (not `Path::with_extension`, which would clobber the existing `.gz`
+/// extension instead of appending).
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(suffix);
+    PathBuf::from(os)
+}
+
+/// The `.meta` sidecar path for a `.sql.gz` backup.
+pub fn meta_path_for(sql_gz_path: &Path) -> PathBuf {
+    append_suffix(sql_gz_path, ".meta")
+}
+
+// ---------------------------------------------------------------------------
+// UTC timestamp — `date -u +%Y%m%d-%H%M%S` (`90-main.sh:3676`), hand-rolled
+// (no date/time crate is a dependency of this workspace) via Howard
+// Hinnant's `civil_from_days` (public domain,
+// http://howardhinnant.github.io/date_algorithms.html).
+// ---------------------------------------------------------------------------
+
+/// Proleptic-Gregorian civil `(year, month, day)` from a day count since the
+/// Unix epoch (1970-01-01 = day 0). Pure.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// UTC `(year, month, day, hour, min, sec)` for a Unix timestamp. Pure.
+pub fn utc_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (y, m, d) = civil_from_days(days);
+    (y, m, d, (rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32)
+}
+
+/// `date -u +%Y%m%d-%H%M%S` for a Unix timestamp.
+pub fn format_utc_compact(secs: u64) -> String {
+    let (y, m, d, hh, mm, ss) = utc_from_unix(secs);
+    format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
+}
+
+/// `bfile="wow-$(date -u +%Y%m%d-%H%M%S)$bsuffix.sql.gz"` (`90-main.sh:3674-3676`).
+pub fn new_backup_file_name(include_world: bool) -> String {
+    new_backup_file_name_at(
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        include_world,
+    )
+}
+
+/// Pure half of [`new_backup_file_name`], for testing without the real clock.
+pub fn new_backup_file_name_at(unix_secs: u64, include_world: bool) -> String {
+    let ts = format_utc_compact(unix_secs);
+    if include_world { format!("wow-{ts}-full.sql.gz") } else { format!("wow-{ts}.sql.gz") }
+}
+
+// ---------------------------------------------------------------------------
+// list / prune — directory scans. `sort -r` on the fixed-width
+// `wow-YYYYMMDD-HHMMSS...` names IS a chronological descending sort (plain
+// byte/lexicographic order agrees with numeric order for same-width
+// zero-padded fields), so a plain descending string sort is faithful.
+// ---------------------------------------------------------------------------
+
+/// Every `*.sql.gz` entry directly under `dir`, newest-name-first — a port
+/// of `ls -1 "$bdir" | grep -E '\.sql\.gz$' | sort -r`. Deliberately NOT
+/// filtered by [`valid_backup_name`] (neither is the bash `ls` pipeline
+/// `_backup_prune` reads): prune sweeps every `.sql.gz` file past the
+/// retention window, even a stray mis-named one. Missing/unreadable `dir`
+/// degrades to empty (matches `ls ... 2>/dev/null`).
+pub fn sql_gz_names_desc(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.ends_with(".sql.gz"))
+        .collect();
+    names.sort_by(|a, b| b.cmp(a));
+    names
+}
+
+/// Names beyond the newest `keep` in an already-sorted-descending list — the
+/// pure core of `_backup_prune`'s `(( n > keep ))` loop.
+pub fn prune_names(sorted_desc: &[String], keep: usize) -> &[String] {
+    if sorted_desc.len() <= keep {
+        &[]
+    } else {
+        &sorted_desc[keep..]
+    }
+}
+
+/// Delete every backup (+ its `.meta` sidecar) beyond the retention window
+/// under `dir`, returning the pruned names in the order they were pruned
+/// (newest-of-the-pruned first, matching the bash loop's read order).
+/// Best-effort per file (`rm -f` semantics: a missing/unremovable file is
+/// silently skipped, never aborts the sweep).
+pub fn prune(dir: &Path) -> Vec<String> {
+    let names = sql_gz_names_desc(dir);
+    let keep = backup_keep_from_env();
+    let pruned = prune_names(&names, keep);
+    for f in pruned {
+        let path = dir.join(f);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(meta_path_for(&path));
+    }
+    pruned.to_vec()
+}
+
+/// One `backup list` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackupEntry {
+    pub file: String,
+    pub size: u64,
+    pub created: String,
+    pub world: bool,
+    pub summary: Value,
+}
+
+/// `backup list` (`90-main.sh:3709-3729`): every [`valid_backup_name`] entry
+/// under `dir`, newest first, each with its size/created/world/summary
+/// fields. Missing `dir` degrades to an empty list (matches the bash's
+/// `[[ -d "$bdir" ]]` guard).
+pub fn list_backups(dir: &Path) -> Vec<BackupEntry> {
+    let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut names: Vec<String> =
+        rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| valid_backup_name(n)).collect();
+    names.sort_by(|a, b| b.cmp(a));
+    names
+        .into_iter()
+        .map(|f| {
+            let path = dir.join(&f);
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let created = parse_created(&f).unwrap_or_default();
+            let world = is_full_name(&f);
+            let summary = read_summary(&meta_path_for(&path));
+            BackupEntry { file: f, size, created, world, summary }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Content-summary sidecar — `_backup_summary_json`/`_backup_write_meta`/
+// `_backup_summary_read` (`60-backup.sh:81-117`).
+// ---------------------------------------------------------------------------
+
+const SUMMARY_CHARS_SQL: &str = "SELECT COUNT(*) FROM characters;";
+const SUMMARY_ACCOUNTS_SQL: &str = "SELECT COUNT(*) FROM account;";
+const SUMMARY_BOTS_SQL: &str = "SELECT COUNT(*) FROM characters WHERE account IN \
+    (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));";
+
+/// Decode a single-cell `COUNT(*)` result: the binary protocol should hand
+/// back a native `Int`, but a `Text` digit-string is accepted too (defensive
+/// parity with the bash's `^[0-9]+$` guard on `mysql -N -B` text output).
+fn scalar_i64(res: &db::QueryResult) -> Option<i64> {
+    match res.rows.first()?.first()? {
+        db::SqlValue::Int(n) => Some(*n),
+        db::SqlValue::Text(s) if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// The exact compact literal a `.meta` sidecar holds:
+/// `{"characters":N,"accounts":N,"bots":M}` or `{"characters":N,"accounts":N,"bots":null}`.
+/// Hand-built (not via `serde_json::Value`) so the key order is guaranteed —
+/// see the module doc comment for why that matters.
+pub fn format_summary_line(chars: i64, accounts: i64, bots: Option<i64>) -> String {
+    let bots_str = bots.map(|b| b.to_string()).unwrap_or_else(|| "null".to_string());
+    format!("{{\"characters\":{chars},\"accounts\":{accounts},\"bots\":{bots_str}}}")
+}
+
+/// `_backup_summary_json` (`60-backup.sh:81-93`): live `{characters,accounts,
+/// bots}` counts, or `None` if either of the two REQUIRED counts (characters,
+/// accounts) couldn't be read — `bots` alone is optional (stays `null`).
+pub fn compute_summary(cfg: &DbConfig) -> Option<Value> {
+    let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
+    let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
+    let bots = db::query(cfg, Database::Characters, SUMMARY_BOTS_SQL).ok().and_then(|r| scalar_i64(&r));
+    serde_json::from_str(&format_summary_line(chars, accounts, bots)).ok()
+}
+
+/// `_backup_write_meta` (`60-backup.sh:97-102`): best-effort — a failed
+/// summary read (DB unreachable, query error) silently writes no sidecar and
+/// never fails the caller's backup.
+pub fn write_meta(cfg: &DbConfig, sql_gz_path: &Path) {
+    let Some((chars, accounts, bots)) = compute_summary_parts(cfg) else { return };
+    let line = format_summary_line(chars, accounts, bots);
+    let _ = std::fs::write(meta_path_for(sql_gz_path), format!("{line}\n"));
+}
+
+/// [`compute_summary`]'s raw `(characters, accounts, bots)` triple, before
+/// JSON assembly — split out so [`write_meta`] can hand it straight to
+/// [`format_summary_line`] without an extra JSON round-trip.
+fn compute_summary_parts(cfg: &DbConfig) -> Option<(i64, i64, Option<i64>)> {
+    let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
+    let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
+    let bots = db::query(cfg, Database::Characters, SUMMARY_BOTS_SQL).ok().and_then(|r| scalar_i64(&r));
+    Some((chars, accounts, bots))
+}
+
+fn parse_digits(s: &str) -> Option<(&str, &str)> {
+    let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    if end == 0 {
+        None
+    } else {
+        Some((&s[..end], &s[end..]))
+    }
+}
+
+/// `_backup_summary_read`'s regex, hand-rolled:
+/// `^\{"characters":[0-9]+,"accounts":[0-9]+,"bots":([0-9]+|null)\}$`. Exact
+/// literal shape only — NOT "any JSON object with these keys" (a
+/// pretty-printed or reordered sidecar is rejected, same as the bash regex
+/// would reject it).
+fn valid_summary_line(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("{\"characters\":") else { return false };
+    let Some((_, rest)) = parse_digits(rest) else { return false };
+    let Some(rest) = rest.strip_prefix(",\"accounts\":") else { return false };
+    let Some((_, rest)) = parse_digits(rest) else { return false };
+    let Some(rest) = rest.strip_prefix(",\"bots\":") else { return false };
+    let rest = if let Some(r) = rest.strip_prefix("null") {
+        r
+    } else if let Some((_, r)) = parse_digits(rest) {
+        r
+    } else {
+        return false;
+    };
+    rest == "}"
+}
+
+/// `_backup_summary_read` (`60-backup.sh:109-117`): the sidecar's parsed
+/// summary object, or `Value::Null` when the file is absent or its first
+/// line doesn't match [`valid_summary_line`] — a malformed/garbage sidecar
+/// degrades to `null` rather than corrupting the `backup list` envelope.
+pub fn read_summary(meta_path: &Path) -> Value {
+    let Ok(raw) = std::fs::read_to_string(meta_path) else { return Value::Null };
+    let first_line = raw.lines().next().unwrap_or("");
+    if valid_summary_line(first_line) {
+        serde_json::from_str(first_line).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `backup create`'s dump half — `_backup_dump_to` (`60-backup.sh:51-63`).
+// ---------------------------------------------------------------------------
+
+/// Generous bound for `docker exec … mysqldump` — a full character-DB dump
+/// is small, but `--include-world` can move a much larger `acore_world`
+/// snapshot; 30 minutes is ample for either while still guaranteeing the
+/// streamed command can never hang forever on a wedged docker.
+pub const DUMP_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// The `docker exec ac-database mysqldump …` argv — a port of
+/// `_backup_dump_to`'s command line (`60-backup.sh:56`).
+pub fn mysqldump_args(password: &str, include_world: bool) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "exec".into(),
+        "ac-database".into(),
+        "mysqldump".into(),
+        "-uroot".into(),
+        format!("-p{password}"),
+        "--databases".into(),
+        "acore_characters".into(),
+        "acore_playerbots".into(),
+        "acore_auth".into(),
+    ];
+    if include_world {
+        args.push("acore_world".into());
+    }
+    args.push("--single-transaction".into());
+    args.push("--quick".into());
+    args
+}
+
+/// `tail -c 160 "$out.err" | tr -d '\r\n"\\'` (`90-main.sh:3683`), applied
+/// directly to the captured stderr bytes (native has no `.err` file — the
+/// bytes are already in memory from the draining runner).
+fn err_tail(stderr: &[u8]) -> String {
+    let start = stderr.len().saturating_sub(160);
+    String::from_utf8_lossy(&stderr[start..]).chars().filter(|c| !matches!(c, '\r' | '\n' | '"' | '\\')).collect()
+}
+
+/// `_backup_dump_to` (`60-backup.sh:51-63`): run the dump, gzip the captured
+/// stdout, atomic tmp+rename into `out_path`. `Err` carries the
+/// [`err_tail`]-trimmed stderr on a dump failure (mirrors the bash's
+/// `errtail` the caller reports as `BACKUP_FAILED`'s hint) or a plain I/O
+/// message on a local gzip/rename failure. No partial file is ever left at
+/// `out_path` on failure (tmp is written first, `.tmp` cleaned up on error).
+pub fn dump_to(program: &OsStr, password: &str, include_world: bool, out_path: &Path) -> Result<(), String> {
+    let mut cmd = Command::new(program);
+    cmd.args(mysqldump_args(password, include_world));
+    windows_no_window(&mut cmd);
+    let out = output_bounded_draining(cmd, DUMP_TIMEOUT)
+        .ok_or_else(|| "mysqldump timed out or the docker command could not be started".to_string())?;
+    if !out.status.success() {
+        return Err(err_tail(&out.stderr));
+    }
+
+    let tmp = append_suffix(out_path, ".tmp");
+    let write_result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let f = std::fs::File::create(&tmp)?;
+        let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+        enc.write_all(&out.stdout)?;
+        enc.finish()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("could not write the gzip archive: {e}"));
+    }
+    std::fs::rename(&tmp, out_path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("could not finalize the backup file: {e}")
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `backup validate` — `90-main.sh:3739-3785`.
+// ---------------------------------------------------------------------------
+
+/// Fully decompress a `.gz` file into memory, validating its trailer CRC/
+/// ISIZE along the way (equivalent to `gzip -t`'s integrity check — `flate2`
+/// surfaces a checksum mismatch as a read error, same as `read_to_end`
+/// failing partway).
+fn gzip_decompress_to_vec(path: &Path) -> std::io::Result<Vec<u8>> {
+    let f = std::fs::File::open(path)?;
+    let mut dec = flate2::read::GzDecoder::new(f);
+    let mut buf = Vec::new();
+    std::io::Read::read_to_end(&mut dec, &mut buf)?;
+    Ok(buf)
+}
+
+/// `grep -aoE 'CREATE TABLE `(characters|account)`'` reduced to one literal
+/// substring test, byte-level (not UTF-8 text) so a dump containing non-UTF8
+/// column bytes elsewhere can never perturb the search — a plain-Rust
+/// `windows().any()` scan, no `regex`/`memchr` dependency.
+fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+const MARKER_CHARACTERS: &[u8] = b"CREATE TABLE `characters`";
+const MARKER_ACCOUNT: &[u8] = b"CREATE TABLE `account`";
+
+/// `backup validate`'s result shape.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidateResult {
+    pub valid: bool,
+    pub size: u64,
+    pub gzip_ok: bool,
+    pub sql_ok: bool,
+    pub markers: Vec<&'static str>,
+    pub detail: String,
+}
+
+/// The `vvalid`/`vdetail` decision (`90-main.sh:3777-3783`), pure — split
+/// out from [`validate_backup`] so the three-way branch is unit-tested
+/// without real gzip fixtures.
+fn classify(gzip_ok: bool, sql_ok: bool) -> (bool, &'static str) {
+    if gzip_ok && sql_ok {
+        (true, "Archive is intact and looks like a full character backup.")
+    } else if !gzip_ok {
+        (false, "gzip integrity check failed -- the file is truncated or corrupt. Do NOT restore it.")
+    } else {
+        (
+            false,
+            "Archive decompresses, but the expected character/account tables were not found -- it may be an incomplete or unrelated dump.",
+        )
+    }
+}
+
+/// `backup validate` (`90-main.sh:3739-3785`): one gzip decompression pass
+/// serves BOTH the integrity check (a truncated/corrupt archive fails to
+/// fully decompress / fails its CRC) and the marker scan — the bash runs two
+/// separate passes (`gzip -t` then `gunzip -c | grep`), but reusing the same
+/// decoded bytes here is an equivalent-output, one-less-pass optimization.
+pub fn validate_backup(path: &Path) -> ValidateResult {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let decompressed = gzip_decompress_to_vec(path).ok();
+    let gzip_ok = decompressed.is_some();
+
+    let mut markers = Vec::new();
+    let mut chars_ok = false;
+    let mut acct_ok = false;
+    if let Some(bytes) = &decompressed {
+        chars_ok = contains_marker(bytes, MARKER_CHARACTERS);
+        acct_ok = contains_marker(bytes, MARKER_ACCOUNT);
+    }
+    if chars_ok {
+        markers.push("characters");
+    }
+    if acct_ok {
+        markers.push("account");
+    }
+    let sql_ok = chars_ok && acct_ok;
+
+    let (valid, detail) = classify(gzip_ok, sql_ok);
+    ValidateResult { valid, size, gzip_ok, sql_ok, markers, detail: detail.to_string() }
+}
+
+/// Assemble the `backup validate` JSON envelope (`90-main.sh:3784`).
+pub fn validate_result_json(file: &str, r: &ValidateResult) -> Value {
+    json!({
+        "valid": r.valid,
+        "file": file,
+        "size": r.size,
+        "gzip_ok": r.gzip_ok,
+        "sql_ok": r.sql_ok,
+        "markers": r.markers,
+        "detail": r.detail,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `backup delete` — `90-main.sh:3730-3738`.
+// ---------------------------------------------------------------------------
+
+/// `rm -f "$bdir/$file" "$bdir/$file.meta"`: best-effort, ignores a missing/
+/// unremovable file (matches `rm -f` semantics). Caller (`lib.rs`) is
+/// responsible for the [`valid_backup_name`] gate and the `NOT_FOUND`
+/// existence check BEFORE calling this — those are error-reporting
+/// decisions, not this function's concern.
+pub fn delete_backup(dir: &Path, file: &str) {
+    let path = dir.join(file);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(meta_path_for(&path));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- valid_backup_name / is_full_name / parse_created --------------------
+
+    #[test]
+    fn valid_backup_name_accepts_every_shape() {
+        assert!(valid_backup_name("wow-20260726-143022.sql.gz"));
+        assert!(valid_backup_name("wow-20260726-143022-full.sql.gz"));
+        assert!(valid_backup_name("wow-20260726-143022-prerestore.sql.gz"));
+        assert!(valid_backup_name("wow-20260726-143022-full-prerestore.sql.gz"));
+    }
+
+    #[test]
+    fn valid_backup_name_rejects_garbage() {
+        assert!(!valid_backup_name("wow-2026726-143022.sql.gz")); // date too short
+        assert!(!valid_backup_name("wow-20260726-14302.sql.gz")); // time too short
+        assert!(!valid_backup_name("wow-20260726-143022.sql.gz.bak"));
+        assert!(!valid_backup_name("wow-20260726-143022.tar.gz"));
+        assert!(!valid_backup_name("../../etc/passwd"));
+        assert!(!valid_backup_name(""));
+        assert!(!valid_backup_name("wow-20260726-143022-prerestore-full.sql.gz")); // wrong order
+        assert!(!valid_backup_name("xwow-20260726-143022.sql.gz"));
+        assert!(!valid_backup_name("wow-20260726-143022.sql.gzX"));
+    }
+
+    #[test]
+    fn is_full_name_detects_world_snapshots() {
+        assert!(is_full_name("wow-20260726-143022-full.sql.gz"));
+        assert!(is_full_name("wow-20260726-143022-full-prerestore.sql.gz"));
+        assert!(!is_full_name("wow-20260726-143022.sql.gz"));
+        assert!(!is_full_name("wow-20260726-143022-prerestore.sql.gz"));
+    }
+
+    #[test]
+    fn parse_created_slices_the_fixed_date_time() {
+        assert_eq!(parse_created("wow-20260726-143022.sql.gz").as_deref(), Some("2026-07-26 14:30:22"));
+        assert_eq!(parse_created("wow-20260726-143022-full.sql.gz").as_deref(), Some("2026-07-26 14:30:22"));
+        assert_eq!(parse_created("not-a-backup"), None);
+    }
+
+    // -- UTC timestamp ---------------------------------------------------------
+
+    #[test]
+    fn format_utc_compact_epoch() {
+        assert_eq!(format_utc_compact(0), "19700101-000000");
+    }
+
+    #[test]
+    fn format_utc_compact_known_timestamp() {
+        // 1700000000 is a widely-documented reference value: 2023-11-14T22:13:20Z.
+        assert_eq!(format_utc_compact(1_700_000_000), "20231114-221320");
+    }
+
+    #[test]
+    fn format_utc_compact_leap_day() {
+        // 2024-02-29T00:00:00Z = 1709164800.
+        assert_eq!(format_utc_compact(1_709_164_800), "20240229-000000");
+    }
+
+    #[test]
+    fn new_backup_file_name_at_shapes() {
+        let plain = new_backup_file_name_at(1_700_000_000, false);
+        assert_eq!(plain, "wow-20231114-221320.sql.gz");
+        assert!(valid_backup_name(&plain));
+        let full = new_backup_file_name_at(1_700_000_000, true);
+        assert_eq!(full, "wow-20231114-221320-full.sql.gz");
+        assert!(valid_backup_name(&full));
+        assert!(is_full_name(&full));
+    }
+
+    // -- sql_gz_names_desc / prune_names / prune ------------------------------
+
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dml-backup-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn sql_gz_names_desc_sorts_newest_first_and_ignores_other_files() {
+        let d = tmp_dir("sort");
+        for f in ["wow-20260101-000000.sql.gz", "wow-20260301-000000.sql.gz", "wow-20260201-000000.sql.gz", "readme.txt"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        let names = sql_gz_names_desc(&d);
+        assert_eq!(
+            names,
+            vec!["wow-20260301-000000.sql.gz", "wow-20260201-000000.sql.gz", "wow-20260101-000000.sql.gz"]
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn sql_gz_names_desc_missing_dir_is_empty() {
+        let d = tmp_dir("missing");
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(sql_gz_names_desc(&d).is_empty());
+    }
+
+    #[test]
+    fn prune_names_keeps_the_newest_n() {
+        let all = vec!["c".to_string(), "b".to_string(), "a".to_string()];
+        assert_eq!(prune_names(&all, 2).to_vec(), vec!["a".to_string()]);
+        assert!(prune_names(&all, 3).is_empty());
+        assert!(prune_names(&all, 10).is_empty());
+        assert_eq!(prune_names(&all, 0).to_vec(), all);
+    }
+
+    #[test]
+    fn prune_deletes_files_beyond_the_keep_window() {
+        let d = tmp_dir("prune");
+        std::env::set_var("DML_BACKUP_KEEP", "2");
+        for f in ["wow-20260101-000000.sql.gz", "wow-20260201-000000.sql.gz", "wow-20260301-000000.sql.gz"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+            std::fs::write(meta_path_for(&d.join(f)), b"{}").unwrap();
+        }
+        let pruned = prune(&d);
+        assert_eq!(pruned, vec!["wow-20260101-000000.sql.gz".to_string()]);
+        assert!(!d.join("wow-20260101-000000.sql.gz").exists());
+        assert!(!meta_path_for(&d.join("wow-20260101-000000.sql.gz")).exists());
+        assert!(d.join("wow-20260201-000000.sql.gz").exists());
+        assert!(d.join("wow-20260301-000000.sql.gz").exists());
+        std::env::remove_var("DML_BACKUP_KEEP");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- summary sidecar -------------------------------------------------------
+
+    #[test]
+    fn format_summary_line_matches_bash_shape() {
+        assert_eq!(format_summary_line(5, 3, Some(2)), r#"{"characters":5,"accounts":3,"bots":2}"#);
+        assert_eq!(format_summary_line(5, 3, None), r#"{"characters":5,"accounts":3,"bots":null}"#);
+    }
+
+    #[test]
+    fn valid_summary_line_accepts_the_exact_shape_only() {
+        assert!(valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2}"#));
+        assert!(valid_summary_line(r#"{"characters":0,"accounts":0,"bots":null}"#));
+        // Reordered keys, extra whitespace, or a pretty-printed form all fail
+        // the exact-shape check -- same as the bash regex would reject them.
+        assert!(!valid_summary_line(r#"{"accounts":3,"characters":5,"bots":2}"#));
+        assert!(!valid_summary_line(r#"{"characters": 5,"accounts":3,"bots":2}"#));
+        assert!(!valid_summary_line(""));
+        assert!(!valid_summary_line("garbage"));
+        assert!(!valid_summary_line(r#"{"characters":5,"accounts":3,"bots":2}extra"#));
+    }
+
+    #[test]
+    fn read_summary_round_trips_through_write_and_missing_file_is_null() {
+        let d = tmp_dir("summary");
+        let sidecar = d.join("wow-20260101-000000.sql.gz.meta");
+        std::fs::write(&sidecar, format!("{}\n", format_summary_line(7, 4, Some(1)))).unwrap();
+        assert_eq!(read_summary(&sidecar), json!({"characters":7,"accounts":4,"bots":1}));
+
+        let missing = d.join("nope.sql.gz.meta");
+        assert_eq!(read_summary(&missing), Value::Null);
+
+        let garbage = d.join("garbage.meta");
+        std::fs::write(&garbage, "not json at all\n").unwrap();
+        assert_eq!(read_summary(&garbage), Value::Null);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn meta_path_for_appends_literal_suffix() {
+        let p = PathBuf::from(r"C:\backups\wow-20260101-000000.sql.gz");
+        assert_eq!(meta_path_for(&p), PathBuf::from(r"C:\backups\wow-20260101-000000.sql.gz.meta"));
+    }
+
+    // -- dump args / err_tail --------------------------------------------------
+
+    #[test]
+    fn mysqldump_args_characters_only() {
+        let args = mysqldump_args("hunter2", false);
+        assert_eq!(
+            args,
+            vec![
+                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "acore_characters",
+                "acore_playerbots", "acore_auth", "--single-transaction", "--quick",
+            ]
+        );
+    }
+
+    #[test]
+    fn mysqldump_args_include_world_adds_the_schema_before_the_flags() {
+        let args = mysqldump_args("hunter2", true);
+        assert_eq!(
+            args,
+            vec![
+                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "acore_characters",
+                "acore_playerbots", "acore_auth", "acore_world", "--single-transaction", "--quick",
+            ]
+        );
+    }
+
+    #[test]
+    fn err_tail_strips_control_and_quote_chars_and_keeps_last_160_bytes() {
+        assert_eq!(err_tail(b"plain error"), "plain error");
+        assert_eq!(err_tail(b"a\r\nb\"c\\d"), "abcd");
+        let long = vec![b'x'; 500];
+        assert_eq!(err_tail(&long).len(), 160);
+    }
+
+    // -- validate: pure classify + marker scan ----------------------------------
+
+    #[test]
+    fn classify_branches() {
+        assert_eq!(classify(true, true).0, true);
+        assert_eq!(classify(false, false).0, false);
+        assert_eq!(classify(false, true).0, false);
+        assert_eq!(classify(true, false).0, false);
+        assert!(classify(false, true).1.contains("gzip integrity"));
+        assert!(classify(true, false).1.contains("were not found"));
+    }
+
+    #[test]
+    fn contains_marker_finds_and_misses() {
+        let hay = b"USE acore_characters;\nCREATE TABLE `characters` (\n  `guid` int\n);\n";
+        assert!(contains_marker(hay, MARKER_CHARACTERS));
+        assert!(!contains_marker(hay, MARKER_ACCOUNT));
+    }
+
+    #[test]
+    fn validate_backup_end_to_end_with_real_gzip_fixtures() {
+        let d = tmp_dir("validate");
+
+        // A well-formed dump: gzip-valid, both markers present.
+        let good = d.join("wow-20260101-000000.sql.gz");
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(&good).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            enc.write_all(b"-- dump\nCREATE TABLE `characters` (`guid` int);\nCREATE TABLE `account` (`id` int);\n").unwrap();
+            enc.finish().unwrap();
+        }
+        let r = validate_backup(&good);
+        assert!(r.valid);
+        assert!(r.gzip_ok);
+        assert!(r.sql_ok);
+        assert_eq!(r.markers, vec!["characters", "account"]);
+        assert!(r.size > 0);
+
+        // Corrupt gzip: truncate the file mid-stream.
+        let corrupt = d.join("wow-20260201-000000.sql.gz");
+        std::fs::write(&corrupt, b"\x1f\x8b\x08\x00not really gzip data").unwrap();
+        let r = validate_backup(&corrupt);
+        assert!(!r.valid);
+        assert!(!r.gzip_ok);
+        assert!(!r.sql_ok);
+        assert!(r.markers.is_empty());
+        assert!(r.detail.contains("truncated or corrupt"));
+
+        // Valid gzip, but not a character dump.
+        let unrelated = d.join("wow-20260301-000000.sql.gz");
+        {
+            use std::io::Write;
+            let f = std::fs::File::create(&unrelated).unwrap();
+            let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            enc.write_all(b"just some unrelated text\n").unwrap();
+            enc.finish().unwrap();
+        }
+        let r = validate_backup(&unrelated);
+        assert!(!r.valid);
+        assert!(r.gzip_ok);
+        assert!(!r.sql_ok);
+        assert!(r.detail.contains("were not found"));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn validate_backup_missing_file_is_not_valid() {
+        let d = tmp_dir("validate-missing");
+        let r = validate_backup(&d.join("nope.sql.gz"));
+        assert!(!r.valid);
+        assert!(!r.gzip_ok);
+        assert_eq!(r.size, 0);
+    }
+
+    #[test]
+    fn validate_result_json_shape() {
+        let r = ValidateResult {
+            valid: true,
+            size: 123,
+            gzip_ok: true,
+            sql_ok: true,
+            markers: vec!["characters", "account"],
+            detail: "ok".to_string(),
+        };
+        assert_eq!(
+            validate_result_json("wow-20260101-000000.sql.gz", &r),
+            json!({
+                "valid": true,
+                "file": "wow-20260101-000000.sql.gz",
+                "size": 123,
+                "gzip_ok": true,
+                "sql_ok": true,
+                "markers": ["characters", "account"],
+                "detail": "ok",
+            })
+        );
+    }
+
+    // -- list_backups ------------------------------------------------------------
+
+    #[test]
+    fn list_backups_shape_newest_first_with_summary_and_world_flag() {
+        let d = tmp_dir("list");
+        std::fs::write(d.join("wow-20260101-000000.sql.gz"), b"aaaa").unwrap();
+        std::fs::write(d.join("wow-20260201-000000-full.sql.gz"), b"bb").unwrap();
+        std::fs::write(
+            meta_path_for(&d.join("wow-20260201-000000-full.sql.gz")),
+            format!("{}\n", format_summary_line(1, 1, Some(0))),
+        )
+        .unwrap();
+        // Not a valid backup name -- must be skipped entirely.
+        std::fs::write(d.join("stray.sql.gz"), b"z").unwrap();
+
+        let entries = list_backups(&d);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].file, "wow-20260201-000000-full.sql.gz");
+        assert!(entries[0].world);
+        assert_eq!(entries[0].size, 2);
+        assert_eq!(entries[0].summary, json!({"characters":1,"accounts":1,"bots":0}));
+        assert_eq!(entries[1].file, "wow-20260101-000000.sql.gz");
+        assert!(!entries[1].world);
+        assert_eq!(entries[1].summary, Value::Null);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn list_backups_missing_dir_is_empty() {
+        let d = tmp_dir("list-missing");
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(list_backups(&d).is_empty());
+    }
+
+    // -- delete_backup -----------------------------------------------------------
+
+    #[test]
+    fn delete_backup_removes_file_and_meta_and_is_idempotent() {
+        let d = tmp_dir("delete");
+        let file = "wow-20260101-000000.sql.gz";
+        std::fs::write(d.join(file), b"x").unwrap();
+        std::fs::write(meta_path_for(&d.join(file)), b"{}").unwrap();
+        delete_backup(&d, file);
+        assert!(!d.join(file).exists());
+        assert!(!meta_path_for(&d.join(file)).exists());
+        // Calling again on an already-gone file must not panic (rm -f semantics).
+        delete_backup(&d, file);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn backup_keep_from_env_default_and_override() {
+        std::env::remove_var("DML_BACKUP_KEEP");
+        assert_eq!(backup_keep_from_env(), 10);
+        std::env::set_var("DML_BACKUP_KEEP", "3");
+        assert_eq!(backup_keep_from_env(), 3);
+        std::env::set_var("DML_BACKUP_KEEP", "not-a-number");
+        assert_eq!(backup_keep_from_env(), 10);
+        std::env::remove_var("DML_BACKUP_KEEP");
+    }
+}

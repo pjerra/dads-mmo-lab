@@ -36,4 +36,10 @@ mysql = { version = "28", default-features = false, features = ["minimal-rust", 
 # to the version already resolved transitively (reqwest/mysql), so adding it
 # as a direct dep doesn't shift anything else in Cargo.lock.
 base64 = "0.22.1"
+# Backup create/validate (dml::backup, Chunk 2 task C2a): gzip the mysqldump
+# stream + gzip-test/decompress a saved backup for validation. Already
+# resolved transitively (mysql's minimal-rust feature pulls flate2's pure-Rust
+# `rust_backend`/miniz_oxide, no OpenSSL/C dep), so making it a direct dep
+# doesn't shift anything else in Cargo.lock.
+flate2 = "1"
 
