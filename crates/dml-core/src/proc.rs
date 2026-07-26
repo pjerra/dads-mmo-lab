@@ -15,33 +15,28 @@
 //! `launcher::dml::destructive` keeps every DOMAIN-specific primitive
 //! (titles, volumes, compose, removal targets) and re-exports these names so
 //! every existing caller keeps compiling unchanged.
+//!
+//! This module is also now the CANONICAL home of the launcher's two
+//! lower-level subprocess primitives, [`windows_no_window`] and
+//! [`output_bounded_draining`] — moved here (not just `run_captured`/
+//! `run_streamed_unbounded`, which are built on top of them) because Rust
+//! re-exports are transparent: `launcher/src-tauri/src/dml/status.rs` (their
+//! original home) now does `pub(crate) use dml_core::proc::{output_bounded_draining,
+//! windows_no_window};` and every one of its many OTHER call sites (`maint`,
+//! `modmgr`, `backup`, `moduletail`, `restore`, and `status.rs` itself) kept
+//! compiling with zero changes, since they all reached these two exclusively
+//! through `super::status::`/`status::`-qualified paths.
 
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-// ---------------------------------------------------------------------------
-// Private local copies of `dml::status`'s two subprocess primitives.
-//
-// `run_captured` (bounded) and `run_streamed_unbounded` (unbounded) both need
-// a way to spawn a child without ever flashing a console window on Windows,
-// and `run_captured` additionally needs a bounded, pipe-draining `Command`
-// runner. Both already exist in `launcher/src-tauri/src/dml/status.rs`
-// (`windows_no_window`/`output_bounded_draining`), but `crates/dml-core`
-// cannot depend on the launcher crate (dependency direction is the other way
-// round, and the global constraint here is "crates/* never depend on tauri/
-// tokio"). Rather than invent a different shape, these are byte-for-byte
-// copies of `status.rs`'s implementations, kept private to this module —
-// `status.rs`'s own copies stay put; they still serve its many OTHER
-// call sites (`maint`, `modmgr`, `backup`, `moduletail`, `restore`, and
-// `status.rs` itself), none of which are in scope for this move.
-// ---------------------------------------------------------------------------
-
 /// `CREATE_NO_WINDOW` on Windows so a spawned child never flashes a console —
 /// same flag every other native docker-shelling call in this codebase sets
-/// (see `dml::native`/`lib.rs::run_bounded`/`dml::status`).
-fn windows_no_window(cmd: &mut Command) {
+/// (see `dml::native`/`lib.rs::run_bounded`; `launcher::dml::status`
+/// re-exports this under the same name for its own call sites).
+pub fn windows_no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -55,15 +50,16 @@ fn windows_no_window(cmd: &mut Command) {
 }
 
 /// Bounded `Command` runner, deliberately NOT a non-draining `output()`
-/// call: that shape's own doc comment (in `dml::status`, where this is
-/// duplicated from) explains why output must be small — a modestly-chatty
+/// call: output must stay small with that shape — a modestly-chatty
 /// long-running child can emit output larger than the OS pipe buffer (64KiB
 /// on Windows), which blocks the child writing to a full pipe nobody is
 /// reading while a bare `try_wait()`-poller never observes it exit, silently
 /// timing out every call. This variant drains both pipes on background
 /// threads WHILE polling for exit, so the child can never block on a full
-/// buffer, no matter the output size.
-fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+/// buffer, no matter the output size. `launcher::dml::status` re-exports
+/// this under the same name for its own (much more numerous) call sites —
+/// `docker inspect`/`ps`/`port`/`logs`, `git fetch`, and more.
+pub fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -145,10 +141,9 @@ pub struct CapturedRun {
 }
 
 /// Run `program args...` (no `cwd` — `docker builder prune`/`docker image
-/// prune` are host-level, not compose-scoped), bounded+drained via this
-/// module's private [`output_bounded_draining`] (a copy of the launcher's
-/// `dml::status::output_bounded_draining` — see this module's header for
-/// why), and split its combined output into non-empty lines.
+/// prune` are host-level, not compose-scoped), bounded+drained via
+/// [`output_bounded_draining`], and split its combined output into
+/// non-empty lines.
 pub fn run_captured(program: &OsStr, args: &[&str], timeout: Duration) -> CapturedRun {
     let mut cmd = Command::new(program);
     cmd.args(args);

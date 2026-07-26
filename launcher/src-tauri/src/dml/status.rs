@@ -52,92 +52,18 @@ fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// `CREATE_NO_WINDOW` on Windows so a status poll never flashes a console —
-/// the same flag every other native docker-shelling call in this codebase
-/// sets (see `dml::native`/`lib.rs::run_bounded`).
-pub(crate) fn windows_no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = cmd;
-    }
-}
-
-/// Bounded `Command` runner for THIS module's docker calls, deliberately
-/// NOT `crate::output_bounded`. That helper's own doc comment says output
-/// must be small: it polls `try_wait()` without draining the piped stdout/
-/// stderr, then does one `wait_with_output()` after the child has already
-/// exited. `docker logs` blows that assumption — a modestly-chatty
-/// long-running world (`console-tail`, `world_ready`'s `--since` tail) can
-/// emit output larger than the OS pipe buffer (64KiB on Windows), so the
-/// child BLOCKS writing to a full pipe nobody is reading, `try_wait()` never
-/// observes it exit, and every call silently times out (confirmed live:
-/// `read_server_detail`'s `world_ready` returned `false` against a server
-/// that had, in fact, finished booting 36 minutes earlier — the 96KB of
-/// accumulated log output deadlocked the read). This variant drains both
-/// pipes on background threads WHILE polling for exit, so the child can
-/// never block on a full buffer, no matter the output size.
-///
-/// `pub(crate)` (Task C starter): `dml::maint`'s docker-usage/port-check/
-/// update-check reads shell out too (`docker system df`, `docker port`,
-/// `git fetch`) and reuse this same drain-while-polling runner rather than
-/// duplicating it or risking the `crate::output_bounded` deadlock above.
-pub(crate) fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
-
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
-        buf
-    });
-
-    let deadline = std::time::Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    timed_out = true;
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                timed_out = true;
-                break None;
-            }
-        }
-    };
-    // Killing/waiting the child closes its end of both pipes, so the reader
-    // threads see EOF and finish promptly either way — this join is not
-    // itself an unbounded wait.
-    let stdout_buf = stdout_handle.join().unwrap_or_default();
-    let stderr_buf = stderr_handle.join().unwrap_or_default();
-    if timed_out {
-        return None;
-    }
-    status.map(|status| std::process::Output { status, stdout: stdout_buf, stderr: stderr_buf })
-}
+/// [`windows_no_window`]/[`output_bounded_draining`] now live in
+/// `dml_core::proc` (cargo-workspace refactor, Task 4 fix-up) — they're
+/// generic, docker-agnostic subprocess primitives with no status/SOAP/DB
+/// knowledge, so `dml-core` is their canonical home. Re-exported here under
+/// the SAME names so every one of this crate's other call sites
+/// (`dml::maint`'s docker-usage/port-check/update-check reads, `dml::modmgr`,
+/// `dml::backup`, `dml::moduletail`, `dml::restore`, `lib.rs`, and this
+/// module's own `docker_ps_rows`/`world_ready`/`host_port`/etc. below) keep
+/// compiling unchanged, whether they reach these via a bare `use
+/// super::status::{...}` import or a fully-qualified `super::status::`/
+/// `status::` path.
+pub(crate) use dml_core::proc::{output_bounded_draining, windows_no_window};
 
 // ---------------------------------------------------------------------------
 // `server-info` — `_parse_server_info_fields` / `_parse_server_info`.
