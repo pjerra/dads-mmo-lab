@@ -302,6 +302,11 @@ mod tests {
         );
     }
 
+    /// WINDOWS-ONLY: the drive-letter program path, the `;` PATH separator and
+    /// `join_paths`' rules are all platform-specific — on Linux
+    /// `C:\Windows;C:\…` is a single entry containing `:`, which
+    /// `join_paths` rejects outright. The POSIX equivalent is below.
+    #[cfg(windows)]
     #[test]
     fn augmented_path_prepends_docker_bin_dir() {
         let got = augmented_path(
@@ -312,6 +317,19 @@ mod tests {
         let s = got.to_string_lossy();
         assert!(s.starts_with(r"C:\Users\me\AppData\Local\Programs\DockerDesktop\resources\bin"));
         assert!(s.contains(r"C:\Windows"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn augmented_path_prepends_docker_bin_dir() {
+        let got = augmented_path(
+            OsStr::new("/opt/docker/resources/bin/docker"),
+            Some(OsString::from("/usr/bin:/bin")),
+        )
+        .unwrap();
+        let s = got.to_string_lossy();
+        assert!(s.starts_with("/opt/docker/resources/bin"), "s={s}");
+        assert!(s.contains("/usr/bin"), "s={s}");
     }
 
     #[test]

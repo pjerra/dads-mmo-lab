@@ -1115,8 +1115,20 @@ mod tests {
 
     #[test]
     fn basename_extracts_final_component() {
-        assert_eq!(basename(Path::new(r"C:\games\wow-server-playerbots")), "wow-server-playerbots");
+        // Forward slashes on purpose: `std::path` accepts `/` as a separator
+        // on BOTH flavours, so this case is real coverage on Windows and on
+        // Linux CI alike. The backslash form is Windows-only (below).
+        assert_eq!(basename(Path::new("/games/wow-server-playerbots")), "wow-server-playerbots");
         assert_eq!(basename(Path::new("")), "");
+    }
+
+    /// WINDOWS-ONLY: on Linux `C:\games\…` is a single component, so
+    /// `file_name()` returns the whole string — correct behaviour there, just
+    /// not this assertion.
+    #[cfg(windows)]
+    #[test]
+    fn basename_extracts_final_component_from_a_backslash_path() {
+        assert_eq!(basename(Path::new(r"C:\games\wow-server-playerbots")), "wow-server-playerbots");
     }
 
     // -- build-volume regex ---------------------------------------------------
@@ -1188,6 +1200,15 @@ mod tests {
 
     #[test]
     fn client_data_volume_name_shape() {
+        // `/` separators — real coverage on both path flavours (see
+        // `basename_extracts_final_component`).
+        let dir = Path::new("/games/Wow_Server-Playerbots");
+        assert_eq!(client_data_volume_name(dir), "wow_server-playerbots_ac-client-data");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn client_data_volume_name_shape_from_a_backslash_path() {
         let dir = Path::new(r"C:\games\Wow_Server-Playerbots");
         assert_eq!(client_data_volume_name(dir), "wow_server-playerbots_ac-client-data");
     }

@@ -403,16 +403,50 @@ mod tests {
     // -- stream_into: real subprocess, no docker dependency ---------------------
     //
     // These exercise the FULL streaming engine (gzip decode -> chunked write
-    // -> concurrent stdout/stderr drain -> reap) against `cmd.exe`-provided
+    // -> concurrent stdout/stderr drain -> reap) against shell-provided
     // sinks instead of `docker exec ... mysql` -- the "dry restore subset"
     // the brief explicitly encourages.
+    //
+    // Each sink is chosen per platform (`cmd.exe` on Windows, `sh`/`cat`
+    // elsewhere) so these run for real on Linux CI too (Task 16): a
+    // hardcoded `cmd.exe` there fails to spawn, and `stream_into` reports
+    // that as `Err("could not start the import: …")` — an unwrap panic here,
+    // never a silent pass.
+
+    /// A sink that copies stdin to stdout verbatim and exits 0.
+    #[cfg(windows)]
+    fn passthrough_sink() -> (&'static str, Vec<String>) {
+        // `more` copies stdin to stdout with no pagination banner when
+        // stdout isn't a real console, which it never is behind a piped fd.
+        ("cmd.exe", vec!["/c".to_string(), "more".to_string()])
+    }
+    #[cfg(not(windows))]
+    fn passthrough_sink() -> (&'static str, Vec<String>) {
+        ("cat", vec![])
+    }
+
+    /// A sink that DRAINS stdin (so the writer never hits a broken pipe) and
+    /// then exits with `code`.
+    #[cfg(windows)]
+    fn draining_exit_sink(code: i32) -> (&'static str, Vec<String>) {
+        ("cmd.exe", vec!["/c".to_string(), "exit".to_string(), code.to_string()])
+    }
+    #[cfg(not(windows))]
+    fn draining_exit_sink(code: i32) -> (&'static str, Vec<String>) {
+        // Unlike `cmd.exe /c exit N`, a bare `sh -c 'exit N'` would close its
+        // stdin read end immediately and race the writer into EPIPE — which
+        // `stream_into` would (correctly) report as a LOCAL stream error,
+        // flipping the very assertion these tests make. Drain first.
+        ("sh", vec!["-c".to_string(), format!("cat >/dev/null; exit {code}")])
+    }
 
     #[test]
     fn stream_into_real_passthrough_sink_reproduces_content_exactly() {
-        // `cmd.exe /c more` copies stdin to stdout verbatim (no pagination
+        // A passthrough sink (`cmd.exe /c more` on Windows, `cat` elsewhere)
+        // copies stdin to stdout verbatim -- `more` prints no pagination
         // banner when stdout isn't a real console, which it never is behind
-        // a Rust `Stdio::piped()` pipe) -- an effective `cat` for a text
-        // payload, letting the test prove the decompressed bytes actually
+        // a Rust `Stdio::piped()` pipe. That lets the test prove the
+        // decompressed bytes actually
         // arrived at the child intact via a REAL spawned process and a REAL
         // pipe, not a mock.
         let dir = tmp_dir("passthrough");
@@ -423,12 +457,8 @@ mod tests {
         }
         write_gz(&gz_path, payload.as_bytes());
 
-        let result = stream_into(
-            OsStr::new("cmd.exe"),
-            &["/c".to_string(), "more".to_string()],
-            &gz_path,
-        )
-        .unwrap();
+        let (prog, args) = passthrough_sink();
+        let result = stream_into(OsStr::new(prog), &args, &gz_path).unwrap();
 
         assert!(result.success(), "status={:?} stream_error={:?} stderr={:?}", result.status, result.stream_error, String::from_utf8_lossy(&result.stderr));
         let got = String::from_utf8_lossy(&result.stdout).replace("\r\n", "\n");
@@ -444,11 +474,11 @@ mod tests {
         let gz_path = dir.join("in.sql.gz");
         write_gz(&gz_path, b"irrelevant payload");
 
-        // `cmd.exe /c exit 7` drains any stdin it's handed and exits 7,
-        // without needing to read it all first -- proving a real nonzero
-        // child exit is reported as a failed import even though the local
-        // gunzip stream itself was perfectly healthy.
-        let result = stream_into(OsStr::new("cmd.exe"), &["/c".to_string(), "exit".to_string(), "7".to_string()], &gz_path).unwrap();
+        // A draining sink that exits 7 -- proving a real nonzero child exit
+        // is reported as a failed import even though the local gunzip stream
+        // itself was perfectly healthy.
+        let (prog, args) = draining_exit_sink(7);
+        let result = stream_into(OsStr::new(prog), &args, &gz_path).unwrap();
         assert!(!result.success());
         assert_eq!(result.status.and_then(|s| s.code()), Some(7));
         assert!(result.stream_error.is_none(), "a clean nonzero exit is not a LOCAL stream error");
@@ -458,7 +488,8 @@ mod tests {
     fn stream_into_missing_backup_file_is_a_setup_error() {
         let dir = tmp_dir("missing");
         let missing = dir.join("does-not-exist.sql.gz");
-        let err = stream_into(OsStr::new("cmd.exe"), &["/c".to_string(), "exit".to_string(), "0".to_string()], &missing);
+        let (prog, args) = draining_exit_sink(0);
+        let err = stream_into(OsStr::new(prog), &args, &missing);
         assert!(err.is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -471,7 +502,8 @@ mod tests {
         // very first read.
         std::fs::write(&bad_path, b"this is definitely not gzip data").unwrap();
 
-        let result = stream_into(OsStr::new("cmd.exe"), &["/c".to_string(), "more".to_string()], &bad_path).unwrap();
+        let (prog, args) = passthrough_sink();
+        let result = stream_into(OsStr::new(prog), &args, &bad_path).unwrap();
         assert!(!result.success());
         assert!(result.stream_error.is_some());
 

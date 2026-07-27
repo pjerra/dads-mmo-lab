@@ -1430,13 +1430,53 @@ mod tests {
     //
     // These exercise the FULL streaming engine (spawn -> chunked stdout read
     // -> gzip-encode-to-disk -> concurrent stderr drain -> deadline poll ->
-    // reap) against `cmd.exe`-provided stand-ins instead of `docker exec …
+    // reap) against shell-provided stand-ins instead of `docker exec …
     // mysqldump` — mirrors `dml::restore::tests`'s `stream_into` coverage for
     // the opposite (import) direction.
+    //
+    // Each stand-in is chosen per platform (`cmd.exe` on Windows, `sh`
+    // elsewhere) so these run for real on Linux CI too (Task 16). Hardcoding
+    // `cmd.exe` there does not just fail — a spawn failure surfaces as the
+    // SAME "timed out or the docker command could not be started" string the
+    // timeout test asserts on, which would pass VACUOUSLY.
+
+    /// A child that copies `path` to stdout and exits 0.
+    #[cfg(windows)]
+    fn cat_file_child(path: &Path) -> (&'static str, Vec<String>) {
+        ("cmd.exe", vec!["/c".to_string(), "type".to_string(), path.display().to_string()])
+    }
+    #[cfg(not(windows))]
+    fn cat_file_child(path: &Path) -> (&'static str, Vec<String>) {
+        // `$0` carries the path, so spaces in it need no quoting.
+        ("sh", vec!["-c".to_string(), "cat \"$0\"".to_string(), path.display().to_string()])
+    }
+
+    /// A child that loops forever WITHOUT spawning a grandchild (see the
+    /// timeout test's comment for why a grandchild would defeat the kill).
+    #[cfg(windows)]
+    fn spin_forever_child() -> (&'static str, Vec<String>) {
+        ("cmd.exe", vec!["/c".to_string(), "for /L %i in (1,0,2) do @rem".to_string()])
+    }
+    #[cfg(not(windows))]
+    fn spin_forever_child() -> (&'static str, Vec<String>) {
+        // `while :; do :; done` is entirely shell builtins — no forked
+        // helper inherits the stdout pipe, so killing `sh` closes it.
+        ("sh", vec!["-c".to_string(), "while :; do :; done".to_string()])
+    }
+
+    /// A child that writes `dump failed badly` to stderr and exits 5.
+    #[cfg(windows)]
+    fn fails_loudly_child() -> (&'static str, Vec<String>) {
+        ("cmd.exe", vec!["/c".to_string(), "echo dump failed badly 1>&2 & exit 5".to_string()])
+    }
+    #[cfg(not(windows))]
+    fn fails_loudly_child() -> (&'static str, Vec<String>) {
+        ("sh", vec!["-c".to_string(), "echo dump failed badly >&2; exit 5".to_string()])
+    }
 
     #[test]
     fn dump_stream_real_multichunk_child_round_trips_through_gzip() {
-        // A real `cmd.exe /c type <file>` child streams a payload comfortably
+        // A real file-copying child streams a payload comfortably
         // larger than several `DUMP_CHUNK_SIZE` chunks to stdout, proving the
         // read/gzip-encode loop's chunk boundaries never drop or corrupt
         // bytes -- not just a single small in-memory buffer.
@@ -1450,13 +1490,8 @@ mod tests {
         std::fs::write(&src, payload.as_bytes()).unwrap();
 
         let out = d.join("wow-20260101-000000.sql.gz");
-        dump_stream(
-            OsStr::new("cmd.exe"),
-            &["/c".to_string(), "type".to_string(), src.display().to_string()],
-            &out,
-            DUMP_TIMEOUT,
-        )
-        .unwrap();
+        let (prog, args) = cat_file_child(&src);
+        dump_stream(OsStr::new(prog), &args, &out, DUMP_TIMEOUT).unwrap();
 
         assert!(out.is_file());
         assert!(!append_suffix(&out, ".tmp").exists(), "the .tmp sibling must be gone after a successful rename");
@@ -1488,14 +1523,12 @@ mod tests {
         let out = d.join("wow-20260101-000000.sql.gz");
 
         let start = std::time::Instant::now();
-        let err = dump_stream(
-            OsStr::new("cmd.exe"),
-            &["/c".to_string(), "for /L %i in (1,0,2) do @rem".to_string()],
-            &out,
-            Duration::from_millis(200),
-        )
-        .unwrap_err();
+        let (prog, args) = spin_forever_child();
+        let err = dump_stream(OsStr::new(prog), &args, &out, Duration::from_millis(200)).unwrap_err();
         assert!(err.contains("timed out"), "err={err}");
+        // The deadline must be what ended this, not a failed spawn: both
+        // collapse into the same message, so prove the child really ran.
+        assert!(start.elapsed() >= Duration::from_millis(200), "elapsed={:?} — child never ran", start.elapsed());
         // The kill must land close to the deadline, not after running
         // indefinitely (this loop would otherwise never exit on its own).
         assert!(start.elapsed() < Duration::from_secs(10), "elapsed={:?}", start.elapsed());
@@ -1514,13 +1547,8 @@ mod tests {
         let d = tmp_dir("dump-stream-nonzero");
         let out = d.join("wow-20260101-000000.sql.gz");
 
-        let err = dump_stream(
-            OsStr::new("cmd.exe"),
-            &["/c".to_string(), "echo dump failed badly 1>&2 & exit 5".to_string()],
-            &out,
-            DUMP_TIMEOUT,
-        )
-        .unwrap_err();
+        let (prog, args) = fails_loudly_child();
+        let err = dump_stream(OsStr::new(prog), &args, &out, DUMP_TIMEOUT).unwrap_err();
 
         assert!(err.contains("dump failed badly"), "err={err}");
         assert!(!out.exists());

@@ -185,6 +185,13 @@ mod tests {
         assert_eq!(root, PathBuf::from("/repo/cli").join("lua"));
     }
 
+    /// WINDOWS-ONLY by construction: `\` is a path separator only under
+    /// `std::path`'s Windows flavour. On Linux `C:\repo\cli\dml` is one
+    /// component with no parent, so the fallback (covered by
+    /// `lua_root_from_script_falls_back_on_a_bare_filename_with_no_parent`)
+    /// is the correct answer there, not this one. The POSIX-path case is
+    /// covered by `lua_root_from_script_uses_the_scripts_parent_dir`.
+    #[cfg(windows)]
     #[test]
     fn lua_root_from_script_windows_style_path() {
         let root = lua_root_from_script(Some(Path::new(r"C:\repo\cli\dml")));
