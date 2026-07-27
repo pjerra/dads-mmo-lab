@@ -46,6 +46,7 @@
   }
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { aleInstallOffer } from "$lib/ale-gate";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { moduleBusy } from "$lib/module-busy.svelte";
   import { moduleUpdates, runUpdateCheck, checkBadge, versionLabel } from "$lib/module-updates.svelte";
@@ -788,10 +789,31 @@
     <h3>Lua scripts (ALE)</h3>
     {#if list}
       {#if !list.ale_ready}
-        <p class="muted">Install the ALE module (mod-ale) first — it's in the C++ modules list above.</p>
-      {:else}
-        {#each list.families.lua as m (m.key)}
-          <div class="row mrow">
+        {@const offer = aleInstallOffer(list.families.cpp, list.ale_ready)}
+        <!-- Deliberately NOT hiding the list: it's a catalog of what you
+             could install, so hiding it hides the reason to install ALE at
+             all. Rows render disabled beneath this note instead. -->
+        <div class="ale-note">
+          <p class="muted">
+            These scripts need the ALE module (mod-ale) — the Eluna engine that runs
+            them. Install it and everything below becomes available.
+          </p>
+          {#if offer}
+            <button
+              class="primary"
+              onclick={() => install(offer.key, null, offer.name)}
+              disabled={busy || featureLocked("modules-cpp")}
+              title={featureLocked("modules-cpp") ? LOCKED_HINT : `Install ${offer.name}`}
+            >
+              Install ALE
+            </button>
+          {:else}
+            <span class="muted">Find it in the C++ modules list above.</span>
+          {/if}
+        </div>
+      {/if}
+      {#each list.families.lua as m (m.key)}
+          <div class="row mrow" class:needs-ale={!list.ale_ready}>
             <div class="mhead">
               <span class="mtitle">
                 <strong class="mname">{m.name}</strong>
@@ -837,15 +859,23 @@
             <button
               class="primary"
               onclick={() => installLua(m)}
-              disabled={busy || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua") ? LOCKED_HINT : undefined}
+              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
+              title={featureLocked("modules-lua")
+                ? LOCKED_HINT
+                : !list.ale_ready
+                  ? "Install the ALE module first"
+                  : undefined}
             >
               Install
             </button>
             <button
               onclick={() => removeLua(m)}
-              disabled={busy || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua") ? LOCKED_HINT : undefined}
+              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
+              title={featureLocked("modules-lua")
+                ? LOCKED_HINT
+                : !list.ale_ready
+                  ? "Install the ALE module first"
+                  : undefined}
             >
               {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
             </button>
@@ -856,7 +886,6 @@
             <p class="mod-warn">⚠ {m.warn}</p>
           {/if}
         {/each}
-      {/if}
     {/if}
   </div>
 
@@ -1120,6 +1149,22 @@
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .mrow { padding: 6px 0; border-top: 1px solid #21262d; }
   .mrow:first-of-type { border-top: none; }
+
+  /* ALE missing: the lua catalog stays readable (that's the point -- it shows
+     what you'd get) but reads as unavailable. */
+  .ale-note {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .ale-note p { margin: 0; flex: 1 1 260px; }
+  .mrow.needs-ale { opacity: 0.55; }
   .mhead { display: flex; flex-direction: column; gap: 2px; min-width: 260px; max-width: 460px; }
   .mtitle { display: flex; gap: 8px; align-items: baseline; }
   .mname { min-width: 0; }
