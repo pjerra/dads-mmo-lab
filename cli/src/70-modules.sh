@@ -9,6 +9,14 @@
 # ---------------------------------------------------------------------------
 
 # key|display name|git url|sql dirs (informational -- db-import applies them)
+#
+# MIRRORED SNAPSHOT: crates/dml-wow/data/module-catalog.json embeds these
+# three registries (cpp here, plus lua/sql below) for the native launcher +
+# dml-wow-cli. Edited any of them? Regenerate:
+#   bash cli/dml wow module catalog --json | jq .data > crates/dml-wow/data/module-catalog.json
+# Skip it and the native path ships stale data -- crates/dml-wow/tests/module_parity.rs
+# would catch it, but SKIPS (silently passes) on any machine without the
+# native runtime at C:/Users/perzi/dml-native (i.e. CI and most dev boxes).
 _module_registry_cpp() {
 cat <<'EOF'
 mod-1v1-arena|1v1 Arena|https://github.com/azerothcore/mod-1v1-arena.git|characters

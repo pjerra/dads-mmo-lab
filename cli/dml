@@ -421,6 +421,13 @@ _parse_server_info() {
 # newline-free value. A direct save live-applies ONLY when the module has a
 # VERIFIED reload console command (_conf_reload_cmd; currently mod-transmog)
 # and no frozen legacy env; everything else stays restart-to-apply.
+#
+# MIRRORED SNAPSHOT: crates/dml-wow/data/config-registry.json embeds this
+# registry for the native launcher + dml-wow-cli. Edited a row? Regenerate:
+#   bash cli/dml wow config registry --json | jq .data.settings > crates/dml-wow/data/config-registry.json
+# Skip it and the native path ships stale data -- crates/dml-wow/tests/config_parity.rs
+# would catch it, but SKIPS (silently passes) on any machine without the
+# native runtime at C:/Users/perzi/dml-native (i.e. CI and most dev boxes).
 _cfg_rows() {
 cat <<'EOF'
 rates.xp_kill|Rates|XP from kills|float|0.5|20|conf:Rate.XP.Kill|1|Multiplies XP earned from kills. 3 = level three times as fast.
@@ -1215,6 +1222,13 @@ _host_port_json() {
 # Keys/defaults are the upstream .conf.dist / .lua HEADs, verified 2026-07-20
 # (mod-npc-beastmaster, mod-learn-spells, Day36512/Acore_Lua_Unlimited_Ammo,
 # Brytenwally/SitMeansRest).
+#
+# MIRRORED SNAPSHOT: crates/dml-wow/data/tuning-registry.json embeds this
+# registry for the native launcher + dml-wow-cli. Edited a row? Regenerate:
+#   bash cli/dml wow config tuning-registry --json | jq .data.settings > crates/dml-wow/data/tuning-registry.json
+# Skip it and the native path ships stale data -- crates/dml-wow/tests/tuning_parity.rs
+# would catch it, but SKIPS (silently passes) on any machine without the
+# native runtime at C:/Users/perzi/dml-native (i.e. CI and most dev boxes).
 _mtune_rows() {
 cat <<'EOF'
 beastmaster.enable|conf|mod_npc_beastmaster.conf|BeastMaster.Enable|NPC Beastmaster|Enable the Beastmaster NPC|bool|||1|Master switch for the Beastmaster NPC that lets classes tame, stable and use hunter pets.
@@ -2703,6 +2717,14 @@ _backup_summary_read() {
 # ---------------------------------------------------------------------------
 
 # key|display name|git url|sql dirs (informational -- db-import applies them)
+#
+# MIRRORED SNAPSHOT: crates/dml-wow/data/module-catalog.json embeds these
+# three registries (cpp here, plus lua/sql below) for the native launcher +
+# dml-wow-cli. Edited any of them? Regenerate:
+#   bash cli/dml wow module catalog --json | jq .data > crates/dml-wow/data/module-catalog.json
+# Skip it and the native path ships stale data -- crates/dml-wow/tests/module_parity.rs
+# would catch it, but SKIPS (silently passes) on any machine without the
+# native runtime at C:/Users/perzi/dml-native (i.e. CI and most dev boxes).
 _module_registry_cpp() {
 cat <<'EOF'
 mod-1v1-arena|1v1 Arena|https://github.com/azerothcore/mod-1v1-arena.git|characters

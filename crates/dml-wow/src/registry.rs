@@ -75,6 +75,15 @@ mod tests {
         assert!(rows.iter().any(|r| r["key"] == "server.motd"));
     }
 
+    // Pins the exact row count so an unnoticed add/remove in the bash
+    // oracle's `_cfg_rows` heredoc (`cli/src/40-config.sh`) fails HERE, on
+    // every machine, rather than only in `config_parity.rs`, which SKIPS on
+    // any box without the native runtime at C:/Users/perzi/dml-native.
+    #[test]
+    fn config_registry_is_66_rows() {
+        assert_eq!(config_registry_rows().len(), 66);
+    }
+
     #[test]
     fn tuning_registry_is_13_rows() {
         assert_eq!(tuning_registry_rows().len(), 13);
@@ -83,5 +92,18 @@ mod tests {
     #[test]
     fn module_catalog_parses() {
         assert!(module_catalog().is_object() || module_catalog().is_array());
+    }
+
+    // Same COUNT-drift guard as `config_registry_is_66_rows`, for the three
+    // family arrays sourced from `cli/src/70-modules.sh`'s
+    // `_module_registry_{cpp,lua,sql}` heredocs -- catches an unnoticed
+    // add/remove on every machine, not just where `module_parity.rs` runs.
+    #[test]
+    fn module_catalog_family_counts() {
+        let cat = module_catalog();
+        let families = &cat["families"];
+        assert_eq!(families["cpp"].as_array().expect("families.cpp[]").len(), 19);
+        assert_eq!(families["lua"].as_array().expect("families.lua[]").len(), 9);
+        assert_eq!(families["sql"].as_array().expect("families.sql[]").len(), 10);
     }
 }
