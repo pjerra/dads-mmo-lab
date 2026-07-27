@@ -18,12 +18,12 @@
 //! SQL shape, not their code.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use dml_core::error::CmdError;
 
 use super::db::{cell_string, db_unreachable_err, sql_row_int};
-use super::soap_cmds::valid_charname;
+use super::soap_cmds::{party_fire_result, valid_charname};
 
 fn bad_arg(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
     CmdError { code: "BAD_ARG".into(), message: message.into(), hint: hint.into() }
@@ -552,6 +552,89 @@ pub fn party_preset_load_stream(
 
     emit(section_end(PRESET_LOAD_SECTION, "ok"));
     emit(done_event(serde_json::json!({"loaded": true, "requested": requested, "joined": joined})));
+}
+
+/// `NOT_FOUND` for an offline character in a `party`-family arm — same code
+/// as `not_online_err` (gm) but with a CALLER-SUPPLIED hint, since each
+/// `party` sub-arm's oracle spells a slightly different one (`90-main.sh`:
+/// add "Log the character into the game first, then try again.";
+/// dismiss-all/preset-save/preset-load "Log the character into the game
+/// first."; botcmd's bot-side check "The bot must be in the world -- is it
+/// still in your party?").
+pub fn party_not_online_err(who: &str, hint: &str) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: format!("Character not online: {who}"), hint: hint.into() }
+}
+
+/// `_party_spec_names` (`50-party.sh:151-165`) read straight off the
+/// deployed playerbots.conf (or its `.dist`) via the already-native `party_
+/// specs` reader — the single source of truth `wow_party_specs_read` also
+/// uses. `None` when no conf is deployed at all (the caller then falls back
+/// to `valid_bot_spec`'s static mirror), matching `_party_pb_conf`'s own
+/// "nothing deployed" case.
+pub fn live_spec_names(title_dir: &std::path::Path) -> Option<Vec<String>> {
+    let (conf_path, _source) = crate::party_specs::find_conf(title_dir)?;
+    let content = std::fs::read_to_string(&conf_path).ok()?;
+    Some(
+        crate::party_specs::parse_spec_rows(&content)
+            .into_iter()
+            .map(|r| r.name)
+            .filter(|n| !n.is_empty())
+            .collect(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `party add` (`90-main.sh:3067-3130`) — moved out of the
+// launcher's `lib.rs` by the cargo-workspace refactor (Task 9b). A
+// four-outcome partial-success state machine, kept whole: online-guid lookup
+// -> pre-fire member snapshot -> SOAP fire -> new-member poll (may time out:
+// "added but not joined") -> name resolution (may fail: "joined but
+// unnamed") -> spec + autogear whispers under the lock. `cmd` is the
+// already-built (and therefore already-validated) `party_add_cmd` string and
+// `spec`, if present, has already been checked against `live_spec_names`.
+// ---------------------------------------------------------------------------
+
+pub fn party_add(
+    player: String,
+    cmd: String,
+    spec: Option<String>,
+    lock: Arc<Mutex<()>>,
+) -> Result<serde_json::Value, CmdError> {
+    let db_cfg = crate::db::DbConfig::from_env();
+    let pguid = party_online_guid(&db_cfg, &player)
+        .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first, then try again."))?;
+    let before = group_member_guids(&db_cfg, pguid);
+    {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::soap::SoapConfig::load();
+        let outcome = crate::soap::exec(&soap_cfg, &cmd);
+        party_fire_result(outcome, "add")?;
+    }
+    let Some(newguid) = wait_new_member(&db_cfg, pguid, &before) else {
+        return Ok(if let Some(s) = &spec {
+            serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
+        } else {
+            serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Spawned but not attached yet -- give it a moment and Refresh."})
+        });
+    };
+    let Some(botname) = char_name_by_guid(&db_cfg, newguid) else {
+        return Ok(if let Some(s) = &spec {
+            serde_json::json!({"added":true,"joined":true,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
+        } else {
+            serde_json::json!({"added":true,"joined":true,"bot":null,"note":null})
+        });
+    };
+    if let Some(s) = &spec {
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::soap::SoapConfig::load();
+        let o1 = crate::soap::exec(&soap_cfg, &crate::party::spec_whisper_cmd(&player, &botname, s));
+        party_fire_result(o1, "spec")?;
+        let o2 = crate::soap::exec(&soap_cfg, &crate::party::autogear_whisper_cmd(&player, &botname));
+        party_fire_result(o2, "spec")?;
+        Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null,"spec":s,"spec_applied":true}))
+    } else {
+        Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null}))
+    }
 }
 
 #[cfg(test)]

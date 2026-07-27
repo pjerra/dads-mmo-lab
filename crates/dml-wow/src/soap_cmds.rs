@@ -9,6 +9,8 @@
 //! `crate::soap::exec` and hand the resulting [`SoapOutcome`] to the
 //! mappers at the bottom of this file.
 
+use std::sync::{Arc, Mutex};
+
 use super::soap::SoapOutcome;
 use dml_core::error::CmdError;
 
@@ -378,6 +380,125 @@ pub fn motd_result(o: crate::soap::SoapOutcome) -> Result<(), CmdError> {
                 .into(),
         }),
     }
+}
+
+/// `SoapOutcome -> CmdError` matching `_party_fire`'s exact case block
+/// (`cli/src/50-party.sh:67-79`) -- used by the bridge-backed gm ops
+/// (gold/heal/revive/summon), which all fire through `_party_fire`. `label`
+/// is the short noun `_party_fire`'s caller passes as its `$2` (e.g. "gold",
+/// "heal", "revive", "summon"), spliced into the fixed fault message. Unlike
+/// the generic mappers, the SOAP_FAULT text here is NEVER the server's own
+/// fault string -- bash's `_party_fire` discards `$out` entirely on rc=2.
+pub fn party_fire_result(o: crate::soap::SoapOutcome, label: &str) -> Result<String, CmdError> {
+    use crate::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(_) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: format!("The {label} command was rejected"),
+            hint: "Deploy the server bridges (bridge-setup) and restart the server first.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP auth failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Is it running?".into(),
+        }),
+    }
+}
+
+/// `NOT_FOUND` for an offline character, matching `_gm_require_online`
+/// (`cli/src/55-gm.sh:9-14`) exactly.
+pub fn not_online_err(player: &str) -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: format!("Character not online: {player}"),
+        hint: "This action needs the character logged in. (Set level works offline.)".into(),
+    }
+}
+
+/// Whether `player` is currently online -- a native-mode port of
+/// `_gm_require_online`/`_party_online_guid` (`cli/src/55-gm.sh:9-14`,
+/// `cli/src/50-party.sh:46-49`): a `characters` row with `online=1`. Any
+/// query failure reads as "not online", matching bash: `_party_online_guid`
+/// redirects `db_chars_query`'s stderr to `/dev/null` and always `return`s 0,
+/// so a DB error there surfaces as an empty guid (== not online) rather than
+/// a separate DB_UNREACHABLE branch -- this mirrors that swallow rather than
+/// inventing a new error path the oracle doesn't have.
+pub fn char_is_online(cfg: &crate::db::DbConfig, player: &str) -> bool {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(player)];
+    crate::db::query_with_params(
+        cfg,
+        crate::db::Database::Characters,
+        "SELECT guid FROM characters WHERE name=? AND online=1 LIMIT 1",
+        params,
+    )
+    .map(|res| !res.rows.is_empty())
+    .unwrap_or(false)
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `dml_summon_npc` bridge command (`90-main.sh:3554-3577`) —
+// moved out of the launcher's `lib.rs` by the cargo-workspace refactor
+// (Task 9b). Order matches the oracle exactly: creature_template
+// existence+name lookup (World DB) -> online check (Characters DB) -> SOAP
+// fire -> success with the looked-up NPC name. `cmd` is the already-built
+// (and therefore already-validated) SOAP command string from
+// `gm_summon_cmd`; `lock` serializes the fire against every other SOAP call.
+// ---------------------------------------------------------------------------
+
+pub fn gm_summon(
+    player: String,
+    entry: i32,
+    cmd: String,
+    lock: Arc<Mutex<()>>,
+) -> Result<serde_json::Value, CmdError> {
+    let cfg = crate::db::DbConfig::from_env();
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
+    let npc_res = crate::db::query_with_params(
+        &cfg,
+        crate::db::Database::World,
+        "SELECT name FROM creature_template WHERE entry=? LIMIT 1",
+        params,
+    )
+    .map_err(|_e| CmdError {
+        code: "DB_UNREACHABLE".into(),
+        message: "Could not check the creature entry".into(),
+        hint: "Is ac-database running?".into(),
+    })?;
+    let npc_name: Option<String> =
+        npc_res.rows.first().and_then(|r| r.first()).and_then(|v| match v {
+            crate::db::SqlValue::Text(s) => Some(s.clone()),
+            crate::db::SqlValue::Int(i) => Some(i.to_string()),
+            crate::db::SqlValue::Null => None,
+        });
+    let npc_name = match npc_name {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("No creature with entry {entry}"),
+                hint: "Check the id (creature_template.entry).".into(),
+            })
+        }
+    };
+    if !char_is_online(&cfg, &player) {
+        return Err(not_online_err(&player));
+    }
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let soap_cfg = crate::soap::SoapConfig::load();
+    let outcome = crate::soap::exec(&soap_cfg, &cmd);
+    party_fire_result(outcome, "summon")?;
+    Ok(serde_json::json!({
+        "summoned": true,
+        "player": player,
+        "entry": entry,
+        "npc": npc_name,
+    }))
 }
 
 #[cfg(test)]

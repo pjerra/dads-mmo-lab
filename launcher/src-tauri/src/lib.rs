@@ -25,9 +25,10 @@ use dml_wow::config::{cfg_installed_err, cfg_missing_file_err, cfg_not_editable_
 use dml_wow::db::{cell_string, count_result, db_err_to_cmd, db_unreachable_err, sql_row_int};
 use dml_wow::lan::LAN_TITLE;
 use dml_wow::party::{
-    bot_member_classes, bot_member_names, char_name_by_guid, group_member_guids,
-    party_online_guid, preset_dir_or_internal_err, wait_new_member,
+    bot_member_classes, bot_member_names, live_spec_names, party_not_online_err, party_online_guid,
+    preset_dir_or_internal_err,
 };
+use dml_wow::soap_cmds::{char_is_online, not_online_err, party_fire_result};
 
 pub struct InstallSession {
     pub stdin: std::process::ChildStdin,
@@ -3071,35 +3072,6 @@ async fn wow_gm_return_home(char_name: String, state: State<'_, AppState>) -> Re
 // Fault paths and its whitespace-only empty-command check.
 // -----------------------------------------------------------------------
 
-/// `SoapOutcome -> CmdError` matching `_party_fire`'s exact case block
-/// (`cli/src/50-party.sh:67-79`) -- used by the bridge-backed gm ops
-/// (gold/heal/revive/summon), which all fire through `_party_fire`. `label`
-/// is the short noun `_party_fire`'s caller passes as its `$2` (e.g. "gold",
-/// "heal", "revive", "summon"), spliced into the fixed fault message. Unlike
-/// the generic mappers, the SOAP_FAULT text here is NEVER the server's own
-/// fault string -- bash's `_party_fire` discards `$out` entirely on rc=2.
-fn party_fire_result(o: dml_wow::soap::SoapOutcome, label: &str) -> Result<String, CmdError> {
-    use dml_wow::soap::SoapOutcome;
-    match o {
-        SoapOutcome::Ok(t) => Ok(t),
-        SoapOutcome::Fault(_) => Err(CmdError {
-            code: "SOAP_FAULT".into(),
-            message: format!("The {label} command was rejected"),
-            hint: "Deploy the server bridges (bridge-setup) and restart the server first.".into(),
-        }),
-        SoapOutcome::Auth => Err(CmdError {
-            code: "SOAP_AUTH".into(),
-            message: "SOAP auth failed".into(),
-            hint: "Check ~/.dml/soap.env".into(),
-        }),
-        SoapOutcome::Unreachable(_) => Err(CmdError {
-            code: "SOAP_UNREACHABLE".into(),
-            message: "Could not reach the server".into(),
-            hint: "Is it running?".into(),
-        }),
-    }
-}
-
 /// `SoapOutcome -> CmdError` for `gm level` (`90-main.sh:3509-3516`): the
 /// stock `.character level` command. The fault case is a FIXED message (not
 /// the server's fault text -- bash discards `$out` on rc=2), and the auth
@@ -3266,36 +3238,6 @@ const RETURN_HOME_SELECT_SQL: &str = "SELECT guid, race, online FROM characters 
 /// Same reasoning as [`RETURN_HOME_SELECT_SQL`].
 const RETURN_HOME_UPDATE_SQL: &str =
     "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?";
-
-/// `NOT_FOUND` for an offline character, matching `_gm_require_online`
-/// (`cli/src/55-gm.sh:9-14`) exactly.
-fn not_online_err(player: &str) -> CmdError {
-    CmdError {
-        code: "NOT_FOUND".into(),
-        message: format!("Character not online: {player}"),
-        hint: "This action needs the character logged in. (Set level works offline.)".into(),
-    }
-}
-
-/// Whether `player` is currently online -- a native-mode port of
-/// `_gm_require_online`/`_party_online_guid` (`cli/src/55-gm.sh:9-14`,
-/// `cli/src/50-party.sh:46-49`): a `characters` row with `online=1`. Any
-/// query failure reads as "not online", matching bash: `_party_online_guid`
-/// redirects `db_chars_query`'s stderr to `/dev/null` and always `return`s 0,
-/// so a DB error there surfaces as an empty guid (== not online) rather than
-/// a separate DB_UNREACHABLE branch -- this mirrors that swallow rather than
-/// inventing a new error path the oracle doesn't have.
-fn char_is_online(cfg: &dml_wow::db::DbConfig, player: &str) -> bool {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(player)];
-    dml_wow::db::query_with_params(
-        cfg,
-        dml_wow::db::Database::Characters,
-        "SELECT guid FROM characters WHERE name=? AND online=1 LIMIT 1",
-        params,
-    )
-    .map(|res| !res.rows.is_empty())
-    .unwrap_or(false)
-}
 
 /// Split a mail `--items` CSV the way bash's `IFS=',' read -ra specs <<<
 /// "$items"` does: an EMPTY string splits to ZERO fields (bash's word
@@ -3603,10 +3545,9 @@ async fn wow_gm_revive_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// NATIVE-MODE `dml_summon_npc` bridge command (`90-main.sh:3554-3577`).
-/// Order matches the oracle exactly: validate -> creature_template
-/// existence+name lookup (World DB) -> online check (Characters DB) -> SOAP
-/// fire -> success with the looked-up NPC name.
+/// NATIVE-MODE `dml_summon_npc` bridge command — see
+/// [`dml_wow::soap_cmds::gm_summon`]. The wrapper only builds (and thereby
+/// validates) the SOAP command and resolves the lock.
 #[tauri::command]
 async fn wow_gm_summon_native(
     player: String,
@@ -3616,50 +3557,7 @@ async fn wow_gm_summon_native(
     require_native_backend()?;
     let cmd = dml_wow::soap_cmds::gm_summon_cmd(&player, entry)?;
     let lock = state.soap_lock.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = dml_wow::db::DbConfig::from_env();
-        let params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
-        let npc_res = dml_wow::db::query_with_params(
-            &cfg,
-            dml_wow::db::Database::World,
-            "SELECT name FROM creature_template WHERE entry=? LIMIT 1",
-            params,
-        )
-        .map_err(|_e| CmdError {
-            code: "DB_UNREACHABLE".into(),
-            message: "Could not check the creature entry".into(),
-            hint: "Is ac-database running?".into(),
-        })?;
-        let npc_name: Option<String> =
-            npc_res.rows.first().and_then(|r| r.first()).and_then(|v| match v {
-                dml_wow::db::SqlValue::Text(s) => Some(s.clone()),
-                dml_wow::db::SqlValue::Int(i) => Some(i.to_string()),
-                dml_wow::db::SqlValue::Null => None,
-            });
-        let npc_name = match npc_name {
-            Some(n) if !n.is_empty() => n,
-            _ => {
-                return Err(CmdError {
-                    code: "NOT_FOUND".into(),
-                    message: format!("No creature with entry {entry}"),
-                    hint: "Check the id (creature_template.entry).".into(),
-                })
-            }
-        };
-        if !char_is_online(&cfg, &player) {
-            return Err(not_online_err(&player));
-        }
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = dml_wow::soap::SoapConfig::load();
-        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
-        party_fire_result(outcome, "summon")?;
-        Ok(serde_json::json!({
-            "summoned": true,
-            "player": player,
-            "entry": entry,
-            "npc": npc_name,
-        }))
-    })
+    tauri::async_runtime::spawn_blocking(move || dml_wow::soap_cmds::gm_summon(player, entry, cmd, lock))
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
@@ -3675,35 +3573,6 @@ async fn wow_gm_summon_native(
 // block), and `preset-load` follows the SAME ndjson vocabulary as
 // `modmgr::module_install_stream`/`lifecycle::world_restart_stream`.
 // ---------------------------------------------------------------------------
-
-/// `NOT_FOUND` for an offline character in a `party`-family arm — same code
-/// as `not_online_err` (gm) but with a CALLER-SUPPLIED hint, since each
-/// `party` sub-arm's oracle spells a slightly different one (`90-main.sh`:
-/// add "Log the character into the game first, then try again.";
-/// dismiss-all/preset-save/preset-load "Log the character into the game
-/// first."; botcmd's bot-side check "The bot must be in the world -- is it
-/// still in your party?").
-fn party_not_online_err(who: &str, hint: &str) -> CmdError {
-    CmdError { code: "NOT_FOUND".into(), message: format!("Character not online: {who}"), hint: hint.into() }
-}
-
-/// `_party_spec_names` (`50-party.sh:151-165`) read straight off the
-/// deployed playerbots.conf (or its `.dist`) via the already-native `party_
-/// specs` reader — the single source of truth `wow_party_specs_read` also
-/// uses. `None` when no conf is deployed at all (the caller then falls back
-/// to `valid_bot_spec`'s static mirror), matching `_party_pb_conf`'s own
-/// "nothing deployed" case.
-fn live_spec_names(title_dir: &std::path::Path) -> Option<Vec<String>> {
-    let (conf_path, _source) = dml_wow::party_specs::find_conf(title_dir)?;
-    let content = std::fs::read_to_string(&conf_path).ok()?;
-    Some(
-        dml_wow::party_specs::parse_spec_rows(&content)
-            .into_iter()
-            .map(|r| r.name)
-            .filter(|n| !n.is_empty())
-            .collect(),
-    )
-}
 
 /// `SoapOutcome -> Result<String, CmdError>` for `dismiss-all`'s "every fire
 /// failed" case (`90-main.sh:3224-3231`): SAME code/hint table as
@@ -3732,11 +3601,9 @@ fn dismiss_fire_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError
     }
 }
 
-/// NATIVE-MODE `party add` (`90-main.sh:3067-3130`). Validates + (if given) a
-/// live-checked `--spec` BEFORE ever touching the DB/SOAP; the online-guid
-/// lookup, pre-fire member snapshot, SOAP fire, new-member poll, and the
-/// post-join spec whispers all run inside the one `spawn_blocking` closure,
-/// same ordering as the oracle.
+/// NATIVE-MODE `party add` — see [`dml_wow::party::party_add`]. The wrapper
+/// builds (and thereby validates) the SOAP command and live-checks `--spec`
+/// BEFORE ever touching the DB/SOAP, same ordering as the oracle.
 #[tauri::command]
 async fn wow_party_add_native(
     player: String,
@@ -3761,43 +3628,7 @@ async fn wow_party_add_native(
         }
     }
     let lock = state.soap_lock.clone();
-    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let db_cfg = dml_wow::db::DbConfig::from_env();
-        let pguid = party_online_guid(&db_cfg, &player)
-            .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first, then try again."))?;
-        let before = group_member_guids(&db_cfg, pguid);
-        {
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = dml_wow::soap::SoapConfig::load();
-            let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
-            party_fire_result(outcome, "add")?;
-        }
-        let Some(newguid) = wait_new_member(&db_cfg, pguid, &before) else {
-            return Ok(if let Some(s) = &spec {
-                serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
-            } else {
-                serde_json::json!({"added":true,"joined":false,"bot":null,"note":"Spawned but not attached yet -- give it a moment and Refresh."})
-            });
-        };
-        let Some(botname) = char_name_by_guid(&db_cfg, newguid) else {
-            return Ok(if let Some(s) = &spec {
-                serde_json::json!({"added":true,"joined":true,"bot":null,"note":"Added but spec not applied -- bot not attached in time","spec":s,"spec_applied":false})
-            } else {
-                serde_json::json!({"added":true,"joined":true,"bot":null,"note":null})
-            });
-        };
-        if let Some(s) = &spec {
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = dml_wow::soap::SoapConfig::load();
-            let o1 = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::spec_whisper_cmd(&player, &botname, s));
-            party_fire_result(o1, "spec")?;
-            let o2 = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::autogear_whisper_cmd(&player, &botname));
-            party_fire_result(o2, "spec")?;
-            Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null,"spec":s,"spec_applied":true}))
-        } else {
-            Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null}))
-        }
-    })
+    tauri::async_runtime::spawn_blocking(move || dml_wow::party::party_add(player, cmd, spec, lock))
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
