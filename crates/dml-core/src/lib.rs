@@ -7,6 +7,7 @@ pub mod engine;
 pub mod envelope;
 pub mod error;
 pub mod events;
+pub mod launcher_config;
 pub mod proc;
 pub mod runner;
 pub mod util;
