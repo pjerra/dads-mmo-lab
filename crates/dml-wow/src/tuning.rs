@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::dml::config::{self, parse_conf, strip_conf_quotes};
+use crate::config::{self, parse_conf, strip_conf_quotes};
 
 /// The conf/lua key token for one tuning row key — the `confkey` column of
 /// `_mtune_rows` (40-config.sh:878), which the `tuning-registry` arm does not
@@ -114,7 +114,7 @@ pub fn lua_cfg_read(content: &str, key: &str) -> String {
 
 /// Validate + normalize a `tuning-set` value against its row's `type`/`min`/
 /// `max` — a faithful port of the validation switch in the `tuning-set)` case
-/// (90-main.sh:2879-2895), used by [`super::super::wow_config_tuning_set_native`]
+/// (90-main.sh:2879-2895), used by `launcher_lib::wow_config_tuning_set_native`
 /// (Task B2b) for BOTH backends (the oracle validates once, before branching
 /// on `conf`/`lua`). `min`/`max` are only consulted for `type == "int"` (the
 /// other two types have no range). On success returns the value to WRITE:

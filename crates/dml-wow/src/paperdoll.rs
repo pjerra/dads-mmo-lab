@@ -207,7 +207,7 @@ pub fn read_paperdoll(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbErr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dml::db::SqlValue;
+    use crate::db::SqlValue;
 
     fn t(s: &str) -> SqlValue {
         SqlValue::Text(s.to_string())

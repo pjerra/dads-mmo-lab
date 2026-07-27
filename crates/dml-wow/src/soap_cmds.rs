@@ -6,11 +6,11 @@
 //! (arms named on each item below) and `cli/src/45-console.sh:18-27`
 //! (`_soap_text_decode`). PURE logic only — no network, no Tauri, no DB.
 //! Later tasks (A2b/A2c) wire these into `#[tauri::command]`s that call
-//! `crate::dml::soap::exec` and hand the resulting [`SoapOutcome`] to the
+//! `crate::soap::exec` and hand the resulting [`SoapOutcome`] to the
 //! mappers at the bottom of this file.
 
 use super::soap::SoapOutcome;
-use crate::CmdError;
+use dml_core::error::CmdError;
 
 // ---------------------------------------------------------------------
 // Validators — port of `cli/src/90-main.sh:116-138`'s allowlist regexes.

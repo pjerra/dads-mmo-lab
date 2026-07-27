@@ -226,11 +226,13 @@ impl ConfigReader {
 /// `_cfg_env_remove`) and their private plumbing (`unquote_conf_matched`,
 /// `conf_read_raw`, `atomic_write`, `ensure_yaml_mapping`) now live in
 /// `dml_core::conf` (cargo-workspace refactor, Task 5) — none of it is
-/// AC-specific. `atomic_write` is additionally re-exported `pub(crate)`
-/// (its pre-move visibility) because `lib.rs`'s `wow_config_raw_write_native`
-/// calls it directly, not just through the three writers above.
+/// AC-specific. `atomic_write` is additionally re-exported (it was
+/// `pub(crate)` while this module lived in the launcher crate; the dml-wow
+/// split, Task 7, widens it to `pub`) because `lib.rs`'s
+/// `wow_config_raw_write_native` calls it directly, not just through the
+/// three writers above.
 pub use dml_core::conf::{conf_write, override_env_remove, override_env_write};
-pub(crate) use dml_core::conf::atomic_write;
+pub use dml_core::conf::atomic_write;
 
 // ---------------------------------------------------------------------------
 // `wow_config_set_native` (Task B2a) — pure routing/path/validation helpers.

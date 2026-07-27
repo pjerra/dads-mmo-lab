@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::CmdError;
+use dml_core::error::CmdError;
 
 use super::soap_cmds::valid_charname;
 

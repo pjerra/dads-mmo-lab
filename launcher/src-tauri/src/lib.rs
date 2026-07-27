@@ -1,4 +1,8 @@
-pub mod dml;
+/// Transitional alias: the whole `dml` module tree moved to the `dml-wow`
+/// crate (cargo-workspace refactor, Task 7). Re-exported under its old name
+/// so this commit is a pure move; the next commit rewrites every
+/// `crate::dml::…` call site to `dml_wow::…` and drops this line.
+pub use dml_wow as dml;
 pub mod nativesetup;
 pub mod power;
 pub mod realmlist;

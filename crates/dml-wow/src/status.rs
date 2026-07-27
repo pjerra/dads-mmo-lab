@@ -63,7 +63,7 @@ fn is_digits(s: &str) -> bool {
 /// compiling unchanged, whether they reach these via a bare `use
 /// super::status::{...}` import or a fully-qualified `super::status::`/
 /// `status::` path.
-pub(crate) use dml_core::proc::{output_bounded_draining, windows_no_window};
+pub use dml_core::proc::{output_bounded_draining, windows_no_window};
 
 // ---------------------------------------------------------------------------
 // `server-info` — `_parse_server_info_fields` / `_parse_server_info`.
@@ -364,11 +364,12 @@ pub fn parse_running(raw: &str) -> bool {
 
 /// Live "is this container running" probe (bounded) — a port of the
 /// world-restart precondition's two `docker inspect -f '{{.State.Running}}'`
-/// calls (`90-main.sh:1684-1685`). `pub(crate)`: consumed by `lib.rs`'s
+/// calls (`90-main.sh:1684-1685`). `pub` (was `pub(crate)` before the dml-wow
+/// crate split, Task 7): consumed by `lib.rs`'s
 /// `wow_world_restart_native` (Task: native world-restart). Any failure/
 /// timeout degrades to `false` (matches the bash's `2>/dev/null || true` —
 /// an unreadable/absent container is not a running one).
-pub(crate) fn container_running(program: &OsStr, name: &str, timeout: Duration) -> bool {
+pub fn container_running(program: &OsStr, name: &str, timeout: Duration) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(["inspect", "-f", "{{.State.Running}}", name]);
     windows_no_window(&mut cmd);
@@ -632,7 +633,7 @@ pub fn console_lines(raw_combined: &str) -> Vec<String> {
 /// Live `console-tail` read: `docker logs --tail <lines> ac-worldserver`
 /// (bounded, pipe-draining — `--tail 1000` can comfortably exceed the OS
 /// pipe buffer, see [`output_bounded_draining`]), combined stdout+stderr
-/// (best-effort merge — see [`crate::run_bounded`]'s identical convention).
+/// (best-effort merge — see `launcher_lib::run_bounded`'s identical convention).
 /// A non-zero exit or timeout reports `{"available":false,"lines":[]}` —
 /// down is an answer, this verb never errors (`90-main.sh:1644-1656`).
 pub fn read_console_tail(program: &OsStr, lines: u32) -> Value {

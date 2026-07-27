@@ -532,7 +532,7 @@ fn run_concurrent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dml::db::SqlValue;
+    use crate::db::SqlValue;
 
     fn t(s: &str) -> SqlValue {
         SqlValue::Text(s.to_string())

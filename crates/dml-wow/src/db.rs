@@ -291,8 +291,8 @@ pub fn query(cfg: &DbConfig, db: Database, sql: &str) -> Result<QueryResult, DbE
 /// order) and decode the whole result set. Connection failures map to
 /// [`DbError::Unreachable`]; a failure once connected (bad SQL, a param-count
 /// mismatch) maps to [`DbError::Query`]. SYNCHRONOUS and BLOCKING — call it
-/// inside [`tauri::async_runtime::spawn_blocking`] (or use [`query_async`]) so
-/// it never blocks the async runtime.
+/// inside `tauri::async_runtime::spawn_blocking` so it never blocks the async
+/// runtime.
 ///
 /// The query runs over the PREPARED (binary) protocol (`exec_iter`), NOT the
 /// text protocol: the text protocol hands every column back as raw bytes, so
@@ -340,7 +340,7 @@ pub fn query_with_params(
 /// the FIRST write path in the native core (Task A2c, `gm return-home`'s
 /// offline arm): every reader above only ever `SELECT`s. SYNCHRONOUS and
 /// BLOCKING like [`query_with_params`] -- call it inside
-/// [`tauri::async_runtime::spawn_blocking`].
+/// `tauri::async_runtime::spawn_blocking`.
 pub fn execute(
     cfg: &DbConfig,
     db: Database,
@@ -352,19 +352,6 @@ pub fn execute(
     conn.exec_drop(sql, params)
         .map_err(|e| DbError::Query(format!("Query failed: {e}")))?;
     Ok(conn.affected_rows())
-}
-
-/// Async convenience wrapper: runs [`query`] on the blocking pool so a Tauri
-/// command can `.await` it. Takes owned args because the closure outlives the
-/// caller's stack frame.
-pub async fn query_async(
-    cfg: DbConfig,
-    db: Database,
-    sql: String,
-) -> Result<QueryResult, DbError> {
-    tauri::async_runtime::spawn_blocking(move || query(&cfg, db, &sql))
-        .await
-        .map_err(|e| DbError::Query(format!("DB task panicked: {e}")))?
 }
 
 #[cfg(test)]

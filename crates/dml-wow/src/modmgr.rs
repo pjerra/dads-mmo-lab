@@ -475,11 +475,12 @@ fn git_clone_depth1(program: &OsStr, url: &str, dest: &Path) -> bool {
 
 /// `_sqlmod_run_stmt`/`_tweak_apply` (`70-modules.sh:711,748-750`): `docker
 /// exec ac-database mysql -uroot -p<pw> <db> -e "<stmt>"`, bounded+drained.
-/// `pub(crate)`: also reused by `dml::moduletail`'s fixit orchestration
+/// `pub` (was `pub(crate)` before the dml-wow crate split, Task 7 -- `lib.rs`
+/// calls it too): also reused by `moduletail`'s fixit orchestration
 /// (Chunk 5, Part 5b) for its multi-statement (`SET`/`PREPARE`/`EXECUTE`)
 /// canned fixes, which the `mysql` crate's single-statement `exec_drop`
 /// cannot run — see this module's doc comment for the fuller rationale.
-pub(crate) fn mysql_run_stmt(program: &OsStr, password: &str, db: &str, stmt: &str) -> bool {
+pub fn mysql_run_stmt(program: &OsStr, password: &str, db: &str, stmt: &str) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(["exec", "ac-database", "mysql", "-uroot", &format!("-p{password}"), db, "-e", stmt]);
     windows_no_window(&mut cmd);

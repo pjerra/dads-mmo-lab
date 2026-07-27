@@ -135,7 +135,7 @@ pub struct ModuleReader {
 
 impl ModuleReader {
     pub fn from_env() -> Self {
-        Self::for_title(crate::dml::config::ConfigReader::title_dir_from_env())
+        Self::for_title(crate::config::ConfigReader::title_dir_from_env())
     }
 
     pub fn for_title(title_dir: impl Into<PathBuf>) -> Self {
