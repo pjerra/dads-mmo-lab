@@ -1730,6 +1730,13 @@ export async function setKeepAwake(on: boolean): Promise<void> {
   return await invoke("set_keep_awake", { on });
 }
 
+// Push the polled verdict to Rust so the tray can show it with the window
+// hidden. Rust has no status poller of its own -- see the tray_set_status doc
+// comment for why duplicating the poll there would be wrong.
+export async function traySetStatus(verdict: string): Promise<void> {
+  return await invoke("tray_set_status", { verdict });
+}
+
 // --- Auto-shutdown watcher (Batch 2 F5) ------------------------------------
 
 // Progress arrives separately via the "auto-shutdown" tauri event channel

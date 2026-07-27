@@ -11,7 +11,14 @@
 // export directly -- no termBuf-style "must return through the proxy" trap
 // applies here.
 
-import { detectLanIp, setKeepAwake, wowLan, wowServerDetail, type ServerDetail } from "./api";
+import {
+  detectLanIp,
+  setKeepAwake,
+  traySetStatus,
+  wowLan,
+  wowServerDetail,
+  type ServerDetail,
+} from "./api";
 import { featureLocked } from "./features.svelte";
 import { toolPrefs } from "./tool-prefs.svelte";
 import { parseLanStatus, verdictTransitionActions } from "./transitions";
@@ -101,6 +108,11 @@ function runTransitionActions(prev: ServerDetail["verdict"] | null, next: Server
   }
   if (actions.lanRefresh) void lanAutoRefresh();
   if (azerothReadyTransition(prev, next)) fireReadyNotification();
+  // Tray tooltip. NB runTransitionActions runs on EVERY successful poll, not
+  // only on changes (the prev !== next gate lives inside
+  // verdictTransitionActions), so this needs its own guard or it would fire
+  // at Rust every 7 seconds.
+  if (prev !== next) void traySetStatus(next).catch(() => {});
 }
 
 // --- "Azeroth is ready" notification (Batch 3 F10) --------------------------

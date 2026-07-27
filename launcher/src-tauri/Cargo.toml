@@ -21,7 +21,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 dml-core = { path = "../../crates/dml-core" }
 dml-wow = { path = "../../crates/dml-wow" }
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

@@ -2,6 +2,9 @@ pub mod nativesetup;
 pub mod power;
 pub mod realmlist;
 mod startup;
+mod tray;
+mod autostart;
+mod single_instance;
 pub mod watch;
 pub mod wslconfig;
 mod zam;
@@ -76,6 +79,13 @@ pub struct AppState {
     /// single-global-mutex shape, just scoped to config writes instead of
     /// SOAP calls.
     pub config_lock: Arc<std::sync::Mutex<()>>,
+    /// When the frontend last pushed a server status. The keep-awake watchdog
+    /// reads this to notice a STALLED webview poll: keep-awake is engaged by
+    /// the webview's 7s poll loop, and before close-to-tray existed it could
+    /// never leak because process exit cleared it. Now that the app survives
+    /// window close, a hidden window whose timers WebView2 throttles would
+    /// otherwise hold the sleep block forever.
+    pub last_status_push: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 pub use dml_core::error::CmdError;
@@ -401,6 +411,37 @@ async fn realmlist_lock(
     tauri::async_runtime::spawn_blocking(move || realmlist::lock(&runner, locked, lan))
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// The frontend pushes its polled verdict here so the tray can show server
+/// state while the window is hidden. Rust has NO status poller of its own —
+/// polling is entirely frontend-driven (a 7s setInterval), and duplicating it
+/// here would open a second unserialized SOAP client and would flap during
+/// restarts, because the `restarting` suppression flag lives only in the
+/// webview. Sync and infallible, same doctrine as `set_keep_awake`.
+#[tauri::command]
+fn tray_set_status(app: tauri::AppHandle, verdict: String, state: State<'_, AppState>) {
+    if let Ok(mut t) = state.last_status_push.lock() {
+        *t = Some(std::time::Instant::now());
+    }
+    tray::apply_status(&app, &verdict);
+}
+
+/// Whether a Windows Run entry exists AND points at a file that still exists.
+#[tauri::command]
+fn autostart_get() -> bool {
+    autostart::enabled()
+}
+
+/// Turn start-with-Windows on or off. Records the CURRENT exe path, so a dev
+/// build and an installed build register different targets.
+#[tauri::command]
+fn autostart_set(on: bool) -> Result<(), CmdError> {
+    autostart::set(on).map_err(|e| CmdError {
+        code: "AUTOSTART_FAILED".into(),
+        message: e,
+        hint: String::new(),
+    })
 }
 
 /// Keep-awake toggle (Batch 2 F6): see power.rs for the per-thread semantics.
@@ -5896,6 +5937,15 @@ pub fn run() {
     // before AppState captures backend::selected().
     startup::resolve_and_export();
 
+    // Single instance. Must come before the builder: if another instance is
+    // already live we surface ITS window and exit rather than starting a
+    // second app that fights over the same server. Only matters now that
+    // close-to-tray keeps the first one alive with no window showing.
+    let instance_lock = match single_instance::acquire() {
+        Some(l) => l,
+        None => return,
+    };
+
     tauri::Builder::default()
         .manage(AppState {
             // Backend switch (spike/docker-desktop-native): default WSL, or the
@@ -5908,11 +5958,34 @@ pub fn run() {
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
             soap_lock: Arc::new(Mutex::new(())),
             config_lock: Arc::new(Mutex::new(())),
+            last_status_push: Arc::new(Mutex::new(None)),
         })
-        .setup(|_app| {
+        .setup(|app| {
             // (Task 8 removed the startup registry prefetch here: the config/
             // tuning/module-catalog registries are now embedded in dml-wow —
             // see `dml_wow::registry` — so there is nothing left to warm.)
+            tray::build(app.handle())?;
+            single_instance::serve(instance_lock, app.handle().clone());
+
+            // Keep-awake safety net. Engagement is driven by the webview poll
+            // loop; a hidden window whose timers get throttled would
+            // otherwise hold the sleep block forever. Two minutes is ~17
+            // missed 7s polls — long enough never to fight a briefly-busy
+            // poll, short enough that a stalled webview cannot keep the PC
+            // awake unnoticed.
+            let pushes = app.state::<AppState>().last_status_push.clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                let stale = pushes
+                    .lock()
+                    .ok()
+                    .and_then(|t| *t)
+                    .map(|t| t.elapsed() > std::time::Duration::from_secs(120))
+                    .unwrap_or(false);
+                if stale {
+                    power::keep_awake(false);
+                }
+            });
             if dml_wow::backend::selected() == dml_wow::backend::Backend::Native {
                 // Automatic "Auto (6h)" interval backup watcher (see the
                 // `interval_backup_watcher` doc comment above): started once,
@@ -5926,6 +5999,27 @@ pub fn run() {
                 std::thread::spawn(move || interval_backup_watcher(last_run));
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != tray::MAIN_WINDOW {
+                    return;
+                }
+                // Read the preference fresh rather than caching it: the user
+                // can change it in Settings without restarting, and a window
+                // close is rare enough that a small file read is free.
+                let hide = dml_core::util::dml_home_dir()
+                    .map(|h| dml_core::launcher_config::load(&h).close_to_tray)
+                    .unwrap_or(true);
+                if hide {
+                    api.prevent_close();
+                    // HIDE, never destroy. The webview must keep running: it
+                    // owns the 7s status poll that feeds the tray, and the
+                    // auto-shutdown toggle is re-asserted to Rust from its
+                    // onMount. Destroying it would silently kill both.
+                    let _ = window.hide();
+                }
+            }
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -6174,7 +6268,10 @@ pub fn run() {
             realmlist_fix,
             realmlist_lock,
             launcher_config_read,
-            launcher_config_write
+            launcher_config_write,
+            tray_set_status,
+            autostart_get,
+            autostart_set
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
