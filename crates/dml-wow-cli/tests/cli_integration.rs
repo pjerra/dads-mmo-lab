@@ -1424,3 +1424,307 @@ fn item_info_over_25_ids_is_bad_arg_exit_1() {
     assert_eq!(envelope["error"]["code"], "BAD_ARG");
     assert_eq!(envelope["error"]["message"], "--entries max 25 ids per call");
 }
+
+// ---------------------------------------------------------------------------
+// Task 15: `lan` (Controller ruling D1), the remaining offline reads
+// (`cache`, `client-path`, `accountwide`, `commands`), and the `install`
+// preflight. Everything below reuses [`Sealed`] from the Task 13/14 blocks
+// above -- a dead SOAP endpoint, a dead MySQL port, and a private
+// HOME/USERPROFILE + games dir.
+// ---------------------------------------------------------------------------
+
+/// D1's own adversarial transcript: `dml_wow::lan::lan_action` carries an
+/// `.expect("validated: ip required for on/refresh")` and an
+/// `unreachable!()` that a caller can trigger directly if it skips
+/// `validate_lan_request` -- so every one of these has to land as a clean
+/// BAD_ARG envelope (exit 1), never a Rust panic (exit 101). None of these
+/// reach a docker/DB probe: `validate_lan_request` runs entirely before
+/// `lan_action` is ever called (see `run.rs::dispatch`'s `Lan` arm).
+#[test]
+fn lan_rejects_bad_input_before_any_docker_or_db_probe() {
+    let s = Sealed::new("lan");
+
+    // Unknown action.
+    assert_bad_arg(&s, &["lan", "reset"], "invalid lan action: \"reset\"");
+    // Missing IP on the two actions that require one.
+    assert_bad_arg(&s, &["lan", "on"], "ip is required for the on/refresh actions");
+    assert_bad_arg(&s, &["lan", "refresh"], "ip is required for the on/refresh actions");
+    // Malformed IP (non-internet -- strict IPv4 shape).
+    assert_bad_arg(&s, &["lan", "on", "not-an-ip"], "invalid IPv4 address: \"not-an-ip\"");
+    assert_bad_arg(&s, &["lan", "refresh", "not-an-ip"], "invalid IPv4 address: \"not-an-ip\"");
+    // Malformed address under --internet (hostname-shape check instead).
+    assert_bad_arg(
+        &s,
+        &["lan", "on", "bad host;", "--internet"],
+        "invalid address or hostname: \"bad host;\"",
+    );
+
+    // Every one of the above is BAD_ARG with the library's own hint, not a
+    // hand-copied one.
+    let (_, envelope) = s.run(&["lan", "reset"]);
+    assert_eq!(envelope["error"]["hint"], "Check the value and try again.");
+
+    // Sanity check on the seal itself (same doctrine as `console`'s own
+    // companion check above): a WELL-FORMED call passes validation and
+    // reaches `lan_action`'s own first gate (server not installed, since the
+    // sealed DML_GAMES_DIR is empty) -- an OK envelope, not an error, because
+    // `lan_action` is TEXT-mode (every domain outcome is folded into its
+    // `Ok(String)`; see `run.rs::dispatch`'s `Lan` arm doc comment). Without
+    // this, the BAD_ARG assertions above could be passing for the wrong
+    // reason (e.g. if the arm always answered BAD_ARG regardless of input).
+    let (code, envelope) = s.run(&["lan", "status"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["ok"], true);
+    let output = envelope["data"]["output"].as_str().unwrap_or_default();
+    assert!(output.contains("not installed"), "{envelope}");
+}
+
+/// Offline smoke: `cache status`/`cache clean` never touch docker/SOAP/DB,
+/// so this exercises them end to end inside the private sealed home.
+#[test]
+fn cache_status_and_clean_round_trip_in_a_private_home() {
+    let s = Sealed::new("cache");
+
+    let (code, envelope) = s.run(&["cache", "status"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["caches"][0]["key"], "wowhead");
+    assert_eq!(envelope["data"]["caches"][0]["present"], false);
+    assert_eq!(envelope["data"]["caches"][0]["files"], 0);
+
+    let cache_dir = s.home().join(".dml").join("wowhead-cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(cache_dir.join("25.json"), b"{}").unwrap();
+
+    let (code, envelope) = s.run(&["cache", "status"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["caches"][0]["present"], true);
+    assert_eq!(envelope["data"]["caches"][0]["files"], 1);
+
+    let (code, envelope) = s.run(&["cache", "clean"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["wiped"], true);
+    assert!(!cache_dir.exists(), "cache clean must remove the directory");
+}
+
+/// Offline smoke: `client-path get/set/detect`, none of which touch
+/// docker/SOAP/DB -- the guard set here is entirely `set_client_path`'s own
+/// ("let the builder validate", same doctrine as Task 13's account
+/// commands): a missing folder is BAD_PATH, a real-but-not-WoW folder is
+/// NOT_CLIENT, before any write.
+#[test]
+fn client_path_get_set_and_detect_round_trip_in_a_private_home() {
+    let s = Sealed::new("clientpath");
+
+    let (code, envelope) = s.run(&["client-path", "get"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["path"], serde_json::Value::Null);
+    assert_eq!(envelope["data"]["valid"], false);
+
+    let missing = s.root.join("NoSuchFolder");
+    let (code, envelope) = s.run(&["client-path", "set", &missing.display().to_string()]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "BAD_PATH");
+
+    let plain = s.root.join("PlainFolder");
+    fs::create_dir_all(&plain).unwrap();
+    let (code, envelope) = s.run(&["client-path", "set", &plain.display().to_string()]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_CLIENT");
+
+    let client = s.root.join("MyClient");
+    fs::create_dir_all(client.join("Interface")).unwrap();
+    let (code, envelope) = s.run(&["client-path", "set", &client.display().to_string()]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["valid"], true);
+
+    let (code, envelope) = s.run(&["client-path", "get"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["path"], client.display().to_string());
+    assert_eq!(envelope["data"]["valid"], true);
+
+    let scan_root = s.root.join("scan-root");
+    fs::create_dir_all(scan_root.join("GoodClient").join("Interface")).unwrap();
+    let out = s
+        .cmd(&["client-path", "detect"])
+        .env("DML_CLIENT_SCAN_ROOTS", &scan_root)
+        .output()
+        .expect("spawn dml-wow client-path detect");
+    assert_eq!(out.status.code(), Some(0));
+    let envelope = parse_envelope(&out.stdout);
+    let candidates: Vec<&str> =
+        envelope["data"]["candidates"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    assert!(
+        candidates.iter().any(|c| c.ends_with("GoodClient")),
+        "expected GoodClient among {candidates:?}"
+    );
+}
+
+/// The `accountwide set` guard set, in the launcher's own order
+/// (`wow_accountwide_set_native`, lib.rs:2423-2457): `--value` shape, then
+/// flag-name shape, BOTH before the server-dir resolve -- proven here by a
+/// bad value/key reporting BAD_ARG even though NO server is installed at all
+/// (if the resolve ran first, both would instead report NOT_FOUND).
+#[test]
+fn accountwide_set_guard_order_survives_an_uninstalled_server() {
+    let s = Sealed::new("accountwide-guard");
+
+    let (code, envelope) = s.run(&["accountwide", "get"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND");
+    assert_eq!(envelope["error"]["message"], "WoW Playerbots server not installed");
+
+    let (code, envelope) = s.run(&["accountwide", "set", "ENABLE_ACCOUNTWIDE_MOUNTS", "sideways"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "BAD_ARG", "{envelope}");
+    assert_eq!(envelope["error"]["message"], "--value must be on or off");
+
+    let (code, envelope) = s.run(&["accountwide", "set", "NOT_A_FLAG", "on"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "BAD_ARG", "{envelope}");
+    assert_eq!(envelope["error"]["message"], "Invalid flag name: NOT_A_FLAG");
+
+    // A well-formed value+key against the SAME uninstalled server now falls
+    // through to NOT_FOUND -- proving the two BAD_ARG results above were
+    // really the pre-checks firing, not a coincidence of a broken arm that
+    // always says BAD_ARG.
+    let (code, envelope) = s.run(&["accountwide", "set", "ENABLE_ACCOUNTWIDE_MOUNTS", "on"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND", "{envelope}");
+}
+
+/// Full offline round trip once a server dir (but not yet the accountwide
+/// lua payload) exists: `get` reports `installed:false` (a DIFFERENT
+/// question from "is the server installed" -- see `build_get`'s doc
+/// comment), `set` reports the dedicated `NOT_INSTALLED`, and once the
+/// payload is deployed, `set` actually flips the flag on disk.
+#[test]
+fn accountwide_full_round_trip_once_the_lua_payload_is_deployed() {
+    let s = Sealed::new("accountwide-rt");
+    let title = s.root.join("games").join("wow-server-playerbots");
+    fs::create_dir_all(&title).unwrap();
+    fs::write(title.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+    let (code, envelope) = s.run(&["accountwide", "get"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["installed"], false);
+
+    let (code, envelope) = s.run(&["accountwide", "set", "ENABLE_ACCOUNTWIDE_MOUNTS", "on"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_INSTALLED");
+
+    let aw_dir = title
+        .join("env")
+        .join("dist")
+        .join("etc")
+        .join("modules")
+        .join("lua_scripts")
+        .join("accountwide");
+    fs::create_dir_all(&aw_dir).unwrap();
+    fs::write(aw_dir.join("AccountMounts.lua"), "local ENABLE_ACCOUNTWIDE_MOUNTS = false\n").unwrap();
+
+    let (code, envelope) = s.run(&["accountwide", "get"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["installed"], true);
+    let mounts = envelope["data"]["subsystems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key"] == "ENABLE_ACCOUNTWIDE_MOUNTS")
+        .expect("ENABLE_ACCOUNTWIDE_MOUNTS row");
+    assert_eq!(mounts["value"], "off");
+
+    let (code, envelope) = s.run(&["accountwide", "set", "ENABLE_ACCOUNTWIDE_MOUNTS", "on"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["changed"], true);
+    assert_eq!(envelope["data"]["value"], "on");
+
+    let content = fs::read_to_string(aw_dir.join("AccountMounts.lua")).unwrap();
+    assert!(content.contains("local ENABLE_ACCOUNTWIDE_MOUNTS = true"), "{content:?}");
+}
+
+/// `commands`: NOT_FOUND before an uninstalled server's catalog/reader are
+/// ever touched, then a clean empty list once a server dir exists but no
+/// modules are deployed.
+#[test]
+fn commands_reports_not_found_uninstalled_then_an_empty_list_once_a_server_dir_exists() {
+    let s = Sealed::new("commands");
+
+    let (code, envelope) = s.run(&["commands"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND");
+    assert_eq!(envelope["error"]["message"], "WoW Playerbots server not installed");
+
+    let title = s.root.join("games").join("wow-server-playerbots");
+    fs::create_dir_all(&title).unwrap();
+    fs::write(title.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+    let (code, envelope) = s.run(&["commands"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["mods"].as_array().unwrap().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Task 15: `install`'s preflight. Do NOT actually run an installer here --
+// every case below is engineered so BOTH (or one) of bash/the dml script
+// fail to resolve, which the code checks BEFORE any `Command::spawn` at
+// all. A real installer run is left to the user's supervised smoke session.
+// ---------------------------------------------------------------------------
+
+/// The id guard (`run.rs::valid_game_id`, a CLI-specific addition -- see the
+/// task report) runs BEFORE the prereqs check: a malformed id is BAD_ID even
+/// when bash/the script are ALSO both unresolvable, proving the ordering
+/// (if the prereqs check ran first, this would instead report
+/// INSTALL_PREREQS).
+#[test]
+fn install_rejects_a_bad_id_before_checking_prereqs() {
+    let out = bin()
+        .args(["install", "wow server"]) // a space is invalid
+        .env("DML_BASH", r"C:\definitely\does\not\exist\bash.exe")
+        .env_remove("DML_SCRIPT")
+        .output()
+        .expect("spawn dml-wow install");
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "BAD_ID");
+}
+
+/// THE plan-required preflight test: neither bash nor the dml script resolve
+/// -> a single INSTALL_PREREQS envelope, exit 1, and (since `DML_BASH` here
+/// is a nonexistent path) nothing could possibly have been spawned.
+#[test]
+fn install_preflight_missing_bash_and_script_reports_install_prereqs_and_spawns_nothing() {
+    let out = bin()
+        .args(["install", "wow-server-playerbots"])
+        .env("DML_BASH", r"C:\definitely\does\not\exist\bash.exe")
+        .env_remove("DML_SCRIPT")
+        .output()
+        .expect("spawn dml-wow install");
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "INSTALL_PREREQS");
+    assert_eq!(
+        envelope["error"]["message"],
+        "Git Bash (or bash on PATH) and the dml script (DML_SCRIPT) are required for install"
+    );
+    assert_eq!(envelope["error"]["hint"], "");
+}
+
+/// BOTH halves are required, not just one: a REAL, resolvable executable for
+/// `DML_BASH` (a harmless stand-in -- `cmd.exe`, present on every Windows
+/// install, is never actually invoked here) with the script STILL missing
+/// must still refuse — proving the check isn't a short-circuiting OR that
+/// would let a present bash alone through.
+#[test]
+fn install_preflight_bash_resolves_but_missing_script_still_refuses() {
+    let out = bin()
+        .args(["install", "wow-server-playerbots"])
+        .env("DML_BASH", r"C:\Windows\System32\cmd.exe")
+        .env_remove("DML_SCRIPT")
+        .output()
+        .expect("spawn dml-wow install");
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["error"]["code"], "INSTALL_PREREQS");
+}

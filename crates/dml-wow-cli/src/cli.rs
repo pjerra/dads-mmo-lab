@@ -291,6 +291,102 @@ pub enum Cmd {
         #[command(flatten)]
         backup: BackupChoice,
     },
+
+    // -- Task 15: misc reads + the interactive `install` passthrough --------
+    //
+    // `action` stays a raw String, deliberately NOT a clap subcommand/
+    // allowlist -- same loose-typing doctrine as `account set-gm`'s `level`
+    // (Task 13): `dml_wow::lan::validate_lan_request` owns the closed
+    // LAN_ACTIONS allowlist and the IP-vs-hostname shape check (Controller
+    // ruling D1 -- `lan_action` itself `.expect()`s/`unreachable!()`s on
+    // unvalidated input, see `run.rs::dispatch`'s `Lan` arm and the task
+    // report's D1 section), so an unknown action must reach it as a domain
+    // BAD_ARG/exit-1, never a clap usage-error/exit-2.
+    /// LAN address control for this CLI's fixed AC title (on/off/status/
+    /// refresh) — native-mode `dml lan`.
+    Lan {
+        /// on | off | status | refresh
+        action: String,
+        /// Required for on/refresh; ignored (and may be omitted) for
+        /// off/status.
+        ip: Option<String>,
+        /// Internet-play addressing — only honored when action == on
+        /// (`validate_lan_request`'s own narrowing).
+        #[arg(long)]
+        internet: bool,
+    },
+    /// Wowhead item-info cache size/wipe (`dml_wow::cachestatus`)
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
+    },
+    /// The saved WoW client folder (`dml_wow::clientpath`)
+    ClientPath {
+        #[command(subcommand)]
+        cmd: ClientPathCmd,
+    },
+    /// Account-wide sharing flags (`dml_wow::accountwide`)
+    Accountwide {
+        #[command(subcommand)]
+        cmd: AccountwideCmd,
+    },
+    /// The in-game `.` commands cheat sheet
+    /// (`dml_wow::commands::assemble_commands`)
+    Commands,
+    /// Interactively install a title — STDIO PASSTHROUGH, not NDJSON: the
+    /// installer is an interactive bash script and would starve on a
+    /// captured pipe. Prints NO envelope on success (the installer's own
+    /// raw output IS the output); an `INSTALL_PREREQS` envelope only when Git
+    /// Bash or the dml script can't be found, before anything is spawned.
+    Install {
+        /// Title id to install. Defaults to this CLI's own title.
+        /// Validated with the launcher's own `[A-Za-z0-9._-]+` rule
+        /// (`run.rs::valid_game_id`) — a CLI-specific hardening addition:
+        /// `games_install` itself (`launcher/src-tauri/src/lib.rs`) carries
+        /// NO id guard of its own (only a "busy" check, not applicable to a
+        /// one-shot process) — see the task report's `install` section.
+        #[arg(default_value = dml_wow::config::TITLE)]
+        id: String,
+    },
+}
+
+/// `dml-wow cache …` — `dml_wow::cachestatus`.
+#[derive(Subcommand, Debug)]
+pub enum CacheCmd {
+    /// Wowhead item-info cache size
+    Status,
+    /// Wipe the wowhead item-info cache
+    Clean,
+}
+
+/// `dml-wow client-path …` — `dml_wow::clientpath`. `set` is the only writer;
+/// its `dir` is unvalidated here (loose-typing doctrine again) — the library
+/// owns the "no such folder" / "doesn't look like a WoW client" wording.
+#[derive(Subcommand, Debug)]
+pub enum ClientPathCmd {
+    /// The saved client folder, if any
+    Get,
+    /// Save a new client folder
+    Set { dir: String },
+    /// Scan common install locations for a WoW client
+    Detect,
+}
+
+/// `dml-wow accountwide …` — `dml_wow::accountwide`.
+#[derive(Subcommand, Debug)]
+pub enum AccountwideCmd {
+    /// Installed state + every subsystem's on/off value
+    Get,
+    /// Flip one flag (or the reputation pick-one, with an optional
+    /// `--variant`)
+    Set {
+        /// e.g. ENABLE_ACCOUNTWIDE_MOUNTS
+        key: String,
+        /// on | off
+        value: String,
+        #[arg(long)]
+        variant: Option<String>,
+    },
 }
 
 /// The `--backup` / `--no-backup` pair, flattened into every subcommand whose
@@ -1657,5 +1753,160 @@ mod tests {
             Cmd::ItemInfo { ids } => assert_eq!(ids.0.len(), 25),
             other => panic!("expected ItemInfo, got {other:?}"),
         }
+    }
+
+    // -- Task 15: lan / cache / client-path / accountwide / commands / install
+
+    #[test]
+    fn parses_lan_arms() {
+        match Cli::try_parse_from(["dml-wow", "lan", "on", "192.168.1.50"]).unwrap().command {
+            Cmd::Lan { action, ip, internet } => {
+                assert_eq!(action, "on");
+                assert_eq!(ip.as_deref(), Some("192.168.1.50"));
+                assert!(!internet);
+            }
+            other => panic!("expected Lan, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "lan", "off"]).unwrap().command {
+            Cmd::Lan { action, ip, .. } => {
+                assert_eq!(action, "off");
+                assert_eq!(ip, None);
+            }
+            other => panic!("expected Lan, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "lan", "status"]).unwrap().command,
+            Cmd::Lan { action, ip: None, internet: false } if action == "status"
+        ));
+        match Cli::try_parse_from([
+            "dml-wow", "lan", "refresh", "myserver.duckdns.org", "--internet",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Lan { action, ip, internet } => {
+                assert_eq!(action, "refresh");
+                assert_eq!(ip.as_deref(), Some("myserver.duckdns.org"));
+                assert!(internet);
+            }
+            other => panic!("expected Lan, got {other:?}"),
+        }
+    }
+
+    /// `action` is a RAW string (review-relevant): an unknown value still
+    /// PARSES here — `validate_lan_request` is what turns it into a domain
+    /// BAD_ARG, not clap. Same doctrine as `account set-gm`'s out-of-range
+    /// `level` (Task 13).
+    #[test]
+    fn lan_action_is_not_a_clap_allowlist() {
+        match Cli::try_parse_from(["dml-wow", "lan", "reset"]).unwrap().command {
+            Cmd::Lan { action, .. } => assert_eq!(action, "reset"),
+            other => panic!("expected Lan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lan_requires_the_action_positional() {
+        assert!(Cli::try_parse_from(["dml-wow", "lan"]).is_err());
+    }
+
+    #[test]
+    fn parses_cache_arms() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "cache", "status"]).unwrap().command,
+            Cmd::Cache { cmd: CacheCmd::Status }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "cache", "clean"]).unwrap().command,
+            Cmd::Cache { cmd: CacheCmd::Clean }
+        ));
+        assert!(Cli::try_parse_from(["dml-wow", "cache"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "cache", "nope"]).is_err());
+    }
+
+    #[test]
+    fn parses_client_path_arms() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "client-path", "get"]).unwrap().command,
+            Cmd::ClientPath { cmd: ClientPathCmd::Get }
+        ));
+        match Cli::try_parse_from(["dml-wow", "client-path", "set", "C:\\Games\\WoW"])
+            .unwrap()
+            .command
+        {
+            Cmd::ClientPath { cmd: ClientPathCmd::Set { dir } } => {
+                assert_eq!(dir, "C:\\Games\\WoW")
+            }
+            other => panic!("expected ClientPath Set, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "client-path", "detect"]).unwrap().command,
+            Cmd::ClientPath { cmd: ClientPathCmd::Detect }
+        ));
+        assert!(Cli::try_parse_from(["dml-wow", "client-path", "set"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "client-path"]).is_err());
+    }
+
+    #[test]
+    fn parses_accountwide_arms() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "accountwide", "get"]).unwrap().command,
+            Cmd::Accountwide { cmd: AccountwideCmd::Get }
+        ));
+        match Cli::try_parse_from([
+            "dml-wow", "accountwide", "set", "ENABLE_ACCOUNTWIDE_MOUNTS", "on",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Accountwide { cmd: AccountwideCmd::Set { key, value, variant } } => {
+                assert_eq!(key, "ENABLE_ACCOUNTWIDE_MOUNTS");
+                assert_eq!(value, "on");
+                assert_eq!(variant, None);
+            }
+            other => panic!("expected Accountwide Set, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "accountwide", "set", "ENABLE_ACCOUNTWIDE_REPUTATION", "on", "--variant",
+            "default",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Accountwide { cmd: AccountwideCmd::Set { variant, .. } } => {
+                assert_eq!(variant.as_deref(), Some("default"))
+            }
+            other => panic!("expected Accountwide Set, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["dml-wow", "accountwide", "set", "ENABLE_X"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "accountwide"]).is_err());
+    }
+
+    #[test]
+    fn parses_commands_and_rejects_stray_args() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "commands"]).unwrap().command,
+            Cmd::Commands
+        ));
+        assert!(Cli::try_parse_from(["dml-wow", "commands", "extra"]).is_err());
+    }
+
+    #[test]
+    fn parses_install_default_and_explicit_id() {
+        match Cli::try_parse_from(["dml-wow", "install"]).unwrap().command {
+            Cmd::Install { id } => assert_eq!(id, "wow-server-playerbots"),
+            other => panic!("expected Install, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "install", "maplestory-server"]).unwrap().command {
+            Cmd::Install { id } => assert_eq!(id, "maplestory-server"),
+            other => panic!("expected Install, got {other:?}"),
+        }
+        // A malformed id still PARSES here — `run.rs`'s `valid_game_id` guard
+        // is what rejects it, matching `start`/`stop`/`restart`'s own id.
+        match Cli::try_parse_from(["dml-wow", "install", "wow server"]).unwrap().command {
+            Cmd::Install { id } => assert_eq!(id, "wow server"),
+            other => panic!("expected Install, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["dml-wow", "install", "a", "b"]).is_err());
     }
 }

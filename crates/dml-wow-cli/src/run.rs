@@ -26,7 +26,10 @@ use dml_wow::db::{DbConfig, DbError};
 use dml_wow::soap::{SoapConfig, SoapOutcome};
 use serde_json::{json, Value};
 
-use crate::cli::{AccountCmd, BackupCmd, Cmd, ConfigCmd, GmCmd, ModuleCmd, PartyCmd, TuningCmd};
+use crate::cli::{
+    AccountCmd, AccountwideCmd, BackupCmd, CacheCmd, Cmd, ClientPathCmd, ConfigCmd, GmCmd,
+    ModuleCmd, PartyCmd, TuningCmd,
+};
 use crate::out::{emit_err, emit_ok, stream_exit, stream_sink, TerminalSeen};
 
 /// Print a `dml-wow` call's `Result` as the one envelope it maps to, and
@@ -696,7 +699,279 @@ pub fn dispatch(command: Cmd) -> i32 {
             // --no-backup"), matching `wow_update_native`'s `Option<bool>`.
             stream_dispatch(|emit| dml_wow::maint::update_stream(backup.choice(), emit))
         }
+
+        // -- Task 15: misc reads + the interactive `install` passthrough ----
+
+        Cmd::Lan { action, ip, internet } => {
+            // GUARD (`wow_lan_native`, lib.rs:4430-4437): `validate_lan_request`
+            // owns the closed LAN_ACTIONS allowlist and the IP-vs-hostname
+            // shape check, and MUST run before `lan_action` ever touches
+            // docker/DB -- `lan_action` itself `.expect()`s ("validated: ip
+            // required for on/refresh") and `unreachable!()`s on an
+            // unvalidated action (see the task report's D1 section).
+            match dml_wow::lan::validate_lan_request(&action, ip, internet) {
+                Ok((inet, ip_arg)) => {
+                    // `lan_action` is TEXT-mode (its own doc comment): every
+                    // domain-level outcome (not installed, docker down, DB not
+                    // answering yet, ...) is folded into the returned
+                    // `Ok(String)` rather than a typed error, matching
+                    // `wow_lan_native`'s `Result<String, CmdError>` (whose
+                    // `Err` side is reserved for a `spawn_blocking` join
+                    // failure, not reachable here since this CLI runs
+                    // synchronously). So this arm always emits an ok envelope
+                    // wrapping that text -- never an error envelope, mirroring
+                    // the launcher's own contract.
+                    let text = dml_wow::lan::lan_action(&action, ip_arg, inet);
+                    emit_ok(json!({ "output": text }))
+                }
+                Err(e) => emit_err(&e.code, &e.message, &e.hint),
+            }
+        }
+
+        Cmd::Cache { cmd } => dispatch_cache(cmd),
+        Cmd::ClientPath { cmd } => dispatch_client_path(cmd),
+        Cmd::Accountwide { cmd } => dispatch_accountwide(cmd),
+
+        Cmd::Commands => {
+            // GUARD (`wow_commands_read`, lib.rs:1899-1924): NOT_FOUND before
+            // the catalog/reader are even touched, exact code/message/hint.
+            let title_dir = title_dir();
+            if dml_wow::maint::resolve_server_dir(&title_dir).is_none() {
+                return emit_err(
+                    "NOT_FOUND",
+                    "WoW Playerbots server not installed",
+                    "Install it first.",
+                );
+            }
+            let catalog = dml_wow::registry::module_catalog();
+            let reader = dml_wow::modules::ModuleReader::from_env();
+            let modules_dir = title_dir.join("modules");
+            emit_ok(dml_wow::commands::assemble_commands(catalog, &reader, &modules_dir))
+        }
+
+        Cmd::Install { id } => cmd_install(&id),
     }
+}
+
+/// `dml-wow cache …` — `dml_wow::cachestatus`. No guards beyond
+/// `require_native_backend` (a no-op here, this binary IS the native
+/// backend) in either `wow_cache_status_read`/`wow_cache_clean_native`.
+fn dispatch_cache(cmd: CacheCmd) -> i32 {
+    match cmd {
+        CacheCmd::Status => emit_ok(dml_wow::cachestatus::read_cache_status()),
+        CacheCmd::Clean => emit_result(dml_wow::cachestatus::clean_cache().map_err(|e| match e {
+            dml_wow::cachestatus::CacheCleanError::Guard(m) => {
+                CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
+            }
+            dml_wow::cachestatus::CacheCleanError::Wipe(m) => {
+                CmdError { code: "WIPE_FAILED".into(), message: m, hint: String::new() }
+            }
+        })),
+    }
+}
+
+/// `dml-wow client-path …` — `dml_wow::clientpath`. Same "no guards beyond
+/// require_native_backend" shape as `dispatch_cache` for `get`/`detect`
+/// (`wow_client_path_read`/`wow_client_path_detect_read`); `set` is
+/// "let the builder validate" (`wow_client_path_set_native`), same doctrine
+/// as Task 13's account commands — `set_client_path` owns the BAD_PATH/
+/// NOT_CLIENT wording.
+fn dispatch_client_path(cmd: ClientPathCmd) -> i32 {
+    match cmd {
+        ClientPathCmd::Get => emit_ok(dml_wow::clientpath::read_client_path()),
+        ClientPathCmd::Set { dir } => {
+            emit_result(dml_wow::clientpath::set_client_path(Path::new(&dir)).map_err(|e| match e {
+                dml_wow::clientpath::ClientPathSetError::BadPath(m) => CmdError {
+                    code: "BAD_PATH".into(),
+                    message: m,
+                    hint: "Check the folder exists and try again.".into(),
+                },
+                dml_wow::clientpath::ClientPathSetError::NotClient(m) => CmdError {
+                    code: "NOT_CLIENT".into(),
+                    message: m,
+                    hint: "Expected Wow.exe or an Interface folder inside it.".into(),
+                },
+                dml_wow::clientpath::ClientPathSetError::Io(m) => {
+                    CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
+                }
+            }))
+        }
+        ClientPathCmd::Detect => {
+            let roots = dml_wow::clientpath::default_scan_roots();
+            let candidates = dml_wow::clientpath::detect_client(&roots);
+            emit_ok(json!({ "candidates": candidates }))
+        }
+    }
+}
+
+/// `dml-wow accountwide …` — `dml_wow::accountwide`.
+fn dispatch_accountwide(cmd: AccountwideCmd) -> i32 {
+    match cmd {
+        AccountwideCmd::Get => {
+            // GUARD (`wow_accountwide_get_native`, lib.rs:2397-2413): NOT_FOUND
+            // before `build_get` is ever called, exact code/message/hint.
+            let title_dir = title_dir();
+            match dml_wow::maint::resolve_server_dir(&title_dir) {
+                Some(server_dir) => emit_ok(dml_wow::accountwide::build_get(&server_dir)),
+                None => emit_err(
+                    "NOT_FOUND",
+                    "WoW Playerbots server not installed",
+                    "Install it first.",
+                ),
+            }
+        }
+
+        AccountwideCmd::Set { key, value, variant } => {
+            // GUARD SET (`wow_accountwide_set_native`, lib.rs:2423-2457), in
+            // its EXACT order — value shape, then flag-name shape, BOTH
+            // before the server-dir resolve (`set_flag` re-validates both
+            // internally too, "belt and braces, not the only gate" per that
+            // wrapper's own doc comment; reproducing the pre-checks here is
+            // what keeps a bad `--value`/key rejected with BAD_ARG even
+            // against an uninstalled server, rather than NOT_FOUND winning
+            // by dumb luck of which check runs first).
+            if value != "on" && value != "off" {
+                return emit_err("BAD_ARG", "--value must be on or off", "");
+            }
+            if !dml_wow::accountwide::valid_flag(&key) {
+                return emit_err(
+                    "BAD_ARG",
+                    &format!("Invalid flag name: {key}"),
+                    "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json",
+                );
+            }
+            let title_dir = title_dir();
+            let server_dir = match dml_wow::maint::resolve_server_dir(&title_dir) {
+                Some(d) => d,
+                None => {
+                    return emit_err(
+                        "NOT_FOUND",
+                        "WoW Playerbots server not installed",
+                        "Install it first.",
+                    )
+                }
+            };
+            emit_result(
+                dml_wow::accountwide::set_flag(&server_dir, &key, &value, variant.as_deref())
+                    .map_err(|e| CmdError { code: e.code.into(), message: e.message, hint: e.hint }),
+            )
+        }
+    }
+}
+
+// -- `install`: the interactive, non-JSON passthrough (task brief's ONE
+// deliberate deviation) --------------------------------------------------
+//
+// `games_install` (lib.rs:5531-5583) is the launcher's ONLY install command
+// (shared by both backends through `state.runner`, no `_native` sibling to
+// diverge from) and it has NO id validation of its own -- only a "an install
+// is already running" BUSY guard, which does not apply to a one-shot CLI
+// process. The `valid_game_id` check below is therefore a CLI-specific
+// hardening addition, not a reproduction of an existing wrapper guard (see
+// the task report).
+//
+// Runner construction reuses `dml_core::runner::DmlRunner::native()` rather
+// than re-deriving `find_bash`/`find_dml_script`'s resolution by hand: its
+// `program`/`prefix_args`/`path_prepend` fields are already `pub`, and are
+// the EXACT values the native backend's own `dml` invocations use (Docker
+// Desktop's bin dir on PATH included, so the installer's own `docker`
+// calls resolve exactly like every other native command's do). Its
+// `spawn_interactive`/`run_captured`/etc. methods are not used here because
+// every one of them pipes or nulls at least one stdio stream; a true
+// interactive passthrough needs all three INHERITED, so this builds its own
+// `Command` from those public fields instead.
+fn cmd_install(id: &str) -> i32 {
+    if !valid_game_id(id) {
+        let e = bad_id(id);
+        return emit_err(&e.code, &e.message, &e.hint);
+    }
+
+    let runner = dml_core::runner::DmlRunner::native();
+    let script = runner.prefix_args.first().cloned().unwrap_or_default();
+    if !resolves_on_path_or_disk(&runner.program) || !Path::new(&script).is_file() {
+        return emit_err(
+            "INSTALL_PREREQS",
+            "Git Bash (or bash on PATH) and the dml script (DML_SCRIPT) are required for install",
+            "",
+        );
+    }
+
+    let mut cmd = std::process::Command::new(&runner.program);
+    cmd.args(&runner.prefix_args).args(["games", "install", id]);
+    if let Some(dir) = &runner.path_prepend {
+        if !dir.is_empty() {
+            let mut paths = vec![std::path::PathBuf::from(dir)];
+            if let Some(cur) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&cur));
+            }
+            if let Ok(joined) = std::env::join_paths(paths) {
+                cmd.env("PATH", joined);
+            }
+        }
+    }
+    // ALL THREE stdio streams inherited -- no pipes -- so the installer's
+    // prompts and the user's answers pass straight through. This is the
+    // task brief's ONE deliberate non-JSON, non-NDJSON command: no envelope
+    // is printed on this path, ever -- the installer's own raw output IS
+    // the output.
+    cmd.stdin(std::process::Stdio::inherit());
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    match cmd.spawn().and_then(|mut child| child.wait()) {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        // Unreachable in ordinary operation (the preflight above just
+        // confirmed both resolve) short of a race (the file vanishing
+        // between the check and the spawn) or a permissions error -- handled
+        // rather than unwrapped, but deliberately its own distinct code so it
+        // is never mistaken for the preflight's own INSTALL_PREREQS.
+        Err(e) => emit_err(
+            "INSTALL_SPAWN_FAILED",
+            &format!("failed to launch the installer: {e}"),
+            "",
+        ),
+    }
+}
+
+/// Does `candidate` (an `OsString`, as `DmlRunner::native().program` is)
+/// actually resolve to a real, runnable file, WITHOUT spawning anything?
+///
+/// `find_bash` (`dml_core::runner`) returns one of three shapes: (a) a
+/// `DML_BASH` override, taken VERBATIM with no existence check of its own;
+/// (b) one of two hardcoded Git-Bash absolute paths, already
+/// existence-checked before `find_bash` returns it; (c) the ultimate bare
+/// `"bash"` fallback, which relies on PATH resolution at spawn time. Cases
+/// (a)/(b) are both "looks like a path" (contains a separator) and get a
+/// direct [`Path::is_file`] check; case (c) is a bare command name and gets
+/// a manual PATH walk instead, since `Command::spawn` performs that same
+/// resolution internally and there is no portable "does this resolve"
+/// query short of trying it.
+fn resolves_on_path_or_disk(candidate: &std::ffi::OsStr) -> bool {
+    let text = candidate.to_string_lossy();
+    if text.contains(['\\', '/']) {
+        Path::new(candidate).is_file()
+    } else {
+        on_path(&text)
+    }
+}
+
+/// `true` iff `name` resolves to a file in some `PATH` directory. Thin env
+/// wrapper over the pure [`finds_on`] so the actual search logic is
+/// testable without mutating the process-wide `PATH` (which every parallel
+/// `cargo test` thread in this binary shares). No `PATH` at all is "not
+/// found", not "found everywhere".
+fn on_path(name: &str) -> bool {
+    let Some(path_var) = std::env::var_os("PATH") else { return false };
+    finds_on(name, std::env::split_paths(&path_var))
+}
+
+/// Pure search core of [`on_path`]: `true` iff `name` is a file directly
+/// under some directory in `dirs` (with a bare `.exe` fallback on Windows,
+/// mirroring how `CreateProcess` resolves an extension-less name).
+fn finds_on(name: &str, dirs: impl IntoIterator<Item = PathBuf>) -> bool {
+    dirs.into_iter().any(|dir| {
+        dir.join(name).is_file() || (cfg!(windows) && dir.join(format!("{name}.exe")).is_file())
+    })
 }
 
 /// `dml-wow backup …` — the launcher's five native backup commands.
@@ -1391,5 +1666,74 @@ mod tests {
         std::fs::write(dir.join(name), b"not really gzip").unwrap();
         assert_eq!(require_backup_file(&dir, name).unwrap(), dir.join(name));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Task 15: `install`'s preflight resolver -----------------------------
+    //
+    // `finds_on`/`resolves_on_path_or_disk` are tested with an EXPLICIT
+    // directory list / absolute temp paths rather than mutating the
+    // process-wide `PATH` env var, which every parallel `cargo test` thread
+    // in this binary shares (mutating it would be exactly the kind of
+    // flaky-by-construction test this crate's own doc comments warn against
+    // elsewhere).
+
+    fn t15_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("dml-cli-t15-{}-{tag}", std::process::id()))
+    }
+
+    #[test]
+    fn finds_on_locates_a_bare_name_in_a_directory_list() {
+        let dir = t15_dir("finds-on");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bash"), b"").unwrap();
+
+        assert!(finds_on("bash", vec![dir.clone()]));
+        assert!(!finds_on("bash", vec![t15_dir("finds-on-nowhere")]));
+        assert!(!finds_on("bash", Vec::<PathBuf>::new()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Windows-only `.exe` fallback, mirroring how `CreateProcess`
+    /// resolves an extension-less name -- exercised only on the platform it
+    /// applies to (matching `finds_on`'s own `cfg!(windows)` gate).
+    #[test]
+    fn finds_on_matches_the_dotexe_fallback_on_windows() {
+        let dir = t15_dir("finds-on-exe");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bash.exe"), b"").unwrap();
+
+        assert_eq!(finds_on("bash", vec![dir.clone()]), cfg!(windows));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolves_on_path_or_disk_checks_a_path_shaped_candidate_directly() {
+        let dir = t15_dir("resolves-abs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = dir.join("bash.exe");
+        std::fs::write(&real, b"").unwrap();
+
+        assert!(resolves_on_path_or_disk(real.as_os_str()));
+        let missing = dir.join("does-not-exist.exe");
+        assert!(!resolves_on_path_or_disk(missing.as_os_str()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A bare name (no path separators) is never treated as found just
+    /// because IT happens to be a relative filename that doesn't exist in
+    /// the test process's cwd -- it must go through the PATH search branch
+    /// (proven indirectly: this cwd never contains a file literally named
+    /// `definitely-not-a-real-binary-xyz`).
+    #[test]
+    fn resolves_on_path_or_disk_bare_name_does_not_shortcut_to_true() {
+        assert!(!resolves_on_path_or_disk(std::ffi::OsStr::new(
+            "definitely-not-a-real-binary-xyz"
+        )));
     }
 }
