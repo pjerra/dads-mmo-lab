@@ -521,7 +521,7 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
     if is_native_backend() {
         let id_for_blocking = id.clone();
         return tauri::async_runtime::spawn_blocking(move || {
-            games_status_native_blocking(&id_for_blocking, &dml_wow::lifecycle::games_dir_from_env())
+            dml_wow::lifecycle::games_status(&id_for_blocking, &dml_wow::lifecycle::games_dir_from_env())
         })
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
@@ -532,45 +532,6 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
         .map_err(CmdError::from)
         .and_then(envelope_to_result)
-}
-
-/// NATIVE-MODE `games status <id>` (`90-main.sh:1074-1091`, Part 5a):
-/// title-dir existence -> `_resolve_compose_dir` -> (if resolved)
-/// `_compose_running`'s `docker compose -f <file> ps --status running -q`
-/// probe. Read-only; never mutates anything. A title with no resolvable
-/// compose dir reports `"stopped"` WITHOUT ever invoking docker (matches the
-/// oracle's own `[[ -n "$compose_dir" ]] &&` short-circuit) -- and a
-/// down/absent docker engine degrades the same way (`output_bounded_draining`
-/// returning `None`, or an empty/failed `ps` -> zero running ids -> stopped).
-fn games_status_native_blocking(id: &str, games_dir: &std::path::Path) -> Result<serde_json::Value, CmdError> {
-    use dml_wow::{lifecycle, native, status};
-
-    let title_dir = games_dir.join(id);
-    if !title_dir.is_dir() {
-        return Err(CmdError {
-            code: "NOT_FOUND".into(),
-            message: format!("Title not found: {id}"),
-            hint: "Run: dml games list --json".into(),
-        });
-    }
-
-    let mut state = "stopped";
-    if let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) {
-        if let Some(name) = lifecycle::compose_file_name(&compose_dir) {
-            let program = native::docker_program();
-            let mut cmd = std::process::Command::new(&program);
-            cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
-            cmd.args(["ps", "--status", "running", "-q"]);
-            status::windows_no_window(&mut cmd);
-            if let Some(out) = status::output_bounded_draining(cmd, std::time::Duration::from_secs(5)) {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if lifecycle::count_running_ids(&text) > 0 {
-                    state = "running";
-                }
-            }
-        }
-    }
-    Ok(serde_json::json!({ "id": id, "state": state }))
 }
 
 #[tauri::command]
@@ -3337,7 +3298,7 @@ fn flush_restart_authworld(
     }
 
     emit(modmgr::line_event("info", format!("waiting for the world ({label})...")));
-    let timeout_secs = wr_ready_timeout_secs();
+    let timeout_secs = dml_wow::lifecycle::wr_ready_timeout_secs();
     let t0 = std::time::Instant::now();
     let mut last_note: u64 = 0;
     loop {
@@ -3345,10 +3306,10 @@ fn flush_restart_authworld(
             return FlushRestartOutcome::Ready;
         }
         let elapsed = t0.elapsed().as_secs();
-        if wr_timeout_exceeded(elapsed, timeout_secs) {
+        if dml_wow::lifecycle::wr_timeout_exceeded(elapsed, timeout_secs) {
             return FlushRestartOutcome::Timeout;
         }
-        if wr_should_note_wait(elapsed, last_note) {
+        if dml_wow::lifecycle::wr_should_note_wait(elapsed, last_note) {
             last_note = elapsed;
             emit(modmgr::line_event(
                 "info",
@@ -3891,195 +3852,10 @@ async fn wow_world_restart(
     stream_args(args, on_event, state).await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `world-restart` (Task: world-restart-native) — the first fully
-// native STREAMED action: it emits `on_event` NDJSON events DIRECTLY (no
-// `dml` subprocess at all), rather than forwarding a WSL child's stream like
-// `stream_args`/`stream_action` above. A faithful port of `90-main.sh:1657-
-// 1724`'s `world-restart)` arm — same order, messages, and error codes. WSL
-// mode is untouched: it keeps calling `wow_world_restart` (the sibling just
-// above), which shells `dml wow world-restart` as always.
-//
-// Every domain failure (NOT_FOUND/DOCKER_DOWN/NOT_RUNNING/RESTART_FAILED/
-// READY_TIMEOUT) travels IN the event stream as `section_end{status:"error"}`
-// + `error`, exactly like a `dml` failure would -- the command itself still
-// resolves `Ok(())` for those; only a genuinely unexpected internal failure
-// (the blocking task panicking) surfaces as a rejected promise.
-// ---------------------------------------------------------------------------
-
-/// Bounded timeout for `docker restart -t 300 ac-worldserver`: must exceed
-/// the 300s graceful-stop window the flag itself requests, or the bound
-/// would kill the graceful stop it's supposed to be waiting out.
-const WORLD_RESTART_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(330);
-
-fn wr_event_section_start() -> serde_json::Value {
-    serde_json::json!({"event": "section_start", "name": "world-restart"})
-}
-
-fn wr_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
-    serde_json::json!({"event": "line", "level": level, "text": text.into()})
-}
-
-fn wr_event_section_end(status: &str) -> serde_json::Value {
-    serde_json::json!({"event": "section_end", "name": "world-restart", "status": status})
-}
-
-fn wr_event_done() -> serde_json::Value {
-    serde_json::json!({"event": "done", "data": {
-        "restarted": "world-only",
-        "note": "settings changes were NOT applied -- use full Restart for that",
-    }})
-}
-
-fn wr_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
-    serde_json::json!({"event": "error", "error": {
-        "code": code, "message": message.into(), "hint": hint,
-    }})
-}
-
-/// Both containers must already be running for a world-only restart to
-/// proceed — a port of the precondition gate at `90-main.sh:1686-1689`. A
-/// `docker restart` on a STOPPED container STARTS it, which on a fully
-/// stopped stack would boot the worldserver alone against a down database
-/// and hang until `READY_TIMEOUT` (~30 min); requiring both up first turns
-/// that into an instant, correct `NOT_RUNNING` answer instead.
-fn wr_preconditions_ok(world_running: bool, db_running: bool) -> bool {
-    world_running && db_running
-}
-
-/// `90-main.sh:1716`'s `(( wr_elapsed - wr_note >= 60 ))` cadence check, pure
-/// (elapsed/last-note in whole seconds; `saturating_sub` since `elapsed` is
-/// always `>= last_note` in the real loop, but a pure function shouldn't
-/// panic on out-of-order test input).
-fn wr_should_note_wait(elapsed_secs: u64, last_note_secs: u64) -> bool {
-    elapsed_secs.saturating_sub(last_note_secs) >= 60
-}
-
-/// `90-main.sh:1718`'s "still waiting" progress line text.
-fn wr_wait_note_text(elapsed_secs: u64) -> String {
-    format!("still waiting (~{}m) - bots respawning takes a while...", elapsed_secs / 60)
-}
-
-/// `90-main.sh:1712`'s `(( wr_elapsed >= wr_timeout ))` timeout check, pure.
-fn wr_timeout_exceeded(elapsed_secs: u64, timeout_secs: u64) -> bool {
-    elapsed_secs >= timeout_secs
-}
-
-/// `DML_READY_TIMEOUT_SECS`, default 1800s — `90-main.sh:1709`'s
-/// `"${DML_READY_TIMEOUT_SECS:-1800}"`. Any unset/unparseable value falls
-/// back to the same default (matches bash's parameter-expansion fallback,
-/// which never validates the override either).
-fn wr_ready_timeout_secs() -> u64 {
-    std::env::var("DML_READY_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800)
-}
-
-/// The blocking flow itself (real docker/SOAP I/O + wall-clock sleeps) — run
-/// under `spawn_blocking`. `emit` sends one NDJSON event per call; every
-/// return path emits its own terminal event(s) first, so the caller never
-/// needs to synthesize one. `soap_lock` serializes the `saveall` SOAP call
-/// against any other native SOAP command in flight, same discipline as
-/// `wow_console_send_native`.
-fn wow_world_restart_native_blocking(
-    no_saveall: bool,
-    soap_lock: Arc<Mutex<()>>,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{config::ConfigReader, maint, native, soap, status};
-
-    emit(wr_event_section_start());
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    if maint::resolve_server_dir(&title_dir).is_none() {
-        emit(wr_event_section_end("error"));
-        emit(wr_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    }
-
-    let program = native::docker_program();
-    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
-        emit(wr_event_section_end("error"));
-        emit(wr_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
-        return;
-    }
-
-    let world_running = status::container_running(&program, "ac-worldserver", maint::PROBE_TIMEOUT);
-    let db_running = status::container_running(&program, "ac-database", maint::PROBE_TIMEOUT);
-    if !wr_preconditions_ok(world_running, db_running) {
-        emit(wr_event_section_end("error"));
-        emit(wr_event_error(
-            "NOT_RUNNING",
-            "The server is not running",
-            "A world-only restart needs the world server and database already up. Start the server (full Start) first.",
-        ));
-        return;
-    }
-
-    emit(wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"));
-
-    if no_saveall {
-        emit(wr_event_line(
-            "info",
-            "skipping pre-stop saveall (faster) -- the graceful stop still saves characters on shutdown",
-        ));
-    } else {
-        emit(wr_event_line("info", "saving all characters (best effort)..."));
-        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = soap::SoapConfig::load();
-        // Best-effort: outcome (Ok/Fault/Auth/Unreachable) is deliberately
-        // ignored, matching the bash's `soap_exec 'saveall' >/dev/null 2>&1
-        // || true`.
-        let _ = soap::exec(&cfg, "saveall");
-    }
-
-    emit(wr_event_line("info", "restarting the world server (graceful stop, up to 300s)..."));
-    let mut cmd = std::process::Command::new(&program);
-    cmd.args(["restart", "-t", "300", "ac-worldserver"]);
-    status::windows_no_window(&mut cmd);
-    let restart_ok =
-        matches!(status::output_bounded_draining(cmd, WORLD_RESTART_STOP_TIMEOUT), Some(out) if out.status.success());
-    if !restart_ok {
-        emit(wr_event_section_end("error"));
-        emit(wr_event_error(
-            "RESTART_FAILED",
-            "docker restart failed for ac-worldserver",
-            "Is the server installed and started? Check: dml doctor",
-        ));
-        return;
-    }
-
-    emit(wr_event_line("info", "waiting for the world to come back..."));
-    let timeout_secs = wr_ready_timeout_secs();
-    let t0 = std::time::Instant::now();
-    let mut last_note: u64 = 0;
-    loop {
-        if status::world_ready(&program, maint::PROBE_TIMEOUT) {
-            break;
-        }
-        let elapsed = t0.elapsed().as_secs();
-        if wr_timeout_exceeded(elapsed, timeout_secs) {
-            emit(wr_event_section_end("error"));
-            emit(wr_event_error(
-                "READY_TIMEOUT",
-                format!("The world did not come back within {timeout_secs}s"),
-                "Check the Console logs; a full Restart may be needed.",
-            ));
-            return;
-        }
-        if wr_should_note_wait(elapsed, last_note) {
-            last_note = elapsed;
-            emit(wr_event_line("info", wr_wait_note_text(elapsed)));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-
-    emit(wr_event_section_end("ok"));
-    emit(wr_event_done());
-}
-
 /// NATIVE-MODE fast world-only restart: same flow/messages/codes as `dml wow
-/// world-restart` (see `wow_world_restart_native_blocking`'s doc comment),
-/// via direct `docker`/SOAP calls instead of shelling `dml`. Native mode
-/// only — WSL keeps calling `wow_world_restart`.
+/// world-restart` (see [`dml_wow::lifecycle::world_restart_stream`]'s doc
+/// comment), via direct `docker`/SOAP calls instead of shelling `dml`. Native
+/// mode only — WSL keeps calling `wow_world_restart`.
 #[tauri::command]
 async fn wow_world_restart_native(
     on_event: Channel<serde_json::Value>,
@@ -4090,7 +3866,7 @@ async fn wow_world_restart_native(
     let soap_lock = state.soap_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_world_restart_native_blocking(no_saveall, soap_lock, |v| {
+        dml_wow::lifecycle::world_restart_stream(no_saveall, soap_lock, |v| {
             let _ = ch.send(v);
         });
     })
@@ -8099,140 +7875,8 @@ async fn games_remove(
     stream_args(args, on_event, state).await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `games remove` (Chunk 4a): faithful port of the `remove)` arm
-// (`90-main.sh:1184-1309`) + its shared helpers `_title_row`/
-// `_title_installed`/`_resolve_compose_dir`/`_compose_server_images`
-// (`dml::destructive`, `dml::lifecycle`). Same NDJSON vocabulary as
-// `wow_world_restart_native`. Traversal guard FIRST: `id` must EXACT-match
-// the static 6-row title registry before any path is built from it. The
-// Tauri command hardcodes confirm=true (the typed-id UI IS the user gate,
-// matching the WSL sibling's hardcoded `--yes` above) — the CONFIRM_REQUIRED
-// gate is still ported inside the blocking function for parity/testability,
-// same posture the task brief calls for on `bots flush`'s CONFIRM logic.
-// Native mode only — WSL keeps calling `games_remove` (the sibling above).
-// ---------------------------------------------------------------------------
-
-const GAMES_REMOVE_SECTION: &str = "games-remove";
-
-fn games_remove_native_blocking(
-    id: String,
-    keep_data: bool,
-    remove_images: bool,
-    confirm: bool,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{destructive, lifecycle, native, status};
-
-    emit(dml_wow::modmgr::section_start(GAMES_REMOVE_SECTION));
-
-    let Some(row) = destructive::title_row(&id) else {
-        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(dml_wow::modmgr::error_event("BAD_ARG", format!("Unknown title: {id}"), ""));
-        return;
-    };
-
-    let games_dir = lifecycle::games_dir_from_env();
-    let home = dml_wow::home_dir();
-    if !destructive::title_installed(&games_dir, home.as_deref(), &id) {
-        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(dml_wow::modmgr::error_event("NOT_FOUND", format!("{id} is not installed"), ""));
-        return;
-    }
-
-    if !confirm {
-        let targets = destructive::removal_targets(&games_dir, home.as_deref(), &id, row.launcher);
-        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(dml_wow::modmgr::error_event(
-            "CONFIRM_REQUIRED",
-            format!("Removing {id} deletes: {targets}"),
-            "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept.",
-        ));
-        return;
-    }
-
-    let tdir = if games_dir.join(&id).is_dir() {
-        games_dir.join(&id)
-    } else {
-        home.as_deref().map(|h| h.join(&id)).unwrap_or_else(|| games_dir.join(&id))
-    };
-    let tcompose = lifecycle::resolve_compose_dir(&tdir);
-
-    let docker_program = native::docker_program();
-
-    if let Some(compose_dir) = &tcompose {
-        emit(dml_wow::modmgr::line_event("info", format!("stopping {id}...")));
-        let mut down_cmd = std::process::Command::new(&docker_program);
-        down_cmd.current_dir(compose_dir).args(["compose", "down"]);
-        status::windows_no_window(&mut down_cmd);
-        let _ = status::output_bounded_draining(down_cmd, destructive::QUICK_OP_TIMEOUT);
-    }
-
-    // --- client-data volume (Batch 3 F13c parity) ---------------------------
-    if let Some(compose_dir) = &tcompose {
-        if destructive::compose_declares_client_data(compose_dir) {
-            let tvol = destructive::client_data_volume_name(compose_dir);
-            if keep_data {
-                emit(dml_wow::modmgr::line_event(
-                    "info",
-                    format!("keeping the downloaded game data volume ({tvol}, ~6 GB) for a faster reinstall"),
-                ));
-            } else {
-                let mut rm_cmd = std::process::Command::new(&docker_program);
-                rm_cmd.args(["volume", "rm", &tvol]);
-                status::windows_no_window(&mut rm_cmd);
-                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
-                {
-                    emit(dml_wow::modmgr::line_event("info", format!("removed game data volume {tvol}")));
-                } else {
-                    emit(dml_wow::modmgr::line_event(
-                        "warn",
-                        format!("could not remove game data volume {tvol} (may not exist or still in use)"),
-                    ));
-                }
-            }
-        }
-    }
-
-    // --- server docker images (Batch 6 B parity) ----------------------------
-    if remove_images {
-        if let Some(compose_dir) = &tcompose {
-            let images = destructive::compose_server_images(compose_dir);
-            let mut removed_count = 0;
-            for img in &images {
-                let mut rm_cmd = std::process::Command::new(&docker_program);
-                rm_cmd.args(["image", "rm", img]);
-                status::windows_no_window(&mut rm_cmd);
-                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
-                {
-                    emit(dml_wow::modmgr::line_event("info", format!("removed server image {img}")));
-                    removed_count += 1;
-                } else {
-                    emit(dml_wow::modmgr::line_event(
-                        "warn",
-                        format!("could not remove image {img} (in use by another title, or already gone)"),
-                    ));
-                }
-            }
-            if removed_count == 0 {
-                emit(dml_wow::modmgr::line_event("info", "no server images to remove"));
-            }
-        }
-    } else if tcompose.is_some() {
-        emit(dml_wow::modmgr::line_event(
-            "info",
-            "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)",
-        ));
-    }
-
-    destructive::remove_title_fs(&games_dir, home.as_deref(), &id, row.launcher);
-
-    emit(dml_wow::modmgr::line_event("info", "removed (backups under ~/.dml are kept)"));
-    emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "ok"));
-    emit(dml_wow::modmgr::done_event(serde_json::json!({"id": id, "removed": true})));
-}
-
-/// NATIVE-MODE `games remove` — see the module comment above. Native mode
+/// NATIVE-MODE `games remove` — see
+/// [`dml_wow::destructive::games_remove_stream`]. Native mode
 /// only — WSL keeps calling `games_remove` (the sibling above). `confirm` is
 /// ALWAYS `true` here (the typed-id UI is the gate, matching the WSL
 /// sibling's hardcoded `--yes`) — no parameter exposes it, so a stray caller
@@ -8247,7 +7891,7 @@ async fn games_remove_native(
     require_native_backend()?;
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        games_remove_native_blocking(id, keep_data.unwrap_or(false), remove_images.unwrap_or(false), true, |v| {
+        dml_wow::destructive::games_remove_stream(id, keep_data.unwrap_or(false), remove_images.unwrap_or(false), true, |v| {
             let _ = ch.send(v);
         });
     })
@@ -8263,120 +7907,22 @@ async fn games_remove_native(
 // be up before any `docker compose` runs, so `games_start` ensures it first;
 // and stopping it on `games_stop` frees the VM's RAM, so `games_stop` shuts it
 // down afterwards when the (default-on) `nativeManageDocker` toggle is set. WSL
-// mode does neither — it is byte-for-byte unchanged. The pure decision/poll
-// logic lives in `dml::native`; these wrappers supply the real docker spawns,
-// wall-clock sleeps, and the NDJSON progress stream (envelope `line`/`error`
-// events, the same shape `dml games start/stop` emits).
+// mode does neither — it is byte-for-byte unchanged. The decision/poll logic
+// AND the blocking spawn/sleep/stream orchestration both live in
+// `dml_wow::native` ([`dml_wow::native::ensure_engine_up_stream`] /
+// [`dml_wow::native::stop_engine_stream`]); these two are only the async
+// `spawn_blocking` adapters.
 // ---------------------------------------------------------------------------
-
-/// Emit engine-lifecycle progress as an envelope `line` event onto the same
-/// stream the games output uses, so the UI terminal shows it inline.
-fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
-    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
-}
-
-/// Native-mode prerequisite for any start: make sure the Docker Desktop engine
-/// is up before compose runs. Emits progress; on an unrecoverable failure it
-/// emits a terminal `error` event AND returns Err so the caller ABORTS instead
-/// of composing against a dead engine. Blocking (real spawns + sleeps) — run
-/// under `spawn_blocking`.
-fn ensure_engine_up_blocking(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
-    use dml_wow::native;
-    let program = native::docker_program();
-    let desktop = native::docker_desktop_program();
-    match native::ensure_decision(native::engine_running(&program), desktop.is_some()) {
-        native::EnsureDecision::AlreadyUp => {
-            engine_line(&emit, "info", "Docker Desktop engine already running.");
-            Ok(())
-        }
-        native::EnsureDecision::NoDesktop => {
-            let msg = "Docker engine is down and Docker Desktop.exe was not found; \
-                       cannot start the engine.";
-            let hint = "Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.";
-            emit(serde_json::json!({"event": "error", "error": {
-                "code": "DOCKER_DESKTOP_MISSING", "message": msg, "hint": hint,
-            }}));
-            Err(CmdError { code: "DOCKER_DESKTOP_MISSING".into(), message: msg.into(), hint: hint.into() })
-        }
-        native::EnsureDecision::Launch => {
-            // desktop is Some here (decision returned Launch).
-            let exe = desktop.expect("Launch decision implies a resolved desktop exe");
-            engine_line(&emit, "info", "Docker engine is down. Starting Docker Desktop...");
-            if let Err(e) = native::launch_detached(&exe) {
-                let msg = format!("Failed to launch Docker Desktop: {e}");
-                emit(serde_json::json!({"event": "error", "error": {
-                    "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
-                }}));
-                return Err(CmdError { code: "DOCKER_DESKTOP_LAUNCH".into(), message: msg, hint: String::new() });
-            }
-            let outcome = native::poll_until_ready(
-                native::ENGINE_POLL_INTERVAL_MS,
-                native::ENGINE_POLL_TIMEOUT_MS,
-                || native::engine_running(&program),
-                |ms| {
-                    engine_line(&emit, "info", "Waiting for Docker Desktop to be ready...");
-                    std::thread::sleep(std::time::Duration::from_millis(ms));
-                },
-            );
-            match outcome {
-                native::PollOutcome::Ready { .. } => {
-                    engine_line(&emit, "info", "Docker Desktop engine is ready.");
-                    Ok(())
-                }
-                native::PollOutcome::Timeout { waited_ms } => {
-                    let msg = format!(
-                        "Docker Desktop did not become ready within {}s.",
-                        waited_ms / 1000
-                    );
-                    let hint = "Start Docker Desktop manually, wait for it to finish, then retry.";
-                    emit(serde_json::json!({"event": "error", "error": {
-                        "code": "DOCKER_ENGINE_TIMEOUT", "message": msg, "hint": hint,
-                    }}));
-                    Err(CmdError { code: "DOCKER_ENGINE_TIMEOUT".into(), message: msg, hint: hint.into() })
-                }
-            }
-        }
-    }
-}
 
 /// Async wrapper: ensure the engine is up before a native start. Aborts (Err)
 /// when it cannot be brought up.
 async fn ensure_engine_up(on_event: &Channel<serde_json::Value>) -> Result<(), CmdError> {
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        ensure_engine_up_blocking(|v| { let _ = ch.send(v); })
+        dml_wow::native::ensure_engine_up_stream(|v| { let _ = ch.send(v); })
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
-}
-
-/// Best-effort `docker desktop stop` after a native stop: stops the engine +
-/// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
-/// never fails the server-stop. Blocking — run under `spawn_blocking`.
-fn stop_engine_blocking(emit: impl Fn(serde_json::Value)) {
-    use dml_wow::native;
-    let program = native::docker_program();
-    engine_line(&emit, "info", "Stopping Docker Desktop...");
-    match native::stop_engine(&program) {
-        Ok(out) if out.status.success() => {
-            engine_line(&emit, "info", "Docker Desktop stopped.");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            engine_line(
-                &emit,
-                "warn",
-                format!(
-                    "Could not stop Docker Desktop (exit {}): {}",
-                    out.status.code().unwrap_or(-1),
-                    stderr.trim()
-                ),
-            );
-        }
-        Err(e) => {
-            engine_line(&emit, "warn", format!("Could not stop Docker Desktop: {e}"));
-        }
-    }
 }
 
 /// Async wrapper: best-effort stop of the Docker Desktop engine after a native
@@ -8384,7 +7930,7 @@ fn stop_engine_blocking(emit: impl Fn(serde_json::Value)) {
 async fn stop_engine_best_effort(on_event: &Channel<serde_json::Value>) {
     let ch = on_event.clone();
     let _ = tauri::async_runtime::spawn_blocking(move || {
-        stop_engine_blocking(|v| { let _ = ch.send(v); })
+        dml_wow::native::stop_engine_stream(|v| { let _ = ch.send(v); })
     })
     .await;
 }
@@ -8474,181 +8020,13 @@ async fn games_restart(
     stream_args(args, on_event, state).await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `games start`/`stop`/`restart` compose orchestration (Chunk
-// 3b) — same NDJSON vocabulary + contract as `wow_world_restart_native`:
-// every domain failure travels IN the stream (`section_end{status:"error"}`
-// + `error`), this function itself never "fails" (the three commands above
-// resolve `Ok(())` regardless). A faithful port of `_games_start_impl`
-// (`90-main.sh:194-253`, covers BOTH `start` and `restart`) + the `stop)`
-// arm (`90-main.sh:1111-1132`). Pure primitives (title/compose-dir
-// resolution, the flush-heal decision, the port-conflict line builder, the
-// per-mode compose argv sequence) live in `dml::lifecycle`; this is the thin
-// per-command orchestration wrapper, mirroring `wow_world_restart_native_
-// blocking`'s shape. NOT gated on `require_native_backend()` — unlike
-// `wow_world_restart_native` these aren't `_native`-suffixed siblings; the
-// THREE CALLERS (`games_start`/`games_stop`/`games_restart` above) already
-// branch on `is_native_backend()` themselves (that's where the Docker-
-// Desktop-engine wrapping lives), so this only ever runs in native mode.
-//
-// KEY FACT (verified live): the native title dir has no `dml-start.sh`, so
-// this always takes the bash arm's ELSE branch -- pure `docker compose`
-// orchestration, never `bash ./dml-start.sh`. If a future title dir grows
-// one, there is no bash host here to run it.
-// ---------------------------------------------------------------------------
-
-fn gl_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
-    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
-}
-
-fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
-    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
-}
-
-/// Automatic pre-stop/-restart safety dump (see `dml::lifecycle::
-/// lifecycle_steps_for_mode`'s doc comment for why this always runs before
-/// the sequence's first `down`): if `ac-database` isn't running there is
-/// nothing to dump — skipped silently, no line at all, matching every other
-/// best-effort backup call site's "DB unreachable -> no sidecar" doctrine.
-/// A dump failure only warns and returns — an automatic backup must NEVER
-/// block a stop/restart the user asked for. Chars-only (no `--include-world`,
-/// same as the bots-flush safety dump above), named `backup::AUTO_STOP_NAME`
-/// so the Backups page can tell it apart from a manual one. Feeds the SAME
-/// keep-10 prune pool as every other backup (see the `dml::backup` "Automatic
-/// backups" section doc comment).
-fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serde_json::Value)) {
-    use dml_wow::{backup, db, maint, status};
-
-    if !status::container_running(docker_program, "ac-database", maint::PROBE_TIMEOUT) {
-        return;
-    }
-    let Some(bdir) = backup::backup_dir() else { return };
-    if std::fs::create_dir_all(&bdir).is_err() {
-        return;
-    }
-
-    gl_line(emit, "info", "automatic backup before stop...");
-    let db_cfg = db::DbConfig::from_env();
-    let file_name = backup::new_backup_file_name(false);
-    let out_path = bdir.join(&file_name);
-    match backup::dump_to(docker_program, &db_cfg.password, false, &out_path) {
-        Ok(()) => {
-            backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_STOP_NAME));
-            gl_line(emit, "info", format!("automatic backup saved: {file_name}"));
-            for p in backup::prune(&bdir) {
-                gl_line(emit, "info", format!("pruned old backup: {p}"));
-            }
-        }
-        Err(errtail) => {
-            gl_line(emit, "warn", format!("automatic backup failed -- continuing: {errtail}"));
-        }
-    }
-}
-
-/// The blocking flow itself (real docker spawns) — run under
-/// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
-fn games_lifecycle_native_blocking(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::{lifecycle, maint, native, status};
-
-    emit(serde_json::json!({"event": "section_start", "name": mode}));
-
-    let title_dir = lifecycle::title_dir_for_id(&id);
-    if !title_dir.is_dir() {
-        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-        emit(gl_error("NOT_FOUND", format!("Title not found: {id}"), "Run: dml games list --json"));
-        return;
-    }
-    let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) else {
-        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-        emit(gl_error(
-            "NO_COMPOSE",
-            format!("No compose file found in {id} or its subdirectories."),
-            &format!("Reinstall the title or check {}", title_dir.display()),
-        ));
-        return;
-    };
-
-    let docker_program = native::docker_program();
-    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
-        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-        emit(gl_error("DOCKER_DOWN", "Docker is not running.", "Try: dml doctor"));
-        return;
-    }
-
-    // Automatic pre-down safety backup -- stop/restart only, BEFORE anything
-    // below touches compose (see `lifecycle::lifecycle_steps_for_mode`'s doc
-    // comment for the pure "backup precedes the first down" invariant this
-    // mirrors). Best-effort: never aborts the stop/restart.
-    if mode == "stop" || mode == "restart" {
-        auto_backup_before_stop(&docker_program, &emit);
-    }
-
-    // Self-heal an interrupted `wow bots flush` -- start+restart only (a
-    // `stop` never boots the server, so there is nothing to heal against
-    // before it runs). THIS GUARD PREVENTS A BOT-WIPE ON BOOT.
-    if mode == "start" || mode == "restart" {
-        if let Some(note) = lifecycle::flush_heal_flag(&compose_dir) {
-            gl_line(&emit, "warn", note);
-        }
-    }
-
-    // Cold starts only: on a restart the ports are (expectedly) held by this
-    // server's own still-running containers, so the check would cry wolf.
-    if mode == "start" {
-        for line in lifecycle::check_port_conflicts(&compose_dir, lifecycle::port_listening) {
-            gl_line(&emit, "warn", line);
-        }
-    }
-
-    if mode == "restart" && skip_saveall {
-        gl_line(&emit, "info", lifecycle::SKIP_SAVEALL_NOTE);
-    }
-
-    let mut rc: Result<(), i32> = Ok(());
-    for argv in lifecycle::compose_sequence_for_mode(mode) {
-        let is_down = lifecycle::is_compose_down(&argv);
-        gl_line(
-            &emit,
-            "info",
-            if is_down { "stopping containers (docker compose down)..." } else { "starting containers (docker compose up -d)..." },
-        );
-        let timeout = if is_down { lifecycle::COMPOSE_DOWN_TIMEOUT } else { lifecycle::COMPOSE_UP_TIMEOUT };
-        let mut cmd = std::process::Command::new(&docker_program);
-        cmd.current_dir(&compose_dir).args(argv);
-        status::windows_no_window(&mut cmd);
-        rc = match status::output_bounded_draining(cmd, timeout) {
-            Some(out) if out.status.success() => Ok(()),
-            Some(out) => Err(out.status.code().unwrap_or(-1)),
-            None => Err(-1),
-        };
-        if rc.is_err() {
-            break;
-        }
-    }
-
-    match rc {
-        Ok(()) => {
-            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "ok"}));
-            let state = if mode == "stop" { "stopped" } else { "running" };
-            emit(serde_json::json!({"event": "done", "data": {"id": id, "state": state}}));
-        }
-        Err(code) if mode == "stop" => {
-            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-            emit(gl_error("STOP_FAILED", format!("{id} failed to stop (exit {code})"), &format!("Try: dml kill {id}")));
-        }
-        Err(code) => {
-            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-            emit(gl_error(
-                "START_FAILED",
-                format!("{id} failed to {mode} (exit {code})"),
-                "Check logs: docker compose logs, or dml doctor",
-            ));
-        }
-    }
-}
-
 /// Async wrapper shared by `games_start`/`games_stop`/`games_restart`'s
-/// native branch: spawns [`games_lifecycle_native_blocking`] and joins it.
+/// native branch: spawns [`dml_wow::lifecycle::games_lifecycle_stream`] and
+/// joins it. NOT gated on `require_native_backend()` — unlike
+/// `wow_world_restart_native` these aren't `_native`-suffixed siblings; the
+/// THREE CALLERS (`games_start`/`games_stop`/`games_restart` above) already
+/// branch on `is_native_backend()` themselves (that's where the Docker-
+/// Desktop-engine wrapping lives), so this only ever runs in native mode.
 /// Domain failures already traveled in the event stream, so this resolves
 /// `Ok(())` unless the blocking task itself panicked.
 async fn run_games_lifecycle_native(
@@ -8659,7 +8037,7 @@ async fn run_games_lifecycle_native(
 ) -> Result<(), CmdError> {
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        games_lifecycle_native_blocking(mode, id, skip_saveall, |v| {
+        dml_wow::lifecycle::games_lifecycle_stream(mode, id, skip_saveall, |v| {
             let _ = ch.send(v);
         });
     })
@@ -8692,13 +8070,13 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
     let title_dir = ConfigReader::title_dir_from_env();
     let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
         emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(gl_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        emit(dml_wow::lifecycle::gl_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
         return;
     };
 
     if !modmgr::is_git_checkout(&sdir) {
         emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(gl_error("GIT_MISSING", format!("{} is not a git checkout", sdir.display()), "Can't update from source."));
+        emit(dml_wow::lifecycle::gl_error("GIT_MISSING", format!("{} is not a git checkout", sdir.display()), "Can't update from source."));
         return;
     }
 
@@ -8710,7 +8088,7 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
     let acurl = modmgr::git_remote_url(&git_program, &sdir);
     if !modmgr::wow_remote_ok(&acurl, "mod-playerbots/azerothcore-wotlk") {
         emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(gl_error(
+        emit(dml_wow::lifecycle::gl_error(
             "REMOTE_MISMATCH",
             "AzerothCore origin is not the expected Playerbots fork",
             &format!(
@@ -8727,7 +8105,7 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
         let pburl = modmgr::git_remote_url(&git_program, &moddir);
         if !modmgr::wow_remote_ok(&pburl, "mod-playerbots/mod-playerbots") {
             emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-            emit(gl_error(
+            emit(dml_wow::lifecycle::gl_error(
                 "REMOTE_MISMATCH",
                 "mod-playerbots origin is not the expected fork",
                 &format!("found: {}", if pburl.is_empty() { "<none>" } else { pburl.as_str() }),
@@ -8739,13 +8117,13 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
     let acbranch = modmgr::git_branch(&git_program, &sdir);
     if acbranch != "Playerbot" {
         emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(gl_error("BRANCH_MISMATCH", format!("AzerothCore checkout is on branch '{acbranch}' (expected 'Playerbot')"), ""));
+        emit(dml_wow::lifecycle::gl_error("BRANCH_MISMATCH", format!("AzerothCore checkout is on branch '{acbranch}' (expected 'Playerbot')"), ""));
         return;
     }
 
     let Some(do_backup) = backup else {
         emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(gl_error(
+        emit(dml_wow::lifecycle::gl_error(
             "BAD_ARG",
             "Pick --backup or --no-backup",
             "New core revisions can run DB migrations at next start -- decide explicitly.",
@@ -8758,7 +8136,7 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
         let db_cfg = dml_wow::db::DbConfig::from_env();
         if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
             emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-            emit(gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
+            emit(dml_wow::lifecycle::gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
             return;
         }
     }
@@ -8794,13 +8172,13 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
         }
         modmgr::pull_summary(&pb_before, &pb_after)
     } else {
-        gl_line(&emit, "warn", "modules/mod-playerbots not found -- skipping module update.");
+        dml_wow::lifecycle::gl_line(&emit, "warn", "modules/mod-playerbots not found -- skipping module update.");
         "skipped".to_string()
     };
 
     if changed {
         let _ = modmgr::rebuild_pending_add(&sdir, "core-update");
-        gl_line(&emit, "info", "Rebuild required to compile the update -- use the rebuild banner on this page.");
+        dml_wow::lifecycle::gl_line(&emit, "info", "Rebuild required to compile the update -- use the rebuild banner on this page.");
     }
 
     emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "ok"}));
@@ -9854,34 +9232,6 @@ mod tests {
         assert_eq!(e.hint, "Character must be logged out.");
     }
 
-    #[test]
-    fn games_status_native_reports_not_found_for_missing_title() {
-        // Takes `games_dir` as an explicit parameter (not read from
-        // `DML_GAMES_DIR`) specifically so this test never touches a
-        // process-global env var -- `cargo test` runs this crate's tests in
-        // one process, and mutating `DML_GAMES_DIR` would race every OTHER
-        // test that reads it via `ConfigReader::title_dir_from_env`/
-        // `lifecycle::games_dir_from_env` concurrently (see the caution in
-        // `dml::lifecycle`'s own test module header).
-        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-missing-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let err = games_status_native_blocking("wow-server-playerbots", &dir).unwrap_err();
-        assert_eq!(err.code, "NOT_FOUND");
-        assert_eq!(err.message, "Title not found: wow-server-playerbots");
-    }
-
-    #[test]
-    fn games_status_native_reports_stopped_when_no_compose_dir() {
-        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-nocompose-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("some-title")).unwrap();
-        // A title dir that exists but carries no compose file anywhere ->
-        // `_compose_running` is never even invoked; state is "stopped".
-        let out = games_status_native_blocking("some-title", &dir).unwrap();
-        assert_eq!(out, serde_json::json!({ "id": "some-title", "state": "stopped" }));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     // -- Task B2a: `wow_config_set_native` --------------------------------
 
     #[test]
@@ -10298,104 +9648,7 @@ mod tests {
     // frontend's terminal-state.ts parses (see the task brief) -- these are
     // pure, so no docker/soap I/O is exercised.
 
-    #[test]
-    fn wr_event_section_start_shape() {
-        assert_eq!(wr_event_section_start(), serde_json::json!({"event":"section_start","name":"world-restart"}));
-    }
-
-    #[test]
-    fn wr_event_line_shape() {
-        assert_eq!(
-            wr_event_line("info", "saving all characters (best effort)..."),
-            serde_json::json!({"event":"line","level":"info","text":"saving all characters (best effort)..."})
-        );
-        assert_eq!(
-            wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"),
-            serde_json::json!({"event":"line","level":"warn","text":"world-only restart does NOT apply settings changes -- use full Restart for that"})
-        );
-    }
-
-    #[test]
-    fn wr_event_section_end_shape() {
-        assert_eq!(
-            wr_event_section_end("ok"),
-            serde_json::json!({"event":"section_end","name":"world-restart","status":"ok"})
-        );
-        assert_eq!(
-            wr_event_section_end("error"),
-            serde_json::json!({"event":"section_end","name":"world-restart","status":"error"})
-        );
-    }
-
-    #[test]
-    fn wr_event_done_shape() {
-        assert_eq!(
-            wr_event_done(),
-            serde_json::json!({"event":"done","data":{
-                "restarted":"world-only",
-                "note":"settings changes were NOT applied -- use full Restart for that",
-            }})
-        );
-    }
-
-    #[test]
-    fn wr_event_error_shape() {
-        assert_eq!(
-            wr_event_error("NOT_RUNNING", "The server is not running", "Start the server (full Start) first."),
-            serde_json::json!({"event":"error","error":{
-                "code":"NOT_RUNNING",
-                "message":"The server is not running",
-                "hint":"Start the server (full Start) first.",
-            }})
-        );
-    }
-
     // -- native world-restart: pure decision logic ----------------------------
-
-    #[test]
-    fn wr_preconditions_ok_requires_both_running() {
-        assert!(wr_preconditions_ok(true, true));
-        assert!(!wr_preconditions_ok(true, false));
-        assert!(!wr_preconditions_ok(false, true));
-        assert!(!wr_preconditions_ok(false, false));
-    }
-
-    #[test]
-    fn wr_should_note_wait_60s_cadence() {
-        assert!(!wr_should_note_wait(0, 0));
-        assert!(!wr_should_note_wait(59, 0));
-        assert!(wr_should_note_wait(60, 0));
-        assert!(wr_should_note_wait(125, 60));
-        assert!(!wr_should_note_wait(119, 60));
-        assert!(wr_should_note_wait(120, 60));
-    }
-
-    #[test]
-    fn wr_wait_note_text_formats_minutes() {
-        assert_eq!(wr_wait_note_text(60), "still waiting (~1m) - bots respawning takes a while...");
-        assert_eq!(wr_wait_note_text(125), "still waiting (~2m) - bots respawning takes a while...");
-        assert_eq!(wr_wait_note_text(0), "still waiting (~0m) - bots respawning takes a while...");
-    }
-
-    #[test]
-    fn wr_timeout_exceeded_boundary() {
-        assert!(!wr_timeout_exceeded(1799, 1800));
-        assert!(wr_timeout_exceeded(1800, 1800));
-        assert!(wr_timeout_exceeded(1801, 1800));
-    }
-
-    #[test]
-    fn wr_ready_timeout_secs_defaults_and_reads_env() {
-        std::env::remove_var("DML_READY_TIMEOUT_SECS");
-        assert_eq!(wr_ready_timeout_secs(), 1800);
-        std::env::set_var("DML_READY_TIMEOUT_SECS", "60");
-        assert_eq!(wr_ready_timeout_secs(), 60);
-        // Unparseable override falls back to the default, same as bash's
-        // parameter expansion never validating the env var either.
-        std::env::set_var("DML_READY_TIMEOUT_SECS", "not-a-number");
-        assert_eq!(wr_ready_timeout_secs(), 1800);
-        std::env::remove_var("DML_READY_TIMEOUT_SECS");
-    }
 
     // -- native bridge-setup: event-shape builders (Chunk 2 task C2c item 4) --
 

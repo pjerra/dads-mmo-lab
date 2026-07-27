@@ -449,6 +449,138 @@ pub fn compose_server_images(compose_dir: &Path) -> Vec<String> {
     extract_server_images(&texts, &image_tag)
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `games remove` (Chunk 4a): faithful port of the `remove)` arm
+// (`90-main.sh:1184-1309`) + its shared helpers `_title_row`/
+// `_title_installed`/`_resolve_compose_dir`/`_compose_server_images`. Same
+// NDJSON vocabulary as `lifecycle::world_restart_stream`. Traversal guard
+// FIRST: `id` must EXACT-match the static title registry above before any
+// path is built from it. Moved out of the launcher's `lib.rs` by the
+// cargo-workspace refactor (Task 9) — the Tauri command hardcodes
+// confirm=true (the typed-id UI IS the user gate, matching the WSL sibling's
+// hardcoded `--yes`), but the CONFIRM_REQUIRED gate stays ported here for
+// parity/testability and for the CLI's own `--yes` guard.
+// ---------------------------------------------------------------------------
+
+const GAMES_REMOVE_SECTION: &str = "games-remove";
+
+pub fn games_remove_stream(
+    id: String,
+    keep_data: bool,
+    remove_images: bool,
+    confirm: bool,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{destructive, lifecycle, native, status};
+
+    emit(crate::modmgr::section_start(GAMES_REMOVE_SECTION));
+
+    let Some(row) = destructive::title_row(&id) else {
+        emit(crate::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::modmgr::error_event("BAD_ARG", format!("Unknown title: {id}"), ""));
+        return;
+    };
+
+    let games_dir = lifecycle::games_dir_from_env();
+    let home = crate::home_dir();
+    if !destructive::title_installed(&games_dir, home.as_deref(), &id) {
+        emit(crate::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::modmgr::error_event("NOT_FOUND", format!("{id} is not installed"), ""));
+        return;
+    }
+
+    if !confirm {
+        let targets = destructive::removal_targets(&games_dir, home.as_deref(), &id, row.launcher);
+        emit(crate::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(crate::modmgr::error_event(
+            "CONFIRM_REQUIRED",
+            format!("Removing {id} deletes: {targets}"),
+            "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept.",
+        ));
+        return;
+    }
+
+    let tdir = if games_dir.join(&id).is_dir() {
+        games_dir.join(&id)
+    } else {
+        home.as_deref().map(|h| h.join(&id)).unwrap_or_else(|| games_dir.join(&id))
+    };
+    let tcompose = lifecycle::resolve_compose_dir(&tdir);
+
+    let docker_program = native::docker_program();
+
+    if let Some(compose_dir) = &tcompose {
+        emit(crate::modmgr::line_event("info", format!("stopping {id}...")));
+        let mut down_cmd = std::process::Command::new(&docker_program);
+        down_cmd.current_dir(compose_dir).args(["compose", "down"]);
+        status::windows_no_window(&mut down_cmd);
+        let _ = status::output_bounded_draining(down_cmd, destructive::QUICK_OP_TIMEOUT);
+    }
+
+    // --- client-data volume (Batch 3 F13c parity) ---------------------------
+    if let Some(compose_dir) = &tcompose {
+        if destructive::compose_declares_client_data(compose_dir) {
+            let tvol = destructive::client_data_volume_name(compose_dir);
+            if keep_data {
+                emit(crate::modmgr::line_event(
+                    "info",
+                    format!("keeping the downloaded game data volume ({tvol}, ~6 GB) for a faster reinstall"),
+                ));
+            } else {
+                let mut rm_cmd = std::process::Command::new(&docker_program);
+                rm_cmd.args(["volume", "rm", &tvol]);
+                status::windows_no_window(&mut rm_cmd);
+                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
+                {
+                    emit(crate::modmgr::line_event("info", format!("removed game data volume {tvol}")));
+                } else {
+                    emit(crate::modmgr::line_event(
+                        "warn",
+                        format!("could not remove game data volume {tvol} (may not exist or still in use)"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // --- server docker images (Batch 6 B parity) ----------------------------
+    if remove_images {
+        if let Some(compose_dir) = &tcompose {
+            let images = destructive::compose_server_images(compose_dir);
+            let mut removed_count = 0;
+            for img in &images {
+                let mut rm_cmd = std::process::Command::new(&docker_program);
+                rm_cmd.args(["image", "rm", img]);
+                status::windows_no_window(&mut rm_cmd);
+                if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
+                {
+                    emit(crate::modmgr::line_event("info", format!("removed server image {img}")));
+                    removed_count += 1;
+                } else {
+                    emit(crate::modmgr::line_event(
+                        "warn",
+                        format!("could not remove image {img} (in use by another title, or already gone)"),
+                    ));
+                }
+            }
+            if removed_count == 0 {
+                emit(crate::modmgr::line_event("info", "no server images to remove"));
+            }
+        }
+    } else if tcompose.is_some() {
+        emit(crate::modmgr::line_event(
+            "info",
+            "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)",
+        ));
+    }
+
+    destructive::remove_title_fs(&games_dir, home.as_deref(), &id, row.launcher);
+
+    emit(crate::modmgr::line_event("info", "removed (backups under ~/.dml are kept)"));
+    emit(crate::modmgr::section_end(GAMES_REMOVE_SECTION, "ok"));
+    emit(crate::modmgr::done_event(serde_json::json!({"id": id, "removed": true})));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

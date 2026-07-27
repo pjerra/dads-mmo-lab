@@ -24,6 +24,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use dml_core::error::CmdError;
+
 /// Docker discovery, `docker compose ps` parsing, and the native-mode Docker
 /// Desktop engine lifecycle (poll/launch/stop) — moved to `dml_core::engine`
 /// (cargo-workspace refactor, Task 6). `docker_program`/`docker_desktop_program`
@@ -164,6 +166,120 @@ impl NativeDocker {
     /// `docker compose down`, aliased to the lifecycle verb the launcher uses.
     pub fn stop(&self) -> std::io::Result<std::process::Output> {
         self.down()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Docker Desktop engine lifecycle around start/stop — moved out of the
+// launcher's `lib.rs` by the cargo-workspace refactor (Task 9).
+//
+// In native mode the Docker Desktop engine (and its docker-desktop WSL VM)
+// must be up before any `docker compose` runs, so a cold `games start`
+// ensures it first; and stopping it on `games stop` frees the VM's RAM, so
+// the caller shuts it down afterwards when the (default-on) manage-docker
+// toggle is set. The pure decision/poll logic lives in `dml_core::engine`
+// (re-exported above); these two supply the real docker spawns, wall-clock
+// sleeps, and the NDJSON progress stream (envelope `line`/`error` events, the
+// same shape `dml games start/stop` emits). Blocking — the Tauri/CLI caller
+// runs them off the async runtime.
+// ---------------------------------------------------------------------------
+
+/// Emit engine-lifecycle progress as an envelope `line` event onto the same
+/// stream the games output uses, so the UI terminal shows it inline.
+fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
+    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
+}
+
+/// Native-mode prerequisite for any start: make sure the Docker Desktop engine
+/// is up before compose runs. Emits progress; on an unrecoverable failure it
+/// emits a terminal `error` event AND returns Err so the caller ABORTS instead
+/// of composing against a dead engine. Blocking (real spawns + sleeps) — run
+/// under `spawn_blocking`.
+pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
+    use crate::native;
+    let program = native::docker_program();
+    let desktop = native::docker_desktop_program();
+    match native::ensure_decision(native::engine_running(&program), desktop.is_some()) {
+        native::EnsureDecision::AlreadyUp => {
+            engine_line(&emit, "info", "Docker Desktop engine already running.");
+            Ok(())
+        }
+        native::EnsureDecision::NoDesktop => {
+            let msg = "Docker engine is down and Docker Desktop.exe was not found; \
+                       cannot start the engine.";
+            let hint = "Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.";
+            emit(serde_json::json!({"event": "error", "error": {
+                "code": "DOCKER_DESKTOP_MISSING", "message": msg, "hint": hint,
+            }}));
+            Err(CmdError { code: "DOCKER_DESKTOP_MISSING".into(), message: msg.into(), hint: hint.into() })
+        }
+        native::EnsureDecision::Launch => {
+            // desktop is Some here (decision returned Launch).
+            let exe = desktop.expect("Launch decision implies a resolved desktop exe");
+            engine_line(&emit, "info", "Docker engine is down. Starting Docker Desktop...");
+            if let Err(e) = native::launch_detached(&exe) {
+                let msg = format!("Failed to launch Docker Desktop: {e}");
+                emit(serde_json::json!({"event": "error", "error": {
+                    "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
+                }}));
+                return Err(CmdError { code: "DOCKER_DESKTOP_LAUNCH".into(), message: msg, hint: String::new() });
+            }
+            let outcome = native::poll_until_ready(
+                native::ENGINE_POLL_INTERVAL_MS,
+                native::ENGINE_POLL_TIMEOUT_MS,
+                || native::engine_running(&program),
+                |ms| {
+                    engine_line(&emit, "info", "Waiting for Docker Desktop to be ready...");
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                },
+            );
+            match outcome {
+                native::PollOutcome::Ready { .. } => {
+                    engine_line(&emit, "info", "Docker Desktop engine is ready.");
+                    Ok(())
+                }
+                native::PollOutcome::Timeout { waited_ms } => {
+                    let msg = format!(
+                        "Docker Desktop did not become ready within {}s.",
+                        waited_ms / 1000
+                    );
+                    let hint = "Start Docker Desktop manually, wait for it to finish, then retry.";
+                    emit(serde_json::json!({"event": "error", "error": {
+                        "code": "DOCKER_ENGINE_TIMEOUT", "message": msg, "hint": hint,
+                    }}));
+                    Err(CmdError { code: "DOCKER_ENGINE_TIMEOUT".into(), message: msg, hint: hint.into() })
+                }
+            }
+        }
+    }
+}
+
+/// Best-effort `docker desktop stop` after a native stop: stops the engine +
+/// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
+/// never fails the server-stop. Blocking — run under `spawn_blocking`.
+pub fn stop_engine_stream(emit: impl Fn(serde_json::Value)) {
+    use crate::native;
+    let program = native::docker_program();
+    engine_line(&emit, "info", "Stopping Docker Desktop...");
+    match native::stop_engine(&program) {
+        Ok(out) if out.status.success() => {
+            engine_line(&emit, "info", "Docker Desktop stopped.");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            engine_line(
+                &emit,
+                "warn",
+                format!(
+                    "Could not stop Docker Desktop (exit {}): {}",
+                    out.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ),
+            );
+        }
+        Err(e) => {
+            engine_line(&emit, "warn", format!("Could not stop Docker Desktop: {e}"));
+        }
     }
 }
 

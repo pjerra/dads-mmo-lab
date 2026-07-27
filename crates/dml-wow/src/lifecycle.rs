@@ -5,14 +5,17 @@
 //! BOTH `start` and `restart`), `_check_port_conflicts` (255-296), and
 //! `_flush_heal_flag` (`cli/src/40-config.sh:774-785`).
 //!
-//! ARCHITECTURE, mirroring `dml::modmgr`: every REUSABLE, unit-testable
-//! primitive (title/compose-dir resolution, the flush-heal breadcrumb
-//! decision, the port-conflict line builder, the per-mode compose argv
-//! sequence) lives here as a free function. The actual STREAMED Tauri
-//! orchestration (`section_start`/`line`/`section_end`/`done`/`error`
-//! sequencing, the real bounded `docker compose` spawns) lives in `lib.rs`
-//! right next to `wow_world_restart_native_blocking`, which it follows
-//! event-for-event.
+//! ARCHITECTURE, mirroring `modmgr`: every REUSABLE, unit-testable primitive
+//! (title/compose-dir resolution, the flush-heal breadcrumb decision, the
+//! port-conflict line builder, the per-mode compose argv sequence) lives here
+//! as a free function. The STREAMED orchestration itself
+//! ([`games_lifecycle_stream`], [`world_restart_stream`]) and the read-only
+//! [`games_status`] probe live at the BOTTOM of this file — moved out of the
+//! launcher's `lib.rs` by the cargo-workspace refactor (Task 9) so the
+//! standalone CLI can drive them too. They keep the same NDJSON vocabulary
+//! (`section_start`/`line`/`section_end`/`done`/`error`) with domain failures
+//! travelling IN the stream; the Tauri commands are now thin `spawn_blocking`
+//! adapters.
 //!
 //! NATIVE-MODE-ONLY by convention: WSL keeps calling `dml` (`games_start`/
 //! `games_stop`/`games_restart` in `lib.rs` branch on `is_native_backend()`
@@ -20,7 +23,10 @@
 //! the Docker-Desktop-engine wrapping already lives inside them).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use dml_core::error::CmdError;
 
 /// Title/compose-dir resolution, `games status`'s running-count helper, the
 /// per-mode compose argv sequence, and the port-conflict bind probe — moved to
@@ -298,6 +304,386 @@ pub fn lifecycle_steps_for_mode(mode: &str) -> Vec<&'static str> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// STREAMED / blocking orchestration, moved out of the launcher's `lib.rs` by
+// the cargo-workspace refactor (Task 9).
+//
+// `world-restart` was the first fully native STREAMED action: it emits NDJSON
+// events DIRECTLY (no `dml` subprocess at all) rather than forwarding a WSL
+// child's stream. A faithful port of `90-main.sh:1657-1724`'s
+// `world-restart)` arm — same order, messages, and error codes. Every domain
+// failure (NOT_FOUND/DOCKER_DOWN/NOT_RUNNING/RESTART_FAILED/READY_TIMEOUT)
+// travels IN the event stream as `section_end{status:"error"}` + `error`, so
+// the caller resolves `Ok` for those; only a genuinely unexpected internal
+// failure (the blocking task panicking) surfaces as a rejected promise.
+//
+// `games_lifecycle_stream` is the same shape for `games start`/`stop`/
+// `restart` (a port of `_games_start_impl`, `90-main.sh:194-253`, which
+// covers BOTH `start` and `restart`, plus the `stop)` arm at 1111-1132).
+// KEY FACT (verified live): the native title dir has no `dml-start.sh`, so it
+// always takes the bash arm's ELSE branch -- pure `docker compose`
+// orchestration, never `bash ./dml-start.sh`. If a future title dir grows
+// one, there is no bash host here to run it.
+// ---------------------------------------------------------------------------
+
+/// Bounded timeout for `docker restart -t 300 ac-worldserver`: must exceed
+/// the 300s graceful-stop window the flag itself requests, or the bound
+/// would kill the graceful stop it's supposed to be waiting out.
+const WORLD_RESTART_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(330);
+
+fn wr_event_section_start() -> serde_json::Value {
+    serde_json::json!({"event": "section_start", "name": "world-restart"})
+}
+
+fn wr_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"event": "line", "level": level, "text": text.into()})
+}
+
+fn wr_event_section_end(status: &str) -> serde_json::Value {
+    serde_json::json!({"event": "section_end", "name": "world-restart", "status": status})
+}
+
+fn wr_event_done() -> serde_json::Value {
+    serde_json::json!({"event": "done", "data": {
+        "restarted": "world-only",
+        "note": "settings changes were NOT applied -- use full Restart for that",
+    }})
+}
+
+fn wr_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {
+        "code": code, "message": message.into(), "hint": hint,
+    }})
+}
+
+/// Both containers must already be running for a world-only restart to
+/// proceed — a port of the precondition gate at `90-main.sh:1686-1689`. A
+/// `docker restart` on a STOPPED container STARTS it, which on a fully
+/// stopped stack would boot the worldserver alone against a down database
+/// and hang until `READY_TIMEOUT` (~30 min); requiring both up first turns
+/// that into an instant, correct `NOT_RUNNING` answer instead.
+fn wr_preconditions_ok(world_running: bool, db_running: bool) -> bool {
+    world_running && db_running
+}
+
+/// `90-main.sh:1716`'s `(( wr_elapsed - wr_note >= 60 ))` cadence check, pure
+/// (elapsed/last-note in whole seconds; `saturating_sub` since `elapsed` is
+/// always `>= last_note` in the real loop, but a pure function shouldn't
+/// panic on out-of-order test input).
+pub fn wr_should_note_wait(elapsed_secs: u64, last_note_secs: u64) -> bool {
+    elapsed_secs.saturating_sub(last_note_secs) >= 60
+}
+
+/// `90-main.sh:1718`'s "still waiting" progress line text.
+fn wr_wait_note_text(elapsed_secs: u64) -> String {
+    format!("still waiting (~{}m) - bots respawning takes a while...", elapsed_secs / 60)
+}
+
+/// `90-main.sh:1712`'s `(( wr_elapsed >= wr_timeout ))` timeout check, pure.
+pub fn wr_timeout_exceeded(elapsed_secs: u64, timeout_secs: u64) -> bool {
+    elapsed_secs >= timeout_secs
+}
+
+/// `DML_READY_TIMEOUT_SECS`, default 1800s — `90-main.sh:1709`'s
+/// `"${DML_READY_TIMEOUT_SECS:-1800}"`. Any unset/unparseable value falls
+/// back to the same default (matches bash's parameter-expansion fallback,
+/// which never validates the override either).
+pub fn wr_ready_timeout_secs() -> u64 {
+    std::env::var("DML_READY_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800)
+}
+
+pub fn gl_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
+    emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
+}
+
+pub fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
+}
+
+/// Automatic pre-stop/-restart safety dump (see `dml::lifecycle::
+/// lifecycle_steps_for_mode`'s doc comment for why this always runs before
+/// the sequence's first `down`): if `ac-database` isn't running there is
+/// nothing to dump — skipped silently, no line at all, matching every other
+/// best-effort backup call site's "DB unreachable -> no sidecar" doctrine.
+/// A dump failure only warns and returns — an automatic backup must NEVER
+/// block a stop/restart the user asked for. Chars-only (no `--include-world`,
+/// same as the bots-flush safety dump above), named `backup::AUTO_STOP_NAME`
+/// so the Backups page can tell it apart from a manual one. Feeds the SAME
+/// keep-10 prune pool as every other backup (see the `dml::backup` "Automatic
+/// backups" section doc comment).
+fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serde_json::Value)) {
+    use crate::{backup, db, maint, status};
+
+    if !status::container_running(docker_program, "ac-database", maint::PROBE_TIMEOUT) {
+        return;
+    }
+    let Some(bdir) = backup::backup_dir() else { return };
+    if std::fs::create_dir_all(&bdir).is_err() {
+        return;
+    }
+
+    gl_line(emit, "info", "automatic backup before stop...");
+    let db_cfg = db::DbConfig::from_env();
+    let file_name = backup::new_backup_file_name(false);
+    let out_path = bdir.join(&file_name);
+    match backup::dump_to(docker_program, &db_cfg.password, false, &out_path) {
+        Ok(()) => {
+            backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_STOP_NAME));
+            gl_line(emit, "info", format!("automatic backup saved: {file_name}"));
+            for p in backup::prune(&bdir) {
+                gl_line(emit, "info", format!("pruned old backup: {p}"));
+            }
+        }
+        Err(errtail) => {
+            gl_line(emit, "warn", format!("automatic backup failed -- continuing: {errtail}"));
+        }
+    }
+}
+
+/// NATIVE-MODE `games status <id>` (`90-main.sh:1074-1091`, Part 5a):
+/// title-dir existence -> `_resolve_compose_dir` -> (if resolved)
+/// `_compose_running`'s `docker compose -f <file> ps --status running -q`
+/// probe. Read-only; never mutates anything. A title with no resolvable
+/// compose dir reports `"stopped"` WITHOUT ever invoking docker (matches the
+/// oracle's own `[[ -n "$compose_dir" ]] &&` short-circuit) -- and a
+/// down/absent docker engine degrades the same way (`output_bounded_draining`
+/// returning `None`, or an empty/failed `ps` -> zero running ids -> stopped).
+pub fn games_status(id: &str, games_dir: &std::path::Path) -> Result<serde_json::Value, CmdError> {
+    use crate::{lifecycle, native, status};
+
+    let title_dir = games_dir.join(id);
+    if !title_dir.is_dir() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("Title not found: {id}"),
+            hint: "Run: dml games list --json".into(),
+        });
+    }
+
+    let mut state = "stopped";
+    if let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) {
+        if let Some(name) = lifecycle::compose_file_name(&compose_dir) {
+            let program = native::docker_program();
+            let mut cmd = std::process::Command::new(&program);
+            cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
+            cmd.args(["ps", "--status", "running", "-q"]);
+            status::windows_no_window(&mut cmd);
+            if let Some(out) = status::output_bounded_draining(cmd, std::time::Duration::from_secs(5)) {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if lifecycle::count_running_ids(&text) > 0 {
+                    state = "running";
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({ "id": id, "state": state }))
+}
+
+/// The blocking flow itself (real docker/SOAP I/O + wall-clock sleeps) — run
+/// under `spawn_blocking`. `emit` sends one NDJSON event per call; every
+/// return path emits its own terminal event(s) first, so the caller never
+/// needs to synthesize one. `soap_lock` serializes the `saveall` SOAP call
+/// against any other native SOAP command in flight, same discipline as
+/// `wow_console_send_native`.
+pub fn world_restart_stream(
+    no_saveall: bool,
+    soap_lock: Arc<Mutex<()>>,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{config::ConfigReader, maint, native, soap, status};
+
+    emit(wr_event_section_start());
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    if maint::resolve_server_dir(&title_dir).is_none() {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    }
+
+    let program = native::docker_program();
+    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    let world_running = status::container_running(&program, "ac-worldserver", maint::PROBE_TIMEOUT);
+    let db_running = status::container_running(&program, "ac-database", maint::PROBE_TIMEOUT);
+    if !wr_preconditions_ok(world_running, db_running) {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error(
+            "NOT_RUNNING",
+            "The server is not running",
+            "A world-only restart needs the world server and database already up. Start the server (full Start) first.",
+        ));
+        return;
+    }
+
+    emit(wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"));
+
+    if no_saveall {
+        emit(wr_event_line(
+            "info",
+            "skipping pre-stop saveall (faster) -- the graceful stop still saves characters on shutdown",
+        ));
+    } else {
+        emit(wr_event_line("info", "saving all characters (best effort)..."));
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        // Best-effort: outcome (Ok/Fault/Auth/Unreachable) is deliberately
+        // ignored, matching the bash's `soap_exec 'saveall' >/dev/null 2>&1
+        // || true`.
+        let _ = soap::exec(&cfg, "saveall");
+    }
+
+    emit(wr_event_line("info", "restarting the world server (graceful stop, up to 300s)..."));
+    let mut cmd = std::process::Command::new(&program);
+    cmd.args(["restart", "-t", "300", "ac-worldserver"]);
+    status::windows_no_window(&mut cmd);
+    let restart_ok =
+        matches!(status::output_bounded_draining(cmd, WORLD_RESTART_STOP_TIMEOUT), Some(out) if out.status.success());
+    if !restart_ok {
+        emit(wr_event_section_end("error"));
+        emit(wr_event_error(
+            "RESTART_FAILED",
+            "docker restart failed for ac-worldserver",
+            "Is the server installed and started? Check: dml doctor",
+        ));
+        return;
+    }
+
+    emit(wr_event_line("info", "waiting for the world to come back..."));
+    let timeout_secs = wr_ready_timeout_secs();
+    let t0 = std::time::Instant::now();
+    let mut last_note: u64 = 0;
+    loop {
+        if status::world_ready(&program, maint::PROBE_TIMEOUT) {
+            break;
+        }
+        let elapsed = t0.elapsed().as_secs();
+        if wr_timeout_exceeded(elapsed, timeout_secs) {
+            emit(wr_event_section_end("error"));
+            emit(wr_event_error(
+                "READY_TIMEOUT",
+                format!("The world did not come back within {timeout_secs}s"),
+                "Check the Console logs; a full Restart may be needed.",
+            ));
+            return;
+        }
+        if wr_should_note_wait(elapsed, last_note) {
+            last_note = elapsed;
+            emit(wr_event_line("info", wr_wait_note_text(elapsed)));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    emit(wr_event_section_end("ok"));
+    emit(wr_event_done());
+}
+
+/// The blocking flow itself (real docker spawns) — run under
+/// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
+pub fn games_lifecycle_stream(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
+    use crate::{lifecycle, maint, native, status};
+
+    emit(serde_json::json!({"event": "section_start", "name": mode}));
+
+    let title_dir = lifecycle::title_dir_for_id(&id);
+    if !title_dir.is_dir() {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error("NOT_FOUND", format!("Title not found: {id}"), "Run: dml games list --json"));
+        return;
+    }
+    let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) else {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error(
+            "NO_COMPOSE",
+            format!("No compose file found in {id} or its subdirectories."),
+            &format!("Reinstall the title or check {}", title_dir.display()),
+        ));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+        emit(gl_error("DOCKER_DOWN", "Docker is not running.", "Try: dml doctor"));
+        return;
+    }
+
+    // Automatic pre-down safety backup -- stop/restart only, BEFORE anything
+    // below touches compose (see `lifecycle::lifecycle_steps_for_mode`'s doc
+    // comment for the pure "backup precedes the first down" invariant this
+    // mirrors). Best-effort: never aborts the stop/restart.
+    if mode == "stop" || mode == "restart" {
+        auto_backup_before_stop(&docker_program, &emit);
+    }
+
+    // Self-heal an interrupted `wow bots flush` -- start+restart only (a
+    // `stop` never boots the server, so there is nothing to heal against
+    // before it runs). THIS GUARD PREVENTS A BOT-WIPE ON BOOT.
+    if mode == "start" || mode == "restart" {
+        if let Some(note) = lifecycle::flush_heal_flag(&compose_dir) {
+            gl_line(&emit, "warn", note);
+        }
+    }
+
+    // Cold starts only: on a restart the ports are (expectedly) held by this
+    // server's own still-running containers, so the check would cry wolf.
+    if mode == "start" {
+        for line in lifecycle::check_port_conflicts(&compose_dir, lifecycle::port_listening) {
+            gl_line(&emit, "warn", line);
+        }
+    }
+
+    if mode == "restart" && skip_saveall {
+        gl_line(&emit, "info", lifecycle::SKIP_SAVEALL_NOTE);
+    }
+
+    let mut rc: Result<(), i32> = Ok(());
+    for argv in lifecycle::compose_sequence_for_mode(mode) {
+        let is_down = lifecycle::is_compose_down(&argv);
+        gl_line(
+            &emit,
+            "info",
+            if is_down { "stopping containers (docker compose down)..." } else { "starting containers (docker compose up -d)..." },
+        );
+        let timeout = if is_down { lifecycle::COMPOSE_DOWN_TIMEOUT } else { lifecycle::COMPOSE_UP_TIMEOUT };
+        let mut cmd = std::process::Command::new(&docker_program);
+        cmd.current_dir(&compose_dir).args(argv);
+        status::windows_no_window(&mut cmd);
+        rc = match status::output_bounded_draining(cmd, timeout) {
+            Some(out) if out.status.success() => Ok(()),
+            Some(out) => Err(out.status.code().unwrap_or(-1)),
+            None => Err(-1),
+        };
+        if rc.is_err() {
+            break;
+        }
+    }
+
+    match rc {
+        Ok(()) => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "ok"}));
+            let state = if mode == "stop" { "stopped" } else { "running" };
+            emit(serde_json::json!({"event": "done", "data": {"id": id, "state": state}}));
+        }
+        Err(code) if mode == "stop" => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+            emit(gl_error("STOP_FAILED", format!("{id} failed to stop (exit {code})"), &format!("Try: dml kill {id}")));
+        }
+        Err(code) => {
+            emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
+            emit(gl_error(
+                "START_FAILED",
+                format!("{id} failed to {mode} (exit {code})"),
+                "Check logs: docker compose logs, or dml doctor",
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +931,130 @@ mod tests {
         assert_eq!(lifecycle_steps_for_mode("stop"), vec!["backup", "down"]);
         assert_eq!(lifecycle_steps_for_mode("restart"), vec!["backup", "down", "up"]);
         assert!(lifecycle_steps_for_mode("bogus").is_empty());
+    }
+
+    #[test]
+    fn games_status_native_reports_not_found_for_missing_title() {
+        // Takes `games_dir` as an explicit parameter (not read from
+        // `DML_GAMES_DIR`) specifically so this test never touches a
+        // process-global env var -- `cargo test` runs this crate's tests in
+        // one process, and mutating `DML_GAMES_DIR` would race every OTHER
+        // test that reads it via `ConfigReader::title_dir_from_env`/
+        // `lifecycle::games_dir_from_env` concurrently (see the caution in
+        // `dml::lifecycle`'s own test module header).
+        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-missing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let err = games_status("wow-server-playerbots", &dir).unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
+        assert_eq!(err.message, "Title not found: wow-server-playerbots");
+    }
+
+    #[test]
+    fn games_status_native_reports_stopped_when_no_compose_dir() {
+        let dir = std::env::temp_dir().join(format!("dml-gamesstatus-test-nocompose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("some-title")).unwrap();
+        // A title dir that exists but carries no compose file anywhere ->
+        // `_compose_running` is never even invoked; state is "stopped".
+        let out = games_status("some-title", &dir).unwrap();
+        assert_eq!(out, serde_json::json!({ "id": "some-title", "state": "stopped" }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wr_event_section_start_shape() {
+        assert_eq!(wr_event_section_start(), serde_json::json!({"event":"section_start","name":"world-restart"}));
+    }
+
+    #[test]
+    fn wr_event_line_shape() {
+        assert_eq!(
+            wr_event_line("info", "saving all characters (best effort)..."),
+            serde_json::json!({"event":"line","level":"info","text":"saving all characters (best effort)..."})
+        );
+        assert_eq!(
+            wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"),
+            serde_json::json!({"event":"line","level":"warn","text":"world-only restart does NOT apply settings changes -- use full Restart for that"})
+        );
+    }
+
+    #[test]
+    fn wr_event_section_end_shape() {
+        assert_eq!(
+            wr_event_section_end("ok"),
+            serde_json::json!({"event":"section_end","name":"world-restart","status":"ok"})
+        );
+        assert_eq!(
+            wr_event_section_end("error"),
+            serde_json::json!({"event":"section_end","name":"world-restart","status":"error"})
+        );
+    }
+
+    #[test]
+    fn wr_event_done_shape() {
+        assert_eq!(
+            wr_event_done(),
+            serde_json::json!({"event":"done","data":{
+                "restarted":"world-only",
+                "note":"settings changes were NOT applied -- use full Restart for that",
+            }})
+        );
+    }
+
+    #[test]
+    fn wr_event_error_shape() {
+        assert_eq!(
+            wr_event_error("NOT_RUNNING", "The server is not running", "Start the server (full Start) first."),
+            serde_json::json!({"event":"error","error":{
+                "code":"NOT_RUNNING",
+                "message":"The server is not running",
+                "hint":"Start the server (full Start) first.",
+            }})
+        );
+    }
+
+    #[test]
+    fn wr_preconditions_ok_requires_both_running() {
+        assert!(wr_preconditions_ok(true, true));
+        assert!(!wr_preconditions_ok(true, false));
+        assert!(!wr_preconditions_ok(false, true));
+        assert!(!wr_preconditions_ok(false, false));
+    }
+
+    #[test]
+    fn wr_should_note_wait_60s_cadence() {
+        assert!(!wr_should_note_wait(0, 0));
+        assert!(!wr_should_note_wait(59, 0));
+        assert!(wr_should_note_wait(60, 0));
+        assert!(wr_should_note_wait(125, 60));
+        assert!(!wr_should_note_wait(119, 60));
+        assert!(wr_should_note_wait(120, 60));
+    }
+
+    #[test]
+    fn wr_wait_note_text_formats_minutes() {
+        assert_eq!(wr_wait_note_text(60), "still waiting (~1m) - bots respawning takes a while...");
+        assert_eq!(wr_wait_note_text(125), "still waiting (~2m) - bots respawning takes a while...");
+        assert_eq!(wr_wait_note_text(0), "still waiting (~0m) - bots respawning takes a while...");
+    }
+
+    #[test]
+    fn wr_timeout_exceeded_boundary() {
+        assert!(!wr_timeout_exceeded(1799, 1800));
+        assert!(wr_timeout_exceeded(1800, 1800));
+        assert!(wr_timeout_exceeded(1801, 1800));
+    }
+
+    #[test]
+    fn wr_ready_timeout_secs_defaults_and_reads_env() {
+        std::env::remove_var("DML_READY_TIMEOUT_SECS");
+        assert_eq!(wr_ready_timeout_secs(), 1800);
+        std::env::set_var("DML_READY_TIMEOUT_SECS", "60");
+        assert_eq!(wr_ready_timeout_secs(), 60);
+        // Unparseable override falls back to the default, same as bash's
+        // parameter expansion never validating the env var either.
+        std::env::set_var("DML_READY_TIMEOUT_SECS", "not-a-number");
+        assert_eq!(wr_ready_timeout_secs(), 1800);
+        std::env::remove_var("DML_READY_TIMEOUT_SECS");
     }
 }
