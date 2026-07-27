@@ -1,6 +1,7 @@
 pub mod nativesetup;
 pub mod power;
 pub mod realmlist;
+mod startup;
 pub mod watch;
 pub mod wslconfig;
 mod zam;
@@ -5842,6 +5843,10 @@ async fn wow_update_native(backup: Option<bool>, on_event: Channel<serde_json::V
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // MUST run before any thread exists (Builder::setup spawns one) and
+    // before AppState captures backend::selected().
+    startup::resolve_and_export();
+
     tauri::Builder::default()
         .manage(AppState {
             // Backend switch (spike/docker-desktop-native): default WSL, or the
