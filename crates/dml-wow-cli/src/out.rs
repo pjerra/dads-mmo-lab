@@ -12,13 +12,12 @@
 //! This module is the template Tasks 11-15's write/streaming subcommands
 //! lean on — keep it dependency-free beyond `dml_core`/`serde_json`.
 //!
-//! Task 10's four subcommands (version/status/server-info/console-tail) are
-//! all single-envelope reads, so nothing calls the streaming half
-//! ([`stream_sink`]/[`TerminalSeen`]/[`stream_exit`]) yet — it is built now
-//! for Tasks 11-15's write/long-running subcommands to wire into their
-//! dispatch arms, same convention as `dml_core::backend`/`dml_wow::db`.
-
-#![allow(dead_code)]
+//! The streaming half ([`stream_sink`]/[`TerminalSeen`]/[`stream_exit`]) was
+//! built ahead of its first caller, in Task 10, for Tasks 11-15's write/
+//! long-running subcommands to wire into their dispatch arms, same
+//! convention as `dml_core::backend`/`dml_wow::db`. `party preset-load`
+//! (Task 13, `run.rs::dispatch_party`'s `PresetLoad` arm) is that first
+//! caller now.
 
 use std::cell::Cell;
 use std::io::{self, Write};

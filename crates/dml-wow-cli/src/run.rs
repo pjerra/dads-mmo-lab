@@ -572,11 +572,11 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             if let Some(s) = &spec {
                 let live = dml_wow::party::live_spec_names(&title_dir());
                 if !dml_wow::party::valid_bot_spec(s, live.as_deref()) {
-                    return emit_err(
-                        "BAD_ARG",
-                        &format!("Unknown spec: {s}"),
+                    let e = dml_wow::party::unknown_spec_err(
+                        s,
                         "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list.",
                     );
+                    return emit_err(&e.code, &e.message, &e.hint);
                 }
             }
             emit_result(dml_wow::party::party_add(player, built, spec, soap_lock()))
@@ -589,11 +589,11 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // logout whisper. Both command strings are built (and thereby
             // both names validated) before either fires.
             if !dml_wow::soap_cmds::valid_charname(&player) {
-                return emit_err(
-                    "BAD_ARG",
-                    &format!("Invalid player name: {player}"),
+                let e = dml_wow::party::invalid_player_err(
+                    &player,
                     "Kick needs --player (the bot's master) so the bot can also be dismissed.",
                 );
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             let uninvite = match dml_wow::party::party_uninvite_cmd(&bot) {
                 Ok(c) => c,
@@ -634,11 +634,22 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // bot's NOT_FOUND hint differs from every other party arm's — and
             // only then the whisper.
             if !dml_wow::soap_cmds::valid_charname(&player) {
-                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+                let e = dml_wow::party::invalid_player_err(&player, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             if !dml_wow::soap_cmds::valid_charname(&bot) {
-                return emit_err("BAD_ARG", &format!("Invalid bot name: {bot}"), "");
+                let e = dml_wow::party::invalid_bot_err(&bot, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
+            // `Invalid action`/`Action spec requires --spec <name>` stay
+            // inline literals (review Fix 3): each is spelled exactly ONCE
+            // in this crate — `botcmd` is the only arm with an action
+            // allowlist or a `spec`-needs-a-value case — so there is no
+            // intra-crate copy for either to drift from. (Both also exist,
+            // unavoidably duplicated, in the launcher's own
+            // `wow_party_botcmd_native`, which this task's brief did not
+            // allow touching — same status as the `eda5085`-hoisted SOAP
+            // mappers' launcher-side copies.)
             let wmsg = if let Some(tail) = dml_wow::party::botcmd_fixed_tail(&action) {
                 tail.to_string()
             } else if action == "spec" {
@@ -651,11 +662,11 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
                 };
                 let live = dml_wow::party::live_spec_names(&title_dir());
                 if !dml_wow::party::valid_bot_spec(&spec_val, live.as_deref()) {
-                    return emit_err(
-                        "BAD_ARG",
-                        &format!("Unknown spec: {spec_val}"),
+                    let e = dml_wow::party::unknown_spec_err(
+                        &spec_val,
                         "A premade spec name like 'frost pve'.",
                     );
+                    return emit_err(&e.code, &e.message, &e.hint);
                 }
                 dml_wow::party::spec_action_wmsg(&spec_val)
             } else {
@@ -694,14 +705,15 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // from ever being joined onto `~/.dml/party-presets`, so it MUST
             // run here, before `preset_save` builds a path.
             if !dml_wow::soap_cmds::valid_charname(&player) {
-                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+                let e = dml_wow::party::invalid_player_err(&player, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             if !dml_wow::party::valid_preset_name(&name) {
-                return emit_err(
-                    "BAD_ARG",
-                    &format!("Invalid preset name: {name}"),
+                let e = dml_wow::party::invalid_preset_name_err(
+                    &name,
                     "Letters, digits, - and _ (max 32).",
                 );
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             emit_result(dml_wow::party::preset_save(player, name))
         }
@@ -712,7 +724,8 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // Same path-traversal guard as `preset-save`, with this arm's own
             // (empty) hint — `wow_party_preset_delete_native`.
             if !dml_wow::party::valid_preset_name(&name) {
-                return emit_err("BAD_ARG", &format!("Invalid preset name: {name}"), "");
+                let e = dml_wow::party::invalid_preset_name_err(&name, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             emit_result(dml_wow::party::preset_delete(name))
         }
@@ -724,10 +737,12 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // never a half-emitted NDJSON stream, and never a preset path
             // built from an unvalidated name.
             if !dml_wow::soap_cmds::valid_charname(&player) {
-                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+                let e = dml_wow::party::invalid_player_err(&player, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             if !dml_wow::party::valid_preset_name(&name) {
-                return emit_err("BAD_ARG", &format!("Invalid preset name: {name}"), "");
+                let e = dml_wow::party::invalid_preset_name_err(&name, "");
+                return emit_err(&e.code, &e.message, &e.hint);
             }
             // Streaming wiring, per `out.rs`'s documented composition: the
             // stateless printer and the terminal-event tracker are separate,

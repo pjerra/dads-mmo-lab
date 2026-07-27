@@ -141,8 +141,13 @@ pub enum Cmd {
     /// Run one raw worldserver console command over SOAP
     Console {
         /// The command — every remaining token, joined with single spaces
-        /// (e.g. `dml-wow console server info`)
-        #[arg(required = true, num_args = 1..)]
+        /// (e.g. `dml-wow console server info`). `allow_hyphen_values`: this
+        /// is a RAW PASSTHROUGH arm, so a token starting with `-` (e.g. the
+        /// `-1` in `account set gmlevel bob 3 -1`, which is literally what
+        /// `account_set_gm_cmd` itself emits) must reach the worldserver, not
+        /// be rejected by clap as an unknown flag — both siblings (the
+        /// launcher's single IPC string, bash's `--command "..."`) accept it.
+        #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// Game-account administration over SOAP (create/password/GM level/delete)
@@ -180,7 +185,10 @@ pub enum Cmd {
     },
     /// Set the message of the day — applies live, no restart
     Motd {
-        /// The new MOTD text
+        /// The new MOTD text. `allow_hyphen_values`: a MOTD is free text and
+        /// may legitimately start with `-` (e.g. "-50% XP weekend") — same
+        /// reasoning as `Console::command` above.
+        #[arg(allow_hyphen_values = true)]
         text: String,
     },
     /// Playerbot party management (`dml_wow::party`)
@@ -757,6 +765,23 @@ mod tests {
         assert!(Cli::try_parse_from(["dml-wow", "console"]).is_err());
     }
 
+    /// A leading-hyphen token (e.g. the `-1` `account_set_gm_cmd` itself
+    /// emits) must reach `command`, not be mistaken for an unknown flag —
+    /// review Fix 1: `console` is a raw passthrough arm and both siblings
+    /// accept this shape.
+    #[test]
+    fn console_accepts_leading_hyphen_tokens() {
+        match Cli::try_parse_from(["dml-wow", "console", "account", "set", "gmlevel", "bob", "3", "-1"])
+            .unwrap()
+            .command
+        {
+            Cmd::Console { command } => {
+                assert_eq!(command, vec!["account", "set", "gmlevel", "bob", "3", "-1"])
+            }
+            other => panic!("expected Console, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_account_arms() {
         match Cli::try_parse_from(["dml-wow", "account", "create", "bob", "pw12"]).unwrap().command {
@@ -947,6 +972,16 @@ mod tests {
             Cli::try_parse_from(["dml-wow", "teleport-list"]).unwrap().command,
             Cmd::TeleportList { .. }
         ));
+    }
+
+    /// A MOTD may legitimately start with `-` (e.g. a percent-off callout) —
+    /// review Fix 1, same reasoning as `console_accepts_leading_hyphen_tokens`.
+    #[test]
+    fn motd_accepts_leading_hyphen_text() {
+        match Cli::try_parse_from(["dml-wow", "motd", "-50% XP weekend"]).unwrap().command {
+            Cmd::Motd { text } => assert_eq!(text, "-50% XP weekend"),
+            other => panic!("expected Motd, got {other:?}"),
+        }
     }
 
     #[test]

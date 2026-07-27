@@ -613,12 +613,31 @@ fn account_arms_reject_bad_credentials_before_any_soap_call() {
         "Invalid password (4-16 chars, letters/digits/_@#%+=!-)",
     );
     assert_bad_arg(&s, &["account", "set-password", "bob", "x"], "Invalid password (4-16 chars, letters/digits/_@#%+=!-)");
+    // `set-password`'s USERNAME validation (review Fix 2) -- `validate_account_user`
+    // runs before `validate_account_pass`, so a bad username must be caught even
+    // with an otherwise-valid password.
+    assert_bad_arg(
+        &s,
+        &["account", "set-password", "bad name", "pw12"],
+        "Invalid username (3-20 letters/digits/_)",
+    );
     assert_bad_arg(&s, &["account", "set-gm", "bob", "4"], "--level must be 0-3");
     // An out-of-u8 level is still a DOMAIN rejection (exit 1), not a clap
     // integer-parse usage error -- that is why `set-gm`'s level is a String.
     assert_bad_arg(&s, &["account", "set-gm", "bob", "9999"], "--level must be 0-3");
+    // `set-gm`'s USERNAME validation (review Fix 2) -- the same guard, checked
+    // before the 0-3 level match.
+    assert_bad_arg(
+        &s,
+        &["account", "set-gm", "bad name", "3"],
+        "Invalid username (3-20 letters/digits/_)",
+    );
     // The admin-account refusal is a guard too: it must never reach SOAP.
     assert_bad_arg(&s, &["account", "delete", "ADMIN"], "Refusing to delete the admin account");
+    // `delete`'s GENERIC username guard (review Fix 2) -- a syntactically
+    // invalid username must be caught by `validate_account_user`, distinctly
+    // from the admin-account special case above.
+    assert_bad_arg(&s, &["account", "delete", "bad name"], "Invalid username (3-20 letters/digits/_)");
 }
 
 #[test]
@@ -630,9 +649,16 @@ fn gm_arms_reject_bad_names_levels_and_entries_before_any_soap_or_db_call() {
     assert_bad_arg(&s, &["gm", "level", "Testen", "0"], "Invalid level: 0");
     assert_bad_arg(&s, &["gm", "level", "Testen", "-5"], "Invalid level: -5");
     assert_bad_arg(&s, &["gm", "at-login", "Testen", "resurrect"], "Invalid flag: resurrect");
+    // `at-login`'s PLAYER guard (review Fix 2) -- `gm_at_login_cmd` validates
+    // the name before the four-flag allowlist, same order as `gm level`.
+    assert_bad_arg(&s, &["gm", "at-login", "bad name", "rename"], "Invalid player name: bad name");
     assert_bad_arg(&s, &["gm", "gold", "Testen", "214749"], "Invalid gold amount: 214749");
     assert_bad_arg(&s, &["gm", "summon", "Testen", "0"], "Invalid creature entry: 0");
     assert_bad_arg(&s, &["gm", "summon", "Testen", "1000000"], "Invalid creature entry: 1000000");
+    // `summon`'s PLAYER guard (review Fix 2) -- `gm_summon_cmd` validates the
+    // name before the 1..=999999 entry range, so this must be BAD_ARG rather
+    // than reaching the World-DB creature lookup `gm_summon` does next.
+    assert_bad_arg(&s, &["gm", "summon", "bad name", "190"], "Invalid player name: bad name");
     // The three bridge ops validate the NAME before the online DB check --
     // otherwise this would come back NOT_FOUND (`char_is_online` swallows the
     // sealed DB's failure and reads as "not online"), not BAD_ARG.
@@ -715,6 +741,58 @@ fn party_add_rejects_bad_player_class_gender_and_spec_before_any_soap_or_db_call
         &["party", "add", "Testen", "warrior", "--spec", "bear pvp"],
         "Unknown spec: bear pvp",
     );
+}
+
+/// `valid_bot_spec_shape`'s `^[a-z][a-z ]*$` injection guard (review Fix 2):
+/// `bear pvp` above is shape-VALID (lowercase words + spaces) and fails only
+/// on membership, so it proves nothing about whether the shape guard itself
+/// still runs -- deleting `valid_bot_spec_shape` entirely would not change
+/// that assertion's outcome. These inputs are chosen to be shape-INVALID
+/// specifically (uppercase, digits, and SQL/shell-metacharacter shapes that
+/// would be dangerous if ever concatenated into a whisper string), so they
+/// pin down that the shape guard -- not just the membership lookup -- is what
+/// fires, on BOTH `party add --spec` and `party botcmd ... spec --spec`. The
+/// message asserted is the SAME shape for every shape-invalid input
+/// ("Unknown spec: <value>"): `valid_bot_spec` collapses shape and membership
+/// failures into one BAD_ARG, so the value round-tripping into the message
+/// unmangled is itself the proof the guard rejected the raw string rather
+/// than something derived from it.
+#[test]
+fn party_add_and_botcmd_spec_reject_shape_invalid_values_before_any_soap_or_db_call() {
+    let s = Sealed::new("specshape");
+    let add_hint =
+        "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list.";
+    let botcmd_hint = "A premade spec name like 'frost pve'.";
+
+    for bad_spec in ["Frost PvE", "frost1", "frost'; DROP TABLE bots; --", "frost-pve", " frost"] {
+        let (code, envelope) =
+            s.run(&["party", "add", "Testen", "warrior", "--spec", bad_spec]);
+        assert_eq!(code, 1, "party add --spec {bad_spec:?}: {envelope}");
+        assert_eq!(envelope["error"]["code"], "BAD_ARG", "party add --spec {bad_spec:?}: {envelope}");
+        assert_eq!(
+            envelope["error"]["message"],
+            format!("Unknown spec: {bad_spec}"),
+            "party add --spec {bad_spec:?}: {envelope}"
+        );
+        assert_eq!(envelope["error"]["hint"], add_hint, "party add --spec {bad_spec:?}: {envelope}");
+
+        let (code, envelope) =
+            s.run(&["party", "botcmd", "Testen", "Botty", "spec", "--spec", bad_spec]);
+        assert_eq!(code, 1, "party botcmd spec --spec {bad_spec:?}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "BAD_ARG",
+            "party botcmd spec --spec {bad_spec:?}: {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"],
+            format!("Unknown spec: {bad_spec}"),
+            "party botcmd spec --spec {bad_spec:?}: {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["hint"], botcmd_hint,
+            "party botcmd spec --spec {bad_spec:?}: {envelope}"
+        );
+    }
 }
 
 #[test]

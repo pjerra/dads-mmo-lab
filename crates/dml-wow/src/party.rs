@@ -40,6 +40,14 @@ pub fn valid_preset_name(s: &str) -> bool {
     (1..=32).contains(&n) && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// `Invalid preset name: {name}` (`BAD_ARG`) with a caller-supplied hint —
+/// review Fix 3, same reasoning as [`invalid_player_err`]. `preset-save`'s
+/// arm gives its own "Letters, digits, - and _ (max 32)." hint;
+/// `preset-delete`/`preset-load` pass `""`.
+pub fn invalid_preset_name_err(name: &str, hint: &str) -> CmdError {
+    bad_arg(format!("Invalid preset name: {name}"), hint)
+}
+
 /// `_valid_bot_class`: the class set `party add --class` accepts.
 /// Deathknight (class id 6) is deliberately excluded — see
 /// `party_specs::class_name_from_id`'s matching exclusion.
@@ -93,6 +101,16 @@ pub fn valid_bot_spec(want: &str, live_names: Option<&[String]>) -> bool {
     }
 }
 
+/// `Unknown spec: {spec}` (`BAD_ARG`) with a caller-supplied hint — review
+/// Fix 3, same reasoning as [`invalid_player_err`]. `party add --spec` and
+/// `party botcmd … spec --spec` both reject through [`valid_bot_spec`] (shape
+/// AND membership collapse into this one message — see that function's doc
+/// comment) but each has its own hint text (`add`'s points at the launcher's
+/// role picker; `botcmd`'s doesn't).
+pub fn unknown_spec_err(spec: &str, hint: &str) -> CmdError {
+    bad_arg(format!("Unknown spec: {spec}"), hint)
+}
+
 // ---------------------------------------------------------------------
 // Command-string builders — `party add`/`kick`/`dismiss-all`/`relogin`/
 // `botcmd` (`90-main.sh:3067-3282`). Online-guid lookups, the new-member
@@ -100,16 +118,34 @@ pub fn valid_bot_spec(want: &str, live_names: Option<&[String]>) -> bool {
 // pure builders.
 // ---------------------------------------------------------------------
 
+/// `Invalid player name: {player}` (`BAD_ARG`) with a caller-supplied hint —
+/// review Fix 3. Every `dml-wow-cli` party arm that validates a player name
+/// with its own hint (`kick`'s "needs --player…", the others' empty string)
+/// previously hand-copied this exact message shape at each call site; a
+/// second front end doing the same thing was exactly the drift the Task 12
+/// review ruled out for `db_err_to_cmd` and this crate's own `29a7512`
+/// follow-up fixed for the `botcmd` whisper. [`validate_player`] is this
+/// function with an empty hint, kept private since none of its OWN callers
+/// need a custom one.
+pub fn invalid_player_err(player: &str, hint: &str) -> CmdError {
+    bad_arg(format!("Invalid player name: {player}"), hint)
+}
+
+/// `Invalid bot name: {bot}` (`BAD_ARG`) — see [`invalid_player_err`].
+pub fn invalid_bot_err(bot: &str, hint: &str) -> CmdError {
+    bad_arg(format!("Invalid bot name: {bot}"), hint)
+}
+
 fn validate_player(player: &str) -> Result<(), CmdError> {
     if !valid_charname(player) {
-        return Err(bad_arg(format!("Invalid player name: {player}"), ""));
+        return Err(invalid_player_err(player, ""));
     }
     Ok(())
 }
 
 fn validate_bot(bot: &str) -> Result<(), CmdError> {
     if !valid_charname(bot) {
-        return Err(bad_arg(format!("Invalid bot name: {bot}"), ""));
+        return Err(invalid_bot_err(bot, ""));
     }
     Ok(())
 }
@@ -738,6 +774,20 @@ mod tests {
         assert!(!valid_preset_name("../evil"));
     }
 
+    // -- review Fix 3: shared error-message builders (`invalid_player_err`/
+    // `invalid_bot_err`/`invalid_preset_name_err`/`unknown_spec_err`) --------
+
+    #[test]
+    fn invalid_preset_name_err_carries_message_and_caller_hint() {
+        let e = invalid_preset_name_err("../evil", "Letters, digits, - and _ (max 32).");
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Invalid preset name: ../evil");
+        assert_eq!(e.hint, "Letters, digits, - and _ (max 32).");
+
+        let e2 = invalid_preset_name_err("../evil", "");
+        assert_eq!(e2.hint, "");
+    }
+
     // -- valid_bot_class -------------------------------------------------
 
     #[test]
@@ -775,6 +825,48 @@ mod tests {
         assert!(valid_bot_spec("frost pve", Some(&[])));
         assert!(!valid_bot_spec("bear pvp", None)); // deliberately absent
         assert!(!valid_bot_spec("nonsense", None));
+    }
+
+    #[test]
+    fn unknown_spec_err_carries_message_and_caller_hint() {
+        let e = unknown_spec_err("Frost PvE", "A premade spec name like 'frost pve'.");
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Unknown spec: Frost PvE");
+        assert_eq!(e.hint, "A premade spec name like 'frost pve'.");
+    }
+
+    // -- invalid_player_err / invalid_bot_err --------------------------------
+
+    #[test]
+    fn invalid_player_err_and_invalid_bot_err_carry_message_and_caller_hint() {
+        let p = invalid_player_err("bad name", "Kick needs --player (the bot's master).");
+        assert_eq!(p.code, "BAD_ARG");
+        assert_eq!(p.message, "Invalid player name: bad name");
+        assert_eq!(p.hint, "Kick needs --player (the bot's master).");
+
+        let b = invalid_bot_err("bad bot", "");
+        assert_eq!(b.code, "BAD_ARG");
+        assert_eq!(b.message, "Invalid bot name: bad bot");
+        assert_eq!(b.hint, "");
+    }
+
+    /// [`validate_player`]/[`validate_bot`] (the builders' own internal
+    /// guards) are now thin wrappers over the same two functions with an
+    /// empty hint — proven here so the two never drift apart silently.
+    /// `CmdError` has no `PartialEq`, so the fields are compared by hand.
+    #[test]
+    fn validate_player_and_validate_bot_delegate_to_the_shared_err_builders() {
+        let got = validate_player("bad name").unwrap_err();
+        let want = invalid_player_err("bad name", "");
+        assert_eq!(got.code, want.code);
+        assert_eq!(got.message, want.message);
+        assert_eq!(got.hint, want.hint);
+
+        let got = validate_bot("bad bot").unwrap_err();
+        let want = invalid_bot_err("bad bot", "");
+        assert_eq!(got.code, want.code);
+        assert_eq!(got.message, want.message);
+        assert_eq!(got.hint, want.hint);
     }
 
     // -- party_add_cmd -------------------------------------------------
