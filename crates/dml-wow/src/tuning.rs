@@ -316,7 +316,8 @@ pub const LUA_RELOAD_HINT: &str = ".reload ale (Console page) or restart the ser
 
 /// Validate + normalize a `tuning-set` value against its row's `type`/`min`/
 /// `max` — a faithful port of the validation switch in the `tuning-set)` case
-/// (90-main.sh:2879-2895), used by `launcher_lib::wow_config_tuning_set_native`
+/// (90-main.sh:2872-2887 — `case "$type" in` through its `esac`), used by
+/// `launcher_lib::wow_config_tuning_set_native`
 /// (Task B2b) for BOTH backends (the oracle validates once, before branching
 /// on `conf`/`lua`). `min`/`max` are only consulted for `type == "int"` (the
 /// other two types have no range). On success returns the value to WRITE:

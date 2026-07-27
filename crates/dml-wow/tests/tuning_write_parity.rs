@@ -28,14 +28,11 @@
 //! the whole comparison is a pure offline file edit — safe (and meaningful)
 //! with Docker Desktop closed.
 //!
-//! LINE ENDINGS ARE PART OF THE CONTRACT. The deployed files on a real box are
-//! CRLF (the lua scripts and every `.conf` under `env/dist/etc`), and the
-//! oracle is awk — which has its own `\r` handling in both `is_key_line` and
-//! `rebuild`. A Rust-only CRLF test proves nothing about whether the two
-//! AGREE, so `native_lua_tuning_write_matches_cli_for_odd_line_endings` runs
-//! the same oracle comparison over CRLF, no-trailing-newline, and both
-//! combined — including the sharpest case, where the edited line IS the final
-//! record and has no terminator.
+//! LINE ENDINGS ARE PART OF THE CONTRACT — see
+//! `native_lua_tuning_write_matches_cli_for_odd_line_endings` below for the
+//! measured evidence that CRLF `.lua` scripts really do land in
+//! `lua_scripts/`, and for the platform-dependent oracle behaviour that
+//! comparison uncovered.
 //!
 //! FILE/TOOL-GATED, same skip convention as its siblings: skips (and passes)
 //! when `bash` or the `dml` script can't be found, or when the temp fixtures
@@ -95,17 +92,52 @@ fn find_yq() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
-/// The `awk` the spawned `dml` would itself use — probed next to `bash` so
-/// the binary-mode cross-check below runs the SAME interpreter, just without
-/// Windows text-mode I/O. `None` skips only that cross-check.
-fn find_awk(bash: &Path) -> Option<PathBuf> {
-    let bin = bash.parent()?;
-    for c in [bin.join("awk.exe"), bin.parent()?.join("usr").join("bin").join("awk.exe")] {
-        if c.exists() {
-            return Some(c);
+/// The `awk` the spawned `dml` would itself use. Resolved by scanning the
+/// SAME augmented PATH handed to the CLI (which already prepends bash's own
+/// toolchain dirs), so it finds Git-Bash's `awk.exe` on Windows and
+/// `/usr/bin/awk` on Linux/WSL with one mechanism. `DML_AWK` overrides.
+///
+/// A `None` here is NOT tolerated by the caller — see the doc comment on the
+/// line-ending test: the cross-check this feeds is a hard requirement.
+fn find_awk(path: &OsString) -> Option<PathBuf> {
+    if let Some(a) = std::env::var_os("DML_AWK").filter(|s| !s.is_empty()) {
+        let p = PathBuf::from(a);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    for dir in std::env::split_paths(path) {
+        for name in ["awk.exe", "awk"] {
+            let c = dir.join(name);
+            if c.is_file() {
+                return Some(c);
+            }
         }
     }
     None
+}
+
+/// Does the awk we are about to drive actually SEE a `\r` at end of record?
+///
+/// gawk on Windows opens files in TEXT mode and strips it before the script
+/// runs; every Unix awk does not. `length($0)` for a record `A\r` is therefore
+/// `1` there and `2` elsewhere. Probed rather than inferred from `cfg!(windows)`
+/// or a path shape, because it is the exact property the assertions below
+/// depend on — and a wrong guess would turn correct behaviour into a red test.
+fn awk_strips_cr(awk: &Path, scratch: &Path) -> bool {
+    let probe = scratch.join("cr-probe.txt");
+    fs::write(&probe, b"A\r\n").expect("write awk CR probe");
+    let out = Command::new(awk)
+        .arg("{ print length($0) }")
+        .arg(&probe)
+        .output()
+        .expect("spawn awk for the CR probe");
+    let seen = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match seen.as_str() {
+        "1" => true,  // TEXT mode: the CR was stripped on read
+        "2" => false, // binary/Unix: the CR is part of the record
+        other => panic!("awk CR probe returned an unexpected record length {other:?} (stderr: {})", String::from_utf8_lossy(&out.stderr)),
+    }
 }
 
 /// The oracle's awk program, lifted VERBATIM out of `_lua_cfg_write` at test
@@ -386,49 +418,99 @@ fn native_lua_tuning_write_matches_cli() {
     let _ = fs::remove_dir_all(&tmp_base);
 }
 
-/// The line-ending axis — and a RECORDED DIVERGENCE. Read this before
-/// changing either implementation.
+/// The line-ending axis — and a RECORDED PLATFORM DIVERGENCE. Read this
+/// before changing either implementation.
 ///
-/// The shape a real box actually has is CRLF: the deployed lua scripts and
-/// every `.conf` under `env/dist/etc` (`playerbots.conf` is 2366/2366 CRLF).
+/// ## Why CRLF matters on THIS path
+///
+/// A correction first, because an earlier version of this comment asserted the
+/// opposite and was wrong: the `.conf` files are **not** CRLF. Measured on this
+/// box, every `.conf`/`.conf.dist` under
+/// `dml-native/wow-server-playerbots/env/dist/etc` has ZERO CR bytes, and
+/// `playerbots.conf` is md5-identical to its `.dist`
+/// (`a0aafcae552044dcd1da2d4e78cf2877`) — it was LF from install and has never
+/// been rewritten.
+///
+/// The `.lua` scripts are a different story, and they are exactly what this
+/// writer edits. Measured in the live `lua_scripts/` directory, **6 of the 13
+/// deployed `.lua` files carry CRLF** (`gasino/30_gasino_host.lua` has 323 CR,
+/// `31_gasino_blackjack.lua` 199, `20_gasino_vault.lua` 116, and three more).
+/// The mechanism is structural, not an accident:
+///
+///   - ALE lua modules install by `git clone --depth 1` (70-modules.sh:423)
+///     followed by a plain `cp` into `lua_scripts/` (e.g. :476, :486 — the
+///     SitMeansRest and UnlimitedAmmo files two of this suite's rows target);
+///   - in native mode that clone runs under Git Bash, whose SYSTEM gitconfig
+///     sets `core.autocrlf=true` (verified:
+///     `file:C:/Program Files/Git/etc/gitconfig  true`), so a cloned `.lua`
+///     lands CRLF unless upstream ships a `.gitattributes`;
+///   - this repo's own `.gitattributes` scopes its `eol=lf` lua rule to
+///     `cli/lua/**` deliberately, and says why: the upstream reference copies
+///     under `guides/` carry CRLF. They measurably do —
+///     `guides/wow-wotlk/ALE-Kegs/BlackMarketAuctionHouse/BMAH.lua` has 605 CR
+///     and `SeasonOfDiscovery/SOD.lua` has 96 — and the bmah/sod installers
+///     copy those straight into `lua_scripts/`.
+///
+/// IMPACT SCOPE, stated honestly: this is round-trip / diff-noise stability,
+/// NOT corruption. AzerothCore's conf parser and Lua both accept LF, CRLF and
+/// mixed. What is at stake is whether one knob edit produces a one-line diff
+/// or rewrites every line of the file (and the backup churn that implies).
+///
+/// ## The divergence
+///
 /// The oracle is awk, with its own `\r` handling in `is_key_line`
 /// (`sub(/\r$/,"",s)`) and in `rebuild` (capture `cr`, re-append it), plus a
-/// record model that re-adds `ORS` to a final partial record. So this axis
-/// needs a real comparison, not just the Rust-side unit tests.
+/// record model that re-adds `ORS` to a final partial record.
 ///
 /// FINDING (measured here, 2026-07-27): **GNU Awk on Windows opens files in
 /// TEXT mode**, so under Git Bash it strips `\r` on read before the script
 /// ever sees it (`length($0)` is 5, not 6, for `A = 1\r`). The oracle's own
 /// `\r`-preservation code is therefore DEAD in that environment, and any
-/// `_lua_cfg_write` edit silently rewrites the WHOLE file LF-only. Run the
-/// exact same awk program with `-v BINMODE=3` — which is simply how the Linux
-/// gawk inside the `dml-arch` WSL distro (where the CLI actually ships)
-/// behaves by default — and the `\r` is visible, that code fires, and the
-/// oracle preserves CRLF **byte-for-byte identically to this port**.
+/// `_lua_cfg_write` edit rewrites the WHOLE file LF-only. Run the exact same
+/// awk program with `-v BINMODE=3` — simply how the Linux gawk inside the
+/// `dml-arch` WSL distro behaves by default — and the `\r` is visible, that
+/// code fires, and the oracle preserves CRLF **byte-for-byte identically to
+/// this port**.
 ///
-/// So the port matches the oracle's source semantics AND its production
-/// behaviour; it differs only from the Git-Bash-on-Windows harness artifact.
-/// This test encodes BOTH facts rather than papering over either:
+/// That LF-flattening is REAL PRODUCT BEHAVIOUR, not merely a test artifact:
+/// `DmlRunner::native()` drives this same bash script under Git Bash, and
+/// native mode (`DML_BACKEND=native`) is a shipped, opt-in product mode. The
+/// user-visible effect is that a `bash cli/dml` edit of a CRLF lua script on
+/// Windows rewrites every line, where the Rust CLI produces a one-line diff.
+///
+/// So the port matches the oracle's source semantics and its Linux/WSL
+/// behaviour, and differs from its Git-Bash-on-Windows behaviour. This test
+/// encodes BOTH rather than papering over either:
 ///
 ///   A) against the oracle's own awk in BINARY mode (extracted verbatim from
 ///      `cli/src/40-config.sh` at test time): **byte-identical**. This is the
-///      real parity claim.
-///   B) against the full Git-Bash CLI: identical after normalizing line
-///      endings, AND the known LF-flattening is asserted POSITIVELY — if the
-///      harness ever gains binary-mode awk (or this suite runs under WSL),
-///      that assertion fails and whoever sees it is pointed back here.
+///      real parity claim, and it is a HARD requirement — if awk or the
+///      program cannot be found, this test PANICS rather than skipping the
+///      check, because a silent no-op in the one assertion guarding a write
+///      path is worse than a failure.
+///   B) against the full bash CLI: what is asserted depends on what the awk
+///      being driven actually DOES, probed at runtime (`awk_strips_cr`)
+///      rather than assumed from the platform — LF-flattening where awk is in
+///      text mode, full byte-parity where it is not. A fixture with no CR at
+///      all is held to plain byte-equality either way.
 ///
 /// Four rounds, each seeding both temp trees byte-identically:
 ///   1. CRLF throughout;
-///   2. LF with NO trailing newline (awk adds exactly one);
+///   2. LF with NO trailing newline (awk adds exactly one) — no CR anywhere,
+///      so this round is a strict byte-equality round on every platform;
 ///   3. CRLF with no trailing newline;
 ///   4. the sharpest case — CRLF where the EDITED line is the final record and
 ///      carries a `\r` but no terminator, so `rebuild`'s `cr` capture and
 ///      awk's `ORS` both have to fire on the same line.
 ///
 /// Deliberately NOT done: changing the Rust to match the Windows-gawk
-/// artifact. That would make one tuning edit rewrite all 2366 lines of a real
-/// conf, and would contradict the awk the port was ported from.
+/// behaviour. That would contradict the awk this was ported from, and would
+/// turn every knob edit on a CRLF lua script into a whole-file rewrite.
+///
+/// KNOWN GAP: check (A) drives the extracted awk program only, so
+/// `_lua_cfg_write`'s shell wrapper around it — the tmp-file verify step, the
+/// NOT_FOUND arm, the no-op arm — is never exercised on CRLF input. Those are
+/// covered on LF input by `native_lua_tuning_write_matches_cli`.
 #[test]
 fn native_lua_tuning_write_matches_cli_for_odd_line_endings() {
     let Some(bash) = find_bash() else {
@@ -467,6 +549,39 @@ fn native_lua_tuning_write_matches_cli_for_odd_line_endings() {
     };
     assert_ne!(rust_title_dir, real_title_dir(), "rust-side fixture must not be the real title dir");
     assert_ne!(cli_title_dir, real_title_dir(), "cli-side fixture must not be the real title dir");
+
+    // Past the skip gate: from here on, a missing prerequisite is a FAILURE,
+    // never a quiet degradation. `find_awk`/`oracle_awk_program` feed the only
+    // assertion that can catch a partial-CR regression, and cargo swallows
+    // `eprintln!` without `--nocapture`, so an else-arm here would silently
+    // turn this suite's strongest check into a no-op while still reporting
+    // green.
+    let awk = find_awk(&path).unwrap_or_else(|| {
+        panic!(
+            "tuning_write_parity: bash+script are present so this suite is RUNNING, but no \
+             `awk` was found on the augmented PATH. The binary-mode oracle cross-check cannot \
+             be skipped -- set DML_AWK to the awk the `dml` CLI itself would use."
+        )
+    });
+    let oracle_prog = oracle_awk_program().unwrap_or_else(|| {
+        panic!(
+            "tuning_write_parity: could not extract the awk program from `_lua_cfg_write` in \
+             cli/src/40-config.sh. The extraction anchors are the literal `V=\"$3\" awk '` and \
+             `' \"$1\" > \"$tmp\"` -- if that function was reformatted, update them here. \
+             This is NOT skippable: it is the only byte-exact oracle comparison in the suite."
+        )
+    });
+    let prog_file = tmp_base.join("oracle.awk");
+    fs::write(&prog_file, &oracle_prog).expect("write extracted oracle awk");
+    // Probed, not assumed -- see `awk_strips_cr`. Reported (not branched on
+    // silently) so a `--nocapture` run shows which platform behaviour the
+    // assertions below were held to.
+    let strips_cr = awk_strips_cr(&awk, &tmp_base);
+    eprintln!(
+        "tuning_write_parity(line endings): awk={} -> {} (BINMODE=3 cross-check is unconditional)",
+        awk.display(),
+        if strips_cr { "TEXT mode, strips CR on read" } else { "binary/Unix, CR preserved" }
+    );
 
     // (label, fixture bytes, value to write). Each round re-seeds BOTH trees
     // with the same bytes, so rounds are independent.
@@ -523,52 +638,76 @@ fn native_lua_tuning_write_matches_cli_for_odd_line_endings() {
         let cli_bytes = fs::read(&cli_file).expect("read cli lua");
         assert_ne!(rust_bytes, fixture.as_bytes(), "[{label}] the file must actually have changed");
 
-        // (A) THE REAL PARITY CLAIM: the oracle's own awk, in binary mode
-        // (== a Linux/WSL gawk), byte-for-byte.
-        if let (Some(awk), Some(prog)) = (find_awk(&bash), oracle_awk_program()) {
-            let prog_file = tmp_base.join("oracle.awk");
-            fs::write(&prog_file, &prog).expect("write extracted oracle awk");
-            let src = tmp_base.join("oracle-input.lua");
-            fs::write(&src, fixture.as_bytes()).expect("write oracle input");
-            let out = Command::new(&awk)
-                .args(["-v", "BINMODE=3", "-f"])
-                .arg(&prog_file)
-                .arg(&src)
-                .env("K", "DURATION")
-                .env("V", value)
-                .output()
-                .expect("spawn the oracle awk in binary mode");
-            assert!(out.status.success(), "[{label}] oracle awk failed: {out:?}");
+        // (A) THE REAL PARITY CLAIM, and a hard requirement: the oracle's own
+        // awk, in binary mode (== a Linux/WSL gawk), byte-for-byte. Both its
+        // prerequisites were resolved (or panicked) before the loop.
+        let src = tmp_base.join("oracle-input.lua");
+        fs::write(&src, fixture.as_bytes()).expect("write oracle input");
+        let out = Command::new(&awk)
+            .args(["-v", "BINMODE=3", "-f"])
+            .arg(&prog_file)
+            .arg(&src)
+            .env("K", "DURATION")
+            .env("V", value)
+            .output()
+            .expect("spawn the oracle awk in binary mode");
+        assert!(out.status.success(), "[{label}] oracle awk failed: {out:?}");
+        assert_eq!(
+            out.stdout,
+            rust_bytes,
+            "[{label}] the port and the ORACLE'S OWN AWK (binary mode) produced different bytes\n\
+             oracle: {:?}\nrust:   {:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&rust_bytes)
+        );
+
+        // (B) the full bash CLI. What to expect depends on what the awk it
+        // drives actually does with a CR -- probed, not assumed, so this is
+        // correct under Git Bash AND under WSL/Linux (which the yq-gate
+        // removal deliberately widened this suite to reach).
+        let strip_cr = |b: &[u8]| -> Vec<u8> { b.iter().copied().filter(|c| *c != b'\r').collect() };
+        if !fixture.contains('\r') {
+            // No CR anywhere: text-mode I/O has nothing to strip, so the two
+            // must agree exactly on every platform. (This is what keeps round
+            // 2 from being a vacuous CR test.)
             assert_eq!(
-                out.stdout,
                 rust_bytes,
-                "[{label}] the port and the ORACLE'S OWN AWK (binary mode) produced different bytes\n\
-                 oracle: {:?}\nrust:   {:?}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&rust_bytes)
+                cli_bytes,
+                "[{label}] CR-free fixture: the port and the bash CLI must be byte-identical\n\
+                 rust: {:?}\ncli:  {:?}",
+                String::from_utf8_lossy(&rust_bytes),
+                String::from_utf8_lossy(&cli_bytes)
+            );
+        } else if strips_cr {
+            // Text-mode awk (Git Bash on Windows): content must still match,
+            // and the documented whole-file LF-flattening must be exactly what
+            // happened -- asserted positively so a change is loud.
+            assert_eq!(
+                strip_cr(&rust_bytes),
+                strip_cr(&cli_bytes),
+                "[{label}] the port and the bash CLI disagree on CONTENT, not merely line endings\n\
+                 rust: {:?}\ncli:  {:?}",
+                String::from_utf8_lossy(&rust_bytes),
+                String::from_utf8_lossy(&cli_bytes)
+            );
+            assert!(
+                !cli_bytes.contains(&b'\r'),
+                "[{label}] awk probed as CR-stripping (TEXT mode), so the CLI was expected to \
+                 flatten the file to LF -- but it kept a CR. Re-read this test's doc comment: \
+                 the recorded platform finding may no longer hold."
             );
         } else {
-            eprintln!("[{label}] NOTE: binary-mode oracle-awk cross-check skipped (no awk / could not extract the program)");
+            // Binary/Unix awk: the oracle's own \r handling is live, so there
+            // is no divergence left to tolerate.
+            assert_eq!(
+                rust_bytes,
+                cli_bytes,
+                "[{label}] awk probed as CR-preserving, so the port and the bash CLI must be \
+                 byte-identical\nrust: {:?}\ncli:  {:?}",
+                String::from_utf8_lossy(&rust_bytes),
+                String::from_utf8_lossy(&cli_bytes)
+            );
         }
-
-        // (B) the full Git-Bash CLI: same content, and exactly the known
-        // line-ending divergence -- see this test's doc comment.
-        let strip_cr = |b: &[u8]| -> Vec<u8> { b.iter().copied().filter(|c| *c != b'\r').collect() };
-        assert_eq!(
-            strip_cr(&rust_bytes),
-            strip_cr(&cli_bytes),
-            "[{label}] the port and the bash CLI disagree on CONTENT, not merely line endings\n\
-             rust: {:?}\ncli:  {:?}",
-            String::from_utf8_lossy(&rust_bytes),
-            String::from_utf8_lossy(&cli_bytes)
-        );
-        assert!(
-            !cli_bytes.contains(&b'\r'),
-            "[{label}] the Git-Bash CLI unexpectedly PRESERVED a CR. That is the good \
-             outcome, but it means the recorded Windows-gawk TEXT-mode finding in this \
-             test's doc comment no longer holds -- re-read it, then tighten this round \
-             back to a plain byte-equality assertion."
-        );
         assert_eq!(
             rust_bytes.contains(&b'\r'),
             fixture.contains('\r'),
