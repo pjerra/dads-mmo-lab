@@ -315,6 +315,42 @@ Ranking note: everything else in Round 2 is polish. This one determines whether
 a tester who installs the app sees a working product or a broken one, so it
 should land before any shareable-release round.
 
+### System-tray presence for the launcher (user request, 2026-07-27)
+
+The user wants to reach the launcher from the **system tray** — the way the
+old closed-source C# tray worked (CLAUDE.md still notes the legacy top-level
+`list`/`status`/`start` text output exists precisely because "the old C# tray
+parses it"). Today the Tauri launcher has **no tray icon at all**: `tauri` is
+declared with `features = []`, so the `tray-icon` feature is off, and
+`tauri.conf.json` has no `trayIcon` block. Closing the window exits the app,
+so there is nothing to go back into.
+
+Everything needed is already present — Tauri 2 has first-class tray support and
+the bundle already ships the icon set (`icons/icon.ico` for Windows).
+
+Fix shape:
+
+- Enable the `tray-icon` feature on the `tauri` dependency and build a
+  `TrayIconBuilder` in the `setup` hook.
+- Menu: **Open DML Launcher**, a status line, **Start / Stop server**, **Quit**.
+  Left-click shows/focuses the window.
+- Intercept the window close event and **hide instead of exit**, so the app
+  keeps living in the tray — this is the behaviour that makes "go into the
+  launcher from the tray" true. Quit stays available from the tray menu.
+- Reflect server state in the tray (icon variant and/or tooltip) off the
+  existing `server-status` store, so the tray answers "is my server up?"
+  without opening the window. That was the old C# tray's main value.
+
+Open decisions: whether close-to-tray is the default or a setting (some users
+expect close to mean close); whether to offer start-with-Windows, which is the
+usual companion to a tray app but is a system-level change; and whether the
+tray's Start/Stop reuse the same confirmation flow the Home card uses.
+
+Small-to-medium, launcher-only, no new backend surface. Pairs naturally with
+the release-build self-configuration item above: a tray app that launches at
+login is exactly the case where "needs four env vars set by a wrapper script"
+breaks down.
+
 ### Incident follow-ups (2026-07-21 docker-network wedge — diagnosed live)
 
 Root cause that night: the distro's Docker network black-holed (connect
