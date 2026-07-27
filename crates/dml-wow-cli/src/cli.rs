@@ -53,6 +53,109 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: ModuleCmd,
     },
+
+    // -- Task 12: read-only database page reads (`dml_wow::{pages,paperdoll,
+    // stats,iteminfo}`) --------------------------------------------------
+
+    /// Real (non-bot) characters currently online (`pages::read_players_online`)
+    PlayersOnline,
+    /// Every real account + its characters (`pages::read_accounts`)
+    Accounts,
+    /// Filtered playerbots browser page (`pages::read_bots`)
+    Bots {
+        /// Name prefix (1-12 letters/digits/underscore)
+        #[arg(long)]
+        name: Option<String>,
+        /// Class id: one of 1-9 or 11 (10 never shipped a class)
+        #[arg(long)]
+        class: Option<u32>,
+        /// Inclusive lower level bound
+        #[arg(long)]
+        min_level: Option<u32>,
+        /// Inclusive upper level bound
+        #[arg(long)]
+        max_level: Option<u32>,
+        /// Online bots only
+        #[arg(long)]
+        online: bool,
+        /// Page size, clamped to 1..=200 (default 50, matching bash)
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long, default_value_t = 0)]
+        offset: u32,
+    },
+    /// `game_tele` locations, optionally filtered by name (`pages::read_teleport_list`)
+    TeleportList {
+        #[arg(long)]
+        search: Option<String>,
+    },
+    /// `item_template` search (`pages::read_items_search`)
+    ItemsSearch {
+        /// Required, non-empty (a LIKE-wrapped substring match)
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        quality: Option<u32>,
+        /// Inclusive lower required-level bound
+        #[arg(long)]
+        min_level: Option<u32>,
+        /// Inclusive upper required-level bound
+        #[arg(long)]
+        max_level: Option<u32>,
+    },
+    /// One character's equipped gear + appearance (`paperdoll::read_paperdoll`)
+    Paperdoll {
+        /// 1-12 letters/digits/underscore
+        name: String,
+    },
+    /// One character's achievement/talent summary (`pages::read_char_progress`)
+    CharProgress {
+        /// 1-12 letters/digits/underscore
+        name: String,
+    },
+    /// One character's full earned-achievement list (`pages::read_achievements`)
+    Achievements {
+        /// 1-12 letters/digits/underscore
+        name: String,
+    },
+    /// The Statistics page envelope — 19 queries, 18 run concurrently (`stats::read_stats`)
+    Stats,
+    /// Wowhead tooltip/icon info for one or more item entries (`iteminfo::read_item_info`)
+    ItemInfo {
+        /// Comma-separated item entry ids, e.g. `25,116,6948` (max 25)
+        #[arg(value_parser = parse_item_ids)]
+        ids: ItemIds,
+    },
+}
+
+/// The parsed form of `item-info`'s positional argument. A thin newtype
+/// rather than a bare `Vec<u32>` field: clap's derive treats a `Vec<T>`
+/// field as MULTIPLE occurrences of a scalar `T` (one `u32` per argv token),
+/// not one token parsed into a collection — wrapping opts back into "one
+/// token, custom parser", the same way `console-tail`'s `--lines` stays a
+/// plain `u32` field with a `.range()`-adapted parser rather than a `Vec`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemIds(pub Vec<u32>);
+
+/// `dml-wow item-info`'s positional argument, `<ID>[,<ID>...]`. A CLI-argv
+/// shape decision (bad ids are a usage error, exit 2), the same idiom as
+/// `ConsoleTail`'s `--lines` range gate above: mirrors the bash CLI's own
+/// gate on `--entries` (`90-main.sh`'s `item-info` arm — `^[0-9]+(,[0-9]+)*$`
+/// then reject a count over 25) as a clap value_parser, so a malformed or
+/// oversized id list never reaches `iteminfo::read_item_info` unguarded and
+/// `run.rs`'s dispatch arm stays a single call.
+fn parse_item_ids(raw: &str) -> Result<ItemIds, String> {
+    let mut ids = Vec::new();
+    for part in raw.split(',') {
+        let id: u32 = part.parse().map_err(|_| {
+            format!("not a valid item id: {part:?} (want comma-separated ids, e.g. 25,116,6948)")
+        })?;
+        ids.push(id);
+    }
+    if ids.len() > 25 {
+        return Err(format!("too many ids ({}) -- 25 max per call", ids.len()));
+    }
+    Ok(ItemIds(ids))
 }
 
 /// `dml-wow config …` — mirrors the bash CLI's `dml wow config` arms, with
@@ -301,6 +404,200 @@ mod tests {
         match Cli::try_parse_from(["dml-wow", "module", "catalog"]).unwrap().command {
             Cmd::Module { cmd } => assert!(matches!(cmd, ModuleCmd::Catalog)),
             other => panic!("expected Module, got {other:?}"),
+        }
+    }
+
+    // -- Task 12: database page reads ---------------------------------------
+
+    #[test]
+    fn parses_players_online_accounts_and_stats() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "players-online"]).unwrap().command,
+            Cmd::PlayersOnline
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "accounts"]).unwrap().command,
+            Cmd::Accounts
+        ));
+        assert!(matches!(Cli::try_parse_from(["dml-wow", "stats"]).unwrap().command, Cmd::Stats));
+    }
+
+    #[test]
+    fn players_online_accounts_and_stats_reject_stray_args() {
+        // None of these take flags/positionals -- an unexpected one is a
+        // usage error, not silently ignored.
+        assert!(Cli::try_parse_from(["dml-wow", "players-online", "extra"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "accounts", "--bogus"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "stats", "--bogus"]).is_err());
+    }
+
+    #[test]
+    fn parses_bots_defaults() {
+        match Cli::try_parse_from(["dml-wow", "bots"]).unwrap().command {
+            Cmd::Bots { name, class, min_level, max_level, online, limit, offset } => {
+                assert_eq!(name, None);
+                assert_eq!(class, None);
+                assert_eq!(min_level, None);
+                assert_eq!(max_level, None);
+                assert!(!online);
+                assert_eq!(limit, None);
+                assert_eq!(offset, 0);
+            }
+            other => panic!("expected Bots, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_bots_all_flags() {
+        match Cli::try_parse_from([
+            "dml-wow", "bots", "--name", "Foo", "--class", "5", "--min-level", "10",
+            "--max-level", "20", "--online", "--limit", "75", "--offset", "100",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Bots { name, class, min_level, max_level, online, limit, offset } => {
+                assert_eq!(name.as_deref(), Some("Foo"));
+                assert_eq!(class, Some(5));
+                assert_eq!(min_level, Some(10));
+                assert_eq!(max_level, Some(20));
+                assert!(online);
+                assert_eq!(limit, Some(75));
+                assert_eq!(offset, 100);
+            }
+            other => panic!("expected Bots, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bots_rejects_non_numeric_flags() {
+        for argv in [
+            vec!["dml-wow", "bots", "--class", "not-a-number"],
+            vec!["dml-wow", "bots", "--min-level", "abc"],
+            vec!["dml-wow", "bots", "--limit", "-5"],
+            vec!["dml-wow", "bots", "--offset", "abc"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn parses_teleport_list_default_and_search() {
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "teleport-list"]).unwrap().command,
+            Cmd::TeleportList { search: None }
+        ));
+        match Cli::try_parse_from(["dml-wow", "teleport-list", "--search", "Orgrimmar"])
+            .unwrap()
+            .command
+        {
+            Cmd::TeleportList { search } => assert_eq!(search.as_deref(), Some("Orgrimmar")),
+            other => panic!("expected TeleportList, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_items_search_requires_name() {
+        match Cli::try_parse_from(["dml-wow", "items-search", "--name", "Hearthstone"])
+            .unwrap()
+            .command
+        {
+            Cmd::ItemsSearch { name, quality, min_level, max_level } => {
+                assert_eq!(name, "Hearthstone");
+                assert_eq!(quality, None);
+                assert_eq!(min_level, None);
+                assert_eq!(max_level, None);
+            }
+            other => panic!("expected ItemsSearch, got {other:?}"),
+        }
+        // `--name` is required at the clap level -- an empty/whitespace-only
+        // value still parses here (it is `run.rs`'s job to reject that, same
+        // as `wow_items_search_read`'s own pre-check), but a MISSING flag is
+        // a usage error.
+        assert!(Cli::try_parse_from(["dml-wow", "items-search"]).is_err());
+    }
+
+    #[test]
+    fn parses_items_search_all_flags() {
+        match Cli::try_parse_from([
+            "dml-wow", "items-search", "--name", "Sword", "--quality", "4", "--min-level", "10",
+            "--max-level", "60",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::ItemsSearch { name, quality, min_level, max_level } => {
+                assert_eq!(name, "Sword");
+                assert_eq!(quality, Some(4));
+                assert_eq!(min_level, Some(10));
+                assert_eq!(max_level, Some(60));
+            }
+            other => panic!("expected ItemsSearch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_paperdoll_char_progress_achievements_names() {
+        match Cli::try_parse_from(["dml-wow", "paperdoll", "Hypeer"]).unwrap().command {
+            Cmd::Paperdoll { name } => assert_eq!(name, "Hypeer"),
+            other => panic!("expected Paperdoll, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "char-progress", "Hypeer"]).unwrap().command {
+            Cmd::CharProgress { name } => assert_eq!(name, "Hypeer"),
+            other => panic!("expected CharProgress, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "achievements", "Hypeer"]).unwrap().command {
+            Cmd::Achievements { name } => assert_eq!(name, "Hypeer"),
+            other => panic!("expected Achievements, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn paperdoll_char_progress_achievements_require_the_name_positional() {
+        assert!(Cli::try_parse_from(["dml-wow", "paperdoll"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "char-progress"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "achievements"]).is_err());
+    }
+
+    #[test]
+    fn parses_item_info_single_and_multiple_ids() {
+        match Cli::try_parse_from(["dml-wow", "item-info", "25"]).unwrap().command {
+            Cmd::ItemInfo { ids } => assert_eq!(ids.0, vec![25]),
+            other => panic!("expected ItemInfo, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "item-info", "25,116,6948"]).unwrap().command {
+            Cmd::ItemInfo { ids } => assert_eq!(ids.0, vec![25, 116, 6948]),
+            other => panic!("expected ItemInfo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn item_info_requires_the_ids_positional() {
+        assert!(Cli::try_parse_from(["dml-wow", "item-info"]).is_err());
+    }
+
+    #[test]
+    fn item_info_rejects_malformed_ids() {
+        for argv in [
+            vec!["dml-wow", "item-info", "abc"],
+            vec!["dml-wow", "item-info", "25,"],
+            vec!["dml-wow", "item-info", "25,,116"],
+            vec!["dml-wow", "item-info", "25, 116"], // whitespace not allowed
+            vec!["dml-wow", "item-info", ""],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn item_info_rejects_more_than_25_ids() {
+        let too_many = (1..=26).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        assert!(Cli::try_parse_from(["dml-wow", "item-info", &too_many]).is_err());
+        // Exactly 25 is fine.
+        let ok = (1..=25).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        match Cli::try_parse_from(["dml-wow", "item-info", &ok]).unwrap().command {
+            Cmd::ItemInfo { ids } => assert_eq!(ids.0.len(), 25),
+            other => panic!("expected ItemInfo, got {other:?}"),
         }
     }
 }

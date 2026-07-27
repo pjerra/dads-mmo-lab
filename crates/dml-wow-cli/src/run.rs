@@ -22,12 +22,17 @@ use std::sync::{Arc, Mutex};
 use dml_core::engine::docker_program;
 use dml_core::error::CmdError;
 use dml_wow::config::ConfigReader;
-use dml_wow::db::DbConfig;
+use dml_wow::db::{DbConfig, DbError};
 use dml_wow::soap::SoapConfig;
 use serde_json::{json, Value};
 
 use crate::cli::{Cmd, ConfigCmd, ModuleCmd, TuningCmd};
 use crate::out::{emit_err, emit_ok};
+
+/// The hint every `DB_UNREACHABLE` envelope below carries — the SAME text
+/// `db_err_to_cmd`/`stats_err_to_cmd` use in the launcher's own native-mode
+/// Tauri commands (`launcher/src-tauri/src/lib.rs`).
+const DB_UNREACHABLE_HINT: &str = "Is the server running? (docker + MySQL on 127.0.0.1:3306)";
 
 /// Print a `dml-wow` call's `Result` as the one envelope it maps to, and
 /// return the process exit code. NOT a second output path — it is the
@@ -41,6 +46,33 @@ fn emit_result(result: Result<Value, CmdError>) -> i32 {
     match result {
         Ok(data) => emit_ok(data),
         Err(e) => emit_err(&e.code, &e.message, &e.hint),
+    }
+}
+
+/// Print a `dml_wow` DB page-reader's `Result` the way EVERY Task 12
+/// subcommand maps it: `Err(DbError)` collapses to `DB_UNREACHABLE` for BOTH
+/// variants (a query error on a reachable DB reports the same code as an
+/// unreachable one) — the exact collapse `db_err_to_cmd`/`stats_err_to_cmd`
+/// apply in the launcher's own native-mode Tauri commands, so a script
+/// driving both surfaces sees identical error codes for identical failures.
+fn emit_db_result(result: Result<Value, DbError>) -> i32 {
+    match result {
+        Ok(data) => emit_ok(data),
+        Err(e) => emit_err("DB_UNREACHABLE", &e.to_string(), DB_UNREACHABLE_HINT),
+    }
+}
+
+/// Same collapse as [`emit_db_result`], but for a reader whose `Ok(None)`
+/// means "no such character" — `paperdoll::read_paperdoll`,
+/// `pages::read_char_progress` and `pages::read_achievements` all use this
+/// shape (see each's own doc comment). `not_found_message` is the arm's own
+/// wording (paperdoll's differs slightly from char-progress's/
+/// achievements'), matching the launcher's `wow_*_read` commands exactly.
+fn emit_db_option_result(result: Result<Option<Value>, DbError>, not_found_message: &str) -> i32 {
+    match result {
+        Ok(Some(data)) => emit_ok(data),
+        Ok(None) => emit_err("NOT_FOUND", not_found_message, ""),
+        Err(e) => emit_err("DB_UNREACHABLE", &e.to_string(), DB_UNREACHABLE_HINT),
     }
 }
 
@@ -127,6 +159,120 @@ pub fn dispatch(command: Cmd) -> i32 {
         Cmd::Config { cmd } => dispatch_config(cmd),
         Cmd::Tuning { cmd } => dispatch_tuning(cmd),
         Cmd::Module { cmd } => dispatch_module(cmd),
+
+        Cmd::PlayersOnline => {
+            let cfg = DbConfig::from_env();
+            emit_db_result(dml_wow::pages::read_players_online(&cfg))
+        }
+
+        Cmd::Accounts => {
+            let cfg = DbConfig::from_env();
+            emit_db_result(dml_wow::pages::read_accounts(&cfg))
+        }
+
+        Cmd::Bots { name, class, min_level, max_level, online, limit, offset } => {
+            // Validate BEFORE any SQL is built, matching the bash arm's own
+            // doctrine (90-main.sh ~3884-3894) and the launcher's identical
+            // native-mode pre-check (`wow_bots_read`, lib.rs) — not a defense
+            // the bound-parameter query builder in `dml_wow::pages` needs,
+            // parity with both siblings for invalid input.
+            if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
+                if !dml_wow::paperdoll::valid_charname(n) {
+                    return emit_err(
+                        "BAD_ARG",
+                        &format!("Invalid name prefix: {n}"),
+                        "1-12 letters/digits/underscore.",
+                    );
+                }
+            }
+            if let Some(c) = class {
+                if !dml_wow::pages::valid_bot_class(c) {
+                    return emit_err("BAD_ARG", &format!("Invalid class id: {c}"), "1-9 or 11.");
+                }
+            }
+            let cfg = DbConfig::from_env();
+            let f = dml_wow::pages::BotFilters {
+                name,
+                class,
+                min_level,
+                max_level,
+                online,
+                limit: dml_wow::pages::clamp_limit(limit),
+                offset,
+            };
+            emit_db_result(dml_wow::pages::read_bots(&cfg, &f))
+        }
+
+        Cmd::TeleportList { search } => {
+            let cfg = DbConfig::from_env();
+            emit_db_result(dml_wow::pages::read_teleport_list(&cfg, search.as_deref()))
+        }
+
+        Cmd::ItemsSearch { name, quality, min_level, max_level } => {
+            // Rejects an empty/whitespace-only name BEFORE any SQL is built,
+            // matching the bash arm's own pre-check and the launcher's
+            // identical native-mode one (`wow_items_search_read`, lib.rs).
+            if name.trim().is_empty() {
+                return emit_err(
+                    "BAD_ARG",
+                    "items search requires a non-empty --name",
+                    "Example: dml-wow items-search --name hearthstone",
+                );
+            }
+            let cfg = DbConfig::from_env();
+            let opts = dml_wow::pages::ItemSearchOpts { name, quality, min_level, max_level };
+            emit_db_result(dml_wow::pages::read_items_search(&cfg, &opts))
+        }
+
+        Cmd::Paperdoll { name } => {
+            if !dml_wow::paperdoll::valid_charname(&name) {
+                return emit_err("BAD_ARG", &format!("Invalid character name: {name}"), "");
+            }
+            let cfg = DbConfig::from_env();
+            emit_db_option_result(
+                dml_wow::paperdoll::read_paperdoll(&cfg, &name),
+                &format!("No such character or no equipped items: {name}"),
+            )
+        }
+
+        Cmd::CharProgress { name } => {
+            if !dml_wow::paperdoll::valid_charname(&name) {
+                return emit_err("BAD_ARG", &format!("Invalid character name: {name}"), "");
+            }
+            let cfg = DbConfig::from_env();
+            emit_db_option_result(
+                dml_wow::pages::read_char_progress(&cfg, &name),
+                &format!("No such character: {name}"),
+            )
+        }
+
+        Cmd::Achievements { name } => {
+            if !dml_wow::paperdoll::valid_charname(&name) {
+                return emit_err("BAD_ARG", &format!("Invalid character name: {name}"), "");
+            }
+            let cfg = DbConfig::from_env();
+            emit_db_option_result(
+                dml_wow::pages::read_achievements(&cfg, &name),
+                &format!("No such character: {name}"),
+            )
+        }
+
+        Cmd::Stats => {
+            let cfg = DbConfig::from_env();
+            emit_db_result(dml_wow::stats::read_stats(&cfg))
+        }
+
+        Cmd::ItemInfo { ids } => match dml_wow::cachestatus::cache_dir() {
+            Some(cache_root) => {
+                let cfg = DbConfig::from_env();
+                emit_ok(dml_wow::iteminfo::read_item_info(&cache_root, Some(&cfg), &ids.0))
+            }
+            None => emit_err(
+                "INTERNAL",
+                "Could not resolve the wowhead cache directory",
+                "",
+            ),
+        },
     }
 }
 
