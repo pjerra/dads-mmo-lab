@@ -521,7 +521,7 @@ pub fn read_summary(meta_path: &Path) -> Value {
 // ---------------------------------------------------------------------------
 // Automatic backups: the STOP/RESTART pre-down safety dump and the 6h
 // background-interval dump `lib.rs` fires in native mode (see
-// `games_lifecycle_native_blocking` and the interval watcher started from
+// `games_lifecycle_stream` and the interval watcher started from
 // `run()`'s `.setup()`). Both are chars-only, named via the fixed literals
 // below, and feed the SAME keep-`DML_BACKUP_KEEP` (default 10) prune pool as
 // every manual backup — the file itself is a standard `wow-<ts>.sql.gz`, so
@@ -978,7 +978,7 @@ fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_j
 /// The blocking flow itself (real docker exec + gzip I/O) — run under
 /// `spawn_blocking`. `emit` sends one NDJSON event per call, matching the
 /// `wow world-restart` streamed-command convention (see
-/// `wow_world_restart_native_blocking`): every return path emits its own
+/// `lifecycle::world_restart_stream`): every return path emits its own
 /// terminal event(s) first, so the caller never needs to synthesize one. A
 /// port of the `backup create` arm (`90-main.sh:3662-3707`), extended with
 /// the optional display `name` (backup display names) the CLI has no

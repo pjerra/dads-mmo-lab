@@ -265,6 +265,42 @@ pub fn run_streamed_unbounded(
     child.wait().ok()
 }
 
+/// Spawn `cmd`, wait up to `timeout` wall-clock, and — crucially — **kill and
+/// reap** the child if it overruns instead of abandoning it. The previous
+/// idiom ran a blocking `output()` on a detached helper thread and left it
+/// (and its un-reaped child holding open stdio pipes) alive forever on a hung
+/// `docker`/`tailscale` subprocess; repeated calls against a wedged engine
+/// slowly leaked threads + process handles. Here the child is owned, polled,
+/// and terminated on the deadline. Output is small for every caller (a docker
+/// env list, a tailscale status) so a full drain via `wait_with_output()`
+/// after exit cannot deadlock on the pipe buffer.
+pub fn output_bounded(mut cmd: std::process::Command, timeout: std::time::Duration) -> Option<std::process::Output> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap so it never zombies
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    child.wait_with_output().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +444,32 @@ mod tests {
         let bad = run_captured(OsStr::new(shell_program()), &shell_args(&exit7_path), Duration::from_secs(10));
         assert!(!bad.success);
         assert_eq!(bad.code, Some(7));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_bounded_returns_output_for_a_fast_command() {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "echo", "bounded_ok"]);
+        let out = super::output_bounded(cmd, std::time::Duration::from_secs(5))
+            .expect("fast command should return Some");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("bounded_ok"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn output_bounded_kills_and_returns_none_on_timeout() {
+        // `ping -n 20` runs ~19s; a 300ms bound must return None well before
+        // that, proving the child was killed rather than waited out.
+        let start = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "ping", "-n", "20", "127.0.0.1"]);
+        let out = super::output_bounded(cmd, std::time::Duration::from_millis(300));
+        assert!(out.is_none(), "an overrunning command must time out to None");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must return promptly after the deadline, not wait for the child"
+        );
     }
 }

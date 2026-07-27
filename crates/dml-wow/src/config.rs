@@ -23,6 +23,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use dml_core::error::CmdError;
+use dml_core::proc::output_bounded;
+
 use serde_json::Value;
 
 /// The single title this launcher drives (mirrors `LAN_TITLE` in lib.rs and
@@ -557,6 +560,74 @@ pub fn conf_reload_cmd(file: &str) -> Option<&'static str> {
 /// knowledge. Re-exported here under the same names.
 pub use dml_core::conf::{float_in_range, int_in_range, is_bool01, sanitize_text_value};
 
+/// Small `CmdError` builder to keep the `set)` port's many typed errors
+/// readable — every field the bash `json_err`/exit-1 pairs carry, in one call.
+pub fn cfgset_err(code: &str, message: impl Into<String>, hint: impl Into<String>) -> CmdError {
+    CmdError { code: code.into(), message: message.into(), hint: hint.into() }
+}
+
+/// Legacy-env cleanup for one derived `AC_*` name against the override —
+/// shared by both routes. Mirrors `_cfg_env_read` non-empty check +
+/// `_cfg_env_remove` (`40-config.sh:212-220`, `276-281`): a present-but-empty
+/// override value reads as "absent" too, matching bash's `[[ -n … ]]` gate.
+/// Returns `Ok(true)` iff the key WAS present (and is now removed).
+pub fn cfgset_clean_legacy_env(override_path: &std::path::Path, ename: &str) -> Result<bool, CmdError> {
+    let present = std::fs::read_to_string(override_path)
+        .ok()
+        .and_then(|t| crate::config::parse_override_env(&t).get(ename).cloned())
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !present {
+        return Ok(false);
+    }
+    crate::config::override_env_remove(override_path, ename).map_err(|e| {
+        cfgset_err("WRITE_FAILED", format!("Could not update the config override: {e}"), "")
+    })?;
+    Ok(true)
+}
+
+/// Port of `_cfg_env_frozen` (`40-config.sh:266-271`): `true` iff the
+/// running `ac-worldserver` container's CREATION-TIME environment carries
+/// `ename`. Degrades to `false` (not frozen) on ANY error/timeout/docker-down
+/// — matches the bash `return 1` fallback exactly (a clean override with no
+/// frozen legacy env is the correct read when there is no way to ask). Bounds
+/// the `docker inspect` call so a hung/absent engine can never stall a save;
+/// the check runs on a helper thread that is left to finish (or hang) on its
+/// own past the timeout rather than being joined, so the caller is never
+/// blocked longer than `timeout`.
+pub fn env_frozen(ename: &str) -> bool {
+    env_frozen_with(
+        &crate::native::docker_program(),
+        "ac-worldserver",
+        ename,
+        std::time::Duration::from_secs(3),
+    )
+}
+
+pub fn env_frozen_with(
+    program: &std::ffi::OsStr,
+    container: &str,
+    ename: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let ename_prefix = format!("{ename}=");
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", container]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match output_bounded(cmd, timeout) {
+        Some(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            text.lines().any(|l| l.starts_with(ename_prefix.as_str()))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -999,5 +1070,19 @@ services:
         assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
         assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn env_frozen_with_missing_binary_degrades_to_false() {
+        // No such executable -> the spawn itself fails -> degrades to `false`,
+        // matching the bash oracle's docker-down fallback. No live docker/
+        // server needed (this is the whole point of the degrade rule).
+        let program = std::ffi::OsStr::new("dml-b2a-definitely-not-a-real-binary-xyz");
+        assert!(!env_frozen_with(
+            program,
+            "ac-worldserver",
+            "AC_RATE_XP_KILL",
+            std::time::Duration::from_millis(500)
+        ));
     }
 }

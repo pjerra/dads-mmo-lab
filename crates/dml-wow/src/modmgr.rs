@@ -302,7 +302,7 @@ pub fn rebuild_pending_clear(sdir: &Path) {
 // that streams progress reuses this ONE constructor instead of each owning a
 // near-duplicate. `section_start`/`section_end`/`done`/`error` DO carry a
 // section name, so those stay local to their `lib.rs` orchestration
-// function, matching `wow_world_restart_native_blocking`'s convention.
+// function, matching `lifecycle::world_restart_stream`'s convention.
 //
 // The constructors themselves are game-agnostic and now live in
 // `dml_core::events`; re-exported here so every existing
@@ -430,7 +430,7 @@ pub fn pull_summary(before: &str, after: &str) -> String {
 /// remote -> mod-playerbots remote (only if the module is present) -> branch
 /// -> explicit `--backup`/`--no-backup`). `None` means every gate passed (the
 /// real function proceeds to the backup + pull steps). The real
-/// `wow_update_native_blocking` (`lib.rs`) evaluates the SAME conditions in
+/// `maint::update_stream` evaluates the SAME conditions in
 /// the SAME order directly (each with its own message/hint) rather than
 /// calling this helper -- it exists so that order is independently asserted
 /// against synthetic states without a live git checkout.

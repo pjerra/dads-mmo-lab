@@ -4,19 +4,25 @@
 //! case in `cli/src/90-main.sh:3067-3483`.
 //!
 //! ARCHITECTURE. Pure command-string builders, validators, bound-param SQL
-//! text, and preset-file (de)serialization live here — no SOAP/DB/Tauri.
-//! `lib.rs` wires these to `soap::exec`/`db::query_with_params`/`std::fs`,
-//! the same split `dml::soap_cmds` (SOAP builders) and `dml::modmgr`
-//! (module orchestration primitives) already use. `party online`/`party
+//! text, and preset-file (de)serialization come first — no SOAP/DB/Tauri.
+//! Below them sit the live DB read helpers that bind those SQL texts
+//! ([`party_online_guid`], [`group_member_guids`], [`char_name_by_guid`],
+//! [`bot_member_names`], [`bot_member_classes`], [`wait_new_member`]) and the
+//! one STREAMED orchestration, [`party_preset_load_stream`]. That live half
+//! moved out of the launcher's `lib.rs` in the cargo-workspace refactor
+//! (Task 9) so the standalone CLI can drive it too; the SOAP serialization
+//! mutex arrives as a plain `Arc<Mutex<()>>` parameter. `party online`/`party
 //! specs`/`party list` are OUT of scope here — they were ported earlier
-//! (task D1a: `pages::read_party_online`, `party_specs`) and this task's own
-//! `dismiss-all`/`preset-save`/`preset-load` reuse their bot-membership SQL
-//! shape, not their code.
+//! (task D1a: `pages::read_party_online`, `party_specs`) and this module's
+//! own `dismiss-all`/`preset-save`/`preset-load` reuse their bot-membership
+//! SQL shape, not their code.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use dml_core::error::CmdError;
 
+use super::db::{cell_string, db_unreachable_err, sql_row_int};
 use super::soap_cmds::valid_charname;
 
 fn bad_arg(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
@@ -345,6 +351,207 @@ pub fn parse_import_classes(classes: &str) -> Result<Vec<String>, CmdError> {
         out.push(c.to_string());
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Live DB reads + the `preset-load` stream — moved out of the launcher's
+// `lib.rs` by the cargo-workspace refactor (Task 9). Every read below is
+// bound-param over `db::query_with_params` against the Characters DB (the
+// same schema `party online`/`party list`/the gm bridge commands already
+// read).
+// ---------------------------------------------------------------------------
+
+/// The DML state dir that holds saved presets, or an `INTERNAL` error when
+/// neither `USERPROFILE` nor `HOME` is set.
+pub fn preset_dir_or_internal_err() -> Result<std::path::PathBuf, CmdError> {
+    crate::party::preset_dir().ok_or_else(|| CmdError {
+        code: "INTERNAL".into(),
+        message: "could not resolve the DML state directory (USERPROFILE/HOME not set)".into(),
+        hint: String::new(),
+    })
+}
+
+/// `_party_online_guid` (`50-party.sh:46-49`) over a direct MySQL
+/// connection. Any query failure reads as "not online" (`None`), matching
+/// the bash's own `2>/dev/null` swallow — same doctrine as `char_is_online`.
+pub fn party_online_guid(cfg: &crate::db::DbConfig, name: &str) -> Option<i64> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::ONLINE_GUID_SQL, params)
+        .ok()
+        .and_then(|res| sql_row_int(res.rows.first().and_then(|r| r.first())))
+}
+
+/// `_party_group_member_guids` (`50-party.sh:52-55`).
+pub fn group_member_guids(cfg: &crate::db::DbConfig, pguid: i64) -> Vec<i64> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::GROUP_MEMBER_GUIDS_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
+        .unwrap_or_default()
+}
+
+/// Bot's name-by-guid lookup after a successful join (`90-main.sh:3102,
+/// 3417`).
+pub fn char_name_by_guid(cfg: &crate::db::DbConfig, guid: i64) -> Option<String> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(guid)];
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::CHAR_NAME_BY_GUID_SQL, params)
+        .ok()
+        .and_then(|res| cell_string(res.rows.first().and_then(|r| r.first())))
+}
+
+/// The bot-members-of-a-party names query, shared by `dismiss-all` and
+/// `preset-load`'s kick phase ([`crate::party::BOT_MEMBER_NAMES_SQL`]).
+/// Unlike `party_online_guid`/`group_member_guids`/`char_name_by_guid`
+/// (which swallow query failure exactly like the oracle's own `2>/dev/null`
+/// helpers do), a failure here MUST surface: `dismiss-all`'s bash caller
+/// explicitly checks this query and exits `DB_UNREACHABLE "Could not read
+/// the party"` on failure (`90-main.sh:3195-3196`) rather than treating an
+/// unreachable DB as "zero bots" -- so this returns `Result`, not a
+/// silently-emptied `Vec`.
+pub fn bot_member_names(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::BOT_MEMBER_NAMES_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
+        .map_err(|_| db_unreachable_err("Could not read the party"))
+}
+
+/// `preset-save`'s bot-classes query ([`crate::party::
+/// BOT_MEMBER_CLASSES_SQL`]). Same doctrine as `bot_member_names`: the
+/// oracle's `preset-save` caller checks this query and exits
+/// `DB_UNREACHABLE "Could not read the party"` on failure
+/// (`90-main.sh:3302-3303`), so a query error must propagate rather than be
+/// swallowed into an empty (and thus falsely "no bots to save") list.
+pub fn bot_member_classes(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::BOT_MEMBER_CLASSES_SQL, params)
+        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
+        .map_err(|_| db_unreachable_err("Could not read the party"))
+}
+
+/// `_party_wait_new_member` (`50-party.sh:85-101`): poll up to
+/// `poll_tries_from_env()` times (sleeping `poll_sleep_from_env()` between)
+/// for a group member guid that wasn't in `before`. The per-iteration
+/// membership test is [`crate::party::find_new_member`] (pure,
+/// unit-tested); this wrapper owns only the retry/sleep mechanics.
+pub fn wait_new_member(cfg: &crate::db::DbConfig, pguid: i64, before: &[i64]) -> Option<i64> {
+    let before_set: std::collections::HashSet<i64> = before.iter().copied().collect();
+    let tries = crate::party::poll_tries_from_env();
+    let sleep = crate::party::poll_sleep_from_env();
+    for i in 0..tries {
+        let now = group_member_guids(cfg, pguid);
+        if let Some(g) = crate::party::find_new_member(&now, pguid, &before_set) {
+            return Some(g);
+        }
+        if i + 1 < tries && !sleep.is_zero() {
+            std::thread::sleep(sleep);
+        }
+    }
+    None
+}
+
+const PRESET_LOAD_SECTION: &str = "preset-load";
+
+/// `party preset-load`'s full orchestration (`90-main.sh:3348-3435`): kick
+/// phase (replace semantics — every current bot goes, best-effort per bot)
+/// then a join phase (one `dml_addclass` + new-member poll per preset
+/// class line, talents/gear whispers on a successful join). Streamed NDJSON
+/// (`section_start`/`line`/`section_end`/`done`/`error`) — same vocabulary
+/// as `modmgr::module_install_stream`.
+pub fn party_preset_load_stream(
+    player: String,
+    name: String,
+    lock: Arc<std::sync::Mutex<()>>,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::modmgr::{done_event, error_event, line_event, section_end, section_start};
+
+    emit(section_start(PRESET_LOAD_SECTION));
+
+    let dir = match preset_dir_or_internal_err() {
+        Ok(d) => d,
+        Err(e) => {
+            emit(section_end(PRESET_LOAD_SECTION, "error"));
+            emit(error_event(&e.code, e.message, &e.hint));
+            return;
+        }
+    };
+    let path = crate::party::preset_path(&dir, &name);
+    if !path.is_file() {
+        emit(section_end(PRESET_LOAD_SECTION, "error"));
+        emit(error_event("NOT_FOUND", format!("No preset named {name}"), ""));
+        return;
+    }
+
+    let db_cfg = crate::db::DbConfig::from_env();
+    let Some(pguid) = party_online_guid(&db_cfg, &player) else {
+        emit(section_end(PRESET_LOAD_SECTION, "error"));
+        emit(error_event(
+            "NOT_FOUND",
+            format!("Character not online: {player}"),
+            "Log the character into the game first.",
+        ));
+        return;
+    };
+
+    let soap_cfg = crate::soap::SoapConfig::load();
+
+    // Kick phase (replace semantics): every current bot goes. Byte-faithful
+    // swallow here (unlike `dismiss-all`/`preset-save`'s propagation): bash's
+    // own `kicklist="$(db_chars_query ...)" || kicklist=""` at
+    // `90-main.sh:3383` silently treats a query failure as "nothing to kick"
+    // too.
+    for b in bot_member_names(&db_cfg, pguid).unwrap_or_default() {
+        if !crate::soap_cmds::valid_charname(&b) {
+            continue;
+        }
+        let kicked_ok = {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(crate::soap::exec(&soap_cfg, &format!("dml_uninvite {b}")), crate::soap::SoapOutcome::Ok(_))
+        };
+        emit(line_event(if kicked_ok { "info" } else { "warn" }, if kicked_ok { format!("kicked {b}") } else { format!("could not kick {b}") }));
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = crate::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+    }
+
+    // Join phase: one addclass + new-member poll per preset class line.
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    let (mut requested, mut joined) = (0u32, 0u32);
+    for cls in crate::party::parse_preset_classes(&content) {
+        if !crate::party::valid_bot_class(&cls) {
+            emit(line_event("warn", format!("skipping unknown class: {cls}")));
+            continue;
+        }
+        requested += 1;
+        let before = group_member_guids(&db_cfg, pguid);
+        let fired_ok = {
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(
+                crate::soap::exec(&soap_cfg, &format!("dml_addclass {player} {cls}")),
+                crate::soap::SoapOutcome::Ok(_)
+            )
+        };
+        if !fired_ok {
+            emit(line_event("warn", format!("add {cls} was rejected")));
+            continue;
+        }
+        match wait_new_member(&db_cfg, pguid, &before) {
+            Some(g) => {
+                joined += 1;
+                match char_name_by_guid(&db_cfg, g) {
+                    Some(bname) => {
+                        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = crate::soap::exec(&soap_cfg, &crate::party::talents_autopick_whisper_cmd(&player, &bname));
+                        let _ = crate::soap::exec(&soap_cfg, &crate::party::autogear_whisper_cmd(&player, &bname));
+                        emit(line_event("info", format!("{bname} joined -- talents + gear applied")));
+                    }
+                    None => emit(line_event("info", format!("a {cls} joined"))),
+                }
+            }
+            None => emit(line_event("warn", format!("{cls} did not attach in time"))),
+        }
+    }
+
+    emit(section_end(PRESET_LOAD_SECTION, "ok"));
+    emit(done_event(serde_json::json!({"loaded": true, "requested": requested, "joined": joined})));
 }
 
 #[cfg(test)]

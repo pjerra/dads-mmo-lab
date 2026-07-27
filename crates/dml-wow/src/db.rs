@@ -31,6 +31,8 @@
 
 use std::path::PathBuf;
 
+use dml_core::error::CmdError;
+
 /// Loopback host the native stack publishes MySQL on.
 pub const DB_HOST: &str = "127.0.0.1";
 /// The only DB user the stack (and `dml`) authenticates as.
@@ -354,6 +356,31 @@ pub fn execute(
     Ok(conn.affected_rows())
 }
 
+/// Decode one `characters`-row cell to `i64`, tolerating both the binary
+/// protocol's native `Int`/`UInt` decode and (defensively) a text fallback --
+/// `guid`/`race`/`online` are all integer columns, but [`db::SqlValue`]'s
+/// `Text` variant is the safe catch-all for anything the driver didn't map to
+/// `Int`.
+pub fn sql_row_int(v: Option<&crate::db::SqlValue>) -> Option<i64> {
+    match v {
+        Some(crate::db::SqlValue::Int(i)) => Some(*i),
+        Some(crate::db::SqlValue::Text(s)) => s.parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+pub fn cell_string(v: Option<&crate::db::SqlValue>) -> Option<String> {
+    match v {
+        Some(crate::db::SqlValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        Some(crate::db::SqlValue::Int(i)) => Some(i.to_string()),
+        _ => None,
+    }
+}
+
+pub fn db_unreachable_err(message: impl Into<String>) -> CmdError {
+    CmdError { code: "DB_UNREACHABLE".into(), message: message.into(), hint: "Is ac-database running?".into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +609,15 @@ BLANK=
         let res = query_with_params(&cfg, Database::Auth, "SELECT ? AS echoed", params)
             .expect("bound-param SELECT on a reachable DB");
         assert_eq!(res.rows, vec![vec![SqlValue::Text(tricky.to_string())]]);
+    }
+
+    #[test]
+    fn sql_row_int_reads_int_and_text_variants() {
+        use crate::db::SqlValue;
+        assert_eq!(sql_row_int(Some(&SqlValue::Int(42))), Some(42));
+        assert_eq!(sql_row_int(Some(&SqlValue::Text("7".into()))), Some(7));
+        assert_eq!(sql_row_int(Some(&SqlValue::Text("nope".into()))), None);
+        assert_eq!(sql_row_int(Some(&SqlValue::Null)), None);
+        assert_eq!(sql_row_int(None), None);
     }
 }

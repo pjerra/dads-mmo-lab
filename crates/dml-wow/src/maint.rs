@@ -3,9 +3,15 @@
 //! `docker-usage`, `port-check`, `update-check`. These are the first
 //! non-DB/non-SOAP shell-outs ported off `dml` (docker disk usage, docker
 //! port bindings, git behind-counts) — proving the native pattern extends
-//! to plain docker/git reads, not just MySQL/SOAP. Destructive verbs
-//! (`docker-clean`, `update`, `backup`/`restore`) are explicitly OUT of
-//! scope; WSL keeps calling `dml` for everything not ported here.
+//! to plain docker/git reads, not just MySQL/SOAP.
+//!
+//! [`update_stream`] at the bottom is the one WRITE verb here: `wow update`,
+//! the server self-update that `update-check` reports on. It moved out of
+//! the launcher's `lib.rs` in the cargo-workspace refactor (Task 9) and sits
+//! next to its read-only sibling rather than in `modmgr` (whose
+//! `module_update_stream` updates ONE module, not the core checkout).
+//! `docker-clean`/`backup`/`restore`/`games remove` live in `destructive`/
+//! `backup`/`restore`.
 //!
 //! Each function is a faithful port of its `cli/src/90-main.sh` arm,
 //! documented at each site:
@@ -420,6 +426,142 @@ pub fn read_update_check(program: &OsStr, server_dir: &Path) -> Value {
     let mod_playerbots =
         if is_git_checkout(&mod_dir) { Some(read_repo_check(program, &mod_dir, "mod-playerbots")) } else { None };
     assemble_update_check(azerothcore, mod_playerbots)
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `wow update` (server self-update) — oracle `90-main.sh:5645-
+// 5732` + `_wow_pull_repo`/`_wow_remote_ok`/`_wow_git_branch`
+// (`70-modules.sh:843,850,872-933`, ported in `modmgr`). STREAMED, same
+// NDJSON vocabulary as `lifecycle::world_restart_stream`. Fail-closed gates
+// run IN ORDER, before any mutation: server dir -> `.git` checkout ->
+// AzerothCore remote -> mod-playerbots remote (only if present) -> branch ->
+// explicit `--backup`/`--no-backup` (see `modmgr::update_gate_order` for the
+// same order, pure + unit-tested).
+// ---------------------------------------------------------------------------
+
+const WOW_UPDATE_SECTION: &str = "server-update";
+
+pub fn update_stream(backup: Option<bool>, emit: impl Fn(serde_json::Value)) {
+    use crate::{config::ConfigReader, maint, modmgr, native};
+
+    emit(serde_json::json!({"event": "section_start", "name": WOW_UPDATE_SECTION}));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(crate::lifecycle::gl_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    if !modmgr::is_git_checkout(&sdir) {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(crate::lifecycle::gl_error("GIT_MISSING", format!("{} is not a git checkout", sdir.display()), "Can't update from source."));
+        return;
+    }
+
+    let git_program = std::ffi::OsString::from("git");
+
+    // AzerothCore must be the custom mod-playerbots fork on the Playerbot
+    // branch -- pulling upstream azerothcore/azerothcore-wotlk here would
+    // break the playerbots integration. No override: hard error.
+    let acurl = modmgr::git_remote_url(&git_program, &sdir);
+    if !modmgr::wow_remote_ok(&acurl, "mod-playerbots/azerothcore-wotlk") {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(crate::lifecycle::gl_error(
+            "REMOTE_MISMATCH",
+            "AzerothCore origin is not the expected Playerbots fork",
+            &format!(
+                "found: {} -- pulling upstream AzerothCore would break Playerbots. Fix the remote manually, then retry.",
+                if acurl.is_empty() { "<none>" } else { acurl.as_str() }
+            ),
+        ));
+        return;
+    }
+
+    let moddir = sdir.join("modules").join("mod-playerbots");
+    let pb_present = modmgr::is_git_checkout(&moddir);
+    if pb_present {
+        let pburl = modmgr::git_remote_url(&git_program, &moddir);
+        if !modmgr::wow_remote_ok(&pburl, "mod-playerbots/mod-playerbots") {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            emit(crate::lifecycle::gl_error(
+                "REMOTE_MISMATCH",
+                "mod-playerbots origin is not the expected fork",
+                &format!("found: {}", if pburl.is_empty() { "<none>" } else { pburl.as_str() }),
+            ));
+            return;
+        }
+    }
+
+    let acbranch = modmgr::git_branch(&git_program, &sdir);
+    if acbranch != "Playerbot" {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(crate::lifecycle::gl_error("BRANCH_MISMATCH", format!("AzerothCore checkout is on branch '{acbranch}' (expected 'Playerbot')"), ""));
+        return;
+    }
+
+    let Some(do_backup) = backup else {
+        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+        emit(crate::lifecycle::gl_error(
+            "BAD_ARG",
+            "Pick --backup or --no-backup",
+            "New core revisions can run DB migrations at next start -- decide explicitly.",
+        ));
+        return;
+    };
+
+    if do_backup {
+        let docker_program = native::docker_program();
+        let db_cfg = crate::db::DbConfig::from_env();
+        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            emit(crate::lifecycle::gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
+            return;
+        }
+    }
+
+    let mut changed = false;
+
+    let ac_before = modmgr::git_short_head(&git_program, &sdir);
+    let ac_pull_changed = match modmgr::wow_pull_repo(&git_program, &sdir, "AzerothCore", &emit) {
+        Ok(c) => c,
+        Err(()) => {
+            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+            return;
+        }
+    };
+    let ac_after = modmgr::git_short_head(&git_program, &sdir);
+    if ac_pull_changed {
+        changed = true;
+    }
+    let ac_summary = modmgr::pull_summary(&ac_before, &ac_after);
+
+    let pb_summary = if pb_present {
+        let pb_before = modmgr::git_short_head(&git_program, &moddir);
+        let pb_pull_changed = match modmgr::wow_pull_repo(&git_program, &moddir, "mod-playerbots", &emit) {
+            Ok(c) => c,
+            Err(()) => {
+                emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
+                return;
+            }
+        };
+        let pb_after = modmgr::git_short_head(&git_program, &moddir);
+        if pb_pull_changed {
+            changed = true;
+        }
+        modmgr::pull_summary(&pb_before, &pb_after)
+    } else {
+        crate::lifecycle::gl_line(&emit, "warn", "modules/mod-playerbots not found -- skipping module update.");
+        "skipped".to_string()
+    };
+
+    if changed {
+        let _ = modmgr::rebuild_pending_add(&sdir, "core-update");
+        crate::lifecycle::gl_line(&emit, "info", "Rebuild required to compile the update -- use the rebuild banner on this page.");
+    }
+
+    emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "ok"}));
+    emit(serde_json::json!({"event": "done", "data": {"changed": changed, "ac": ac_summary, "playerbots": pb_summary}}));
 }
 
 #[cfg(test)]

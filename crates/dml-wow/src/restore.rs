@@ -9,8 +9,8 @@
 //! purely by the TARGET file's own name) and [`stream_restore`] (the actual
 //! import). The STREAMED Tauri orchestration (guard ordering, the `docker
 //! compose stop/start` calls, NDJSON event sequencing) lives in `lib.rs` next
-//! to `wow_world_restart_native_blocking`/`wow_backup_create_native_blocking`,
-//! which `wow_backup_restore_native_blocking` follows event-for-event.
+//! to `lifecycle::world_restart_stream`/`backup::backup_create_stream`,
+//! which `restore::backup_restore_stream` follows event-for-event.
 //!
 //! THE CRITICAL ENGINEERING PROBLEM: a `.sql.gz` backup can be many GB
 //! decompressed (a `--include-world` snapshot especially). The bash oracle

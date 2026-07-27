@@ -3,16 +3,19 @@
 //! port of the regex classifiers and the exact message text from the
 //! AzerothCore branch of `90-main.sh:858-1052`.
 //!
-//! WHY A SEPARATE MODULE. The docker/DB orchestration (container checks, the
-//! "wait for the realm DB to answer" retry loop, the UPDATE + read-back
-//! write) needs real I/O and lives in `lib.rs::wow_lan_native_blocking`,
-//! alongside every other native command's blocking half. What's left here is
-//! exactly what CAN be tested without a live server: the private-address
-//! classifier (security-relevant -- it is the only thing standing between
-//! `dml lan on <ip>` and silently exposing the realm to a public address)
-//! and the verbatim success/error text `wow_lan_native` returns, so the
-//! `<pre>`-rendered output stays byte-identical to the WSL sibling's
-//! `dml lan` stdout (see `wowLan`'s doc comment in `api.ts`).
+//! LAYOUT. Everything above [`LAN_TITLE`] is PURE and testable without a
+//! live server: the private-address classifier (security-relevant -- it is
+//! the only thing standing between `dml lan on <ip>` and silently exposing
+//! the realm to a public address) and the verbatim success/error text the
+//! command returns, so the `<pre>`-rendered output stays byte-identical to
+//! the WSL sibling's `dml lan` stdout (see `wowLan`'s doc comment in
+//! `api.ts`). Below it sits the docker/DB orchestration ([`lan_action`] plus
+//! [`lan_current_address`]/[`lan_set`]): container checks, the "wait for the
+//! realm DB to answer" retry loop, the UPDATE + read-back write. That half
+//! moved out of the launcher's `lib.rs` in the cargo-workspace refactor
+//! (Task 9) so the standalone CLI can drive it too; input validation (the
+//! closed action allowlist, the IP/hostname shape checks) stays with the
+//! caller, which passes only pre-validated values in.
 //!
 //! AC-ONLY BY DECISION (chunk2-decisions.md item 3): `dml::db` has no
 //! MaNGOS/Tortoise support, so native mode never reaches the oracle's
@@ -152,6 +155,128 @@ pub fn address_mismatch_message(wanted: &str, got: Option<&str>) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// Live orchestration — moved out of the launcher's `lib.rs` (Task 9).
+// Unlike every other hoisted command this one returns plain TEXT, not an
+// NDJSON stream or a typed envelope: `dml lan`'s output is human-readable
+// stdout the UI renders verbatim inside a `<pre>` (see the module doc above).
+// `action`/`ip_arg`/`inet` arrive PRE-VALIDATED by the caller.
+// ---------------------------------------------------------------------------
+
+/// The single fixed AC title native mode drives (see the AC-ONLY note above).
+pub const LAN_TITLE: &str = "wow-server-playerbots";
+
+/// `_lan_sql "SELECT address FROM realmlist WHERE id=1;"`, decoded to a
+/// plain `String` (NULL/an empty/unreadable result -> `None`).
+pub fn lan_current_address(db_cfg: &crate::db::DbConfig) -> Option<String> {
+    let res = crate::db::query(db_cfg, crate::db::Database::Auth, "SELECT address FROM realmlist WHERE id = 1").ok()?;
+    let row = res.rows.first()?;
+    match row.first()? {
+        crate::db::SqlValue::Text(s) => Some(s.clone()),
+        crate::db::SqlValue::Int(i) => Some(i.to_string()),
+        crate::db::SqlValue::Null => None,
+    }
+}
+
+/// `_lan_set` (`90-main.sh:976-997`): UPDATE + read-back verify. `Err`
+/// carries the already-formatted `[dml] ERROR: ...` text to return verbatim
+/// -- this is a TEXT-mode command (see the module doc comment above).
+pub fn lan_set(db_cfg: &crate::db::DbConfig, ip: &str) -> Result<(), String> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(ip)];
+    if crate::db::execute(db_cfg, crate::db::Database::Auth, "UPDATE realmlist SET address = ? WHERE id = 1", params).is_err() {
+        return Err(crate::lan::update_failed_message());
+    }
+    let newaddr = lan_current_address(db_cfg);
+    if newaddr.as_deref() != Some(ip) {
+        return Err(crate::lan::address_mismatch_message(ip, newaddr.as_deref()));
+    }
+    Ok(())
+}
+
+/// `dml lan on/off/status/refresh`'s full flow (real docker/DB I/O) -- run
+/// off the caller's async runtime. Named `lan_action` rather than the bare
+/// `lan` the Task 9 naming rule literally produces, purely to avoid a
+/// `lan::lan` stutter. Order mirrors the oracle top-to-bottom: private-address
+/// gate -> installed? -> docker up? -> `ac-database` running? -> DB
+/// answering (retry loop)? -> the requested action.
+pub fn lan_action(action: &str, ip_arg: Option<String>, inet: bool) -> String {
+    use crate::{config::ConfigReader, db, lan, maint, native, status};
+
+    if !inet {
+        if let Some(ip) = ip_arg.as_deref() {
+            if (action == "on" || action == "refresh") && !lan::is_loopback_or_private(ip) {
+                return lan::not_private_message(LAN_TITLE, ip);
+            }
+        }
+    }
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    if maint::resolve_server_dir(&title_dir).is_none() {
+        return lan::not_installed_message();
+    }
+
+    let program = native::docker_program();
+    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
+        return lan::docker_down_message();
+    }
+    if !status::container_running(&program, "ac-database", maint::PROBE_TIMEOUT) {
+        return lan::not_running_message(LAN_TITLE);
+    }
+
+    let db_cfg = db::DbConfig::from_env();
+    let (tries, gap) = lan::tries_and_gap(action);
+    let mut reachable = false;
+    for i in 0..tries {
+        if db::query(&db_cfg, db::Database::Auth, "SELECT 1").is_ok() {
+            reachable = true;
+            break;
+        }
+        if i + 1 < tries {
+            std::thread::sleep(std::time::Duration::from_secs(gap));
+        }
+    }
+    if !reachable {
+        return lan::db_not_answering_message();
+    }
+
+    let current = lan_current_address(&db_cfg);
+
+    match action {
+        "on" => {
+            let ip = ip_arg.expect("validated: ip required for on");
+            match lan_set(&db_cfg, &ip) {
+                Ok(()) => lan::on_message(LAN_TITLE, &ip),
+                Err(e) => e,
+            }
+        }
+        "off" => match lan_set(&db_cfg, "127.0.0.1") {
+            Ok(()) => lan::off_message(LAN_TITLE),
+            Err(e) => e,
+        },
+        "status" => match current.as_deref() {
+            None | Some("") => lan::status_no_current_message(),
+            Some("127.0.0.1") => lan::status_off_message(),
+            Some(cur) => lan::status_on_message(cur),
+        },
+        "refresh" => {
+            let ip = ip_arg.expect("validated: ip required for refresh");
+            match current.as_deref() {
+                None | Some("") | Some("127.0.0.1") => lan::refresh_off_message(LAN_TITLE),
+                Some(cur) if cur == ip => lan::refresh_already_message(&ip),
+                Some(cur) if !lan::is_private_lan(cur) => lan::refresh_not_lan_message(cur),
+                Some(cur) => {
+                    let cur = cur.to_string();
+                    match lan_set(&db_cfg, &ip) {
+                        Ok(()) => lan::refresh_done_message(&cur, &ip),
+                        Err(e) => e,
+                    }
+                }
+            }
+        }
+        _ => unreachable!("action pre-validated by validate_lan_request_native"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +387,13 @@ mod tests {
         let m = not_private_message("wow-server-playerbots", "8.8.8.8");
         assert!(m.contains("'8.8.8.8' is not a private LAN address"));
         assert!(m.contains("--internet on 8.8.8.8"));
+    }
+
+    #[test]
+    fn lan_current_address_none_on_unreachable_db() {
+        // A bogus port guarantees an unreachable connection without touching
+        // the real DB -- exercises the `.ok()?` degrade-to-None path.
+        let cfg = crate::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
+        assert_eq!(lan_current_address(&cfg), None);
     }
 }

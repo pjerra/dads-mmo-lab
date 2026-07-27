@@ -284,13 +284,13 @@ pub const COMPOSE_UP_TIMEOUT: Duration = Duration::from_secs(600);
 /// of silently swallowing the option.
 pub const SKIP_SAVEALL_NOTE: &str = "faster-restart requested -- the native compose path has no separate pre-stop saveall to skip; the graceful `docker compose down` already saves characters on shutdown.";
 
-/// The ordered HIGH-LEVEL steps `lib.rs`'s `games_lifecycle_native_blocking`
+/// The ordered HIGH-LEVEL steps `games_lifecycle_stream`
 /// runs for `mode` -- `"backup"` = the automatic chars-only pre-down safety
 /// dump (`backup::AUTO_STOP_NAME`, `lib.rs`'s `auto_backup_before_stop`),
 /// `"down"`/`"up"` = one [`compose_sequence_for_mode`] step. Exists so the
 /// invariant "the automatic backup always runs before the FIRST `down`" is a
 /// pure, independently-testable fact rather than only visible by reading
-/// `lib.rs`'s call order -- `games_lifecycle_native_blocking` is itself only
+/// `lib.rs`'s call order -- `games_lifecycle_stream` is itself only
 /// integration-testable (it shells real `docker`), same doctrine as every
 /// other pure-primitives-here/orchestration-in-lib.rs split in this module.
 /// `start` has no backup step (nothing is stopping, so there is nothing to

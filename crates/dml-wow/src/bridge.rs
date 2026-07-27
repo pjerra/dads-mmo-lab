@@ -11,8 +11,14 @@
 //! (in dev, the repo's `cli/dml`; a bundled copy in a release build) -- so
 //! its SIBLING `lua` dir (`cli/lua` in dev) is the deploy source:
 //! `<parent of DML_SCRIPT>/lua`.
+//!
+//! [`bridge_setup_stream`] at the bottom is the streamed orchestration (SOAP
+//! `server info` preflight, then deploy), moved out of the launcher's
+//! `lib.rs` by the cargo-workspace refactor (Task 9) so the standalone CLI
+//! can drive it too.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// `<parent of DML_SCRIPT>/lua` -- native's answer to `_bridge_lua_root`.
 /// Falls back to a bare `"lua"` (relative to the process cwd) when
@@ -83,6 +89,80 @@ pub fn deploy_scripts(root: &Path, dest: &Path) -> std::io::Result<bool> {
         }
     }
     Ok(changed)
+}
+
+fn bs_event_section_start() -> serde_json::Value {
+    serde_json::json!({"event": "section_start", "name": "bridge-setup"})
+}
+
+fn bs_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"event": "line", "level": level, "text": text.into()})
+}
+
+fn bs_event_section_end(status: &str) -> serde_json::Value {
+    serde_json::json!({"event": "section_end", "name": "bridge-setup", "status": status})
+}
+
+fn bs_event_done(changed: bool) -> serde_json::Value {
+    serde_json::json!({"event": "done", "data": {"changed": changed, "restart_required": changed}})
+}
+
+fn bs_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
+}
+
+/// The blocking flow itself (real SOAP + fs I/O) -- run under
+/// `spawn_blocking`. A port of the `bridge-setup)` arm (`90-main.sh:2941-
+/// 2979`): server installed? -> SOAP `server info` preflight -> deploy.
+pub fn bridge_setup_stream(soap_lock: Arc<Mutex<()>>, emit: impl Fn(serde_json::Value)) {
+    use crate::{bridge, config::ConfigReader, maint, soap};
+
+    emit(bs_event_section_start());
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(bs_event_section_end("error"));
+        emit(bs_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    emit(bs_event_line("info", "checking SOAP..."));
+    let outcome = {
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        soap::exec(&cfg, "server info")
+    };
+    match outcome {
+        soap::SoapOutcome::Ok(_) => {}
+        soap::SoapOutcome::Auth => {
+            emit(bs_event_section_end("error"));
+            emit(bs_event_error("SOAP_AUTH", "SOAP auth failed", "Check ~/.dml/soap.env"));
+            return;
+        }
+        // Fault and Unreachable both collapse to the oracle's default `rc
+        // 3) ...; *) ...` case (90-main.sh:2962-2965) -- only auth (rc 3)
+        // gets its own message.
+        _ => {
+            emit(bs_event_section_end("error"));
+            emit(bs_event_error("SOAP_UNREACHABLE", "Could not reach the server over SOAP", "Start the server, then re-run."));
+            return;
+        }
+    }
+
+    emit(bs_event_line("info", "deploying bridge scripts..."));
+    let root = bridge::lua_root_from_env();
+    let dest = bridge::dest_dir(&sdir);
+    let changed = match bridge::deploy_scripts(&root, &dest) {
+        Ok(c) => c,
+        Err(e) => {
+            emit(bs_event_section_end("error"));
+            emit(bs_event_error("WRITE_FAILED", format!("Could not deploy bridge scripts: {e}"), ""));
+            return;
+        }
+    };
+    emit(bs_event_line("info", format!("scripts deployed (changed={changed})")));
+    emit(bs_event_section_end("ok"));
+    emit(bs_event_done(changed));
 }
 
 #[cfg(test)]
@@ -216,5 +296,38 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn bs_event_section_start_shape() {
+        assert_eq!(bs_event_section_start(), serde_json::json!({"event":"section_start","name":"bridge-setup"}));
+    }
+
+    #[test]
+    fn bs_event_line_shape() {
+        assert_eq!(
+            bs_event_line("info", "deploying bridge scripts..."),
+            serde_json::json!({"event":"line","level":"info","text":"deploying bridge scripts..."})
+        );
+    }
+
+    #[test]
+    fn bs_event_section_end_shape() {
+        assert_eq!(bs_event_section_end("ok"), serde_json::json!({"event":"section_end","name":"bridge-setup","status":"ok"}));
+        assert_eq!(bs_event_section_end("error"), serde_json::json!({"event":"section_end","name":"bridge-setup","status":"error"}));
+    }
+
+    #[test]
+    fn bs_event_done_shape() {
+        assert_eq!(bs_event_done(true), serde_json::json!({"event":"done","data":{"changed":true,"restart_required":true}}));
+        assert_eq!(bs_event_done(false), serde_json::json!({"event":"done","data":{"changed":false,"restart_required":false}}));
+    }
+
+    #[test]
+    fn bs_event_error_shape() {
+        assert_eq!(
+            bs_event_error("SOAP_AUTH", "SOAP auth failed", "Check ~/.dml/soap.env"),
+            serde_json::json!({"event":"error","error":{"code":"SOAP_AUTH","message":"SOAP auth failed","hint":"Check ~/.dml/soap.env"}})
+        );
     }
 }

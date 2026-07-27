@@ -14,6 +14,19 @@ use tauri::State;
 use dml_wow::envelope::Envelope;
 use dml_core::runner::DmlRunner;
 
+// Helpers that USED to be private to this file and moved into the library
+// with the orchestration bodies that needed them (cargo-workspace refactor,
+// Task 9). Imported under their original names so the many remaining call
+// sites here read exactly as before.
+use dml_core::proc::output_bounded;
+use dml_wow::config::{cfgset_clean_legacy_env, cfgset_err, env_frozen};
+use dml_wow::db::{cell_string, db_unreachable_err, sql_row_int};
+use dml_wow::lan::LAN_TITLE;
+use dml_wow::party::{
+    bot_member_classes, bot_member_names, char_name_by_guid, group_member_guids,
+    party_online_guid, preset_dir_or_internal_err, wait_new_member,
+};
+
 pub struct InstallSession {
     pub stdin: std::process::ChildStdin,
     pub pid: u32,
@@ -113,7 +126,6 @@ fn bad_id(id: &str) -> CmdError {
 // and turns a bad webview call into a typed error instead of a mystery
 // WSL/CLI failure.
 
-const LAN_TITLE: &str = "wow-server-playerbots";
 const LAN_ACTIONS: [&str; 4] = ["on", "off", "status", "refresh"];
 const TAILSCALE_ACTIONS: [&str; 4] = ["install", "up", "status", "down"];
 const TOOL_NAMES: [&str; 2] = ["unbound", "unbound-remove"];
@@ -964,10 +976,6 @@ async fn wow_module_place_npc(
 
 fn not_found_err(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
     CmdError { code: "NOT_FOUND".into(), message: message.into(), hint: hint.into() }
-}
-
-fn db_unreachable_err(message: impl Into<String>) -> CmdError {
-    CmdError { code: "DB_UNREACHABLE".into(), message: message.into(), hint: "Is ac-database running?".into() }
 }
 
 /// One row's `COUNT(*)` decoded as `i64` (defaulting to 0 on anything odd —
@@ -2270,74 +2278,6 @@ async fn wow_config_set(
 // whether a legacy AC_* env still beats the conf in the RUNNING container.
 // ---------------------------------------------------------------------------
 
-/// Port of `_cfg_env_frozen` (`40-config.sh:266-271`): `true` iff the
-/// running `ac-worldserver` container's CREATION-TIME environment carries
-/// `ename`. Degrades to `false` (not frozen) on ANY error/timeout/docker-down
-/// — matches the bash `return 1` fallback exactly (a clean override with no
-/// frozen legacy env is the correct read when there is no way to ask). Bounds
-/// the `docker inspect` call so a hung/absent engine can never stall a save;
-/// the check runs on a helper thread that is left to finish (or hang) on its
-/// own past the timeout rather than being joined, so the caller is never
-/// blocked longer than `timeout`.
-fn env_frozen(ename: &str) -> bool {
-    env_frozen_with(
-        &dml_wow::native::docker_program(),
-        "ac-worldserver",
-        ename,
-        std::time::Duration::from_secs(3),
-    )
-}
-
-fn env_frozen_with(
-    program: &std::ffi::OsStr,
-    container: &str,
-    ename: &str,
-    timeout: std::time::Duration,
-) -> bool {
-    let ename_prefix = format!("{ename}=");
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(["inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", container]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    match output_bounded(cmd, timeout) {
-        Some(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            text.lines().any(|l| l.starts_with(ename_prefix.as_str()))
-        }
-        _ => false,
-    }
-}
-
-/// Small `CmdError` builder to keep the `set)` port's many typed errors
-/// readable — every field the bash `json_err`/exit-1 pairs carry, in one call.
-fn cfgset_err(code: &str, message: impl Into<String>, hint: impl Into<String>) -> CmdError {
-    CmdError { code: code.into(), message: message.into(), hint: hint.into() }
-}
-
-/// Legacy-env cleanup for one derived `AC_*` name against the override —
-/// shared by both routes. Mirrors `_cfg_env_read` non-empty check +
-/// `_cfg_env_remove` (`40-config.sh:212-220`, `276-281`): a present-but-empty
-/// override value reads as "absent" too, matching bash's `[[ -n … ]]` gate.
-/// Returns `Ok(true)` iff the key WAS present (and is now removed).
-fn cfgset_clean_legacy_env(override_path: &std::path::Path, ename: &str) -> Result<bool, CmdError> {
-    let present = std::fs::read_to_string(override_path)
-        .ok()
-        .and_then(|t| dml_wow::config::parse_override_env(&t).get(ename).cloned())
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
-    if !present {
-        return Ok(false);
-    }
-    dml_wow::config::override_env_remove(override_path, ename).map_err(|e| {
-        cfgset_err("WRITE_FAILED", format!("Could not update the config override: {e}"), "")
-    })?;
-    Ok(true)
-}
-
 /// Route A — the direct `conf:` route (`90-main.sh:2354-2438`). `full_key` is
 /// the ORIGINAL `--key` value (including the `conf:` prefix), used verbatim in
 /// the "Bad conf key" message exactly like the oracle.
@@ -3542,104 +3482,21 @@ async fn wow_bridge_setup(on_event: Channel<serde_json::Value>, state: State<'_,
     stream_args(vec!["wow".into(), "bridge-setup".into()], on_event, state).await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `wow bridge-setup`/`party-setup`/`setup` (Chunk 2 task C2c
-// item 4): faithful port of `90-main.sh:2941-2979` -- a SOAP `server info`
-// preflight, then deploy every `*.lua` family under `dml::bridge::
-// lua_root_from_env()` into the server's flat `lua_scripts` dir (see
-// `dml::bridge`'s module doc comment for the native source-root decision).
-// STREAMED, same NDJSON vocabulary as `wow_world_restart_native`. ONE native
-// command backs BOTH `wowBridgeSetup` (GMTools.svelte) and `wowPartySetup`
-// (Playerbots.svelte) in `api.ts` -- like their WSL siblings `wow_bridge_
-// setup`/`wow_party_setup` above/below, they are aliases for the identical
-// bash arm (`bridge-setup|party-setup|setup)`), so one native implementation
-// covers both call sites.
-// ---------------------------------------------------------------------------
-
-fn bs_event_section_start() -> serde_json::Value {
-    serde_json::json!({"event": "section_start", "name": "bridge-setup"})
-}
-
-fn bs_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
-    serde_json::json!({"event": "line", "level": level, "text": text.into()})
-}
-
-fn bs_event_section_end(status: &str) -> serde_json::Value {
-    serde_json::json!({"event": "section_end", "name": "bridge-setup", "status": status})
-}
-
-fn bs_event_done(changed: bool) -> serde_json::Value {
-    serde_json::json!({"event": "done", "data": {"changed": changed, "restart_required": changed}})
-}
-
-fn bs_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
-    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
-}
-
-/// The blocking flow itself (real SOAP + fs I/O) -- run under
-/// `spawn_blocking`. A port of the `bridge-setup)` arm (`90-main.sh:2941-
-/// 2979`): server installed? -> SOAP `server info` preflight -> deploy.
-fn wow_bridge_setup_native_blocking(soap_lock: Arc<Mutex<()>>, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::{bridge, config::ConfigReader, maint, soap};
-
-    emit(bs_event_section_start());
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(bs_event_section_end("error"));
-        emit(bs_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    emit(bs_event_line("info", "checking SOAP..."));
-    let outcome = {
-        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = soap::SoapConfig::load();
-        soap::exec(&cfg, "server info")
-    };
-    match outcome {
-        soap::SoapOutcome::Ok(_) => {}
-        soap::SoapOutcome::Auth => {
-            emit(bs_event_section_end("error"));
-            emit(bs_event_error("SOAP_AUTH", "SOAP auth failed", "Check ~/.dml/soap.env"));
-            return;
-        }
-        // Fault and Unreachable both collapse to the oracle's default `rc
-        // 3) ...; *) ...` case (90-main.sh:2962-2965) -- only auth (rc 3)
-        // gets its own message.
-        _ => {
-            emit(bs_event_section_end("error"));
-            emit(bs_event_error("SOAP_UNREACHABLE", "Could not reach the server over SOAP", "Start the server, then re-run."));
-            return;
-        }
-    }
-
-    emit(bs_event_line("info", "deploying bridge scripts..."));
-    let root = bridge::lua_root_from_env();
-    let dest = bridge::dest_dir(&sdir);
-    let changed = match bridge::deploy_scripts(&root, &dest) {
-        Ok(c) => c,
-        Err(e) => {
-            emit(bs_event_section_end("error"));
-            emit(bs_event_error("WRITE_FAILED", format!("Could not deploy bridge scripts: {e}"), ""));
-            return;
-        }
-    };
-    emit(bs_event_line("info", format!("scripts deployed (changed={changed})")));
-    emit(bs_event_section_end("ok"));
-    emit(bs_event_done(changed));
-}
-
-/// NATIVE-MODE `wow bridge-setup`/`party-setup`/`setup` -- see the module
-/// comment above `wow_bridge_setup_native_blocking`. Native mode only — WSL
-/// keeps calling `wow_bridge_setup`/`wow_party_setup`.
+/// NATIVE-MODE `wow bridge-setup`/`party-setup`/`setup` -- see
+/// [`dml_wow::bridge::bridge_setup_stream`]. ONE native command backs BOTH
+/// `wowBridgeSetup` (GMTools.svelte) and `wowPartySetup` (Playerbots.svelte)
+/// in `api.ts` -- like their WSL siblings `wow_bridge_setup`/
+/// `wow_party_setup` above/below, they are aliases for the identical bash arm
+/// (`bridge-setup|party-setup|setup)`), so one native implementation covers
+/// both call sites. Native mode only — WSL keeps calling
+/// `wow_bridge_setup`/`wow_party_setup`.
 #[tauri::command]
 async fn wow_bridge_setup_native(on_event: Channel<serde_json::Value>, state: State<'_, AppState>) -> Result<(), CmdError> {
     require_native_backend()?;
     let soap_lock = state.soap_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_bridge_setup_native_blocking(soap_lock, |v| {
+        dml_wow::bridge::bridge_setup_stream(soap_lock, |v| {
             let _ = ch.send(v);
         });
     })
@@ -4092,19 +3949,6 @@ const RETURN_HOME_SELECT_SQL: &str = "SELECT guid, race, online FROM characters 
 const RETURN_HOME_UPDATE_SQL: &str =
     "UPDATE characters SET position_x=?, position_y=?, position_z=?, map=?, orientation=0 WHERE guid=?";
 
-/// Decode one `characters`-row cell to `i64`, tolerating both the binary
-/// protocol's native `Int`/`UInt` decode and (defensively) a text fallback --
-/// `guid`/`race`/`online` are all integer columns, but [`db::SqlValue`]'s
-/// `Text` variant is the safe catch-all for anything the driver didn't map to
-/// `Int`.
-fn sql_row_int(v: Option<&dml_wow::db::SqlValue>) -> Option<i64> {
-    match v {
-        Some(dml_wow::db::SqlValue::Int(i)) => Some(*i),
-        Some(dml_wow::db::SqlValue::Text(s)) => s.parse::<i64>().ok(),
-        _ => None,
-    }
-}
-
 /// `NOT_FOUND` for an offline character, matching `_gm_require_online`
 /// (`cli/src/55-gm.sh:9-14`) exactly.
 fn not_online_err(player: &str) -> CmdError {
@@ -4511,7 +4355,7 @@ async fn wow_gm_summon_native(
 // `party online`/`party list`/the gm bridge commands already read), every
 // SOAP fire reuses `party_fire_result` (== `_party_fire`'s exact case
 // block), and `preset-load` follows the SAME ndjson vocabulary as
-// `wow_module_install_native_blocking`/`wow_world_restart_native_blocking`.
+// `modmgr::module_install_stream`/`lifecycle::world_restart_stream`.
 // ---------------------------------------------------------------------------
 
 /// `NOT_FOUND` for an offline character in a `party`-family arm — same code
@@ -4523,91 +4367,6 @@ async fn wow_gm_summon_native(
 /// still in your party?").
 fn party_not_online_err(who: &str, hint: &str) -> CmdError {
     CmdError { code: "NOT_FOUND".into(), message: format!("Character not online: {who}"), hint: hint.into() }
-}
-
-/// `_party_online_guid` (`50-party.sh:46-49`) over a direct MySQL
-/// connection. Any query failure reads as "not online" (`None`), matching
-/// the bash's own `2>/dev/null` swallow — same doctrine as `char_is_online`.
-fn party_online_guid(cfg: &dml_wow::db::DbConfig, name: &str) -> Option<i64> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
-    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::ONLINE_GUID_SQL, params)
-        .ok()
-        .and_then(|res| sql_row_int(res.rows.first().and_then(|r| r.first())))
-}
-
-/// `_party_group_member_guids` (`50-party.sh:52-55`).
-fn group_member_guids(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Vec<i64> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::GROUP_MEMBER_GUIDS_SQL, params)
-        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
-        .unwrap_or_default()
-}
-
-fn cell_string(v: Option<&dml_wow::db::SqlValue>) -> Option<String> {
-    match v {
-        Some(dml_wow::db::SqlValue::Text(s)) if !s.is_empty() => Some(s.clone()),
-        Some(dml_wow::db::SqlValue::Int(i)) => Some(i.to_string()),
-        _ => None,
-    }
-}
-
-/// Bot's name-by-guid lookup after a successful join (`90-main.sh:3102,
-/// 3417`).
-fn char_name_by_guid(cfg: &dml_wow::db::DbConfig, guid: i64) -> Option<String> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(guid)];
-    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::CHAR_NAME_BY_GUID_SQL, params)
-        .ok()
-        .and_then(|res| cell_string(res.rows.first().and_then(|r| r.first())))
-}
-
-/// The bot-members-of-a-party names query, shared by `dismiss-all` and
-/// `preset-load`'s kick phase ([`dml_wow::party::BOT_MEMBER_NAMES_SQL`]).
-/// Unlike `party_online_guid`/`group_member_guids`/`char_name_by_guid`
-/// (which swallow query failure exactly like the oracle's own `2>/dev/null`
-/// helpers do), a failure here MUST surface: `dismiss-all`'s bash caller
-/// explicitly checks this query and exits `DB_UNREACHABLE "Could not read
-/// the party"` on failure (`90-main.sh:3195-3196`) rather than treating an
-/// unreachable DB as "zero bots" -- so this returns `Result`, not a
-/// silently-emptied `Vec`.
-fn bot_member_names(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::BOT_MEMBER_NAMES_SQL, params)
-        .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
-        .map_err(|_| db_unreachable_err("Could not read the party"))
-}
-
-/// `preset-save`'s bot-classes query ([`dml_wow::party::
-/// BOT_MEMBER_CLASSES_SQL`]). Same doctrine as `bot_member_names`: the
-/// oracle's `preset-save` caller checks this query and exits
-/// `DB_UNREACHABLE "Could not read the party"` on failure
-/// (`90-main.sh:3302-3303`), so a query error must propagate rather than be
-/// swallowed into an empty (and thus falsely "no bots to save") list.
-fn bot_member_classes(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::BOT_MEMBER_CLASSES_SQL, params)
-        .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
-        .map_err(|_| db_unreachable_err("Could not read the party"))
-}
-
-/// `_party_wait_new_member` (`50-party.sh:85-101`): poll up to
-/// `poll_tries_from_env()` times (sleeping `poll_sleep_from_env()` between)
-/// for a group member guid that wasn't in `before`. The per-iteration
-/// membership test is [`dml_wow::party::find_new_member`] (pure,
-/// unit-tested); this wrapper owns only the retry/sleep mechanics.
-fn wait_new_member(cfg: &dml_wow::db::DbConfig, pguid: i64, before: &[i64]) -> Option<i64> {
-    let before_set: std::collections::HashSet<i64> = before.iter().copied().collect();
-    let tries = dml_wow::party::poll_tries_from_env();
-    let sleep = dml_wow::party::poll_sleep_from_env();
-    for i in 0..tries {
-        let now = group_member_guids(cfg, pguid);
-        if let Some(g) = dml_wow::party::find_new_member(&now, pguid, &before_set) {
-            return Some(g);
-        }
-        if i + 1 < tries && !sleep.is_zero() {
-            std::thread::sleep(sleep);
-        }
-    }
-    None
 }
 
 /// `_party_spec_names` (`50-party.sh:151-165`) read straight off the
@@ -4900,14 +4659,6 @@ async fn wow_party_botcmd_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-fn preset_dir_or_internal_err() -> Result<std::path::PathBuf, CmdError> {
-    dml_wow::party::preset_dir().ok_or_else(|| CmdError {
-        code: "INTERNAL".into(),
-        message: "could not resolve the DML state directory (USERPROFILE/HOME not set)".into(),
-        hint: String::new(),
-    })
-}
-
 fn preset_not_found(name: &str) -> CmdError {
     CmdError { code: "NOT_FOUND".into(), message: format!("No preset named {name}"), hint: String::new() }
 }
@@ -5052,113 +4803,7 @@ async fn wow_party_preset_import_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-const PRESET_LOAD_SECTION: &str = "preset-load";
-
-/// `party preset-load`'s full orchestration (`90-main.sh:3348-3435`): kick
-/// phase (replace semantics — every current bot goes, best-effort per bot)
-/// then a join phase (one `dml_addclass` + new-member poll per preset
-/// class line, talents/gear whispers on a successful join). Streamed NDJSON
-/// (`section_start`/`line`/`section_end`/`done`/`error`) — same vocabulary
-/// as `wow_module_install_native_blocking`.
-fn wow_party_preset_load_native_blocking(
-    player: String,
-    name: String,
-    lock: Arc<std::sync::Mutex<()>>,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::modmgr::{done_event, error_event, line_event, section_end, section_start};
-
-    emit(section_start(PRESET_LOAD_SECTION));
-
-    let dir = match preset_dir_or_internal_err() {
-        Ok(d) => d,
-        Err(e) => {
-            emit(section_end(PRESET_LOAD_SECTION, "error"));
-            emit(error_event(&e.code, e.message, &e.hint));
-            return;
-        }
-    };
-    let path = dml_wow::party::preset_path(&dir, &name);
-    if !path.is_file() {
-        emit(section_end(PRESET_LOAD_SECTION, "error"));
-        emit(error_event("NOT_FOUND", format!("No preset named {name}"), ""));
-        return;
-    }
-
-    let db_cfg = dml_wow::db::DbConfig::from_env();
-    let Some(pguid) = party_online_guid(&db_cfg, &player) else {
-        emit(section_end(PRESET_LOAD_SECTION, "error"));
-        emit(error_event(
-            "NOT_FOUND",
-            format!("Character not online: {player}"),
-            "Log the character into the game first.",
-        ));
-        return;
-    };
-
-    let soap_cfg = dml_wow::soap::SoapConfig::load();
-
-    // Kick phase (replace semantics): every current bot goes. Byte-faithful
-    // swallow here (unlike `dismiss-all`/`preset-save`'s propagation): bash's
-    // own `kicklist="$(db_chars_query ...)" || kicklist=""` at
-    // `90-main.sh:3383` silently treats a query failure as "nothing to kick"
-    // too.
-    for b in bot_member_names(&db_cfg, pguid).unwrap_or_default() {
-        if !dml_wow::soap_cmds::valid_charname(&b) {
-            continue;
-        }
-        let kicked_ok = {
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            matches!(dml_wow::soap::exec(&soap_cfg, &format!("dml_uninvite {b}")), dml_wow::soap::SoapOutcome::Ok(_))
-        };
-        emit(line_event(if kicked_ok { "info" } else { "warn" }, if kicked_ok { format!("kicked {b}") } else { format!("could not kick {b}") }));
-        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = dml_wow::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
-    }
-
-    // Join phase: one addclass + new-member poll per preset class line.
-    let content = std::fs::read_to_string(&path).unwrap_or_default();
-    let (mut requested, mut joined) = (0u32, 0u32);
-    for cls in dml_wow::party::parse_preset_classes(&content) {
-        if !dml_wow::party::valid_bot_class(&cls) {
-            emit(line_event("warn", format!("skipping unknown class: {cls}")));
-            continue;
-        }
-        requested += 1;
-        let before = group_member_guids(&db_cfg, pguid);
-        let fired_ok = {
-            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            matches!(
-                dml_wow::soap::exec(&soap_cfg, &format!("dml_addclass {player} {cls}")),
-                dml_wow::soap::SoapOutcome::Ok(_)
-            )
-        };
-        if !fired_ok {
-            emit(line_event("warn", format!("add {cls} was rejected")));
-            continue;
-        }
-        match wait_new_member(&db_cfg, pguid, &before) {
-            Some(g) => {
-                joined += 1;
-                match char_name_by_guid(&db_cfg, g) {
-                    Some(bname) => {
-                        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        let _ = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::talents_autopick_whisper_cmd(&player, &bname));
-                        let _ = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::autogear_whisper_cmd(&player, &bname));
-                        emit(line_event("info", format!("{bname} joined -- talents + gear applied")));
-                    }
-                    None => emit(line_event("info", format!("a {cls} joined"))),
-                }
-            }
-            None => emit(line_event("warn", format!("{cls} did not attach in time"))),
-        }
-    }
-
-    emit(section_end(PRESET_LOAD_SECTION, "ok"));
-    emit(done_event(serde_json::json!({"loaded": true, "requested": requested, "joined": joined})));
-}
-
-/// NATIVE-MODE `party preset-load` — see [`wow_party_preset_load_native_blocking`].
+/// NATIVE-MODE `party preset-load` — see [`dml_wow::party::party_preset_load_stream`].
 #[tauri::command]
 async fn wow_party_preset_load_native(
     player: String,
@@ -5176,7 +4821,7 @@ async fn wow_party_preset_load_native(
     let lock = state.soap_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_party_preset_load_native_blocking(player, name, lock, |v| {
+        dml_wow::party::party_preset_load_stream(player, name, lock, |v| {
             let _ = ch.send(v);
         });
     })
@@ -5407,232 +5052,9 @@ async fn wow_ahbot_repair(
     .await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `wow ahbot repair` (Chunk 2 task C2c item 8): faithful port of
-// `90-main.sh:4239-4416`. STREAMED, same NDJSON vocabulary as
-// `wow_world_restart_native`. Reuses `dml::config::conf_write` (Subsystem
-// B1) for the `mod_ahbot.conf` writes and the SAME legacy-env-cleanup +
-// `env_frozen` + SOAP-`reload config` decision `config_set_curated` already
-// uses for its own `mod_ahbot.conf`-touching `ahbot.character` special case
-// just above -- see that function's doc comment for the shared rationale.
-// ---------------------------------------------------------------------------
-
-fn ar_event_section_start() -> serde_json::Value {
-    serde_json::json!({"event": "section_start", "name": "ahbot-repair"})
-}
-
-fn ar_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
-    serde_json::json!({"event": "line", "level": level, "text": text.into()})
-}
-
-fn ar_event_section_end(status: &str) -> serde_json::Value {
-    serde_json::json!({"event": "section_end", "name": "ahbot-repair", "status": status})
-}
-
-#[allow(clippy::too_many_arguments)]
-fn ar_event_done(
-    char_name: &str,
-    guid: u64,
-    account: u64,
-    applied: &str,
-    restart_required: bool,
-    module: &str,
-    already: bool,
-) -> serde_json::Value {
-    serde_json::json!({"event": "done", "data": {
-        "repaired": true,
-        "already": already,
-        "char": char_name,
-        "guid": guid,
-        "account": account,
-        "applied": applied,
-        "restart_required": restart_required,
-        "module": module,
-        "manual_steps": dml_wow::ahbot::MANUAL_STEPS,
-    }})
-}
-
-fn ar_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
-    serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
-}
-
-/// The blocking flow itself (real DB/fs/docker/SOAP I/O) -- run under
-/// `spawn_blocking`. A faithful port of the `ahbot) repair)` arm
-/// (`90-main.sh:4242-4410`), same order: char-name shape -> installed? ->
-/// module detected? -> conf ensured? -> character lookup -> conf writes ->
-/// legacy-env cleanup -> apply (live reload or restart-required).
-fn wow_ahbot_repair_native_blocking(
-    char_name: String,
-    soap_lock: Arc<Mutex<()>>,
-    config_lock: Arc<Mutex<()>>,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{ahbot, config, db, maint, soap};
-
-    emit(ar_event_section_start());
-
-    if !dml_wow::soap_cmds::valid_charname(&char_name) {
-        emit(ar_event_section_end("error"));
-        emit(ar_event_error(
-            "BAD_ARG",
-            "ahbot repair needs --char <the bot character's name>",
-            ahbot::MANUAL_STEPS,
-        ));
-        return;
-    }
-
-    let title_dir = config::ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(ar_event_section_end("error"));
-        emit(ar_event_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    let Some(ahmod) = ahbot::detect_module(&sdir) else {
-        emit(ar_event_section_end("error"));
-        emit(ar_event_error(
-            "NOT_INSTALLED",
-            "No Auction House Bot module is installed",
-            "Install Auction House Bot (or Auction House Bot Plus) from the Modules page first.",
-        ));
-        return;
-    };
-
-    let ahconf = config::conf_path_in(&sdir, "mod_ahbot.conf");
-    // Serializes against every other native conf/override write, same
-    // discipline as `wow_config_set_native` -- `mod_ahbot.conf` is exactly
-    // the shared-file example `AppState::config_lock`'s own doc comment
-    // names.
-    let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
-
-    let ensured = match config::conf_ensure(&ahconf) {
-        Ok(v) => v,
-        Err(e) => {
-            emit(ar_event_section_end("error"));
-            emit(ar_event_error("WRITE_FAILED", format!("Could not write mod_ahbot.conf: {e}"), ""));
-            return;
-        }
-    };
-    if !ensured {
-        emit(ar_event_section_end("error"));
-        emit(ar_event_error(
-            "NOT_FOUND",
-            "mod_ahbot.conf not found (nor its .dist)",
-            "Is the module fully installed? Try a rebuild from the Modules page.",
-        ));
-        return;
-    }
-
-    emit(ar_event_line("info", format!("looking up character {char_name}...")));
-    let db_cfg = db::DbConfig::from_env();
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(char_name.as_str())];
-    let res = match db::query_with_params(
-        &db_cfg,
-        db::Database::Characters,
-        "SELECT guid, account FROM characters WHERE name = ? LIMIT 1",
-        params,
-    ) {
-        Ok(r) => r,
-        Err(_e) => {
-            emit(ar_event_section_end("error"));
-            emit(ar_event_error("DB_UNREACHABLE", "Could not look up the character", "Is the server (ac-database) running?"));
-            return;
-        }
-    };
-    let Some(row) = res.rows.first() else {
-        emit(ar_event_section_end("error"));
-        emit(ar_event_error("NOT_FOUND", format!("No character named {char_name} exists yet"), ahbot::MANUAL_STEPS));
-        return;
-    };
-    let guid = sql_row_int(row.first()).filter(|g| *g >= 0);
-    let acct = sql_row_int(row.get(1)).filter(|a| *a >= 0);
-    let (guid, acct) = match (guid, acct) {
-        (Some(g), Some(a)) => (g as u64, a as u64),
-        _ => {
-            emit(ar_event_section_end("error"));
-            emit(ar_event_error("DB_UNREACHABLE", "Unexpected character lookup result", ""));
-            return;
-        }
-    };
-
-    emit(ar_event_line("info", format!("selected: {char_name} (guid {guid}, account {acct})")));
-
-    let keys = ahbot::conf_keys(ahmod, guid, acct);
-    let mut cfg_changed = false;
-    for (k, v) in &keys {
-        match config::conf_write(&ahconf, k, v) {
-            Ok(c) => cfg_changed = cfg_changed || c,
-            Err(_e) => {
-                emit(ar_event_section_end("error"));
-                emit(ar_event_error("WRITE_FAILED", "Could not write mod_ahbot.conf", ""));
-                return;
-            }
-        }
-    }
-    emit(ar_event_line("info", format!("wrote mod_ahbot.conf for {char_name} (guid {guid}): seller + buyer on")));
-
-    // Legacy-env cleanup, one key at a time (mirrors the oracle's single
-    // per-key if/elif -- NOT a "check removal for all keys, then check
-    // frozen for all keys" two-pass, since a frozen line must be emitted for
-    // EVERY matching key, not just the first).
-    let override_path = sdir.join("docker-compose.override.yml");
-    let mut env_was = false;
-    for (k, _) in &keys {
-        let ename = config::env_name_for(k);
-        match cfgset_clean_legacy_env(&override_path, &ename) {
-            Ok(true) => {
-                env_was = true;
-                cfg_changed = true;
-                emit(ar_event_line(
-                    "info",
-                    format!("removed old override {ename} (the running server still has it until a restart)"),
-                ));
-            }
-            Ok(false) => {
-                if env_frozen(&ename) {
-                    env_was = true;
-                    emit(ar_event_line(
-                        "info",
-                        format!("the running server still carries {ename} from when it started - a restart is needed"),
-                    ));
-                }
-            }
-            Err(e) => {
-                emit(ar_event_section_end("error"));
-                emit(ar_event_error(&e.code, e.message, &e.hint));
-                return;
-            }
-        }
-    }
-
-    let (applied, restart_required, already) = if cfg_changed {
-        if !env_was {
-            emit(ar_event_line("info", "asking the running server to reload its config..."));
-            let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = soap::SoapConfig::load();
-            let outcome = soap::exec(&soap_cfg, "reload config");
-            if matches!(outcome, soap::SoapOutcome::Ok(_)) {
-                emit(ar_event_line("info", format!("reloaded - the auction bot switches to {char_name} without a restart")));
-                ("live".to_string(), false, false)
-            } else {
-                emit(ar_event_line("info", "server not reachable - the change applies on the next start"));
-                ("restart".to_string(), true, false)
-            }
-        } else {
-            ("restart".to_string(), true, false)
-        }
-    } else {
-        emit(ar_event_line("info", format!("already configured for {char_name} - nothing to change")));
-        ("none".to_string(), false, true)
-    };
-
-    emit(ar_event_section_end("ok"));
-    emit(ar_event_done(&char_name, guid, acct, &applied, restart_required, ahmod, already));
-}
-
-/// NATIVE-MODE `wow ahbot repair` -- see the module comment above
-/// `wow_ahbot_repair_native_blocking`. Native mode only — WSL keeps calling
-/// `wow_ahbot_repair`.
+/// NATIVE-MODE `wow ahbot repair` -- see
+/// [`dml_wow::ahbot::ahbot_repair_stream`]. Native mode only — WSL keeps
+/// calling `wow_ahbot_repair`.
 #[tauri::command]
 async fn wow_ahbot_repair_native(
     char_name: String,
@@ -5644,7 +5066,7 @@ async fn wow_ahbot_repair_native(
     let config_lock = state.config_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_ahbot_repair_native_blocking(char_name, soap_lock, config_lock, |v| {
+        dml_wow::ahbot::ahbot_repair_stream(char_name, soap_lock, config_lock, |v| {
             let _ = ch.send(v);
         });
     })
@@ -5931,115 +5353,6 @@ fn validate_lan_request_native(
     Ok((inet, ip_arg))
 }
 
-/// `_lan_sql "SELECT address FROM realmlist WHERE id=1;"`, decoded to a
-/// plain `String` (NULL/an empty/unreadable result -> `None`).
-fn lan_current_address(db_cfg: &dml_wow::db::DbConfig) -> Option<String> {
-    let res = dml_wow::db::query(db_cfg, dml_wow::db::Database::Auth, "SELECT address FROM realmlist WHERE id = 1").ok()?;
-    let row = res.rows.first()?;
-    match row.first()? {
-        dml_wow::db::SqlValue::Text(s) => Some(s.clone()),
-        dml_wow::db::SqlValue::Int(i) => Some(i.to_string()),
-        dml_wow::db::SqlValue::Null => None,
-    }
-}
-
-/// `_lan_set` (`90-main.sh:976-997`): UPDATE + read-back verify. `Err`
-/// carries the already-formatted `[dml] ERROR: ...` text to return verbatim
-/// -- this is a TEXT-mode command (see the module doc comment above).
-fn lan_set(db_cfg: &dml_wow::db::DbConfig, ip: &str) -> Result<(), String> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(ip)];
-    if dml_wow::db::execute(db_cfg, dml_wow::db::Database::Auth, "UPDATE realmlist SET address = ? WHERE id = 1", params).is_err() {
-        return Err(dml_wow::lan::update_failed_message());
-    }
-    let newaddr = lan_current_address(db_cfg);
-    if newaddr.as_deref() != Some(ip) {
-        return Err(dml_wow::lan::address_mismatch_message(ip, newaddr.as_deref()));
-    }
-    Ok(())
-}
-
-/// The blocking flow itself (real docker/DB I/O) -- run under
-/// `spawn_blocking`. Order mirrors the oracle top-to-bottom: private-address
-/// gate -> installed? -> docker up? -> `ac-database` running? -> DB
-/// answering (retry loop)? -> the requested action.
-fn wow_lan_native_blocking(action: &str, ip_arg: Option<String>, inet: bool) -> String {
-    use dml_wow::{config::ConfigReader, db, lan, maint, native, status};
-
-    if !inet {
-        if let Some(ip) = ip_arg.as_deref() {
-            if (action == "on" || action == "refresh") && !lan::is_loopback_or_private(ip) {
-                return lan::not_private_message(LAN_TITLE, ip);
-            }
-        }
-    }
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    if maint::resolve_server_dir(&title_dir).is_none() {
-        return lan::not_installed_message();
-    }
-
-    let program = native::docker_program();
-    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
-        return lan::docker_down_message();
-    }
-    if !status::container_running(&program, "ac-database", maint::PROBE_TIMEOUT) {
-        return lan::not_running_message(LAN_TITLE);
-    }
-
-    let db_cfg = db::DbConfig::from_env();
-    let (tries, gap) = lan::tries_and_gap(action);
-    let mut reachable = false;
-    for i in 0..tries {
-        if db::query(&db_cfg, db::Database::Auth, "SELECT 1").is_ok() {
-            reachable = true;
-            break;
-        }
-        if i + 1 < tries {
-            std::thread::sleep(std::time::Duration::from_secs(gap));
-        }
-    }
-    if !reachable {
-        return lan::db_not_answering_message();
-    }
-
-    let current = lan_current_address(&db_cfg);
-
-    match action {
-        "on" => {
-            let ip = ip_arg.expect("validated: ip required for on");
-            match lan_set(&db_cfg, &ip) {
-                Ok(()) => lan::on_message(LAN_TITLE, &ip),
-                Err(e) => e,
-            }
-        }
-        "off" => match lan_set(&db_cfg, "127.0.0.1") {
-            Ok(()) => lan::off_message(LAN_TITLE),
-            Err(e) => e,
-        },
-        "status" => match current.as_deref() {
-            None | Some("") => lan::status_no_current_message(),
-            Some("127.0.0.1") => lan::status_off_message(),
-            Some(cur) => lan::status_on_message(cur),
-        },
-        "refresh" => {
-            let ip = ip_arg.expect("validated: ip required for refresh");
-            match current.as_deref() {
-                None | Some("") | Some("127.0.0.1") => lan::refresh_off_message(LAN_TITLE),
-                Some(cur) if cur == ip => lan::refresh_already_message(&ip),
-                Some(cur) if !lan::is_private_lan(cur) => lan::refresh_not_lan_message(cur),
-                Some(cur) => {
-                    let cur = cur.to_string();
-                    match lan_set(&db_cfg, &ip) {
-                        Ok(()) => lan::refresh_done_message(&cur, &ip),
-                        Err(e) => e,
-                    }
-                }
-            }
-        }
-        _ => unreachable!("action pre-validated by validate_lan_request_native"),
-    }
-}
-
 /// NATIVE-MODE `wow lan on/off/status/refresh` -- see the module doc comment
 /// above `validate_lan_request_native` for the text-vs-typed-error split.
 /// Native mode only — WSL keeps calling `wow_lan`.
@@ -6047,7 +5360,7 @@ fn wow_lan_native_blocking(action: &str, ip_arg: Option<String>, inet: bool) -> 
 async fn wow_lan_native(action: String, ip: Option<String>, internet: Option<bool>) -> Result<String, CmdError> {
     require_native_backend()?;
     let (inet, ip_arg) = validate_lan_request_native(&action, ip, internet.unwrap_or(false))?;
-    tauri::async_runtime::spawn_blocking(move || wow_lan_native_blocking(&action, ip_arg, inet))
+    tauri::async_runtime::spawn_blocking(move || dml_wow::lan::lan_action(&action, ip_arg, inet))
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
 }
@@ -6111,42 +5424,6 @@ fn find_tailscale_exe() -> Option<std::path::PathBuf> {
         return Some(std::path::PathBuf::from("tailscale.exe"));
     }
     None
-}
-
-/// Spawn `cmd`, wait up to `timeout` wall-clock, and — crucially — **kill and
-/// reap** the child if it overruns instead of abandoning it. The previous
-/// idiom ran a blocking `output()` on a detached helper thread and left it
-/// (and its un-reaped child holding open stdio pipes) alive forever on a hung
-/// `docker`/`tailscale` subprocess; repeated calls against a wedged engine
-/// slowly leaked threads + process handles. Here the child is owned, polled,
-/// and terminated on the deadline. Output is small for every caller (a docker
-/// env list, a tailscale status) so a full drain via `wait_with_output()`
-/// after exit cannot deadlock on the pipe buffer.
-fn output_bounded(mut cmd: std::process::Command, timeout: std::time::Duration) -> Option<std::process::Output> {
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap so it never zombies
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    child.wait_with_output().ok()
 }
 
 /// Runs `program` with `args`, bounded by `timeout` wall-clock (see
@@ -6334,6 +5611,16 @@ fn tailscale_down_native() -> serde_json::Value {
     serde_json::json!({"down": true})
 }
 
+/// The one `*_blocking` body deliberately LEFT in the launcher by the
+/// cargo-workspace refactor (Task 9), which hoisted every other one into
+/// `dml-wow`. This whole Tailscale cluster is Windows-HOST desktop-app
+/// plumbing — locating and driving the Tailscale app's `tailscale.exe`,
+/// running its MSI installer, parsing `tailscale status --json` — with no
+/// WoW/AzerothCore domain content at all, so `dml-wow` ("the WoW game
+/// library") is the wrong home for it and `dml-core` has no host-networking
+/// module to put it in. No planned `dml-wow-cli` subcommand consumes it
+/// either. It is also not orchestration: it is a six-line dispatcher over
+/// the four `tailscale_*_native` helpers directly above.
 fn native_tailscale_blocking(action: &str) -> Result<serde_json::Value, CmdError> {
     match action {
         "install" => tailscale_install_native(),
@@ -7363,7 +6650,7 @@ async fn games_start(
     if is_native_backend() {
         ensure_engine_up(&on_event).await?;
         // Chunk 3b: native mode replaces the inner `dml` shell-out with
-        // direct compose orchestration (see `games_lifecycle_native_blocking`
+        // direct compose orchestration (see `games_lifecycle_stream`
         // below) -- the engine-ensure-up wrapping just above is unchanged.
         return run_games_lifecycle_native("start", id, false, on_event).await;
     }
@@ -7459,146 +6746,11 @@ async fn run_games_lifecycle_native(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `wow update` (server self-update, Chunk 3b) — oracle
-// `90-main.sh:5645-5732` + `_wow_pull_repo`/`_wow_remote_ok`/`_wow_git_branch`
-// (`70-modules.sh:843,850,872-933`, ported in `dml::modmgr`, Chunk 3a).
-// STREAMED, same NDJSON vocabulary as `wow_world_restart_native`. A brand
-// new `_native` sibling (unlike `games_start`/`stop`/`restart` above, WSL's
-// `wow_server_update` has no engine-lifecycle wrapping to preserve) —
-// `require_native_backend()` gates it, matching every other `_native`
-// command. Fail-closed gates run IN ORDER, before any mutation: server dir
-// -> `.git` checkout -> AzerothCore remote -> mod-playerbots remote (only if
-// present) -> branch -> explicit `--backup`/`--no-backup` (see
-// `dml::modmgr::update_gate_order` for the same order, pure + unit-tested).
-// ---------------------------------------------------------------------------
-
-const WOW_UPDATE_SECTION: &str = "server-update";
-
-fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::{config::ConfigReader, maint, modmgr, native};
-
-    emit(serde_json::json!({"event": "section_start", "name": WOW_UPDATE_SECTION}));
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(dml_wow::lifecycle::gl_error("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    if !modmgr::is_git_checkout(&sdir) {
-        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(dml_wow::lifecycle::gl_error("GIT_MISSING", format!("{} is not a git checkout", sdir.display()), "Can't update from source."));
-        return;
-    }
-
-    let git_program = std::ffi::OsString::from("git");
-
-    // AzerothCore must be the custom mod-playerbots fork on the Playerbot
-    // branch -- pulling upstream azerothcore/azerothcore-wotlk here would
-    // break the playerbots integration. No override: hard error.
-    let acurl = modmgr::git_remote_url(&git_program, &sdir);
-    if !modmgr::wow_remote_ok(&acurl, "mod-playerbots/azerothcore-wotlk") {
-        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(dml_wow::lifecycle::gl_error(
-            "REMOTE_MISMATCH",
-            "AzerothCore origin is not the expected Playerbots fork",
-            &format!(
-                "found: {} -- pulling upstream AzerothCore would break Playerbots. Fix the remote manually, then retry.",
-                if acurl.is_empty() { "<none>" } else { acurl.as_str() }
-            ),
-        ));
-        return;
-    }
-
-    let moddir = sdir.join("modules").join("mod-playerbots");
-    let pb_present = modmgr::is_git_checkout(&moddir);
-    if pb_present {
-        let pburl = modmgr::git_remote_url(&git_program, &moddir);
-        if !modmgr::wow_remote_ok(&pburl, "mod-playerbots/mod-playerbots") {
-            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-            emit(dml_wow::lifecycle::gl_error(
-                "REMOTE_MISMATCH",
-                "mod-playerbots origin is not the expected fork",
-                &format!("found: {}", if pburl.is_empty() { "<none>" } else { pburl.as_str() }),
-            ));
-            return;
-        }
-    }
-
-    let acbranch = modmgr::git_branch(&git_program, &sdir);
-    if acbranch != "Playerbot" {
-        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(dml_wow::lifecycle::gl_error("BRANCH_MISMATCH", format!("AzerothCore checkout is on branch '{acbranch}' (expected 'Playerbot')"), ""));
-        return;
-    }
-
-    let Some(do_backup) = backup else {
-        emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-        emit(dml_wow::lifecycle::gl_error(
-            "BAD_ARG",
-            "Pick --backup or --no-backup",
-            "New core revisions can run DB migrations at next start -- decide explicitly.",
-        ));
-        return;
-    };
-
-    if do_backup {
-        let docker_program = native::docker_program();
-        let db_cfg = dml_wow::db::DbConfig::from_env();
-        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
-            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-            emit(dml_wow::lifecycle::gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
-            return;
-        }
-    }
-
-    let mut changed = false;
-
-    let ac_before = modmgr::git_short_head(&git_program, &sdir);
-    let ac_pull_changed = match modmgr::wow_pull_repo(&git_program, &sdir, "AzerothCore", &emit) {
-        Ok(c) => c,
-        Err(()) => {
-            emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-            return;
-        }
-    };
-    let ac_after = modmgr::git_short_head(&git_program, &sdir);
-    if ac_pull_changed {
-        changed = true;
-    }
-    let ac_summary = modmgr::pull_summary(&ac_before, &ac_after);
-
-    let pb_summary = if pb_present {
-        let pb_before = modmgr::git_short_head(&git_program, &moddir);
-        let pb_pull_changed = match modmgr::wow_pull_repo(&git_program, &moddir, "mod-playerbots", &emit) {
-            Ok(c) => c,
-            Err(()) => {
-                emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
-                return;
-            }
-        };
-        let pb_after = modmgr::git_short_head(&git_program, &moddir);
-        if pb_pull_changed {
-            changed = true;
-        }
-        modmgr::pull_summary(&pb_before, &pb_after)
-    } else {
-        dml_wow::lifecycle::gl_line(&emit, "warn", "modules/mod-playerbots not found -- skipping module update.");
-        "skipped".to_string()
-    };
-
-    if changed {
-        let _ = modmgr::rebuild_pending_add(&sdir, "core-update");
-        dml_wow::lifecycle::gl_line(&emit, "info", "Rebuild required to compile the update -- use the rebuild banner on this page.");
-    }
-
-    emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "ok"}));
-    emit(serde_json::json!({"event": "done", "data": {"changed": changed, "ac": ac_summary, "playerbots": pb_summary}}));
-}
-
-/// NATIVE-MODE `wow update` (server self-update). Native mode only -- WSL
+/// NATIVE-MODE `wow update` (server self-update) — see
+/// [`dml_wow::maint::update_stream`]. A brand new `_native` sibling (unlike
+/// `games_start`/`stop`/`restart` above, WSL's `wow_server_update` has no
+/// engine-lifecycle wrapping to preserve), so `require_native_backend()`
+/// gates it, matching every other `_native` command. Native mode only -- WSL
 /// keeps calling `wow_server_update` (the `dml`-shelling sibling above).
 /// `backup: None` reaches the arm's own `BAD_ARG` gate (the frontend always
 /// passes an explicit `true`/`false`, matching WSL's plain-`bool` sibling —
@@ -7608,7 +6760,7 @@ async fn wow_update_native(backup: Option<bool>, on_event: Channel<serde_json::V
     require_native_backend()?;
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_update_native_blocking(backup, |v| {
+        dml_wow::maint::update_stream(backup, |v| {
             let _ = ch.send(v);
         });
     })
@@ -8071,46 +7223,11 @@ mod tests {
     // -- lan_current_address / lan_set shape (Chunk 2 task C2c item 3) -------
 
     #[test]
-    fn lan_current_address_none_on_unreachable_db() {
-        // A bogus port guarantees an unreachable connection without touching
-        // the real DB -- exercises the `.ok()?` degrade-to-None path.
-        let cfg = dml_wow::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
-        assert_eq!(lan_current_address(&cfg), None);
-    }
-
-    #[test]
     fn tool_name_allowlist_is_closed() {
         assert!(TOOL_NAMES.contains(&"unbound"));
         assert!(TOOL_NAMES.contains(&"unbound-remove"));
         assert!(!TOOL_NAMES.contains(&"unbound; rm -rf /"));
         assert!(!TOOL_NAMES.contains(&"anything-else"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn output_bounded_returns_output_for_a_fast_command() {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/c", "echo", "bounded_ok"]);
-        let out = super::output_bounded(cmd, std::time::Duration::from_secs(5))
-            .expect("fast command should return Some");
-        assert!(out.status.success());
-        assert!(String::from_utf8_lossy(&out.stdout).contains("bounded_ok"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn output_bounded_kills_and_returns_none_on_timeout() {
-        // `ping -n 20` runs ~19s; a 300ms bound must return None well before
-        // that, proving the child was killed rather than waited out.
-        let start = std::time::Instant::now();
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.args(["/c", "ping", "-n", "20", "127.0.0.1"]);
-        let out = super::output_bounded(cmd, std::time::Duration::from_millis(300));
-        assert!(out.is_none(), "an overrunning command must time out to None");
-        assert!(
-            start.elapsed() < std::time::Duration::from_secs(5),
-            "must return promptly after the deadline, not wait for the child"
-        );
     }
 
     #[test]
@@ -8553,16 +7670,6 @@ mod tests {
     }
 
     #[test]
-    fn sql_row_int_reads_int_and_text_variants() {
-        use dml_wow::db::SqlValue;
-        assert_eq!(sql_row_int(Some(&SqlValue::Int(42))), Some(42));
-        assert_eq!(sql_row_int(Some(&SqlValue::Text("7".into()))), Some(7));
-        assert_eq!(sql_row_int(Some(&SqlValue::Text("nope".into()))), None);
-        assert_eq!(sql_row_int(Some(&SqlValue::Null)), None);
-        assert_eq!(sql_row_int(None), None);
-    }
-
-    #[test]
     fn return_home_online_result_ok_passes_through() {
         assert_eq!(
             return_home_online_result(SoapOutcome::Ok("done".into())).unwrap(),
@@ -8669,20 +7776,6 @@ mod tests {
             e.hint,
             "The server must be running to change the message of the day - start it first."
         );
-    }
-
-    #[test]
-    fn env_frozen_with_missing_binary_degrades_to_false() {
-        // No such executable -> the spawn itself fails -> degrades to `false`,
-        // matching the bash oracle's docker-down fallback. No live docker/
-        // server needed (this is the whole point of the degrade rule).
-        let program = std::ffi::OsStr::new("dml-b2a-definitely-not-a-real-binary-xyz");
-        assert!(!env_frozen_with(
-            program,
-            "ac-worldserver",
-            "AC_RATE_XP_KILL",
-            std::time::Duration::from_millis(500)
-        ));
     }
 
     // -- config_set_direct / config_set_curated ---------------------------
@@ -9065,87 +8158,6 @@ mod tests {
 
     // -- native bridge-setup: event-shape builders (Chunk 2 task C2c item 4) --
 
-    #[test]
-    fn bs_event_section_start_shape() {
-        assert_eq!(bs_event_section_start(), serde_json::json!({"event":"section_start","name":"bridge-setup"}));
-    }
-
-    #[test]
-    fn bs_event_line_shape() {
-        assert_eq!(
-            bs_event_line("info", "deploying bridge scripts..."),
-            serde_json::json!({"event":"line","level":"info","text":"deploying bridge scripts..."})
-        );
-    }
-
-    #[test]
-    fn bs_event_section_end_shape() {
-        assert_eq!(bs_event_section_end("ok"), serde_json::json!({"event":"section_end","name":"bridge-setup","status":"ok"}));
-        assert_eq!(bs_event_section_end("error"), serde_json::json!({"event":"section_end","name":"bridge-setup","status":"error"}));
-    }
-
-    #[test]
-    fn bs_event_done_shape() {
-        assert_eq!(bs_event_done(true), serde_json::json!({"event":"done","data":{"changed":true,"restart_required":true}}));
-        assert_eq!(bs_event_done(false), serde_json::json!({"event":"done","data":{"changed":false,"restart_required":false}}));
-    }
-
-    #[test]
-    fn bs_event_error_shape() {
-        assert_eq!(
-            bs_event_error("SOAP_AUTH", "SOAP auth failed", "Check ~/.dml/soap.env"),
-            serde_json::json!({"event":"error","error":{"code":"SOAP_AUTH","message":"SOAP auth failed","hint":"Check ~/.dml/soap.env"}})
-        );
-    }
-
     // -- native ahbot-repair: event-shape builders (Chunk 2 task C2c item 8) --
 
-    #[test]
-    fn ar_event_section_start_shape() {
-        assert_eq!(ar_event_section_start(), serde_json::json!({"event":"section_start","name":"ahbot-repair"}));
-    }
-
-    #[test]
-    fn ar_event_line_shape() {
-        assert_eq!(
-            ar_event_line("info", "selected: Bob (guid 5, account 3)"),
-            serde_json::json!({"event":"line","level":"info","text":"selected: Bob (guid 5, account 3)"})
-        );
-    }
-
-    #[test]
-    fn ar_event_section_end_shape() {
-        assert_eq!(ar_event_section_end("ok"), serde_json::json!({"event":"section_end","name":"ahbot-repair","status":"ok"}));
-        assert_eq!(ar_event_section_end("error"), serde_json::json!({"event":"section_end","name":"ahbot-repair","status":"error"}));
-    }
-
-    #[test]
-    fn ar_event_done_shape() {
-        assert_eq!(
-            ar_event_done("Bob", 5, 3, "live", false, "mod-ah-bot-plus", false),
-            serde_json::json!({"event":"done","data":{
-                "repaired": true,
-                "already": false,
-                "char": "Bob",
-                "guid": 5,
-                "account": 3,
-                "applied": "live",
-                "restart_required": false,
-                "module": "mod-ah-bot-plus",
-                "manual_steps": dml_wow::ahbot::MANUAL_STEPS,
-            }})
-        );
-    }
-
-    #[test]
-    fn ar_event_error_shape() {
-        assert_eq!(
-            ar_event_error("NOT_INSTALLED", "No Auction House Bot module is installed", "Install it first."),
-            serde_json::json!({"event":"error","error":{
-                "code":"NOT_INSTALLED",
-                "message":"No Auction House Bot module is installed",
-                "hint":"Install it first.",
-            }})
-        );
-    }
 }
