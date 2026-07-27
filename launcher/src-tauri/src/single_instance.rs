@@ -50,13 +50,33 @@ pub fn acquire() -> Instance {
     }
 }
 
-/// Connect and exchange the handshake. True iff a real sibling answered.
+/// Connect and exchange the handshake, RETRYING for a few seconds.
+///
+/// The retry is load-bearing, not politeness. The listener only starts
+/// accepting inside Tauri's `.setup()`, hundreds of milliseconds after the
+/// first instance binds the port. A second launch during that window
+/// completes its TCP connect against the kernel backlog, gets no reply
+/// because nobody is accepting yet, and would conclude "stranger on the
+/// port" — starting a second full app, which is exactly what this guard
+/// exists to prevent. Retrying spans the gap; a genuine stranger just costs
+/// a few seconds before we start unguarded.
 fn poke_existing_instance() -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+    while std::time::Instant::now() < deadline {
+        if handshake_once() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    false
+}
+
+fn handshake_once() -> bool {
     use std::io::{Read, Write};
     let Ok(mut s) = TcpStream::connect(("127.0.0.1", PORT)) else {
         return false;
     };
-    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(400)));
     if s.write_all(HELLO).is_err() {
         return false;
     }
@@ -72,12 +92,18 @@ pub fn serve(listener: TcpListener, app: tauri::AppHandle) {
             // An accept error is not a poke; treat only real connections as
             // one, or a transient error would raise the window unbidden.
             let Ok(mut s) = stream else { continue };
-            let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
-            let mut buf = [0u8; HELLO.len()];
-            if s.read_exact(&mut buf).is_ok() && buf == HELLO {
-                let _ = s.write_all(HELLO);
-                crate::tray::show_main_window(&app);
-            }
+            let app = app.clone();
+            // One short-lived thread per connection: a stranger that connects
+            // and then goes silent must not hold the accept loop for its read
+            // timeout and delay a real sibling's window-surfacing.
+            std::thread::spawn(move || {
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+                let mut buf = [0u8; HELLO.len()];
+                if s.read_exact(&mut buf).is_ok() && buf == HELLO {
+                    let _ = s.write_all(HELLO);
+                    crate::tray::show_main_window(&app);
+                }
+            });
         }
     });
 }
