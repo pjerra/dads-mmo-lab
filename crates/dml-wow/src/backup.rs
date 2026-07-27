@@ -942,6 +942,112 @@ pub fn delete_backup(dir: &Path, file: &str) {
     let _ = std::fs::remove_file(meta_path_for(&path));
 }
 
+// ---------------------------------------------------------------------------
+// STREAMED `backup create` orchestration (Chunk 2, task C2a) — a faithful
+// port of `90-main.sh:3662-3707`, moved out of the launcher's `lib.rs` by the
+// cargo-workspace refactor (Task 9). Same NDJSON vocabulary as
+// `lifecycle::world_restart_stream`: every domain failure travels IN the
+// stream, so the caller only sees a hard error if the blocking task itself
+// dies.
+// ---------------------------------------------------------------------------
+
+fn bc_event_section_start() -> serde_json::Value {
+    serde_json::json!({"event": "section_start", "name": "backup-create"})
+}
+
+fn bc_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({"event": "line", "level": level, "text": text.into()})
+}
+
+fn bc_event_section_end(status: &str) -> serde_json::Value {
+    serde_json::json!({"event": "section_end", "name": "backup-create", "status": status})
+}
+
+fn bc_event_done(file: &str, size: u64, world: bool, pruned: &[String]) -> serde_json::Value {
+    serde_json::json!({"event": "done", "data": {
+        "file": file, "size": size, "world": world, "pruned": pruned,
+    }})
+}
+
+fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
+    serde_json::json!({"event": "error", "error": {
+        "code": code, "message": message.into(), "hint": hint,
+    }})
+}
+
+/// The blocking flow itself (real docker exec + gzip I/O) — run under
+/// `spawn_blocking`. `emit` sends one NDJSON event per call, matching the
+/// `wow world-restart` streamed-command convention (see
+/// `wow_world_restart_native_blocking`): every return path emits its own
+/// terminal event(s) first, so the caller never needs to synthesize one. A
+/// port of the `backup create` arm (`90-main.sh:3662-3707`), extended with
+/// the optional display `name` (backup display names) the CLI has no
+/// `--name` flag for — `raw_name` is whatever the webview's text input sent
+/// (untrusted, unsanitized), sanitized/bounded here via `backup::
+/// sanitize_backup_name`; `None`/empty/all-stripped falls back to `backup::
+/// default_backup_name`, numbered off however many `.sql.gz` files already
+/// exist in `bdir` at this point -- BEFORE the dump below creates a new one.
+pub fn backup_create_stream(
+    include_world: bool,
+    raw_name: Option<String>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{backup, maint, native};
+
+    emit(bc_event_section_start());
+
+    let program = native::docker_program();
+    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    let Some(bdir) = backup::backup_dir() else {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("INTERNAL", "Could not resolve the backups directory", ""));
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&bdir) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("INTERNAL", format!("Could not create the backups directory: {e}"), ""));
+        return;
+    }
+
+    let resolved_name = backup::sanitize_backup_name(raw_name.as_deref().unwrap_or(""))
+        .unwrap_or_else(|| backup::default_backup_name(backup::sql_gz_names_desc(&bdir).len()));
+
+    let file_name = backup::new_backup_file_name(include_world);
+    let out_path = bdir.join(&file_name);
+
+    emit(bc_event_line(
+        "info",
+        if include_world { "backing up characters, bots, accounts and world..." } else { "backing up characters, bots and accounts..." },
+    ));
+
+    if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path) {
+        emit(bc_event_section_end("error"));
+        emit(bc_event_error("BACKUP_FAILED", "mysqldump failed", &errtail));
+        return;
+    }
+
+    let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+    // Batch 4: content-summary sidecar -- best-effort, never blocks/fails
+    // the backup (matches `_backup_write_meta`'s own swallow-everything
+    // contract). Batch (backup display names): now also carries the
+    // resolved display name.
+    backup::write_meta(&db_cfg, &out_path, Some(&resolved_name));
+
+    let pruned = backup::prune(&bdir);
+    for p in &pruned {
+        emit(bc_event_line("info", format!("pruned old backup: {p}")));
+    }
+
+    emit(bc_event_section_end("ok"));
+    emit(bc_event_done(&file_name, size, include_world, &pruned));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6065,105 +6065,8 @@ async fn wow_backup_restore(file: String, on_event: Channel<serde_json::Value>, 
 // write path).
 // ---------------------------------------------------------------------------
 
-fn bc_event_section_start() -> serde_json::Value {
-    serde_json::json!({"event": "section_start", "name": "backup-create"})
-}
-
-fn bc_event_line(level: &str, text: impl Into<String>) -> serde_json::Value {
-    serde_json::json!({"event": "line", "level": level, "text": text.into()})
-}
-
-fn bc_event_section_end(status: &str) -> serde_json::Value {
-    serde_json::json!({"event": "section_end", "name": "backup-create", "status": status})
-}
-
-fn bc_event_done(file: &str, size: u64, world: bool, pruned: &[String]) -> serde_json::Value {
-    serde_json::json!({"event": "done", "data": {
-        "file": file, "size": size, "world": world, "pruned": pruned,
-    }})
-}
-
-fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
-    serde_json::json!({"event": "error", "error": {
-        "code": code, "message": message.into(), "hint": hint,
-    }})
-}
-
-/// The blocking flow itself (real docker exec + gzip I/O) — run under
-/// `spawn_blocking`. `emit` sends one NDJSON event per call, matching the
-/// `wow world-restart` streamed-command convention (see
-/// `wow_world_restart_native_blocking`): every return path emits its own
-/// terminal event(s) first, so the caller never needs to synthesize one. A
-/// port of the `backup create` arm (`90-main.sh:3662-3707`), extended with
-/// the optional display `name` (backup display names) the CLI has no
-/// `--name` flag for — `raw_name` is whatever the webview's text input sent
-/// (untrusted, unsanitized), sanitized/bounded here via `backup::
-/// sanitize_backup_name`; `None`/empty/all-stripped falls back to `backup::
-/// default_backup_name`, numbered off however many `.sql.gz` files already
-/// exist in `bdir` at this point -- BEFORE the dump below creates a new one.
-fn wow_backup_create_native_blocking(
-    include_world: bool,
-    raw_name: Option<String>,
-    db_cfg: dml_wow::db::DbConfig,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{backup, maint, native};
-
-    emit(bc_event_section_start());
-
-    let program = native::docker_program();
-    if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
-        emit(bc_event_section_end("error"));
-        emit(bc_event_error("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
-        return;
-    }
-
-    let Some(bdir) = backup::backup_dir() else {
-        emit(bc_event_section_end("error"));
-        emit(bc_event_error("INTERNAL", "Could not resolve the backups directory", ""));
-        return;
-    };
-    if let Err(e) = std::fs::create_dir_all(&bdir) {
-        emit(bc_event_section_end("error"));
-        emit(bc_event_error("INTERNAL", format!("Could not create the backups directory: {e}"), ""));
-        return;
-    }
-
-    let resolved_name = backup::sanitize_backup_name(raw_name.as_deref().unwrap_or(""))
-        .unwrap_or_else(|| backup::default_backup_name(backup::sql_gz_names_desc(&bdir).len()));
-
-    let file_name = backup::new_backup_file_name(include_world);
-    let out_path = bdir.join(&file_name);
-
-    emit(bc_event_line(
-        "info",
-        if include_world { "backing up characters, bots, accounts and world..." } else { "backing up characters, bots and accounts..." },
-    ));
-
-    if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path) {
-        emit(bc_event_section_end("error"));
-        emit(bc_event_error("BACKUP_FAILED", "mysqldump failed", &errtail));
-        return;
-    }
-
-    let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-    // Batch 4: content-summary sidecar -- best-effort, never blocks/fails
-    // the backup (matches `_backup_write_meta`'s own swallow-everything
-    // contract). Batch (backup display names): now also carries the
-    // resolved display name.
-    backup::write_meta(&db_cfg, &out_path, Some(&resolved_name));
-
-    let pruned = backup::prune(&bdir);
-    for p in &pruned {
-        emit(bc_event_line("info", format!("pruned old backup: {p}")));
-    }
-
-    emit(bc_event_section_end("ok"));
-    emit(bc_event_done(&file_name, size, include_world, &pruned));
-}
-
 /// NATIVE-MODE fast `backup create`: same flow/messages/codes as `dml wow
-/// backup create` (see `wow_backup_create_native_blocking`'s doc comment),
+/// backup create` (see [`dml_wow::backup::backup_create_stream`]'s doc comment),
 /// via a direct `docker exec … mysqldump` + `flate2` gzip instead of
 /// shelling `dml`/`gzip`. Native mode only — WSL keeps calling
 /// `wow_backup_create`. `name` (backup display names) is native-only for the
@@ -6181,7 +6084,7 @@ async fn wow_backup_create_native(
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let db_cfg = dml_wow::db::DbConfig::from_env();
-        wow_backup_create_native_blocking(include_world.unwrap_or(false), name, db_cfg, |v| {
+        dml_wow::backup::backup_create_stream(include_world.unwrap_or(false), name, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -6266,130 +6169,10 @@ async fn wow_backup_delete_native(file: String) -> Result<serde_json::Value, Cmd
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `backup restore` (Chunk 4b, Part 1): faithful port of the
-// `restore)` arm (`90-main.sh:3786-3855`) — the CLI's ONE sanctioned
-// whole-DB-overwrite write path. Same NDJSON vocabulary as `wow_world_
-// restart_native`/`wow_backup_create_native_blocking`; the ONE new subprocess
-// shape is `dml::restore::stream_restore`'s gunzip-into-`docker exec … mysql`
-// stdin pipe (see that module's doc comment). No `--yes`/confirm parameter
-// exists on either side (the two-click UI is the gate, same as the WSL
-// sibling `wow_backup_restore` above). Native mode only — WSL keeps calling
-// `wow_backup_restore`.
-// ---------------------------------------------------------------------------
-
-const BACKUP_RESTORE_SECTION: &str = "backup-restore";
-
-/// The blocking flow itself (real docker/SOAP/fs I/O) — run under
-/// `spawn_blocking`. Order mirrors the oracle top-to-bottom: name-shape gate
-/// -> backup file exists? -> server installed? -> saveall (best-effort) ->
-/// stop world+auth (hard-fail: "Nothing was changed") -> pre-restore safety
-/// dump (hard-fail: restart best-effort + "nothing was restored") -> the
-/// import itself (hard-fail: server LEFT STOPPED, no auto-restart) -> start
-/// world+auth (soft-fail: warn only) -> done.
-fn wow_backup_restore_native_blocking(
-    file: String,
-    soap_lock: Arc<Mutex<()>>,
-    db_cfg: dml_wow::db::DbConfig,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{backup, config::ConfigReader, lifecycle, maint, modmgr, native, restore, soap, status};
-
-    emit(modmgr::section_start(BACKUP_RESTORE_SECTION));
-
-    if !backup::valid_backup_name(&file) {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event("BAD_ARG", format!("Invalid backup name: {file}"), ""));
-        return;
-    }
-
-    let Some(bdir) = backup::backup_dir() else {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event("INTERNAL", "Could not resolve the backups directory", ""));
-        return;
-    };
-    let bpath = bdir.join(&file);
-    if !bpath.is_file() {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event("NOT_FOUND", format!("No backup named {file}"), ""));
-        return;
-    }
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    let docker_program = native::docker_program();
-
-    emit(modmgr::line_event("info", "stopping the game server..."));
-    // Flush characters before the stop so the pre-restore safety dump
-    // contains everyone's latest state (best-effort) — `90-main.sh:3812-3816`.
-    {
-        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = soap::SoapConfig::load();
-        let _ = soap::exec(&cfg, "saveall");
-    }
-    let mut stop_cmd = std::process::Command::new(&docker_program);
-    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver", "ac-authserver"]);
-    status::windows_no_window(&mut stop_cmd);
-    if !matches!(status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT), Some(o) if o.status.success())
-    {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event("BACKUP_FAILED", "Could not stop the server", "Nothing was changed."));
-        return;
-    }
-
-    emit(modmgr::line_event("info", "taking a pre-restore safety backup..."));
-    let (safety, include_world) = restore::prerestore_name(&file);
-    let safety_path = bdir.join(&safety);
-    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, include_world, &safety_path) {
-        let _ = errtail; // bash discards the tail here too -- fixed hint text only.
-        let mut start_cmd = std::process::Command::new(&docker_program);
-        start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
-        status::windows_no_window(&mut start_cmd);
-        let _ = status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT);
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event(
-            "BACKUP_FAILED",
-            "Safety backup failed -- nothing was restored",
-            "The server was started again.",
-        ));
-        return;
-    }
-
-    emit(modmgr::line_event("info", format!("restoring {file}...")));
-    let import_ok = matches!(restore::stream_restore(&docker_program, &db_cfg.password, &bpath), Ok(r) if r.success());
-    if !import_ok {
-        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
-        emit(modmgr::error_event(
-            "BACKUP_FAILED",
-            "Import failed -- the server was LEFT STOPPED",
-            &format!("Your pre-restore state is saved as {safety}. Restore it, or start the server manually once resolved."),
-        ));
-        return;
-    }
-
-    emit(modmgr::line_event("info", "starting the game server..."));
-    let mut start_cmd = std::process::Command::new(&docker_program);
-    start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
-    status::windows_no_window(&mut start_cmd);
-    if !matches!(status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT), Some(o) if o.status.success())
-    {
-        emit(modmgr::line_event("warn", "server start failed -- start it from Home"));
-    }
-
-    emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "ok"));
-    emit(modmgr::done_event(serde_json::json!({
-        "restored": true, "file": file, "safety_backup": safety,
-    })));
-}
-
-/// NATIVE-MODE `backup restore` — see the module comment above. No `--yes`
-/// exists on either backend: the launcher's two-click confirm UI is the
-/// gate, unchanged from `wow_backup_restore`. Native mode only.
+/// NATIVE-MODE `backup restore` — see
+/// [`dml_wow::restore::backup_restore_stream`]. No `--yes` exists on either
+/// backend: the launcher's two-click confirm UI is the gate, unchanged from
+/// `wow_backup_restore`. Native mode only.
 #[tauri::command]
 async fn wow_backup_restore_native(
     file: String,
@@ -6401,7 +6184,7 @@ async fn wow_backup_restore_native(
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let db_cfg = dml_wow::db::DbConfig::from_env();
-        wow_backup_restore_native_blocking(file, soap_lock, db_cfg, |v| {
+        dml_wow::restore::backup_restore_stream(file, soap_lock, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })

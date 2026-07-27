@@ -49,6 +49,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
 use super::backup;
 use super::status::windows_no_window;
@@ -205,6 +206,127 @@ fn stream_into(program: &OsStr, args: &[String], gz_path: &Path) -> Result<Impor
     let status = child.wait().ok();
 
     Ok(ImportResult { status, stdout: stdout_buf, stderr: stderr_buf, stream_error })
+}
+
+// ---------------------------------------------------------------------------
+// STREAMED `backup restore` orchestration (Chunk 4b, Part 1): faithful port
+// of the `restore)` arm (`90-main.sh:3786-3855`) — the CLI's ONE sanctioned
+// whole-DB-overwrite write path. Moved out of the launcher's `lib.rs` by the
+// cargo-workspace refactor (Task 9). Same NDJSON vocabulary as
+// `lifecycle::world_restart_stream`/`backup::backup_create_stream`; the ONE
+// new subprocess shape is [`stream_restore`]'s gunzip-into-`docker exec …
+// mysql` stdin pipe (see the module doc comment above). No `--yes`/confirm
+// parameter exists here — the launcher's two-click UI is its gate, and the
+// CLI supplies its own.
+// ---------------------------------------------------------------------------
+
+const BACKUP_RESTORE_SECTION: &str = "backup-restore";
+
+/// The blocking flow itself (real docker/SOAP/fs I/O) — run under
+/// `spawn_blocking`. Order mirrors the oracle top-to-bottom: name-shape gate
+/// -> backup file exists? -> server installed? -> saveall (best-effort) ->
+/// stop world+auth (hard-fail: "Nothing was changed") -> pre-restore safety
+/// dump (hard-fail: restart best-effort + "nothing was restored") -> the
+/// import itself (hard-fail: server LEFT STOPPED, no auto-restart) -> start
+/// world+auth (soft-fail: warn only) -> done.
+pub fn backup_restore_stream(
+    file: String,
+    soap_lock: Arc<Mutex<()>>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{backup, config::ConfigReader, lifecycle, maint, modmgr, native, restore, soap, status};
+
+    emit(modmgr::section_start(BACKUP_RESTORE_SECTION));
+
+    if !backup::valid_backup_name(&file) {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("BAD_ARG", format!("Invalid backup name: {file}"), ""));
+        return;
+    }
+
+    let Some(bdir) = backup::backup_dir() else {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("INTERNAL", "Could not resolve the backups directory", ""));
+        return;
+    };
+    let bpath = bdir.join(&file);
+    if !bpath.is_file() {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", format!("No backup named {file}"), ""));
+        return;
+    }
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+
+    emit(modmgr::line_event("info", "stopping the game server..."));
+    // Flush characters before the stop so the pre-restore safety dump
+    // contains everyone's latest state (best-effort) — `90-main.sh:3812-3816`.
+    {
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = soap::SoapConfig::load();
+        let _ = soap::exec(&cfg, "saveall");
+    }
+    let mut stop_cmd = std::process::Command::new(&docker_program);
+    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver", "ac-authserver"]);
+    status::windows_no_window(&mut stop_cmd);
+    if !matches!(status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT), Some(o) if o.status.success())
+    {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event("BACKUP_FAILED", "Could not stop the server", "Nothing was changed."));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "taking a pre-restore safety backup..."));
+    let (safety, include_world) = restore::prerestore_name(&file);
+    let safety_path = bdir.join(&safety);
+    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, include_world, &safety_path) {
+        let _ = errtail; // bash discards the tail here too -- fixed hint text only.
+        let mut start_cmd = std::process::Command::new(&docker_program);
+        start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
+        status::windows_no_window(&mut start_cmd);
+        let _ = status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT);
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BACKUP_FAILED",
+            "Safety backup failed -- nothing was restored",
+            "The server was started again.",
+        ));
+        return;
+    }
+
+    emit(modmgr::line_event("info", format!("restoring {file}...")));
+    let import_ok = matches!(restore::stream_restore(&docker_program, &db_cfg.password, &bpath), Ok(r) if r.success());
+    if !import_ok {
+        emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BACKUP_FAILED",
+            "Import failed -- the server was LEFT STOPPED",
+            &format!("Your pre-restore state is saved as {safety}. Restore it, or start the server manually once resolved."),
+        ));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "starting the game server..."));
+    let mut start_cmd = std::process::Command::new(&docker_program);
+    start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);
+    status::windows_no_window(&mut start_cmd);
+    if !matches!(status::output_bounded_draining(start_cmd, lifecycle::COMPOSE_UP_TIMEOUT), Some(o) if o.status.success())
+    {
+        emit(modmgr::line_event("warn", "server start failed -- start it from Home"));
+    }
+
+    emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({
+        "restored": true, "file": file, "safety_backup": safety,
+    })));
 }
 
 #[cfg(test)]
