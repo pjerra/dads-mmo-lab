@@ -12,12 +12,16 @@ rem                            inside the dml-arch distro, and correctly reports
 rem                            that (different, stopped) install as offline.
 rem   DML_GAMES_DIR         -> where the native titles live.
 rem   DML_SCRIPT            -> the bash `dml` script. Still needed by the
-rem                            features that have not been ported yet (install,
-rem                            some module operations, self-update) and by the
-rem                            Eluna bridge, whose lua source root is
-rem                            <parent of DML_SCRIPT>\lua. Missing it is why
-rem                            those features appear broken when the exe is
-rem                            started straight from Explorer or the taskbar.
+rem                            features not yet ported to Rust: games list /
+rem                            catalog / install, url + tool install, doctor,
+rem                            the realmlist arms, and the auto-shutdown
+rem                            watcher. (Module operations and self-update do
+rem                            NOT need it -- those are ported.) Also the Eluna
+rem                            bridge, whose lua source root is
+rem                            <parent of DML_SCRIPT>\lua -- so `lua` must stay
+rem                            a SIBLING of the script wherever it lives.
+rem                            Missing it is why those features appear broken
+rem                            when the exe is started from Explorer.
 rem   DML_YQ_BIN            -> yq, used by the compose/override readers.
 rem
 rem %~dp0 = this script's folder, so it works wherever the repo is cloned.
