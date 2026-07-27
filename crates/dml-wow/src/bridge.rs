@@ -53,19 +53,35 @@ pub fn dest_dir(server_dir: &Path) -> PathBuf {
 /// leave an already-identical file untouched. `Ok(true)` iff anything
 /// changed.
 ///
-/// A missing/unreadable `root` degrades to "no families found" (`Ok(false)`,
-/// after still creating `dest`) rather than an error -- mirrors the bash's
-/// `for d in "$root"/*/` glob silently matching nothing on an absent dir
-/// (no error, `changed` just stays empty), not `mkdir -p`'s own failure mode
-/// (that one DOES propagate, matching the bash requiring `dest` to exist
-/// before the loop can even try `cp`).
+/// Deploying NOTHING is an error, not a quiet `Ok(false)`.
+///
+/// This used to mirror the bash's `for d in "$root"/*/` glob silently matching
+/// nothing on an absent dir. That faithfulness cost more than it bought: with
+/// `DML_SCRIPT` unset, `lua_root_from_env` resolves to a CWD-relative `"lua"`
+/// that does not exist, so `bridge_setup_stream` emitted
+/// `done{changed:false}` -- a SUCCESS envelope for a no-op. "Enable My Party"
+/// then appeared to work and My Party simply did not function, with nothing
+/// pointing at the cause. `dest` is still created either way; only the
+/// reporting changed.
+///
+/// There are TWO ways to find no families and both must fail: an absent or
+/// unreadable `root`, and a `root` that exists but holds no family dirs.
 pub fn deploy_scripts(root: &Path, dest: &Path) -> std::io::Result<bool> {
     std::fs::create_dir_all(dest)?;
     let mut changed = false;
+    let no_scripts = || {
+        std::io::Error::other(format!(
+            "no bridge scripts found at {} -- is DML_SCRIPT set? (the lua dir must be its sibling)",
+            root.display()
+        ))
+    };
     let Ok(read) = std::fs::read_dir(root) else {
-        return Ok(false);
+        return Err(no_scripts());
     };
     let mut family_dirs: Vec<PathBuf> = read.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    if family_dirs.is_empty() {
+        return Err(no_scripts());
+    }
     family_dirs.sort();
     for family in family_dirs {
         let Ok(files) = std::fs::read_dir(&family) else { continue };
@@ -275,15 +291,32 @@ mod tests {
     }
 
     #[test]
-    fn deploy_scripts_missing_root_creates_dest_and_reports_unchanged() {
+    fn deploy_scripts_missing_root_is_an_error_not_a_silent_success() {
         let root = tmp_dir("deploy_missing_root_never_created");
         std::fs::remove_dir_all(&root).unwrap(); // now genuinely absent
         let dest = tmp_dir("deploy_missing_dest");
 
-        let changed = deploy_scripts(&root, &dest).unwrap();
-        assert!(!changed);
+        let err = deploy_scripts(&root, &dest).unwrap_err().to_string();
+        assert!(err.contains("no bridge scripts"), "err={err}");
+        // dest is still created -- only the reporting changed.
         assert!(dest.is_dir());
 
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn deploy_scripts_empty_root_is_also_an_error() {
+        // The SECOND no-families path: the root EXISTS but holds no family
+        // dirs, so the copy loop never runs. This also returned Ok(false)
+        // before, and is what an installed app with a stray empty lua dir
+        // would hit.
+        let root = tmp_dir("deploy_empty_root");
+        let dest = tmp_dir("deploy_empty_dest");
+
+        let err = deploy_scripts(&root, &dest).unwrap_err().to_string();
+        assert!(err.contains("no bridge scripts"), "err={err}");
+
+        let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dest);
     }
 
