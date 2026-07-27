@@ -437,6 +437,126 @@ pub fn dbc_source_files(mdir: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// `module client-patch`'s section name (`90-main.sh:5347`).
+const CLIENT_PATCH_SECTION: &str = "client-patch";
+
+/// `module client-patch`'s full orchestration (`90-main.sh:5346-5432`, `--key
+/// mod-arac` only): copy every server DBC into the running worldserver's
+/// data volume via a throwaway `docker run` container, then best-effort
+/// copy `Patch-A.MPQ` into the saved client folder's `Data/`. Streamed
+/// NDJSON — same vocabulary as [`super::modmgr::module_install_stream`].
+/// Moved out of the launcher's `lib.rs` by the cargo-workspace refactor
+/// (Task 9); the Tauri command is now a thin `spawn_blocking` adapter.
+pub fn module_client_patch_stream(key: String, emit: impl Fn(serde_json::Value)) {
+    use crate::modmgr::{done_event, error_event, line_event, section_end, section_start};
+    use crate::moduletail as mt;
+
+    emit(section_start(CLIENT_PATCH_SECTION));
+
+    if key != "mod-arac" {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event(
+            "BAD_ARG",
+            "client-patch supports only --key mod-arac",
+            "Other modules ship no client patch step.",
+        ));
+        return;
+    }
+
+    let sdir = match super::maint::require_server_dir("Install it first.") {
+        Ok(d) => d,
+        Err(e) => {
+            emit(section_end(CLIENT_PATCH_SECTION, "error"));
+            emit(error_event(&e.code, e.message, &e.hint));
+            return;
+        }
+    };
+    if !crate::modmgr::cpp_installed(&sdir, "mod-arac") {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event("NOT_INSTALLED", "mod-arac is not installed", "Install it on the Modules page first."));
+        return;
+    }
+    let mdir = sdir.join("modules").join("mod-arac");
+    let dbcsrc = mdir.join("patch-contents").join("DBFilesContent");
+    if !dbcsrc.is_dir() {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        let hint = format!("Expected {} -- try Update on the Modules page to refresh the clone.", dbcsrc.display());
+        emit(error_event("NOT_FOUND", "DBC files not found in the mod-arac clone", &hint));
+        return;
+    }
+
+    let docker_program = crate::native::docker_program();
+    let (vol, used_fallback) = mt::resolve_client_data_volume(&docker_program);
+    if used_fallback {
+        emit(line_event(
+            "warn",
+            format!("could not resolve the data volume from the worldserver container -- using the default name {vol}"),
+        ));
+    }
+
+    let dbc_files = mt::dbc_source_files(&mdir);
+    let mut dbc_n = 0u32;
+    for f in &dbc_files {
+        let bn = f.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+        emit(line_event("info", format!("copying {bn} into the server data volume...")));
+        if !mt::docker_copy_dbc_into_volume(&docker_program, &vol, f, &bn) {
+            emit(section_end(CLIENT_PATCH_SECTION, "error"));
+            emit(error_event("COPY_FAILED", format!("Could not copy {bn} into the data volume"), "Is Docker running?"));
+            return;
+        }
+        dbc_n += 1;
+    }
+    if dbc_n == 0 {
+        emit(section_end(CLIENT_PATCH_SECTION, "error"));
+        emit(error_event(
+            "NOT_FOUND",
+            format!("No .dbc files found in {}", dbcsrc.display()),
+            "Try Update on the Modules page to refresh the clone.",
+        ));
+        return;
+    }
+    emit(line_event("info", format!("{dbc_n} server DBC files installed")));
+
+    let client_path = crate::modmgr::effective_client_path();
+    let mut client_done = false;
+    match client_path {
+        None => emit(line_event(
+            "warn",
+            "no client folder set — skipped Patch-A.MPQ (set it on the Modules page, then re-run this)",
+        )),
+        Some(cpath) => {
+            let mpq = mdir.join("Patch-A.MPQ");
+            if !mpq.is_file() {
+                emit(line_event(
+                    "warn",
+                    format!("Patch-A.MPQ not found in the mod-arac clone — try Update on the Modules page, or copy it manually into {}/Data/", mdir.display()),
+                ));
+            } else {
+                emit(line_event("info", "installing Patch-A.MPQ into the client Data folder..."));
+                let dest = cpath.join("Data").join("Patch-A.MPQ");
+                if std::fs::copy(&mpq, &dest).is_ok() {
+                    client_done = true;
+                    emit(line_event("info", "Patch-A.MPQ installed"));
+                } else {
+                    emit(line_event(
+                        "warn",
+                        format!("could not copy Patch-A.MPQ — copy {} into <client>/Data/ manually", mpq.display()),
+                    ));
+                }
+            }
+        }
+    }
+
+    emit(line_event(
+        "info",
+        "restart the server (Home) to load the new race/class combinations — no rebuild needed",
+    ));
+    emit(section_end(CLIENT_PATCH_SECTION, "ok"));
+    emit(done_event(serde_json::json!({
+        "key": "mod-arac", "dbc_files": dbc_n, "client_patched": client_done, "restart_required": true,
+    })));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use dml_core::error::CmdError;
 use serde_json::{json, Value};
 
 use super::status::{output_bounded_draining, windows_no_window};
@@ -75,6 +76,20 @@ pub fn resolve_server_dir(title_dir: &Path) -> Option<PathBuf> {
     }
     let entries = std::fs::read_dir(title_dir).ok()?;
     entries.flatten().map(|e| e.path()).find(|p| p.is_dir() && has_compose(p))
+}
+
+/// The resolved WoW Playerbots server dir, or the arm's own `NOT_FOUND`
+/// (`90-main.sh`'s recurring `[[ -z "$sdir" ]] && { json_err NOT_FOUND
+/// "WoW Playerbots server not installed" … }`). `resolve_server_dir` with
+/// the env-derived title dir baked in — the shape every native-mode arm
+/// that needs the server dir opens with.
+pub fn require_server_dir(hint: &str) -> Result<PathBuf, CmdError> {
+    let title_dir = super::config::ConfigReader::title_dir_from_env();
+    resolve_server_dir(&title_dir).ok_or_else(|| CmdError {
+        code: "NOT_FOUND".into(),
+        message: "WoW Playerbots server not installed".into(),
+        hint: hint.into(),
+    })
 }
 
 /// `true` when a bounded `docker info` succeeds — deliberately NOT

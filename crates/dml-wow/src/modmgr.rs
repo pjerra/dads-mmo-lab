@@ -9,13 +9,15 @@
 //! ARCHITECTURE. This module holds every REUSABLE primitive (registries,
 //! validators, rebuild-pending marker I/O, git/mysql subprocess helpers, the
 //! per-family lua/sql install-time helpers, `_wow_pull_repo`) as free
-//! functions, mirroring how `dml::backup`/`dml::maint` split "library" from
-//! "orchestration". The three STREAMED Tauri commands' `_blocking` functions
-//! (the actual arm-shaped orchestration: precondition order, ndjson event
-//! sequencing, `done` shapes) live in `lib.rs` next to
-//! `wow_world_restart_native_blocking`, which they follow event-for-event
-//! (`section_start`/`line`/`section_end`/`done`/`error`, domain errors
-//! travel IN the stream, the command itself still resolves `Ok(())`).
+//! functions, mirroring how `backup`/`maint` split "library" from
+//! "orchestration". The arm-shaped orchestration itself (precondition order,
+//! ndjson event sequencing, `done` shapes) lives at the BOTTOM of this file
+//! in [`module_install_stream`]/[`module_update_stream`]/
+//! [`module_remove_stream`]/[`module_rebuild_stream`] — moved out of the
+//! launcher's `lib.rs` by the cargo-workspace refactor (Task 9) so the
+//! standalone CLI can drive it too. Domain errors travel IN the stream
+//! (`section_start`/`line`/`section_end`/`done`/`error`); the Tauri command
+//! is now a thin `spawn_blocking` adapter.
 //!
 //! SUBPROCESS DISCIPLINE. Every `git`/`docker` call here goes through
 //! [`super::status::output_bounded_draining`] (never `crate::output_bounded`
@@ -315,6 +317,8 @@ pub use dml_core::events::{done_event, error_event, line_event, section_end, sec
 pub const SECTION_INSTALL: &str = "module-install";
 pub const SECTION_REMOVE: &str = "module-remove";
 pub const SECTION_UPDATE: &str = "module-update";
+/// `module rebuild`'s section name (`90-main.sh:4968`).
+pub const MODULE_REBUILD_SECTION: &str = "module-rebuild";
 
 /// `_client_path` (`70-modules.sh:317-325`): the saved WoW client folder,
 /// but ONLY while it still exists as a directory on disk — deliberately NOT
@@ -1951,6 +1955,229 @@ pub fn update_module(git_program: &OsStr, sdir: &Path, key: &str, emit: &dyn Fn(
     }
 
     Ok(serde_json::json!({"key": key, "changed": changed, "before": ubefore, "after": uafter, "pending_rebuild": pending_rebuild}))
+}
+
+// ---------------------------------------------------------------------------
+// STREAMED per-command ORCHESTRATION (moved out of the launcher's `lib.rs` by
+// the cargo-workspace refactor, Task 9 — the Tauri commands are now thin
+// `spawn_blocking` adapters over these). Same NDJSON vocabulary throughout:
+// every domain failure travels IN the stream (`section_end{status:"error"}` +
+// `error`); the caller's own result stays `Ok`. Faithful ports of the arms in
+// `cli/src/90-main.sh` (install 4586-4841, update 5472-5544, remove 4842-4966,
+// rebuild 4967-5008) — the per-family/-verb logic lives in the `install_cpp`/
+// `install_lua`/`install_sql`/`remove_cpp`/`remove_lua`/`remove_sql`/
+// `update_module` functions above, each of which emits its OWN
+// `section_end`+`error` on failure; these are the thin per-command wrappers
+// (resolve the server dir, pick the family fn, wrap a success `Ok` in
+// `section_end("ok")`+`done`).
+// ---------------------------------------------------------------------------
+
+/// NATIVE-MODE `wow module install` — see the section comment above.
+pub fn module_install_stream(
+    family: String,
+    key: Option<String>,
+    url: Option<String>,
+    backup: Option<bool>,
+    variant: Option<String>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{config::ConfigReader, maint, modmgr, native};
+
+    emit(modmgr::section_start(modmgr::SECTION_INSTALL));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    // Two DIFFERENT executables: cpp install/update and every family's
+    // clone step shell out to `git` (PATH-resolved, same convention as
+    // `maint`'s `update-check`); the lua/sql families' SQL apply + safety
+    // backup shell out to the resolved Docker Desktop `docker` binary. A
+    // module install/remove/update NEVER hands the wrong one to the wrong
+    // subprocess (a `docker` binary invoked as `git` would just fail every
+    // git call, and vice versa) -- see `dml::modmgr::install_lua`/
+    // `install_sql`'s doc comments for which family touches which.
+    let git_program = std::ffi::OsString::from("git");
+    let docker_program = native::docker_program();
+    let result = match family.as_str() {
+        "cpp" => modmgr::install_cpp(&git_program, &sdir, key.as_deref(), url.as_deref(), backup, &emit),
+        "lua" => {
+            let client_path = modmgr::effective_client_path();
+            modmgr::install_lua(
+                &git_program,
+                &docker_program,
+                &sdir,
+                key.as_deref().unwrap_or(""),
+                url.as_deref(),
+                backup,
+                &db_cfg.password,
+                client_path.as_deref(),
+                &emit,
+            )
+        }
+        "sql" => modmgr::install_sql(
+            &git_program,
+            &docker_program,
+            &sdir,
+            key.as_deref().unwrap_or(""),
+            url.as_deref(),
+            backup,
+            variant.as_deref(),
+            &db_cfg.password,
+            &emit,
+        ),
+        other => {
+            emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
+            return;
+        }
+    };
+
+    if let Ok(data) = result {
+        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module update` — see the section comment above.
+pub fn module_update_stream(key: String, emit: impl Fn(serde_json::Value)) {
+    use crate::{config::ConfigReader, maint, modmgr};
+
+    emit(modmgr::section_start(modmgr::SECTION_UPDATE));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
+        return;
+    };
+
+    // `module update` is pure git -- no docker at all (see `update_module`'s
+    // doc comment).
+    let git_program = std::ffi::OsString::from("git");
+    if let Ok(data) = modmgr::update_module(&git_program, &sdir, &key, &emit) {
+        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module remove` — see the section comment above.
+pub fn module_remove_stream(
+    family: String,
+    key: String,
+    backup: Option<bool>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{config::ConfigReader, maint, modmgr, native};
+
+    emit(modmgr::section_start(modmgr::SECTION_REMOVE));
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
+        return;
+    };
+
+    let program = native::docker_program();
+    let result = match family.as_str() {
+        "cpp" => modmgr::remove_cpp(&sdir, &key, backup, &emit),
+        "lua" => modmgr::remove_lua(&sdir, &key, backup, &emit),
+        "sql" => modmgr::remove_sql(&program, &sdir, &key, backup, &db_cfg.password, &emit),
+        other => {
+            emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
+            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
+            return;
+        }
+    };
+
+    if let Ok(data) = result {
+        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "ok"));
+        emit(modmgr::done_event(data));
+    }
+}
+
+/// NATIVE-MODE `wow module rebuild` (`90-main.sh:4967-5008`). The ONE new
+/// shape versus its install/update/remove siblings is the build step itself —
+/// `docker compose up -d --build` streams LIVE via
+/// [`super::destructive::run_streamed_unbounded`] rather than the
+/// bounded/captured-then-split pattern every other docker call in this crate
+/// uses, because a first-time AzerothCore rebuild can run 30-90 minutes and
+/// the UI needs to see progress as it happens, not just at the end.
+pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use crate::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
+
+    emit(modmgr::section_start(MODULE_REBUILD_SECTION));
+
+    let Some(do_backup) = backup else {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BAD_ARG",
+            "Pick --backup or --no-backup",
+            "Module SQL lands during the rebuild -- decide explicitly.",
+        ));
+        return;
+    };
+
+    let title_dir = ConfigReader::title_dir_from_env();
+    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
+        return;
+    };
+
+    let docker_program = native::docker_program();
+    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
+        return;
+    }
+
+    if do_backup {
+        // Same helper `wow update`'s --backup gate uses (Chunk 3b) --
+        // world-INCLUSIVE (module/core SQL lands during the rebuild), a
+        // faithful port of `_module_backup_now` (`70-modules.sh:294-312`).
+        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+            emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+            emit(modmgr::error_event("BACKUP_FAILED", "Safety backup failed -- rebuild not started", ""));
+            return;
+        }
+    }
+
+    emit(modmgr::line_event("info", "stopping worldserver..."));
+    let mut stop_cmd = std::process::Command::new(&docker_program);
+    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
+    crate::status::windows_no_window(&mut stop_cmd);
+    // Best-effort, swallowed like the bash arm's unchecked `|| true`.
+    let _ = crate::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
+
+    emit(modmgr::line_event(
+        "info",
+        format!("building (this can take 30-90 minutes; full log: {}/rebuild.log)...", sdir.display()),
+    ));
+    let log_path = sdir.join("rebuild.log");
+    let status = destructive::run_streamed_unbounded(&docker_program, &["compose", "up", "-d", "--build"], &sdir, &log_path, |line| {
+        emit(modmgr::line_event("info", line));
+    });
+
+    if !matches!(&status, Some(s) if s.success()) {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BUILD_FAILED",
+            "worldserver rebuild failed",
+            &format!("Full log: {}/rebuild.log", sdir.display()),
+        ));
+        return;
+    }
+
+    modmgr::rebuild_pending_clear(&sdir);
+    emit(modmgr::section_end(MODULE_REBUILD_SECTION, "ok"));
+    emit(modmgr::done_event(serde_json::json!({"rebuilt": true})));
 }
 
 #[cfg(test)]

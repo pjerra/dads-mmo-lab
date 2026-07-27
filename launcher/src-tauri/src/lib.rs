@@ -926,92 +926,17 @@ async fn wow_module_update(
 // NATIVE-MODE `module install`/`module update`/`module remove` (Chunk 3a) —
 // same NDJSON vocabulary as `wow_world_restart_native`: every domain failure
 // travels IN the stream (`section_end{status:"error"}` + `error`), the
-// command itself still resolves `Ok(())`. Faithful ports of the arms in
-// `cli/src/90-main.sh` (install 4586-4841, update 5472-5544, remove 4842-
-// 4966) — the actual per-family/-verb logic lives in `dml::modmgr`
-// (registries, validators, git/mysql subprocess primitives, and the
-// `install_cpp`/`install_lua`/`install_sql`/`remove_cpp`/`remove_lua`/
-// `remove_sql`/`update_module` orchestration functions, each of which emits
-// its OWN `section_end`+`error` on failure); these three `_blocking`
-// functions are the thin per-command wrapper (resolve the server dir, pick
-// the family fn, wrap a success `Ok` in `section_end("ok")`+`done`) that
-// mirrors `wow_world_restart_native_blocking`'s shape. Native mode only —
-// WSL keeps calling `wow_module_install`/`wow_module_update`/`wow_module_
-// remove` (the `dml`-shelling siblings just above).
+// command itself still resolves `Ok(())`. The orchestration itself lives in
+// `dml_wow::modmgr::{module_install_stream, module_update_stream,
+// module_remove_stream}` (cargo-workspace refactor, Task 9) — see those
+// functions' doc comments. Native mode only — WSL keeps calling
+// `wow_module_install`/`wow_module_update`/`wow_module_remove` (the
+// `dml`-shelling siblings just above).
 // ---------------------------------------------------------------------------
 
-fn wow_module_install_native_blocking(
-    family: String,
-    key: Option<String>,
-    url: Option<String>,
-    backup: Option<bool>,
-    variant: Option<String>,
-    db_cfg: dml_wow::db::DbConfig,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{config::ConfigReader, maint, modmgr, native};
-
-    emit(modmgr::section_start(modmgr::SECTION_INSTALL));
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
-        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    // Two DIFFERENT executables: cpp install/update and every family's
-    // clone step shell out to `git` (PATH-resolved, same convention as
-    // `maint`'s `update-check`); the lua/sql families' SQL apply + safety
-    // backup shell out to the resolved Docker Desktop `docker` binary. A
-    // module install/remove/update NEVER hands the wrong one to the wrong
-    // subprocess (a `docker` binary invoked as `git` would just fail every
-    // git call, and vice versa) -- see `dml::modmgr::install_lua`/
-    // `install_sql`'s doc comments for which family touches which.
-    let git_program = std::ffi::OsString::from("git");
-    let docker_program = native::docker_program();
-    let result = match family.as_str() {
-        "cpp" => modmgr::install_cpp(&git_program, &sdir, key.as_deref(), url.as_deref(), backup, &emit),
-        "lua" => {
-            let client_path = modmgr::effective_client_path();
-            modmgr::install_lua(
-                &git_program,
-                &docker_program,
-                &sdir,
-                key.as_deref().unwrap_or(""),
-                url.as_deref(),
-                backup,
-                &db_cfg.password,
-                client_path.as_deref(),
-                &emit,
-            )
-        }
-        "sql" => modmgr::install_sql(
-            &git_program,
-            &docker_program,
-            &sdir,
-            key.as_deref().unwrap_or(""),
-            url.as_deref(),
-            backup,
-            variant.as_deref(),
-            &db_cfg.password,
-            &emit,
-        ),
-        other => {
-            emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
-            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
-            return;
-        }
-    };
-
-    if let Ok(data) = result {
-        emit(modmgr::section_end(modmgr::SECTION_INSTALL, "ok"));
-        emit(modmgr::done_event(data));
-    }
-}
-
-/// NATIVE-MODE `wow module install` — see the module comment above. Native
-/// mode only — WSL keeps calling `wow_module_install`.
+/// NATIVE-MODE `wow module install` — see
+/// [`dml_wow::modmgr::module_install_stream`]. Native mode only — WSL keeps
+/// calling `wow_module_install`.
 #[tauri::command]
 async fn wow_module_install_native(
     family: String,
@@ -1025,7 +950,7 @@ async fn wow_module_install_native(
     let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_module_install_native_blocking(family, key, url, backup, variant, db_cfg, |v| {
+        dml_wow::modmgr::module_install_stream(family, key, url, backup, variant, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -1034,35 +959,15 @@ async fn wow_module_install_native(
     Ok(())
 }
 
-fn wow_module_update_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::{config::ConfigReader, maint, modmgr};
-
-    emit(modmgr::section_start(modmgr::SECTION_UPDATE));
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "error"));
-        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", "Install it first."));
-        return;
-    };
-
-    // `module update` is pure git -- no docker at all (see `update_module`'s
-    // doc comment).
-    let git_program = std::ffi::OsString::from("git");
-    if let Ok(data) = modmgr::update_module(&git_program, &sdir, &key, &emit) {
-        emit(modmgr::section_end(modmgr::SECTION_UPDATE, "ok"));
-        emit(modmgr::done_event(data));
-    }
-}
-
-/// NATIVE-MODE `wow module update` — see the module comment above. Native
-/// mode only — WSL keeps calling `wow_module_update`.
+/// NATIVE-MODE `wow module update` — see
+/// [`dml_wow::modmgr::module_update_stream`]. Native mode only — WSL keeps
+/// calling `wow_module_update`.
 #[tauri::command]
 async fn wow_module_update_native(key: String, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
     require_native_backend()?;
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_module_update_native_blocking(key, |v| {
+        dml_wow::modmgr::module_update_stream(key, |v| {
             let _ = ch.send(v);
         });
     })
@@ -1071,44 +976,9 @@ async fn wow_module_update_native(key: String, on_event: Channel<serde_json::Val
     Ok(())
 }
 
-fn wow_module_remove_native_blocking(
-    family: String,
-    key: String,
-    backup: Option<bool>,
-    db_cfg: dml_wow::db::DbConfig,
-    emit: impl Fn(serde_json::Value),
-) {
-    use dml_wow::{config::ConfigReader, maint, modmgr, native};
-
-    emit(modmgr::section_start(modmgr::SECTION_REMOVE));
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
-        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
-        return;
-    };
-
-    let program = native::docker_program();
-    let result = match family.as_str() {
-        "cpp" => modmgr::remove_cpp(&sdir, &key, backup, &emit),
-        "lua" => modmgr::remove_lua(&sdir, &key, backup, &emit),
-        "sql" => modmgr::remove_sql(&program, &sdir, &key, backup, &db_cfg.password, &emit),
-        other => {
-            emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
-            emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
-            return;
-        }
-    };
-
-    if let Ok(data) = result {
-        emit(modmgr::section_end(modmgr::SECTION_REMOVE, "ok"));
-        emit(modmgr::done_event(data));
-    }
-}
-
-/// NATIVE-MODE `wow module remove` — see the module comment above. Native
-/// mode only — WSL keeps calling `wow_module_remove`.
+/// NATIVE-MODE `wow module remove` — see
+/// [`dml_wow::modmgr::module_remove_stream`]. Native mode only — WSL keeps
+/// calling `wow_module_remove`.
 #[tauri::command]
 async fn wow_module_remove_native(
     family: String,
@@ -1120,7 +990,7 @@ async fn wow_module_remove_native(
     let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_module_remove_native_blocking(family, key, backup, db_cfg, |v| {
+        dml_wow::modmgr::module_remove_stream(family, key, backup, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -1129,101 +999,16 @@ async fn wow_module_remove_native(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `module rebuild` (Chunk 4a): faithful port of the `rebuild)`
-// case (`90-main.sh:4967-5008`). Same NDJSON vocabulary as `wow_world_
-// restart_native`/the Chunk 3a module commands just above; the ONE new shape
-// here is the build step itself — `docker compose up -d --build` streams
-// LIVE via `destructive::run_streamed_unbounded` (see that function's doc
-// comment) rather than the bounded/captured-then-split pattern every other
-// docker call in this codebase uses, because a first-time AzerothCore
-// rebuild can run 30-90 minutes and the UI needs to see progress as it
-// happens, not just at the end. Native mode only — WSL keeps calling
-// `wow_module_rebuild` (the `dml`-shelling sibling above).
-// ---------------------------------------------------------------------------
-
-const MODULE_REBUILD_SECTION: &str = "module-rebuild";
-
-fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: dml_wow::db::DbConfig, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
-
-    emit(modmgr::section_start(MODULE_REBUILD_SECTION));
-
-    let Some(do_backup) = backup else {
-        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-        emit(modmgr::error_event(
-            "BAD_ARG",
-            "Pick --backup or --no-backup",
-            "Module SQL lands during the rebuild -- decide explicitly.",
-        ));
-        return;
-    };
-
-    let title_dir = ConfigReader::title_dir_from_env();
-    let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
-        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-        emit(modmgr::error_event("NOT_FOUND", "WoW Playerbots server not installed", ""));
-        return;
-    };
-
-    let docker_program = native::docker_program();
-    if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
-        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-        emit(modmgr::error_event("DOCKER_DOWN", "Docker is not running", "Start Docker in the distro first."));
-        return;
-    }
-
-    if do_backup {
-        // Same helper `wow update`'s --backup gate uses (Chunk 3b) --
-        // world-INCLUSIVE (module/core SQL lands during the rebuild), a
-        // faithful port of `_module_backup_now` (`70-modules.sh:294-312`).
-        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
-            emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-            emit(modmgr::error_event("BACKUP_FAILED", "Safety backup failed -- rebuild not started", ""));
-            return;
-        }
-    }
-
-    emit(modmgr::line_event("info", "stopping worldserver..."));
-    let mut stop_cmd = std::process::Command::new(&docker_program);
-    stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
-    dml_wow::status::windows_no_window(&mut stop_cmd);
-    // Best-effort, swallowed like the bash arm's unchecked `|| true`.
-    let _ = dml_wow::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
-
-    emit(modmgr::line_event(
-        "info",
-        format!("building (this can take 30-90 minutes; full log: {}/rebuild.log)...", sdir.display()),
-    ));
-    let log_path = sdir.join("rebuild.log");
-    let status = destructive::run_streamed_unbounded(&docker_program, &["compose", "up", "-d", "--build"], &sdir, &log_path, |line| {
-        emit(modmgr::line_event("info", line));
-    });
-
-    if !matches!(&status, Some(s) if s.success()) {
-        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-        emit(modmgr::error_event(
-            "BUILD_FAILED",
-            "worldserver rebuild failed",
-            &format!("Full log: {}/rebuild.log", sdir.display()),
-        ));
-        return;
-    }
-
-    modmgr::rebuild_pending_clear(&sdir);
-    emit(modmgr::section_end(MODULE_REBUILD_SECTION, "ok"));
-    emit(modmgr::done_event(serde_json::json!({"rebuilt": true})));
-}
-
-/// NATIVE-MODE `wow module rebuild` — see the module comment above. Native
-/// mode only — WSL keeps calling `wow_module_rebuild`.
+/// NATIVE-MODE `wow module rebuild` — see
+/// [`dml_wow::modmgr::module_rebuild_stream`]. Native mode only — WSL keeps
+/// calling `wow_module_rebuild`.
 #[tauri::command]
 async fn wow_module_rebuild_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
     require_native_backend()?;
     let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_module_rebuild_native_blocking(backup, db_cfg, |v| {
+        dml_wow::modmgr::module_rebuild_stream(backup, db_cfg, |v| {
             let _ = ch.send(v);
         });
     })
@@ -1345,15 +1130,6 @@ fn db_unreachable_err(message: impl Into<String>) -> CmdError {
     CmdError { code: "DB_UNREACHABLE".into(), message: message.into(), hint: "Is ac-database running?".into() }
 }
 
-/// The resolved WoW Playerbots server dir, or the arm's own `NOT_FOUND`
-/// (`90-main.sh`'s recurring `[[ -z "$sdir" ]] && { json_err NOT_FOUND
-/// "WoW Playerbots server not installed" … }`).
-fn require_server_dir(hint: &str) -> Result<std::path::PathBuf, CmdError> {
-    let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
-    dml_wow::maint::resolve_server_dir(&title_dir)
-        .ok_or_else(|| not_found_err("WoW Playerbots server not installed", hint))
-}
-
 /// One row's `COUNT(*)` decoded as `i64` (defaulting to 0 on anything odd —
 /// every caller only ever asks "is this nonzero").
 fn count_result(res: dml_wow::db::QueryResult) -> i64 {
@@ -1365,7 +1141,7 @@ fn count_result(res: dml_wow::db::QueryResult) -> i64 {
 async fn wow_module_update_check_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = require_server_dir("Install it first, then re-run.")?;
+        let sdir = dml_wow::maint::require_server_dir("Install it first, then re-run.")?;
         let program = std::ffi::OsString::from("git");
         Ok(dml_wow::moduletail::module_update_check(&program, &sdir))
     })
@@ -1385,7 +1161,7 @@ async fn wow_module_conf_activate_native(
     }
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = require_server_dir("")?;
+        let sdir = dml_wow::maint::require_server_dir("")?;
         let Some(conf_name) = dml_wow::moduletail::module_conf_name(&key) else {
             return Err(CmdError { code: "NO_CONF".into(), message: format!("{key} has no standard conf file"), hint: String::new() });
         };
@@ -1424,7 +1200,7 @@ async fn wow_module_tracking_native(key: String) -> Result<serde_json::Value, Cm
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid module key: {key}"), hint: String::new() });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = require_server_dir("")?;
+        let sdir = dml_wow::maint::require_server_dir("")?;
         if !dml_wow::modmgr::cpp_installed(&sdir, &key) {
             return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
         }
@@ -1481,7 +1257,7 @@ async fn wow_module_repair_native(
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid --mode: {mode}"), hint: "Use mark or clear.".into() });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = require_server_dir("")?;
+        let sdir = dml_wow::maint::require_server_dir("")?;
         if !dml_wow::modmgr::cpp_installed(&sdir, &key) {
             return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
         }
@@ -1663,7 +1439,7 @@ async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, C
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = require_server_dir("Install it first.")?;
+        let sdir = dml_wow::maint::require_server_dir("Install it first.")?;
         let installed = if key == "bmah" {
             dml_wow::modmgr::lua_deployed(&sdir, "bmah")
         } else {
@@ -1717,125 +1493,8 @@ async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, C
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-const CLIENT_PATCH_SECTION: &str = "client-patch";
-
-/// `module client-patch`'s full orchestration (`90-main.sh:5346-5432`, `--key
-/// mod-arac` only): copy every server DBC into the running worldserver's
-/// data volume via a throwaway `docker run` container, then best-effort
-/// copy `Patch-A.MPQ` into the saved client folder's `Data/`. Streamed
-/// NDJSON — same vocabulary as `wow_module_install_native_blocking`.
-fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
-    use dml_wow::modmgr::{done_event, error_event, line_event, section_end, section_start};
-    use dml_wow::moduletail as mt;
-
-    emit(section_start(CLIENT_PATCH_SECTION));
-
-    if key != "mod-arac" {
-        emit(section_end(CLIENT_PATCH_SECTION, "error"));
-        emit(error_event(
-            "BAD_ARG",
-            "client-patch supports only --key mod-arac",
-            "Other modules ship no client patch step.",
-        ));
-        return;
-    }
-
-    let sdir = match require_server_dir("Install it first.") {
-        Ok(d) => d,
-        Err(e) => {
-            emit(section_end(CLIENT_PATCH_SECTION, "error"));
-            emit(error_event(&e.code, e.message, &e.hint));
-            return;
-        }
-    };
-    if !dml_wow::modmgr::cpp_installed(&sdir, "mod-arac") {
-        emit(section_end(CLIENT_PATCH_SECTION, "error"));
-        emit(error_event("NOT_INSTALLED", "mod-arac is not installed", "Install it on the Modules page first."));
-        return;
-    }
-    let mdir = sdir.join("modules").join("mod-arac");
-    let dbcsrc = mdir.join("patch-contents").join("DBFilesContent");
-    if !dbcsrc.is_dir() {
-        emit(section_end(CLIENT_PATCH_SECTION, "error"));
-        let hint = format!("Expected {} -- try Update on the Modules page to refresh the clone.", dbcsrc.display());
-        emit(error_event("NOT_FOUND", "DBC files not found in the mod-arac clone", &hint));
-        return;
-    }
-
-    let docker_program = dml_wow::native::docker_program();
-    let (vol, used_fallback) = mt::resolve_client_data_volume(&docker_program);
-    if used_fallback {
-        emit(line_event(
-            "warn",
-            format!("could not resolve the data volume from the worldserver container -- using the default name {vol}"),
-        ));
-    }
-
-    let dbc_files = mt::dbc_source_files(&mdir);
-    let mut dbc_n = 0u32;
-    for f in &dbc_files {
-        let bn = f.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
-        emit(line_event("info", format!("copying {bn} into the server data volume...")));
-        if !mt::docker_copy_dbc_into_volume(&docker_program, &vol, f, &bn) {
-            emit(section_end(CLIENT_PATCH_SECTION, "error"));
-            emit(error_event("COPY_FAILED", format!("Could not copy {bn} into the data volume"), "Is Docker running?"));
-            return;
-        }
-        dbc_n += 1;
-    }
-    if dbc_n == 0 {
-        emit(section_end(CLIENT_PATCH_SECTION, "error"));
-        emit(error_event(
-            "NOT_FOUND",
-            format!("No .dbc files found in {}", dbcsrc.display()),
-            "Try Update on the Modules page to refresh the clone.",
-        ));
-        return;
-    }
-    emit(line_event("info", format!("{dbc_n} server DBC files installed")));
-
-    let client_path = dml_wow::modmgr::effective_client_path();
-    let mut client_done = false;
-    match client_path {
-        None => emit(line_event(
-            "warn",
-            "no client folder set — skipped Patch-A.MPQ (set it on the Modules page, then re-run this)",
-        )),
-        Some(cpath) => {
-            let mpq = mdir.join("Patch-A.MPQ");
-            if !mpq.is_file() {
-                emit(line_event(
-                    "warn",
-                    format!("Patch-A.MPQ not found in the mod-arac clone — try Update on the Modules page, or copy it manually into {}/Data/", mdir.display()),
-                ));
-            } else {
-                emit(line_event("info", "installing Patch-A.MPQ into the client Data folder..."));
-                let dest = cpath.join("Data").join("Patch-A.MPQ");
-                if std::fs::copy(&mpq, &dest).is_ok() {
-                    client_done = true;
-                    emit(line_event("info", "Patch-A.MPQ installed"));
-                } else {
-                    emit(line_event(
-                        "warn",
-                        format!("could not copy Patch-A.MPQ — copy {} into <client>/Data/ manually", mpq.display()),
-                    ));
-                }
-            }
-        }
-    }
-
-    emit(line_event(
-        "info",
-        "restart the server (Home) to load the new race/class combinations — no rebuild needed",
-    ));
-    emit(section_end(CLIENT_PATCH_SECTION, "ok"));
-    emit(done_event(serde_json::json!({
-        "key": "mod-arac", "dbc_files": dbc_n, "client_patched": client_done, "restart_required": true,
-    })));
-}
-
 /// NATIVE-MODE `module client-patch` — see
-/// [`wow_module_client_patch_native_blocking`].
+/// [`dml_wow::moduletail::module_client_patch_stream`].
 #[tauri::command]
 async fn wow_module_client_patch_native(
     key: String,
@@ -1844,7 +1503,7 @@ async fn wow_module_client_patch_native(
     require_native_backend()?;
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        wow_module_client_patch_native_blocking(key, |v| {
+        dml_wow::moduletail::module_client_patch_stream(key, |v| {
             let _ = ch.send(v);
         });
     })
