@@ -57,11 +57,11 @@ pub enum Cmd {
     // -- Task 12: read-only database page reads (`dml_wow::{pages,paperdoll,
     // stats,iteminfo}`) --------------------------------------------------
 
-    /// Real (non-bot) characters currently online (`pages::read_players_online`)
+    /// Real (non-bot) characters currently online
     PlayersOnline,
-    /// Every real account + its characters (`pages::read_accounts`)
+    /// Every real account + its characters
     Accounts,
-    /// Filtered playerbots browser page (`pages::read_bots`)
+    /// Filtered playerbots browser page
     Bots {
         /// Name prefix (1-12 letters/digits/underscore)
         #[arg(long)]
@@ -84,12 +84,12 @@ pub enum Cmd {
         #[arg(long, default_value_t = 0)]
         offset: u32,
     },
-    /// `game_tele` locations, optionally filtered by name (`pages::read_teleport_list`)
+    /// Teleport destinations (`game_tele`), optionally filtered by name
     TeleportList {
         #[arg(long)]
         search: Option<String>,
     },
-    /// `item_template` search (`pages::read_items_search`)
+    /// Search the item database (`item_template`)
     ItemsSearch {
         /// Required, non-empty (a LIKE-wrapped substring match)
         #[arg(long)]
@@ -103,24 +103,24 @@ pub enum Cmd {
         #[arg(long)]
         max_level: Option<u32>,
     },
-    /// One character's equipped gear + appearance (`paperdoll::read_paperdoll`)
+    /// One character's equipped gear + appearance
     Paperdoll {
         /// 1-12 letters/digits/underscore
         name: String,
     },
-    /// One character's achievement/talent summary (`pages::read_char_progress`)
+    /// One character's achievement/talent summary
     CharProgress {
         /// 1-12 letters/digits/underscore
         name: String,
     },
-    /// One character's full earned-achievement list (`pages::read_achievements`)
+    /// One character's full earned-achievement list
     Achievements {
         /// 1-12 letters/digits/underscore
         name: String,
     },
-    /// The Statistics page envelope — 19 queries, 18 run concurrently (`stats::read_stats`)
+    /// Server statistics — 19 queries, 18 of them run concurrently
     Stats,
-    /// Wowhead tooltip/icon info for one or more item entries (`iteminfo::read_item_info`)
+    /// Wowhead tooltip/icon info for one or more item entries
     ItemInfo {
         /// Comma-separated item entry ids, e.g. `25,116,6948` (max 25 —
         /// enforced in `run.rs`, not here; see [`parse_item_ids`])
@@ -160,7 +160,7 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: GmCmd,
     },
-    /// Send in-game mail with item attachments (`soap_cmds::mail_items_cmd`)
+    /// Send in-game mail with item attachments
     MailItem {
         /// Recipient character name (1-12 letters/digits/underscore)
         to: String,
@@ -191,7 +191,7 @@ pub enum Cmd {
         #[arg(allow_hyphen_values = true)]
         text: String,
     },
-    /// Playerbot party management (`dml_wow::party`)
+    /// Playerbot party management
     Party {
         #[command(subcommand)]
         cmd: PartyCmd,
@@ -215,7 +215,7 @@ pub enum Cmd {
     /// STREAMS NDJSON events.
     Start {
         /// Title id. Defaults to this CLI's own title, the one every other
-        /// subcommand resolves implicitly (`dml_wow::config::TITLE`).
+        /// subcommand resolves implicitly.
         #[arg(long, default_value = dml_wow::config::TITLE)]
         id: String,
     },
@@ -237,8 +237,9 @@ pub enum Cmd {
     Restart {
         #[arg(long, default_value = dml_wow::config::TITLE)]
         id: String,
+        // Why it is a no-op here: dml_wow::lifecycle::SKIP_SAVEALL_NOTE.
         /// "Faster restart": skip the pre-stop saveall. A no-op on the native
-        /// compose path — see `lifecycle::SKIP_SAVEALL_NOTE`.
+        /// compose path.
         #[arg(long)]
         no_saveall: bool,
     },
@@ -250,9 +251,10 @@ pub enum Cmd {
     /// Reclaim Docker disk space (build cache, dangling images, stale
     /// volumes). DESTRUCTIVE — requires `--yes`. STREAMS NDJSON events.
     DockerClean {
-        /// 1, 2 or 3. NOT range-gated here: `destructive::docker_clean_stream`
-        /// owns that check (and its exact BAD_ARG wording), unlike
-        /// `console-tail --lines`, which has no library-side check behind it.
+        // NOT range-gated here: destructive::docker_clean_stream owns that
+        // check and its exact BAD_ARG wording — unlike `console-tail --lines`,
+        // which has no library-side check behind it.
+        /// How much to reclaim: 1, 2 or 3
         #[arg(long)]
         level: u8,
         #[arg(long)]
@@ -315,23 +317,22 @@ pub enum Cmd {
         #[arg(long)]
         internet: bool,
     },
-    /// Wowhead item-info cache size/wipe (`dml_wow::cachestatus`)
+    /// Wowhead item-info cache size/wipe
     Cache {
         #[command(subcommand)]
         cmd: CacheCmd,
     },
-    /// The saved WoW client folder (`dml_wow::clientpath`)
+    /// The saved WoW client folder
     ClientPath {
         #[command(subcommand)]
         cmd: ClientPathCmd,
     },
-    /// Account-wide sharing flags (`dml_wow::accountwide`)
+    /// Account-wide sharing flags
     Accountwide {
         #[command(subcommand)]
         cmd: AccountwideCmd,
     },
     /// The in-game `.` commands cheat sheet
-    /// (`dml_wow::commands::assemble_commands`)
     Commands,
     /// Interactively install a title — STDIO PASSTHROUGH, not NDJSON: the
     /// installer is an interactive bash script and would starve on a
@@ -434,8 +435,8 @@ pub enum BackupCmd {
         /// edited world data by hand)
         #[arg(long)]
         include_world: bool,
-        /// Display name for the Backups page. Sanitized/bounded by
-        /// `backup::sanitize_backup_name`; empty/absent gets an auto name.
+        // Sanitized/bounded by dml_wow::backup::sanitize_backup_name.
+        /// Display name for the Backups page; empty or absent gets an auto name
         #[arg(long)]
         name: Option<String>,
     },
@@ -615,10 +616,10 @@ pub enum ConfigCmd {
         /// File name as reported by `config files`
         name: String,
     },
+    // SECURITY: the read-only allowlist lives on dml_wow::config::raw_write.
     /// Overwrite one editable file with the body read from STDIN
     /// (bash: `config raw-write`). `.env` and `docker-compose.override.yml`
-    /// are read-only here and are rejected — see the SECURITY note on
-    /// `dml_wow::config::raw_write`.
+    /// are read-only here and are rejected.
     Write {
         /// File name as reported by `config files`
         name: String,
@@ -656,12 +657,13 @@ pub enum ModuleCmd {
     Catalog,
     /// Install (or pull) one module — STREAMS NDJSON events
     Install {
-        /// cpp | lua | sql. Unvalidated here — `modmgr::module_install_stream`
-        /// owns the allowlist and its "Unknown family: x" wording.
+        // Unvalidated here: modmgr::module_install_stream owns the allowlist
+        // and its "Unknown family: x" wording.
+        /// Module family: cpp | lua | sql
         #[arg(long)]
         family: String,
-        /// Registry key, e.g. `mod-transmog` (mutually exclusive with `--url`,
-        /// enforced by `modmgr::install_cpp`)
+        // The mutual exclusion is enforced by modmgr::install_cpp.
+        /// Registry key, e.g. `mod-transmog` (mutually exclusive with `--url`)
         #[arg(long)]
         key: Option<String>,
         /// Custom C++ module git URL; the key is derived from it
