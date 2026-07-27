@@ -171,6 +171,17 @@ pub fn botcmd_fixed_tail(action: &str) -> Option<&'static str> {
     }
 }
 
+/// `party botcmd`'s whisper (`90-main.sh:3277`), assembled once the caller has
+/// validated BOTH names ([`crate::soap_cmds::valid_charname`]) and resolved
+/// `wmsg` from the closed allowlist ([`botcmd_fixed_tail`] /
+/// [`spec_action_wmsg`]). A builder rather than an inline `format!` at the
+/// call site so the one place this command string is spelled is here, next to
+/// its siblings — the launcher's `wow_party_botcmd_native` still formats it
+/// inline and should be pointed at this instead when it is next touched.
+pub fn botcmd_whisper_cmd(player: &str, bot: &str, wmsg: &str) -> String {
+    format!("dml_whisper {player} {bot} {wmsg}")
+}
+
 /// The `action == "spec"` whisper tail, once `spec` has already passed the
 /// non-empty + live-validity checks at the call site (`90-main.sh:3269-
 /// 3273`).
@@ -826,6 +837,18 @@ mod tests {
     #[test]
     fn spec_action_wmsg_builds_tail() {
         assert_eq!(spec_action_wmsg("frost pve"), "talents spec frost pve");
+    }
+
+    #[test]
+    fn botcmd_whisper_cmd_joins_master_bot_and_tail() {
+        assert_eq!(
+            botcmd_whisper_cmd("Testen", "Botty", botcmd_fixed_tail("gear").unwrap()),
+            "dml_whisper Testen Botty autogear"
+        );
+        assert_eq!(
+            botcmd_whisper_cmd("Testen", "Botty", &spec_action_wmsg("frost pve")),
+            "dml_whisper Testen Botty talents spec frost pve"
+        );
     }
 
     // -- find_new_member -------------------------------------------------

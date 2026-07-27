@@ -680,7 +680,7 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
                 );
                 return emit_err(&e.code, &e.message, &e.hint);
             }
-            let whisper = format!("dml_whisper {player} {bot} {wmsg}");
+            let whisper = dml_wow::party::botcmd_whisper_cmd(&player, &bot, &wmsg);
             emit_result(
                 soap_fire(&whisper, |o, _| dml_wow::soap_cmds::party_fire_result(o, "botcmd")).map(
                     |_| json!({ "sent": true, "player": player, "bot": bot, "action": action }),
