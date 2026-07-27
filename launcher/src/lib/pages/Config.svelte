@@ -10,10 +10,13 @@
     wowModuleList,
     wowAccountwideGet,
     wowAccountwideSet,
+    launcherConfigRead,
+    launcherConfigWrite,
     type ConfigSetting,
     type PbKey,
     type AccountwideState,
     type AwSubsystem,
+    type LauncherSettings,
   } from "$lib/api";
   import { configSettingsCache } from "$lib/page-cache.svelte";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
@@ -58,6 +61,42 @@
   let error: string | null = $state(null);
   let saving = $state(false);
 
+  // --- Launcher's own settings (~/.dml/launcher.json) ---------------------
+  // NOT part of the AC config registry above: these are read by Rust at
+  // startup, before any window exists, so they cannot live in localStorage
+  // like the launcher's other preferences.
+  let launcher: LauncherSettings | null = $state(null);
+  let launcherSaving = $state(false);
+  let launcherNote: string | null = $state(null);
+
+  async function loadLauncherSettings(): Promise<void> {
+    try {
+      launcher = await launcherConfigRead();
+    } catch {
+      // A missing or broken launcher.json must not break the Settings page.
+      launcher = null;
+    }
+  }
+
+  async function saveLauncherBackend(choice: string): Promise<void> {
+    if (!launcher) return;
+    launcherSaving = true;
+    try {
+      const next = { ...launcher.config, backend: choice };
+      await launcherConfigWrite(next);
+      launcher = { ...launcher, config: next };
+      // AppState builds its runner once at startup from selected(), so this
+      // genuinely cannot take effect until the next launch. Say so rather
+      // than implying a live switch.
+      launcherNote = "Saved. Restart the launcher to switch backend.";
+    } catch (e) {
+      const err = e as { message?: string };
+      error = err.message ?? "Could not save launcher settings";
+    } finally {
+      launcherSaving = false;
+    }
+  }
+
   const buf = termBuf("config");
 
   let aleNote: string | null = $state(null);
@@ -86,6 +125,9 @@
   }
   $effect(() => {
     if (tab === "botworld" && !pbLoaded) void loadPbKeys();
+  });
+  $effect(() => {
+    if (tab === "settings" && launcher === null) void loadLauncherSettings();
   });
 
   // --- Flush & rebuild bot population (Batch 1 F4) -------------------------
@@ -476,6 +518,35 @@
           docs/SMOKE-TESTS.md.
         </p>
       </div>
+      {#if launcher}
+        <div class="card">
+          <h3>Launcher</h3>
+          <label class="row">
+            Server backend
+            <select
+              value={launcher.config.backend ?? "auto"}
+              disabled={launcherSaving || launcher.backendSource === "env"}
+              onchange={(e) => saveLauncherBackend(e.currentTarget.value)}
+            >
+              <option value="auto">Detect automatically</option>
+              <option value="native">Docker Desktop (native)</option>
+              <option value="wsl">WSL (dml-arch distro)</option>
+            </select>
+          </label>
+          <p class="muted">
+            Currently using <strong>{launcher.effectiveBackend}</strong>.
+            {#if launcher.backendSource === "env"}
+              Locked by the DML_BACKEND environment variable
+              (<code>{launcher.envBackend}</code>), which overrides this setting. Clear it to
+              choose here.
+            {:else if launcher.backendSource === "auto"}
+              Detected automatically — native is chosen when a title folder and Docker Desktop are
+              both present.
+            {/if}
+          </p>
+          {#if launcherNote}<p class="muted">{launcherNote}</p>{/if}
+        </div>
+      {/if}
     {/if}
     {#each visibleGroups as g (g)}
       <h3>{g}</h3>
