@@ -57,7 +57,12 @@ pub fn set(on: bool) -> Result<(), String> {
         return Ok(());
     }
     let exe = std::env::current_exe().map_err(|e| format!("could not resolve the exe path: {e}"))?;
-    let exe = exe.to_string_lossy().into_owned();
+    // QUOTED. The installers put this in `C:\Program Files\DML Launcher\`,
+    // and an unquoted path sends CreateProcess's space heuristic hunting
+    // `C:\Program.exe` and `C:\Program Files\DML.exe` first — if either
+    // exists, autostart launches the wrong binary. `enabled()` already strips
+    // the quotes when reading back.
+    let exe = format!("\"{}\"", exe.to_string_lossy());
     let out = reg(&["add", KEY, "/v", VALUE, "/t", "REG_SZ", "/d", &exe, "/f"])
         .map_err(|e| format!("could not run reg.exe: {e}"))?;
     if out.status.success() {

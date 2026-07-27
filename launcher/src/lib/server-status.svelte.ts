@@ -109,11 +109,15 @@ function runTransitionActions(prev: ServerDetail["verdict"] | null, next: Server
   if (actions.lanRefresh) void lanAutoRefresh();
   if (azerothReadyTransition(prev, next)) fireReadyNotification();
   if (serverWentDownTransition(prev, next)) fireServerDownNotification(next);
-  // Tray tooltip. NB runTransitionActions runs on EVERY successful poll, not
-  // only on changes (the prev !== next gate lives inside
-  // verdictTransitionActions), so this needs its own guard or it would fire
-  // at Rust every 7 seconds.
-  if (prev !== next) void traySetStatus(next).catch(() => {});
+  // Tray tooltip — pushed on EVERY successful poll, deliberately NOT only on
+  // transitions. It doubles as the heartbeat the Rust keep-awake watchdog
+  // waits on: gating this on `prev !== next` meant a steady online server
+  // pushed nothing, the watchdog saw >2min of silence and released the sleep
+  // block, and it could never re-engage (verdictTransitionActions only
+  // returns keepAwake:"on" on a transition INTO online). The PC then slept
+  // mid-session while the sidebar still claimed it was being kept awake.
+  // `apply_status` is an idempotent set_tooltip, so a 7s cadence is free.
+  void traySetStatus(next).catch(() => {});
 }
 
 // Pure: did a server we KNEW was up go down? The mirror of

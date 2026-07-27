@@ -18,6 +18,21 @@
 
 use std::path::PathBuf;
 
+/// Whether the USER set `DML_BACKEND` before launch, captured before we
+/// export our own resolved value over the top of that emptiness.
+///
+/// Without this the Settings dropdown is permanently read-only: we always
+/// export `DML_BACKEND`, so a later `std::env::var` can never distinguish
+/// "the user pinned it" from "we resolved it", and the UI would report every
+/// session as env-locked.
+static BACKEND_WAS_USER_SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// True only when `DML_BACKEND` was already set in the environment we
+/// inherited. Defaults to false if `resolve_and_export` never ran.
+pub fn backend_was_user_set() -> bool {
+    *BACKEND_WAS_USER_SET.get().unwrap_or(&false)
+}
+
 /// Pure: what to write for one variable, or `None` to leave it alone.
 pub fn value_to_export(env_value: Option<&str>, resolved: Option<&str>) -> Option<String> {
     if env_value.map(str::trim).is_some_and(|v| !v.is_empty()) {
@@ -41,12 +56,27 @@ pub fn resolve_and_export() {
     };
     let cfg = dml_core::launcher_config::load(&home);
 
+    // Capture user-set-ness BEFORE any export, or it is unrecoverable.
+    let env_backend_raw = std::env::var("DML_BACKEND").ok();
+    let _ = BACKEND_WAS_USER_SET.set(
+        env_backend_raw.as_deref().map(str::trim).is_some_and(|v| !v.is_empty()),
+    );
+
     // --- games dir -------------------------------------------------------
-    let games_dir: Option<PathBuf> = cfg
-        .games_dir
-        .as_deref()
+    // Env FIRST. It is not merely an override to pass through: the probe
+    // below uses this path, so ignoring a user's DML_GAMES_DIR would detect
+    // against the wrong directory and could land them on the very "offline
+    // while the server runs" bug this module exists to fix.
+    let games_dir: Option<PathBuf> = std::env::var("DML_GAMES_DIR")
+        .ok()
         .filter(|s| !s.trim().is_empty())
         .map(PathBuf::from)
+        .or_else(|| {
+            cfg.games_dir
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+        })
         .or_else(default_games_dir);
 
     // --- probes for auto-detection ---------------------------------------
@@ -59,7 +89,7 @@ pub fn resolve_and_export() {
     let docker_present = dml_core::engine::docker_desktop_program().is_some();
 
     let backend = dml_core::backend::resolve(
-        std::env::var("DML_BACKEND").ok().as_deref(),
+        env_backend_raw.as_deref(),
         cfg.backend.as_deref(),
         native_dir_exists,
         docker_present,
@@ -84,7 +114,7 @@ pub fn resolve_and_export() {
     let script: Option<String> = cfg.dml_script.clone().filter(|s| !s.trim().is_empty());
 
     let exports: Vec<(&str, Option<String>)> = vec![
-        ("DML_BACKEND", value_to_export(std::env::var("DML_BACKEND").ok().as_deref(), Some(backend_str))),
+        ("DML_BACKEND", value_to_export(env_backend_raw.as_deref(), Some(backend_str))),
         (
             "DML_GAMES_DIR",
             value_to_export(

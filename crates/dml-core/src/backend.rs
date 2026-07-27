@@ -67,13 +67,24 @@ pub fn resolve(
     native_dir_exists: bool,
     docker_present: bool,
 ) -> Backend {
-    if let Some(v) = env_value.map(str::trim).filter(|v| !v.is_empty()) {
+    // `"auto"` means detection wherever it appears. Honouring it only in the
+    // file would silently pin a user who hand-writes `DML_BACKEND=auto` to
+    // Wsl (from_override maps unrecognised strings there) — and `auto` is
+    // exactly what the file documents and the UI labels "Detect
+    // automatically", so writing it into the env is entirely plausible.
+    let env_value = env_value.map(str::trim).filter(|v| !v.is_empty());
+    if let Some(v) = env_value.filter(|v| !v.eq_ignore_ascii_case("auto")) {
         return from_override(Some(v));
     }
-    match file_value.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) if !v.eq_ignore_ascii_case("auto") => from_override(Some(v)),
-        _ => detect(native_dir_exists, docker_present),
+    if env_value.is_none() {
+        if let Some(v) = file_value
+            .map(str::trim)
+            .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
+        {
+            return from_override(Some(v));
+        }
     }
+    detect(native_dir_exists, docker_present)
 }
 
 #[cfg(test)]
@@ -137,6 +148,18 @@ mod tests {
     fn resolve_absent_file_value_means_detect() {
         assert_eq!(resolve(None, None, true, true), Backend::Native);
         assert_eq!(resolve(None, Some(""), true, true), Backend::Native);
+    }
+
+    #[test]
+    fn resolve_auto_in_the_ENV_also_means_detect() {
+        // Final-review finding: honouring "auto" only in the file silently
+        // pinned a user who hand-wrote DML_BACKEND=auto to Wsl, because
+        // from_override maps unrecognised strings there. "auto" is exactly
+        // what the file documents and the UI labels "Detect automatically",
+        // so writing it into the env is entirely plausible.
+        assert_eq!(resolve(Some("auto"), None, true, true), Backend::Native);
+        assert_eq!(resolve(Some("  AUTO "), Some("wsl"), true, true), Backend::Native);
+        assert_eq!(resolve(Some("auto"), None, false, false), Backend::Wsl);
     }
 
     #[test]

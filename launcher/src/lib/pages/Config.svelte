@@ -76,10 +76,18 @@
   async function loadLauncherSettings(): Promise<void> {
     try {
       launcher = await launcherConfigRead();
-      autostartOn = await autostartGet();
     } catch {
       // A missing or broken launcher.json must not break the Settings page.
       launcher = null;
+      return;
+    }
+    // Separate try: a failing autostart probe must NOT null `launcher` and
+    // hide the whole card. The $effect only re-runs while launcher === null,
+    // so that would remove the card for the rest of the session.
+    try {
+      autostartOn = await autostartGet();
+    } catch {
+      autostartOn = false;
     }
   }
 
@@ -105,12 +113,17 @@
     } catch (e) {
       const err = e as { message?: string };
       error = err.message ?? "Could not change the Windows startup setting";
-    } finally {
-      // Re-read either way: the registry is the source of truth, so a failed
-      // write must not leave the checkbox showing what the user clicked.
-      autostartOn = await autostartGet();
-      launcherSaving = false;
     }
+    // Re-read either way: the registry is the source of truth, so a failed
+    // write must not leave the checkbox showing what the user clicked. NOT in
+    // a `finally` that can itself throw — that would skip the reset below and
+    // leave all three launcher controls disabled for the session.
+    try {
+      autostartOn = await autostartGet();
+    } catch {
+      // keep the last known value
+    }
+    launcherSaving = false;
   }
 
   async function saveLauncherBackend(choice: string): Promise<void> {

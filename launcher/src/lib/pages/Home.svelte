@@ -118,11 +118,13 @@
   // implementation with the buttons instead of driving the lifecycle API
   // itself. Consumed before acting so a re-render cannot double-fire.
   $effect(() => {
-    if (trayAction.pending && !busy) {
-      const action = trayAction.pending;
-      trayAction.pending = null;
-      act(action);
-    }
+    if (!trayAction.pending) return;
+    // DROP the request if we are mid-operation rather than queueing it: a
+    // stop that fires minutes later, when the user has moved on, is worse
+    // than one that visibly did nothing.
+    const action = trayAction.pending;
+    trayAction.pending = null;
+    if (!busy) act(action);
   });
 
   async function act(action: "start" | "stop" | "restart") {

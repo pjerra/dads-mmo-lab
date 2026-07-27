@@ -60,9 +60,12 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&open_i, &start_i, &stop_i, &quit_i])?;
 
     TrayIconBuilder::with_id("dml-tray")
+        // Returned as an error rather than .expect()ed: this runs inside
+        // .setup(), so a bundle.icon change should abort cleanly instead of
+        // panicking the app.
         .icon(
             app.default_window_icon()
-                .expect("bundle.icon provides icons/icon.ico")
+                .ok_or_else(|| tauri::Error::UnknownPath)?
                 .clone(),
         )
         .tooltip("DML Launcher")

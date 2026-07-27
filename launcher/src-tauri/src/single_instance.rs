@@ -18,26 +18,66 @@ use std::net::{TcpListener, TcpStream};
 /// both run) — so treat it as a constant, not a setting.
 const PORT: u16 = 51789;
 
-/// `Some(listener)` if we are the first instance; `None` if another is live
-/// (after poking it so it surfaces its window).
-pub fn acquire() -> Option<TcpListener> {
+/// Handshake so we only ever defer to ANOTHER DML LAUNCHER.
+///
+/// The port sits in Windows' dynamic range (49152-65535), so an unrelated
+/// process can hold it. Without this check that stranger would make the
+/// launcher exit silently on every double-click — indistinguishable from a
+/// broken install, and permanent until reboot. It also stops any local
+/// process from popping our window by connecting.
+const HELLO: &[u8] = b"dml-launcher-1\n";
+
+/// The three genuinely different outcomes. Collapsing the last two into
+/// "None" would make the app exit silently when an unrelated process happens
+/// to hold the port.
+pub enum Instance {
+    /// We are the only instance. Hold this listener for the app's lifetime.
+    First(TcpListener),
+    /// A real sibling answered and has been asked to surface. Exit quietly.
+    AlreadyRunning,
+    /// The port belongs to something that is not us. Start anyway, unguarded.
+    PortUnavailable,
+}
+
+pub fn acquire() -> Instance {
     match TcpListener::bind(("127.0.0.1", PORT)) {
-        Ok(l) => Some(l),
-        Err(_) => {
-            // Best-effort: if the poke fails the other instance is wedged or
-            // dying, and exiting anyway is still better than running two.
-            let _ = TcpStream::connect(("127.0.0.1", PORT));
-            None
-        }
+        Ok(l) => Instance::First(l),
+        Err(_) if poke_existing_instance() => Instance::AlreadyRunning,
+        // Someone else owns the port. Carry on WITHOUT the guard rather than
+        // refusing to start: a second window is a far smaller failure than an
+        // app that will not launch at all.
+        Err(_) => Instance::PortUnavailable,
     }
 }
 
-/// Focus the window whenever another launch pokes us.
+/// Connect and exchange the handshake. True iff a real sibling answered.
+fn poke_existing_instance() -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut s) = TcpStream::connect(("127.0.0.1", PORT)) else {
+        return false;
+    };
+    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    if s.write_all(HELLO).is_err() {
+        return false;
+    }
+    let mut buf = [0u8; HELLO.len()];
+    matches!(s.read_exact(&mut buf), Ok(())) && buf == HELLO
+}
+
+/// Focus the window whenever another launcher pokes us.
 pub fn serve(listener: TcpListener, app: tauri::AppHandle) {
+    use std::io::{Read, Write};
     std::thread::spawn(move || {
         for stream in listener.incoming() {
-            drop(stream);
-            crate::tray::show_main_window(&app);
+            // An accept error is not a poke; treat only real connections as
+            // one, or a transient error would raise the window unbidden.
+            let Ok(mut s) = stream else { continue };
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+            let mut buf = [0u8; HELLO.len()];
+            if s.read_exact(&mut buf).is_ok() && buf == HELLO {
+                let _ = s.write_all(HELLO);
+                crate::tray::show_main_window(&app);
+            }
         }
     });
 }

@@ -1461,11 +1461,16 @@ fn launcher_home() -> Result<std::path::PathBuf, CmdError> {
 #[tauri::command]
 fn launcher_config_read() -> Result<serde_json::Value, CmdError> {
     let cfg = dml_core::launcher_config::load(&launcher_home()?);
-    let env_backend = std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty());
-    // NB `startup::resolve_and_export` has already written DML_BACKEND into
-    // this process's environment by the time any command runs, so "env" here
-    // means "the user set it before launch OR we resolved it at startup".
-    // `envBackend` is reported so the UI can show the value either way.
+    // MUST use the flag captured at startup, NOT std::env::var: by the time
+    // any command runs, `resolve_and_export` has already written our own
+    // resolved value into DML_BACKEND, so reading the env here would report
+    // EVERY session as env-locked and leave the dropdown permanently
+    // read-only — defeating the whole setting.
+    let env_backend = if startup::backend_was_user_set() {
+        std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty())
+    } else {
+        None
+    };
     let source = if env_backend.is_some() {
         "env"
     } else if cfg.backend.as_deref().is_some_and(|v| !v.eq_ignore_ascii_case("auto")) {
@@ -5942,8 +5947,9 @@ pub fn run() {
     // second app that fights over the same server. Only matters now that
     // close-to-tray keeps the first one alive with no window showing.
     let instance_lock = match single_instance::acquire() {
-        Some(l) => l,
-        None => return,
+        single_instance::Instance::First(l) => Some(l),
+        single_instance::Instance::AlreadyRunning => return,
+        single_instance::Instance::PortUnavailable => None,
     };
 
     tauri::Builder::default()
@@ -5965,7 +5971,9 @@ pub fn run() {
             // tuning/module-catalog registries are now embedded in dml-wow —
             // see `dml_wow::registry` — so there is nothing left to warm.)
             tray::build(app.handle())?;
-            single_instance::serve(instance_lock, app.handle().clone());
+            if let Some(l) = instance_lock {
+                single_instance::serve(l, app.handle().clone());
+            }
 
             // Keep-awake safety net. Engagement is driven by the webview poll
             // loop; a hidden window whose timers get throttled would
