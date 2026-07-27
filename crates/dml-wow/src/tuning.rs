@@ -26,11 +26,9 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use dml_core::envelope::envelope_to_result;
 use dml_core::error::CmdError;
-use dml_core::runner::DmlRunner;
 
-use crate::config::{self, cfgset_err, parse_conf, strip_conf_quotes};
+use crate::config::{self, atomic_write, cfgset_err, parse_conf, strip_conf_quotes};
 
 /// The conf/lua key token for one tuning row key — the `confkey` column of
 /// `_mtune_rows` (40-config.sh:878), which the `tuning-registry` arm does not
@@ -67,6 +65,22 @@ pub fn mtune_to_json(ty: &str, fileval: &str) -> String {
         }
     } else {
         fileval.to_string()
+    }
+}
+
+/// Display/JSON value → Lua file form — a port of `_mtune_to_lua`
+/// (40-config.sh:910), the exact inverse of [`mtune_to_json`]. Only the `bool`
+/// type is translated (`1`→`true`, `0`→`false`); every other type (int/list)
+/// passes through verbatim.
+pub fn mtune_to_lua(ty: &str, jsonval: &str) -> String {
+    if ty == "bool" {
+        match jsonval {
+            "1" => "true".to_string(),
+            "0" => "false".to_string(),
+            other => other.to_string(),
+        }
+    } else {
+        jsonval.to_string()
     }
 }
 
@@ -116,6 +130,189 @@ pub fn lua_cfg_read(content: &str, key: &str) -> String {
     }
     found.unwrap_or_default()
 }
+
+// ---------------------------------------------------------------------------
+// The lua-backend WRITE path — the symmetric sibling of [`lua_cfg_read`],
+// ported to Rust by Task 11 (controller ruling D2). Before this, the lua
+// branch of [`tuning_set`] shelled the bash CLI through a `DmlRunner`, which
+// contradicted the workspace plan's central promise that the standalone
+// `dml-wow` CLI never needs the bash script for manage commands — and it was
+// FIVE of the 13 embedded tuning rows, not the 2 the inherited TODO claimed
+// (unlimitedammo.{enabled,max_ammo,min_threshold}, sitmeansrest.{duration,
+// regen_aura}).
+//
+// Oracle: `_lua_cfg_write` (`cli/src/40-config.sh:1000-1033`) and its awk
+// `is_key_line`/`rebuild` pair. `tuning_write_parity.rs` byte-compares the
+// files this produces against the ones the real bash CLI produces for the
+// same edits.
+// ---------------------------------------------------------------------------
+
+/// Whether one record is an (uncommented) `<key> [blanks] =` assignment line —
+/// the awk `is_key_line` function inside `_lua_cfg_write` (40-config.sh:1008).
+/// One trailing `\r` is dropped, leading blanks are skipped, then the key must
+/// match LITERALLY at position 1 (awk `index(body,k)==1`) and be followed by
+/// optional blanks and an `=`. Deliberately the same shape gate
+/// [`lua_cfg_read`] applies, so read and write always agree on which lines are
+/// candidates.
+fn is_lua_key_line(rec: &str, key: &str) -> bool {
+    let s = rec.strip_suffix('\r').unwrap_or(rec);
+    let body = s.trim_start_matches([' ', '\t']);
+    match body.strip_prefix(key) {
+        Some(rest) => rest.trim_start_matches([' ', '\t']).starts_with('='),
+        None => false,
+    }
+}
+
+/// Rebuild one key line around a new value — the awk `rebuild` function
+/// (40-config.sh:1016). Preserves, byte-for-byte: the leading whitespace, the
+/// exact spacing around `=`, everything from the first ` `/`\t`/`,`/`;` after
+/// the value onward (a table comma and/or an inline `-- comment`), and a
+/// trailing `\r`.
+///
+/// NOTE the deliberate asymmetry with [`lua_cfg_read`], faithfully carried
+/// over: the value token ends at the first `[ \t,;]` ONLY. `--` is NOT a
+/// terminator here, so a comment glued straight onto the value with no
+/// separator (`V = 7--c`) is swallowed into the replaced token and lost,
+/// exactly as the awk does it. Every real tuning file separates its comments
+/// with a space or a comma, so this never fires in practice — but a port that
+/// "fixed" it would diverge from the oracle byte-for-byte.
+///
+/// Only ever called for a record [`is_lua_key_line`] accepted; if the `=` is
+/// somehow absent the `eqlen = 0` fallback mirrors awk's failed `match()`.
+fn rebuild_lua_line(rec: &str, key: &str, fileval: &str) -> String {
+    let (s, cr) = match rec.strip_suffix('\r') {
+        Some(t) => (t, "\r"),
+        None => (rec, ""),
+    };
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let lead = &s[..s.len() - trimmed.len()];
+    let after = trimmed.get(key.len()..).unwrap_or("");
+    // awk: if (match(after, /^[ \t]*=[ \t]*/)) { eqlen = RLENGTH }
+    let a = after.trim_start_matches([' ', '\t']);
+    let pre = after.len() - a.len();
+    let eqlen = match a.strip_prefix('=') {
+        Some(a2) => pre + 1 + (a2.len() - a2.trim_start_matches([' ', '\t']).len()),
+        None => 0,
+    };
+    let eqpart = &after[..eqlen];
+    let rest = &after[eqlen..];
+    // awk: vlen = length(rest); if (match(rest, /[ \t,;]/)) vlen = RSTART - 1
+    let vlen = rest.find([' ', '\t', ',', ';']).unwrap_or(rest.len());
+    let trailer = &rest[vlen..];
+    format!("{lead}{key}{eqpart}{fileval}{trailer}{cr}")
+}
+
+/// Patch the LAST `<key> = …` line of a Lua config's TEXT — the pure core of
+/// `_lua_cfg_write`'s awk program (40-config.sh:1039-1046). Editing the LAST
+/// occurrence (not the first) matches [`lua_cfg_read`] and Lua's own
+/// last-assignment-wins load semantics, so a write round-trips through a read.
+///
+/// Records follow awk's model, identical to
+/// [`dml_core::conf::conf_write`]'s: split on `'\n'`, dropping a single
+/// trailing empty record, and every emitted record gets awk's `ORS` newline
+/// back — so a file that ended without a trailing newline gains exactly one,
+/// and CRLF line endings survive untouched (each record keeps its own `\r`).
+/// With no matching key line at all, awk's `last` stays 0 and every record is
+/// echoed verbatim; [`lua_cfg_write`] never gets that far (its `cur` check
+/// fails first), but the behaviour is preserved anyway.
+pub fn lua_cfg_rewrite(content: &str, key: &str, fileval: &str) -> String {
+    let recs: Vec<&str> = if content.is_empty() {
+        Vec::new()
+    } else {
+        let mut v: Vec<&str> = content.split('\n').collect();
+        if content.ends_with('\n') {
+            v.pop();
+        }
+        v
+    };
+    let last = recs.iter().rposition(|rec| is_lua_key_line(rec, key));
+    let mut out = String::with_capacity(content.len() + fileval.len() + 1);
+    for (i, rec) in recs.iter().enumerate() {
+        if Some(i) == last {
+            out.push_str(&rebuild_lua_line(rec, key, fileval));
+        } else {
+            out.push_str(rec);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// What one [`lua_cfg_write`] attempt did — the bash oracle's
+/// `(return code, MTUNE_CHANGED)` pair as a single value.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LuaWrite {
+    /// The value moved and the file was rewritten (bash: `return 0` with
+    /// `MTUNE_CHANGED=true`).
+    Changed,
+    /// The key already held this value — the file is byte-untouched (bash:
+    /// `return 0` with `MTUNE_CHANGED` left `false`).
+    Unchanged,
+    /// bash `return 1`: the file is missing/unreadable, the key line is
+    /// absent or commented, or the patch failed to verify. The original file
+    /// is never modified in this case. The CALLER distinguishes "key absent"
+    /// from "write failed" by re-reading the file, exactly like the oracle's
+    /// `tuning-set` arm does (`90-main.sh:2926-2930`).
+    Failed,
+}
+
+/// In-place value replacement in a deployed ALE `.lua` script — a faithful
+/// port of `_lua_cfg_write` (40-config.sh:1000). `fileval` must ALREADY be in
+/// file form (`true`/`false` or a validated integer — see [`mtune_to_lua`]),
+/// so the reconstructed line is safe.
+///
+/// Order of operations mirrors the oracle exactly:
+/// 1. read the current value; empty (absent file, absent/commented key, or an
+///    empty value token) → [`LuaWrite::Failed`], nothing written;
+/// 2. current == requested → [`LuaWrite::Unchanged`], nothing written;
+/// 3. patch, then RE-VERIFY by reading the patched text back — a patch that
+///    doesn't read back as the requested value is discarded
+///    ([`LuaWrite::Failed`]) rather than applied, so a bad edit can never
+///    truncate or corrupt the live script;
+/// 4. only then write, atomically (tmp + rename, like the oracle's
+///    `tmp`+`mv`).
+///
+/// The one deliberate divergence: the oracle verifies its tmp FILE and would
+/// still report success if the final `mv` failed; this verifies the patched
+/// TEXT and reports [`LuaWrite::Failed`] if the atomic write itself fails —
+/// strictly more honest, and unobservable in every non-pathological case.
+pub fn lua_cfg_write(path: &Path, key: &str, fileval: &str) -> LuaWrite {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return LuaWrite::Failed;
+    };
+    let cur = lua_cfg_read(&content, key);
+    if cur.is_empty() {
+        return LuaWrite::Failed;
+    }
+    if cur == fileval {
+        return LuaWrite::Unchanged;
+    }
+    let patched = lua_cfg_rewrite(&content, key, fileval);
+    if lua_cfg_read(&patched, key) != fileval {
+        return LuaWrite::Failed;
+    }
+    if atomic_write(path, &patched).is_err() {
+        return LuaWrite::Failed;
+    }
+    LuaWrite::Changed
+}
+
+/// Deployed ALE script path for a lua-backend tuning file — the free-function
+/// form of `_lua_cfg_path` (40-config.sh:897), shared by [`TuningReader`]'s
+/// read path and [`tuning_set`]'s write path so both resolve the same file.
+pub fn lua_path_in(title_dir: &Path, file: &str) -> PathBuf {
+    title_dir
+        .join("env")
+        .join("dist")
+        .join("etc")
+        .join("modules")
+        .join("lua_scripts")
+        .join(file)
+}
+
+/// The lua backend's advisory text, verbatim from `mtreload`
+/// (90-main.sh:2918): a lua tuning change applies live, no restart needed.
+pub const LUA_RELOAD_HINT: &str = ".reload ale (Console page) or restart the server to apply";
 
 /// Validate + normalize a `tuning-set` value against its row's `type`/`min`/
 /// `max` — a faithful port of the validation switch in the `tuning-set)` case
@@ -205,16 +402,11 @@ impl TuningReader {
         strip_conf_quotes(&raw)
     }
 
-    /// Deployed ALE script path for a lua-backend tuning file — a port of
-    /// `_lua_cfg_path` (40-config.sh:897).
+    /// Deployed ALE script path for a lua-backend tuning file — delegates to
+    /// the free-function [`lua_path_in`] (`_lua_cfg_path`, 40-config.sh:897)
+    /// so the read path and [`tuning_set`]'s write path can never drift.
     fn lua_path(&self, file: &str) -> PathBuf {
-        self.title_dir
-            .join("env")
-            .join("dist")
-            .join("etc")
-            .join("modules")
-            .join("lua_scripts")
-            .join(file)
+        lua_path_in(&self.title_dir, file)
     }
 
     /// Compute `(value, installed)` for one tuning row, mirroring the
@@ -289,25 +481,31 @@ impl TuningReader {
     }
 }
 
+// ---------------------------------------------------------------------------
+// `config tuning-set` (Task B2b) — moved out of the launcher's `lib.rs` by
+// the cargo-workspace refactor (Task 9b); made fully native (no `DmlRunner`,
+// no bash) by Task 11 / controller ruling D2.
+// ---------------------------------------------------------------------------
+
 /// `dml wow config tuning-set` port (`90-main.sh:2859-2934`, Task B2b).
 /// Looks up the row in the tuning registry, validates by `type` (shared by
 /// BOTH backends, exactly like the oracle validates once before branching),
-/// then writes it: the `conf` backend is fully native (mirrors
-/// `config::config_set_curated`'s conf-write tail almost verbatim, minus the
-/// ahbot/bots.population special-case companion writes that don't apply to
-/// tuning rows); the `lua` backend defers to the `dml` CLI through `runner`
-/// -- see the TODO on that arm below. Moved out of the launcher's `lib.rs`
-/// by the cargo-workspace refactor (Task 9b); `runner`, `config_lock` and
-/// `title_dir` are all resolved by the caller, none of them Tauri types.
-// ---------------------------------------------------------------------------
-// `config tuning-set` (Task B2b) — moved out of the launcher's `lib.rs` by
-// the cargo-workspace refactor (Task 9b).
-// ---------------------------------------------------------------------------
-
+/// then writes it. BOTH backends are now fully native:
+///
+///  - `conf` mirrors `config::config_set_curated`'s conf-write tail almost
+///    verbatim, minus the ahbot/bots.population special-case companion writes
+///    that don't apply to tuning rows;
+///  - `lua` line-replaces the DEPLOYED ALE script through [`lua_cfg_write`]
+///    (Task 11 / ruling D2 — this arm used to shell `dml wow config
+///    tuning-set` through an `Arc<DmlRunner>`, which broke the workspace
+///    plan's promise that the standalone CLI never needs the bash script for
+///    manage commands, for 5 of the 13 rows).
+///
+/// `config_lock` and `title_dir` are resolved by the caller, neither of them
+/// a Tauri type.
 pub fn tuning_set(
     key: String,
     value: String,
-    runner: Arc<DmlRunner>,
     config_lock: Arc<Mutex<()>>,
     title_dir: PathBuf,
 ) -> Result<serde_json::Value, CmdError> {
@@ -350,39 +548,69 @@ pub fn tuning_set(
     let norm_value = crate::tuning::validate_tuning_value(ty, &value, label, min, max)
         .map_err(|msg| cfgset_err("BAD_ARG", msg, ""))?;
 
-    if backend == "lua" {
-        // TODO: native lua-tuning writer (deferred). Porting
-        // `_lua_cfg_write` + `_mtune_to_lua` (the `.lua` assignment
-        // editor with re-verify, `40-config.sh:969-1019`) is out of scope
-        // for this pass -- only 2 of 13 tuning rows are lua-backend
-        // (unlimitedammo.enabled, sitmeansrest.*'s file is also lua but
-        // that's 4 rows total; still a small minority). Shell the
-        // existing CLI so lua-backend rows keep working (byte-parity,
-        // since `dml` does the actual write) without porting the lua
-        // editor tonight. The CLI re-validates independently; the
-        // validation above still runs first so a bad value fails fast
-        // without a subprocess, and to keep both backends going through
-        // one shared validation path exactly like the oracle does.
-        let env = runner
-            .run_json(&["wow", "config", "tuning-set", "--key", &key, "--value", &value])
-            .map_err(CmdError::from)?;
-        return envelope_to_result(env);
-    }
-
     // `_wow_server_dir` re-check (`90-main.sh:2888-2892`): the oracle runs
     // this AFTER type/range validation but BEFORE either backend branch
     // (it feeds the lua branch's `_lua_cfg_path` too, at 2913) -- for the
     // conf backend specifically, that puts it before `_cfg_conf_ensure`'s
     // own NOT_INSTALLED check, so a not-installed server reports the
     // oracle's uniform "server not installed" rather than "{module} is
-    // not installed". The lua branch above already shelled out to the CLI
-    // before we get here, so it gets this same check for free.
+    // not installed". It used to sit BELOW the lua branch here (that branch
+    // shelled the CLI, which ran its own copy of the check); now that the
+    // lua write is native too, the check moved back UP to the oracle's own
+    // position so both backends share it, exactly like the bash does.
     if !crate::config::wow_server_installed(&title_dir) {
         return Err(cfgset_err(
             "NOT_FOUND",
             "WoW Playerbots server not installed",
             "Install it first, then re-run.",
         ));
+    }
+
+    if backend == "lua" {
+        // Lua backend (`90-main.sh:2909-2932`): line-replace the DEPLOYED
+        // script; applies live via `.reload ale`. This family has no `.dist`
+        // to seed from, so an absent file is NOT_INSTALLED (no `conf_ensure`
+        // equivalent), and an absent KEY inside a present file is NOT_FOUND.
+        let lpath = lua_path_in(&title_dir, file);
+        if !lpath.is_file() {
+            return Err(cfgset_err(
+                "NOT_INSTALLED",
+                format!("{module} is not installed"),
+                format!("Install {module} from the Modules page (Lua scripts) first, then reopen this page."),
+            ));
+        }
+        let fileval = mtune_to_lua(ty, &norm_value);
+        return match lua_cfg_write(&lpath, confkey, &fileval) {
+            LuaWrite::Changed => Ok(serde_json::json!({
+                "key": key, "backend": "lua", "changed": true,
+                "restart_required": false, "applied": "reload-ale",
+                "reload": LUA_RELOAD_HINT,
+            })),
+            LuaWrite::Unchanged => Ok(serde_json::json!({
+                "key": key, "backend": "lua", "changed": false,
+                "restart_required": false, "applied": "none",
+            })),
+            // The oracle discriminates its single `return 1` by RE-READING
+            // the (untouched) file: still no value for this key -> the key
+            // simply isn't in this build of the module; a readable value ->
+            // the patch itself failed.
+            LuaWrite::Failed => {
+                let content = std::fs::read_to_string(&lpath).unwrap_or_default();
+                if lua_cfg_read(&content, confkey).is_empty() {
+                    Err(cfgset_err(
+                        "NOT_FOUND",
+                        format!("{confkey} is not present in {file}"),
+                        format!("This setting may not exist in the installed version of {module}."),
+                    ))
+                } else {
+                    Err(cfgset_err(
+                        "WRITE_FAILED",
+                        format!("Could not update {confkey} in {file}"),
+                        format!("Edit the file manually or reinstall {module}."),
+                    ))
+                }
+            }
+        };
     }
 
     // backend == "conf" -- same `_cfg_conf_path` resolution as B2a's
@@ -565,6 +793,153 @@ mod tests {
         assert_eq!(s["default"], "1");
         assert_eq!(s["file"], "mod_learnspells.conf");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- lua WRITE path (Task 11 / ruling D2: the `_lua_cfg_write` port) -----
+
+    #[test]
+    fn mtune_to_lua_translates_only_bool_and_inverts_to_json() {
+        assert_eq!(mtune_to_lua("bool", "1"), "true");
+        assert_eq!(mtune_to_lua("bool", "0"), "false");
+        assert_eq!(mtune_to_lua("bool", "weird"), "weird");
+        assert_eq!(mtune_to_lua("int", "1000"), "1000");
+        assert_eq!(mtune_to_lua("list", "1,2,3"), "1,2,3");
+        // Exact inverse of `_mtune_to_json` for the two real bool forms.
+        assert_eq!(mtune_to_json("bool", &mtune_to_lua("bool", "1")), "1");
+        assert_eq!(mtune_to_json("bool", &mtune_to_lua("bool", "0")), "0");
+    }
+
+    #[test]
+    fn is_lua_key_line_matches_the_read_gate() {
+        assert!(is_lua_key_line("UnlimitedAmmoNamespace.ENABLED = false", "UnlimitedAmmoNamespace.ENABLED"));
+        assert!(is_lua_key_line("    DURATION = 20,", "DURATION"));
+        assert!(is_lua_key_line("\tDURATION\t=\t20", "DURATION"));
+        assert!(is_lua_key_line("DURATION =\r", "DURATION"));
+        // A longer key must not be matched by a shorter probe.
+        assert!(!is_lua_key_line("DURATION_MAX = 9", "DURATION"));
+        // Commented out -> the key is not at position 1 of the trimmed body.
+        assert!(!is_lua_key_line("-- DURATION = 20", "DURATION"));
+        // No `=` at all.
+        assert!(!is_lua_key_line("DURATION", "DURATION"));
+    }
+
+    #[test]
+    fn rebuild_lua_line_preserves_lead_spacing_and_trailer() {
+        // Plain namespaced assignment.
+        assert_eq!(
+            rebuild_lua_line("UnlimitedAmmoNamespace.ENABLED = false", "UnlimitedAmmoNamespace.ENABLED", "true"),
+            "UnlimitedAmmoNamespace.ENABLED = true"
+        );
+        // Indented table key with a trailing comma AND an inline comment.
+        assert_eq!(
+            rebuild_lua_line("    DURATION = 20, -- seconds", "DURATION", "45"),
+            "    DURATION = 45, -- seconds"
+        );
+        // Semicolon trailer.
+        assert_eq!(rebuild_lua_line("  REGEN_AURA = 25990;", "REGEN_AURA", "1"), "  REGEN_AURA = 1;");
+        // Unusual `=` spacing is preserved byte-for-byte.
+        assert_eq!(rebuild_lua_line("\tX\t=\t\t7 -- c", "X", "9"), "\tX\t=\t\t9 -- c");
+        assert_eq!(rebuild_lua_line("X=7", "X", "9"), "X=9");
+        // CRLF survives.
+        assert_eq!(rebuild_lua_line("X = 7\r", "X", "9"), "X = 9\r");
+        // Faithful oracle quirk: a `--` comment GLUED to the value with no
+        // separator is part of the value token and is lost (awk's rebuild
+        // only splits on [ \t,;], unlike its read which also splits on `--`).
+        assert_eq!(rebuild_lua_line("V = 7--c", "V", "9"), "V = 9");
+    }
+
+    #[test]
+    fn lua_cfg_rewrite_edits_only_the_last_occurrence() {
+        let c = "X = 1\nY = 2\nX = 3\n";
+        assert_eq!(lua_cfg_rewrite(c, "X", "9"), "X = 1\nY = 2\nX = 9\n");
+        // ...and a read of the result returns the new value (round trip).
+        assert_eq!(lua_cfg_read(&lua_cfg_rewrite(c, "X", "9"), "X"), "9");
+    }
+
+    #[test]
+    fn lua_cfg_rewrite_matches_awks_record_model() {
+        // No trailing newline in -> exactly one added (awk's ORS per record).
+        assert_eq!(lua_cfg_rewrite("X = 1", "X", "2"), "X = 2\n");
+        // Empty input -> zero records -> empty output (never a phantom line).
+        assert_eq!(lua_cfg_rewrite("", "X", "2"), "");
+        // CRLF file: untouched lines keep their own \r verbatim.
+        assert_eq!(lua_cfg_rewrite("A = 1\r\nX = 1\r\n", "X", "2"), "A = 1\r\nX = 2\r\n");
+        // No matching key -> every record echoed verbatim (awk's last == 0).
+        assert_eq!(lua_cfg_rewrite("A = 1\nB = 2\n", "X", "9"), "A = 1\nB = 2\n");
+        // Blank lines and comments pass through untouched.
+        assert_eq!(
+            lua_cfg_rewrite("-- head\n\nX = 1\n\n-- tail\n", "X", "2"),
+            "-- head\n\nX = 2\n\n-- tail\n"
+        );
+    }
+
+    fn tmp_lua(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dml-luawrite-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Script.lua");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    #[test]
+    fn lua_cfg_write_changed_unchanged_and_absent_key() {
+        let p = tmp_lua("basic", "UnlimitedAmmoNamespace.ENABLED = false\n");
+        // First write moves the value.
+        assert_eq!(lua_cfg_write(&p, "UnlimitedAmmoNamespace.ENABLED", "true"), LuaWrite::Changed);
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "UnlimitedAmmoNamespace.ENABLED = true\n"
+        );
+        // Same value again is a true no-op: byte-identical, reported Unchanged.
+        let before = std::fs::read(&p).unwrap();
+        assert_eq!(lua_cfg_write(&p, "UnlimitedAmmoNamespace.ENABLED", "true"), LuaWrite::Unchanged);
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        // An absent key is the oracle's `return 1`, and never touches the file.
+        assert_eq!(lua_cfg_write(&p, "UnlimitedAmmoNamespace.MAX_AMMO", "1000"), LuaWrite::Failed);
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn lua_cfg_write_missing_file_is_failed() {
+        let missing = std::env::temp_dir().join(format!("dml-luawrite-none-{}.lua", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        assert_eq!(lua_cfg_write(&missing, "X", "1"), LuaWrite::Failed);
+        assert!(!missing.exists(), "a failed write must not create the file");
+    }
+
+    #[test]
+    fn lua_cfg_write_preserves_comments_and_leaves_no_tmp_files() {
+        let p = tmp_lua(
+            "fmt",
+            "-- SitMeansRest\nlocal CONFIG = {\n    DURATION = 20, -- seconds\n    REGEN_AURA = 25990,\n}\n",
+        );
+        assert_eq!(lua_cfg_write(&p, "DURATION", "45"), LuaWrite::Changed);
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "-- SitMeansRest\nlocal CONFIG = {\n    DURATION = 45, -- seconds\n    REGEN_AURA = 25990,\n}\n"
+        );
+        // The atomic tmp+rename must leave nothing behind next to the file.
+        let leftovers: Vec<String> = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n != "Script.lua")
+            .collect();
+        assert!(leftovers.is_empty(), "unexpected leftovers: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn lua_cfg_write_round_trips_through_the_reader() {
+        // The write targets the LAST occurrence precisely because the reader
+        // does; targeting the first would leave the effective value unchanged.
+        let p = tmp_lua("last", "DURATION = 20\nDURATION = 30\n");
+        assert_eq!(lua_cfg_write(&p, "DURATION", "45"), LuaWrite::Changed);
+        let after = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(after, "DURATION = 20\nDURATION = 45\n");
+        assert_eq!(lua_cfg_read(&after, "DURATION"), "45");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[test]

@@ -2162,7 +2162,9 @@ async fn wow_config_set_native(
 }
 
 /// `dml wow config tuning-set` port — see [`dml_wow::tuning::tuning_set`].
-/// Native-only.
+/// Native-only. No `runner`: as of the cargo-workspace refactor's Task 11
+/// (controller ruling D2) BOTH tuning backends are native Rust, so this no
+/// longer hands the lua-backend rows off to the bash CLI.
 #[tauri::command]
 async fn wow_config_tuning_set_native(
     key: String,
@@ -2170,12 +2172,11 @@ async fn wow_config_tuning_set_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let runner = state.runner.clone();
     let config_lock = state.config_lock.clone();
     let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
 
     tauri::async_runtime::spawn_blocking(move || {
-        dml_wow::tuning::tuning_set(key, value, runner, config_lock, title_dir)
+        dml_wow::tuning::tuning_set(key, value, config_lock, title_dir)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
