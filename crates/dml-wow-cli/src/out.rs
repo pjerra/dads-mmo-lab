@@ -159,11 +159,25 @@ impl TerminalSeen {
 
     /// Update the tracked state from one stream event: `event: "done"` marks
     /// success, `event: "error"` marks failure, anything else is untouched.
-    /// A later terminal event overwrites an earlier one (a stream is only
-    /// ever expected to emit one, but this is not the place to assert that).
+    ///
+    /// STICKY ON FAILURE (Task 14 review, Fix 2): once a failure has been
+    /// observed, a later `done` can NEVER take it back. A single stream only
+    /// ever emits one terminal event, so within one stream this changes
+    /// nothing — but `run.rs::stream_dispatch` deliberately allows ONE arm to
+    /// drive SEVERAL streams onto ONE tracker (`start` = engine-ensure then
+    /// compose; `stop` = compose then engine-stop). Under last-terminal-wins,
+    /// a future arm whose first stream fails and whose second succeeds would
+    /// exit **0** and silently report success for a failed operation — and the
+    /// hazard would be invisible at the call site. Failure-sticky is also the
+    /// same doctrine [`stream_exit`] already applies to a stream that ends with
+    /// no terminal event at all: when in doubt, report the failure.
+    ///
+    /// (No arm can trigger this today: neither `native::ensure_engine_up_stream`
+    /// nor `native::stop_engine_stream` ever emits `done`, so masking is
+    /// currently impossible. This closes it before a future arm can.)
     pub fn observe(&self, event: &Value) {
         match event["event"].as_str() {
-            Some("done") => self.0.set(Some(true)),
+            Some("done") if self.0.get() != Some(false) => self.0.set(Some(true)),
             Some("error") => self.0.set(Some(false)),
             _ => {}
         }
@@ -238,6 +252,38 @@ mod tests {
         let seen = TerminalSeen::new();
         seen.observe(&json!({"event": "error", "error": {"code": "X", "message": "y", "hint": ""}}));
         assert_eq!(stream_exit(&seen), 1);
+    }
+
+    /// Fix 2, both orderings: a tracker that has seen a failure stays failed,
+    /// whichever order the two terminal events arrive in. `error` then `done`
+    /// is the one that matters (multi-stream masking); `done` then `error` was
+    /// already correct under last-terminal-wins and must stay correct.
+    #[test]
+    fn terminal_seen_is_sticky_on_failure_in_both_orderings() {
+        let error_then_done = TerminalSeen::new();
+        error_then_done.observe(&json!({"event": "error", "error": {"code": "STOP_FAILED"}}));
+        error_then_done.observe(&json!({"event": "line", "level": "info", "text": "second stream"}));
+        error_then_done.observe(&json!({"event": "done", "data": {}}));
+        assert_eq!(
+            stream_exit(&error_then_done),
+            1,
+            "a later stream's `done` must not mask an earlier stream's failure"
+        );
+
+        let done_then_error = TerminalSeen::new();
+        done_then_error.observe(&json!({"event": "done", "data": {}}));
+        done_then_error.observe(&json!({"event": "error", "error": {"code": "X"}}));
+        assert_eq!(stream_exit(&done_then_error), 1);
+
+        // And the ordinary single-stream success is untouched by the change.
+        let just_done = TerminalSeen::new();
+        just_done.observe(&json!({"event": "done", "data": {}}));
+        assert_eq!(stream_exit(&just_done), 0);
+        // ...including a `done` after a NON-terminal event.
+        let line_then_done = TerminalSeen::new();
+        line_then_done.observe(&json!({"event": "line", "text": "hi"}));
+        line_then_done.observe(&json!({"event": "done", "data": {}}));
+        assert_eq!(stream_exit(&line_then_done), 0);
     }
 
     #[test]

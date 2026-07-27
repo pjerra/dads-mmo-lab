@@ -600,12 +600,43 @@ pub fn dispatch(command: Cmd) -> i32 {
                 _ => None,
             };
             stream_dispatch(|emit| {
-                dml_wow::lifecycle::games_lifecycle_stream("stop", id, false, emit);
+                // TERMINAL EVENT HELD BACK, and this is a CORRECTNESS fix, not
+                // tidiness (Task 14 review, Fix 1). `stop` is the only arm that
+                // writes anything AFTER its orchestration's terminal event, and
+                // `out.rs`'s contract says a stream ENDS at that event. A
+                // consumer that believes the contract — `dml-wow stop | head -n
+                // <k>`, a `jq` `first(...)`, any reader that stops at
+                // `done`/`error` — closes the pipe there; the next engine-stop
+                // write then hits BrokenPipe, and
+                // `print_stdout_line_or_exit`'s (correct, deliberate)
+                // broken-pipe rule exits **0** — reporting success for a stop
+                // that may have FAILED. Buffering the terminal event and
+                // re-emitting it last makes the contract true again, so there
+                // is never a write after it to lose the race on.
+                //
+                // The launcher's channel ordering (engine lines after the
+                // terminal event) is NOT parity worth keeping here: a Tauri
+                // Channel has no pipe to break and no exit code to corrupt.
+                // Only the ORDER of the engine lines relative to the terminal
+                // event differs; every line is still emitted, still in the same
+                // order relative to each other.
+                let held: std::cell::RefCell<Vec<Value>> = std::cell::RefCell::new(Vec::new());
+                dml_wow::lifecycle::games_lifecycle_stream("stop", id, false, |v| {
+                    if matches!(v["event"].as_str(), Some("done") | Some("error")) {
+                        held.borrow_mut().push(v);
+                    } else {
+                        emit(v);
+                    }
+                });
                 if dml_wow::native::stop_engine_enabled(true, manage) {
                     // Emits `line` events only — never a terminal one — so the
                     // exit code still comes from the stop above, exactly as the
                     // launcher's `result` does.
                     dml_wow::native::stop_engine_stream(emit);
+                }
+                // ...and now the stream really does end at its terminal event.
+                for v in held.into_inner() {
+                    emit(v);
                 }
             })
         }

@@ -939,14 +939,20 @@ fn preset_list_and_delete_round_trip_in_a_private_home() {
 // Task 14: lifecycle, module mutations, backup/restore and the four DESTRUCTIVE
 // subcommands.
 //
-// SAFETY RULE FOR THIS WHOLE SECTION, and it is absolute: `backup restore`,
-// `docker-clean`, `bots-flush` and `games-remove` are NEVER invoked with
-// `--yes` anywhere in this file — not even in a sealed environment, not even
-// with an argument the library would refuse at its first statement. Every test
-// below exercises the REFUSAL side of those four, plus the non-destructive
-// arms. What the `--yes` path actually does when it is allowed to run is owed
-// to the user's supervised smoke session, and is recorded as such in the task
-// report.
+// SAFETY RULE FOR THIS WHOLE SECTION, stated precisely (an absolute that is
+// untrue is worse than a narrow one that holds — Task 14 review, Fix 3):
+// `backup restore`, `docker-clean` and `games-remove` are NEVER invoked with
+// `--yes` anywhere in this file. `bots-flush --yes` IS spawned three times, in
+// `bots_flush_without_yes_or_ack_is_refused_and_arms_nothing`, and only ever
+// with a MISSING or WRONG `--ack` — `lifecycle::bots_flush_confirmed(yes, ack)`
+// refuses every one of them before `bots_flush_stream` is reached, which is
+// precisely what those three cases exist to prove. So the invariant that
+// actually holds, and the one to preserve when adding tests here, is: NO
+// destructive subcommand is ever invoked with `--yes` AND a valid `--ack`.
+// Everything below exercises the REFUSAL side of those four, plus the
+// non-destructive arms. What the confirmed path actually does when it is
+// allowed to run is owed to the user's supervised smoke session, and is
+// recorded as such in the task report.
 //
 // Everything reuses [`Sealed`] from the Task 13 block above: a dead SOAP
 // endpoint, a dead MySQL port, and a private HOME/USERPROFILE + games dir. A
@@ -1138,6 +1144,100 @@ fn lifecycle_arms_reject_a_bad_id_before_touching_docker() {
     let (code, lines) = s.run_lines(&["restart", "--id", ""]);
     assert_eq!(code, 1);
     assert_eq!(lines[0]["error"]["code"], "BAD_ID", "{}", lines[0]);
+}
+
+/// Task 14 review, Fix 1 — THE REGRESSION PIN for a failing `stop` that must
+/// not exit 0.
+///
+/// `stop` is the only arm that runs a SECOND stream (the Docker Desktop
+/// engine-stop) after its orchestration finishes. If anything is written after
+/// the terminal `done`/`error` event, a consumer that follows this CLI's own
+/// documented contract (`out.rs`: a stream ends at its terminal event) closes
+/// the pipe there — and the next write hits BrokenPipe, which
+/// `print_stdout_line_or_exit` correctly answers with `exit(0)`. A FAILED stop
+/// would then report success.
+///
+/// The pin is STRUCTURAL rather than a live pipe-close race (which the header
+/// of this file explains is not deterministic): assert that the engine-stop
+/// line is present (so the second stream really ran), that it comes BEFORE the
+/// terminal event, and that the terminal event is the LAST line on stdout.
+/// With that invariant there is no write left to break the pipe on, so the
+/// exit code cannot be corrupted.
+///
+/// NO DOCKER IS INVOLVED. `DML_DOCKER` is an unconditional override
+/// (`engine::resolve_docker_program`), so pointing it at a path that does not
+/// exist means every docker spawn fails instantly at `Command::new` — the
+/// engine-stop degrades to its `warn` line without a real `docker` process
+/// ever being created, and the lifecycle stream never gets past its
+/// title-not-found gate.
+#[test]
+fn a_failing_stop_ends_at_its_terminal_event_so_a_truncating_consumer_cannot_see_exit_0() {
+    let s = Sealed::new("stopterminal");
+    let no_docker = s.root.join("no-such-docker-binary.exe");
+    let out = s
+        .cmd(&["stop", "--id", "wow-server-playerbots"])
+        .env("DML_DOCKER", &no_docker)
+        .output()
+        .expect("spawn dml-wow stop");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l:?}")))
+        .collect();
+
+    // The stop itself FAILED (no such title in the sealed games dir) -- which
+    // is the whole point: this is the case a truncating consumer must not see
+    // as success.
+    assert_eq!(out.status.code(), Some(1), "a failing stop must exit 1: {events:?}");
+    let last = events.last().expect("at least one event");
+    assert_eq!(last["event"], "error", "the LAST line must be the terminal event: {events:?}");
+    assert_eq!(last["error"]["code"], "NOT_FOUND", "{events:?}");
+
+    // The engine-stop stream really did run...
+    let engine_idx = events
+        .iter()
+        .position(|e| {
+            e["event"] == "line"
+                && e["text"].as_str().is_some_and(|t| t.contains("Docker Desktop"))
+        })
+        .unwrap_or_else(|| panic!("the engine-stop stream did not run: {events:?}"));
+    // ...and every one of its lines precedes the terminal event.
+    assert!(
+        engine_idx < events.len() - 1,
+        "engine-stop lines must come BEFORE the terminal event, not after it: {events:?}"
+    );
+    assert!(
+        events[engine_idx + 1..events.len() - 1]
+            .iter()
+            .all(|e| e["event"] == "line"),
+        "nothing but engine `line` events may sit between the section end and the terminal event: {events:?}"
+    );
+}
+
+/// The same arm with `--no-stop-engine`: no second stream at all, so the
+/// terminal event is trivially last. Proves the flag is wired and that the
+/// assertion above was observing a real engine-stop, not an artefact.
+#[test]
+fn stop_with_no_stop_engine_runs_no_second_stream() {
+    let s = Sealed::new("stopnoengine");
+    let no_docker = s.root.join("no-such-docker-binary.exe");
+    let out = s
+        .cmd(&["stop", "--id", "wow-server-playerbots", "--no-stop-engine"])
+        .env("DML_DOCKER", &no_docker)
+        .output()
+        .expect("spawn dml-wow stop --no-stop-engine");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(1), "{stdout}");
+    assert!(
+        !stdout.contains("Docker Desktop"),
+        "--no-stop-engine must skip the engine stream entirely: {stdout}"
+    );
+    let last: serde_json::Value =
+        serde_json::from_str(stdout.lines().rfind(|l| !l.trim().is_empty()).expect("a line"))
+            .expect("valid JSON");
+    assert_eq!(last["event"], "error");
+    assert_eq!(last["error"]["code"], "NOT_FOUND");
 }
 
 /// `module repair`'s three closed-allowlist guards (controller ruling D1). The
