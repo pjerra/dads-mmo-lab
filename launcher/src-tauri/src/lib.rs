@@ -1057,11 +1057,10 @@ async fn wow_module_tracking_native(key: String) -> Result<serde_json::Value, Cm
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// NATIVE-MODE `module repair` (`90-main.sh:5107-5180`): the FOURTH
-/// sanctioned direct MySQL write (see `db.rs`/`backup.rs` headers) — INSERT/
-/// DELETE on the `updates` tracking tables ONLY, via bound-param `db::
-/// execute`. Every filename is validated BEFORE any SQL runs, matching the
-/// oracle's abort-before-mutation contract.
+/// NATIVE-MODE `module repair` — see
+/// [`dml_wow::moduletail::module_repair`]. The three closed-allowlist arg
+/// checks stay here in the wrapper (webview input), the work itself is in
+/// the library.
 #[tauri::command]
 async fn wow_module_repair_native(
     key: String,
@@ -1079,65 +1078,7 @@ async fn wow_module_repair_native(
     if !matches!(mode.as_str(), "mark" | "clear") {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid --mode: {mode}"), hint: "Use mark or clear.".into() });
     }
-    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let sdir = dml_wow::maint::require_server_dir("")?;
-        if !dml_wow::modmgr::cpp_installed(&sdir, &key) {
-            return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
-        }
-        let file_list: Vec<String> = match &files {
-            Some(f) => f.split_whitespace().map(str::to_string).collect(),
-            None => dml_wow::moduletail::module_discover_sql_files(&sdir, &key, &db),
-        };
-        for f in &file_list {
-            if !dml_wow::moduletail::valid_module_sql_filename(f) {
-                return Err(CmdError {
-                    code: "BAD_ARG".into(),
-                    message: format!("Invalid filename: {f}"),
-                    hint: "Filenames must match ^[A-Za-z0-9._-]+\\.sql$ (no slashes).".into(),
-                });
-            }
-        }
-        let database = dml_wow::moduletail::database_for_short(&db).expect("validated above");
-        let cfg = dml_wow::db::DbConfig::from_env();
-        let mut results = Vec::new();
-        for f in file_list {
-            let res = if mode == "mark" {
-                match dml_wow::moduletail::find_module_sql_file(&sdir, &key, &f) {
-                    None => "file_missing",
-                    Some(path) => {
-                        let bytes = std::fs::read(&path).map_err(io_internal_err)?;
-                        let hash = {
-                            use sha1::Digest;
-                            let mut hasher = sha1::Sha1::new();
-                            hasher.update(&bytes);
-                            let digest = hasher.finalize();
-                            digest.iter().map(|b| format!("{b:02X}")).collect::<String>()
-                        };
-                        let params: Vec<mysql::Value> =
-                            vec![mysql::Value::from(&f), mysql::Value::from(&hash), mysql::Value::from(&hash)];
-                        dml_wow::db::execute(&cfg, database, dml_wow::moduletail::REPAIR_MARK_SQL, params)
-                            .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
-                        "marked"
-                    }
-                }
-            } else {
-                let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
-                let cnt = dml_wow::db::query_with_params(&cfg, database, dml_wow::moduletail::REPAIR_CLEAR_COUNT_SQL, cnt_params)
-                    .map_err(|e| db_unreachable_err(format!("Could not reach the {db} database: {e}")))
-                    .map(count_result)?;
-                if cnt == 0 {
-                    "not_tracked"
-                } else {
-                    let del_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
-                    dml_wow::db::execute(&cfg, database, dml_wow::moduletail::REPAIR_CLEAR_DELETE_SQL, del_params)
-                        .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
-                    "cleared"
-                }
-            };
-            results.push(serde_json::json!({"file": f, "result": res}));
-        }
-        Ok(serde_json::json!({"key": key, "db": db, "mode": mode, "results": results}))
-    })
+    tauri::async_runtime::spawn_blocking(move || dml_wow::moduletail::module_repair(key, db, mode, files))
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }

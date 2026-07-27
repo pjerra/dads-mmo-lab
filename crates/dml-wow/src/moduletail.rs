@@ -18,7 +18,10 @@
 
 use std::path::{Path, PathBuf};
 
+use dml_core::error::{io_internal_err, not_found_err, CmdError};
 use serde_json::Value;
+
+use super::db::{count_result, db_unreachable_err};
 
 // ---------------------------------------------------------------------------
 // conf-activate / `module conf` — `_module_conf_name_var`/`_module_conf_
@@ -555,6 +558,86 @@ pub fn module_client_patch_stream(key: String, emit: impl Fn(serde_json::Value))
     emit(done_event(serde_json::json!({
         "key": "mod-arac", "dbc_files": dbc_n, "client_patched": client_done, "restart_required": true,
     })));
+}
+
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `module repair` (`90-main.sh:5107-5180`) — moved out of the
+// launcher's `lib.rs` by the cargo-workspace refactor (Task 9b). The FOURTH
+// sanctioned direct MySQL write (see `db`/`backup`'s headers): INSERT/DELETE
+// on the `updates` tracking tables ONLY, via bound-param `db::execute`.
+// Every filename is validated BEFORE any SQL runs, matching the oracle's
+// abort-before-mutation contract. The `mark` mode hashes each `.sql` file
+// the SAME way the bash oracle's `sha1sum` does, so the tracking row's hash
+// matches what AzerothCore's own db-import would have written.
+//
+// `key`/`db`/`mode` arrive PRE-VALIDATED by the caller (module-key shape,
+// the three database names, mark|clear) -- the same split every other
+// hoisted body uses.
+// ---------------------------------------------------------------------------
+
+pub fn module_repair(
+    key: String,
+    db: String,
+    mode: String,
+    files: Option<String>,
+) -> Result<serde_json::Value, CmdError> {
+    let sdir = crate::maint::require_server_dir("")?;
+    if !crate::modmgr::cpp_installed(&sdir, &key) {
+        return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
+    }
+    let file_list: Vec<String> = match &files {
+        Some(f) => f.split_whitespace().map(str::to_string).collect(),
+        None => crate::moduletail::module_discover_sql_files(&sdir, &key, &db),
+    };
+    for f in &file_list {
+        if !crate::moduletail::valid_module_sql_filename(f) {
+            return Err(CmdError {
+                code: "BAD_ARG".into(),
+                message: format!("Invalid filename: {f}"),
+                hint: "Filenames must match ^[A-Za-z0-9._-]+\\.sql$ (no slashes).".into(),
+            });
+        }
+    }
+    let database = crate::moduletail::database_for_short(&db).expect("validated above");
+    let cfg = crate::db::DbConfig::from_env();
+    let mut results = Vec::new();
+    for f in file_list {
+        let res = if mode == "mark" {
+            match crate::moduletail::find_module_sql_file(&sdir, &key, &f) {
+                None => "file_missing",
+                Some(path) => {
+                    let bytes = std::fs::read(&path).map_err(io_internal_err)?;
+                    let hash = {
+                        use sha1::Digest;
+                        let mut hasher = sha1::Sha1::new();
+                        hasher.update(&bytes);
+                        let digest = hasher.finalize();
+                        digest.iter().map(|b| format!("{b:02X}")).collect::<String>()
+                    };
+                    let params: Vec<mysql::Value> =
+                        vec![mysql::Value::from(&f), mysql::Value::from(&hash), mysql::Value::from(&hash)];
+                    crate::db::execute(&cfg, database, crate::moduletail::REPAIR_MARK_SQL, params)
+                        .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
+                    "marked"
+                }
+            }
+        } else {
+            let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
+            let cnt = crate::db::query_with_params(&cfg, database, crate::moduletail::REPAIR_CLEAR_COUNT_SQL, cnt_params)
+                .map_err(|e| db_unreachable_err(format!("Could not reach the {db} database: {e}")))
+                .map(count_result)?;
+            if cnt == 0 {
+                "not_tracked"
+            } else {
+                let del_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
+                crate::db::execute(&cfg, database, crate::moduletail::REPAIR_CLEAR_DELETE_SQL, del_params)
+                    .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
+                "cleared"
+            }
+        };
+        results.push(serde_json::json!({"file": f, "result": res}));
+    }
+    Ok(serde_json::json!({"key": key, "db": db, "mode": mode, "results": results}))
 }
 
 #[cfg(test)]

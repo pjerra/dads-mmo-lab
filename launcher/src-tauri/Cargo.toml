@@ -36,9 +36,4 @@ serde_yaml_ng = "0.10.0"
 # launcher dep after the dml-wow split (Task 7): lib.rs binds `mysql::Value`
 # params itself before handing them to `dml_wow::db`.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "derive", "buffer-pool"] }
-# module repair's `mark` mode: hashes a module's .sql file the SAME way the
-# bash oracle's `sha1sum` does, so the `updates` tracking row's hash matches
-# what AzerothCore's own db-import would have written. Pure Rust, no
-# C/OpenSSL dependency. Used directly by lib.rs's module-repair command.
-sha1 = "0.10"
 

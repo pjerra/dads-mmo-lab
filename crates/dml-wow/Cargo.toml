@@ -30,3 +30,9 @@ base64 = "0.22.1"
 # Backup create/validate (`backup`, `restore`): gzip the mysqldump stream +
 # gzip-test/decompress a saved backup for validation.
 flate2 = "1"
+# `module repair`'s `mark` mode: hashes a module's .sql file the SAME way the
+# bash oracle's `sha1sum` does, so the `updates` tracking row's hash matches
+# what AzerothCore's own db-import would have written. Pure Rust, no
+# C/OpenSSL dependency. Moved off the launcher manifest with `module repair`
+# itself (cargo-workspace refactor, Task 9b).
+sha1 = "0.10"
