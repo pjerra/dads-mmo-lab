@@ -411,6 +411,171 @@ pub fn party_fire_result(o: crate::soap::SoapOutcome, label: &str) -> Result<Str
     }
 }
 
+// ---------------------------------------------------------------------
+// PER-ARM `SoapOutcome -> CmdError` mappers (Task 13).
+//
+// The oracle does NOT use one mapper for every write arm: each `90-main.sh`
+// arm spells its own fault/auth/unreachable strings, and the launcher
+// reproduced that arm-by-arm in `launcher/src-tauri/src/lib.rs` as a set of
+// PRIVATE `fn *_result` helpers (`console_send_result`, `account_result`,
+// `gm_level_result`, `gm_at_login_result`, `mail_result`, `teleport_result`).
+// The standalone CLI needs the SAME strings for the SAME subcommands, and the
+// Task 12 review rule is explicit: never hand-copy an error mapping into a
+// second call site where it can drift. So the mappers move HERE, next to
+// `motd_result`/`party_fire_result` (the two the Task 9 hoist already brought
+// across for the same reason), and both front ends can share one definition.
+//
+// NOTE for whoever next touches the launcher: `lib.rs` still carries its own
+// private copies (this task was not allowed to modify the launcher). They are
+// byte-identical to these today — pinned by the unit tests below AND by the
+// launcher's own tests over its copies — and the launcher's should simply be
+// deleted in favour of these.
+// ---------------------------------------------------------------------
+
+/// `console-send` (`90-main.sh:1736-1746`) — the arm the Console tab actually
+/// fires, NOT `soap-exec`. Unique in TWO ways: it entity-decodes the OK result
+/// as well as the fault text, and its unreachable branch names the endpoint
+/// (`soap_url`) and points at `soap-setup`.
+pub fn console_send_result(o: SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Ok(t) => Ok(soap_text_decode(&t)),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: soap_text_decode(&t),
+            hint: "The worldserver rejected the command.".into(),
+        }),
+        SoapOutcome::Auth => Err(soap_auth_err()),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: format!("Could not reach SOAP at {soap_url}"),
+            hint: "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup".into(),
+        }),
+    }
+}
+
+/// The `account` arm's catch-all case block (`90-main.sh:1999-2010`), shared
+/// by create/set-password/set-gm/delete. Ok/Fault/Auth are
+/// [`outcome_to_result_decoded`] byte-for-byte; only Unreachable differs
+/// (endpoint named, `Is the worldserver running?`).
+pub fn account_result(o: SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: format!("Could not reach SOAP at {soap_url}"),
+            hint: "Is the worldserver running?".into(),
+        }),
+        other => outcome_to_result_decoded(other),
+    }
+}
+
+/// `gm level` (`90-main.sh:3509-3516`). The fault message is FIXED — bash
+/// discards the server's own `$out` on rc=2 — and the auth message is the
+/// shorter "SOAP auth failed" this arm family uses (not a typo; see
+/// [`gm_at_login_result`] and [`party_fire_result`], which agree).
+pub fn gm_level_result(o: SoapOutcome) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(_) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: "The level command was rejected".into(),
+            hint: "Does the character exist? The server said no.".into(),
+        }),
+        SoapOutcome::Auth => Err(short_soap_auth_err()),
+        SoapOutcome::Unreachable(_) => Err(soap_unreachable_err()),
+    }
+}
+
+/// `gm at-login` (`90-main.sh:3595-3601`). Unlike [`gm_level_result`] the
+/// server's own fault text DOES surface here (entity-decoded), but the auth
+/// message is still the short one.
+pub fn gm_at_login_result(o: SoapOutcome) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: soap_text_decode(&t),
+            hint: "The worldserver rejected the command.".into(),
+        }),
+        SoapOutcome::Auth => Err(short_soap_auth_err()),
+        SoapOutcome::Unreachable(_) => Err(soap_unreachable_err()),
+    }
+}
+
+/// `mail-item` (`90-main.sh:1828-1833`): RAW (undecoded) fault text, its own
+/// fault hint, an EMPTY auth hint, and an unreachable hint that walks the user
+/// through `soap-setup`.
+pub fn mail_result(o: SoapOutcome) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: t,
+            hint: "The server rejected the mail command.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: String::new(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "Run: dml wow soap-setup, then start the server.".into(),
+        }),
+    }
+}
+
+/// `teleport` (`90-main.sh:1888-1893`): RAW fault text with a location-shaped
+/// hint; empty hints on both auth and unreachable.
+pub fn teleport_result(o: SoapOutcome) -> Result<String, CmdError> {
+    match o {
+        SoapOutcome::Ok(t) => Ok(t),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: t,
+            hint: "Unknown location? See dml wow teleport-list.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: String::new(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: String::new(),
+        }),
+    }
+}
+
+/// The SHORTER auth wording used by the `gm`/`party` bridge arm family
+/// ("SOAP auth failed"), as opposed to [`soap_auth_err`]'s "SOAP
+/// authentication failed". Both spellings are real and arm-specific — see
+/// `party_fire_result`, which has carried the short one since the Task 9
+/// hoist.
+fn short_soap_auth_err() -> CmdError {
+    CmdError {
+        code: "SOAP_AUTH".into(),
+        message: "SOAP auth failed".into(),
+        hint: "Check ~/.dml/soap.env".into(),
+    }
+}
+
+/// Split a mail `--items` CSV the way bash's `IFS=',' read -ra specs <<<
+/// "$items"` does: an EMPTY string splits to ZERO fields, unlike Rust's
+/// `"".split(',')` which yields one empty-string field — that mismatch would
+/// turn an empty items argument into a "Malformed item spec: " BAD_ARG instead
+/// of the oracle's "Provide 1-12 items…" one. Any other input (including
+/// doubled/trailing commas, which bash also turns into empty fields) splits
+/// exactly like `str::split`.
+pub fn split_mail_items(items: &str) -> Vec<&str> {
+    if items.is_empty() {
+        Vec::new()
+    } else {
+        items.split(',').collect()
+    }
+}
+
 /// `NOT_FOUND` for an offline character, matching `_gm_require_online`
 /// (`cli/src/55-gm.sh:9-14`) exactly.
 pub fn not_online_err(player: &str) -> CmdError {
@@ -913,6 +1078,125 @@ mod tests {
         assert_eq!(e.code, "SOAP_AUTH");
         let e = outcome_to_result_decoded(SoapOutcome::Unreachable("boom".into())).unwrap_err();
         assert_eq!(e.code, "SOAP_UNREACHABLE");
+    }
+
+    // -- Task 13 per-arm mappers -------------------------------------------
+    //
+    // Every assertion below is the EXACT code/message/hint the launcher's
+    // matching private `fn *_result` produces (`launcher/src-tauri/src/lib.rs`
+    // 3242-3153). These are the pin that makes the two definitions provably
+    // the same text while both exist.
+
+    #[test]
+    fn console_send_result_decodes_ok_as_well_as_fault() {
+        assert_eq!(
+            console_send_result(SoapOutcome::Ok("a&lt;b".into()), "http://x/").unwrap(),
+            "a<b"
+        );
+        let e = console_send_result(SoapOutcome::Fault("a&lt;b".into()), "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "a<b");
+        assert_eq!(e.hint, "The worldserver rejected the command.");
+    }
+
+    #[test]
+    fn console_send_result_auth_and_unreachable_name_the_endpoint() {
+        let e = console_send_result(SoapOutcome::Auth, "http://x/").unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+
+        let e = console_send_result(SoapOutcome::Unreachable("boom".into()), "http://127.0.0.1:7878/")
+            .unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach SOAP at http://127.0.0.1:7878/");
+        assert_eq!(e.hint, "Is the worldserver running with SOAP enabled? Run: dml wow soap-setup");
+    }
+
+    #[test]
+    fn account_result_matches_decoded_except_unreachable() {
+        // Ok/Fault/Auth delegate to `outcome_to_result_decoded` verbatim.
+        assert_eq!(account_result(SoapOutcome::Ok("done".into()), "http://x/").unwrap(), "done");
+        let e = account_result(SoapOutcome::Fault("a&lt;b".into()), "http://x/").unwrap_err();
+        assert_eq!(e.message, "a<b");
+        let e = account_result(SoapOutcome::Auth, "http://x/").unwrap_err();
+        assert_eq!(e.message, "SOAP authentication failed");
+        // ...only Unreachable is this arm's own wording.
+        let e = account_result(SoapOutcome::Unreachable("x".into()), "http://127.0.0.1:7878/")
+            .unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach SOAP at http://127.0.0.1:7878/");
+        assert_eq!(e.hint, "Is the worldserver running?");
+    }
+
+    #[test]
+    fn gm_level_result_fault_is_fixed_and_auth_is_the_short_wording() {
+        assert_eq!(gm_level_result(SoapOutcome::Ok("ok".into())).unwrap(), "ok");
+        let e = gm_level_result(SoapOutcome::Fault("the server said something".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        assert_eq!(e.message, "The level command was rejected");
+        assert_eq!(e.hint, "Does the character exist? The server said no.");
+        let e = gm_level_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.message, "SOAP auth failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+        let e = gm_level_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(e.hint, "Is it running?");
+    }
+
+    #[test]
+    fn gm_at_login_result_decodes_the_server_fault_but_keeps_short_auth() {
+        let e = gm_at_login_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.message, "a<b");
+        assert_eq!(e.hint, "The worldserver rejected the command.");
+        assert_eq!(gm_at_login_result(SoapOutcome::Auth).unwrap_err().message, "SOAP auth failed");
+    }
+
+    #[test]
+    fn mail_result_fault_is_raw_with_empty_auth_hint() {
+        let e = mail_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.message, "a&lt;b", "mail faults are NOT entity-decoded");
+        assert_eq!(e.hint, "The server rejected the mail command.");
+        let e = mail_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "");
+        let e = mail_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.hint, "Run: dml wow soap-setup, then start the server.");
+    }
+
+    #[test]
+    fn teleport_result_fault_is_raw_with_empty_auth_and_unreachable_hints() {
+        let e = teleport_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.message, "a&lt;b");
+        assert_eq!(e.hint, "Unknown location? See dml wow teleport-list.");
+        assert_eq!(teleport_result(SoapOutcome::Auth).unwrap_err().hint, "");
+        assert_eq!(teleport_result(SoapOutcome::Unreachable("x".into())).unwrap_err().hint, "");
+    }
+
+    // -- split_mail_items -------------------------------------------------
+
+    #[test]
+    fn split_mail_items_empty_string_is_zero_fields() {
+        assert!(split_mail_items("").is_empty());
+    }
+
+    #[test]
+    fn split_mail_items_splits_on_commas_and_keeps_empty_inner_fields() {
+        assert_eq!(split_mail_items("6948:1,2589:5"), vec!["6948:1", "2589:5"]);
+        assert_eq!(split_mail_items("6948:1"), vec!["6948:1"]);
+        // Doubled/trailing commas yield empty fields in bash too -- they then
+        // fail `valid_item_spec`, which is the oracle's behaviour.
+        assert_eq!(split_mail_items("6948:1,,"), vec!["6948:1", "", ""]);
+    }
+
+    /// The pair that matters end to end: an empty items string must reach
+    /// `mail_items_cmd`'s "Provide 1-12 items…" branch, not its "Malformed
+    /// item spec: " one.
+    #[test]
+    fn split_mail_items_empty_routes_to_the_count_error_not_the_spec_error() {
+        let specs = split_mail_items("");
+        let e = mail_items_cmd("Testen", &specs, "s", "b").unwrap_err();
+        assert_eq!(e.message, "Provide 1-12 items as id:count[,id:count…]");
     }
 
     #[test]

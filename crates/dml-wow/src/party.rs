@@ -637,6 +637,79 @@ pub fn party_add(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Preset save/list/delete orchestrations (Task 13). Same hoist rationale as
+// `party_add`/`party_preset_load_stream` above: each is a DB read and/or a
+// filesystem mutation with its own domain rules (an empty party is NOT_FOUND,
+// a missing preset file is NOT_FOUND), which is library work, not CLI work.
+// `launcher/src-tauri/src/lib.rs` still runs its own inline copies of these
+// three bodies (`wow_party_preset_save_native` / `_list_native` /
+// `_delete_native`) — this task was not allowed to modify the launcher, so
+// those should be collapsed onto these functions next time it is touched.
+//
+// The NAME/PLAYER guards deliberately stay OUT of these functions, exactly
+// like `party_add`'s: each caller runs `valid_charname` / `valid_preset_name`
+// first (the launcher does, and the CLI must too), because a bad preset name
+// is a path-traversal question that has to be answered before a path is ever
+// joined.
+// ---------------------------------------------------------------------------
+
+/// `NOT_FOUND` for a preset that isn't on disk (`90-main.sh:3343,3440`).
+pub fn preset_not_found(name: &str) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: format!("No preset named {name}"), hint: String::new() }
+}
+
+/// `party preset-save` (`90-main.sh:3283-3321`): snapshot the caller's current
+/// bot party as a class list. `player` MUST already have passed
+/// [`crate::soap_cmds::valid_charname`] and `name` [`valid_preset_name`].
+pub fn preset_save(player: String, name: String) -> Result<serde_json::Value, CmdError> {
+    let db_cfg = crate::db::DbConfig::from_env();
+    let pguid = party_online_guid(&db_cfg, &player)
+        .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
+    let names: Vec<String> = bot_member_classes(&db_cfg, pguid)?
+        .into_iter()
+        .filter_map(crate::party_specs::class_name_from_id)
+        .map(str::to_string)
+        .collect();
+    if names.is_empty() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: "Party has no bots to save".into(),
+            hint: "Add some bots first.".into(),
+        });
+    }
+    let dir = preset_dir_or_internal_err()?;
+    std::fs::create_dir_all(&dir).map_err(dml_core::error::io_internal_err)?;
+    let path = preset_path(&dir, &name);
+    let overwrote = path.is_file();
+    std::fs::write(&path, preset_file_content(&names)).map_err(dml_core::error::io_internal_err)?;
+    Ok(serde_json::json!({"saved": true, "name": name, "bots": names, "overwrote": overwrote}))
+}
+
+/// `party preset-list` (`90-main.sh:3322-3337`) — read-only; a missing preset
+/// dir is an empty list, not an error (see [`list_presets`]).
+pub fn preset_list() -> Result<serde_json::Value, CmdError> {
+    let dir = preset_dir_or_internal_err()?;
+    let presets: Vec<serde_json::Value> = list_presets(&dir)
+        .into_iter()
+        .map(|p| serde_json::json!({"name": p.name, "bots": p.bots}))
+        .collect();
+    Ok(serde_json::json!({"presets": presets}))
+}
+
+/// `party preset-delete` (`90-main.sh:3339-3347`). `name` MUST already have
+/// passed [`valid_preset_name`] — that check, not this function, is what keeps
+/// a `../…` argument from being joined onto the preset dir.
+pub fn preset_delete(name: String) -> Result<serde_json::Value, CmdError> {
+    let dir = preset_dir_or_internal_err()?;
+    let path = preset_path(&dir, &name);
+    if !path.is_file() {
+        return Err(preset_not_found(&name));
+    }
+    std::fs::remove_file(&path).map_err(dml_core::error::io_internal_err)?;
+    Ok(serde_json::json!({"deleted": true, "name": name}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -880,6 +953,24 @@ mod tests {
         let d = tmp_dir("empty");
         assert!(list_presets(&d).is_empty());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- preset_not_found (Task 13) ---------------------------------------
+    //
+    // `preset_save`/`preset_list`/`preset_delete` themselves resolve
+    // `~/.dml/party-presets` from USERPROFILE/HOME, so exercising them in a
+    // library unit test would either touch the developer's real preset dir or
+    // race every other test in this binary over a process-wide env var. They
+    // are covered instead as SUBPROCESS tests in
+    // `crates/dml-wow-cli/tests/cli_integration.rs`, which can give the child
+    // its own USERPROFILE safely. Only the pure error constructor is pinned
+    // here.
+    #[test]
+    fn preset_not_found_shape() {
+        let e = preset_not_found("raiders");
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "No preset named raiders");
+        assert_eq!(e.hint, "");
     }
 
     #[test]
