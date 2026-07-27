@@ -189,6 +189,132 @@ the explanatory note, render the rows disabled beneath it, and add the
 one-click **Install ALE** button. Frontend-only, small; the data is already
 plumbed.
 
+### Item Database: hover tooltips + icons, and a better mail recipient (user request, 2026-07-27)
+
+Three asks on the Items page ([`launcher/src/lib/pages/Items.svelte`](launcher/src/lib/pages/Items.svelte)).
+
+**1. Wowhead hover tooltip + icon on each result row.** Today the results
+table is plain text (name coloured by quality, quality/ilvl/reqlvl columns)
+with a 🔗 button that opens Wowhead in an external browser (`Items.svelte:183-201`).
+
+The important finding: **all the machinery already exists and is live on the
+Character Sheet — this is a reuse job, not a new integration.** Round E built
+`wow item-info` ([`cli/src/46-iteminfo.sh`](cli/src/46-iteminfo.sh), Rust port
+`dml::iteminfo`), surfaced as `wowItemInfo(entries) -> ItemInfo[]`
+([`api.ts:742-773`](launcher/src/lib/api.ts#L742-L773)). It returns
+`icon_b64` (base64 JPEG), `wowhead.tooltip` HTML, and a `tooltip_html` local
+fallback rendered from `item_template`, disk-cached in `~/.dml/wowhead-cache`.
+Consequences worth knowing before scoping:
+
+- **No CSP change and no remote JS.** The fetch happens host-side in
+  Rust/bash and icons arrive as base64, so nothing loads from
+  `wow.zamimg.com` into the webview. (This is why the Wowhead-widget
+  approach — `power.js` + `whTooltips` — should *not* be used: it would put
+  third-party JS in the launcher's webview alongside the Tauri IPC bridge.)
+- **Custom items already work.** `source: "wowhead" | "local" | "unavailable"`
+  — server-custom entries (the Casino/Gasino 990000 NPC's items, module-added
+  gear) fall back to a locally-rendered tooltip instead of breaking, and
+  `sanitizeTooltipHtml` ([`$lib/tooltip`](launcher/src/lib/tooltip.ts)) already
+  guards the `{@html}` path.
+- **Offline degrades cleanly** — `unavailable` just leaves today's plain row.
+- **No CLI contract change.** `items search` already returns `entry` (and
+  `displayid`), which is all `wowItemInfo` is keyed on. Pure frontend work.
+
+The actual work is an **extraction**: the hover tooltip — positioning, edge
+flip, post-render vertical clamp, and the plain-text-upgrades-when-the-batch-lands
+behaviour — currently lives inline in
+[`CharacterSheet.svelte`](launcher/src/lib/CharacterSheet.svelte) (~408-500,
+741-746, styles ~800-813). Pull it into a shared component and mount it on
+both pages. **Refactor risk:** CharacterSheet is live-verified, so the
+extraction must not regress the paperdoll — that, not the Items page wiring,
+is where the care goes. Also respect the existing batch ceiling (the
+base64-icon payload is why one exists; see the note at `CharacterSheet.svelte:19`)
+— fetch info for the rows actually on screen, not every search hit.
+
+**2. Move the mail recipient to the top of the tab.** Today the recipient
+picker only appears in the send box at the *bottom* of the page, after you've
+clicked Send on a row (`Items.svelte:269-292`), and the gear-set "Mail to…"
+row has a *second*, independent picker (`mailSetTo`, `Items.svelte:226`).
+Proposed: one recipient selector at the top of the page, chosen once and
+reused by every send on the page (single item and gear set), so mailing five
+items to the same kid doesn't mean re-picking five times. **Confirm with the
+user before building** — this unifies the two pickers, which is a real
+behaviour change for the gear-set row.
+
+**3. Let the recipient be typed, not just picked.** `CharPicker` is two
+dropdowns (account → character) built from `wowAccounts()`
+([`CharPicker.svelte:118-131`](launcher/src/lib/CharPicker.svelte#L118-L131)) —
+there's no way to just type a name you already know, which is tedious with
+many accounts and awkward for characters that aren't easy to find in the list.
+
+Cheapest shape that keeps both modes: a `<input list=…>` combobox backed by a
+`<datalist>` of the known characters — you can type freely *and* get
+autocomplete. Two things it must carry:
+
+- **Same validation.** CharPicker filters to `^[A-Za-z0-9_]{1,12}$` on
+  purpose (`CharPicker.svelte:24`) because every action verb enforces it and
+  an unfiltered name fails later with an opaque `BAD_ARG`. Free text must
+  apply that regex client-side, before the call.
+- **A real error path.** The dropdown made a wrong recipient impossible;
+  typing makes typos the *normal* failure. A name that passes the regex but
+  doesn't exist must surface the SOAP/CLI error clearly on the page rather
+  than looking like a successful send. Worth deciding whether an unknown name
+  warns before sending or just reports afterwards — mail to a nonexistent
+  character is silently lost in-game.
+
+Frontend-only across all three; no new sanctioned writes (mail already goes
+through the existing `mail-item` verb and its feature lock).
+
+### The release build is not self-configuring — it needs 4 env vars nobody sets (found live, 2026-07-27)
+
+**This is the highest-ranked item in Round 2.** It is the difference between
+the release exe working out of the box and appearing broken, and it was found
+the first time the built exe was double-clicked rather than started from a
+wrapper script.
+
+Symptoms, in the order they appear:
+
+1. The status card says the server is **offline** while it is demonstrably
+   running. Not a bug: `DML_BACKEND` unset means `Backend::Wsl`
+   (`crates/dml-core/src/backend.rs`), so the launcher asks the bash CLI inside
+   the `dml-arch` distro — a DIFFERENT install, which really is stopped
+   (verified: `dml status --json` → `wow-server-playerbots:stopped`). The
+   launcher reports the truth about the wrong server.
+2. With `DML_BACKEND=native` alone, "a lot of features" still fail, because the
+   working dev-mode script sets FOUR variables, not one:
+   `DML_BACKEND`, `DML_GAMES_DIR`, `DML_SCRIPT`, `DML_YQ_BIN`. `DML_SCRIPT` is
+   the load-bearing one — the not-yet-ported features (install, some module
+   operations, self-update) still shell the bash script, and the Eluna bridge
+   derives its lua source root from `<parent of DML_SCRIPT>/lua`. A packaged
+   install started from the Start menu or a taskbar pin has none of these.
+
+The UI can already *read* the mode (`backend_mode` command; `Backups.svelte`
+and others branch on it) but there is **no way to change it from inside the
+app**, and no auto-detection. So the user's only recourse is an env var they
+have no reason to know exists.
+
+Fix shape, roughly in order of value:
+
+- **Auto-detect the backend** instead of defaulting blindly: if a native title
+  directory exists (`%USERPROFILE%\dml-native` or the configured games dir) and
+  Docker Desktop is present, prefer Native; else WSL. Keep `DML_BACKEND` as an
+  explicit override that always wins.
+- **Derive the other three** rather than requiring them. `DML_GAMES_DIR` and
+  `DML_YQ_BIN` already have launcher-side fallbacks; `DML_SCRIPT` should fall
+  back to a `cli/dml` bundled with the installed app (the packaging question:
+  the release currently ships no copy of the bash script at all, which is why
+  it cannot self-heal).
+- **Surface the mode in the UI**: a backend row in Settings (read-only at
+  minimum, switchable ideally) and a status card that names which backend it is
+  reporting on — "WSL install: stopped" beats a bare "offline".
+- Until then, `start-launcher-native.bat` at the repo root sets all four for the
+  built exe (release-build sibling of the desktop dev script), and the four vars
+  have been set persistently for this user so a pinned/installed shortcut works.
+
+Ranking note: everything else in Round 2 is polish. This one determines whether
+a tester who installs the app sees a working product or a broken one, so it
+should land before any shareable-release round.
+
 ### Incident follow-ups (2026-07-21 docker-network wedge — diagnosed live)
 
 Root cause that night: the distro's Docker network black-holed (connect
