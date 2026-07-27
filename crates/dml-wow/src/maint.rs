@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use dml_core::error::CmdError;
+use dml_core::error::{not_found_err, CmdError};
 use serde_json::{json, Value};
 
 use super::status::{output_bounded_draining, windows_no_window};
@@ -91,11 +91,8 @@ pub fn resolve_server_dir(title_dir: &Path) -> Option<PathBuf> {
 /// that needs the server dir opens with.
 pub fn require_server_dir(hint: &str) -> Result<PathBuf, CmdError> {
     let title_dir = super::config::ConfigReader::title_dir_from_env();
-    resolve_server_dir(&title_dir).ok_or_else(|| CmdError {
-        code: "NOT_FOUND".into(),
-        message: "WoW Playerbots server not installed".into(),
-        hint: hint.into(),
-    })
+    resolve_server_dir(&title_dir)
+        .ok_or_else(|| not_found_err("WoW Playerbots server not installed", hint))
 }
 
 /// `true` when a bounded `docker info` succeeds — deliberately NOT

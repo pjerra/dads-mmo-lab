@@ -18,8 +18,6 @@
 //! See `poc/native-docker/` for the compose file this drives and the findings
 //! write-up.
 
-#![allow(dead_code)] // spike foundation: exercised by tests + the live PoC, not yet by a Tauri command
-
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
