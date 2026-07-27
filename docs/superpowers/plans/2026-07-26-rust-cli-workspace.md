@@ -559,7 +559,7 @@ Subcommand → library mapping (args mirror the bash `dml wow …` arms; look ea
 | `stats` | `stats::read_stats` |
 | `item-info <ID>[,<ID>…]` | `iteminfo::read_item_info(cache_dir()…, Some(&cfg), &ids)` |
 
-DbError mapping: every `Err(DbError)` → `emit_err("DB_UNREACHABLE", <display>, "Is the server running? (docker + MySQL on 127.0.0.1:3306)")` — same collapse the launcher uses.
+DbError mapping: every `Err(DbError)` → `emit_err("DB_UNREACHABLE", <display>, …)`. CORRECTED 2026-07-27: the hint string originally written here was invented and matched nothing. Do NOT hand-copy a string — reuse the launcher's single source, `db_err_to_cmd` (crates/dml-wow/src/db.rs), whose real hint is "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)" (the bash CLI uses the shorter "Is ac-database running?"). Making that helper public is preferable to a second copy that can drift.
 
 - [ ] Steps: parse tests → implement → workspace tests → smoke vs live snapshot (compare `stats` against `bash cli/dml wow stats --json`) → commit `feat: dml-wow CLI database page reads`.
 
