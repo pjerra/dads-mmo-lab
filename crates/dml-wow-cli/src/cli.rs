@@ -316,6 +316,12 @@ pub enum Cmd {
         /// (`validate_lan_request`'s own narrowing).
         #[arg(long)]
         internet: bool,
+        /// This host's LAN address, written to realmlist.localAddress so
+        /// players inside the house are not routed out to the public
+        /// address (which only works if the router hairpins NAT). Private
+        /// IPv4 only; `off` always reverts it to 127.0.0.1.
+        #[arg(long)]
+        local: Option<String>,
     },
     /// Wowhead item-info cache size/wipe
     Cache {
@@ -1762,10 +1768,11 @@ mod tests {
     #[test]
     fn parses_lan_arms() {
         match Cli::try_parse_from(["dml-wow", "lan", "on", "192.168.1.50"]).unwrap().command {
-            Cmd::Lan { action, ip, internet } => {
+            Cmd::Lan { action, ip, internet, local } => {
                 assert_eq!(action, "on");
                 assert_eq!(ip.as_deref(), Some("192.168.1.50"));
                 assert!(!internet);
+                assert_eq!(local, None); // absent unless asked for
             }
             other => panic!("expected Lan, got {other:?}"),
         }
@@ -1778,7 +1785,7 @@ mod tests {
         }
         assert!(matches!(
             Cli::try_parse_from(["dml-wow", "lan", "status"]).unwrap().command,
-            Cmd::Lan { action, ip: None, internet: false } if action == "status"
+            Cmd::Lan { action, ip: None, internet: false, local: None } if action == "status"
         ));
         match Cli::try_parse_from([
             "dml-wow", "lan", "refresh", "myserver.duckdns.org", "--internet",
@@ -1786,10 +1793,26 @@ mod tests {
         .unwrap()
         .command
         {
-            Cmd::Lan { action, ip, internet } => {
+            Cmd::Lan { action, ip, internet, .. } => {
                 assert_eq!(action, "refresh");
                 assert_eq!(ip.as_deref(), Some("myserver.duckdns.org"));
                 assert!(internet);
+            }
+            other => panic!("expected Lan, got {other:?}"),
+        }
+        // The internet-play LAN fix: `--local` rides alongside `--internet`
+        // and carries this host's LAN address for realmlist.localAddress.
+        match Cli::try_parse_from([
+            "dml-wow", "lan", "on", "wow.example.org", "--internet", "--local", "192.168.1.50",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Lan { action, ip, internet, local } => {
+                assert_eq!(action, "on");
+                assert_eq!(ip.as_deref(), Some("wow.example.org"));
+                assert!(internet);
+                assert_eq!(local.as_deref(), Some("192.168.1.50"));
             }
             other => panic!("expected Lan, got {other:?}"),
         }

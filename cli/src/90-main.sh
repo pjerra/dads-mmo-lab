@@ -875,10 +875,24 @@ case "$cmd" in
     title="${1:-}"
     shift || true
     lan_inet=0
-    if [[ "${1:-}" == "--internet" ]]; then lan_inet=1; shift; fi
+    lan_local=""
+    # --local <lan-ip> (internet-play LAN fix): also point realmlist's
+    # localAddress at the host's LAN IP so machines INSIDE the house are sent
+    # to the LAN address while outside clients get the public one. Without it,
+    # every local player is routed out to the public address and only connects
+    # if the router hairpins NAT -- many consumer routers don't. The CLI can't
+    # detect this itself (inside WSL, `hostname -I` is the 172.x NAT address,
+    # not the Windows host's LAN IP), so the launcher passes it down.
+    while [[ "${1:-}" == --* ]]; do
+      case "$1" in
+        --internet) lan_inet=1; shift ;;
+        --local) _need_flag_val "$1" $#; lan_local="$2"; shift 2 ;;
+        *) echo "[dml] Usage: dml lan <title> [--internet] [--local <lan-ip>] on <address> | off | status | refresh <lan-ip>"; exit 1 ;;
+      esac
+    done
     action="${1:-}"
     ip="${2:-}"
-    lan_usage="[dml] Usage: dml lan <title> [--internet] on <address> | off | status | refresh <lan-ip>"
+    lan_usage="[dml] Usage: dml lan <title> [--internet] [--local <lan-ip>] on <address> | off | status | refresh <lan-ip>"
     if [[ -z "$title" || -z "$action" ]]; then echo "$lan_usage"; exit 1; fi
 
     # Validate arguments up front -- the database wait below can take a
@@ -907,6 +921,18 @@ case "$cmd" in
       off|status) ;;
       *) echo "$lan_usage"; exit 1 ;;
     esac
+
+    # --local carries the HOST's LAN address, so it is always private-only --
+    # a public value here would send local players out to the internet, the
+    # exact problem the flag exists to fix.
+    if [[ -n "$lan_local" ]]; then
+      if [[ ! "$lan_local" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "[dml] ERROR: '$lan_local' does not look like an IPv4 address."; exit 1
+      fi
+      if [[ ! "$lan_local" =~ ^(127\.|192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]]; then
+        echo "[dml] ERROR: '$lan_local' is not a private LAN address."; exit 1
+      fi
+    fi
 
     dir="$GAMES_DIR/$title"
     if [[ ! -d "$dir" ]]; then echo "[dml] ERROR: Title not found: $title"; exit 1; fi
@@ -996,10 +1022,25 @@ case "$cmd" in
         fi
     }
 
+    # Point localAddress at the given address (and pin the stock /24 mask).
+    # AzerothCore hands localAddress to any client whose IP falls inside that
+    # subnet, and to loopback clients when neither address is loopback, so
+    # this is what keeps the house playable while `address` is public.
+    _lan_set_local() {
+        local lip="$1"
+        if [[ ! "$lip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+            echo "[dml] ERROR: '$lip' is not a valid local address."; exit 1
+        fi
+        if ! _lan_sql "UPDATE realmlist SET localAddress='$lip', localSubnetMask='255.255.255.0' WHERE id=1;"; then
+            echo "[dml] ERROR: Could not update the realm's local address."; exit 1
+        fi
+    }
+
     current=$(_lan_sql "SELECT address FROM realmlist WHERE id=1;" || true)
     case "$action" in
       on)
         _lan_set "$ip"
+        [[ -n "$lan_local" ]] && _lan_set_local "$lan_local"
         echo "[ok] LAN play ENABLED for $title."
         echo ""
         echo "Other PCs on your network: set realmlist $ip"
@@ -1009,6 +1050,10 @@ case "$cmd" in
         ;;
       off)
         _lan_set "127.0.0.1"
+        # Revert the local override too, back to AC's stock default -- else a
+        # previous internet session leaves LAN clients pinned at an address
+        # that may no longer be this PC's.
+        _lan_set_local "127.0.0.1"
         echo "[ok] LAN play DISABLED for $title."
         echo "The server only accepts world connections from this PC again."
         ;;

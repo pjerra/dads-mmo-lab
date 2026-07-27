@@ -89,3 +89,42 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.public_ip')" = "null" ]
 }
+
+# --- internet-play LAN fix: --local <lan-ip> --------------------------------
+#
+# `--local` carries the HOST's own LAN address for realmlist.localAddress, so
+# unlike the realm `address` it is private/loopback-only even under
+# --internet: a public value there would route players inside the house out
+# to the internet, the exact breakage the flag exists to fix.
+
+@test "lan --local accepts a private IPv4 alongside --internet" {
+  run bash "$DML" lan ghost-title --internet --local 192.168.1.50 on wow.example.org
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'Title not found'
+}
+
+@test "lan --local rejects a public IPv4 even under --internet" {
+  run bash "$DML" lan ghost-title --internet --local 84.210.13.37 on wow.example.org
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'not a private LAN address'
+}
+
+@test "lan --local rejects a hostname" {
+  run bash "$DML" lan ghost-title --internet --local myserver.duckdns.org on wow.example.org
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'does not look like an IPv4 address'
+}
+
+@test "lan --local with no value emits BAD_ARG, not an unbound-variable abort" {
+  # Every value-taking flag calls _need_flag_val before reading $2 -- without
+  # it `set -u` aborts with no envelope at all.
+  run bash "$DML" lan ghost-title --local
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'Missing value for --local'
+}
+
+@test "lan rejects an unknown leading flag with usage" {
+  run bash "$DML" lan ghost-title --bogus on 192.168.1.50
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'Usage: dml lan'
+}

@@ -254,7 +254,12 @@
         // promise), so gate `inetApplied` (which drives the friends-connect
         // share line) on the CLI's own ok marker instead of on the call merely
         // returning -- same pattern as tsApplyRealm / lanRefreshApplied.
-        const out = await wowLan("on", inetAddr.trim(), true);
+        // Pass this PC's LAN address so realmlist.localAddress points home:
+        // without it every player INSIDE the house is sent out to the public
+        // address and only connects if the router hairpins NAT. `lanIp` is
+        // detected Windows-side (step 1 of this card) -- the CLI can't work
+        // it out itself, since inside WSL it only sees the 172.x NAT address.
+        const out = await wowLan("on", inetAddr.trim(), true, lanIp || undefined);
         inetOutput = out;
         if (out.includes("[ok] LAN play ENABLED")) {
           inetApplied = inetAddr.trim();
