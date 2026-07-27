@@ -1403,6 +1403,55 @@ fn backend_mode() -> &'static str {
     }
 }
 
+/// `~/.dml` or a typed error. Both launcher-config commands need it and both
+/// must fail the same way when the home directory cannot be resolved.
+fn launcher_home() -> Result<std::path::PathBuf, CmdError> {
+    dml_core::util::dml_home_dir().ok_or_else(|| CmdError {
+        code: "NO_HOME".into(),
+        message: "Could not resolve the home directory".into(),
+        hint: "Set USERPROFILE or HOME.".into(),
+    })
+}
+
+/// The launcher's own settings, plus which source currently WINS for the
+/// backend. The UI needs `backendSource` to explain why its dropdown is
+/// read-only when an env var overrides the file — otherwise changing the
+/// dropdown appears to do nothing.
+#[tauri::command]
+fn launcher_config_read() -> Result<serde_json::Value, CmdError> {
+    let cfg = dml_core::launcher_config::load(&launcher_home()?);
+    let env_backend = std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty());
+    // NB `startup::resolve_and_export` has already written DML_BACKEND into
+    // this process's environment by the time any command runs, so "env" here
+    // means "the user set it before launch OR we resolved it at startup".
+    // `envBackend` is reported so the UI can show the value either way.
+    let source = if env_backend.is_some() {
+        "env"
+    } else if cfg.backend.as_deref().is_some_and(|v| !v.eq_ignore_ascii_case("auto")) {
+        "file"
+    } else {
+        "auto"
+    };
+    Ok(serde_json::json!({
+        "config": cfg,
+        "backendSource": source,
+        "effectiveBackend": backend_mode(),
+        "envBackend": env_backend,
+    }))
+}
+
+/// Persist the settings. A backend change applies on the NEXT launch —
+/// `AppState`'s runner is built once at startup from `selected()` — so the UI
+/// must say so rather than imply a live switch.
+#[tauri::command]
+fn launcher_config_write(cfg: dml_core::launcher_config::LauncherConfig) -> Result<(), CmdError> {
+    dml_core::launcher_config::save(&launcher_home()?, &cfg).map_err(|e| CmdError {
+        code: "WRITE_FAILED".into(),
+        message: format!("Could not write launcher.json: {e}"),
+        hint: String::new(),
+    })
+}
+
 /// NATIVE-MODE fast read of the config settings: returns the SAME shape as
 /// `wow_config_list` (`{"settings":[…66 rows…]}`) with zero bash/yq/fork on the
 /// hot path. The static registry is embedded in `dml_wow::registry` (Task 8 —
@@ -6123,7 +6172,9 @@ pub fn run() {
             set_taskbar_progress,
             realmlist_status,
             realmlist_fix,
-            realmlist_lock
+            realmlist_lock,
+            launcher_config_read,
+            launcher_config_write
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

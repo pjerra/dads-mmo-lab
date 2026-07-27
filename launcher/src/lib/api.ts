@@ -819,6 +819,39 @@ export async function wowConfigList(): Promise<ConfigSetting[]> {
 // to decide whether to fast-path config reads through Rust (native) or keep
 // shelling the CLI (wsl). Cheap and pure — safe to call on mount and cache.
 export type BackendMode = "native" | "wsl";
+
+// The launcher's OWN settings, persisted at ~/.dml/launcher.json. Distinct
+// from the AC config registry: Rust reads these at startup, before any window
+// exists, which is why they cannot live in localStorage like the rest of the
+// launcher's preferences.
+export interface LauncherConfig {
+  backend: string | null;
+  gamesDir: string | null;
+  dmlScript: string | null;
+  yqBin: string | null;
+  closeToTray: boolean;
+  startWithWindows: boolean;
+}
+export interface LauncherSettings {
+  config: LauncherConfig;
+  // Which source currently WINS for the backend. "env" means the dropdown is
+  // read-only -- an environment variable overrides the persisted setting.
+  backendSource: "env" | "file" | "auto";
+  effectiveBackend: BackendMode;
+  envBackend: string | null;
+}
+
+export async function launcherConfigRead(): Promise<LauncherSettings> {
+  return await invoke<LauncherSettings>("launcher_config_read");
+}
+
+// The Rust parameter is named `cfg`, so the invoke key is `cfg`. Deriving the
+// key from the Rust PARAMETER name matters: a wrongly-cased key fails
+// silently for Option params rather than erroring.
+export async function launcherConfigWrite(cfg: LauncherConfig): Promise<void> {
+  return await invoke("launcher_config_write", { cfg });
+}
+
 export async function backendMode(): Promise<BackendMode> {
   return await invoke<BackendMode>("backend_mode");
 }
