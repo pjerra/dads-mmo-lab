@@ -53,7 +53,7 @@ fn find_script() -> Option<PathBuf> {
     if let Some(s) = std::env::var_os("DML_SCRIPT").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(s));
     }
-    // <repo>/cli/dml, relative to launcher/src-tauri.
+    // <repo>/cli/dml, relative to crates/dml-wow.
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
