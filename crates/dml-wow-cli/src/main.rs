@@ -30,17 +30,20 @@ fn main() {
 
 /// clap failed to parse argv. `--help`/`--version` are not usage errors --
 /// clap's own `Error::exit()` already prints them to the right stream (stdout)
-/// and exits 0, so let it. Everything else (bad flags, unknown subcommand,
-/// missing required arg, ...) is a real usage error: print clap's own
-/// message to stderr for a human reading the terminal, AND a `BAD_ARGS`
-/// error envelope to stdout for a machine reading the pipe, then exit 2.
+/// and exits 0, so let it. Everything else (bad flags, unknown subcommand, an
+/// out-of-range `console-tail --lines`, missing required arg, ...) is a real
+/// usage error: print clap's own message to stderr for a human reading the
+/// terminal, AND a `BAD_ARGS` error envelope to stdout for a machine reading
+/// the pipe, then exit 2. Both writes go through `out`'s panic-free helpers
+/// (Task 10 review Finding 2) instead of `eprintln!`/`println!`, which panic
+/// internally on ANY write error, broken pipe included.
 fn handle_parse_error(err: clap::Error) -> i32 {
     if matches!(err.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
         err.exit();
     }
-    eprintln!("{err}");
+    out::eprint_best_effort(&err.to_string());
     let first_line = err.to_string().lines().next().unwrap_or("").to_string();
     let envelope = dml_core::envelope::error_envelope("BAD_ARGS", &first_line, "dml-wow --help");
-    println!("{envelope}");
+    out::print_stdout_line_or_exit(&envelope.to_string());
     2
 }
