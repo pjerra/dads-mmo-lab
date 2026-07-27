@@ -89,6 +89,20 @@ with ~2000 AI playerbots. One window, no terminal needed.*
 - **Self-updating** — pull the latest AzerothCore + playerbots source and
   rebuild from inside the app; Docker disk cleanup included.
 
+**Under the hood**
+- **The app is one frontend, not the only one** — the server logic lives in a
+  Rust workspace at the repo root (`crates/dml-core` for the game-agnostic
+  parts, `crates/dml-wow` for the AzerothCore/playerbots half) that the
+  launcher links in-process; its Tauri commands are thin adapters over it.
+- **`dml-wow` command-line tool** — the same code also ships as a standalone
+  binary with 74 subcommands that print JSON envelopes and NDJSON event
+  streams on stdout, so a script, an Electron app or another launcher can
+  drive the server the same way this app does. The full wire contract is in
+  `docs/cli-contract.md`; the reasoning behind per-game binaries on a shared
+  core is in `docs/rust-cli-pitch.md`. The original `dml` bash CLI is
+  unchanged and stays the reference implementation the Rust side is tested
+  against.
+
 *This is under active development. The core stuff — starting/stopping the
 server, characters, teleporting, GM tools, mailing items, your bot party —
 is up and running. A lot of the rest (installing titles/modules, backups,

@@ -153,11 +153,18 @@ up-to-date list of what's verified and what's still pending.
 
 ## Architecture
 
-The GUI is a thin Tauri 2 + Svelte 5 shell: every feature calls the `dml` CLI
-inside the `dml-arch` WSL distro as
-`wsl.exe -d dml-arch -u dml -- dml <cmd> --json` and renders the JSON
-envelopes / NDJSON event streams documented in `../cli/README.md`. No server
-logic lives in the GUI.
+The GUI is a thin Tauri 2 + Svelte 5 shell — no server logic lives in it. It
+has two backends, and both speak the same JSON envelopes / NDJSON event
+streams documented in `../cli/README.md` and `../docs/cli-contract.md`:
+
+* **WSL mode** shells the bash `dml` CLI inside the `dml-arch` distro as
+  `wsl.exe -d dml-arch -u dml -- dml <cmd> --json`.
+* **Native mode** calls the `dml-wow` Rust library in-process. That code used
+  to live under `src-tauri/src/dml/`; it now lives in the repo-root cargo
+  workspace (`../crates/dml-core`, `../crates/dml-wow`) and this crate is a
+  workspace member holding only the `#[tauri::command]` adapters. The same
+  library also ships as a standalone `dml-wow` binary
+  (`../crates/dml-wow-cli`), so a frontend does not have to be this one.
 
 ## Dev loop
 
@@ -166,13 +173,16 @@ logic lives in the GUI.
     npm run tauri dev        # run the app
     npm test                 # vitest
     npm run check            # svelte-check
-    cd src-tauri; cargo test # runner + envelope + command tests
+
+Rust tests run from the REPO ROOT, not here — the cargo root is the workspace:
+
+    cargo test --workspace   # launcher + dml-core + dml-wow + dml-wow-cli
 
 CLI tests run in the distro: `wsl -d dml-arch -u dml -- bash -lc "cd /mnt/.../cli && bash build.sh && bats tests/"`
 
 ## Release build
 
-    npm run tauri build      # NSIS installer under src-tauri/target/release/bundle/
+    npm run tauri build      # NSIS+MSI under the ROOT ../target/release/bundle/
 
 Builds are currently unsigned (SmartScreen warning expected).
 
@@ -183,8 +193,10 @@ Builds are currently unsigned (SmartScreen warning expected).
     src/lib/Terminal.svelte    embedded terminal (sections, runtime, jump-to-latest)
     src/lib/pages/             one Svelte component per sidebar page
     src/routes/+page.svelte    sidebar + status chip + page shell
-    src-tauri/src/dml/         envelope parsing + WSL process runner (cargo tests)
     src-tauri/src/lib.rs       tauri commands (validated IPC surface)
+    ../crates/dml-core/        envelope parsing + process runner + docker/compose
+    ../crates/dml-wow/         the WoW library (SOAP, DB reads, config, backups)
+    ../crates/dml-wow-cli/     the standalone `dml-wow` binary
 
 ## License
 

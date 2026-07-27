@@ -176,6 +176,16 @@ Turns out — for a lot of classic MMOs — you can. The emulator community has 
 | `uninstall.sh` | Removes a Dad's MMO Lab server install |
 | `Uninstall-HOWTO.md` | Uninstall guide |
 
+### Server Tooling (`cli/`, `crates/`, `launcher/`)
+
+| Directory | What it does |
+|------|-------------|
+| `cli/` | The `dml` bash CLI that runs inside WSL2 — start/stop/status per title, JSON output for tools ([contract](./cli/README.md)) |
+| `crates/dml-core/` | Game-agnostic Rust library: JSON envelope + NDJSON event contract, subprocess runner, `Key = value` conf-file engine, Docker engine + compose lifecycle |
+| `crates/dml-wow/` | The WoW (AzerothCore + Playerbots) Rust library: SOAP client, read-only MySQL readers, config/tuning/module registries, backup and restore, party and GM operations |
+| `crates/dml-wow-cli/` | The `dml-wow` binary — 74 JSON subcommands any frontend can drive the server with |
+| `launcher/` | DML Launcher — the Tauri 2 + Svelte desktop app ([README](./launcher/README.md), [feature list](./docs/FEATURES.md)) |
+
 ---
 
 ## 🚀 Quick Start
@@ -328,6 +338,56 @@ Game Client via Proton
 ```
 
 *(RuneScape runs without Docker — pure Java on Linux. No Proton needed.)*
+
+---
+
+## 🧰 The `dml-wow` CLI — attach your own frontend
+
+The Rust code in this repo is a cargo workspace rooted at the top-level
+`Cargo.toml` (build output lands in the root `target/`), not something buried
+inside the launcher:
+
+```
+Cargo.toml            workspace root
+crates/dml-core/      game-agnostic: JSON envelope + NDJSON event contract,
+                      subprocess runner, conf-file engine, docker + compose
+crates/dml-wow/       WoW library: SOAP, read-only MySQL, config/tuning/module
+                      registries, backup and restore, party and GM operations
+crates/dml-wow-cli/   the `dml-wow` binary — 74 JSON subcommands
+launcher/src-tauri/   the Tauri app — a workspace member that links dml-wow
+                      in-process; its Tauri commands are thin adapters
+cli/                  the original `dml` bash CLI (unchanged, runs in WSL2)
+```
+
+`dml-wow` is a standalone command-line tool that prints the same JSON
+envelopes and NDJSON event streams the bash `dml --json` contract defines, so
+any frontend — an Electron app, a shell script, another launcher — can drive
+the server by spawning it and parsing stdout. No IPC and no socket; stdout is
+the whole interface and environment variables are the whole configuration.
+
+- **Full wire contract** — envelopes, event vocabulary, exit codes, all 74
+  commands, environment variables, caveats:
+  [docs/cli-contract.md](./docs/cli-contract.md)
+- **Why per-game binaries on a shared core**:
+  [docs/rust-cli-pitch.md](./docs/rust-cli-pitch.md)
+
+The bash CLI under `cli/` is unchanged and stays the reference
+implementation: 18 parity suites in `crates/dml-wow/tests/` run it beside the
+Rust code and compare the outputs. All 18 ran against a live server on
+2026-07-27 with zero skips.
+
+Build and test from the repo root:
+
+```bash
+cargo test --workspace                # 1063 pass with the server stack down
+cargo build --release -p dml-wow-cli
+cargo run -p dml-wow-cli -- version   # smoke test: prints the contract envelope
+```
+
+CI (`.github/workflows/rust.yml`) builds and tests the whole workspace on
+Windows and the three crates on Linux. The launcher keeps its own frontend dev
+loop in `launcher/` (`npm test`, `npm run check`, `npm run tauri dev`,
+`npm run tauri build`).
 
 ---
 
