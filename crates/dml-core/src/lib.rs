@@ -1,8 +1,9 @@
 //! Game-agnostic DML core.
 
 pub mod backend;
+pub mod compose;
 pub mod conf;
-pub mod docker;
+pub mod engine;
 pub mod envelope;
 pub mod error;
 pub mod events;

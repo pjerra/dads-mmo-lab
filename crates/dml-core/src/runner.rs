@@ -97,7 +97,7 @@ fn find_dml_script() -> String {
 /// The directory holding `docker.exe` (for PATH injection). None when docker is
 /// only resolvable as a bare name on PATH — then the child already has it.
 fn docker_bin_dir() -> Option<PathBuf> {
-    let prog = crate::docker::docker_program();
+    let prog = crate::engine::docker_program();
     Path::new(&prog)
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
