@@ -18,6 +18,17 @@
 //! and a throwaway `__dmlpar<pid>` account create+delete, cleaned up in the
 //! SAME test so nothing persists. NO teleport/gm/mail against real
 //! characters -- destructive ops against live characters are out of scope.
+//!
+//! LEAK-PROOF CLEANUP. A plain "delete at the bottom of the function" only
+//! runs when every assertion above it passes -- a panicking `assert_eq!`, a
+//! `#[should_panic]`-less failure, or the process getting interrupted mid-test
+//! all skip straight past it and leave the throwaway account behind (this
+//! happened live: seven `__dmlpar*` orphans accumulated on the auth DB across
+//! 2026-07-25..27). [`ThrowawayAccountGuard`] below is an RAII guard --
+//! Rust's `Drop` runs during a panic's unwind too, so tying the delete to a
+//! guard's destructor makes cleanup unconditional. No `scopeguard` dependency
+//! (none is available in this workspace) -- a plain hand-rolled guard is the
+//! idiomatic equivalent for one call site.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -117,6 +128,74 @@ fn assert_parity(cfg: &SoapConfig, bash: &Path, script: &Path, games: &Path, cmd
     }
 }
 
+/// Fires `account delete <user>` — the one command both the guard's `Drop`
+/// and the test's own explicit happy-path cleanup need, factored out so
+/// there is exactly one place that builds that command string.
+fn delete_account(cfg: &SoapConfig, user: &str) -> SoapOutcome {
+    exec(cfg, &format!("account delete {user}"))
+}
+
+/// RAII guard for the throwaway `__dmlpar<pid>` SOAP account: deletes it when
+/// dropped, unless [`ThrowawayAccountGuard::cleanup_now`] already did so.
+/// Construct it as soon as the account name is decided (BEFORE the account
+/// is even created) so every assertion downstream — including ones that
+/// panic — unwinds through this guard's `Drop` and gets a delete attempt.
+///
+/// `user` is `Some` until cleaned up once (either explicitly via
+/// `cleanup_now`, or implicitly via `Drop`); taking it on the way out makes
+/// a second delete attempt a no-op instead of firing twice (which would
+/// otherwise print a spurious "already doesn't exist" warning on every
+/// normal, non-panicking run, since the happy path already deletes the
+/// account explicitly and asserts on the result).
+///
+/// `drop()` MUST NOT panic: if it fires while a test's own assertion is
+/// already unwinding, a second panic during that unwind would ABORT THE
+/// WHOLE PROCESS instead of just failing the one test — strictly worse than
+/// a leaked throwaway account. So `exec` is additionally wrapped in
+/// `catch_unwind` as defense-in-depth (it has no known panic path today —
+/// every fallible step inside it maps to `SoapOutcome::Unreachable` — but a
+/// future change to `exec` could add one), and ANY failure to delete
+/// (fault, unreachable, or a caught panic) is reported via `eprintln!` and
+/// swallowed, never propagated.
+struct ThrowawayAccountGuard<'a> {
+    cfg: &'a SoapConfig,
+    user: Option<String>,
+}
+
+impl<'a> ThrowawayAccountGuard<'a> {
+    fn new(cfg: &'a SoapConfig, user: String) -> Self {
+        Self { cfg, user: Some(user) }
+    }
+
+    /// Explicit happy-path cleanup: delete now, return the outcome so the
+    /// caller can still assert on it (same as the old inline cleanup did),
+    /// and disarm the guard so `Drop` doesn't try again afterward.
+    fn cleanup_now(&mut self) -> SoapOutcome {
+        let user = self.user.take().expect("cleanup_now called at most once");
+        delete_account(self.cfg, &user)
+    }
+}
+
+impl Drop for ThrowawayAccountGuard<'_> {
+    fn drop(&mut self) {
+        let Some(user) = self.user.take() else {
+            return; // already cleaned up via `cleanup_now`
+        };
+        let cfg = self.cfg;
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| delete_account(cfg, &user)));
+        match result {
+            Ok(SoapOutcome::Ok(_)) => {}
+            Ok(other) => eprintln!(
+                "WARNING: soap_parity Drop-guard could not delete throwaway account {user} ({other:?}) -- it may be left over; delete manually via SOAP `account delete {user}` if so"
+            ),
+            Err(_) => eprintln!(
+                "WARNING: soap_parity Drop-guard PANICKED deleting throwaway account {user} -- it may be left over; delete manually via SOAP `account delete {user}` if so"
+            ),
+        }
+    }
+}
+
 #[test]
 fn soap_parity_when_reachable() {
     let cfg = SoapConfig::load();
@@ -177,7 +256,14 @@ fn soap_parity_when_reachable() {
     let user = format!("__dmlpar{}", std::process::id());
     let pass = "Parity1!";
     let create_cmd = format!("account create {user} {pass}");
-    let delete_cmd = format!("account delete {user}");
+
+    // Guard the throwaway account from HERE ON: every assertion below --
+    // setup, the parity comparison, or an interruption -- unwinds through
+    // this guard's `Drop` and gets a best-effort delete attempt, so the
+    // account can never outlive this test no matter how it exits. See
+    // `ThrowawayAccountGuard` above for the full rationale and why `Drop`
+    // itself is written to never panic.
+    let mut account_guard = ThrowawayAccountGuard::new(&cfg, user.clone());
 
     // Ensure the account EXISTS (the precondition for the duplicate-create
     // parity check below). Best-effort pre-clean, then create. EITHER outcome
@@ -186,7 +272,7 @@ fn soap_parity_when_reachable() {
     // the session's many parity runs, and SOAP account-delete can lag) -- the
     // account still exists, which is all the dup-create check needs. Only a
     // genuinely different outcome (Auth/Unreachable/other Fault) is a failure.
-    let _ = exec(&cfg, &delete_cmd);
+    let _ = delete_account(&cfg, &user);
     let setup = exec(&cfg, &create_cmd);
     let exists = match &setup {
         SoapOutcome::Ok(_) => true,
@@ -202,8 +288,10 @@ fn soap_parity_when_reachable() {
     let dup_ok = assert_parity(&cfg, &bash, &script, &games, &create_cmd);
     assert!(!dup_ok, "a duplicate account create should Fault on both clients, not Ok");
 
-    // Cleanup.
-    let cleanup = exec(&cfg, &delete_cmd);
+    // Cleanup (explicit, so the happy path still asserts it worked, same as
+    // before this fix). `cleanup_now` also disarms the guard so its `Drop`
+    // doesn't attempt a second, redundant delete afterward.
+    let cleanup = account_guard.cleanup_now();
     assert!(
         matches!(cleanup, SoapOutcome::Ok(_)),
         "cleanup: deleting throwaway account {user} should succeed -- MANUAL CLEANUP MAY BE NEEDED ({cleanup:?})"

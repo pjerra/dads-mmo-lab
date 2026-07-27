@@ -10,10 +10,23 @@
 //! which writes a character's position back to its OWN current value (a true
 //! round trip, non-destructive) — chosen deliberately per the task brief's
 //! "non-destructive live exercise OK" allowance.
+//!
+//! MIXED DB-gating, not file-gating alone: `pb-keys`/`conf-keys`/`raw-read`
+//! (and `games status`, which shells to `docker compose ps`) never touch the
+//! database, so they run regardless of DB reachability. `teleport-coords`,
+//! however, has both file-DB-free (`BAD_ARG`, validated before any DB access)
+//! and DB-dependent (`NOT_FOUND`, only reachable via a live `characters`
+//! lookup that comes back empty; the round-trip test, which reads/writes a
+//! real row) arms. The DB-dependent ones probe reachability first (see
+//! `db_reachable`, same shape as `db_pages_parity.rs`'s `harness()`) and
+//! skip-and-pass when the DB is down rather than surfacing `DB_UNREACHABLE`
+//! as a false assertion failure.
 
 use std::ffi::OsString;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use dml_wow::config;
 use dml_wow::db::{self, Database, DbConfig, SqlValue};
@@ -285,6 +298,29 @@ fn games_status_native_matches_cli_for_wow_server_playerbots() {
 // teleport-coords
 // ---------------------------------------------------------------------------
 
+/// DB-reachability probe -- identical shape and SKIP-message convention to
+/// `db_pages_parity.rs`'s `harness()` (reused here rather than reinvented, per
+/// the task brief): TCP-probes the resolved MySQL host:port with a 600ms
+/// timeout and prints why + returns `None` when nothing answers, so a caller
+/// can skip-and-pass instead of hitting `DB_UNREACHABLE` mid-assertion. NOT
+/// every test in this file needs this -- only the ones whose CLI arm must
+/// reach the DB to produce the result being asserted (see each test's own
+/// doc comment for its call).
+fn db_reachable(label: &str) -> Option<DbConfig> {
+    let cfg = DbConfig::from_env();
+    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let reachable = addr
+        .parse()
+        .ok()
+        .and_then(|a| TcpStream::connect_timeout(&a, Duration::from_millis(600)).ok())
+        .is_some();
+    if !reachable {
+        eprintln!("SKIP {label}: no DB reachable on {addr} (start the native server)");
+        return None;
+    }
+    Some(cfg)
+}
+
 /// Position columns are `FLOAT`, which the native binary-protocol reader
 /// decodes as `SqlValue::Text(f.to_string())` (see `convert_value` in
 /// `dml::db`) -- parse it back to `f64` for the round-trip comparisons.
@@ -399,16 +435,36 @@ fn teleport_coords_native_offline_round_trip_matches_cli() {
     assert!((approx(row2.get(2)) - z).abs() < 0.01, "z drifted after native round trip");
 }
 
-/// NOT_FOUND / BAD_ARG paths never touch the DB in a mutating way -- safe to
-/// compare against the CLI unconditionally (no DB reachability needed beyond
-/// what the arm itself requires for the character lookup).
+/// BAD_ARG path: the CLI rejects a malformed `--map` during arg
+/// parsing/validation, BEFORE the arm ever opens a DB connection -- so this
+/// comparison is safe unconditionally. NO DB-reachability gate here on
+/// purpose: this assertion must keep running (and keep covering the BAD_ARG
+/// arm) even with the DB down, same as `raw_read_native_matches_real_file_
+/// on_disk_for_playerbots_conf` and `games_status_native_matches_cli_for_
+/// wow_server_playerbots` above.
 #[test]
-fn teleport_coords_bad_arg_and_not_found_match_cli() {
-    let Some(h) = harness("teleport-coords error parity") else { return };
+fn teleport_coords_bad_arg_matches_cli() {
+    let Some(h) = harness("teleport-coords bad-arg parity") else { return };
 
     let bad_map = run_dml(&h, &["wow", "teleport-coords", "--char", "Kaldric", "--map", "abc", "--x", "1", "--y", "1", "--z", "1"]);
     assert_eq!(bad_map["ok"], false);
     assert_eq!(bad_map["error"]["code"], "BAD_ARG");
+}
+
+/// NOT_FOUND path: DB-GATED, unlike the BAD_ARG test above. Concluding "no
+/// such character" is only reachable by actually querying `characters` and
+/// getting zero rows back -- with the DB down the CLI arm can't get that far
+/// and reports `DB_UNREACHABLE` instead (this used to be a FALSE premise in
+/// this test's doc comment: NOT_FOUND does not "never touch the DB", it
+/// requires a live lookup that comes back empty). Probe DB reachability
+/// first, same as `db_pages_parity.rs`'s `harness()`, and skip-and-pass when
+/// it's down; run for real (and actually assert NOT_FOUND) when it's up.
+#[test]
+fn teleport_coords_not_found_matches_cli() {
+    let Some(h) = harness("teleport-coords not-found parity") else { return };
+    if db_reachable("teleport-coords not-found parity").is_none() {
+        return;
+    }
 
     // Name must itself be VALID shape (<=12 chars, `_valid_charname`) so the
     // arm reaches the DB lookup instead of failing charname validation first.
