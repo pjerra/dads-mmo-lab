@@ -88,6 +88,107 @@ real:
 - Spec picker/validator drift for non-lowercase custom spec names (the picker
   can offer a name `_valid_bot_spec` then rejects).
 
+### Internet play breaks LAN players unless the router hairpins (user request, 2026-07-27)
+
+`lan --internet on <addr>` sets only `realmlist.address`, so once the realm
+advertises a public IP/hostname, players on the *home* network are also sent
+out to the public address and only reach the world server if the router
+supports NAT hairpinning. Many consumer routers don't; the symptom is "login
+works, realm select hangs at Connecting" for everyone on the LAN while outside
+friends are fine. Today the only fix is a hand-written UPDATE. The tooling
+should cover it.
+
+Fix shape: on the `--internet on` path also set
+`realmlist.localAddress = <host LAN IP>` and `localSubnetMask = 255.255.255.0`;
+on `off`/revert restore `localAddress = 127.0.0.1` (the stock default). AC
+hands the local address to any client whose IP is inside that subnet, and to
+loopback clients when neither address is loopback — so the host PC and every
+LAN machine get the LAN IP while outside clients still get the public one. No
+hairpin needed. **Verify against the deployed AC version before building**
+(`localAddress`/`localSubnetMask` columns present, and the client-address
+selection behaves as described) — this was reasoned from AC's
+`Realm::GetAddressForClient`, not read off the live DB.
+
+Notes that drive the effort:
+
+- **The CLI cannot detect the LAN IP itself.** It runs inside `dml-arch`, where
+  `hostname -I` returns the WSL2 NAT address (172.x), not the Windows host's
+  LAN address. The launcher already detects the right value (`lanIp`, shown in
+  step 1 of the Tools card) and must pass it down — new optional flag, e.g.
+  `lan <title> --internet on <addr> --local <lan-ip>`. With the flag absent,
+  keep today's behaviour rather than guessing.
+- **Three surfaces, not one:** bash [`cli/src/90-main.sh`](cli/src/90-main.sh)
+  (`_lan_set`), the Rust port [`crates/dml-wow/src/lan.rs`](crates/dml-wow/src/lan.rs)
+  (already ported — parameterized UPDATE), and the Tools card's step 4/6
+  wiring. The `lan` arm has a documented contract, so
+  [`docs/cli-contract.md`](docs/cli-contract.md) needs the new flag too, and
+  the bash/Rust parity tests must stay green.
+- Plain LAN play (`lan on <lan-ip>`, no `--internet`) is unaffected — it works
+  today precisely because `localAddress` stays at the 127.0.0.1 default.
+- Still a realmlist-only write; does not touch character data or extend the
+  sanctioned-write list.
+
+### Eluna bridge should deploy itself on server start (user request, 2026-07-27)
+
+Today enabling My Party / GM bridges is a three-step dance, and the middle
+step is only there by inheritance:
+
+1. the server must already be **running** — `bridge_setup_stream` opens with a
+   SOAP `server info` preflight and bails `SOAP_UNREACHABLE` otherwise
+   (`crates/dml-wow/src/bridge.rs:129-147`);
+2. the `.lua` files are copied into
+   `<server>/env/dist/etc/modules/lua_scripts`;
+3. the server must be **restarted** so ALE loads them.
+
+That preflight is not a requirement of the work — the deploy is a pure file
+copy that needs no live server. It exists because the Rust arm is a
+byte-parity port of the bash `bridge-setup` arm, and the bash arm was written
+as an on-demand action. Nobody re-litigated the workflow during the port; the
+doctrine was "reproduce bash exactly". That is the honest answer to "why
+haven't we done this before" — it was never decided, only inherited.
+
+**Fix shape:** run `deploy_scripts` as a step inside `games start`/`restart`,
+*before* the containers come up, and drop the SOAP preflight from that path.
+The restart is already happening, so the whole dance collapses to nothing.
+
+Arguments for: it is already idempotent (`deploy_scripts` content-compares
+each file and copies only on mismatch, so a no-change start writes nothing);
+it fixes a real silent-staleness bug where a DML update ships changed bridge
+scripts but the deployed copies stay old until someone remembers to redeploy;
+and it removes a step users forget, which currently presents as "My Party
+silently does nothing".
+
+Arguments against / open decisions: it would overwrite a hand-edited deployed
+script (true of the manual button too, just rarer); it writes into the server
+directory on every start, which is a side effect nobody asked for; the copy
+failure path must be **non-fatal** or a non-essential step can fail `start`;
+and it needs a decision for the `mod-ale`-not-installed case — copy anyway
+(harmless, the scripts just sit unused) or skip. Keep the manual "Deploy
+server bridges" button as an explicit redeploy either way. Worth a short
+design pass rather than a straight-to-code change.
+
+### Lua modules tab: show the ALE requirement, don't hide the list (user request, 2026-07-27)
+
+Half of this already exists. `ale_ready` is on the module-catalog envelope
+(`modules.rs:342`, literally `cpp_installed("mod-ale")`), and
+`ModuleManager.svelte:790` already swaps the whole "Lua scripts (ALE)" list
+for a note: *"Install the ALE module (mod-ale) first — it's in the C++ modules
+list above."*
+
+What the user actually asked for is the difference: **grey the lua rows out
+instead of hiding them** (so you can see what you would get), and put an
+**Install ALE** button right there instead of "scroll up and find it".
+
+Note the precedent above ("Server-required UX", DECIDED 2026-07-21): grey-out
+was rejected there for being confusing and un-explanatory, in favour of a
+clear message carrying the fixing action as a button. The same reasoning
+mostly applies here — but this case differs in one way that argues for
+showing the rows: the lua list is a *catalog of things you could install*, so
+hiding it hides the reason to install ALE at all. Suggested resolution: keep
+the explanatory note, render the rows disabled beneath it, and add the
+one-click **Install ALE** button. Frontend-only, small; the data is already
+plumbed.
+
 ### Incident follow-ups (2026-07-21 docker-network wedge — diagnosed live)
 
 Root cause that night: the distro's Docker network black-holed (connect

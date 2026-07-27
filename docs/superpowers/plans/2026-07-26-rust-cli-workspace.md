@@ -1,5 +1,25 @@
 # DML Rust CLI Workspace Implementation Plan
 
+> **STATUS 2026-07-27: ALL 18 TASKS COMPLETE.** Authoritative record of what was
+> built, measured and decided: `.superpowers/sdd/2026-07-26-rust-cli-workspace/progress.md`
+> (the ledger, not this file — several plan steps were amended during execution
+> and the corrections live there).
+>
+> Final gate evidence: `cargo test --workspace` 1063 passed / 0 failed / 2 ignored
+> (Windows, stack down); Linux CI 933 tests, both jobs green; the full live parity
+> gate ran all 18 suites against a live AzerothCore + playerbots server with
+> **zero skips** — 686 passed, 0 failed; launcher regression clean (vitest 385,
+> svelte-check 0 errors 0 warnings); `npm run tauri build` produces
+> `target/release/launcher.exe` + NSIS + MSI from the ROOT workspace target and
+> the exe boots; `dml-wow` release binary smoked read-only (17 commands) and
+> mutating (account lifecycle, MOTD, gm revive/heal/summon, mail-item, teleport)
+> against the live server; bats unchanged.
+>
+> **Remaining and NOT done here (deliberate):** user click-through of the release
+> exe, a Linux community smoke of the CLI, live verification of the `party/*`
+> family (needs the Eluna bridge deployed + a restart), and the merge to main —
+> which is the user's call, per standing policy.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Reshape the ported Rust `dml` surface (today inside `launcher/src-tauri/src/dml/`) into a cargo workspace — `dml-core` (game-agnostic library) + `dml-wow` (WoW library) + `dml-wow-cli` (standalone `dml-wow` binary) — so any frontend or script can attach to the server without the launcher, per the approved spec `docs/superpowers/specs/2026-07-26-rust-cli-workspace-design.md`.
