@@ -10,6 +10,8 @@
   } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
+  import { trayAction } from "$lib/tray-action.svelte";
+  import { listen } from "@tauri-apps/api/event";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { charStore, charView, setSelectedChar } from "$lib/char-store.svelte";
   import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
@@ -59,6 +61,12 @@
     // Re-asserts the persisted auto-shutdown toggle to the Rust watcher and
     // hooks its event channel -- idempotent, like startStatusPolling.
     initAutoShutdown();
+    // Tray Start/Stop. Rust has already surfaced the window; land on Home and
+    // hand the request over, so Home runs the SAME act() its own buttons do.
+    void listen<string>("tray-action", (e) => {
+      go("home");
+      trayAction.pending = e.payload === "stop" ? "stop" : "start";
+    });
   });
 
   let status = $derived(statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting));

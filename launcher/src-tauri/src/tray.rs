@@ -15,7 +15,7 @@
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// The window label is `"main"` in tauri.conf.json (implicit default) and in
 /// capabilities/default.json. Reuse it rather than guessing.
@@ -54,8 +54,10 @@ pub fn apply_status(app: &tauri::AppHandle, verdict: &str) {
 
 pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "tray_open", "Open DML Launcher", true, None::<&str>)?;
+    let start_i = MenuItem::with_id(app, "tray_start", "Start server", true, None::<&str>)?;
+    let stop_i = MenuItem::with_id(app, "tray_stop", "Stop server", true, None::<&str>)?;
     let quit_i = MenuItem::with_id(app, "tray_quit", "Exit", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open_i, &quit_i])?;
+    let menu = Menu::with_items(app, &[&open_i, &start_i, &stop_i, &quit_i])?;
 
     TrayIconBuilder::with_id("dml-tray")
         .icon(
@@ -69,6 +71,16 @@ pub fn build(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "tray_open" => show_main_window(app),
+            // Surface the window and hand the request to the frontend, which
+            // runs the SAME act() its Home buttons call. The tray does not
+            // drive the lifecycle API itself — one implementation, one place
+            // to change, and the streamed output stays visible in the
+            // terminal the user is now looking at.
+            "tray_start" | "tray_stop" => {
+                show_main_window(app);
+                let action = if event.id.as_ref() == "tray_start" { "start" } else { "stop" };
+                let _ = app.emit("tray-action", action);
+            }
             // MUST go through app.exit() so the existing RunEvent::Exit arm
             // still fires and clears the keep-awake execution state. A window
             // destroy would bypass it and leave the PC pinned awake.

@@ -8,6 +8,7 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { toolPrefs } from "$lib/tool-prefs.svelte";
 
@@ -108,6 +109,19 @@
     if (chipStart.requested && !busy) {
       chipStart.requested = false;
       act("start");
+    }
+  });
+
+  // Tray menu Start/Stop consumer. Same shape as the chip consumer above:
+  // the tray sets the request and Rust surfaces the window, the shell lands
+  // on Home, and this runs the ordinary act() path -- so the tray shares one
+  // implementation with the buttons instead of driving the lifecycle API
+  // itself. Consumed before acting so a re-render cannot double-fire.
+  $effect(() => {
+    if (trayAction.pending && !busy) {
+      const action = trayAction.pending;
+      trayAction.pending = null;
+      act(action);
     }
   });
 
