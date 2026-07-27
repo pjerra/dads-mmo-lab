@@ -23,11 +23,11 @@ use dml_core::engine::docker_program;
 use dml_core::error::CmdError;
 use dml_wow::config::ConfigReader;
 use dml_wow::db::{DbConfig, DbError};
-use dml_wow::soap::SoapConfig;
+use dml_wow::soap::{SoapConfig, SoapOutcome};
 use serde_json::{json, Value};
 
-use crate::cli::{Cmd, ConfigCmd, ModuleCmd, TuningCmd};
-use crate::out::{emit_err, emit_ok};
+use crate::cli::{AccountCmd, Cmd, ConfigCmd, GmCmd, ModuleCmd, PartyCmd, TuningCmd};
+use crate::out::{emit_err, emit_ok, stream_exit, stream_sink, TerminalSeen};
 
 /// Print a `dml-wow` call's `Result` as the one envelope it maps to, and
 /// return the process exit code. NOT a second output path — it is the
@@ -89,6 +89,42 @@ fn emit_db_option_result(result: Result<Option<Value>, DbError>, not_found_messa
 /// a torn one.
 fn write_lock() -> Arc<Mutex<()>> {
     Arc::new(Mutex::new(()))
+}
+
+/// A fresh, single-use SOAP lock for one `dml-wow` call that fires a SOAP
+/// command (or several, in `party preset-load`'s case).
+///
+/// Same reasoning as [`write_lock`], for the launcher's `AppState::soap_lock`:
+/// a GUI can have several Tauri commands in flight against ONE worldserver
+/// SOAP listener, so it serializes them; this CLI runs one subcommand and
+/// exits, so there is nothing in-process to serialize against. Cross-PROCESS
+/// serialization is NOT provided and never was — two concurrent `dml-wow`
+/// invocations (or a `dml-wow` alongside the GUI, or alongside the bash CLI)
+/// can interleave their SOAP calls. That is parity with the bash CLI, which
+/// takes no lock either, and it is recorded as a contract caveat rather than
+/// silently implied by this parameter existing.
+fn soap_lock() -> Arc<Mutex<()>> {
+    Arc::new(Mutex::new(()))
+}
+
+/// One SOAP round trip: resolve the endpoint the way EVERY launcher native
+/// command does (`SoapConfig::load()`), fire `cmd`, and hand the outcome to
+/// the arm's own mapper. `map` also receives the resolved URL, because three
+/// of the per-arm mappers (`console_send_result`, `account_result`) name the
+/// endpoint in their SOAP_UNREACHABLE message.
+///
+/// The mappers all live in `dml_wow::soap_cmds` — deliberately: an arm's
+/// fault/auth/unreachable strings are arm-specific (see that module's Task 13
+/// section), and hand-copying one into this crate is exactly the drift the
+/// Task 12 review ruled out for `db_err_to_cmd`. No arm below invents a code,
+/// a message or a hint of its own for a SOAP failure.
+fn soap_fire<T>(
+    cmd: &str,
+    map: impl FnOnce(SoapOutcome, &str) -> Result<T, CmdError>,
+) -> Result<T, CmdError> {
+    let cfg = SoapConfig::load();
+    let outcome = dml_wow::soap::exec(&cfg, cmd);
+    map(outcome, &cfg.url)
 }
 
 /// The single title dir every config/tuning/module command resolves against —
@@ -285,6 +321,426 @@ pub fn dispatch(command: Cmd) -> i32 {
                     "",
                 ),
             }
+        }
+
+        // -- Task 13: SOAP write actions -----------------------------------
+        //
+        // GUARD DOCTRINE for every arm from here down. Several `dml-wow`
+        // functions were moved verbatim out of the launcher in Task 9 while
+        // the validation that protected them stayed behind in the Tauri
+        // wrapper. So each arm below reproduces the FULL guard set its
+        // `#[tauri::command]` sibling in `launcher/src-tauri/src/lib.rs` runs
+        // before `spawn_blocking`, in the same order, BEFORE any SOAP call or
+        // DB write. `require_native_backend()` is the one launcher guard with
+        // no analogue here: it rejects a native-only command when the GUI is
+        // on the WSL backend, and this binary IS the native backend (`version`
+        // reports `"backend":"native"`), so there is no wrong-backend state to
+        // refuse. Everything else is reproduced.
+
+        Cmd::Console { command } => {
+            let command = command.join(" ");
+            // GUARD (`wow_console_send_native`): WHITESPACE-only is rejected,
+            // not merely empty — bash tests `[[ -z "${cmd//[[:space:]]/}" ]]`,
+            // so `dml-wow console "   "` must not reach the worldserver.
+            if command.trim().is_empty() {
+                return emit_err(
+                    "BAD_ARG",
+                    "console-send requires a non-empty --command",
+                    "Example: dml wow console-send --command \"server info\" --json",
+                );
+            }
+            emit_result(
+                soap_fire(&command, dml_wow::soap_cmds::console_send_result)
+                    .map(|result| json!({ "result": result })),
+            )
+        }
+
+        Cmd::Account { cmd } => dispatch_account(cmd),
+        Cmd::Gm { cmd } => dispatch_gm(cmd),
+        Cmd::Party { cmd } => dispatch_party(cmd),
+
+        Cmd::MailItem { to, items, subject, body } => {
+            // Tokens are joined and re-split so that BOTH `6948:1 2589:5` and
+            // `6948:1,2589:5` land on the same list, through bash's own
+            // `IFS=','` semantics (`split_mail_items`) rather than a second
+            // splitting rule invented here. `mail_items_cmd` then owns every
+            // guard: recipient name, the 1-12 count, each `id:count` spec, and
+            // the subject/body sanitization (strip `"`, CR/LF -> space) that
+            // closes AC #2695. Nothing is re-sanitized or quote-wrapped here.
+            let joined = items.join(",");
+            let specs = dml_wow::soap_cmds::split_mail_items(&joined);
+            let attachments = specs.len();
+            let built = match dml_wow::soap_cmds::mail_items_cmd(&to, &specs, &subject, &body) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                soap_fire(&built, |o, _| dml_wow::soap_cmds::mail_result(o))
+                    .map(|_| json!({ "sent": true, "to": to, "attachments": attachments })),
+            )
+        }
+
+        Cmd::Teleport { char_name, to } => {
+            // `teleport_name_cmd` validates the character name AND the
+            // location token (single token, letters/digits/_/-) — the latter
+            // matters because AC's console parser keeps quotes LITERAL, so a
+            // destination is never quote-wrapped to make a space safe.
+            let built = match dml_wow::soap_cmds::teleport_name_cmd(&char_name, &to) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                soap_fire(&built, |o, _| dml_wow::soap_cmds::teleport_result(o))
+                    .map(|_| json!({ "teleported": true, "char": char_name, "to": to })),
+            )
+        }
+
+        Cmd::Motd { text } => {
+            // There is no standalone motd command in EITHER sibling: the
+            // launcher reaches it through `wow_config_set_native` and bash
+            // through `config set --key server.motd`, both of which land in
+            // `config::config_set`'s `server.motd` special case. This arm goes
+            // through that same door rather than calling `motd_cmd` directly,
+            // which matters for safety: `motd_cmd` does NO sanitization of its
+            // own (see its doc comment) — the `"text"` registry kind's
+            // `sanitize_text_value` pass, applied by `config_set_curated`
+            // immediately before it, is what strips quotes and CR/LF. Calling
+            // the builder straight from here would have dropped that guard.
+            emit_result(dml_wow::config::config_set(
+                "server.motd".to_string(),
+                text,
+                soap_lock(),
+                write_lock(),
+                title_dir(),
+            ))
+        }
+    }
+}
+
+/// `dml-wow account …` — the four SOAP account actions. The launcher runs
+/// these as four near-identical `#[tauri::command]`s
+/// (`wow_account_{create,set_password,set_gm,delete}_native`); their entire
+/// guard set is "let the builder validate", since `account_create_cmd` /
+/// `account_set_password_cmd` / `account_set_gm_cmd` / `account_delete_cmd`
+/// each check their own arguments (and `delete` additionally refuses the
+/// `admin` account the launcher itself uses for SOAP). Build FIRST, fire
+/// second: an invalid username never reaches the worldserver.
+fn dispatch_account(cmd: AccountCmd) -> i32 {
+    let built = match &cmd {
+        AccountCmd::Create { user, pass } => dml_wow::soap_cmds::account_create_cmd(user, pass),
+        AccountCmd::SetPassword { user, pass } => {
+            dml_wow::soap_cmds::account_set_password_cmd(user, pass)
+        }
+        AccountCmd::SetGm { user, level } => dml_wow::soap_cmds::account_set_gm_cmd(user, level),
+        AccountCmd::Delete { user } => dml_wow::soap_cmds::account_delete_cmd(user),
+    };
+    let built = match built {
+        Ok(c) => c,
+        Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+    };
+    if let Err(e) = soap_fire(&built, dml_wow::soap_cmds::account_result) {
+        return emit_err(&e.code, &e.message, &e.hint);
+    }
+    emit_ok(match cmd {
+        AccountCmd::Create { user, .. } => json!({ "created": true, "user": user }),
+        AccountCmd::SetPassword { user, .. } => json!({ "password_set": true, "user": user }),
+        AccountCmd::SetGm { user, level } => json!({
+            "gm_set": true,
+            "user": user,
+            // A NUMBER in the envelope, matching `wow_account_set_gm_native`
+            // (whose `level` arrives as a `u8` over IPC). The parse cannot
+            // fail here: `account_set_gm_cmd` returned Ok, which it only does
+            // for the literals "0".."3".
+            "level": level.parse::<u8>().unwrap_or_default(),
+        }),
+        AccountCmd::Delete { user } => json!({ "deleted": true, "user": user }),
+    })
+}
+
+/// The three bridge-backed GM ops (`gold`/`heal`/`revive`) share one shape:
+/// REQUIRE the character online, THEN fire. The order is load-bearing and is
+/// the oracle's (`_gm_require_online`, `cli/src/55-gm.sh:9-14`) as well as the
+/// launcher's (`wow_gm_{gold,heal,revive}_native` all check before taking the
+/// SOAP lock) — a SOAP fire is a side effect, so an offline target must be
+/// refused before it happens, not after. `label` is the noun `party_fire_result`
+/// splices into its fixed fault message.
+fn gm_bridge_fire(player: &str, cmd: &str, label: &str) -> Result<(), CmdError> {
+    let db_cfg = DbConfig::from_env();
+    if !dml_wow::soap_cmds::char_is_online(&db_cfg, player) {
+        return Err(dml_wow::soap_cmds::not_online_err(player));
+    }
+    soap_fire(cmd, |o, _| dml_wow::soap_cmds::party_fire_result(o, label)).map(|_| ())
+}
+
+/// `dml-wow gm …`. `level`/`at-login` are stock AzerothCore console commands
+/// and work on OFFLINE characters (no online precondition — matching
+/// `wow_gm_level_native`/`wow_gm_at_login_native`); `gold`/`heal`/`revive` go
+/// through the DML bridges and require the character online
+/// ([`gm_bridge_fire`]); `summon` is fully hoisted
+/// (`soap_cmds::gm_summon` does creature lookup -> online check -> fire).
+fn dispatch_gm(cmd: GmCmd) -> i32 {
+    match cmd {
+        GmCmd::Level { player, level } => {
+            // Validates the name AND the 1..=255 range before anything fires.
+            let built = match dml_wow::soap_cmds::gm_level_cmd(&player, level) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                soap_fire(&built, |o, _| dml_wow::soap_cmds::gm_level_result(o))
+                    .map(|_| json!({ "leveled": true, "player": player, "level": level })),
+            )
+        }
+
+        GmCmd::AtLogin { player, flag } => {
+            // Validates the name AND the four-flag allowlist.
+            let built = match dml_wow::soap_cmds::gm_at_login_cmd(&player, &flag) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                soap_fire(&built, |o, _| dml_wow::soap_cmds::gm_at_login_result(o))
+                    .map(|_| json!({ "applied": true, "player": player, "flag": flag })),
+            )
+        }
+
+        GmCmd::Gold { player, gold } => {
+            let built = match dml_wow::soap_cmds::gm_gold_cmd(&player, gold) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                gm_bridge_fire(&player, &built, "gold")
+                    .map(|_| json!({ "gold_set": true, "player": player, "gold": gold })),
+            )
+        }
+
+        GmCmd::Heal { player } => {
+            let built = match dml_wow::soap_cmds::gm_heal_cmd(&player) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                gm_bridge_fire(&player, &built, "heal")
+                    .map(|_| json!({ "healed": true, "player": player })),
+            )
+        }
+
+        GmCmd::Revive { player } => {
+            let built = match dml_wow::soap_cmds::gm_revive_cmd(&player) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                gm_bridge_fire(&player, &built, "revive")
+                    .map(|_| json!({ "revived": true, "player": player })),
+            )
+        }
+
+        GmCmd::Summon { player, entry } => {
+            // `gm_summon_cmd` validates the name and the 1..=999999 entry
+            // range; `gm_summon` then owns the whole orchestration (World-DB
+            // creature lookup -> online check -> fire), exactly as
+            // `wow_gm_summon_native` calls it.
+            let built = match dml_wow::soap_cmds::gm_summon_cmd(&player, entry) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(dml_wow::soap_cmds::gm_summon(player, entry, built, soap_lock()))
+        }
+    }
+}
+
+/// `dml-wow party …`. NOT ported here (still launcher-only): `dismiss-all`,
+/// `preset-show`, `preset-import` — see the Task 13 report.
+fn dispatch_party(cmd: PartyCmd) -> i32 {
+    match cmd {
+        PartyCmd::Add { player, class, gender, spec } => {
+            // Guard set, in `wow_party_add_native`'s exact order:
+            //  1. `party_add_cmd` validates player / class / gender;
+            //  2. an empty `--spec` is treated as absent;
+            //  3. a present spec is checked against the DEPLOYED
+            //     playerbots.conf's premade spec names (falling back to the
+            //     static mirror when no conf is deployed).
+            // Only then does `party_add` touch the DB or SOAP.
+            let gender = gender.unwrap_or_default();
+            let built = match dml_wow::party::party_add_cmd(&player, &class, &gender) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let spec = spec.filter(|s| !s.is_empty());
+            if let Some(s) = &spec {
+                let live = dml_wow::party::live_spec_names(&title_dir());
+                if !dml_wow::party::valid_bot_spec(s, live.as_deref()) {
+                    return emit_err(
+                        "BAD_ARG",
+                        &format!("Unknown spec: {s}"),
+                        "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list.",
+                    );
+                }
+            }
+            emit_result(dml_wow::party::party_add(player, built, spec, soap_lock()))
+        }
+
+        PartyCmd::Kick { player, bot } => {
+            // GUARD (`wow_party_kick_native`): the MASTER's name is validated
+            // here with the arm's own hint — `party_uninvite_cmd` only sees
+            // the bot, so without this an invalid master would reach the
+            // logout whisper. Both command strings are built (and thereby
+            // both names validated) before either fires.
+            if !dml_wow::soap_cmds::valid_charname(&player) {
+                return emit_err(
+                    "BAD_ARG",
+                    &format!("Invalid player name: {player}"),
+                    "Kick needs --player (the bot's master) so the bot can also be dismissed.",
+                );
+            }
+            let uninvite = match dml_wow::party::party_uninvite_cmd(&bot) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let logout = match dml_wow::party::party_logout_whisper_cmd(&player, &bot) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let cfg = SoapConfig::load();
+            let outcome = dml_wow::soap::exec(&cfg, &uninvite);
+            if let Err(e) = dml_wow::soap_cmds::party_fire_result(outcome, "kick") {
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // Best-effort, exactly like the launcher: a failed logout whisper
+            // only flips `dismissed`, it never fails the kick.
+            let dismissed =
+                matches!(dml_wow::soap::exec(&cfg, &logout), SoapOutcome::Ok(_));
+            emit_ok(json!({ "kicked": true, "dismissed": dismissed }))
+        }
+
+        PartyCmd::Relogin { player, bot } => {
+            // `party_relogin_cmd` validates BOTH names.
+            let built = match dml_wow::party::party_relogin_cmd(&player, &bot) {
+                Ok(c) => c,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            emit_result(
+                soap_fire(&built, |o, _| dml_wow::soap_cmds::party_fire_result(o, "relogin"))
+                    .map(|_| json!({ "relogged": true })),
+            )
+        }
+
+        PartyCmd::Botcmd { player, bot, action, spec } => {
+            // Guard set, in `wow_party_botcmd_native`'s exact order: both
+            // names, then the closed action allowlist (with `spec`'s own
+            // non-empty + live-validity pair), then BOTH parties online — the
+            // bot's NOT_FOUND hint differs from every other party arm's — and
+            // only then the whisper.
+            if !dml_wow::soap_cmds::valid_charname(&player) {
+                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+            }
+            if !dml_wow::soap_cmds::valid_charname(&bot) {
+                return emit_err("BAD_ARG", &format!("Invalid bot name: {bot}"), "");
+            }
+            let wmsg = if let Some(tail) = dml_wow::party::botcmd_fixed_tail(&action) {
+                tail.to_string()
+            } else if action == "spec" {
+                let Some(spec_val) = spec.filter(|s| !s.is_empty()) else {
+                    return emit_err(
+                        "BAD_ARG",
+                        "Action spec requires --spec <name>",
+                        "e.g. --spec 'frost pve'",
+                    );
+                };
+                let live = dml_wow::party::live_spec_names(&title_dir());
+                if !dml_wow::party::valid_bot_spec(&spec_val, live.as_deref()) {
+                    return emit_err(
+                        "BAD_ARG",
+                        &format!("Unknown spec: {spec_val}"),
+                        "A premade spec name like 'frost pve'.",
+                    );
+                }
+                dml_wow::party::spec_action_wmsg(&spec_val)
+            } else {
+                return emit_err(
+                    "BAD_ARG",
+                    &format!("Invalid action: {action}"),
+                    "One of: gear talents maintain spec",
+                );
+            };
+            let db_cfg = DbConfig::from_env();
+            if dml_wow::party::party_online_guid(&db_cfg, &player).is_none() {
+                let e = dml_wow::party::party_not_online_err(
+                    &player,
+                    "Log the character into the game first.",
+                );
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            if dml_wow::party::party_online_guid(&db_cfg, &bot).is_none() {
+                let e = dml_wow::party::party_not_online_err(
+                    &bot,
+                    "The bot must be in the world -- is it still in your party?",
+                );
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            let whisper = format!("dml_whisper {player} {bot} {wmsg}");
+            emit_result(
+                soap_fire(&whisper, |o, _| dml_wow::soap_cmds::party_fire_result(o, "botcmd")).map(
+                    |_| json!({ "sent": true, "player": player, "bot": bot, "action": action }),
+                ),
+            )
+        }
+
+        PartyCmd::PresetSave { player, name } => {
+            // GUARDS (`wow_party_preset_save_native`): the character name, and
+            // the preset name — the latter is what keeps a `../…` argument
+            // from ever being joined onto `~/.dml/party-presets`, so it MUST
+            // run here, before `preset_save` builds a path.
+            if !dml_wow::soap_cmds::valid_charname(&player) {
+                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+            }
+            if !dml_wow::party::valid_preset_name(&name) {
+                return emit_err(
+                    "BAD_ARG",
+                    &format!("Invalid preset name: {name}"),
+                    "Letters, digits, - and _ (max 32).",
+                );
+            }
+            emit_result(dml_wow::party::preset_save(player, name))
+        }
+
+        PartyCmd::PresetList => emit_result(dml_wow::party::preset_list()),
+
+        PartyCmd::PresetDelete { name } => {
+            // Same path-traversal guard as `preset-save`, with this arm's own
+            // (empty) hint — `wow_party_preset_delete_native`.
+            if !dml_wow::party::valid_preset_name(&name) {
+                return emit_err("BAD_ARG", &format!("Invalid preset name: {name}"), "");
+            }
+            emit_result(dml_wow::party::preset_delete(name))
+        }
+
+        PartyCmd::PresetLoad { player, name } => {
+            // The CLI's FIRST streaming subcommand. Both guards
+            // (`wow_party_preset_load_native`) run BEFORE the stream starts,
+            // so a rejection is a single ordinary error envelope + exit 1 —
+            // never a half-emitted NDJSON stream, and never a preset path
+            // built from an unvalidated name.
+            if !dml_wow::soap_cmds::valid_charname(&player) {
+                return emit_err("BAD_ARG", &format!("Invalid player name: {player}"), "");
+            }
+            if !dml_wow::party::valid_preset_name(&name) {
+                return emit_err("BAD_ARG", &format!("Invalid preset name: {name}"), "");
+            }
+            // Streaming wiring, per `out.rs`'s documented composition: the
+            // stateless printer and the terminal-event tracker are separate,
+            // and the closure feeds both. Exit code comes from which terminal
+            // event ended the stream — `done` -> 0, `error` (or no terminal
+            // event at all) -> 1.
+            let seen = TerminalSeen::new();
+            let sink = stream_sink();
+            dml_wow::party::party_preset_load_stream(player, name, soap_lock(), |v| {
+                seen.observe(&v);
+                sink(v);
+            });
+            stream_exit(&seen)
         }
     }
 }

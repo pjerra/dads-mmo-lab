@@ -127,6 +127,152 @@ pub enum Cmd {
         #[arg(value_parser = parse_item_ids)]
         ids: ItemIds,
     },
+
+    // -- Task 13: SOAP write actions (`dml_wow::{soap_cmds,party}`) ---------
+    //
+    // Every numeric/name/flag argument below is DELIBERATELY typed loosely
+    // enough to reach its `dml-wow` builder, because the builders are the
+    // single source of the validation rules (and their exact BAD_ARG wording).
+    // A clap-level allowlist here would be a second copy that could drift —
+    // the opposite of what `console-tail --lines` does, and for a reason: that
+    // one is a plain numeric RANGE with no library-side check behind it,
+    // whereas these all have one. See `run.rs::dispatch` for the guards that
+    // must run BEFORE any SOAP/DB call.
+    /// Run one raw worldserver console command over SOAP
+    Console {
+        /// The command — every remaining token, joined with single spaces
+        /// (e.g. `dml-wow console server info`)
+        #[arg(required = true, num_args = 1..)]
+        command: Vec<String>,
+    },
+    /// Game-account administration over SOAP (create/password/GM level/delete)
+    Account {
+        #[command(subcommand)]
+        cmd: AccountCmd,
+    },
+    /// GM actions against one character
+    Gm {
+        #[command(subcommand)]
+        cmd: GmCmd,
+    },
+    /// Send in-game mail with item attachments (`soap_cmds::mail_items_cmd`)
+    MailItem {
+        /// Recipient character name (1-12 letters/digits/underscore)
+        to: String,
+        /// One or more `itemid:count` specs. Separate tokens and/or
+        /// comma-separated lists both work — they are joined and then split
+        /// with the SAME `split_mail_items` rule bash uses on `--items`.
+        #[arg(required = true, num_args = 1..)]
+        items: Vec<String>,
+        /// Mail subject (quotes and line breaks are stripped by the builder)
+        #[arg(long, default_value = "Dad's MMO Lab")]
+        subject: String,
+        /// Mail body (same sanitization as `--subject`)
+        #[arg(long, alias = "text", default_value = "Enjoy!")]
+        body: String,
+    },
+    /// Teleport a character to a named `game_tele` location
+    Teleport {
+        /// Character name (1-12 letters/digits/underscore)
+        char_name: String,
+        /// Destination token as listed by `teleport-list`
+        to: String,
+    },
+    /// Set the message of the day — applies live, no restart
+    Motd {
+        /// The new MOTD text
+        text: String,
+    },
+    /// Playerbot party management (`dml_wow::party`)
+    Party {
+        #[command(subcommand)]
+        cmd: PartyCmd,
+    },
+}
+
+/// `dml-wow account …` — the four SOAP account actions
+/// (`soap_cmds::account_*_cmd`). Mirrors bash's `dml wow account <sub>` arms
+/// with the flags turned into positionals, matching this CLI's own house style
+/// (Task 12's `paperdoll <NAME>` for bash's `--char`).
+#[derive(Subcommand, Debug)]
+pub enum AccountCmd {
+    /// Create an account (3-20 char user, 4-16 char password)
+    Create { user: String, pass: String },
+    /// Change an account's password
+    SetPassword { user: String, pass: String },
+    /// Set an account's GM level
+    SetGm {
+        user: String,
+        /// 0-3. A STRING, not a number: `account_set_gm_cmd` matches the
+        /// literal `0|1|2|3` exactly like bash's regex does, so an
+        /// out-of-range value has to arrive intact to earn its BAD_ARG
+        /// ("--level must be 0-3") instead of dying as a clap parse error.
+        level: String,
+    },
+    /// Delete an account (refuses `admin`, the launcher's own SOAP account)
+    Delete { user: String },
+}
+
+/// `dml-wow gm …` — the six GM builders. `level`/`at-login` are stock AC
+/// console commands and work on OFFLINE characters; `gold`/`heal`/`revive`/
+/// `summon` go through the DML server bridges and REQUIRE the character
+/// online (checked in `run.rs` before the fire, same order as the oracle).
+#[derive(Subcommand, Debug)]
+pub enum GmCmd {
+    /// Set a character's level (1-255; works offline)
+    #[command(allow_negative_numbers = true)]
+    Level { player: String, level: i32 },
+    /// Give whole gold (0-214748; character must be online)
+    #[command(allow_negative_numbers = true)]
+    Gold { player: String, gold: i32 },
+    /// Heal to full (character must be online)
+    Heal { player: String },
+    /// Revive (character must be online)
+    Revive { player: String },
+    /// Summon a creature next to the character (must be online)
+    #[command(allow_negative_numbers = true)]
+    Summon { player: String, entry: i32 },
+    /// Set an at-next-login flag: rename | customize | changerace | changefaction
+    AtLogin { player: String, flag: String },
+}
+
+/// `dml-wow party …` — the playerbot party arms this task ports. NOT here
+/// (still launcher-only, see the task report): `dismiss-all`, `preset-show`,
+/// `preset-import`.
+#[derive(Subcommand, Debug)]
+pub enum PartyCmd {
+    /// Spawn a bot of `class` and invite it to `player`'s party
+    Add {
+        player: String,
+        /// warrior|paladin|hunter|rogue|priest|shaman|mage|warlock|druid
+        class: String,
+        #[arg(long)]
+        gender: Option<String>,
+        /// A premade spec name, e.g. `frost pve`
+        #[arg(long)]
+        spec: Option<String>,
+    },
+    /// Kick one bot from the party and send it to log out
+    Kick { player: String, bot: String },
+    /// Log a bot back in and re-invite it
+    Relogin { player: String, bot: String },
+    /// Whisper one bot a maintenance action: gear | talents | maintain | spec
+    Botcmd {
+        player: String,
+        bot: String,
+        action: String,
+        /// Required when `action` is `spec`
+        #[arg(long)]
+        spec: Option<String>,
+    },
+    /// Save the caller's current bot party as a named class-list preset
+    PresetSave { player: String, name: String },
+    /// List saved presets
+    PresetList,
+    /// Delete a saved preset
+    PresetDelete { name: String },
+    /// Replace the current party with a preset — STREAMS NDJSON events
+    PresetLoad { player: String, name: String },
 }
 
 /// The parsed form of `item-info`'s positional argument. A thin newtype
@@ -591,6 +737,307 @@ mod tests {
             vec!["dml-wow", "item-info", "25,,116"],
             vec!["dml-wow", "item-info", "25, 116"], // whitespace not allowed
             vec!["dml-wow", "item-info", ""],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    // -- Task 13: SOAP actions, accounts, GM, mail/teleport/motd, party -----
+
+    #[test]
+    fn console_joins_every_remaining_token() {
+        match Cli::try_parse_from(["dml-wow", "console", "server", "info"]).unwrap().command {
+            Cmd::Console { command } => assert_eq!(command, vec!["server", "info"]),
+            other => panic!("expected Console, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn console_requires_at_least_one_token() {
+        assert!(Cli::try_parse_from(["dml-wow", "console"]).is_err());
+    }
+
+    #[test]
+    fn parses_account_arms() {
+        match Cli::try_parse_from(["dml-wow", "account", "create", "bob", "pw12"]).unwrap().command {
+            Cmd::Account { cmd: AccountCmd::Create { user, pass } } => {
+                assert_eq!(user, "bob");
+                assert_eq!(pass, "pw12");
+            }
+            other => panic!("expected Account Create, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "account", "set-password", "bob", "pw12"])
+            .unwrap()
+            .command
+        {
+            Cmd::Account { cmd: AccountCmd::SetPassword { user, .. } } => assert_eq!(user, "bob"),
+            other => panic!("expected Account SetPassword, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "account", "set-gm", "bob", "3"]).unwrap().command {
+            Cmd::Account { cmd: AccountCmd::SetGm { user, level } } => {
+                assert_eq!(user, "bob");
+                // A STRING, not a number: `account_set_gm_cmd` matches the
+                // literal "0".."3" exactly like bash's regex, so "9999" must
+                // reach it as a domain BAD_ARG rather than dying as a clap
+                // integer-parse usage error.
+                assert_eq!(level, "3");
+            }
+            other => panic!("expected Account SetGm, got {other:?}"),
+        }
+        assert_eq!(
+            match Cli::try_parse_from(["dml-wow", "account", "set-gm", "bob", "9999"])
+                .unwrap()
+                .command
+            {
+                Cmd::Account { cmd: AccountCmd::SetGm { level, .. } } => level,
+                other => panic!("expected Account SetGm, got {other:?}"),
+            },
+            "9999"
+        );
+        match Cli::try_parse_from(["dml-wow", "account", "delete", "bob"]).unwrap().command {
+            Cmd::Account { cmd: AccountCmd::Delete { user } } => assert_eq!(user, "bob"),
+            other => panic!("expected Account Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn account_arms_require_their_positionals() {
+        for argv in [
+            vec!["dml-wow", "account"],
+            vec!["dml-wow", "account", "create"],
+            vec!["dml-wow", "account", "create", "bob"],
+            vec!["dml-wow", "account", "set-password", "bob"],
+            vec!["dml-wow", "account", "set-gm", "bob"],
+            vec!["dml-wow", "account", "delete"],
+            vec!["dml-wow", "account", "nope", "bob"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn parses_gm_arms() {
+        match Cli::try_parse_from(["dml-wow", "gm", "level", "Testen", "80"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Level { player, level } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(level, 80);
+            }
+            other => panic!("expected Gm Level, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "gm", "gold", "Testen", "5"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Gold { player, gold } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(gold, 5);
+            }
+            other => panic!("expected Gm Gold, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "gm", "heal", "Testen"]).unwrap().command,
+            Cmd::Gm { cmd: GmCmd::Heal { .. } }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "gm", "revive", "Testen"]).unwrap().command,
+            Cmd::Gm { cmd: GmCmd::Revive { .. } }
+        ));
+        match Cli::try_parse_from(["dml-wow", "gm", "summon", "Testen", "190"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Summon { entry, .. } } => assert_eq!(entry, 190),
+            other => panic!("expected Gm Summon, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "gm", "at-login", "Testen", "rename"]).unwrap().command
+        {
+            Cmd::Gm { cmd: GmCmd::AtLogin { flag, .. } } => assert_eq!(flag, "rename"),
+            other => panic!("expected Gm AtLogin, got {other:?}"),
+        }
+    }
+
+    /// A NEGATIVE number must reach the builder (which answers BAD_ARG/exit 1
+    /// with the value in the message) rather than being swallowed by clap as
+    /// an unknown flag — hence `allow_negative_numbers` on these three arms.
+    #[test]
+    fn gm_numeric_arms_accept_negative_values_for_the_builder_to_reject() {
+        match Cli::try_parse_from(["dml-wow", "gm", "level", "Testen", "-5"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Level { level, .. } } => assert_eq!(level, -5),
+            other => panic!("expected Gm Level, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "gm", "gold", "Testen", "-1"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Gold { gold, .. } } => assert_eq!(gold, -1),
+            other => panic!("expected Gm Gold, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "gm", "summon", "Testen", "-3"]).unwrap().command {
+            Cmd::Gm { cmd: GmCmd::Summon { entry, .. } } => assert_eq!(entry, -3),
+            other => panic!("expected Gm Summon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gm_arms_require_their_positionals_and_reject_non_numbers() {
+        for argv in [
+            vec!["dml-wow", "gm"],
+            vec!["dml-wow", "gm", "level", "Testen"],
+            vec!["dml-wow", "gm", "gold", "Testen"],
+            vec!["dml-wow", "gm", "heal"],
+            vec!["dml-wow", "gm", "summon", "Testen"],
+            vec!["dml-wow", "gm", "at-login", "Testen"],
+            vec!["dml-wow", "gm", "level", "Testen", "abc"],
+            vec!["dml-wow", "gm", "return-home", "Testen"], // not ported yet
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn parses_mail_item_with_defaults_and_flags() {
+        match Cli::try_parse_from(["dml-wow", "mail-item", "Testen", "6948:1"]).unwrap().command {
+            Cmd::MailItem { to, items, subject, body } => {
+                assert_eq!(to, "Testen");
+                assert_eq!(items, vec!["6948:1"]);
+                assert_eq!(subject, "Dad's MMO Lab");
+                assert_eq!(body, "Enjoy!");
+            }
+            other => panic!("expected MailItem, got {other:?}"),
+        }
+        // Several specs as separate tokens...
+        match Cli::try_parse_from([
+            "dml-wow", "mail-item", "Testen", "6948:1", "2589:5", "--subject", "hi", "--body", "yo",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::MailItem { items, subject, body, .. } => {
+                assert_eq!(items, vec!["6948:1", "2589:5"]);
+                assert_eq!(subject, "hi");
+                assert_eq!(body, "yo");
+            }
+            other => panic!("expected MailItem, got {other:?}"),
+        }
+        // ...and `--text` is accepted as an alias of `--body` (the brief's
+        // spelling; `--body` is the bash/launcher one).
+        match Cli::try_parse_from(["dml-wow", "mail-item", "Testen", "1:1", "--text", "yo"])
+            .unwrap()
+            .command
+        {
+            Cmd::MailItem { body, .. } => assert_eq!(body, "yo"),
+            other => panic!("expected MailItem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mail_item_requires_recipient_and_at_least_one_spec() {
+        assert!(Cli::try_parse_from(["dml-wow", "mail-item"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "mail-item", "Testen"]).is_err());
+    }
+
+    #[test]
+    fn parses_teleport_and_motd() {
+        match Cli::try_parse_from(["dml-wow", "teleport", "Testen", "Orgrimmar"]).unwrap().command {
+            Cmd::Teleport { char_name, to } => {
+                assert_eq!(char_name, "Testen");
+                assert_eq!(to, "Orgrimmar");
+            }
+            other => panic!("expected Teleport, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "motd", "Welcome to the Lab!"]).unwrap().command {
+            Cmd::Motd { text } => assert_eq!(text, "Welcome to the Lab!"),
+            other => panic!("expected Motd, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["dml-wow", "teleport", "Testen"]).is_err());
+        assert!(Cli::try_parse_from(["dml-wow", "motd"]).is_err());
+        // `teleport` and the Task 12 `teleport-list` reader stay distinct.
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "teleport-list"]).unwrap().command,
+            Cmd::TeleportList { .. }
+        ));
+    }
+
+    #[test]
+    fn parses_party_arms() {
+        match Cli::try_parse_from(["dml-wow", "party", "add", "Testen", "priest"]).unwrap().command {
+            Cmd::Party { cmd: PartyCmd::Add { player, class, gender, spec } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(class, "priest");
+                assert_eq!(gender, None);
+                assert_eq!(spec, None);
+            }
+            other => panic!("expected Party Add, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "party", "add", "Testen", "priest", "--gender", "female", "--spec",
+            "shadow pve",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Party { cmd: PartyCmd::Add { gender, spec, .. } } => {
+                assert_eq!(gender.as_deref(), Some("female"));
+                assert_eq!(spec.as_deref(), Some("shadow pve"));
+            }
+            other => panic!("expected Party Add, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "party", "kick", "Testen", "Botty"]).unwrap().command {
+            Cmd::Party { cmd: PartyCmd::Kick { player, bot } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(bot, "Botty");
+            }
+            other => panic!("expected Party Kick, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "party", "relogin", "Testen", "Botty"]).unwrap().command,
+            Cmd::Party { cmd: PartyCmd::Relogin { .. } }
+        ));
+        match Cli::try_parse_from(["dml-wow", "party", "botcmd", "Testen", "Botty", "gear"])
+            .unwrap()
+            .command
+        {
+            Cmd::Party { cmd: PartyCmd::Botcmd { action, spec, .. } } => {
+                assert_eq!(action, "gear");
+                assert_eq!(spec, None);
+            }
+            other => panic!("expected Party Botcmd, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "party", "preset-save", "Testen", "raiders"])
+            .unwrap()
+            .command
+        {
+            Cmd::Party { cmd: PartyCmd::PresetSave { player, name } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(name, "raiders");
+            }
+            other => panic!("expected Party PresetSave, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "party", "preset-list"]).unwrap().command,
+            Cmd::Party { cmd: PartyCmd::PresetList }
+        ));
+        match Cli::try_parse_from(["dml-wow", "party", "preset-delete", "raiders"]).unwrap().command
+        {
+            Cmd::Party { cmd: PartyCmd::PresetDelete { name } } => assert_eq!(name, "raiders"),
+            other => panic!("expected Party PresetDelete, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "party", "preset-load", "Testen", "raiders"])
+            .unwrap()
+            .command
+        {
+            Cmd::Party { cmd: PartyCmd::PresetLoad { player, name } } => {
+                assert_eq!(player, "Testen");
+                assert_eq!(name, "raiders");
+            }
+            other => panic!("expected Party PresetLoad, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn party_arms_require_their_positionals() {
+        for argv in [
+            vec!["dml-wow", "party"],
+            vec!["dml-wow", "party", "add", "Testen"],
+            vec!["dml-wow", "party", "kick", "Testen"],
+            vec!["dml-wow", "party", "relogin", "Testen"],
+            vec!["dml-wow", "party", "botcmd", "Testen", "Botty"],
+            vec!["dml-wow", "party", "preset-save", "Testen"],
+            vec!["dml-wow", "party", "preset-delete"],
+            vec!["dml-wow", "party", "preset-load", "Testen"],
+            vec!["dml-wow", "party", "preset-list", "extra"],
+            vec!["dml-wow", "party", "nope"],
         ] {
             assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
         }

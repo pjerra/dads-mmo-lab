@@ -473,6 +473,390 @@ fn item_info_malformed_ids_is_usage_error_exit_2() {
     assert_eq!(envelope["error"]["code"], "BAD_ARGS");
 }
 
+// ---------------------------------------------------------------------------
+// Task 13: every validated argument of the SOAP/account/GM/mail/teleport/motd/
+// party family gets a rejection test proving its guard fires BEFORE any side
+// effect.
+//
+// HOW THE "no side effect" HALF IS PROVEN, without needing a server up OR
+// down: [`Sealed`] points the child at a SOAP endpoint and a MySQL port that
+// are both guaranteed dead (127.0.0.1:1 — nothing may bind port 1), and gives
+// it a private HOME/USERPROFILE + games dir. So for every case below there are
+// only three possible outcomes, and they are mutually exclusive:
+//
+//   * the guard fires first        -> BAD_ARG      (what each test asserts)
+//   * the SOAP call was reached    -> SOAP_UNREACHABLE
+//   * a DB read was reached        -> DB_UNREACHABLE, or the NOT_FOUND that
+//                                     `char_is_online`/`party_online_guid`
+//                                     produce when they swallow a DB failure
+//
+// Asserting BAD_ARG (and the exact message) therefore proves the ordering, not
+// merely that an error happened. The preset arms additionally snapshot the
+// private home dir to prove no file was created, moved or deleted.
+// ---------------------------------------------------------------------------
+
+/// A child-process sandbox with every outside resource sealed off: a dead SOAP
+/// endpoint, a dead DB port, and a private home + games dir. Anything that
+/// escapes a guard hits a wall instead of the user's real server.
+struct Sealed {
+    root: PathBuf,
+}
+
+impl Sealed {
+    fn new(tag: &str) -> Sealed {
+        let root = std::env::temp_dir().join(format!("dml-cli-t13-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("home")).unwrap();
+        fs::create_dir_all(root.join("games")).unwrap();
+        Sealed { root }
+    }
+
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// `~/.dml/party-presets`, the dir `party::preset_dir()` resolves to
+    /// inside this sandbox.
+    fn presets(&self) -> PathBuf {
+        self.home().join(".dml").join("party-presets")
+    }
+
+    fn cmd(&self, args: &[&str]) -> Command {
+        let mut c = bin();
+        c.args(args)
+            // Dead SOAP endpoint: port 1 can never be bound, so ANY SOAP call
+            // that gets past a guard reports SOAP_UNREACHABLE.
+            .env("DML_SOAP_URL", "http://127.0.0.1:1/")
+            .env("DML_SOAP_USER", "sealed")
+            .env("DML_SOAP_PASS", "sealed")
+            // Dead MySQL port, same idea (see Task 12's
+            // `db_unreachable_reports_the_launchers_exact_hint`).
+            .env("DOCKER_DB_EXTERNAL_PORT", "1")
+            // Private state dir: `~/.dml/party-presets` and `~/.dml/soap.env`
+            // both resolve in here, never in the developer's real home.
+            .env("USERPROFILE", self.home())
+            .env("HOME", self.home())
+            .env("DML_GAMES_DIR", self.root.join("games"));
+        c
+    }
+
+    /// Run `dml-wow <args>` sealed; returns (exit code, stdout envelope).
+    fn run(&self, args: &[&str]) -> (i32, serde_json::Value) {
+        let out = self
+            .cmd(args)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn dml-wow {args:?}: {e}"));
+        (out.status.code().unwrap_or(-1), parse_envelope(&out.stdout))
+    }
+
+    /// Every file under the private home, as (relative path, bytes).
+    fn home_snapshot(&self) -> Vec<(PathBuf, Vec<u8>)> {
+        fn walk(dir: &Path, base: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            let Ok(rd) = fs::read_dir(dir) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, base, out);
+                } else if let Ok(bytes) = fs::read(&p) {
+                    out.push((p.strip_prefix(base).unwrap_or(&p).to_path_buf(), bytes));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.home(), &self.home(), &mut out);
+        out.sort();
+        out
+    }
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Assert one sealed invocation is a BAD_ARG error envelope with `message`,
+/// exit 1 — i.e. the guard beat the SOAP/DB call to it.
+fn assert_bad_arg(s: &Sealed, args: &[&str], message: &str) {
+    let (code, envelope) = s.run(args);
+    assert_eq!(code, 1, "{args:?} should be an error envelope, got: {envelope}");
+    assert_eq!(envelope["ok"], false, "{args:?}: {envelope}");
+    assert_eq!(
+        envelope["error"]["code"], "BAD_ARG",
+        "{args:?} must be refused by its guard, not by the sealed SOAP/DB endpoint: {envelope}"
+    );
+    assert_eq!(envelope["error"]["message"], message, "{args:?}: {envelope}");
+}
+
+/// `console` rejects a WHITESPACE-only command (not merely an empty one)
+/// before dialling SOAP.
+#[test]
+fn console_whitespace_only_command_is_refused_before_any_soap_call() {
+    let s = Sealed::new("console");
+    assert_bad_arg(&s, &["console", "   "], "console-send requires a non-empty --command");
+    // Sanity check on the seal itself: a WELL-FORMED command DOES reach SOAP
+    // and reports the dead endpoint. Without this, the assertion above could
+    // pass for the wrong reason (e.g. if the arm were broken and always said
+    // BAD_ARG).
+    let (code, envelope) = s.run(&["console", "server", "info"]);
+    assert_eq!(code, 1);
+    assert_eq!(envelope["error"]["code"], "SOAP_UNREACHABLE", "{envelope}");
+}
+
+#[test]
+fn account_arms_reject_bad_credentials_before_any_soap_call() {
+    let s = Sealed::new("account");
+    assert_bad_arg(&s, &["account", "create", "ab", "pw12"], "Invalid username (3-20 letters/digits/_)");
+    assert_bad_arg(
+        &s,
+        &["account", "create", "bob", "x"],
+        "Invalid password (4-16 chars, letters/digits/_@#%+=!-)",
+    );
+    assert_bad_arg(&s, &["account", "set-password", "bob", "x"], "Invalid password (4-16 chars, letters/digits/_@#%+=!-)");
+    assert_bad_arg(&s, &["account", "set-gm", "bob", "4"], "--level must be 0-3");
+    // An out-of-u8 level is still a DOMAIN rejection (exit 1), not a clap
+    // integer-parse usage error -- that is why `set-gm`'s level is a String.
+    assert_bad_arg(&s, &["account", "set-gm", "bob", "9999"], "--level must be 0-3");
+    // The admin-account refusal is a guard too: it must never reach SOAP.
+    assert_bad_arg(&s, &["account", "delete", "ADMIN"], "Refusing to delete the admin account");
+}
+
+#[test]
+fn gm_arms_reject_bad_names_levels_and_entries_before_any_soap_or_db_call() {
+    let s = Sealed::new("gm");
+    // The brief's own example.
+    assert_bad_arg(&s, &["gm", "level", "bad name", "10"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["gm", "level", "Testen", "256"], "Invalid level: 256");
+    assert_bad_arg(&s, &["gm", "level", "Testen", "0"], "Invalid level: 0");
+    assert_bad_arg(&s, &["gm", "level", "Testen", "-5"], "Invalid level: -5");
+    assert_bad_arg(&s, &["gm", "at-login", "Testen", "resurrect"], "Invalid flag: resurrect");
+    assert_bad_arg(&s, &["gm", "gold", "Testen", "214749"], "Invalid gold amount: 214749");
+    assert_bad_arg(&s, &["gm", "summon", "Testen", "0"], "Invalid creature entry: 0");
+    assert_bad_arg(&s, &["gm", "summon", "Testen", "1000000"], "Invalid creature entry: 1000000");
+    // The three bridge ops validate the NAME before the online DB check --
+    // otherwise this would come back NOT_FOUND (`char_is_online` swallows the
+    // sealed DB's failure and reads as "not online"), not BAD_ARG.
+    assert_bad_arg(&s, &["gm", "heal", "bad name"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["gm", "revive", "bad name"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["gm", "gold", "bad name", "5"], "Invalid player name: bad name");
+}
+
+/// The ordering that the sealed DB makes visible: for a VALID name, `gm heal`
+/// gets past the guard and is stopped by the online check -- proving the
+/// BAD_ARG cases above really were the guard and not a blanket refusal.
+#[test]
+fn gm_heal_valid_name_reaches_the_online_check_and_stops_there() {
+    let s = Sealed::new("gmorder");
+    let (code, envelope) = s.run(&["gm", "heal", "Testen"]);
+    assert_eq!(code, 1);
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND", "{envelope}");
+    assert_eq!(envelope["error"]["message"], "Character not online: Testen");
+    assert_eq!(
+        envelope["error"]["hint"],
+        "This action needs the character logged in. (Set level works offline.)"
+    );
+}
+
+#[test]
+fn mail_item_rejects_bad_recipient_specs_and_counts_before_any_soap_call() {
+    let s = Sealed::new("mail");
+    assert_bad_arg(&s, &["mail-item", "bad name", "6948:1"], "Invalid character name: bad name");
+    assert_bad_arg(&s, &["mail-item", "Testen", "nope"], "Malformed item spec: nope");
+    assert_bad_arg(&s, &["mail-item", "Testen", "6948"], "Malformed item spec: 6948");
+    // An empty items token splits to ZERO fields (bash's `IFS=','` semantics),
+    // so it lands on the COUNT error, not the spec one.
+    assert_bad_arg(&s, &["mail-item", "Testen", ""], "Provide 1-12 items as id:count[,id:count…]");
+    // 13 specs, given as one comma list -- the 1-12 cap.
+    let thirteen = vec!["1:1"; 13].join(",");
+    assert_bad_arg(
+        &s,
+        &["mail-item", "Testen", &thirteen],
+        "Provide 1-12 items as id:count[,id:count…]",
+    );
+}
+
+#[test]
+fn teleport_rejects_bad_character_and_location_before_any_soap_call() {
+    let s = Sealed::new("tele");
+    assert_bad_arg(&s, &["teleport", "bad name", "Orgrimmar"], "Invalid character name: bad name");
+    // A multi-word destination is refused rather than quote-wrapped: AC's
+    // console parser keeps quotes LITERAL, so quoting would not have helped.
+    assert_bad_arg(&s, &["teleport", "Testen", "bad name"], "Invalid location name: bad name");
+    assert_bad_arg(&s, &["teleport", "Testen", ""], "Missing --to <location>");
+}
+
+/// `motd` goes through `config_set`'s `server.motd` special case, so its first
+/// guard is that special case's own installed-server check -- reached before
+/// any SOAP call. (The sanitization that strips quotes/CR-LF runs immediately
+/// after, inside the same function; it has its own library coverage.)
+#[test]
+fn motd_is_refused_when_no_server_is_installed_before_any_soap_call() {
+    let s = Sealed::new("motd");
+    let (code, envelope) = s.run(&["motd", "Welcome \"home\"\nfriends"]);
+    assert_eq!(code, 1);
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND", "{envelope}");
+    assert_eq!(envelope["error"]["message"], "WoW Playerbots server not installed");
+}
+
+#[test]
+fn party_add_rejects_bad_player_class_gender_and_spec_before_any_soap_or_db_call() {
+    let s = Sealed::new("partyadd");
+    assert_bad_arg(&s, &["party", "add", "bad name", "warrior"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["party", "add", "Testen", "deathknight"], "Invalid class: deathknight");
+    assert_bad_arg(
+        &s,
+        &["party", "add", "Testen", "warrior", "--gender", "other"],
+        "Invalid gender: other",
+    );
+    // No playerbots.conf is deployed in the sealed games dir, so the spec
+    // check falls back to the static premade-name mirror -- and rejects.
+    assert_bad_arg(
+        &s,
+        &["party", "add", "Testen", "warrior", "--spec", "bear pvp"],
+        "Unknown spec: bear pvp",
+    );
+}
+
+#[test]
+fn party_kick_relogin_and_botcmd_reject_bad_input_before_any_soap_or_db_call() {
+    let s = Sealed::new("partycmds");
+    // `kick` validates the MASTER itself (its own hint) -- the uninvite
+    // builder only ever sees the bot.
+    let (code, envelope) = s.run(&["party", "kick", "bad name", "Botty"]);
+    assert_eq!(code, 1);
+    assert_eq!(envelope["error"]["code"], "BAD_ARG", "{envelope}");
+    assert_eq!(envelope["error"]["message"], "Invalid player name: bad name");
+    assert_eq!(
+        envelope["error"]["hint"],
+        "Kick needs --player (the bot's master) so the bot can also be dismissed."
+    );
+
+    assert_bad_arg(&s, &["party", "kick", "Testen", "bad bot"], "Invalid bot name: bad bot");
+    assert_bad_arg(&s, &["party", "relogin", "bad name", "Botty"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["party", "relogin", "Testen", "bad bot"], "Invalid bot name: bad bot");
+
+    assert_bad_arg(&s, &["party", "botcmd", "bad name", "Botty", "gear"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["party", "botcmd", "Testen", "bad bot", "gear"], "Invalid bot name: bad bot");
+    assert_bad_arg(&s, &["party", "botcmd", "Testen", "Botty", "dance"], "Invalid action: dance");
+    assert_bad_arg(
+        &s,
+        &["party", "botcmd", "Testen", "Botty", "spec"],
+        "Action spec requires --spec <name>",
+    );
+    assert_bad_arg(
+        &s,
+        &["party", "botcmd", "Testen", "Botty", "spec", "--spec", "nonsense"],
+        "Unknown spec: nonsense",
+    );
+}
+
+/// The preset arms' name guard is a PATH-TRAVERSAL guard: it must fire before
+/// `~/.dml/party-presets` is ever joined with the argument. Proven by
+/// snapshotting the whole private home before and after.
+#[test]
+fn preset_arms_reject_traversal_names_and_touch_no_file() {
+    let s = Sealed::new("presetguard");
+    fs::create_dir_all(s.presets()).unwrap();
+    fs::write(s.presets().join("keepme"), "warrior\n").unwrap();
+    let before = s.home_snapshot();
+
+    assert_bad_arg(&s, &["party", "preset-save", "Testen", "../evil"], "Invalid preset name: ../evil");
+    assert_bad_arg(&s, &["party", "preset-delete", "../evil"], "Invalid preset name: ../evil");
+    assert_bad_arg(&s, &["party", "preset-load", "Testen", "../evil"], "Invalid preset name: ../evil");
+    assert_bad_arg(&s, &["party", "preset-save", "bad name", "raiders"], "Invalid player name: bad name");
+    assert_bad_arg(&s, &["party", "preset-load", "bad name", "raiders"], "Invalid player name: bad name");
+
+    assert_eq!(s.home_snapshot(), before, "a refused preset command must not change ANY file");
+    assert!(!s.root.parent().unwrap().join("evil").exists(), "nothing may escape the preset dir");
+}
+
+/// `preset-load` is the CLI's first STREAMING subcommand, so its guards have
+/// an extra obligation: a rejection is ONE ordinary error envelope, never a
+/// half-emitted NDJSON stream. (A stream that had started would have printed a
+/// `section_start` line first.)
+#[test]
+fn preset_load_guard_emits_exactly_one_envelope_not_a_stream() {
+    let s = Sealed::new("presetload");
+    let out = s
+        .cmd(&["party", "preset-load", "bad name", "raiders"])
+        .output()
+        .expect("spawn dml-wow party preset-load");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), 1, "expected one envelope, got a stream: {stdout:?}");
+    let envelope: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "BAD_ARG");
+    assert!(envelope["event"].is_null(), "an envelope, not a stream event: {envelope}");
+}
+
+/// A well-formed `preset-load` for a preset that does not exist stops at the
+/// NOT_FOUND check -- and does so as a STREAM (section_start -> section_end ->
+/// error), exiting 1 off the terminal `error` event. This is the wiring later
+/// streaming tasks copy, so it is pinned here.
+#[test]
+fn preset_load_missing_preset_streams_an_error_event_and_exits_1() {
+    let s = Sealed::new("presetmissing");
+    let out = s
+        .cmd(&["party", "preset-load", "Testen", "nosuchpreset"])
+        .output()
+        .expect("spawn dml-wow party preset-load");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l:?}")))
+        .collect();
+    assert_eq!(events.first().map(|e| e["event"].clone()), Some(serde_json::json!("section_start")));
+    let last = events.last().expect("at least one event");
+    assert_eq!(last["event"], "error");
+    assert_eq!(last["error"]["code"], "NOT_FOUND");
+    assert_eq!(last["error"]["message"], "No preset named nosuchpreset");
+}
+
+/// The preset read/write family, end to end inside the private home: list an
+/// empty dir, fail to delete something absent, then delete something present.
+/// No server of any kind is involved.
+#[test]
+fn preset_list_and_delete_round_trip_in_a_private_home() {
+    let s = Sealed::new("presetrt");
+
+    // (1) No preset dir at all -> an empty list, not an error.
+    let (code, envelope) = s.run(&["party", "preset-list"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["presets"].as_array().expect("presets[]").len(), 0);
+
+    // (2) Two presets, one with an invalid on-disk name that must be skipped.
+    fs::create_dir_all(s.presets()).unwrap();
+    fs::write(s.presets().join("raiders"), "warrior\npriest\nmage\n").unwrap();
+    fs::write(s.presets().join("duo"), "warrior\npriest\n").unwrap();
+    fs::write(s.presets().join("bad name"), "warrior\n").unwrap();
+    let (code, envelope) = s.run(&["party", "preset-list"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(
+        envelope["data"]["presets"],
+        serde_json::json!([{"name": "duo", "bots": 2}, {"name": "raiders", "bots": 3}])
+    );
+
+    // (3) Deleting a preset that isn't there is NOT_FOUND, and removes nothing.
+    let before = s.home_snapshot();
+    let (code, envelope) = s.run(&["party", "preset-delete", "nosuch"]);
+    assert_eq!(code, 1);
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND");
+    assert_eq!(envelope["error"]["message"], "No preset named nosuch");
+    assert_eq!(s.home_snapshot(), before);
+
+    // (4) Deleting a real one works and removes exactly that file.
+    let (code, envelope) = s.run(&["party", "preset-delete", "duo"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["deleted"], true);
+    assert_eq!(envelope["data"]["name"], "duo");
+    assert!(!s.presets().join("duo").exists());
+    assert!(s.presets().join("raiders").exists());
+}
+
 /// (5b) item-info's 25-id CAP (review finding 2) is a `run.rs` domain
 /// rejection, exit 1 -- distinct from the exit-2 format check above, and
 /// matching the bash/launcher siblings' exact wording ("--entries max 25 ids
