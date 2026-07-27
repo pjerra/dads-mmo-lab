@@ -38,6 +38,16 @@ $WslConfig   = "$env:USERPROFILE\.wslconfig"
 $DesktopLnk  = "$env:USERPROFILE\Desktop\DML Launcher.lnk"
 $StartupLnk  = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\DML Launcher.lnk"
 
+# Read the install root NOW: Step 6 deletes the state directory that holds it,
+# and Step 8b (below) needs it to drop the Defender exclusion the installer
+# optionally added. Best-effort -- a missing or unreadable state file just means
+# that step reports "unknown" and skips.
+$InstallRoot = $null
+$StateFile   = "$StateDir\install-state.json"
+if (Test-Path $StateFile) {
+    try { $InstallRoot = (Get-Content $StateFile -Raw | ConvertFrom-Json).InstallRoot } catch { }
+}
+
 Write-Header
 
 Write-Host "  This will permanently remove:" -ForegroundColor White
@@ -185,6 +195,29 @@ if ($swept -gt 0) {
     Write-Ok "$swept port proxy rule(s) removed"
 } else {
     Write-Info "No DML port proxy rules found"
+}
+
+# Step 8b -- Remove the Defender exclusion the installer optionally added.
+# Without this, uninstalling leaves Defender permanently ignoring a folder
+# that no longer exists. Only the exact recorded install root is touched, so
+# unrelated exclusions survive.
+Write-Step "Checking for the DML Defender exclusion..."
+if ($InstallRoot) {
+    $exclusions = @()
+    try { $exclusions = @((Get-MpPreference).ExclusionPath) } catch { }
+    if ($exclusions -contains $InstallRoot) {
+        try {
+            Remove-MpPreference -ExclusionPath $InstallRoot -ErrorAction Stop
+            Write-Ok "Defender exclusion removed ($InstallRoot)"
+        } catch {
+            Write-Warn "Could not remove the Defender exclusion: $($_.Exception.Message)"
+            Write-Warn "Remove it by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+        }
+    } else {
+        Write-Info "No DML Defender exclusion found"
+    }
+} else {
+    Write-Info "Install location unknown -- skipping the Defender exclusion check"
 }
 
 # Step 9 -- Disable WSL Windows features (-RemoveWSL switch)
