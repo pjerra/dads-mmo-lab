@@ -142,7 +142,16 @@ impl DmlRunner {
     }
 
     /// Apply the optional PATH prepend to a command about to be spawned.
-    fn apply_env(&self, cmd: &mut Command) {
+    ///
+    /// `pub` (Task 15 review, Minor 3): `dml-wow-cli`'s `install` arm builds
+    /// its OWN `Command` from this struct's public `program`/`prefix_args`/
+    /// `path_prepend` fields rather than going through [`DmlRunner::command`]/
+    /// [`DmlRunner::command_raw`] (both of which set `CREATE_NO_WINDOW`, wrong
+    /// for an interactive console passthrough, and every other method on this
+    /// type pipes or nulls at least one stdio stream) — but the PATH-prepend
+    /// step itself is exactly this method, so that one piece is shared
+    /// instead of being re-derived by hand a second time.
+    pub fn apply_env(&self, cmd: &mut Command) {
         if let Some(dir) = &self.path_prepend {
             if let Some(p) = prepend_path(dir, std::env::var_os("PATH")) {
                 cmd.env("PATH", p);

@@ -157,6 +157,26 @@ pub fn address_mismatch_message(wanted: &str, got: Option<&str>) -> String {
     )
 }
 
+/// `true` iff `text` (one of [`lan_action`]'s returned messages) represents
+/// a DOMAIN FAILURE rather than a successful outcome — Task 15 review Fix 1.
+///
+/// `lan_action` is TEXT-mode by design (see the module doc comment), but a
+/// caller that maps EVERY returned string to an ok envelope (as the CLI did
+/// before this fix) contradicts both the oracle's own exit code AND this
+/// crate's "exit 0 iff ok" contract: the bash arm (`90-main.sh:858-1052`)
+/// is `echo "[dml] ERROR: ..."; exit 1` on every failure path, verbatim, and
+/// `exit 0` (or falls through to a plain `echo` with no such prefix) on
+/// every success path — including the three `refresh` no-ops
+/// ([`refresh_off_message`]/[`refresh_already_message`]/
+/// [`refresh_not_lan_message`]), which are worded WITHOUT the `[dml] ERROR:`
+/// prefix specifically so this classifier does not have to special-case
+/// them. A plain prefix check therefore reproduces the oracle's exit codes
+/// exactly — verified against every `*_message` constructor in this module,
+/// below.
+pub fn text_is_error(text: &str) -> bool {
+    text.starts_with("[dml] ERROR:")
+}
+
 // ---------------------------------------------------------------------------
 // Live orchestration — moved out of the launcher's `lib.rs` (Task 9).
 // Unlike every other hoisted command this one returns plain TEXT, not an
@@ -588,5 +608,41 @@ mod tests {
             validate_lan_request("on", Some("bad host;".into()), true).unwrap_err().code,
             "BAD_ARG"
         );
+    }
+
+    // -- text_is_error (Task 15 review Fix 1) --------------------------------
+    //
+    // Every `*_message` constructor in this module, sorted into the oracle's
+    // own two buckets (`90-main.sh:858-1052`): `echo "[dml] ERROR: ...";
+    // exit 1` vs everything else (`exit 0`). If a future edit adds a new
+    // message and puts it in the wrong bucket here, it belongs in the OTHER
+    // bucket in the bash arm too — these two tests are the oracle's exit
+    // codes, restated as an exhaustive table.
+
+    #[test]
+    fn text_is_error_matches_every_message_whose_bash_counterpart_exits_1() {
+        assert!(text_is_error(&not_installed_message()));
+        assert!(text_is_error(&docker_down_message()));
+        assert!(text_is_error(&not_running_message("wow-server-playerbots")));
+        assert!(text_is_error(&db_not_answering_message()));
+        assert!(text_is_error(&not_private_message("wow-server-playerbots", "8.8.8.8")));
+        assert!(text_is_error(&status_no_current_message()));
+        assert!(text_is_error(&update_failed_message()));
+        assert!(text_is_error(&address_mismatch_message("1.2.3.4", None)));
+        assert!(text_is_error(&address_mismatch_message("1.2.3.4", Some("9.9.9.9"))));
+    }
+
+    #[test]
+    fn text_is_error_is_false_for_every_message_whose_bash_counterpart_exits_0() {
+        assert!(!text_is_error(&on_message("wow-server-playerbots", "192.168.1.50")));
+        assert!(!text_is_error(&off_message("wow-server-playerbots")));
+        assert!(!text_is_error(&status_off_message()));
+        assert!(!text_is_error(&status_on_message("192.168.1.50")));
+        // The three refresh no-ops -- these are the cases a naive
+        // "does it start with [dml]" check would get wrong.
+        assert!(!text_is_error(&refresh_off_message("wow-server-playerbots")));
+        assert!(!text_is_error(&refresh_already_message("192.168.1.50")));
+        assert!(!text_is_error(&refresh_not_lan_message("8.8.8.8")));
+        assert!(!text_is_error(&refresh_done_message("192.168.1.50", "192.168.1.60")));
     }
 }

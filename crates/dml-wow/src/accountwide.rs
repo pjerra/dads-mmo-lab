@@ -356,13 +356,16 @@ pub fn build_get(server_dir: &Path) -> Value {
     })
 }
 
-/// `accountwide set` (`90-main.sh:4172-4231`). `server_dir` is assumed
-/// already resolved (the caller does the "WoW Playerbots server not
-/// installed" `NOT_FOUND` check first, matching the bash arm's ordering:
-/// `--value`/flag-shape validation happens BEFORE the server-dir resolve, so
-/// callers should validate those two first too — see `lib.rs`'s
-/// `wow_accountwide_set_native`).
-pub fn set_flag(server_dir: &Path, key: &str, value: &str, variant: Option<&str>) -> Result<Value, AwErr> {
+/// The `--value`/flag-name pre-checks `accountwide set` runs BEFORE the
+/// server-dir resolve (`wow_accountwide_set_native`'s ordering,
+/// lib.rs:2423-2457, and `set_flag` below) — hoisted to its own function
+/// (Task 15 review Fix 2) so [`set_flag`] and every CLI-side pre-check call
+/// the SAME wording instead of each carrying its own copy that could drift.
+/// This is the same fix Task 13's `e67d930` already applied to the party
+/// builders, for the identical reason: a hand-copied pre-check that happens
+/// to agree with the library today would silently stop agreeing the moment
+/// either copy's wording changed.
+pub fn validate_set_args(key: &str, value: &str) -> Result<(), AwErr> {
     if value != "on" && value != "off" {
         return Err(AwErr::new("BAD_ARG", "--value must be on or off", ""));
     }
@@ -373,6 +376,17 @@ pub fn set_flag(server_dir: &Path, key: &str, value: &str, variant: Option<&str>
             "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json",
         ));
     }
+    Ok(())
+}
+
+/// `accountwide set` (`90-main.sh:4172-4231`). `server_dir` is assumed
+/// already resolved (the caller does the "WoW Playerbots server not
+/// installed" `NOT_FOUND` check first, matching the bash arm's ordering:
+/// `--value`/flag-shape validation happens BEFORE the server-dir resolve, so
+/// callers should validate those two first too, via [`validate_set_args`] —
+/// see `lib.rs`'s `wow_accountwide_set_native`).
+pub fn set_flag(server_dir: &Path, key: &str, value: &str, variant: Option<&str>) -> Result<Value, AwErr> {
+    validate_set_args(key, value)?;
     if !aw_installed(server_dir) {
         return Err(AwErr::new(
             "NOT_INSTALLED",
@@ -776,6 +790,42 @@ mod tests {
         assert_eq!(v["reputation"]["active"], "default");
         assert_eq!(v["reputation"]["variants"], json!(["default"]));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- validate_set_args (Task 15 review Fix 2) ----------------------------
+    //
+    // `set_flag` itself is exercised via `set_flag_bad_value_or_flag_shape`
+    // below (proving it still rejects the same inputs after being rewritten
+    // to call this function) — these two pin the STANDALONE function so a
+    // caller-side pre-check (the CLI's `accountwide set` arm) can rely on the
+    // exact same `(code, message, hint)` the library uses internally.
+
+    #[test]
+    fn validate_set_args_rejects_bad_value_shape() {
+        let e = validate_set_args("ENABLE_ACCOUNTWIDE_MOUNTS", "maybe").unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "--value must be on or off");
+        assert_eq!(e.hint, "");
+    }
+
+    #[test]
+    fn validate_set_args_rejects_bad_flag_shape() {
+        let e = validate_set_args("NOT_A_FLAG", "on").unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Invalid flag name: NOT_A_FLAG");
+        assert_eq!(
+            e.hint,
+            "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json"
+        );
+    }
+
+    #[test]
+    fn validate_set_args_accepts_a_wellformed_pair() {
+        assert!(validate_set_args("ENABLE_ACCOUNTWIDE_MOUNTS", "on").is_ok());
+        assert!(validate_set_args("ENABLE_ACCOUNTWIDE_MOUNTS", "off").is_ok());
+        // A NOT-YET-REGISTERED-but-shape-valid flag still passes THIS check --
+        // the registry-membership rule is `set_flag`'s own, further down.
+        assert!(validate_set_args("ENABLE_SOMETHING_ELSE", "on").is_ok());
     }
 
     // -- set_flag: validation ------------------------------------------------

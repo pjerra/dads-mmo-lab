@@ -718,11 +718,41 @@ pub fn dispatch(command: Cmd) -> i32 {
                     // `wow_lan_native`'s `Result<String, CmdError>` (whose
                     // `Err` side is reserved for a `spawn_blocking` join
                     // failure, not reachable here since this CLI runs
-                    // synchronously). So this arm always emits an ok envelope
-                    // wrapping that text -- never an error envelope, mirroring
-                    // the launcher's own contract.
+                    // synchronously). BUT that text still needs to map to
+                    // THIS crate's own exit-code contract ("exit 0 iff ok"),
+                    // which folding every outcome into an ok envelope broke
+                    // (Task 15 review Fix 1): the bash oracle
+                    // (`90-main.sh:858-1052`) exits 1 on every `[dml] ERROR:
+                    // ...` message and 0 on everything else, so
+                    // `lan::text_is_error` (a plain prefix check, verified
+                    // against every `*_message` constructor in `lan.rs`'s own
+                    // tests) reproduces that split here. The success key is
+                    // `"result"`, matching bash's own `console-send --json`
+                    // precedent (`90-main.sh:1742`) rather than inventing a
+                    // second key for the same "raw text output" shape
+                    // `console` already uses (Task 15 review Minor 8).
                     let text = dml_wow::lan::lan_action(&action, ip_arg, inet);
-                    emit_ok(json!({ "output": text }))
+                    if dml_wow::lan::text_is_error(&text) {
+                        // Code choice: `LAN_ERROR`, a single generic code
+                        // rather than trying to name the specific failure
+                        // (not-installed / docker-down / not-running / DB-not-
+                        // answering / update-failed / address-mismatch).
+                        // `BAD_ARG` would be wrong (per the review) for most
+                        // of these -- they are runtime/environment states, not
+                        // a malformed argument -- and there is no existing
+                        // typed code to reuse: bash never emits JSON for this
+                        // arm at all (`lan on/off/status/refresh` has no
+                        // `--json` support, unlike `lan public-ip`), so there
+                        // is no oracle-side code to match, only the oracle's
+                        // exit-1/exit-0 split, which is what `text_is_error`
+                        // reproduces. The message text itself (already
+                        // human-readable and specific) IS the diagnostic;
+                        // `LAN_ERROR` only has to say "this text is a
+                        // failure," matching this command's TEXT-first design.
+                        emit_err("LAN_ERROR", &text, "")
+                    } else {
+                        emit_ok(json!({ "result": text }))
+                    }
                 }
                 Err(e) => emit_err(&e.code, &e.message, &e.hint),
             }
@@ -824,21 +854,18 @@ fn dispatch_accountwide(cmd: AccountwideCmd) -> i32 {
         AccountwideCmd::Set { key, value, variant } => {
             // GUARD SET (`wow_accountwide_set_native`, lib.rs:2423-2457), in
             // its EXACT order — value shape, then flag-name shape, BOTH
-            // before the server-dir resolve (`set_flag` re-validates both
-            // internally too, "belt and braces, not the only gate" per that
-            // wrapper's own doc comment; reproducing the pre-checks here is
-            // what keeps a bad `--value`/key rejected with BAD_ARG even
-            // against an uninstalled server, rather than NOT_FOUND winning
-            // by dumb luck of which check runs first).
-            if value != "on" && value != "off" {
-                return emit_err("BAD_ARG", "--value must be on or off", "");
-            }
-            if !dml_wow::accountwide::valid_flag(&key) {
-                return emit_err(
-                    "BAD_ARG",
-                    &format!("Invalid flag name: {key}"),
-                    "Flags look like ENABLE_ACCOUNTWIDE_MOUNTS -- see: dml wow accountwide get --json",
-                );
+            // before the server-dir resolve. The ORDER is this arm's own
+            // requirement (a bad `--value`/key must report BAD_ARG even
+            // against an uninstalled server, not NOT_FOUND by dumb luck of
+            // which check runs first) — but the WORDING is not: this calls
+            // `dml_wow::accountwide::validate_set_args`, the SAME function
+            // `set_flag` itself calls first (Task 15 review Fix 2), so this
+            // pre-check and the library's internal one can never drift, the
+            // way a hand-copied second copy of the same three strings could
+            // have (exactly what the Task 12 review banned, and what Task
+            // 13's `e67d930` already fixed for the party builders).
+            if let Err(e) = dml_wow::accountwide::validate_set_args(&key, &value) {
+                return emit_err(e.code, &e.message, &e.hint);
             }
             let title_dir = title_dir();
             let server_dir = match dml_wow::maint::resolve_server_dir(&title_dir) {
@@ -877,9 +904,14 @@ fn dispatch_accountwide(cmd: AccountwideCmd) -> i32 {
 // Desktop's bin dir on PATH included, so the installer's own `docker`
 // calls resolve exactly like every other native command's do). Its
 // `spawn_interactive`/`run_captured`/etc. methods are not used here because
-// every one of them pipes or nulls at least one stdio stream; a true
-// interactive passthrough needs all three INHERITED, so this builds its own
-// `Command` from those public fields instead.
+// every one of them pipes or nulls at least one stdio stream (and
+// `command`/`command_raw` both set `CREATE_NO_WINDOW`, wrong for a console
+// passthrough); a true interactive passthrough needs all three stdio
+// streams INHERITED and no suppressed console, so this builds its own
+// `Command` from those public fields instead. The PATH-prepend step itself
+// (Task 15 review Minor 3) IS shared, via `DmlRunner::apply_env` (made
+// `pub` for exactly this caller) rather than a second hand-rolled copy of
+// that logic living here.
 fn cmd_install(id: &str) -> i32 {
     if !valid_game_id(id) {
         let e = bad_id(id);
@@ -898,17 +930,7 @@ fn cmd_install(id: &str) -> i32 {
 
     let mut cmd = std::process::Command::new(&runner.program);
     cmd.args(&runner.prefix_args).args(["games", "install", id]);
-    if let Some(dir) = &runner.path_prepend {
-        if !dir.is_empty() {
-            let mut paths = vec![std::path::PathBuf::from(dir)];
-            if let Some(cur) = std::env::var_os("PATH") {
-                paths.extend(std::env::split_paths(&cur));
-            }
-            if let Ok(joined) = std::env::join_paths(paths) {
-                cmd.env("PATH", joined);
-            }
-        }
-    }
+    runner.apply_env(&mut cmd);
     // ALL THREE stdio streams inherited -- no pipes -- so the installer's
     // prompts and the user's answers pass straight through. This is the
     // task brief's ONE deliberate non-JSON, non-NDJSON command: no envelope
@@ -918,13 +940,32 @@ fn cmd_install(id: &str) -> i32 {
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    match cmd.spawn().and_then(|mut child| child.wait()) {
-        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
-        // Unreachable in ordinary operation (the preflight above just
-        // confirmed both resolve) short of a race (the file vanishing
-        // between the check and the spawn) or a permissions error -- handled
-        // rather than unwrapped, but deliberately its own distinct code so it
-        // is never mistaken for the preflight's own INSTALL_PREREQS.
+    // Split, rather than `cmd.spawn().and_then(|mut child| child.wait())`
+    // (Task 15 review Minor 5): those are two DIFFERENT failures with two
+    // different truths. A `spawn()` failure means the installer never ran
+    // at all -- "failed to launch" is accurate. A `wait()` failure means it
+    // DID launch (and, with stdio inherited, may still be running or have
+    // already finished) -- conflating the two into one "failed to launch"
+    // message would be a lie in the second case, on top of silently
+    // dropping the (possibly still-live) child.
+    match cmd.spawn() {
+        Ok(mut child) => match child.wait() {
+            Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+            Err(e) => emit_err(
+                "INSTALL_WAIT_FAILED",
+                &format!("the installer started but could not be waited on: {e}"),
+                "",
+            ),
+        },
+        // Deterministically reachable (Task 15 review Minor 6), not merely a
+        // theoretical race: point `DML_BASH` at a real, non-executable file
+        // (it passes the preflight's `Path::is_file()` check, then
+        // `CreateProcess` itself refuses it -- Windows os error 193, "%1 is
+        // not a valid Win32 application") -- see
+        // `install_reports_install_spawn_failed_for_a_non_executable_bash`
+        // in `tests/cli_integration.rs`. Handled rather than unwrapped, and
+        // deliberately its own distinct code so it is never mistaken for the
+        // preflight's own INSTALL_PREREQS.
         Err(e) => emit_err(
             "INSTALL_SPAWN_FAILED",
             &format!("failed to launch the installer: {e}"),
@@ -946,6 +987,13 @@ fn cmd_install(id: &str) -> i32 {
 /// a manual PATH walk instead, since `Command::spawn` performs that same
 /// resolution internally and there is no portable "does this resolve"
 /// query short of trying it.
+///
+/// KNOWN LIMITATION (Task 15 review Minor 4, recorded not fixed): this only
+/// approximates `CreateProcess`'s own search — `PATH` plus a bare `.exe`
+/// fallback, no `PATHEXT` (`.bat`/`.cmd`/etc.) — and arguably belongs next to
+/// `find_bash` in `dml_core::runner` rather than in this CLI crate; both are
+/// acceptable because the gap fails CLOSED (a `PATHEXT`-only match would be
+/// reported as "not found," never the reverse), not silently wrong.
 fn resolves_on_path_or_disk(candidate: &std::ffi::OsStr) -> bool {
     let text = candidate.to_string_lossy();
     if text.contains(['\\', '/']) {

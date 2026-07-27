@@ -1465,18 +1465,42 @@ fn lan_rejects_bad_input_before_any_docker_or_db_probe() {
     assert_eq!(envelope["error"]["hint"], "Check the value and try again.");
 
     // Sanity check on the seal itself (same doctrine as `console`'s own
-    // companion check above): a WELL-FORMED call passes validation and
-    // reaches `lan_action`'s own first gate (server not installed, since the
-    // sealed DML_GAMES_DIR is empty) -- an OK envelope, not an error, because
-    // `lan_action` is TEXT-mode (every domain outcome is folded into its
-    // `Ok(String)`; see `run.rs::dispatch`'s `Lan` arm doc comment). Without
-    // this, the BAD_ARG assertions above could be passing for the wrong
-    // reason (e.g. if the arm always answered BAD_ARG regardless of input).
+    // companion check above): a WELL-FORMED call passes `validate_lan_request`
+    // (no BAD_ARG) and reaches `lan_action`'s own first gate (server not
+    // installed, since the sealed DML_GAMES_DIR is empty) -- reported as a
+    // DIFFERENT error code (`LAN_ERROR`, review Fix 1 below) than the BAD_ARG
+    // guard-rejections above. Without this, those BAD_ARG assertions could be
+    // passing for the wrong reason (e.g. if the arm always answered BAD_ARG
+    // regardless of input).
     let (code, envelope) = s.run(&["lan", "status"]);
-    assert_eq!(code, 0, "{envelope}");
-    assert_eq!(envelope["ok"], true);
-    let output = envelope["data"]["output"].as_str().unwrap_or_default();
-    assert!(output.contains("not installed"), "{envelope}");
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "LAN_ERROR", "{envelope}");
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("not installed"), "{envelope}");
+}
+
+/// Review Fix 1 (Important, contract violation): before this fix, EVERY
+/// domain failure `lan_action` returns exited 0 with `ok:true` -- the exact
+/// repro the reviewer supplied: a WELL-FORMED `lan on` with a public
+/// (non-private) IP and no `--internet` is a DOMAIN failure INSIDE
+/// `lan_action` itself ("not a private LAN address" -- this check runs
+/// BEFORE `resolve_server_dir`, so it fires even against a fully
+/// uninstalled/sealed environment, no live server required). It must now
+/// exit 1 with an error envelope, matching the bash oracle's own
+/// `echo "[dml] ERROR: ..."; exit 1` for the identical case
+/// (`90-main.sh:901-905`) -- not the pre-fix `exit 0, ok:true`.
+#[test]
+fn lan_on_a_public_ip_is_a_domain_error_not_an_ok_envelope() {
+    let s = Sealed::new("lan-public-ip");
+    let (code, envelope) = s.run(&["lan", "on", "8.8.8.8"]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "LAN_ERROR", "{envelope}");
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("[dml] ERROR:"), "{envelope}");
+    assert!(message.contains("is not a private LAN address"), "{envelope}");
+    assert_eq!(envelope["error"]["hint"], "", "{envelope}");
 }
 
 /// Offline smoke: `cache status`/`cache clean` never touch docker/SOAP/DB,
@@ -1680,7 +1704,16 @@ fn install_rejects_a_bad_id_before_checking_prereqs() {
     let out = bin()
         .args(["install", "wow server"]) // a space is invalid
         .env("DML_BASH", r"C:\definitely\does\not\exist\bash.exe")
-        .env_remove("DML_SCRIPT")
+        // An explicit NONEXISTENT ABSOLUTE path, not `.env_remove` (Task 15
+        // review Minor 7): removing the var lets `find_dml_script` fall back
+        // to the bare name "dml", and the assertion then rests on THAT not
+        // existing relative to the test binary's cwd -- true under `cargo
+        // test` today, but if this binary ever ran from `cli/` (where a file
+        // literally named `dml` exists) this would flip from "prereqs
+        // missing" to "script found" and the case below could spawn a REAL
+        // installer with inherited stdio. An explicit bogus path can never
+        // resolve regardless of cwd.
+        .env("DML_SCRIPT", r"C:\definitely\does\not\exist\dml-script-that-is-not-real")
         .output()
         .expect("spawn dml-wow install");
     assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
@@ -1697,7 +1730,16 @@ fn install_preflight_missing_bash_and_script_reports_install_prereqs_and_spawns_
     let out = bin()
         .args(["install", "wow-server-playerbots"])
         .env("DML_BASH", r"C:\definitely\does\not\exist\bash.exe")
-        .env_remove("DML_SCRIPT")
+        // An explicit NONEXISTENT ABSOLUTE path, not `.env_remove` (Task 15
+        // review Minor 7): removing the var lets `find_dml_script` fall back
+        // to the bare name "dml", and the assertion then rests on THAT not
+        // existing relative to the test binary's cwd -- true under `cargo
+        // test` today, but if this binary ever ran from `cli/` (where a file
+        // literally named `dml` exists) this would flip from "prereqs
+        // missing" to "script found" and the case below could spawn a REAL
+        // installer with inherited stdio. An explicit bogus path can never
+        // resolve regardless of cwd.
+        .env("DML_SCRIPT", r"C:\definitely\does\not\exist\dml-script-that-is-not-real")
         .output()
         .expect("spawn dml-wow install");
     assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
@@ -1721,10 +1763,53 @@ fn install_preflight_bash_resolves_but_missing_script_still_refuses() {
     let out = bin()
         .args(["install", "wow-server-playerbots"])
         .env("DML_BASH", r"C:\Windows\System32\cmd.exe")
-        .env_remove("DML_SCRIPT")
+        // An explicit NONEXISTENT ABSOLUTE path, not `.env_remove` (Task 15
+        // review Minor 7): removing the var lets `find_dml_script` fall back
+        // to the bare name "dml", and the assertion then rests on THAT not
+        // existing relative to the test binary's cwd -- true under `cargo
+        // test` today, but if this binary ever ran from `cli/` (where a file
+        // literally named `dml` exists) this would flip from "prereqs
+        // missing" to "script found" and the case below could spawn a REAL
+        // installer with inherited stdio. An explicit bogus path can never
+        // resolve regardless of cwd.
+        .env("DML_SCRIPT", r"C:\definitely\does\not\exist\dml-script-that-is-not-real")
         .output()
         .expect("spawn dml-wow install");
     assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
     let envelope = parse_envelope(&out.stdout);
     assert_eq!(envelope["error"]["code"], "INSTALL_PREREQS");
+}
+
+/// Review Minor 6: `INSTALL_SPAWN_FAILED` is deterministically reachable, no
+/// race required — point `DML_BASH` at a REAL file that is NOT a valid
+/// executable. It passes the preflight's only check (`Path::is_file()`), so
+/// the code proceeds to `Command::spawn`, which `CreateProcess` itself then
+/// refuses (Windows os error 193, "%1 is not a valid Win32 application").
+/// WINDOWS-ONLY by construction (relies on `CreateProcess`'s own rejection of
+/// a non-PE file) — see the task report for the cross-platform-coverage note.
+#[test]
+fn install_reports_install_spawn_failed_for_a_non_executable_bash() {
+    let dir = std::env::temp_dir().join(format!("dml-cli-t15-nonexec-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let fake_bash = dir.join("not-a-real-exe.exe");
+    fs::write(&fake_bash, b"not a PE file, just plain text").unwrap();
+    // The script itself doesn't need to do anything real -- `CreateProcess`
+    // rejects `fake_bash` before the script path is ever read.
+    let script = dir.join("dml-script-need-not-exist-for-this-test.sh");
+    fs::write(&script, b"#!/bin/sh\necho hi\n").unwrap();
+
+    let out = bin()
+        .args(["install", "wow-server-playerbots"])
+        .env("DML_BASH", &fake_bash)
+        .env("DML_SCRIPT", &script)
+        .output()
+        .expect("spawn dml-wow install");
+
+    assert_eq!(out.status.code(), Some(1), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "INSTALL_SPAWN_FAILED", "{envelope}");
+
+    let _ = fs::remove_dir_all(&dir);
 }
