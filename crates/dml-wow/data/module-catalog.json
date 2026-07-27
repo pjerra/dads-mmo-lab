@@ -1,0 +1,429 @@
+{
+  "families": {
+    "cpp": [
+      {
+        "key": "mod-1v1-arena",
+        "name": "1v1 Arena",
+        "desc": "Adds a 1v1 arena bracket to the arena system -- queue solo duels through the arena NPC.",
+        "url": "https://github.com/azerothcore/mod-1v1-arena",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "1v1arena.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-aoe-loot",
+        "name": "AoE Loot",
+        "desc": "Loot every nearby corpse with one click, retail-style.",
+        "url": "https://github.com/azerothcore/mod-aoe-loot",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_aoe_loot.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-ah-bot",
+        "name": "Auction House Bot",
+        "desc": "Keeps the Auction House stocked and buying: a bot lists and purchases items so the economy works on a solo server.",
+        "url": "https://github.com/azerothcore/mod-ah-bot",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_ahbot.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-ah-bot-plus",
+        "name": "Auction House Bot Plus (blizzlike pricing)",
+        "desc": "Enhanced Auction House Bot fork: fully customizable, blizzlike pricing by category/quality/item level, conf-only (no SQL). Replaces mod-ah-bot -- install one or the other, not both.",
+        "url": "https://github.com/NathanHandley/mod-ah-bot-plus",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_ahbot.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-autobalance",
+        "name": "Auto Balance (dynamic difficulty)",
+        "desc": "Scales dungeon/raid mob health and damage to your party size, so any group size can run any instance.",
+        "url": "https://github.com/azerothcore/mod-autobalance",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "AutoBalance.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-ale",
+        "name": "AzerothCore Lua Engine (ALE)",
+        "desc": "The Lua scripting engine (Eluna fork) that powers every script in the Lua/ALE family below -- install this first.",
+        "url": "https://github.com/azerothcore/mod-ale",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_ale.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-player-bot-level-brackets",
+        "name": "Bot Level Brackets (Playerbot distribution)",
+        "desc": "Spreads the random playerbot population across level ranges you configure, instead of everyone clustering at cap.",
+        "url": "https://github.com/DustinHendrickson/mod-player-bot-level-brackets",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_player_bot_level_brackets.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-challenge-modes",
+        "name": "Challenge Modes (Hardcore, Iron Man, etc.)",
+        "desc": "Opt-in challenge rulesets per character: Hardcore (death is final), Iron Man, slow-XP and friends, with rewards.",
+        "url": "https://github.com/nl-saw/mod-challenge-modes",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "challenge_modes.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-custom-login",
+        "name": "Custom Login (starter gear + rep on first login)",
+        "desc": "Gives freshly created characters configurable starter gear, items, and reputation on first login.",
+        "url": "https://github.com/azerothcore/mod-custom-login",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_customlogin.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-individual-progression",
+        "name": "Individual Progression (Vanilla -> TBC -> WotLK)",
+        "desc": "Each character progresses through Vanilla -> TBC -> WotLK content gates individually, like a personal timeline.",
+        "url": "https://github.com/ZhengPeiRu21/mod-individual-progression",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "individualProgression.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-junk-to-gold",
+        "name": "Junk to Gold (auto-sell gray items)",
+        "desc": "Automatically sells gray junk for gold the moment you loot it.",
+        "url": "https://github.com/noisiver/mod-junk-to-gold",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": null,
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-learn-spells",
+        "name": "Learn Spells on Levelup",
+        "desc": "Class spells are learned automatically on level-up -- no class-trainer visits.",
+        "url": "https://github.com/azerothcore/mod-learn-spells",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_learnspells.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-npc-beastmaster",
+        "name": "NPC Beastmaster (pets for all classes)",
+        "desc": "A Beastmaster NPC that lets ANY class tame, stable and use hunter pets.",
+        "url": "https://github.com/azerothcore/mod-npc-beastmaster",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_npc_beastmaster.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-quest-loot-party",
+        "name": "Quest Loot Party (quest items drop for all eligible party members)",
+        "desc": "Quest items drop for every eligible party member at once instead of one at a time.",
+        "url": "https://github.com/pangolp/mod-quest-loot-party",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod-quest-loot-party.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-arac",
+        "name": "All Races All Classes (ARAC - data mod: SQL + DBC + MPQ)",
+        "desc": "All Races, All Classes: unlocks every race/class combo. After install, click 'Apply client patch' on this row (server DBCs + client Patch-A.MPQ), then restart -- the server part alone is not enough.",
+        "url": "https://github.com/heyitsbench/mod-arac",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": null,
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-dungeon-master",
+        "name": "Dungeon Master (roguelike dungeon challenge system)",
+        "desc": "Roguelike dungeon challenge system: scaling runs with modifiers and escalating rewards.",
+        "url": "https://github.com/InstanceForge/mod-dungeon-master",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_dungeon_master.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-solocraft",
+        "name": "Solocraft (solo dungeon/raid scaling)",
+        "desc": "Scales YOU up when entering dungeons/raids under-manned, so soloing instances is viable.",
+        "url": "https://github.com/azerothcore/mod-solocraft",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "Solocraft.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-talentbutton",
+        "name": "Talent Button (dual-spec at 10 + anywhere talent reset)",
+        "desc": "Dual spec from level 10 and a talent-reset button usable anywhere.",
+        "url": "https://github.com/brian8544/mod-talentbutton",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "mod_talentbutton.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      },
+      {
+        "key": "mod-transmog",
+        "name": "Transmogrification",
+        "desc": "Transmogrification NPC: reskin your gear's appearance while keeping its stats.",
+        "url": "https://github.com/azerothcore/mod-transmog",
+        "installed": false,
+        "pending_rebuild": false,
+        "conf": "",
+        "conf_name": "transmog.conf",
+        "custom": false,
+        "head": null,
+        "head_date": null
+      }
+    ],
+    "lua": [
+      {
+        "key": "accountwide",
+        "name": "Accountwide Systems (achievements, currency, mounts, pets)",
+        "desc": "Shares achievements, currency, mounts and pets across every character on the same account.",
+        "url": "https://github.com/Aldori15/azerothcore-eluna-accountwide",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": true,
+        "warn": null
+      },
+      {
+        "key": "activechat",
+        "name": "Azeroth Chatter (lore-grounded ambient world RP chat)",
+        "desc": "Ambient lore-flavored NPC chatter around the world, so cities feel alive.",
+        "url": "https://github.com/svey-xyz/ActiveChat",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": false,
+        "warn": null
+      },
+      {
+        "key": "battlepass",
+        "name": "Battle Pass System (XP progression + rewards)",
+        "desc": "A battle-pass style XP track with tiered rewards for playing.",
+        "url": "https://github.com/Shonik/lua-battlepass",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": true,
+        "warn": null
+      },
+      {
+        "key": "bmah",
+        "name": "Black Market Auction House (MoP-style BMAH + client addon)",
+        "desc": "MoP-style Black Market Auction House with rare/unobtainable items (server script + client addon).",
+        "url": "https://github.com/DadsMmoLab/dads-mmo-lab",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": true,
+        "warn": null
+      },
+      {
+        "key": "lootpet",
+        "name": "Loot Pet (vanity pet auto-loots nearby corpses)",
+        "desc": "Your vanity pet trots around auto-looting nearby corpses for you.",
+        "url": "https://github.com/Brytenwally/Lootpet",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": false,
+        "warn": null
+      },
+      {
+        "key": "paragon",
+        "name": "Paragon Anniversary (endless post-80 stat progression + client files)",
+        "desc": "Endless post-80 'paragon' stat progression with client-side UI files.",
+        "url": "https://github.com/Grim-Batol/Paragon-Anniversary",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": true,
+        "warn": null
+      },
+      {
+        "key": "sitmeanrest",
+        "name": "Sit Means Rest (regen buff on /sit; strips on movement)",
+        "desc": "Sitting down grants a rest/regen buff; standing or moving strips it.",
+        "url": "https://github.com/Brytenwally/SitMeansRest",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": false,
+        "warn": null
+      },
+      {
+        "key": "sod",
+        "name": "Season of Discovery Buffs (phased leveling XP rate bonus)",
+        "desc": "Season-of-Discovery-style phased XP rate bonuses while leveling.",
+        "url": "https://github.com/DadsMmoLab/dads-mmo-lab",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": false,
+        "warn": null
+      },
+      {
+        "key": "unlimitedammo",
+        "name": "Unlimited Ammo (auto-refills Hunter arrows/bullets)",
+        "desc": "Hunters never run out: arrows and bullets auto-refill.",
+        "url": "https://github.com/Day36512/Acore_Lua_Unlimited_Ammo",
+        "cloned": false,
+        "deployed": false,
+        "has_sql": false,
+        "warn": null
+      }
+    ],
+    "sql": [
+      {
+        "key": "all-stackables",
+        "name": "All Stackables to 200",
+        "desc": "Raises stack sizes to 200 for everything stackable.",
+        "url": "https://github.com/AsgavinYT/azerothcore-all-stackables-200",
+        "type": "clone_sql",
+        "installed": false
+      },
+      {
+        "key": "baby-mobs",
+        "name": "Baby Mobs (HPx0.25 / DMGx0.25 / ARMx0.25)",
+        "desc": "World tweak: all mobs at quarter health/damage/armor -- easy mode.",
+        "url": null,
+        "type": "tweak_world",
+        "installed": false
+      },
+      {
+        "key": "buff-mobs",
+        "name": "Buff Mobs (HPx2 / DMGx1.5 / ARMx1.5)",
+        "desc": "World tweak: mobs at 2x health, 1.5x damage/armor -- harder world.",
+        "url": null,
+        "type": "tweak_world",
+        "installed": false
+      },
+      {
+        "key": "xbuff-mobs",
+        "name": "Extreme Buff Mobs (HPx4 / DMGx2 / ARMx2)",
+        "desc": "World tweak: mobs at 4x health, 2x damage/armor -- much harder world.",
+        "url": null,
+        "type": "tweak_world",
+        "installed": false
+      },
+      {
+        "key": "hearthstone-cd",
+        "name": "Hearthstone Cooldown Tweaks",
+        "desc": "Pick a shorter Hearthstone cooldown (several variants to choose from).",
+        "url": "https://github.com/AsgavinYT/hearthstone-cooldowns",
+        "type": "clone_sql_pick",
+        "installed": false
+      },
+      {
+        "key": "lvl1-mounts",
+        "name": "Level One Mounts (ride at level 1)",
+        "desc": "Mount training and riding available from level 1.",
+        "url": "https://github.com/tomcoffingiii/mod-level-one-mounts",
+        "type": "clone_sql",
+        "installed": false
+      },
+      {
+        "key": "nerf-mobs",
+        "name": "Nerf Mobs (HPx0.5 / DMGx0.75 / ARMx0.75)",
+        "desc": "World tweak: mobs at half health, 0.75x damage/armor -- gentler world.",
+        "url": null,
+        "type": "tweak_world",
+        "installed": false
+      },
+      {
+        "key": "npc-teleporter",
+        "name": "NPC Teleporter (capital + starting zones)",
+        "desc": "Adds teleporter NPCs in capitals and starting zones.",
+        "url": "https://github.com/Zoidwaffle/sql-npc-teleporter",
+        "type": "clone_dist",
+        "installed": false
+      },
+      {
+        "key": "portals-capitals",
+        "name": "Portals in All Capitals",
+        "desc": "Two-way portals connecting all capital cities.",
+        "url": "https://github.com/azerothcore/portals-in-all-capitals",
+        "type": "clone_sql",
+        "installed": false
+      },
+      {
+        "key": "rare-drops",
+        "name": "Rare Drops (450 Classic rares loot)",
+        "desc": "About 450 Classic rare-spawn loot tables restored/enriched.",
+        "url": "https://github.com/StraysFromPath/mod-rare-drops",
+        "type": "clone_sql_norevert",
+        "installed": false
+      }
+    ]
+  },
+  "rebuild_pending": [],
+  "ale_ready": false
+}

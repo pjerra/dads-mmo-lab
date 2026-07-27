@@ -1,11 +1,14 @@
 //! Parity gate for the native-mode config VALUE reader (Task 2, spike:
 //! `spike/docker-desktop-native`).
 //!
-//! Asserts that `dml::config::ConfigReader`, fed the real
-//! `dml wow config registry --json` rows and reading the real on-disk native
-//! files, assembles JSON that DEEP-EQUALS a real `dml wow config list --json`
-//! run against those same files. This is the load-bearing guarantee: the
-//! Settings/Tuning pages get byte-for-byte the same data with zero forks.
+//! Asserts that `dml::config::ConfigReader`, fed the EMBEDDED config registry
+//! (`dml_wow::registry::config_registry_rows()`, Task 8) and reading the real
+//! on-disk native files, assembles JSON that DEEP-EQUALS a real
+//! `dml wow config list --json` run against those same files. This is the
+//! load-bearing guarantee: the Settings/Tuning pages get byte-for-byte the
+//! same data with zero forks, AND the committed
+//! `crates/dml-wow/data/config-registry.json` snapshot is still faithful to
+//! the bash oracle's `config registry` arm.
 //!
 //! FILE/TOOL-GATED. It runs only when the native files + `bash` + `yq` are all
 //! present (this dev box has them at `C:/Users/perzi/dml-native`); anywhere
@@ -146,17 +149,12 @@ fn native_reader_deep_equals_config_list() {
     let want_rows = want["settings"].as_array().expect("list settings[]");
     assert_eq!(want_rows.len(), 66, "expected 66 rows from config list");
 
-    // --- registry rows the Rust command would cache ---
-    let registry = run_dml(&bash, &script, &games, &yq, &path, &["wow", "config", "registry"]);
-    assert_eq!(registry["ok"], true, "config registry not ok: {registry}");
-    let rows = registry["data"]["settings"]
-        .as_array()
-        .cloned()
-        .expect("registry settings[]");
+    // --- the embedded config registry (Task 8) ---
+    let rows = dml_wow::registry::config_registry_rows();
 
     // --- the reader under test ---
     let mut reader = ConfigReader::for_title(&title_dir);
-    let got = reader.assemble(&rows);
+    let got = reader.assemble(rows);
 
     if &got["settings"] == &want["settings"] {
         return; // exact deep-equal

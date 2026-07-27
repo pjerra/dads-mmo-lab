@@ -37,21 +37,6 @@ pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
     pub install: Arc<Mutex<Option<InstallSlot>>>,
     pub auto_shutdown: Arc<Mutex<AutoShutdownCtl>>,
-    /// Native-mode cache of the STATIC config registry rows (`dml wow config
-    /// registry --json` → `.data.settings[]`). The registry never changes
-    /// within a session, so `wow_config_read` fetches it at most once and then
-    /// reads only the live VALUES itself from disk (see `dml::config`). `None`
-    /// until the first native read populates it.
-    pub config_registry: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
-    /// Native-mode cache of the STATIC tuning registry rows (`dml wow config
-    /// tuning-registry --json` → `.data.settings[]`, 13 rows). Same one-shot
-    /// contract as `config_registry`: `wow_tuning_read` fetches it once, then
-    /// reads only the live value/installed fields itself (see `dml::tuning`).
-    pub tuning_registry: Arc<Mutex<Option<Vec<serde_json::Value>>>>,
-    /// Native-mode cache of the STATIC module catalog (`dml wow module catalog
-    /// --json` → `.data`). `wow_module_read` fetches it once, then fills every
-    /// dynamic per-row field itself from disk (see `dml::modules`).
-    pub module_catalog: Arc<Mutex<Option<serde_json::Value>>>,
     /// Serializes every native-mode SOAP call (Task A2b, carried forward from
     /// the A1 review): the worldserver's SOAP listener runs on the single
     /// world thread, and `dml` (bash) already serializes its own SOAP calls
@@ -2018,110 +2003,34 @@ fn backend_mode() -> &'static str {
 
 /// NATIVE-MODE fast read of the config settings: returns the SAME shape as
 /// `wow_config_list` (`{"settings":[…66 rows…]}`) with zero bash/yq/fork on the
-/// hot path. The static registry is fetched from the CLI ONCE per session (the
-/// only subprocess here, and only on the first call) and cached; every live
-/// `value` is then read directly off the runtime files in Rust (see
-/// `dml::config`). Docker Desktop may be closed — these are pure file reads.
+/// hot path. The static registry is embedded in `dml_wow::registry` (Task 8 —
+/// no CLI fetch at all anymore); every live `value` is read directly off the
+/// runtime files in Rust (see `dml::config`). Docker Desktop may be closed —
+/// these are pure file reads.
 ///
 /// This command is for native mode only. In WSL mode the frontend keeps calling
 /// `wow_config_list`; `backend_mode` tells it which to use.
 #[tauri::command]
-async fn wow_config_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
-    let runner = state.runner.clone();
-    let cache = state.config_registry.clone();
+async fn wow_config_read() -> Result<serde_json::Value, CmdError> {
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let rows = fetch_registry_rows(
-            &runner,
-            &cache,
-            &["wow", "config", "registry"],
-            "config registry",
-        )?;
         let mut reader = dml_wow::config::ConfigReader::from_env();
-        Ok(reader.assemble(&rows))
+        Ok(reader.assemble(dml_wow::registry::config_registry_rows()))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// Fetch-once-and-cache a `…registry`/`…catalog` arm that returns
-/// `.data.settings[]` as an array of rows. The lock is held across the one-time
-/// CLI fetch so racing first-calls don't each spawn the CLI. Shared by
-/// `wow_config_read`, `wow_tuning_read`, and the startup prefetch.
-fn fetch_registry_rows(
-    runner: &DmlRunner,
-    cache: &Mutex<Option<Vec<serde_json::Value>>>,
-    args: &[&str],
-    label: &str,
-) -> Result<Vec<serde_json::Value>, CmdError> {
-    let mut guard = cache.lock().map_err(|_| CmdError {
-        code: "INTERNAL".into(),
-        message: format!("{label} cache poisoned"),
-        hint: String::new(),
-    })?;
-    if let Some(rows) = guard.as_ref() {
-        return Ok(rows.clone());
-    }
-    let env = runner.run_json(args).map_err(CmdError::from)?;
-    let data = envelope_to_result(env)?;
-    let rows = data
-        .get("settings")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .ok_or_else(|| CmdError {
-            code: "CLI_BAD_OUTPUT".into(),
-            message: format!("{label} response missing settings[]"),
-            hint: "Is the dml CLI up to date?".into(),
-        })?;
-    *guard = Some(rows.clone());
-    Ok(rows)
-}
-
-/// Fetch-once-and-cache the module catalog `.data` object (families +
-/// placeholders). Same locking contract as `fetch_registry_rows`.
-fn fetch_catalog_data(
-    runner: &DmlRunner,
-    cache: &Mutex<Option<serde_json::Value>>,
-) -> Result<serde_json::Value, CmdError> {
-    let mut guard = cache.lock().map_err(|_| CmdError {
-        code: "INTERNAL".into(),
-        message: "module catalog cache poisoned".into(),
-        hint: String::new(),
-    })?;
-    if let Some(data) = guard.as_ref() {
-        return Ok(data.clone());
-    }
-    let env = runner.run_json(&["wow", "module", "catalog"]).map_err(CmdError::from)?;
-    let data = envelope_to_result(env)?;
-    if data.get("families").is_none() {
-        return Err(CmdError {
-            code: "CLI_BAD_OUTPUT".into(),
-            message: "module catalog response missing families".into(),
-            hint: "Is the dml CLI up to date (has `wow module catalog`)?".into(),
-        });
-    }
-    *guard = Some(data.clone());
-    Ok(data)
-}
-
 /// NATIVE-MODE fast read of the module-tuning settings: same shape as
 /// `wow_config_tuning_list` (`{"settings":[…13 rows…]}`) with zero bash/fork on
-/// the hot path. The static registry is fetched once per session and cached;
-/// each row's `value` + `installed` are then read straight off the runtime
-/// files in Rust (see `dml::tuning`). Native mode only — WSL keeps calling
-/// `wow_config_tuning_list`.
+/// the hot path. The static registry is embedded in `dml_wow::registry`
+/// (Task 8); each row's `value` + `installed` are read straight off the
+/// runtime files in Rust (see `dml::tuning`). Native mode only — WSL keeps
+/// calling `wow_config_tuning_list`.
 #[tauri::command]
-async fn wow_tuning_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
-    let runner = state.runner.clone();
-    let cache = state.tuning_registry.clone();
+async fn wow_tuning_read() -> Result<serde_json::Value, CmdError> {
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let rows = fetch_registry_rows(
-            &runner,
-            &cache,
-            &["wow", "config", "tuning-registry"],
-            "tuning registry",
-        )?;
         let mut reader = dml_wow::tuning::TuningReader::from_env();
-        Ok(reader.assemble(&rows))
+        Ok(reader.assemble(dml_wow::registry::tuning_registry_rows()))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2130,17 +2039,14 @@ async fn wow_tuning_read(state: State<'_, AppState>) -> Result<serde_json::Value
 /// NATIVE-MODE fast read of the module list: same shape as `wow_module_list`
 /// (`{families:{cpp,lua,sql}, rebuild_pending, ale_ready}`) with zero bash/fork
 /// on the hot path (only LOCAL `git` reads for installed clones' head/date). The
-/// static catalog is fetched once per session and cached; every dynamic field
-/// is then filled from the runtime files in Rust (see `dml::modules`). Native
+/// static catalog is embedded in `dml_wow::registry` (Task 8); every dynamic
+/// field is filled from the runtime files in Rust (see `dml::modules`). Native
 /// mode only — WSL keeps calling `wow_module_list`.
 #[tauri::command]
-async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
-    let runner = state.runner.clone();
-    let cache = state.module_catalog.clone();
+async fn wow_module_read() -> Result<serde_json::Value, CmdError> {
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let catalog = fetch_catalog_data(&runner, &cache)?;
         let reader = dml_wow::modules::ModuleReader::from_env();
-        Ok(reader.assemble(&catalog))
+        Ok(reader.assemble(dml_wow::registry::module_catalog()))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2609,14 +2515,12 @@ async fn wow_update_check_read() -> Result<serde_json::Value, CmdError> {
 /// `wow_commands` (`{"mods":[{key,name,text}]}`). The static per-mod text
 /// blocks are ported verbatim in `dml::commands::cmd_block_for`;
 /// install-state comes from the same `ModuleReader` `wow_module_read` uses;
-/// the module catalog is the same session-cached fetch `wow_module_read`
-/// shares. `NOT_FOUND` when the WoW Playerbots title isn't installed,
-/// matching the CLI arm.
+/// the module catalog is the same embedded `dml_wow::registry::module_catalog`
+/// (Task 8) `wow_module_read` reads. `NOT_FOUND` when the WoW Playerbots title
+/// isn't installed, matching the CLI arm.
 #[tauri::command]
-async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+async fn wow_commands_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let runner = state.runner.clone();
-    let cache = state.module_catalog.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
         if dml_wow::maint::resolve_server_dir(&title_dir).is_none() {
@@ -2626,10 +2530,10 @@ async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Val
                 hint: "Install it first.".into(),
             });
         }
-        let catalog = fetch_catalog_data(&runner, &cache)?;
+        let catalog = dml_wow::registry::module_catalog();
         let reader = dml_wow::modules::ModuleReader::from_env();
         let modules_dir = title_dir.join("modules");
-        Ok(dml_wow::commands::assemble_commands(&catalog, &reader, &modules_dir))
+        Ok(dml_wow::commands::assemble_commands(catalog, &reader, &modules_dir))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -3236,8 +3140,6 @@ async fn wow_config_set_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let runner = state.runner.clone();
-    let cache = state.config_registry.clone();
     let soap_lock = state.soap_lock.clone();
     let config_lock = state.config_lock.clone();
     let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
@@ -3250,8 +3152,8 @@ async fn wow_config_set_native(
         if key.starts_with("conf:") {
             return config_set_direct(&title_dir, &key, &value, &soap_lock);
         }
-        let rows = fetch_registry_rows(&runner, &cache, &["wow", "config", "registry"], "config registry")?;
-        config_set_curated(&title_dir, &key, &value, &rows, &soap_lock)
+        let rows = dml_wow::registry::config_registry_rows();
+        config_set_curated(&title_dir, &key, &value, rows, &soap_lock)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -3279,7 +3181,6 @@ async fn wow_config_tuning_set_native(
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     let runner = state.runner.clone();
-    let cache = state.tuning_registry.clone();
     let config_lock = state.config_lock.clone();
     let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
 
@@ -3287,12 +3188,7 @@ async fn wow_config_tuning_set_native(
         // Serializes against every other native conf/override write -- see
         // the doc comment on `AppState::config_lock`.
         let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let rows = fetch_registry_rows(
-            &runner,
-            &cache,
-            &["wow", "config", "tuning-registry"],
-            "tuning registry",
-        )?;
+        let rows = dml_wow::registry::tuning_registry_rows();
         let row = rows
             .iter()
             .find(|r| r.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
@@ -9283,45 +9179,14 @@ pub fn run() {
             )),
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
-            config_registry: Arc::new(Mutex::new(None)),
-            tuning_registry: Arc::new(Mutex::new(None)),
-            module_catalog: Arc::new(Mutex::new(None)),
             soap_lock: Arc::new(Mutex::new(())),
             config_lock: Arc::new(Mutex::new(())),
         })
-        .setup(|app| {
-            // Startup registry prefetch (native mode only): warm the three
-            // static caches (config + tuning + module catalog) off the main
-            // thread so the first Settings/Tuning/Modules open pays no
-            // one-time CLI-fetch wait. NON-BLOCKING and best-effort — every
-            // error is swallowed (the native files may be absent, Docker may
-            // be closed), and it must never delay or panic app startup. In WSL
-            // mode it does nothing: those pages keep calling the CLI directly.
+        .setup(|_app| {
+            // (Task 8 removed the startup registry prefetch here: the config/
+            // tuning/module-catalog registries are now embedded in dml-wow —
+            // see `dml_wow::registry` — so there is nothing left to warm.)
             if dml_wow::backend::selected() == dml_wow::backend::Backend::Native {
-                let state = app.state::<AppState>();
-                let runner = state.runner.clone();
-                let config_cache = state.config_registry.clone();
-                let tuning_cache = state.tuning_registry.clone();
-                let catalog_cache = state.module_catalog.clone();
-                tauri::async_runtime::spawn(async move {
-                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                        let _ = fetch_registry_rows(
-                            &runner,
-                            &config_cache,
-                            &["wow", "config", "registry"],
-                            "config registry",
-                        );
-                        let _ = fetch_registry_rows(
-                            &runner,
-                            &tuning_cache,
-                            &["wow", "config", "tuning-registry"],
-                            "tuning registry",
-                        );
-                        let _ = fetch_catalog_data(&runner, &catalog_cache);
-                    })
-                    .await;
-                });
-
                 // Automatic "Auto (6h)" interval backup watcher (see the
                 // `interval_backup_watcher` doc comment above): started once,
                 // runs for the app's whole lifetime, no UI toggle. Seed

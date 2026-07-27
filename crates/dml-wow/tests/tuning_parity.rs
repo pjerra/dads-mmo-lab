@@ -1,12 +1,14 @@
 //! Parity gate for the native-mode module-**tuning** reader (Task 2, spike:
 //! `spike/docker-desktop-native`).
 //!
-//! Asserts that `dml::tuning::TuningReader`, fed the real
-//! `dml wow config tuning-registry --json` rows and reading the real on-disk
-//! native files, assembles JSON that DEEP-EQUALS a real
+//! Asserts that `dml::tuning::TuningReader`, fed the EMBEDDED tuning registry
+//! (`dml_wow::registry::tuning_registry_rows()`, Task 8) and reading the real
+//! on-disk native files, assembles JSON that DEEP-EQUALS a real
 //! `dml wow config tuning-list --json` run against those same files. Every
 //! field here is file-derived (conf/.dist/lua + existence checks), so NO field
-//! divergence is tolerated — an exact deep-equal is required.
+//! divergence is tolerated — an exact deep-equal is required. Also guards that
+//! the committed `crates/dml-wow/data/tuning-registry.json` snapshot is still
+//! faithful to the bash oracle's `config tuning-registry` arm.
 //!
 //! FILE/TOOL-GATED like `config_parity.rs`: runs only when the native files +
 //! `bash` + `yq` are present (this dev box has them at `C:/Users/perzi/
@@ -128,15 +130,12 @@ fn native_reader_deep_equals_tuning_list() {
     let want_rows = want["settings"].as_array().expect("tuning-list settings[]");
     assert_eq!(want_rows.len(), 13, "expected 13 tuning rows");
 
-    // Registry rows the Rust command would cache.
-    let registry =
-        run_dml(&bash, &script, &games, &yq, &path, &["wow", "config", "tuning-registry"]);
-    assert_eq!(registry["ok"], true, "tuning-registry not ok: {registry}");
-    let rows = registry["data"]["settings"].as_array().cloned().expect("registry settings[]");
+    // The embedded tuning registry (Task 8).
+    let rows = dml_wow::registry::tuning_registry_rows();
 
     // The reader under test — must deep-equal exactly (no tolerated divergence).
     let mut reader = TuningReader::for_title(&title_dir);
-    let got = reader.assemble(&rows);
+    let got = reader.assemble(rows);
     assert_eq!(
         got["settings"], want["settings"],
         "tuning reader diverged from `config tuning-list`"

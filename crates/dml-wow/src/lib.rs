@@ -31,6 +31,7 @@ pub mod pages;
 pub mod paperdoll;
 pub mod party;
 pub mod party_specs;
+pub mod registry;
 pub mod restore;
 pub use dml_core::runner;
 pub mod soap;

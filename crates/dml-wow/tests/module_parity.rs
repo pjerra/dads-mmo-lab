@@ -1,12 +1,14 @@
 //! Parity gate for the native-mode **module-list** reader (Task 2, spike:
 //! `spike/docker-desktop-native`).
 //!
-//! Asserts that `dml::modules::ModuleReader`, fed the real
-//! `dml wow module catalog --json` `.data` and reading the real on-disk native
-//! files (+ local git for installed clones), assembles JSON that DEEP-EQUALS a
-//! real `dml wow module list --json` run against those same files. Every field
-//! is file/git-derived, so NO divergence is tolerated — an exact deep-equal is
-//! required.
+//! Asserts that `dml::modules::ModuleReader`, fed the EMBEDDED module catalog
+//! (`dml_wow::registry::module_catalog()`, Task 8) and reading the real
+//! on-disk native files (+ local git for installed clones), assembles JSON
+//! that DEEP-EQUALS a real `dml wow module list --json` run against those
+//! same files. Every field is file/git-derived, so NO divergence is
+//! tolerated — an exact deep-equal is required. Also guards that the
+//! committed `crates/dml-wow/data/module-catalog.json` snapshot is still
+//! faithful to the bash oracle's `module catalog` arm.
 //!
 //! head/head_date come from the SAME local `git` binary the bash emitter shells
 //! (`git -C <dir> log -1 --format=%h%x1f%cs`), so the abbreviation length and
@@ -138,11 +140,8 @@ fn native_reader_deep_equals_module_list() {
     assert_eq!(list["ok"], true, "module list not ok: {list}");
     let want = &list["data"];
 
-    // The catalog the Rust command would cache.
-    let catalog =
-        run_dml(&bash, &script, &games, yq.as_deref(), &path, &["wow", "module", "catalog"]);
-    assert_eq!(catalog["ok"], true, "module catalog not ok: {catalog}");
-    let cat_data = &catalog["data"];
+    // The embedded module catalog (Task 8).
+    let cat_data = dml_wow::registry::module_catalog();
 
     // The reader under test — must deep-equal the whole `.data` exactly.
     let reader = ModuleReader::for_title(&title_dir);

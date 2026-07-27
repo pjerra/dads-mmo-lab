@@ -36,3 +36,8 @@ cli/dml text eol=lf
 cli/tests/fixtures/*.txt text eol=lf
 cli/tests/fixtures/*.xml text eol=lf
 cli/tests/fixtures/*.tsv text eol=lf
+
+# Static registry snapshots embedded via include_str! in dml-wow — generated
+# from the bash `dml` oracle in WSL (LF-native); keep LF on Windows checkouts
+# so the committed blob and working tree byte-match regardless of autocrlf.
+crates/dml-wow/data/*.json text eol=lf
