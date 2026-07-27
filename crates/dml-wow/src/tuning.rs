@@ -31,7 +31,7 @@ use dml_core::error::CmdError;
 use crate::config::{self, atomic_write, cfgset_err, parse_conf, strip_conf_quotes};
 
 /// The conf/lua key token for one tuning row key — the `confkey` column of
-/// `_mtune_rows` (40-config.sh:878), which the `tuning-registry` arm does not
+/// `_mtune_rows` (40-config.sh:896), which the `tuning-registry` arm does not
 /// emit. Kept in lock-step with that heredoc (13 rows); the parity test guards
 /// any drift. Unknown key → `None` (the row then passes through untouched).
 pub fn tuning_confkey(key: &str) -> Option<&'static str> {
@@ -54,7 +54,7 @@ pub fn tuning_confkey(key: &str) -> Option<&'static str> {
 }
 
 /// Lua file value → display/JSON form — a port of `_mtune_to_json`
-/// (40-config.sh:900). Only the `bool` type is translated (`true`→`1`,
+/// (40-config.sh:918). Only the `bool` type is translated (`true`→`1`,
 /// `false`→`0`); every other type (int/list) passes through verbatim.
 pub fn mtune_to_json(ty: &str, fileval: &str) -> String {
     if ty == "bool" {
@@ -69,7 +69,7 @@ pub fn mtune_to_json(ty: &str, fileval: &str) -> String {
 }
 
 /// Display/JSON value → Lua file form — a port of `_mtune_to_lua`
-/// (40-config.sh:910), the exact inverse of [`mtune_to_json`]. Only the `bool`
+/// (40-config.sh:928), the exact inverse of [`mtune_to_json`]. Only the `bool`
 /// type is translated (`1`→`true`, `0`→`false`); every other type (int/list)
 /// passes through verbatim.
 pub fn mtune_to_lua(ty: &str, jsonval: &str) -> String {
@@ -85,7 +85,7 @@ pub fn mtune_to_lua(ty: &str, jsonval: &str) -> String {
 }
 
 /// Current file value of a `<key> = …` Lua assignment — a faithful port of
-/// `_lua_cfg_read` (40-config.sh:927). Returns `""` when the key line is absent
+/// `_lua_cfg_read` (40-config.sh:945). Returns `""` when the key line is absent
 /// or commented. Handles both column-0 namespaced keys
 /// (`UnlimitedAmmoNamespace.ENABLED = false`) and indented bare table keys with
 /// a trailing comma (`    DURATION = 20,`). The value token is everything after
@@ -141,14 +141,14 @@ pub fn lua_cfg_read(content: &str, key: &str) -> String {
 // (unlimitedammo.{enabled,max_ammo,min_threshold}, sitmeansrest.{duration,
 // regen_aura}).
 //
-// Oracle: `_lua_cfg_write` (`cli/src/40-config.sh:1000-1033`) and its awk
+// Oracle: `_lua_cfg_write` (`cli/src/40-config.sh:983-1033`) and its awk
 // `is_key_line`/`rebuild` pair. `tuning_write_parity.rs` byte-compares the
 // files this produces against the ones the real bash CLI produces for the
 // same edits.
 // ---------------------------------------------------------------------------
 
 /// Whether one record is an (uncommented) `<key> [blanks] =` assignment line —
-/// the awk `is_key_line` function inside `_lua_cfg_write` (40-config.sh:1008).
+/// the awk `is_key_line` function inside `_lua_cfg_write` (40-config.sh:990).
 /// One trailing `\r` is dropped, leading blanks are skipped, then the key must
 /// match LITERALLY at position 1 (awk `index(body,k)==1`) and be followed by
 /// optional blanks and an `=`. Deliberately the same shape gate
@@ -164,7 +164,7 @@ fn is_lua_key_line(rec: &str, key: &str) -> bool {
 }
 
 /// Rebuild one key line around a new value — the awk `rebuild` function
-/// (40-config.sh:1016). Preserves, byte-for-byte: the leading whitespace, the
+/// (40-config.sh:1000). Preserves, byte-for-byte: the leading whitespace, the
 /// exact spacing around `=`, everything from the first ` `/`\t`/`,`/`;` after
 /// the value onward (a table comma and/or an inline `-- comment`), and a
 /// trailing `\r`.
@@ -203,7 +203,7 @@ fn rebuild_lua_line(rec: &str, key: &str, fileval: &str) -> String {
 }
 
 /// Patch the LAST `<key> = …` line of a Lua config's TEXT — the pure core of
-/// `_lua_cfg_write`'s awk program (40-config.sh:1039-1046). Editing the LAST
+/// `_lua_cfg_write`'s awk program (40-config.sh:1018-1024). Editing the LAST
 /// occurrence (not the first) matches [`lua_cfg_read`] and Lua's own
 /// last-assignment-wins load semantics, so a write round-trips through a read.
 ///
@@ -257,7 +257,7 @@ pub enum LuaWrite {
 }
 
 /// In-place value replacement in a deployed ALE `.lua` script — a faithful
-/// port of `_lua_cfg_write` (40-config.sh:1000). `fileval` must ALREADY be in
+/// port of `_lua_cfg_write` (40-config.sh:983). `fileval` must ALREADY be in
 /// file form (`true`/`false` or a validated integer — see [`mtune_to_lua`]),
 /// so the reconstructed line is safe.
 ///
@@ -298,7 +298,7 @@ pub fn lua_cfg_write(path: &Path, key: &str, fileval: &str) -> LuaWrite {
 }
 
 /// Deployed ALE script path for a lua-backend tuning file — the free-function
-/// form of `_lua_cfg_path` (40-config.sh:897), shared by [`TuningReader`]'s
+/// form of `_lua_cfg_path` (40-config.sh:915), shared by [`TuningReader`]'s
 /// read path and [`tuning_set`]'s write path so both resolve the same file.
 pub fn lua_path_in(title_dir: &Path, file: &str) -> PathBuf {
     title_dir
@@ -403,7 +403,7 @@ impl TuningReader {
     }
 
     /// Deployed ALE script path for a lua-backend tuning file — delegates to
-    /// the free-function [`lua_path_in`] (`_lua_cfg_path`, 40-config.sh:897)
+    /// the free-function [`lua_path_in`] (`_lua_cfg_path`, 40-config.sh:915)
     /// so the read path and [`tuning_set`]'s write path can never drift.
     fn lua_path(&self, file: &str) -> PathBuf {
         lua_path_in(&self.title_dir, file)
