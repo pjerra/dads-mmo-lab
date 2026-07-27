@@ -500,7 +500,11 @@ pub enum Cmd {
     ServerInfo,
     /// Last worldserver console lines
     ConsoleTail {
-        #[arg(long, default_value_t = 200)]
+        // ADDED 2026-07-27: the 1..=1000 bound is NOT optional — both the
+        // launcher (lib.rs wow_console_tail_read) and the bash CLI enforce it
+        // before calling read_console_tail. Omitting it is a GUI-vs-CLI parity
+        // gap and lets an unbounded value reach `docker logs --tail N`.
+        #[arg(long, default_value_t = 200, value_parser = clap::value_parser!(u32).range(1..=1000))]
         lines: u32,
     },
 }
@@ -509,7 +513,7 @@ pub enum Cmd {
 `run.rs`: match on Cmd →
   - Version → `emit_ok(json!({"version": env!("CARGO_PKG_VERSION"), "contract": "dml-json-v3", "backend": "native"}))`
   - Status → `dml_wow::status::read_server_detail(&docker_program(), &soap_cfg, &db_cfg, &mut ConfigReader::from_env())` → emit_ok
-  - ServerInfo → `read_server_info(&soap_cfg)` (Err(()) → emit_err("SOAP_UNREACHABLE", "worldserver SOAP did not answer", "Is the server running?"))
+  - ServerInfo → `read_server_info(&soap_cfg)`. CORRECTED 2026-07-27: `Err(())` means **auth failure only** — an unreachable/down server returns `Ok(server_info_down())` (down is data, not an error). Map it the way the launcher already does: `emit_err("SOAP_AUTH", "SOAP authentication failed", "Check ~/.dml/soap.env")`. The original "SOAP_UNREACHABLE / Is the server running?" wording was wrong and would misdirect a user whose server is up with bad credentials.
   - ConsoleTail → `read_console_tail(&docker_program(), lines)` → emit_ok
 `main.rs`: `Cli::try_parse()` — on clap error, print clap's message to stderr AND `error_envelope("BAD_ARGS", <first line of clap error>, "dml-wow --help")` to stdout, exit 2. Otherwise `std::process::exit(run::dispatch(cli))`.
 
@@ -588,7 +592,7 @@ Streaming commands print NDJSON events via `stream_sink()`; exit code from the t
 
 | Subcommand | Call | Guard |
 |---|---|---|
-| `start` / `stop` / `restart` | Task 9's `lifecycle::games_{start,stop,restart}_stream` | — |
+| `start` / `stop` / `restart` | Task 9's `lifecycle::games_lifecycle_stream(mode, id, skip_saveall, emit)` — ONE mode-dispatched fn, not three (amended 2026-07-27: splitting it would have been a rewrite, so Task 9 moved it whole; the launcher's own `games_start/stop/restart` commands already dispatch by mode the same way). Engine wrapping is available as `native::ensure_engine_up_stream` / `native::stop_engine_stream`. | — |
 | `module install/remove/update/rebuild/repair …` | Task 9's `modmgr::module_*_stream` | `rebuild`,`remove` prompt-free but honor `--backup`/`--no-backup` flags mirroring the launcher args |
 | `backup create [--include-world]` / `backup list` / `backup delete <FILE>` / `backup validate <FILE>` | backup module fns (`dump_to`, `list_backups`, `delete_backup`, `validate_backup` — via the Task 9 hoisted orchestrations where they exist) | — |
 | `backup restore <FILE>` | hoisted restore orchestration (stop → prerestore safety dump → stream import → restart) | `--yes` REQUIRED |
