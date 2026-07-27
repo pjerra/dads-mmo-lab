@@ -528,13 +528,31 @@ mod tests {
         assert_eq!(r.prefix_args, vec!["C:/repo/cli/dml".to_string()]);
     }
 
+    // `join_paths` rejects any component containing the platform's PATH
+    // separator (`:` on Unix, `;` on Windows) — Windows drive paths like
+    // `C:\docker\bin` are fine on Windows (separator is `;`) but the colon
+    // makes `join_paths` return Err on Unix. Platform-appropriate literals so
+    // both variants exercise the real "prepended dir ends up first, existing
+    // PATH preserved after it" property instead of one of them panicking on
+    // a syntax error unrelated to `prepend_path` itself.
     #[test]
+    #[cfg(windows)]
     fn prepend_path_puts_docker_dir_first() {
         let p = prepend_path(OsStr::new(r"C:\docker\bin"), Some(OsString::from(r"C:\win")))
             .unwrap();
         let s = p.to_string_lossy();
         assert!(s.starts_with(r"C:\docker\bin"));
         assert!(s.contains(r"C:\win"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn prepend_path_puts_docker_dir_first() {
+        let p = prepend_path(OsStr::new("/opt/docker/bin"), Some(OsString::from("/usr/bin")))
+            .unwrap();
+        let s = p.to_string_lossy();
+        assert!(s.starts_with("/opt/docker/bin"));
+        assert!(s.contains("/usr/bin"));
     }
 
     #[test]
