@@ -22,6 +22,8 @@
 //! `tw_logon` branch (`90-main.sh:942-960`) -- WSL keeps handling every
 //! other title family; native only ever drives the single fixed AC title.
 
+use dml_core::error::{bad_arg, CmdError};
+
 /// `true` iff `addr` starts with the private-LAN prefix `192.168.` or `10.`
 /// or `172.(16-31).` -- a character-exact port of the bash regex
 /// `^(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)` (`90-main.sh:901,1041`).
@@ -277,6 +279,81 @@ pub fn lan_action(action: &str, ip_arg: Option<String>, inet: bool) -> String {
     }
 }
 
+pub const LAN_ACTIONS: [&str; 4] = ["on", "off", "status", "refresh"];
+
+/// Pure, testable IPv4-shape check: `^[0-9]{1,3}(\.[0-9]{1,3}){3}$`. Exactly
+/// 4 dot-separated groups of 1-3 ASCII digits each -- matches the CLI's own
+/// guard in `dml lan` (it re-validates independently) rather than a strict
+/// 0-255 range check, so this only needs to reject shapes that could carry
+/// something other than an address (whitespace, semicolons, letters, extra
+/// segments) before the value is ever used to build a command line.
+pub fn validate_ip(ip: &str) -> bool {
+    let parts: Vec<&str> = ip.split('.').collect();
+    parts.len() == 4
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Internet-play address check (Batch 4 F15): a public IPv4 or hostname,
+/// `^[A-Za-z0-9.-]{1,253}$` -- mirrors the CLI's own `--internet` guard
+/// (which re-validates independently). Like validate_ip this only needs to
+/// keep shell/SQL-shaped garbage out of an argv slot; DNS decides whether
+/// the name actually resolves.
+pub fn validate_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// THE INPUT GATE for [`lan_action`]: run this first and pass its
+/// `(inet, ip_arg)` straight in — every caller (the launcher's Tauri command
+/// and the CLI alike) gets the same closed rules, so `lan_action` itself can
+/// keep asserting they already hold. Deliberately duplicating (not
+/// refactoring) the launcher's WSL `wow_lan` inline checks: SAME rules --
+/// [`LAN_ACTIONS`] membership, an IPv4-SHAPE ([`validate_ip`]) or
+/// hostname-SHAPE ([`validate_host`]) check depending on `--internet`,
+/// `--internet` itself narrowed to `action == "on"` only (mirrors `wow_lan`'s
+/// existing `internet.unwrap_or(false) && action == "on"` -- a deliberate
+/// product narrowing already shipped for WSL, not a gap to "fix" here). The
+/// private-vs-public "not a private LAN address" check is NOT here -- that
+/// stays a DOMAIN-level TEXT error inside `lan_action`, matching where the
+/// bash oracle itself performs it (`90-main.sh:901-905`, before ever touching
+/// docker/DB).
+///
+/// TEXT-MODE vs TYPED: `CmdError` here is reserved for genuinely malformed
+/// input (bad action, bad address SHAPE). Every DOMAIN-level failure (not a
+/// private address, server not running, DB not answering yet, the address
+/// didn't land) instead comes back from `lan_action` as
+/// `"[dml] ERROR: ..."` TEXT -- see the module doc comment.
+///
+/// Moved out of the launcher's `lib.rs` by the cargo-workspace refactor
+/// (Task 9b).
+pub fn validate_lan_request(
+    action: &str,
+    ip: Option<String>,
+    internet: bool,
+) -> Result<(bool, Option<String>), CmdError> {
+    if !LAN_ACTIONS.contains(&action) {
+        return Err(bad_arg(format!("invalid lan action: {action:?}")));
+    }
+    let inet = internet && action == "on";
+    let ip_arg = if action == "on" || action == "refresh" {
+        let ip = ip.ok_or_else(|| bad_arg("ip is required for the on/refresh actions"))?;
+        if inet {
+            if !validate_host(&ip) {
+                return Err(bad_arg(format!("invalid address or hostname: {ip:?}")));
+            }
+        } else if !validate_ip(&ip) {
+            return Err(bad_arg(format!("invalid IPv4 address: {ip:?}")));
+        }
+        Some(ip)
+    } else {
+        None
+    };
+    Ok((inet, ip_arg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +472,121 @@ mod tests {
         // the real DB -- exercises the `.ok()?` degrade-to-None path.
         let cfg = crate::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
         assert_eq!(lan_current_address(&cfg), None);
+    }
+
+    #[test]
+    fn ip_validation_accepts_well_shaped_ipv4() {
+        assert!(validate_ip("192.168.1.1"));
+        assert!(validate_ip("8.8.8.8"));
+        assert!(validate_ip("1.2.3.4"));
+        assert!(validate_ip("255.255.255.255"));
+        assert!(validate_ip("0.0.0.0"));
+    }
+
+    #[test]
+    fn ip_validation_rejects_garbage() {
+        assert!(!validate_ip(""));
+        assert!(!validate_ip("not an ip"));
+        assert!(!validate_ip("1.2.3"));
+        assert!(!validate_ip("1.2.3.4.5"));
+        assert!(!validate_ip("1..3.4"));
+        assert!(!validate_ip(".1.2.3"));
+        assert!(!validate_ip("1.2.3."));
+        assert!(!validate_ip("1.2.3.4444"));
+    }
+
+    #[test]
+    fn ip_validation_rejects_injection_shaped_strings() {
+        assert!(!validate_ip("1.2.3.4; rm -rf /"));
+        assert!(!validate_ip("1.2.3.4 && whoami"));
+        assert!(!validate_ip("1.2.3.4\nrm -rf /"));
+        assert!(!validate_ip("$(rm -rf /)"));
+        assert!(!validate_ip("1.2.3.4`id`"));
+        assert!(!validate_ip("../../etc/passwd"));
+    }
+
+    #[test]
+    fn host_validation_accepts_public_ips_and_hostnames() {
+        assert!(validate_host("84.210.13.37"));
+        assert!(validate_host("myserver.duckdns.org"));
+        assert!(validate_host("my-name.example-host.net"));
+        assert!(validate_host("localhost"));
+    }
+
+    #[test]
+    fn host_validation_rejects_garbage_and_injection_shapes() {
+        assert!(!validate_host(""));
+        assert!(!validate_host("foo bar"));
+        assert!(!validate_host("evil;drop"));
+        assert!(!validate_host("a`id`"));
+        assert!(!validate_host("$(reboot)"));
+        assert!(!validate_host("host\nname"));
+        assert!(!validate_host("x'y"));
+        assert!(!validate_host(&"a".repeat(254)));
+    }
+
+    #[test]
+    fn lan_action_allowlist_is_closed() {
+        assert!(LAN_ACTIONS.contains(&"on"));
+        assert!(LAN_ACTIONS.contains(&"off"));
+        assert!(LAN_ACTIONS.contains(&"status"));
+        assert!(LAN_ACTIONS.contains(&"refresh"));
+        assert!(!LAN_ACTIONS.contains(&"on; rm -rf /"));
+        assert!(!LAN_ACTIONS.contains(&"reset"));
+    }
+
+    #[test]
+    fn validate_lan_request_native_rejects_unknown_action() {
+        let e = validate_lan_request("reset", None, false).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+    }
+
+    #[test]
+    fn validate_lan_request_native_requires_ip_for_on_and_refresh() {
+        assert_eq!(validate_lan_request("on", None, false).unwrap_err().code, "BAD_ARG");
+        assert_eq!(validate_lan_request("refresh", None, false).unwrap_err().code, "BAD_ARG");
+    }
+
+    #[test]
+    fn validate_lan_request_native_off_and_status_need_no_ip() {
+        let (inet, ip) = validate_lan_request("off", None, false).unwrap();
+        assert!(!inet);
+        assert_eq!(ip, None);
+        let (inet, ip) = validate_lan_request("status", None, true).unwrap();
+        assert!(!inet); // internet is narrowed to action=="on" only
+        assert_eq!(ip, None);
+    }
+
+    #[test]
+    fn validate_lan_request_native_shape_checks_ip_when_not_internet() {
+        assert_eq!(
+            validate_lan_request("on", Some("not-an-ip".into()), false).unwrap_err().code,
+            "BAD_ARG"
+        );
+        let (inet, ip) = validate_lan_request("on", Some("192.168.1.5".into()), false).unwrap();
+        assert!(!inet);
+        assert_eq!(ip.as_deref(), Some("192.168.1.5"));
+    }
+
+    #[test]
+    fn validate_lan_request_native_internet_only_narrows_for_on() {
+        // --internet is only honored for action=="on" (matches wow_lan's own
+        // narrowing) -- refresh with internet=true still gets the strict
+        // IPv4-shape check, not the loose hostname one.
+        let (inet, ip) = validate_lan_request("on", Some("myserver.duckdns.org".into()), true).unwrap();
+        assert!(inet);
+        assert_eq!(ip.as_deref(), Some("myserver.duckdns.org"));
+        assert_eq!(
+            validate_lan_request("refresh", Some("myserver.duckdns.org".into()), true).unwrap_err().code,
+            "BAD_ARG"
+        );
+    }
+
+    #[test]
+    fn validate_lan_request_native_internet_shape_checks_hostname() {
+        assert_eq!(
+            validate_lan_request("on", Some("bad host;".into()), true).unwrap_err().code,
+            "BAD_ARG"
+        );
     }
 }

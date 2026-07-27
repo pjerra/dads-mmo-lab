@@ -23,7 +23,10 @@ use dml_core::proc::output_bounded;
 pub use dml_core::envelope::envelope_to_result;
 use dml_wow::config::{cfg_installed_err, cfg_missing_file_err, cfg_not_editable_err};
 use dml_wow::db::{cell_string, count_result, db_err_to_cmd, db_unreachable_err, sql_row_int};
-use dml_wow::lan::LAN_TITLE;
+// `validate_ip`/`validate_host` are `pub use`d: `realmlist.rs` reaches
+// `validate_ip` as `crate::validate_ip`.
+pub use dml_wow::lan::{validate_host, validate_ip};
+use dml_wow::lan::{LAN_ACTIONS, LAN_TITLE};
 use dml_wow::party::{
     bot_member_classes, bot_member_names, live_spec_names, party_not_online_err, party_online_guid,
     preset_dir_or_internal_err,
@@ -116,23 +119,8 @@ fn bad_id(id: &str) -> CmdError {
 // and turns a bad webview call into a typed error instead of a mystery
 // WSL/CLI failure.
 
-const LAN_ACTIONS: [&str; 4] = ["on", "off", "status", "refresh"];
 const TAILSCALE_ACTIONS: [&str; 4] = ["install", "up", "status", "down"];
 const TOOL_NAMES: [&str; 2] = ["unbound", "unbound-remove"];
-
-/// Pure, testable IPv4-shape check: `^[0-9]{1,3}(\.[0-9]{1,3}){3}$`. Exactly
-/// 4 dot-separated groups of 1-3 ASCII digits each -- matches the CLI's own
-/// guard in `dml lan` (it re-validates independently) rather than a strict
-/// 0-255 range check, so this only needs to reject shapes that could carry
-/// something other than an address (whitespace, semicolons, letters, extra
-/// segments) before the value is ever used to build a command line.
-pub fn validate_ip(ip: &str) -> bool {
-    let parts: Vec<&str> = ip.split('.').collect();
-    parts.len() == 4
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()))
-}
 
 /// Install-from-URL check (Batch 4 F16): a plain https git URL --
 /// `^https://[A-Za-z0-9./_-]+$`, bounded length. Deliberately closed (no
@@ -152,17 +140,6 @@ pub fn validate_git_url(url: &str) -> bool {
         // `dml run <url>`, and a `..` segment could escape the clone dir.
         // A dot-only charset can't otherwise be rejected by the char filter.
         && !url.split('/').any(|seg| seg == "..")
-}
-
-/// Internet-play address check (Batch 4 F15): a public IPv4 or hostname,
-/// `^[A-Za-z0-9.-]{1,253}$` -- mirrors the CLI's own `--internet` guard
-/// (which re-validates independently). Like validate_ip this only needs to
-/// keep shell/SQL-shaped garbage out of an argv slot; DNS decides whether
-/// the name actually resolves.
-pub fn validate_host(host: &str) -> bool {
-    !host.is_empty()
-        && host.len() <= 253
-        && host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 // --- Auto-shutdown watcher (Batch 2 F5) -------------------------------------
@@ -4443,68 +4420,16 @@ async fn wow_lan_public_ip(state: State<'_, AppState>) -> Result<serde_json::Val
     run_json_cmd(state, vec!["wow".into(), "lan".into(), "public-ip".into()]).await
 }
 
-// ---------------------------------------------------------------------------
-// NATIVE-MODE `wow lan on/off/status/refresh` (Chunk 2 task C2c item 3):
-// faithful port of the AzerothCore branch of `90-main.sh:858-1052`. AC-ONLY
-// BY DECISION (`dml::db` has no MaNGOS/Tortoise support) -- native mode only
-// ever drives the single fixed title `LAN_TITLE`; WSL keeps handling every
-// title (including MaNGOS/Tortoise ones) via `wow_lan` above.
-//
-// TEXT-MODE, NOT JSON: like its WSL sibling, this returns `Result<String,
-// CmdError>` where `CmdError` is reserved for genuinely malformed input
-// (bad action, bad address SHAPE) -- the same split `wow_lan`'s own
-// pre-validation already draws. Every DOMAIN-level failure (not a private
-// address, server not running, DB not answering yet, the address didn't
-// land) instead comes back as `Ok("[dml] ERROR: ...")` TEXT, because that's
-// what `run_captured` already does for the WSL sibling: a `dml lan` that
-// exits 1 with informational stdout is still `Ok` to the JS caller (see
-// `DmlRunner::run_captured`'s doc comment) -- so the Svelte side, which just
-// dumps this string into a `<pre>` (see `wowLan`'s doc comment in `api.ts`),
-// needs no branching between backends.
-// ---------------------------------------------------------------------------
-
-/// Shared arg validation for `wow_lan_native`, deliberately duplicating (not
-/// refactoring) `wow_lan`'s own inline checks above: SAME rules --
-/// `LAN_ACTIONS` membership, an IPv4-SHAPE or hostname-SHAPE check depending
-/// on `--internet`, `--internet` itself narrowed to `action == "on"` only
-/// (mirrors `wow_lan`'s existing `internet.unwrap_or(false) && action ==
-/// "on"` -- a deliberate product narrowing already shipped for WSL, not a
-/// gap to "fix" here). The private-vs-public "not a private LAN address"
-/// check is NOT here -- that stays a DOMAIN-level TEXT error further down
-/// (`dml::lan::not_private_message`), matching where the bash oracle itself
-/// performs it (`90-main.sh:901-905`, before ever touching docker/DB).
-fn validate_lan_request_native(
-    action: &str,
-    ip: Option<String>,
-    internet: bool,
-) -> Result<(bool, Option<String>), CmdError> {
-    if !LAN_ACTIONS.contains(&action) {
-        return Err(bad_arg(format!("invalid lan action: {action:?}")));
-    }
-    let inet = internet && action == "on";
-    let ip_arg = if action == "on" || action == "refresh" {
-        let ip = ip.ok_or_else(|| bad_arg("ip is required for the on/refresh actions"))?;
-        if inet {
-            if !validate_host(&ip) {
-                return Err(bad_arg(format!("invalid address or hostname: {ip:?}")));
-            }
-        } else if !validate_ip(&ip) {
-            return Err(bad_arg(format!("invalid IPv4 address: {ip:?}")));
-        }
-        Some(ip)
-    } else {
-        None
-    };
-    Ok((inet, ip_arg))
-}
-
-/// NATIVE-MODE `wow lan on/off/status/refresh` -- see the module doc comment
-/// above `validate_lan_request_native` for the text-vs-typed-error split.
-/// Native mode only — WSL keeps calling `wow_lan`.
+/// NATIVE-MODE `wow lan on/off/status/refresh` -- see
+/// [`dml_wow::lan::validate_lan_request`] (the input gate, which also
+/// documents the text-vs-typed-error split) and [`dml_wow::lan::lan_action`].
+/// AC-ONLY BY DECISION: native mode only ever drives the single fixed title
+/// `LAN_TITLE`; WSL keeps handling every title (including MaNGOS/Tortoise
+/// ones) via `wow_lan` above. Native mode only.
 #[tauri::command]
 async fn wow_lan_native(action: String, ip: Option<String>, internet: Option<bool>) -> Result<String, CmdError> {
     require_native_backend()?;
-    let (inet, ip_arg) = validate_lan_request_native(&action, ip, internet.unwrap_or(false))?;
+    let (inet, ip_arg) = dml_wow::lan::validate_lan_request(&action, ip, internet.unwrap_or(false))?;
     tauri::async_runtime::spawn_blocking(move || dml_wow::lan::lan_action(&action, ip_arg, inet))
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
@@ -6221,37 +6146,6 @@ mod tests {
     }
 
     #[test]
-    fn ip_validation_accepts_well_shaped_ipv4() {
-        assert!(validate_ip("192.168.1.1"));
-        assert!(validate_ip("8.8.8.8"));
-        assert!(validate_ip("1.2.3.4"));
-        assert!(validate_ip("255.255.255.255"));
-        assert!(validate_ip("0.0.0.0"));
-    }
-
-    #[test]
-    fn ip_validation_rejects_garbage() {
-        assert!(!validate_ip(""));
-        assert!(!validate_ip("not an ip"));
-        assert!(!validate_ip("1.2.3"));
-        assert!(!validate_ip("1.2.3.4.5"));
-        assert!(!validate_ip("1..3.4"));
-        assert!(!validate_ip(".1.2.3"));
-        assert!(!validate_ip("1.2.3."));
-        assert!(!validate_ip("1.2.3.4444"));
-    }
-
-    #[test]
-    fn ip_validation_rejects_injection_shaped_strings() {
-        assert!(!validate_ip("1.2.3.4; rm -rf /"));
-        assert!(!validate_ip("1.2.3.4 && whoami"));
-        assert!(!validate_ip("1.2.3.4\nrm -rf /"));
-        assert!(!validate_ip("$(rm -rf /)"));
-        assert!(!validate_ip("1.2.3.4`id`"));
-        assert!(!validate_ip("../../etc/passwd"));
-    }
-
-    #[test]
     fn git_url_validation_accepts_plain_https_repo_links() {
         assert!(validate_git_url("https://github.com/user/repo.git"));
         assert!(validate_git_url("https://github.com/user/repo"));
@@ -6278,92 +6172,7 @@ mod tests {
         assert!(validate_git_url("https://github.com/user/repo..git"));
     }
 
-    #[test]
-    fn host_validation_accepts_public_ips_and_hostnames() {
-        assert!(validate_host("84.210.13.37"));
-        assert!(validate_host("myserver.duckdns.org"));
-        assert!(validate_host("my-name.example-host.net"));
-        assert!(validate_host("localhost"));
-    }
-
-    #[test]
-    fn host_validation_rejects_garbage_and_injection_shapes() {
-        assert!(!validate_host(""));
-        assert!(!validate_host("foo bar"));
-        assert!(!validate_host("evil;drop"));
-        assert!(!validate_host("a`id`"));
-        assert!(!validate_host("$(reboot)"));
-        assert!(!validate_host("host\nname"));
-        assert!(!validate_host("x'y"));
-        assert!(!validate_host(&"a".repeat(254)));
-    }
-
-    #[test]
-    fn lan_action_allowlist_is_closed() {
-        assert!(LAN_ACTIONS.contains(&"on"));
-        assert!(LAN_ACTIONS.contains(&"off"));
-        assert!(LAN_ACTIONS.contains(&"status"));
-        assert!(LAN_ACTIONS.contains(&"refresh"));
-        assert!(!LAN_ACTIONS.contains(&"on; rm -rf /"));
-        assert!(!LAN_ACTIONS.contains(&"reset"));
-    }
-
     // -- validate_lan_request_native (Chunk 2 task C2c item 3) ---------------
-
-    #[test]
-    fn validate_lan_request_native_rejects_unknown_action() {
-        let e = validate_lan_request_native("reset", None, false).unwrap_err();
-        assert_eq!(e.code, "BAD_ARG");
-    }
-
-    #[test]
-    fn validate_lan_request_native_requires_ip_for_on_and_refresh() {
-        assert_eq!(validate_lan_request_native("on", None, false).unwrap_err().code, "BAD_ARG");
-        assert_eq!(validate_lan_request_native("refresh", None, false).unwrap_err().code, "BAD_ARG");
-    }
-
-    #[test]
-    fn validate_lan_request_native_off_and_status_need_no_ip() {
-        let (inet, ip) = validate_lan_request_native("off", None, false).unwrap();
-        assert!(!inet);
-        assert_eq!(ip, None);
-        let (inet, ip) = validate_lan_request_native("status", None, true).unwrap();
-        assert!(!inet); // internet is narrowed to action=="on" only
-        assert_eq!(ip, None);
-    }
-
-    #[test]
-    fn validate_lan_request_native_shape_checks_ip_when_not_internet() {
-        assert_eq!(
-            validate_lan_request_native("on", Some("not-an-ip".into()), false).unwrap_err().code,
-            "BAD_ARG"
-        );
-        let (inet, ip) = validate_lan_request_native("on", Some("192.168.1.5".into()), false).unwrap();
-        assert!(!inet);
-        assert_eq!(ip.as_deref(), Some("192.168.1.5"));
-    }
-
-    #[test]
-    fn validate_lan_request_native_internet_only_narrows_for_on() {
-        // --internet is only honored for action=="on" (matches wow_lan's own
-        // narrowing) -- refresh with internet=true still gets the strict
-        // IPv4-shape check, not the loose hostname one.
-        let (inet, ip) = validate_lan_request_native("on", Some("myserver.duckdns.org".into()), true).unwrap();
-        assert!(inet);
-        assert_eq!(ip.as_deref(), Some("myserver.duckdns.org"));
-        assert_eq!(
-            validate_lan_request_native("refresh", Some("myserver.duckdns.org".into()), true).unwrap_err().code,
-            "BAD_ARG"
-        );
-    }
-
-    #[test]
-    fn validate_lan_request_native_internet_shape_checks_hostname() {
-        assert_eq!(
-            validate_lan_request_native("on", Some("bad host;".into()), true).unwrap_err().code,
-            "BAD_ARG"
-        );
-    }
 
     // -- lan_current_address / lan_set shape (Chunk 2 task C2c item 3) -------
 
