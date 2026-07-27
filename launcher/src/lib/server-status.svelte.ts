@@ -108,11 +108,28 @@ function runTransitionActions(prev: ServerDetail["verdict"] | null, next: Server
   }
   if (actions.lanRefresh) void lanAutoRefresh();
   if (azerothReadyTransition(prev, next)) fireReadyNotification();
+  if (serverWentDownTransition(prev, next)) fireServerDownNotification(next);
   // Tray tooltip. NB runTransitionActions runs on EVERY successful poll, not
   // only on changes (the prev !== next gate lives inside
   // verdictTransitionActions), so this needs its own guard or it would fire
   // at Rust every 7 seconds.
   if (prev !== next) void traySetStatus(next).catch(() => {});
+}
+
+// Pure: did a server we KNEW was up go down? The mirror of
+// azerothReadyTransition, added with the tray: a server dying while the
+// window is hidden is exactly what a tray user wants to be told about.
+// Deliberately narrow -- only FROM online (so a blip recovering into a stop
+// is not reported twice), only TO a settled down-state (soap_unreachable is
+// frequently transient, and starting is a deliberate restart), and never on
+// prev===null, which would notify on every launch that finds a stopped
+// server.
+export function serverWentDownTransition(
+  prev: ServerDetail["verdict"] | null,
+  next: ServerDetail["verdict"] | null,
+): boolean {
+  if (prev !== "online") return false;
+  return next === "stopped" || next === "crashed";
 }
 
 // --- "Azeroth is ready" notification (Batch 3 F10) --------------------------
@@ -156,6 +173,25 @@ function fireReadyNotification(): void {
       }
     } catch {
       // Best-effort: the in-app toast above already happened.
+    }
+  })();
+}
+
+// The down-notification's executor. Mirrors fireReadyNotification's exact
+// permission handling. No in-app toast counterpart on purpose: the whole
+// point is to reach the user when NO window is showing.
+function fireServerDownNotification(next: ServerDetail["verdict"]): void {
+  const body = next === "crashed" ? "The world server crashed." : "The server has stopped.";
+  void (async () => {
+    try {
+      const { isPermissionGranted, requestPermission, sendNotification } = await import(
+        "@tauri-apps/plugin-notification"
+      );
+      let granted = await isPermissionGranted();
+      if (!granted) granted = (await requestPermission()) === "granted";
+      if (granted) sendNotification({ title: "DML Launcher", body });
+    } catch {
+      // Notifications are a courtesy; never let one disturb the poll loop.
     }
   })();
 }

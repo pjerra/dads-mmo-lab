@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   KEEP_AWAKE_FAILURE_LIMIT,
   azerothReadyTransition,
+  serverWentDownTransition,
   chipStartVisible,
   containersExist,
   lanRefreshApplied,
@@ -120,6 +121,33 @@ describe("azerothReadyTransition", () => {
     expect(azerothReadyTransition("online", "stopped")).toBe(false);
     expect(azerothReadyTransition("starting", "crashed")).toBe(false);
     expect(azerothReadyTransition("stopped", null)).toBe(false);
+  });
+});
+
+// The other direction (tray work): a server going down while you are not
+// looking is exactly what a tray user wants to be told about. Deliberately
+// narrow -- only FROM online, only TO a settled down-state.
+describe("serverWentDownTransition", () => {
+  it("fires when a running server stops or crashes", () => {
+    expect(serverWentDownTransition("online", "stopped")).toBe(true);
+    expect(serverWentDownTransition("online", "crashed")).toBe(true);
+  });
+
+  it("does NOT fire on the first poll after app launch (prev null)", () => {
+    // A server that was already down is not news, and notifying on startup
+    // would be noise on every launch.
+    expect(serverWentDownTransition(null, "stopped")).toBe(false);
+    expect(serverWentDownTransition(null, "crashed")).toBe(false);
+  });
+
+  it("does NOT fire for a transient SOAP blip or a deliberate restart", () => {
+    expect(serverWentDownTransition("online", "soap_unreachable")).toBe(false);
+    expect(serverWentDownTransition("online", "starting")).toBe(false);
+    expect(serverWentDownTransition("soap_unreachable", "stopped")).toBe(false);
+  });
+
+  it("does NOT fire when nothing changed", () => {
+    expect(serverWentDownTransition("stopped", "stopped")).toBe(false);
   });
 });
 
