@@ -9,6 +9,7 @@ edition = "2021"
 dml-core = { path = "../dml-core" }
 dml-wow = { path = "../dml-wow" }
 serde_json = "1"
+clap = { version = "4", features = ["derive"] }
 
 [[bin]]
 name = "dml-wow"
