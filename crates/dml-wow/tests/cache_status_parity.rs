@@ -37,7 +37,14 @@ fn find_bash() -> Option<PathBuf> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(b));
     }
-    for c in [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"] {
+    // Fallback probes are per-platform: Git Bash on Windows, the system
+    // shell elsewhere. Probing ONLY the Windows locations made every Linux
+    // run of this suite skip silently, even with bash at /usr/bin/bash.
+    #[cfg(windows)]
+    let candidates = [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"];
+    #[cfg(not(windows))]
+    let candidates = ["/usr/bin/bash", "/bin/bash"];
+    for c in candidates {
         if Path::new(c).exists() {
             return Some(PathBuf::from(c));
         }
@@ -112,7 +119,7 @@ fn native_reader_deep_equals_wow_cache_status() {
         "unexpected CLI path shape: {want_path}"
     );
     assert!(
-        got_path.ends_with(".dml\\wowhead-cache"),
+        got_path.ends_with(".dml/wowhead-cache") || got_path.ends_with(".dml\\wowhead-cache"),
         "unexpected native path shape: {got_path}"
     );
 }

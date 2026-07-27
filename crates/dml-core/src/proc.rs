@@ -472,4 +472,38 @@ mod tests {
             "must return promptly after the deadline, not wait for the child"
         );
     }
+
+    // The two POSIX siblings of the pair above. `output_bounded` is ordinary
+    // portable std code, so gating its only real-subprocess coverage behind
+    // #[cfg(windows)] left it entirely untested on Linux — the platform the
+    // CLI now ships on. Same assertions, platform-appropriate children.
+
+    #[cfg(not(windows))]
+    #[test]
+    fn output_bounded_returns_output_for_a_fast_command() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo bounded_ok"]);
+        let out = super::output_bounded(cmd, std::time::Duration::from_secs(5))
+            .expect("fast command should return Some");
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("bounded_ok"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn output_bounded_kills_and_returns_none_on_timeout() {
+        // `sleep 20` spawned DIRECTLY, not via `sh -c` — one process, so the
+        // kill closes the pipes the draining threads are reading and nothing
+        // is left holding them open (the grandchild trap documented in
+        // `dml_wow::backup`'s timeout test).
+        let start = std::time::Instant::now();
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("20");
+        let out = super::output_bounded(cmd, std::time::Duration::from_millis(300));
+        assert!(out.is_none(), "an overrunning command must time out to None");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "must return promptly after the deadline, not wait for the child"
+        );
+    }
 }

@@ -41,10 +41,14 @@ fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(b);
     }
-    for c in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-    ] {
+    // Fallback probes are per-platform: Git Bash on Windows, the system
+    // shell elsewhere. Probing ONLY the Windows locations made every Linux
+    // run of this suite skip silently, even with bash at /usr/bin/bash.
+    #[cfg(windows)]
+    let candidates = [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"];
+    #[cfg(not(windows))]
+    let candidates = ["/usr/bin/bash", "/bin/bash"];
+    for c in candidates {
         if Path::new(c).exists() {
             return Some(OsString::from(c));
         }
@@ -70,7 +74,11 @@ fn yq_path(games: &Path) -> Option<PathBuf> {
         let p = PathBuf::from(y);
         return p.exists().then_some(p);
     }
+    // The vendored tool is yq.exe on Windows, plain yq on a Linux dev box.
+    #[cfg(windows)]
     let p = games.join("tools").join("yq.exe");
+    #[cfg(not(windows))]
+    let p = games.join("tools").join("yq");
     p.exists().then_some(p)
 }
 

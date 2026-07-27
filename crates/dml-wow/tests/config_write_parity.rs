@@ -37,10 +37,14 @@ fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(b);
     }
-    for c in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-    ] {
+    // Fallback probes are per-platform: Git Bash on Windows, the system
+    // shell elsewhere. Probing ONLY the Windows locations made every Linux
+    // run of this suite skip silently, even with bash at /usr/bin/bash.
+    #[cfg(windows)]
+    let candidates = [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"];
+    #[cfg(not(windows))]
+    let candidates = ["/usr/bin/bash", "/bin/bash"];
+    for c in candidates {
         if Path::new(c).exists() {
             return Some(OsString::from(c));
         }
@@ -62,8 +66,8 @@ fn find_script() -> Option<PathBuf> {
 }
 
 /// Only ever READS this binary's existence — never writes anywhere under the
-/// real games dir. `DML_YQ_BIN` is honored first; otherwise probes the same
-/// fixed dev-box location the sibling parity tests use.
+/// real games dir. `DML_YQ_BIN` is honored first; otherwise probes the fixed
+/// dev-box location on Windows and the usual package locations on Linux.
 fn find_yq() -> Option<PathBuf> {
     if let Some(y) = std::env::var_os("DML_YQ_BIN").filter(|s| !s.is_empty()) {
         let p = PathBuf::from(y);
@@ -71,8 +75,14 @@ fn find_yq() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let p = PathBuf::from(r"C:\Users\perzi\dml-native").join("tools").join("yq.exe");
-    p.exists().then_some(p)
+    // Windows probes the fixed dev-box location; Linux probes where a distro
+    // package puts yq, so this OFFLINE suite can actually run there instead
+    // of skipping forever on a path that can never exist.
+    #[cfg(windows)]
+    let candidates = [PathBuf::from(r"C:\Users\perzi\dml-native").join("tools").join("yq.exe")];
+    #[cfg(not(windows))]
+    let candidates = [PathBuf::from("/usr/bin/yq"), PathBuf::from("/usr/local/bin/yq")];
+    candidates.into_iter().find(|p| p.exists())
 }
 
 /// PATH with the bash toolchain dirs (bin + usr/bin) prepended, so the

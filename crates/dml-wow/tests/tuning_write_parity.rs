@@ -55,10 +55,14 @@ fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(b);
     }
-    for c in [
-        r"C:\Program Files\Git\bin\bash.exe",
-        r"C:\Program Files\Git\usr\bin\bash.exe",
-    ] {
+    // Fallback probes are per-platform: Git Bash on Windows, the system
+    // shell elsewhere. Probing ONLY the Windows locations made every Linux
+    // run of this suite skip silently, even with bash at /usr/bin/bash.
+    #[cfg(windows)]
+    let candidates = [r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"];
+    #[cfg(not(windows))]
+    let candidates = ["/usr/bin/bash", "/bin/bash"];
+    for c in candidates {
         if Path::new(c).exists() {
             return Some(OsString::from(c));
         }
@@ -88,8 +92,14 @@ fn find_yq() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let p = PathBuf::from(r"C:\Users\perzi\dml-native").join("tools").join("yq.exe");
-    p.exists().then_some(p)
+    // Windows probes the fixed dev-box location; Linux probes where a distro
+    // package puts yq, so this OFFLINE suite can actually run there instead
+    // of skipping forever on a path that can never exist.
+    #[cfg(windows)]
+    let candidates = [PathBuf::from(r"C:\Users\perzi\dml-native").join("tools").join("yq.exe")];
+    #[cfg(not(windows))]
+    let candidates = [PathBuf::from("/usr/bin/yq"), PathBuf::from("/usr/local/bin/yq")];
+    candidates.into_iter().find(|p| p.exists())
 }
 
 /// The `awk` the spawned `dml` would itself use. Resolved by scanning the
