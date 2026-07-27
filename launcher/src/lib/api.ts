@@ -1737,6 +1737,16 @@ export async function traySetStatus(verdict: string): Promise<void> {
   return await invoke("tray_set_status", { verdict });
 }
 
+// Start-with-Windows, backed by an HKCU\...\Run entry. `autostartGet` reports
+// false for an entry whose recorded exe no longer exists, so a stale entry
+// from a deleted build does not show as enabled.
+export async function autostartGet(): Promise<boolean> {
+  return await invoke<boolean>("autostart_get");
+}
+export async function autostartSet(on: boolean): Promise<void> {
+  return await invoke("autostart_set", { on });
+}
+
 // --- Auto-shutdown watcher (Batch 2 F5) ------------------------------------
 
 // Progress arrives separately via the "auto-shutdown" tauri event channel

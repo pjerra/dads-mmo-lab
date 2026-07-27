@@ -12,6 +12,8 @@
     wowAccountwideSet,
     launcherConfigRead,
     launcherConfigWrite,
+    autostartGet,
+    autostartSet,
     type ConfigSetting,
     type PbKey,
     type AccountwideState,
@@ -69,12 +71,45 @@
   let launcherSaving = $state(false);
   let launcherNote: string | null = $state(null);
 
+  let autostartOn = $state(false);
+
   async function loadLauncherSettings(): Promise<void> {
     try {
       launcher = await launcherConfigRead();
+      autostartOn = await autostartGet();
     } catch {
       // A missing or broken launcher.json must not break the Settings page.
       launcher = null;
+    }
+  }
+
+  async function saveLauncherFlag(key: "closeToTray", on: boolean): Promise<void> {
+    if (!launcher) return;
+    launcherSaving = true;
+    try {
+      const next = { ...launcher.config, [key]: on };
+      await launcherConfigWrite(next);
+      launcher = { ...launcher, config: next };
+    } catch (e) {
+      const err = e as { message?: string };
+      error = err.message ?? "Could not save launcher settings";
+    } finally {
+      launcherSaving = false;
+    }
+  }
+
+  async function setAutostart(on: boolean): Promise<void> {
+    launcherSaving = true;
+    try {
+      await autostartSet(on);
+    } catch (e) {
+      const err = e as { message?: string };
+      error = err.message ?? "Could not change the Windows startup setting";
+    } finally {
+      // Re-read either way: the registry is the source of truth, so a failed
+      // write must not leave the checkbox showing what the user clicked.
+      autostartOn = await autostartGet();
+      launcherSaving = false;
     }
   }
 
@@ -544,6 +579,24 @@
               both present.
             {/if}
           </p>
+          <label class="row">
+            <input
+              type="checkbox"
+              checked={launcher.config.closeToTray}
+              disabled={launcherSaving}
+              onchange={(e) => saveLauncherFlag("closeToTray", e.currentTarget.checked)}
+            />
+            Closing the window keeps DML Launcher running in the system tray
+          </label>
+          <label class="row">
+            <input
+              type="checkbox"
+              checked={autostartOn}
+              disabled={launcherSaving}
+              onchange={(e) => setAutostart(e.currentTarget.checked)}
+            />
+            Start DML Launcher when Windows starts
+          </label>
           {#if launcherNote}<p class="muted">{launcherNote}</p>{/if}
         </div>
       {/if}
