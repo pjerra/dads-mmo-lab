@@ -9,6 +9,10 @@ edition = "2021"
 dml-core = { path = "../dml-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Compose-override env map (`config::{parse_override_env, override_env_write,
+# override_env_remove}`) — moved back out of dml-core in Task 7 because all
+# three hardcode the `ac-worldserver` service key.
+serde_yaml_ng = "0.10.0"
 # Direct MySQL reader (`db`, `pages`, `stats`, `paperdoll`, `iteminfo`,
 # `backup`, `restore`, `modmgr`, `moduletail`, `destructive`). Pure-Rust
 # build: `minimal-rust` swaps flate2's zlib C backend for the Rust one, and NO

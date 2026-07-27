@@ -56,12 +56,60 @@ pub fn env_name_for(key: &str) -> String {
     format!("AC_{}", out.to_ascii_uppercase())
 }
 
-/// [`strip_conf_quotes`], [`parse_conf`], and [`parse_override_env`] now live
-/// in `dml_core::conf` (cargo-workspace refactor, Task 5) — they are generic
-/// conf-file/YAML parsing with no AC-specific routing knowledge. Re-exported
-/// here under the same names so every call site (this module's own
-/// `ConfigReader`, `dml::tuning`, `lib.rs`) keeps compiling unchanged.
-pub use dml_core::conf::{parse_conf, parse_override_env, strip_conf_quotes};
+/// [`strip_conf_quotes`] and [`parse_conf`] now live in `dml_core::conf`
+/// (cargo-workspace refactor, Task 5) — they are generic conf-file parsing
+/// with no AC-specific routing knowledge. Re-exported here under the same
+/// names so every call site (this module's own `ConfigReader`, `tuning`,
+/// `lib.rs`) keeps compiling unchanged.
+pub use dml_core::conf::{parse_conf, strip_conf_quotes};
+
+// ---------------------------------------------------------------------------
+// Compose-override env map (Task 7): `parse_override_env` and the two writers
+// further down came BACK out of `dml_core::conf`, because all three hardcode
+// the `ac-worldserver` compose service key — the last runtime AzerothCore
+// dependency left in the core crate. The failure mode for a non-AC caller was
+// SILENT (the writer's `ensure_yaml_mapping` would auto-vivify a bogus
+// `services.ac-worldserver.environment` block rather than erroring), so they
+// belong on the game side. Bodies and tests are unchanged.
+// ---------------------------------------------------------------------------
+
+/// yq `tostring` semantics for a scalar override value, so a bare `0.0.0.0` and
+/// a quoted `"7878"` both round-trip to the string bash's `_cfg_env_load_map`
+/// would have stored. Non-scalars never appear in an AC env map; they degrade to
+/// an empty string rather than panicking.
+fn yaml_scalar_to_string(v: &serde_yaml_ng::Value) -> String {
+    match v {
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        serde_yaml_ng::Value::Bool(b) => b.to_string(),
+        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        serde_yaml_ng::Value::Null => "null".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Parse `.services.ac-worldserver.environment` from the override YAML into a
+/// KEY -> value(string) map — the Rust equivalent of one `_cfg_env_load_map`
+/// (40-config.sh:189) yq dump, read ONCE. A missing file/section, or YAML that
+/// fails to parse, yields an empty map (a valid "nothing overridden" answer,
+/// matching the bash `// {}` fallback).
+pub fn parse_override_env(yaml_text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let Ok(doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(yaml_text) else {
+        return map;
+    };
+    let env = doc
+        .get("services")
+        .and_then(|s| s.get("ac-worldserver"))
+        .and_then(|w| w.get("environment"));
+    if let Some(serde_yaml_ng::Value::Mapping(m)) = env {
+        for (k, v) in m {
+            if let Some(key) = k.as_str() {
+                map.insert(key.to_string(), yaml_scalar_to_string(v));
+            }
+        }
+    }
+    map
+}
 
 /// Split a `conf:[<file>.conf:]<Key>` env-column spec into `(file, key)`, a port
 /// of `_cfg_conf_route` (40-config.sh:291). The file defaults to
@@ -231,8 +279,136 @@ impl ConfigReader {
 /// split, Task 7, widens it to `pub`) because `lib.rs`'s
 /// `wow_config_raw_write_native` calls it directly, not just through the
 /// three writers above.
-pub use dml_core::conf::{conf_write, override_env_remove, override_env_write};
+pub use dml_core::conf::conf_write;
 pub use dml_core::conf::atomic_write;
+
+/// Ensure `parent[key]` is a `Mapping`, creating one (or replacing a
+/// non-Mapping value) as needed, and return a mutable reference to it. Used
+/// to auto-vivify the `services.ac-worldserver.environment` nesting.
+fn ensure_yaml_mapping<'a>(
+    parent: &'a mut serde_yaml_ng::Mapping,
+    key: &str,
+) -> &'a mut serde_yaml_ng::Mapping {
+    let needs_insert = !matches!(parent.get(key), Some(serde_yaml_ng::Value::Mapping(_)));
+    if needs_insert {
+        parent.insert(
+            serde_yaml_ng::Value::String(key.to_string()),
+            serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()),
+        );
+    }
+    match parent.get_mut(key) {
+        Some(serde_yaml_ng::Value::Mapping(m)) => m,
+        _ => unreachable!("just ensured a Mapping"),
+    }
+}
+
+/// Set `.services.ac-worldserver.environment[key] = value` in an override
+/// compose YAML, creating the nested maps when absent. Returns `Ok(changed)`.
+/// Semantic-parity target: `_cfg_env_write` (40-config.sh:240).
+///
+/// Compares against the CURRENT value first via the existing
+/// `parse_override_env` reader — an unchanged value is a true no-op
+/// (`Ok(false)`, file untouched), matching the bash oracle's
+/// `[[ "$cur" == "$2" ]] && return 0` short-circuit. The written value is
+/// ALWAYS a YAML string scalar (never int/float/bool), matching yq's
+/// `strenv()` semantics.
+///
+/// KNOWN CAVEAT: `serde_yaml_ng` does not preserve comments and may choose
+/// different scalar quoting than mikefarah `yq` (the bash oracle's engine).
+/// The override file is machine-generated (no hand comments expected), so
+/// this is acceptable — the B3 parity test compares this file SEMANTICALLY
+/// (parsed env-map equality), NOT byte-for-byte, unlike `conf_write`.
+///
+/// SAFETY: a fresh minimal document is only ever built when the file is
+/// genuinely absent or blank — the bash oracle's `yq -i` on an existing file
+/// that fails to parse leaves the file untouched, and this must too. An
+/// existing, non-blank file that fails to parse as YAML (or parses but its
+/// root isn't a mapping — a shape that could never have come from THIS
+/// writer) is an error, never silently replaced: doing otherwise would
+/// discard every other service/volume/env-var already in the file. Mirrors
+/// `override_env_remove`'s "can't make sense of it -> don't touch it" stance,
+/// just surfaced as an `Err` here (a write caller has to know its edit was
+/// NOT applied; `remove`'s equivalent no-op is safe because it has nothing to
+/// apply).
+pub fn override_env_write(path: &Path, key: &str, value: &str) -> std::io::Result<bool> {
+    let existing_text = std::fs::read_to_string(path).ok();
+    let cur = existing_text
+        .as_deref()
+        .map(parse_override_env)
+        .unwrap_or_default();
+    if cur.get(key).map(String::as_str) == Some(value) {
+        return Ok(false);
+    }
+
+    let mut doc: serde_yaml_ng::Value = match existing_text.as_deref() {
+        Some(t) if !t.trim().is_empty() => serde_yaml_ng::from_str(t).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} exists but is not valid YAML; refusing to overwrite it: {e}",
+                    path.display()
+                ),
+            )
+        })?,
+        _ => serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new()),
+    };
+    if !matches!(doc, serde_yaml_ng::Value::Mapping(_)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} exists but its root is not a YAML mapping; refusing to overwrite it",
+                path.display()
+            ),
+        ));
+    }
+
+    let root = doc.as_mapping_mut().expect("just ensured a Mapping");
+    let services = ensure_yaml_mapping(root, "services");
+    let worldserver = ensure_yaml_mapping(services, "ac-worldserver");
+    let environment = ensure_yaml_mapping(worldserver, "environment");
+    environment.insert(
+        serde_yaml_ng::Value::String(key.to_string()),
+        serde_yaml_ng::Value::String(value.to_string()),
+    );
+
+    let text = serde_yaml_ng::to_string(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, &text)?;
+    Ok(true)
+}
+
+/// Remove `key` from `.services.ac-worldserver.environment` if present.
+/// Idempotent: an absent file, absent section, or absent key are all
+/// `Ok(false)` — never an error. Semantic-parity target: `_cfg_env_remove`
+/// (40-config.sh:276).
+pub fn override_env_remove(path: &Path, key: &str) -> std::io::Result<bool> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let Ok(mut doc) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else {
+        return Ok(false);
+    };
+    let removed = doc
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut("services"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|services| services.get_mut("ac-worldserver"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|worldserver| worldserver.get_mut("environment"))
+        .and_then(|v| v.as_mapping_mut())
+        .and_then(|environment| environment.remove(key));
+
+    if removed.is_none() {
+        return Ok(false);
+    }
+    let text = serde_yaml_ng::to_string(&doc)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(path, &text)?;
+    Ok(true)
+}
 
 // ---------------------------------------------------------------------------
 // `wow_config_set_native` (Task B2a) — pure routing/path/validation helpers.
@@ -655,5 +831,173 @@ mod tests {
         assert_eq!(cfg_file_path(&dir, "../evil.conf"), None);
         assert_eq!(cfg_file_path(&dir, "ghost.conf"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_override_env_reads_the_worldserver_map() {
+        let yaml = "\
+services:
+  ac-worldserver:
+    volumes:
+      - ./modules:/azerothcore/modules
+    environment:
+      AC_RATE_XP_KILL: \"3\"
+      AC_SOAP_IP: 0.0.0.0
+      AC_SOAP_PORT: \"7878\"
+      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: \"2000\"
+";
+        let m = parse_override_env(yaml);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        // Bare IP is a YAML string, kept verbatim.
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        assert_eq!(m.get("AC_SOAP_PORT").map(String::as_str), Some("7878"));
+        assert_eq!(m.get("AC_AI_PLAYERBOT_MAX_RANDOM_BOTS").map(String::as_str), Some("2000"));
+    }
+
+    #[test]
+    fn parse_override_env_empty_or_broken_is_empty_map() {
+        assert!(parse_override_env("").is_empty());
+        assert!(parse_override_env("services: {}").is_empty());
+        assert!(parse_override_env(": : not : yaml : [").is_empty());
+    }
+
+    // -- override_env_write / override_env_remove -----------------------
+
+    fn tmp_override_path(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-envwrite-test-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("docker-compose.override.yml")
+    }
+
+    #[test]
+    fn override_env_write_new_key_into_minimal_override() {
+        let path = tmp_override_path("newkey");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        // Other keys survive.
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_same_value_is_noop() {
+        let path = tmp_override_path("samevalue");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_RATE_XP_KILL: \"3\"\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(!changed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_creates_full_nesting_from_absent_file() {
+        let path = tmp_override_path("absent");
+        assert!(!path.exists());
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_refuses_to_clobber_unparseable_existing_file() {
+        let path = tmp_override_path("badyaml");
+        let before = "services: [this is not\n  a valid yaml mapping\n";
+        std::fs::write(&path, before).unwrap();
+        let err = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // File is untouched -- nothing else in it was discarded.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_write_refuses_to_clobber_non_mapping_root() {
+        let path = tmp_override_path("nonmapping");
+        let before = "- just\n- a\n- list\n";
+        std::fs::write(&path, before).unwrap();
+        let err = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_present_key_removes_it() {
+        let path = tmp_override_path("removepresent");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_RATE_XP_KILL: \"3\"\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let removed = override_env_remove(&path, "AC_RATE_XP_KILL").unwrap();
+        assert!(removed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let m = parse_override_env(&text);
+        assert!(!m.contains_key("AC_RATE_XP_KILL"));
+        // Other key survives.
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_absent_key_is_noop() {
+        let path = tmp_override_path("removeabsent");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        let removed = override_env_remove(&path, "AC_DOES_NOT_EXIST").unwrap();
+        assert!(!removed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn override_env_remove_absent_file_is_noop_not_error() {
+        let path = tmp_override_path("removenofile");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        // Directory doesn't exist at all -> read fails -> Ok(false), never an error.
+        let removed = override_env_remove(&path, "AC_SOAP_IP").unwrap();
+        assert!(!removed);
+    }
+
+    #[test]
+    fn override_env_write_preserves_other_top_level_keys() {
+        let path = tmp_override_path("othertopkeys");
+        std::fs::write(
+            &path,
+            "services:\n  ac-worldserver:\n    volumes:\n      - ./modules:/azerothcore/modules\n    environment:\n      AC_SOAP_IP: 0.0.0.0\n",
+        )
+        .unwrap();
+        let changed = override_env_write(&path, "AC_RATE_XP_KILL", "3").unwrap();
+        assert!(changed);
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The volumes list under the same service survives the edit.
+        assert!(text.contains("volumes"));
+        assert!(text.contains("azerothcore/modules"));
+        let m = parse_override_env(&text);
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
