@@ -122,7 +122,8 @@ pub enum Cmd {
     Stats,
     /// Wowhead tooltip/icon info for one or more item entries (`iteminfo::read_item_info`)
     ItemInfo {
-        /// Comma-separated item entry ids, e.g. `25,116,6948` (max 25)
+        /// Comma-separated item entry ids, e.g. `25,116,6948` (max 25 —
+        /// enforced in `run.rs`, not here; see [`parse_item_ids`])
         #[arg(value_parser = parse_item_ids)]
         ids: ItemIds,
     },
@@ -137,13 +138,22 @@ pub enum Cmd {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ItemIds(pub Vec<u32>);
 
-/// `dml-wow item-info`'s positional argument, `<ID>[,<ID>...]`. A CLI-argv
-/// shape decision (bad ids are a usage error, exit 2), the same idiom as
-/// `ConsoleTail`'s `--lines` range gate above: mirrors the bash CLI's own
-/// gate on `--entries` (`90-main.sh`'s `item-info` arm — `^[0-9]+(,[0-9]+)*$`
-/// then reject a count over 25) as a clap value_parser, so a malformed or
-/// oversized id list never reaches `iteminfo::read_item_info` unguarded and
-/// `run.rs`'s dispatch arm stays a single call.
+/// `dml-wow item-info`'s positional argument, `<ID>[,<ID>...]` — FORMAT only
+/// (`^[0-9]+(,[0-9]+)*$`-equivalent): each comma-separated segment must be a
+/// bare non-negative integer, mirroring the bash CLI's own gate on
+/// `--entries` (`90-main.sh`'s `item-info` arm). A malformed token really is
+/// an argv-shape problem, so it stays a clap usage error (exit 2) — same
+/// idiom as `ConsoleTail`'s `--lines` range gate above.
+///
+/// Deliberately NOT the 25-id cap (review finding 2): a cardinality cap is
+/// the same class of check as `bots --class`'s allowlist or
+/// `items-search --name`'s non-empty rule, both of which this same file
+/// routes through `run.rs` as a `BAD_ARG`/exit-1 domain rejection rather
+/// than a clap usage error — the launcher's `wow_item_info_read` and the
+/// bash arm agree (`BAD_ARG`/exit-1-equivalent for both). Enforcing the cap
+/// here would have made `item-info` the only cardinality check in this file
+/// that disagreed with itself as well as with both siblings. See
+/// `run.rs::dispatch`'s `Cmd::ItemInfo` arm for the cap check itself.
 fn parse_item_ids(raw: &str) -> Result<ItemIds, String> {
     let mut ids = Vec::new();
     for part in raw.split(',') {
@@ -151,9 +161,6 @@ fn parse_item_ids(raw: &str) -> Result<ItemIds, String> {
             format!("not a valid item id: {part:?} (want comma-separated ids, e.g. 25,116,6948)")
         })?;
         ids.push(id);
-    }
-    if ids.len() > 25 {
-        return Err(format!("too many ids ({}) -- 25 max per call", ids.len()));
     }
     Ok(ItemIds(ids))
 }
@@ -589,13 +596,20 @@ mod tests {
         }
     }
 
+    /// The 25-id cap is NOT a clap-parse-time concern (review finding 2, see
+    /// `parse_item_ids`'s doc comment) — a well-formed list of any length,
+    /// including over 25, parses cleanly here. The cap itself is exercised
+    /// as a subprocess `run.rs` BAD_ARG/exit-1 case in
+    /// `tests/cli_integration.rs` (`item_info_cap_violation_is_bad_arg`).
     #[test]
-    fn item_info_rejects_more_than_25_ids() {
-        let too_many = (1..=26).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
-        assert!(Cli::try_parse_from(["dml-wow", "item-info", &too_many]).is_err());
-        // Exactly 25 is fine.
-        let ok = (1..=25).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
-        match Cli::try_parse_from(["dml-wow", "item-info", &ok]).unwrap().command {
+    fn item_info_well_formed_ids_parse_regardless_of_count() {
+        let over_25 = (1..=26).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        match Cli::try_parse_from(["dml-wow", "item-info", &over_25]).unwrap().command {
+            Cmd::ItemInfo { ids } => assert_eq!(ids.0.len(), 26),
+            other => panic!("expected ItemInfo, got {other:?}"),
+        }
+        let exactly_25 = (1..=25).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        match Cli::try_parse_from(["dml-wow", "item-info", &exactly_25]).unwrap().command {
             Cmd::ItemInfo { ids } => assert_eq!(ids.0.len(), 25),
             other => panic!("expected ItemInfo, got {other:?}"),
         }

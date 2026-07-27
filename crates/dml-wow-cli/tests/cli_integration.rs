@@ -356,3 +356,134 @@ fn config_get_unknown_key_is_not_found() {
     assert_eq!(envelope["error"]["code"], "NOT_FOUND");
     assert_eq!(envelope["error"]["message"], "Unknown setting: no.such.setting");
 }
+
+// ---------------------------------------------------------------------------
+// Task 12 review, finding 3: subprocess-level coverage for the database page
+// reads (argv parsing, validator branches, error mapping, exit codes).
+// Nothing above this point exercises those subcommands at all -- the
+// DB-gated parity suites in `crates/dml-wow/tests` (`db_pages_parity.rs`,
+// `stats_parity.rs`, `iteminfo_parity.rs`) call the reader FUNCTIONS
+// directly and never spawn the real `dml-wow` binary, so a bug in this
+// crate's own argv parsing, validation, or error-code mapping (exactly
+// finding 1's hand-copied `DB_UNREACHABLE` hint) was invisible to every test
+// that ran. These five close that gap.
+// ---------------------------------------------------------------------------
+
+/// `true` when the real DB `DbConfig::from_env()` resolves is reachable
+/// right now -- the same lightweight TCP probe `db_pages_parity.rs` uses to
+/// skip its DB-gated tests gracefully rather than failing the whole suite
+/// when only the DB tier (or nothing) is running.
+fn db_reachable() -> bool {
+    let cfg = dml_wow::db::DbConfig::from_env();
+    let addr = format!("{}:{}", cfg.host, cfg.port);
+    addr.parse()
+        .ok()
+        .and_then(|a: std::net::SocketAddr| {
+            std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(600)).ok()
+        })
+        .is_some()
+}
+
+/// (1) A DB-gated success path, end to end: argv -> real DB read -> ok
+/// envelope -> exit 0. `--search Orgrimmar` is stable ground truth (a
+/// `game_tele` row every AzerothCore DB ships with).
+#[test]
+fn teleport_list_search_succeeds_end_to_end_against_the_real_db() {
+    if !db_reachable() {
+        eprintln!("SKIP teleport_list_search_succeeds_end_to_end_against_the_real_db: no DB reachable");
+        return;
+    }
+    let out = bin()
+        .args(["teleport-list", "--search", "Orgrimmar"])
+        .output()
+        .expect("spawn dml-wow teleport-list --search Orgrimmar");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], true);
+    let locations = envelope["data"]["locations"].as_array().expect("locations[]");
+    assert!(
+        locations.iter().any(|l| l["name"].as_str() == Some("Orgrimmar")),
+        "expected an Orgrimmar row, got: {locations:?}"
+    );
+}
+
+/// (2) A DB-gated domain BAD_ARG rejection: an invalid `--class` is refused
+/// BEFORE any SQL runs (exit 1) -- distinct from a clap usage error (exit 2)
+/// and from a DB round trip.
+#[test]
+fn bots_invalid_class_is_bad_arg_exit_1() {
+    if !db_reachable() {
+        eprintln!("SKIP bots_invalid_class_is_bad_arg_exit_1: no DB reachable");
+        return;
+    }
+    let out = bin().args(["bots", "--class", "999"]).output().expect("spawn dml-wow bots --class 999");
+    assert_eq!(out.status.code(), Some(1));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "BAD_ARG");
+    assert_eq!(envelope["error"]["message"], "Invalid class id: 999");
+}
+
+/// (3) A DB-gated NOT_FOUND path: a syntactically valid but nonexistent
+/// character name.
+#[test]
+fn paperdoll_unknown_character_is_not_found_exit_1() {
+    if !db_reachable() {
+        eprintln!("SKIP paperdoll_unknown_character_is_not_found_exit_1: no DB reachable");
+        return;
+    }
+    let out = bin().args(["paperdoll", "NoSuchChar"]).output().expect("spawn dml-wow paperdoll NoSuchChar");
+    assert_eq!(out.status.code(), Some(1));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND");
+    assert_eq!(envelope["error"]["message"], "No such character or no equipped items: NoSuchChar");
+}
+
+/// (4) THE test that would have caught review finding 1: an unreachable DB
+/// (via an env override that needs no real server, up or down) must report
+/// the EXACT hint `dml_wow::db::db_err_to_cmd` uses, not a hand-copied
+/// string that merely looked plausible. NOT DB-gated -- the whole point is
+/// that this works regardless of whether `ac-database` is up.
+#[test]
+fn db_unreachable_reports_the_launchers_exact_hint() {
+    let out = bin()
+        .arg("players-online")
+        .env("DOCKER_DB_EXTERNAL_PORT", "1")
+        .output()
+        .expect("spawn dml-wow players-online with an unreachable DB port");
+    assert_eq!(out.status.code(), Some(1));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "DB_UNREACHABLE");
+    assert_eq!(
+        envelope["error"]["hint"],
+        "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)",
+        "must be db_err_to_cmd's own hint, not a second hand-copied string"
+    );
+}
+
+/// (5a) item-info's FORMAT check is a clap usage error (exit 2) -- fails at
+/// parse time, no DB touched.
+#[test]
+fn item_info_malformed_ids_is_usage_error_exit_2() {
+    let out = bin().args(["item-info", "abc"]).output().expect("spawn dml-wow item-info abc");
+    assert_eq!(out.status.code(), Some(2));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["error"]["code"], "BAD_ARGS");
+}
+
+/// (5b) item-info's 25-id CAP (review finding 2) is a `run.rs` domain
+/// rejection, exit 1 -- distinct from the exit-2 format check above, and
+/// matching the bash/launcher siblings' exact wording ("--entries max 25 ids
+/// per call", even though this CLI's own flag isn't named `--entries`).
+#[test]
+fn item_info_over_25_ids_is_bad_arg_exit_1() {
+    let too_many = (1..=26).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+    let out = bin().args(["item-info", &too_many]).output().expect("spawn dml-wow item-info <26 ids>");
+    assert_eq!(out.status.code(), Some(1));
+    let envelope = parse_envelope(&out.stdout);
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(envelope["error"]["code"], "BAD_ARG");
+    assert_eq!(envelope["error"]["message"], "--entries max 25 ids per call");
+}

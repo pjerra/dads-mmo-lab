@@ -29,11 +29,6 @@ use serde_json::{json, Value};
 use crate::cli::{Cmd, ConfigCmd, ModuleCmd, TuningCmd};
 use crate::out::{emit_err, emit_ok};
 
-/// The hint every `DB_UNREACHABLE` envelope below carries — the SAME text
-/// `db_err_to_cmd`/`stats_err_to_cmd` use in the launcher's own native-mode
-/// Tauri commands (`launcher/src-tauri/src/lib.rs`).
-const DB_UNREACHABLE_HINT: &str = "Is the server running? (docker + MySQL on 127.0.0.1:3306)";
-
 /// Print a `dml-wow` call's `Result` as the one envelope it maps to, and
 /// return the process exit code. NOT a second output path — it is the
 /// two-line `Ok`/`Err` match that would otherwise be copy-pasted into every
@@ -50,19 +45,23 @@ fn emit_result(result: Result<Value, CmdError>) -> i32 {
 }
 
 /// Print a `dml_wow` DB page-reader's `Result` the way EVERY Task 12
-/// subcommand maps it: `Err(DbError)` collapses to `DB_UNREACHABLE` for BOTH
-/// variants (a query error on a reachable DB reports the same code as an
-/// unreachable one) — the exact collapse `db_err_to_cmd`/`stats_err_to_cmd`
-/// apply in the launcher's own native-mode Tauri commands, so a script
-/// driving both surfaces sees identical error codes for identical failures.
+/// subcommand maps it: `Err(DbError)` is handed straight to
+/// [`dml_wow::db::db_err_to_cmd`] — the SAME mapper `wow_bots_read` /
+/// `wow_accounts_read` / `wow_paperdoll_read` (etc.) call in the launcher's
+/// own native-mode Tauri commands (`launcher/src-tauri/src/lib.rs`). Reusing
+/// it here (rather than hand-copying its code/message/hint into a second
+/// constant, as an earlier revision of this file did — review finding 1)
+/// means the CLI's `DB_UNREACHABLE` envelope can never drift from the
+/// launcher's. `stats_err_to_cmd`, the launcher's own private mapper for the
+/// `stats` Tauri command specifically, produces a byte-identical `CmdError`
+/// (same code, same hint) for the same `DbError`, so `db_err_to_cmd` alone
+/// covers every Task 12 subcommand including `stats` — no second export
+/// needed.
 fn emit_db_result(result: Result<Value, DbError>) -> i32 {
-    match result {
-        Ok(data) => emit_ok(data),
-        Err(e) => emit_err("DB_UNREACHABLE", &e.to_string(), DB_UNREACHABLE_HINT),
-    }
+    emit_result(result.map_err(dml_wow::db::db_err_to_cmd))
 }
 
-/// Same collapse as [`emit_db_result`], but for a reader whose `Ok(None)`
+/// Same mapping as [`emit_db_result`], but for a reader whose `Ok(None)`
 /// means "no such character" — `paperdoll::read_paperdoll`,
 /// `pages::read_char_progress` and `pages::read_achievements` all use this
 /// shape (see each's own doc comment). `not_found_message` is the arm's own
@@ -72,7 +71,7 @@ fn emit_db_option_result(result: Result<Option<Value>, DbError>, not_found_messa
     match result {
         Ok(Some(data)) => emit_ok(data),
         Ok(None) => emit_err("NOT_FOUND", not_found_message, ""),
-        Err(e) => emit_err("DB_UNREACHABLE", &e.to_string(), DB_UNREACHABLE_HINT),
+        Err(e) => emit_result(Err(dml_wow::db::db_err_to_cmd(e))),
     }
 }
 
@@ -262,17 +261,31 @@ pub fn dispatch(command: Cmd) -> i32 {
             emit_db_result(dml_wow::stats::read_stats(&cfg))
         }
 
-        Cmd::ItemInfo { ids } => match dml_wow::cachestatus::cache_dir() {
-            Some(cache_root) => {
-                let cfg = DbConfig::from_env();
-                emit_ok(dml_wow::iteminfo::read_item_info(&cache_root, Some(&cfg), &ids.0))
+        Cmd::ItemInfo { ids } => {
+            // The 25-id cap (review finding 2): a domain rejection, checked
+            // BEFORE `read_item_info`'s own internal dedup so an argv list
+            // like "1,1,1,...,1" (26 copies of the same id) still trips it,
+            // matching the bash arm's `(( ${#earr[@]} > 25 ))` check (which
+            // also runs before ITS dedup loop) and `wow_item_info_read`'s
+            // identical `entries.len() > 25` check in the launcher. Same
+            // code/message/hint as both siblings (`cli.rs`'s own
+            // `parse_item_ids` only validates FORMAT, not cardinality — see
+            // its doc comment for why this check lives here instead).
+            if ids.0.len() > 25 {
+                return emit_err("BAD_ARG", "--entries max 25 ids per call", "");
             }
-            None => emit_err(
-                "INTERNAL",
-                "Could not resolve the wowhead cache directory",
-                "",
-            ),
-        },
+            match dml_wow::cachestatus::cache_dir() {
+                Some(cache_root) => {
+                    let cfg = DbConfig::from_env();
+                    emit_ok(dml_wow::iteminfo::read_item_info(&cache_root, Some(&cfg), &ids.0))
+                }
+                None => emit_err(
+                    "INTERNAL",
+                    "Could not resolve the wowhead cache directory",
+                    "",
+                ),
+            }
+        }
     }
 }
 
