@@ -22,4 +22,10 @@ jobs:
       # The launcher crate is Tauri/Windows-focused and needs webkit system libs;
       # the community CLI story on Linux is the three crates — test exactly those.
       - run: cargo build -p dml-core -p dml-wow -p dml-wow-cli --locked
-      - run: cargo test -p dml-core -p dml-wow -p dml-wow-cli --locked
+      # --nocapture on purpose: the parity suites announce why they skip with
+      # eprintln!, and cargo swallows that for PASSING tests. Without it a suite
+      # that skips for a BROKEN reason (as every one of them did on Linux until
+      # the tool gates were made platform-honest) is indistinguishable in the log
+      # from one that ran. The skip lines are the only evidence of which suites
+      # this job actually exercises.
+      - run: cargo test -p dml-core -p dml-wow -p dml-wow-cli --locked -- --nocapture
