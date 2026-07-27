@@ -1,8 +1,3 @@
-/// Transitional alias: the whole `dml` module tree moved to the `dml-wow`
-/// crate (cargo-workspace refactor, Task 7). Re-exported under its old name
-/// so this commit is a pure move; the next commit rewrites every
-/// `crate::dml::…` call site to `dml_wow::…` and drops this line.
-pub use dml_wow as dml;
 pub mod nativesetup;
 pub mod power;
 pub mod realmlist;
@@ -16,7 +11,7 @@ use tauri::ipc::Channel;
 use tauri::Manager;
 use tauri::State;
 
-use crate::dml::envelope::Envelope;
+use dml_wow::envelope::Envelope;
 use dml_core::runner::DmlRunner;
 
 pub struct InstallSession {
@@ -84,7 +79,7 @@ fn envelope_to_result(env: Envelope) -> Result<serde_json::Value, CmdError> {
     if env.ok {
         Ok(env.data)
     } else {
-        let e = env.error.unwrap_or(crate::dml::envelope::ErrorInfo {
+        let e = env.error.unwrap_or(dml_wow::envelope::ErrorInfo {
             code: "CLI_BAD_OUTPUT".into(),
             message: "ok=false with no error object".into(),
             hint: String::new(),
@@ -329,12 +324,12 @@ fn auto_shutdown_watcher(
 // unattended housekeeping nobody is watching a terminal for, so it must never
 // surface as a user-facing error or crash the app.
 
-/// One [`crate::dml::backup::INTERVAL_CHECK_SECS`] (30 min) tick: reads/
+/// One [`dml_wow::backup::INTERVAL_CHECK_SECS`] (30 min) tick: reads/
 /// updates `last_run` in place. Split out from [`interval_backup_watcher`]
 /// so the real docker/db work is easy to reason about independent of the
 /// sleep loop around it.
 fn interval_backup_tick(last_run: &Arc<Mutex<Option<u64>>>) {
-    use crate::dml::{backup, db, maint, native, status};
+    use dml_wow::{backup, db, maint, native, status};
 
     let program = native::docker_program();
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -372,11 +367,11 @@ fn interval_backup_tick(last_run: &Arc<Mutex<Option<u64>>>) {
 
 /// The watcher loop itself — spawned once from `run()`'s `.setup()` (native
 /// mode only) and never stopped. `last_run` starts pre-seeded from whatever
-/// [`crate::dml::backup::latest_auto_interval_backup_unix`] found on disk, so
+/// [`dml_wow::backup::latest_auto_interval_backup_unix`] found on disk, so
 /// a relaunch doesn't restart the 6h clock at zero.
 fn interval_backup_watcher(last_run: Arc<Mutex<Option<u64>>>) {
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(crate::dml::backup::INTERVAL_CHECK_SECS));
+        std::thread::sleep(std::time::Duration::from_secs(dml_wow::backup::INTERVAL_CHECK_SECS));
         interval_backup_tick(&last_run);
     }
 }
@@ -541,7 +536,7 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
     if is_native_backend() {
         let id_for_blocking = id.clone();
         return tauri::async_runtime::spawn_blocking(move || {
-            games_status_native_blocking(&id_for_blocking, &crate::dml::lifecycle::games_dir_from_env())
+            games_status_native_blocking(&id_for_blocking, &dml_wow::lifecycle::games_dir_from_env())
         })
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
@@ -563,7 +558,7 @@ async fn games_status(id: String, state: State<'_, AppState>) -> Result<serde_js
 /// down/absent docker engine degrades the same way (`output_bounded_draining`
 /// returning `None`, or an empty/failed `ps` -> zero running ids -> stopped).
 fn games_status_native_blocking(id: &str, games_dir: &std::path::Path) -> Result<serde_json::Value, CmdError> {
-    use crate::dml::{lifecycle, native, status};
+    use dml_wow::{lifecycle, native, status};
 
     let title_dir = games_dir.join(id);
     if !title_dir.is_dir() {
@@ -694,7 +689,7 @@ async fn wow_docker_clean(
 const DOCKER_CLEAN_SECTION: &str = "docker-clean";
 
 fn wow_docker_clean_native_blocking(level: u8, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native, status};
+    use dml_wow::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native, status};
 
     emit(modmgr::section_start(DOCKER_CLEAN_SECTION));
 
@@ -966,10 +961,10 @@ fn wow_module_install_native_blocking(
     url: Option<String>,
     backup: Option<bool>,
     variant: Option<String>,
-    db_cfg: crate::dml::db::DbConfig,
+    db_cfg: dml_wow::db::DbConfig,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+    use dml_wow::{config::ConfigReader, maint, modmgr, native};
 
     emit(modmgr::section_start(modmgr::SECTION_INSTALL));
 
@@ -1042,7 +1037,7 @@ async fn wow_module_install_native(
     on_event: Channel<serde_json::Value>,
 ) -> Result<(), CmdError> {
     require_native_backend()?;
-    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         wow_module_install_native_blocking(family, key, url, backup, variant, db_cfg, |v| {
@@ -1055,7 +1050,7 @@ async fn wow_module_install_native(
 }
 
 fn wow_module_update_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{config::ConfigReader, maint, modmgr};
+    use dml_wow::{config::ConfigReader, maint, modmgr};
 
     emit(modmgr::section_start(modmgr::SECTION_UPDATE));
 
@@ -1095,10 +1090,10 @@ fn wow_module_remove_native_blocking(
     family: String,
     key: String,
     backup: Option<bool>,
-    db_cfg: crate::dml::db::DbConfig,
+    db_cfg: dml_wow::db::DbConfig,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+    use dml_wow::{config::ConfigReader, maint, modmgr, native};
 
     emit(modmgr::section_start(modmgr::SECTION_REMOVE));
 
@@ -1137,7 +1132,7 @@ async fn wow_module_remove_native(
     on_event: Channel<serde_json::Value>,
 ) -> Result<(), CmdError> {
     require_native_backend()?;
-    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         wow_module_remove_native_blocking(family, key, backup, db_cfg, |v| {
@@ -1164,8 +1159,8 @@ async fn wow_module_remove_native(
 
 const MODULE_REBUILD_SECTION: &str = "module-rebuild";
 
-fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
+fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: dml_wow::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use dml_wow::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
 
     emit(modmgr::section_start(MODULE_REBUILD_SECTION));
 
@@ -1207,9 +1202,9 @@ fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: crate::dml::
     emit(modmgr::line_event("info", "stopping worldserver..."));
     let mut stop_cmd = std::process::Command::new(&docker_program);
     stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
-    crate::dml::status::windows_no_window(&mut stop_cmd);
+    dml_wow::status::windows_no_window(&mut stop_cmd);
     // Best-effort, swallowed like the bash arm's unchecked `|| true`.
-    let _ = crate::dml::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
+    let _ = dml_wow::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
 
     emit(modmgr::line_event(
         "info",
@@ -1240,7 +1235,7 @@ fn wow_module_rebuild_native_blocking(backup: Option<bool>, db_cfg: crate::dml::
 #[tauri::command]
 async fn wow_module_rebuild_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
     require_native_backend()?;
-    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         wow_module_rebuild_native_blocking(backup, db_cfg, |v| {
@@ -1369,14 +1364,14 @@ fn db_unreachable_err(message: impl Into<String>) -> CmdError {
 /// (`90-main.sh`'s recurring `[[ -z "$sdir" ]] && { json_err NOT_FOUND
 /// "WoW Playerbots server not installed" … }`).
 fn require_server_dir(hint: &str) -> Result<std::path::PathBuf, CmdError> {
-    let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-    crate::dml::maint::resolve_server_dir(&title_dir)
+    let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+    dml_wow::maint::resolve_server_dir(&title_dir)
         .ok_or_else(|| not_found_err("WoW Playerbots server not installed", hint))
 }
 
 /// One row's `COUNT(*)` decoded as `i64` (defaulting to 0 on anything odd —
 /// every caller only ever asks "is this nonzero").
-fn count_result(res: crate::dml::db::QueryResult) -> i64 {
+fn count_result(res: dml_wow::db::QueryResult) -> i64 {
     sql_row_int(res.rows.first().and_then(|r| r.first())).unwrap_or(0)
 }
 
@@ -1387,7 +1382,7 @@ async fn wow_module_update_check_native() -> Result<serde_json::Value, CmdError>
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = require_server_dir("Install it first, then re-run.")?;
         let program = std::ffi::OsString::from("git");
-        Ok(crate::dml::moduletail::module_update_check(&program, &sdir))
+        Ok(dml_wow::moduletail::module_update_check(&program, &sdir))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -1400,13 +1395,13 @@ async fn wow_module_conf_activate_native(
     force: Option<bool>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::modules::valid_cpp_key(&key) {
+    if !dml_wow::modules::valid_cpp_key(&key) {
         return Err(bad_arg("Invalid module key"));
     }
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = require_server_dir("")?;
-        let Some(conf_name) = crate::dml::moduletail::module_conf_name(&key) else {
+        let Some(conf_name) = dml_wow::moduletail::module_conf_name(&key) else {
             return Err(CmdError { code: "NO_CONF".into(), message: format!("{key} has no standard conf file"), hint: String::new() });
         };
         let active = sdir.join("env").join("dist").join("etc").join("modules").join(conf_name);
@@ -1417,7 +1412,7 @@ async fn wow_module_conf_activate_native(
                 hint: "Pass --force to overwrite with defaults.".into(),
             });
         }
-        let Some(dist) = crate::dml::moduletail::module_conf_dist_path(&sdir, &key) else {
+        let Some(dist) = dml_wow::moduletail::module_conf_dist_path(&sdir, &key) else {
             return Err(CmdError {
                 code: "NEEDS_REBUILD".into(),
                 message: format!("No {conf_name}.dist yet"),
@@ -1440,32 +1435,32 @@ async fn wow_module_conf_activate_native(
 #[tauri::command]
 async fn wow_module_tracking_native(key: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::modules::valid_cpp_key(&key) {
+    if !dml_wow::modules::valid_cpp_key(&key) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid module key: {key}"), hint: String::new() });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = require_server_dir("")?;
-        if !crate::dml::modmgr::cpp_installed(&sdir, &key) {
+        if !dml_wow::modmgr::cpp_installed(&sdir, &key) {
             return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
         }
-        let (stripped, term1) = crate::dml::moduletail::tracking_like_terms(&key);
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let (stripped, term1) = dml_wow::moduletail::tracking_like_terms(&key);
+        let cfg = dml_wow::db::DbConfig::from_env();
         let mut dbs = serde_json::Map::new();
         for db_short in ["world", "characters", "auth"] {
-            let db = crate::dml::moduletail::database_for_short(db_short).expect("closed 3-value list");
+            let db = dml_wow::moduletail::database_for_short(db_short).expect("closed 3-value list");
             let params: Vec<mysql::Value> =
                 vec![mysql::Value::from(format!("%{stripped}%")), mysql::Value::from(format!("%{term1}%"))];
-            let res = crate::dml::db::query_with_params(&cfg, db, crate::dml::moduletail::TRACKING_LIKE_SQL, params)
+            let res = dml_wow::db::query_with_params(&cfg, db, dml_wow::moduletail::TRACKING_LIKE_SQL, params)
                 .map_err(|e| db_unreachable_err(format!("Could not reach the {db_short} database: {e}")))?;
             let tracked_rows: Vec<String> = res.rows.iter().filter_map(|r| cell_string(r.first())).collect();
 
             let mut files_json = Vec::new();
-            for f in crate::dml::moduletail::module_discover_sql_files(&sdir, &key, db_short) {
-                if !crate::dml::moduletail::valid_module_sql_filename(&f) {
+            for f in dml_wow::moduletail::module_discover_sql_files(&sdir, &key, db_short) {
+                if !dml_wow::moduletail::valid_module_sql_filename(&f) {
                     continue;
                 }
                 let params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
-                let cnt = crate::dml::db::query_with_params(&cfg, db, crate::dml::moduletail::TRACKING_EXACT_COUNT_SQL, params)
+                let cnt = dml_wow::db::query_with_params(&cfg, db, dml_wow::moduletail::TRACKING_EXACT_COUNT_SQL, params)
                     .map(count_result)
                     .unwrap_or(0);
                 files_json.push(serde_json::json!({"name": f, "tracked": cnt > 0}));
@@ -1491,7 +1486,7 @@ async fn wow_module_repair_native(
     files: Option<String>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::modules::valid_cpp_key(&key) {
+    if !dml_wow::modules::valid_cpp_key(&key) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid module key: {key}"), hint: String::new() });
     }
     if !matches!(db.as_str(), "world" | "characters" | "auth") {
@@ -1502,15 +1497,15 @@ async fn wow_module_repair_native(
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = require_server_dir("")?;
-        if !crate::dml::modmgr::cpp_installed(&sdir, &key) {
+        if !dml_wow::modmgr::cpp_installed(&sdir, &key) {
             return Err(not_found_err(format!("Module not installed: {key}"), "Install it first."));
         }
         let file_list: Vec<String> = match &files {
             Some(f) => f.split_whitespace().map(str::to_string).collect(),
-            None => crate::dml::moduletail::module_discover_sql_files(&sdir, &key, &db),
+            None => dml_wow::moduletail::module_discover_sql_files(&sdir, &key, &db),
         };
         for f in &file_list {
-            if !crate::dml::moduletail::valid_module_sql_filename(f) {
+            if !dml_wow::moduletail::valid_module_sql_filename(f) {
                 return Err(CmdError {
                     code: "BAD_ARG".into(),
                     message: format!("Invalid filename: {f}"),
@@ -1518,12 +1513,12 @@ async fn wow_module_repair_native(
                 });
             }
         }
-        let database = crate::dml::moduletail::database_for_short(&db).expect("validated above");
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let database = dml_wow::moduletail::database_for_short(&db).expect("validated above");
+        let cfg = dml_wow::db::DbConfig::from_env();
         let mut results = Vec::new();
         for f in file_list {
             let res = if mode == "mark" {
-                match crate::dml::moduletail::find_module_sql_file(&sdir, &key, &f) {
+                match dml_wow::moduletail::find_module_sql_file(&sdir, &key, &f) {
                     None => "file_missing",
                     Some(path) => {
                         let bytes = std::fs::read(&path).map_err(io_internal_err)?;
@@ -1536,21 +1531,21 @@ async fn wow_module_repair_native(
                         };
                         let params: Vec<mysql::Value> =
                             vec![mysql::Value::from(&f), mysql::Value::from(&hash), mysql::Value::from(&hash)];
-                        crate::dml::db::execute(&cfg, database, crate::dml::moduletail::REPAIR_MARK_SQL, params)
+                        dml_wow::db::execute(&cfg, database, dml_wow::moduletail::REPAIR_MARK_SQL, params)
                             .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
                         "marked"
                     }
                 }
             } else {
                 let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
-                let cnt = crate::dml::db::query_with_params(&cfg, database, crate::dml::moduletail::REPAIR_CLEAR_COUNT_SQL, cnt_params)
+                let cnt = dml_wow::db::query_with_params(&cfg, database, dml_wow::moduletail::REPAIR_CLEAR_COUNT_SQL, cnt_params)
                     .map_err(|e| db_unreachable_err(format!("Could not reach the {db} database: {e}")))
                     .map(count_result)?;
                 if cnt == 0 {
                     "not_tracked"
                 } else {
                     let del_params: Vec<mysql::Value> = vec![mysql::Value::from(&f)];
-                    crate::dml::db::execute(&cfg, database, crate::dml::moduletail::REPAIR_CLEAR_DELETE_SQL, del_params)
+                    dml_wow::db::execute(&cfg, database, dml_wow::moduletail::REPAIR_CLEAR_DELETE_SQL, del_params)
                         .map_err(|e| db_unreachable_err(format!("Could not write to acore_{db}.updates: {e}")))?;
                     "cleared"
                 }
@@ -1567,7 +1562,7 @@ async fn wow_module_repair_native(
 /// and place-npc: reads the current spawn count, inserts only if it's zero,
 /// returns whether a spawn was just placed.
 fn ensure_capital_spawn(
-    cfg: &crate::dml::db::DbConfig,
+    cfg: &dml_wow::db::DbConfig,
     entry: u32,
     map: u32,
     x: f64,
@@ -1576,7 +1571,7 @@ fn ensure_capital_spawn(
     o: f64,
 ) -> Result<bool, CmdError> {
     let cnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(map)];
-    let cnt = crate::dml::db::query_with_params(cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_SPAWN_COUNT_SQL, cnt_params)
+    let cnt = dml_wow::db::query_with_params(cfg, dml_wow::db::Database::World, dml_wow::moduletail::CREATURE_SPAWN_COUNT_SQL, cnt_params)
         .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
         .map(count_result)?;
     if cnt > 0 {
@@ -1590,7 +1585,7 @@ fn ensure_capital_spawn(
         mysql::Value::from(z),
         mysql::Value::from(o),
     ];
-    crate::dml::db::execute(cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_SPAWN_INSERT_SQL, ins_params)
+    dml_wow::db::execute(cfg, dml_wow::db::Database::World, dml_wow::moduletail::CREATURE_SPAWN_INSERT_SQL, ins_params)
         .map_err(|_| CmdError {
             code: "SQL_FAILED".into(),
             message: format!("Could not insert the spawn for map {map}"),
@@ -1611,16 +1606,16 @@ async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdEr
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        use crate::dml::moduletail as mt;
-        let cfg = crate::dml::db::DbConfig::from_env();
+        use dml_wow::moduletail as mt;
+        let cfg = dml_wow::db::DbConfig::from_env();
         let entry = mt::BATTLEPASS_NPC_ENTRY;
 
         let sw_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(0u32)];
-        let bp_sw = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, sw_params)
+        let bp_sw = dml_wow::db::query_with_params(&cfg, dml_wow::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, sw_params)
             .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
             .map(count_result)?;
         let og_params: Vec<mysql::Value> = vec![mysql::Value::from(entry), mysql::Value::from(1u32)];
-        let bp_og = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, og_params)
+        let bp_og = dml_wow::db::query_with_params(&cfg, dml_wow::db::Database::World, mt::CREATURE_SPAWN_COUNT_SQL, og_params)
             .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
             .map(count_result)?;
         if bp_sw > 0 && bp_og > 0 {
@@ -1632,13 +1627,13 @@ async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdEr
         }
 
         let tcnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
-        let tcnt = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, mt::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
+        let tcnt = dml_wow::db::query_with_params(&cfg, dml_wow::db::Database::World, mt::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
             .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
             .map(count_result)?;
 
         let template = if tcnt == 0 {
-            let docker_program = crate::dml::native::docker_program();
-            if !crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_TEMPLATE_INSERT_SQL) {
+            let docker_program = dml_wow::native::docker_program();
+            if !dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_TEMPLATE_INSERT_SQL) {
                 return Err(CmdError {
                     code: "SQL_FAILED".into(),
                     message: "Could not create the Battle Pass NPC template".into(),
@@ -1646,10 +1641,10 @@ async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdEr
                 });
             }
             // Schema-adaptive model/scale statements: best-effort, matching the oracle's own `|| true`.
-            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_SCALE_UPDATE_SQL);
-            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_DELETE_SQL);
-            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_INSERT_SQL);
-            let _ = crate::dml::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODELID1_UPDATE_SQL);
+            let _ = dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_SCALE_UPDATE_SQL);
+            let _ = dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_DELETE_SQL);
+            let _ = dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODEL_INSERT_SQL);
+            let _ = dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_MODELID1_UPDATE_SQL);
             "created"
         } else {
             "exists"
@@ -1675,7 +1670,7 @@ async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdEr
 #[tauri::command]
 async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::moduletail::valid_place_npc_key(&key) {
+    if !dml_wow::moduletail::valid_place_npc_key(&key) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("place-npc does not support: {key}"),
@@ -1685,14 +1680,14 @@ async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, C
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = require_server_dir("Install it first.")?;
         let installed = if key == "bmah" {
-            crate::dml::modmgr::lua_deployed(&sdir, "bmah")
+            dml_wow::modmgr::lua_deployed(&sdir, "bmah")
         } else {
             sdir.join("modules").join(&key).is_dir()
         };
         if !installed {
             return Err(not_found_err(format!("{key} is not installed"), "Install it on the Modules page first."));
         }
-        let specs = crate::dml::moduletail::npc_coord_specs(&key);
+        let specs = dml_wow::moduletail::npc_coord_specs(&key);
         if specs.is_empty() {
             return Err(CmdError {
                 code: "NO_COORDS".into(),
@@ -1701,9 +1696,9 @@ async fn wow_module_place_npc_native(key: String) -> Result<serde_json::Value, C
             });
         }
         let entry = specs[0].entry;
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         let tcnt_params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
-        let tcnt = crate::dml::db::query_with_params(&cfg, crate::dml::db::Database::World, crate::dml::moduletail::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
+        let tcnt = dml_wow::db::query_with_params(&cfg, dml_wow::db::Database::World, dml_wow::moduletail::CREATURE_TEMPLATE_COUNT_SQL, tcnt_params)
             .map_err(|e| db_unreachable_err(format!("Could not reach the world database: {e}")))
             .map(count_result)?;
         if tcnt == 0 {
@@ -1745,8 +1740,8 @@ const CLIENT_PATCH_SECTION: &str = "client-patch";
 /// copy `Patch-A.MPQ` into the saved client folder's `Data/`. Streamed
 /// NDJSON — same vocabulary as `wow_module_install_native_blocking`.
 fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::modmgr::{done_event, error_event, line_event, section_end, section_start};
-    use crate::dml::moduletail as mt;
+    use dml_wow::modmgr::{done_event, error_event, line_event, section_end, section_start};
+    use dml_wow::moduletail as mt;
 
     emit(section_start(CLIENT_PATCH_SECTION));
 
@@ -1768,7 +1763,7 @@ fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json
             return;
         }
     };
-    if !crate::dml::modmgr::cpp_installed(&sdir, "mod-arac") {
+    if !dml_wow::modmgr::cpp_installed(&sdir, "mod-arac") {
         emit(section_end(CLIENT_PATCH_SECTION, "error"));
         emit(error_event("NOT_INSTALLED", "mod-arac is not installed", "Install it on the Modules page first."));
         return;
@@ -1782,7 +1777,7 @@ fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json
         return;
     }
 
-    let docker_program = crate::dml::native::docker_program();
+    let docker_program = dml_wow::native::docker_program();
     let (vol, used_fallback) = mt::resolve_client_data_volume(&docker_program);
     if used_fallback {
         emit(line_event(
@@ -1814,7 +1809,7 @@ fn wow_module_client_patch_native_blocking(key: String, emit: impl Fn(serde_json
     }
     emit(line_event("info", format!("{dbc_n} server DBC files installed")));
 
-    let client_path = crate::dml::modmgr::effective_client_path();
+    let client_path = dml_wow::modmgr::effective_client_path();
     let mut client_done = false;
     match client_path {
         None => emit(line_event(
@@ -2015,9 +2010,9 @@ async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value
 /// `wow_config_read` or the WSL `wow_config_list`. Cheap and pure: no spawn.
 #[tauri::command]
 fn backend_mode() -> &'static str {
-    match crate::dml::backend::selected() {
-        crate::dml::backend::Backend::Native => "native",
-        crate::dml::backend::Backend::Wsl => "wsl",
+    match dml_wow::backend::selected() {
+        dml_wow::backend::Backend::Native => "native",
+        dml_wow::backend::Backend::Wsl => "wsl",
     }
 }
 
@@ -2041,7 +2036,7 @@ async fn wow_config_read(state: State<'_, AppState>) -> Result<serde_json::Value
             &["wow", "config", "registry"],
             "config registry",
         )?;
-        let mut reader = crate::dml::config::ConfigReader::from_env();
+        let mut reader = dml_wow::config::ConfigReader::from_env();
         Ok(reader.assemble(&rows))
     })
     .await
@@ -2125,7 +2120,7 @@ async fn wow_tuning_read(state: State<'_, AppState>) -> Result<serde_json::Value
             &["wow", "config", "tuning-registry"],
             "tuning registry",
         )?;
-        let mut reader = crate::dml::tuning::TuningReader::from_env();
+        let mut reader = dml_wow::tuning::TuningReader::from_env();
         Ok(reader.assemble(&rows))
     })
     .await
@@ -2144,14 +2139,14 @@ async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value
     let cache = state.module_catalog.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let catalog = fetch_catalog_data(&runner, &cache)?;
-        let reader = crate::dml::modules::ModuleReader::from_env();
+        let reader = dml_wow::modules::ModuleReader::from_env();
         Ok(reader.assemble(&catalog))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// Map a native-mode [`crate::dml::db::DbError`] to the [`CmdError`] the frontend
+/// Map a native-mode [`dml_wow::db::DbError`] to the [`CmdError`] the frontend
 /// already knows how to render. Both variants collapse to `DB_UNREACHABLE`,
 /// matching the CLI: every one of these arms (`teleport-list` / `bots list` /
 /// `accounts` / `paperdoll`) reports `DB_UNREACHABLE` for ANY `db_*_query`
@@ -2160,7 +2155,7 @@ async fn wow_module_read(state: State<'_, AppState>) -> Result<serde_json::Value
 /// malformed statement) must still read as `DB_UNREACHABLE` to stay
 /// byte-identical to `dml`. Same collapse [`stats_err_to_cmd`] already does for
 /// the `stats` arm — see its comment for the fuller rationale.
-fn db_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
+fn db_err_to_cmd(e: dml_wow::db::DbError) -> CmdError {
     CmdError {
         code: "DB_UNREACHABLE".into(),
         message: e.to_string(),
@@ -2195,8 +2190,8 @@ fn require_native_backend() -> Result<(), CmdError> {
 async fn wow_teleport_list_read(search: Option<String>) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        crate::dml::pages::read_teleport_list(&cfg, search.as_deref()).map_err(db_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        dml_wow::pages::read_teleport_list(&cfg, search.as_deref()).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2224,7 +2219,7 @@ async fn wow_bots_read(
     // not a defense the bound-parameter query builder in `dml::pages` already
     // needed (finding #2).
     if let Some(n) = name.as_deref().filter(|n| !n.is_empty()) {
-        if !crate::dml::paperdoll::valid_charname(n) {
+        if !dml_wow::paperdoll::valid_charname(n) {
             return Err(CmdError {
                 code: "BAD_ARG".into(),
                 message: format!("Invalid name prefix: {n}"),
@@ -2233,7 +2228,7 @@ async fn wow_bots_read(
         }
     }
     if let Some(c) = class {
-        if !crate::dml::pages::valid_bot_class(c) {
+        if !dml_wow::pages::valid_bot_class(c) {
             return Err(CmdError {
                 code: "BAD_ARG".into(),
                 message: format!("Invalid class id: {c}"),
@@ -2242,17 +2237,17 @@ async fn wow_bots_read(
         }
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        let f = crate::dml::pages::BotFilters {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        let f = dml_wow::pages::BotFilters {
             name,
             class,
             min_level,
             max_level,
             online: online.unwrap_or(false),
-            limit: crate::dml::pages::clamp_limit(limit),
+            limit: dml_wow::pages::clamp_limit(limit),
             offset: offset.unwrap_or(0),
         };
-        crate::dml::pages::read_bots(&cfg, &f).map_err(db_err_to_cmd)
+        dml_wow::pages::read_bots(&cfg, &f).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2265,8 +2260,8 @@ async fn wow_bots_read(
 async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        crate::dml::pages::read_accounts(&cfg).map_err(db_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        dml_wow::pages::read_accounts(&cfg).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2280,8 +2275,8 @@ async fn wow_accounts_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_players_online_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        crate::dml::pages::read_players_online(&cfg).map_err(db_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        dml_wow::pages::read_players_online(&cfg).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2295,8 +2290,8 @@ async fn wow_players_online_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_party_online_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        crate::dml::pages::read_party_online(&cfg).map_err(db_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        dml_wow::pages::read_party_online(&cfg).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2323,9 +2318,9 @@ async fn wow_items_search_read(
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        let opts = crate::dml::pages::ItemSearchOpts { name, quality, min_level, max_level };
-        crate::dml::pages::read_items_search(&cfg, &opts).map_err(db_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        let opts = dml_wow::pages::ItemSearchOpts { name, quality, min_level, max_level };
+        dml_wow::pages::read_items_search(&cfg, &opts).map_err(db_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2340,7 +2335,7 @@ async fn wow_items_search_read(
 #[tauri::command]
 async fn wow_char_progress_read(char_name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+    if !dml_wow::soap_cmds::valid_charname(&char_name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid character name: {char_name}"),
@@ -2348,8 +2343,8 @@ async fn wow_char_progress_read(char_name: String) -> Result<serde_json::Value, 
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        match crate::dml::pages::read_char_progress(&cfg, &char_name).map_err(db_err_to_cmd)? {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        match dml_wow::pages::read_char_progress(&cfg, &char_name).map_err(db_err_to_cmd)? {
             Some(v) => Ok(v),
             None => Err(CmdError {
                 code: "NOT_FOUND".into(),
@@ -2369,7 +2364,7 @@ async fn wow_char_progress_read(char_name: String) -> Result<serde_json::Value, 
 #[tauri::command]
 async fn wow_achievements_read(char_name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+    if !dml_wow::soap_cmds::valid_charname(&char_name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid character name: {char_name}"),
@@ -2377,8 +2372,8 @@ async fn wow_achievements_read(char_name: String) -> Result<serde_json::Value, C
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        match crate::dml::pages::read_achievements(&cfg, &char_name).map_err(db_err_to_cmd)? {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        match dml_wow::pages::read_achievements(&cfg, &char_name).map_err(db_err_to_cmd)? {
             Some(v) => Ok(v),
             None => Err(CmdError {
                 code: "NOT_FOUND".into(),
@@ -2391,12 +2386,12 @@ async fn wow_achievements_read(char_name: String) -> Result<serde_json::Value, C
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// Map a native-mode stats [`crate::dml::db::DbError`] to a [`CmdError`] whose
+/// Map a native-mode stats [`dml_wow::db::DbError`] to a [`CmdError`] whose
 /// code matches the CLI's `stats` arm: that arm reports `DB_UNREACHABLE` for
 /// EVERY payload failure (including a query error on a reachable DB — see the
 /// "honest hint" branch in 90-main.sh), so both DbError variants collapse to
 /// `DB_UNREACHABLE` here to stay byte-identical to `dml wow stats`.
-fn stats_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
+fn stats_err_to_cmd(e: dml_wow::db::DbError) -> CmdError {
     CmdError {
         code: "DB_UNREACHABLE".into(),
         message: e.to_string(),
@@ -2413,8 +2408,8 @@ fn stats_err_to_cmd(e: crate::dml::db::DbError) -> CmdError {
 async fn wow_stats_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        crate::dml::stats::read_stats(&cfg).map_err(stats_err_to_cmd)
+        let cfg = dml_wow::db::DbConfig::from_env();
+        dml_wow::stats::read_stats(&cfg).map_err(stats_err_to_cmd)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2428,7 +2423,7 @@ async fn wow_stats_read() -> Result<serde_json::Value, CmdError> {
 #[tauri::command]
 async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::paperdoll::valid_charname(&char_name) {
+    if !dml_wow::paperdoll::valid_charname(&char_name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid character name: {char_name}"),
@@ -2436,8 +2431,8 @@ async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdE
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
-        match crate::dml::paperdoll::read_paperdoll(&cfg, &char_name).map_err(db_err_to_cmd)? {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        match dml_wow::paperdoll::read_paperdoll(&cfg, &char_name).map_err(db_err_to_cmd)? {
             Some(v) => Ok(v),
             None => Err(CmdError {
                 code: "NOT_FOUND".into(),
@@ -2460,8 +2455,8 @@ async fn wow_paperdoll_read(char_name: String) -> Result<serde_json::Value, CmdE
 async fn wow_server_info_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::soap::SoapConfig::load();
-        crate::dml::status::read_server_info(&cfg).map_err(|_| CmdError {
+        let cfg = dml_wow::soap::SoapConfig::load();
+        dml_wow::status::read_server_info(&cfg).map_err(|_| CmdError {
             code: "SOAP_AUTH".into(),
             message: "SOAP authentication failed".into(),
             hint: "Check ~/.dml/soap.env".into(),
@@ -2482,11 +2477,11 @@ async fn wow_server_info_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_server_detail_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let program = crate::dml::native::docker_program();
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let db_cfg = crate::dml::db::DbConfig::from_env();
-        let mut reader = crate::dml::config::ConfigReader::from_env();
-        Ok(crate::dml::status::read_server_detail(&program, &soap_cfg, &db_cfg, &mut reader))
+        let program = dml_wow::native::docker_program();
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
+        let mut reader = dml_wow::config::ConfigReader::from_env();
+        Ok(dml_wow::status::read_server_detail(&program, &soap_cfg, &db_cfg, &mut reader))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2510,8 +2505,8 @@ async fn wow_console_tail_read(lines: Option<u32>) -> Result<serde_json::Value, 
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let program = crate::dml::native::docker_program();
-        Ok(crate::dml::status::read_console_tail(&program, lines))
+        let program = dml_wow::native::docker_program();
+        Ok(dml_wow::status::read_console_tail(&program, lines))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2527,8 +2522,8 @@ async fn wow_console_tail_read(lines: Option<u32>) -> Result<serde_json::Value, 
 async fn wow_docker_usage_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let program = crate::dml::native::docker_program();
-        crate::dml::maint::read_docker_usage(&program).map_err(|_| CmdError {
+        let program = dml_wow::native::docker_program();
+        dml_wow::maint::read_docker_usage(&program).map_err(|_| CmdError {
             code: "DOCKER_DOWN".into(),
             message: "Docker is not running".into(),
             hint: "Start Docker Desktop, then retry.".into(),
@@ -2548,23 +2543,23 @@ async fn wow_docker_usage_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_port_check_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = dml_wow::maint::resolve_server_dir(&title_dir) else {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "WoW Playerbots server not installed".into(),
                 hint: "Install it first.".into(),
             });
         };
-        let program = crate::dml::native::docker_program();
-        if !crate::dml::maint::docker_engine_up(&program, crate::dml::maint::PROBE_TIMEOUT) {
+        let program = dml_wow::native::docker_program();
+        if !dml_wow::maint::docker_engine_up(&program, dml_wow::maint::PROBE_TIMEOUT) {
             return Err(CmdError {
                 code: "DOCKER_DOWN".into(),
                 message: "Docker is not running".into(),
                 hint: "Start the server first, then re-check.".into(),
             });
         }
-        Ok(crate::dml::maint::read_port_check(&program, &server_dir, crate::dml::maint::PROBE_TIMEOUT))
+        Ok(dml_wow::maint::read_port_check(&program, &server_dir, dml_wow::maint::PROBE_TIMEOUT))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2581,15 +2576,15 @@ async fn wow_port_check_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_update_check_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = dml_wow::maint::resolve_server_dir(&title_dir) else {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "WoW Playerbots server not installed".into(),
                 hint: "Install it first, then re-run.".into(),
             });
         };
-        if !crate::dml::maint::is_git_checkout(&server_dir) {
+        if !dml_wow::maint::is_git_checkout(&server_dir) {
             return Err(CmdError {
                 code: "GIT_MISSING".into(),
                 message: format!("{} is not a git checkout", server_dir.display()),
@@ -2597,7 +2592,7 @@ async fn wow_update_check_read() -> Result<serde_json::Value, CmdError> {
             });
         }
         let program = std::ffi::OsString::from("git");
-        Ok(crate::dml::maint::read_update_check(&program, &server_dir))
+        Ok(dml_wow::maint::read_update_check(&program, &server_dir))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2623,8 +2618,8 @@ async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Val
     let runner = state.runner.clone();
     let cache = state.module_catalog.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if crate::dml::maint::resolve_server_dir(&title_dir).is_none() {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if dml_wow::maint::resolve_server_dir(&title_dir).is_none() {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "WoW Playerbots server not installed".into(),
@@ -2632,9 +2627,9 @@ async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Val
             });
         }
         let catalog = fetch_catalog_data(&runner, &cache)?;
-        let reader = crate::dml::modules::ModuleReader::from_env();
+        let reader = dml_wow::modules::ModuleReader::from_env();
         let modules_dir = title_dir.join("modules");
-        Ok(crate::dml::commands::assemble_commands(&catalog, &reader, &modules_dir))
+        Ok(dml_wow::commands::assemble_commands(&catalog, &reader, &modules_dir))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2649,8 +2644,8 @@ async fn wow_commands_read(state: State<'_, AppState>) -> Result<serde_json::Val
 async fn wow_party_specs_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        let Some((conf_path, source)) = crate::dml::party_specs::find_conf(&title_dir) else {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        let Some((conf_path, source)) = dml_wow::party_specs::find_conf(&title_dir) else {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "playerbots.conf not found (nor its .dist)".into(),
@@ -2658,7 +2653,7 @@ async fn wow_party_specs_read() -> Result<serde_json::Value, CmdError> {
             });
         };
         let content = std::fs::read_to_string(&conf_path).unwrap_or_default();
-        Ok(crate::dml::party_specs::build_specs_value(&content, source))
+        Ok(dml_wow::party_specs::build_specs_value(&content, source))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2671,7 +2666,7 @@ async fn wow_party_specs_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_client_path_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        Ok(crate::dml::clientpath::read_client_path())
+        Ok(dml_wow::clientpath::read_client_path())
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2684,8 +2679,8 @@ async fn wow_client_path_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_client_path_detect_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        let roots = crate::dml::clientpath::default_scan_roots();
-        let candidates = crate::dml::clientpath::detect_client(&roots);
+        let roots = dml_wow::clientpath::default_scan_roots();
+        let candidates = dml_wow::clientpath::detect_client(&roots);
         Ok(serde_json::json!({ "candidates": candidates }))
     })
     .await
@@ -2699,7 +2694,7 @@ async fn wow_client_path_detect_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_cache_status_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        Ok(crate::dml::cachestatus::read_cache_status())
+        Ok(dml_wow::cachestatus::read_cache_status())
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2715,11 +2710,11 @@ async fn wow_cache_status_read() -> Result<serde_json::Value, CmdError> {
 async fn wow_cache_clean_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        crate::dml::cachestatus::clean_cache().map_err(|e| match e {
-            crate::dml::cachestatus::CacheCleanError::Guard(m) => {
+        dml_wow::cachestatus::clean_cache().map_err(|e| match e {
+            dml_wow::cachestatus::CacheCleanError::Guard(m) => {
                 CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
             }
-            crate::dml::cachestatus::CacheCleanError::Wipe(m) => {
+            dml_wow::cachestatus::CacheCleanError::Wipe(m) => {
                 CmdError { code: "WIPE_FAILED".into(), message: m, hint: String::new() }
             }
         })
@@ -2738,18 +2733,18 @@ async fn wow_cache_clean_native() -> Result<serde_json::Value, CmdError> {
 async fn wow_client_path_set_native(path: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        crate::dml::clientpath::set_client_path(std::path::Path::new(&path)).map_err(|e| match e {
-            crate::dml::clientpath::ClientPathSetError::BadPath(m) => CmdError {
+        dml_wow::clientpath::set_client_path(std::path::Path::new(&path)).map_err(|e| match e {
+            dml_wow::clientpath::ClientPathSetError::BadPath(m) => CmdError {
                 code: "BAD_PATH".into(),
                 message: m,
                 hint: "Check the folder exists and try again.".into(),
             },
-            crate::dml::clientpath::ClientPathSetError::NotClient(m) => CmdError {
+            dml_wow::clientpath::ClientPathSetError::NotClient(m) => CmdError {
                 code: "NOT_CLIENT".into(),
                 message: m,
                 hint: "Expected Wow.exe or an Interface folder inside it.".into(),
             },
-            crate::dml::clientpath::ClientPathSetError::Io(m) => {
+            dml_wow::clientpath::ClientPathSetError::Io(m) => {
                 CmdError { code: "INTERNAL".into(), message: m, hint: String::new() }
             }
         })
@@ -2766,7 +2761,7 @@ async fn wow_client_path_set_native(path: String) -> Result<serde_json::Value, C
 async fn wow_lan_public_ip_read() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        let ip = crate::dml::lanip::fetch_public_ip();
+        let ip = dml_wow::lanip::fetch_public_ip();
         Ok(serde_json::json!({ "public_ip": ip }))
     })
     .await
@@ -2794,15 +2789,15 @@ async fn wow_item_info_read(entries: Vec<u32>) -> Result<serde_json::Value, CmdE
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let Some(cache_root) = crate::dml::cachestatus::cache_dir() else {
+        let Some(cache_root) = dml_wow::cachestatus::cache_dir() else {
             return Err(CmdError {
                 code: "INTERNAL".into(),
                 message: "Could not resolve the wowhead cache directory".into(),
                 hint: String::new(),
             });
         };
-        let db_cfg = crate::dml::db::DbConfig::from_env();
-        Ok(crate::dml::iteminfo::read_item_info(&cache_root, Some(&db_cfg), &entries))
+        let db_cfg = dml_wow::db::DbConfig::from_env();
+        Ok(dml_wow::iteminfo::read_item_info(&cache_root, Some(&db_cfg), &entries))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2832,14 +2827,14 @@ async fn wow_entity_info_read(kind: String, ids: Vec<u32>) -> Result<serde_json:
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let Some(cache_root) = crate::dml::cachestatus::cache_dir() else {
+        let Some(cache_root) = dml_wow::cachestatus::cache_dir() else {
             return Err(CmdError {
                 code: "INTERNAL".into(),
                 message: "Could not resolve the wowhead cache directory".into(),
                 hint: String::new(),
             });
         };
-        Ok(crate::dml::iteminfo::read_entity_info(&cache_root, &kind, &ids))
+        Ok(dml_wow::iteminfo::read_entity_info(&cache_root, &kind, &ids))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -2883,7 +2878,7 @@ async fn wow_config_set(
 /// blocked longer than `timeout`.
 fn env_frozen(ename: &str) -> bool {
     env_frozen_with(
-        &crate::dml::native::docker_program(),
+        &dml_wow::native::docker_program(),
         "ac-worldserver",
         ename,
         std::time::Duration::from_secs(3),
@@ -2928,13 +2923,13 @@ fn cfgset_err(code: &str, message: impl Into<String>, hint: impl Into<String>) -
 fn cfgset_clean_legacy_env(override_path: &std::path::Path, ename: &str) -> Result<bool, CmdError> {
     let present = std::fs::read_to_string(override_path)
         .ok()
-        .and_then(|t| crate::dml::config::parse_override_env(&t).get(ename).cloned())
+        .and_then(|t| dml_wow::config::parse_override_env(&t).get(ename).cloned())
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     if !present {
         return Ok(false);
     }
-    crate::dml::config::override_env_remove(override_path, ename).map_err(|e| {
+    dml_wow::config::override_env_remove(override_path, ename).map_err(|e| {
         cfgset_err("WRITE_FAILED", format!("Could not update the config override: {e}"), "")
     })?;
     Ok(true)
@@ -2949,45 +2944,45 @@ fn config_set_direct(
     value: &str,
     soap_lock: &Arc<std::sync::Mutex<()>>,
 ) -> Result<serde_json::Value, CmdError> {
-    let Some((conf_file, conf_key)) = crate::dml::config::route_conf(full_key) else {
+    let Some((conf_file, conf_key)) = dml_wow::config::route_conf(full_key) else {
         return Err(cfgset_err("BAD_ARG", format!("Bad conf key: {full_key}"), ""));
     };
-    if crate::dml::config::is_core_conf_file(&conf_file) {
+    if dml_wow::config::is_core_conf_file(&conf_file) {
         return Err(cfgset_err(
             "BAD_ARG",
             "Direct conf keys are limited to module confs",
             "Core server settings live in the curated list: dml wow config list --json",
         ));
     }
-    if !crate::dml::config::is_valid_direct_conf_key(&conf_key) {
+    if !dml_wow::config::is_valid_direct_conf_key(&conf_key) {
         return Err(cfgset_err(
             "BAD_ARG",
             format!("Invalid conf key: {conf_key}"),
             "Letters, digits, dots and underscores only.",
         ));
     }
-    if crate::dml::config::is_denylisted_direct_key(&conf_key) {
+    if dml_wow::config::is_denylisted_direct_key(&conf_key) {
         return Err(cfgset_err(
             "BAD_ARG",
             format!("{conf_key} is managed by the bot flush tool"),
             "Use: dml wow bots flush --yes --ack flush (backs your characters up first and always disarms the flag afterwards).",
         ));
     }
-    if !crate::dml::config::is_single_line(value) {
+    if !dml_wow::config::is_single_line(value) {
         return Err(cfgset_err("BAD_ARG", "The value must be a single line", ""));
     }
-    if !crate::dml::config::within_max_len(value, 200) {
+    if !dml_wow::config::within_max_len(value, 200) {
         return Err(cfgset_err("BAD_ARG", "Value too long (max 200 characters)", ""));
     }
 
-    let cpath = crate::dml::config::direct_conf_path(title_dir, &conf_file).ok_or_else(|| {
+    let cpath = dml_wow::config::direct_conf_path(title_dir, &conf_file).ok_or_else(|| {
         cfgset_err(
             "NOT_FOUND",
             format!("Not an editable module conf: {conf_file}"),
             "See: dml wow config files --json",
         )
     })?;
-    let ensured = crate::dml::config::conf_ensure(&cpath)
+    let ensured = dml_wow::config::conf_ensure(&cpath)
         .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
     if !ensured {
         return Err(cfgset_err(
@@ -2996,10 +2991,10 @@ fn config_set_direct(
             "Is the WoW server fully installed?",
         ));
     }
-    let mut changed = crate::dml::config::conf_write(&cpath, &conf_key, value)
+    let mut changed = dml_wow::config::conf_write(&cpath, &conf_key, value)
         .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
 
-    let ename = crate::dml::config::env_name_for(&conf_key);
+    let ename = dml_wow::config::env_name_for(&conf_key);
     let override_path = title_dir.join("docker-compose.override.yml");
     let mut env_was = cfgset_clean_legacy_env(&override_path, &ename)?;
     if env_was {
@@ -3011,15 +3006,15 @@ fn config_set_direct(
     if changed {
         applied = "restart".to_string();
         restart_required = true;
-        if let Some(reload_cmd) = crate::dml::config::conf_reload_cmd(&conf_file) {
+        if let Some(reload_cmd) = dml_wow::config::conf_reload_cmd(&conf_file) {
             if !env_was && env_frozen(&ename) {
                 env_was = true;
             }
             if !env_was {
                 let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-                let soap_cfg = crate::dml::soap::SoapConfig::load();
-                let outcome = crate::dml::soap::exec(&soap_cfg, reload_cmd);
-                if matches!(outcome, crate::dml::soap::SoapOutcome::Ok(_)) {
+                let soap_cfg = dml_wow::soap::SoapConfig::load();
+                let outcome = dml_wow::soap::exec(&soap_cfg, reload_cmd);
+                if matches!(outcome, dml_wow::soap::SoapOutcome::Ok(_)) {
                     applied = "live".to_string();
                     restart_required = false;
                 }
@@ -3059,7 +3054,7 @@ fn config_set_curated(
     // `cfg_sdir` right after parsing the row and BEFORE any type/range
     // validation (`90-main.sh:2440-2445`), so a not-installed server always
     // wins over a bad value with the SAME top-level verdict the oracle gives.
-    if !crate::dml::config::wow_server_installed(title_dir) {
+    if !dml_wow::config::wow_server_installed(title_dir) {
         return Err(cfgset_err(
             "NOT_FOUND",
             "WoW Playerbots server not installed",
@@ -3070,7 +3065,7 @@ fn config_set_curated(
     let mut value = raw_value.to_string();
     match kind {
         "float" => {
-            if !crate::dml::config::float_in_range(&value, min_num, max_num) {
+            if !dml_wow::config::float_in_range(&value, min_num, max_num) {
                 return Err(cfgset_err(
                     "BAD_ARG",
                     format!("{label} must be a number between {min_disp} and {max_disp}, got: {value}"),
@@ -3079,7 +3074,7 @@ fn config_set_curated(
             }
         }
         "int" => {
-            if !crate::dml::config::int_in_range(&value, min_num as i64, max_num as i64) {
+            if !dml_wow::config::int_in_range(&value, min_num as i64, max_num as i64) {
                 return Err(cfgset_err(
                     "BAD_ARG",
                     format!("{label} must be a whole number between {min_disp} and {max_disp}, got: {value}"),
@@ -3088,7 +3083,7 @@ fn config_set_curated(
             }
         }
         "bool" => {
-            if !crate::dml::config::is_bool01(&value) {
+            if !dml_wow::config::is_bool01(&value) {
                 return Err(cfgset_err(
                     "BAD_ARG",
                     format!("{label} takes 1 (on) or 0 (off), got: {value}"),
@@ -3097,10 +3092,10 @@ fn config_set_curated(
             }
         }
         "text" => {
-            value = crate::dml::config::sanitize_text_value(&value);
+            value = dml_wow::config::sanitize_text_value(&value);
         }
         "char" => {
-            if !crate::dml::soap_cmds::valid_charname(&value) {
+            if !dml_wow::soap_cmds::valid_charname(&value) {
                 return Err(cfgset_err(
                     "BAD_ARG",
                     format!("Invalid character name: {value}"),
@@ -3112,24 +3107,24 @@ fn config_set_curated(
     }
 
     if key == "server.motd" {
-        let cmd = crate::dml::soap_cmds::motd_cmd(&value);
+        let cmd = dml_wow::soap_cmds::motd_cmd(&value);
         let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         motd_result(outcome)?;
         return Ok(serde_json::json!({ "changed": true, "restart_required": false }));
     }
 
-    if let Some((conf_file, conf_key)) = crate::dml::config::route_conf(env) {
+    if let Some((conf_file, conf_key)) = dml_wow::config::route_conf(env) {
         let mut write_value = value.clone();
         let mut extra_writes: Vec<(String, String)> = Vec::new();
 
         if key == "ahbot.character" {
-            let db_cfg = crate::dml::db::DbConfig::from_env();
+            let db_cfg = dml_wow::db::DbConfig::from_env();
             let params: Vec<mysql::Value> = vec![mysql::Value::from(value.as_str())];
-            let res = crate::dml::db::query_with_params(
+            let res = dml_wow::db::query_with_params(
                 &db_cfg,
-                crate::dml::db::Database::Characters,
+                dml_wow::db::Database::Characters,
                 "SELECT guid, account FROM characters WHERE name = ? LIMIT 1",
                 params,
             )
@@ -3154,8 +3149,8 @@ fn config_set_curated(
             extra_writes.push(("AuctionHouseBot.Account".to_string(), acct.to_string()));
         }
 
-        let cpath = crate::dml::config::conf_path_in(title_dir, &conf_file);
-        let ensured = crate::dml::config::conf_ensure(&cpath)
+        let cpath = dml_wow::config::conf_path_in(title_dir, &conf_file);
+        let ensured = dml_wow::config::conf_ensure(&cpath)
             .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
         if !ensured {
             return Err(cfgset_err(
@@ -3164,26 +3159,26 @@ fn config_set_curated(
                 "Is the WoW server fully installed?",
             ));
         }
-        let mut changed = crate::dml::config::conf_write(&cpath, &conf_key, &write_value)
+        let mut changed = dml_wow::config::conf_write(&cpath, &conf_key, &write_value)
             .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
 
         for (k, v) in &extra_writes {
-            let c = crate::dml::config::conf_write(&cpath, k, v)
+            let c = dml_wow::config::conf_write(&cpath, k, v)
                 .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
             changed = changed || c;
         }
         if key == "bots.population" {
-            let c = crate::dml::config::conf_write(&cpath, "AiPlayerbot.MinRandomBots", &write_value)
+            let c = dml_wow::config::conf_write(&cpath, "AiPlayerbot.MinRandomBots", &write_value)
                 .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
             changed = changed || c;
         }
 
-        let mut envnames = vec![crate::dml::config::env_name_for(&conf_key)];
+        let mut envnames = vec![dml_wow::config::env_name_for(&conf_key)];
         if key == "bots.population" {
-            envnames.push(crate::dml::config::env_name_for("AiPlayerbot.MinRandomBots"));
+            envnames.push(dml_wow::config::env_name_for("AiPlayerbot.MinRandomBots"));
         }
         if key == "ahbot.character" {
-            envnames.push(crate::dml::config::env_name_for("AuctionHouseBot.Account"));
+            envnames.push(dml_wow::config::env_name_for("AuctionHouseBot.Account"));
         }
 
         let override_path = title_dir.join("docker-compose.override.yml");
@@ -3210,9 +3205,9 @@ fn config_set_curated(
             restart_required = true;
             if (conf_file == "worldserver.conf" || conf_file == "mod_ahbot.conf") && !env_was {
                 let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
-                let soap_cfg = crate::dml::soap::SoapConfig::load();
-                let outcome = crate::dml::soap::exec(&soap_cfg, "reload config");
-                if matches!(outcome, crate::dml::soap::SoapOutcome::Ok(_)) {
+                let soap_cfg = dml_wow::soap::SoapConfig::load();
+                let outcome = dml_wow::soap::exec(&soap_cfg, "reload config");
+                if matches!(outcome, dml_wow::soap::SoapOutcome::Ok(_)) {
                     applied = "live".to_string();
                     restart_required = false;
                 }
@@ -3228,7 +3223,7 @@ fn config_set_curated(
     // Non-conf env column (currently unreachable — every real registry row is
     // either `conf:` or `server.motd`'s `-`; kept for oracle parity).
     let override_path = title_dir.join("docker-compose.override.yml");
-    let changed = crate::dml::config::override_env_write(&override_path, env, &value)
+    let changed = dml_wow::config::override_env_write(&override_path, env, &value)
         .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write the config override: {e}"), ""))?;
     Ok(serde_json::json!({ "changed": changed, "restart_required": changed }))
 }
@@ -3245,7 +3240,7 @@ async fn wow_config_set_native(
     let cache = state.config_registry.clone();
     let soap_lock = state.soap_lock.clone();
     let config_lock = state.config_lock.clone();
-    let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+    let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         // Serializes against every other native conf/override write (Settings
@@ -3286,7 +3281,7 @@ async fn wow_config_tuning_set_native(
     let runner = state.runner.clone();
     let cache = state.tuning_registry.clone();
     let config_lock = state.config_lock.clone();
-    let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+    let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         // Serializes against every other native conf/override write -- see
@@ -3322,7 +3317,7 @@ async fn wow_config_tuning_set_native(
         // parity test. Every row the registry can ever emit has an entry
         // here, so this is unreachable in practice -- defensive, not a real
         // oracle branch.
-        let confkey = crate::dml::tuning::tuning_confkey(&key).ok_or_else(|| {
+        let confkey = dml_wow::tuning::tuning_confkey(&key).ok_or_else(|| {
             cfgset_err(
                 "NOT_FOUND",
                 format!("Unknown tuning setting: {key}"),
@@ -3330,7 +3325,7 @@ async fn wow_config_tuning_set_native(
             )
         })?;
 
-        let norm_value = crate::dml::tuning::validate_tuning_value(ty, &value, label, min, max)
+        let norm_value = dml_wow::tuning::validate_tuning_value(ty, &value, label, min, max)
             .map_err(|msg| cfgset_err("BAD_ARG", msg, ""))?;
 
         if backend == "lua" {
@@ -3360,7 +3355,7 @@ async fn wow_config_tuning_set_native(
         // oracle's uniform "server not installed" rather than "{module} is
         // not installed". The lua branch above already shelled out to the CLI
         // before we get here, so it gets this same check for free.
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfgset_err(
                 "NOT_FOUND",
                 "WoW Playerbots server not installed",
@@ -3371,8 +3366,8 @@ async fn wow_config_tuning_set_native(
         // backend == "conf" -- same `_cfg_conf_path` resolution as B2a's
         // curated route (`conf_path_in`: worldserver/authserver.conf under
         // `env/dist/etc/`, else `env/dist/etc/modules/{file}`).
-        let cpath = crate::dml::config::conf_path_in(&title_dir, file);
-        let ensured = crate::dml::config::conf_ensure(&cpath)
+        let cpath = dml_wow::config::conf_path_in(&title_dir, file);
+        let ensured = dml_wow::config::conf_ensure(&cpath)
             .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
         if !ensured {
             return Err(cfgset_err(
@@ -3381,7 +3376,7 @@ async fn wow_config_tuning_set_native(
                 format!("Install {module} from the Modules page first, then reopen this page."),
             ));
         }
-        let changed = crate::dml::config::conf_write(&cpath, confkey, &norm_value)
+        let changed = dml_wow::config::conf_write(&cpath, confkey, &norm_value)
             .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
 
         Ok(if changed {
@@ -3464,19 +3459,19 @@ fn cfg_missing_file_err() -> CmdError {
 /// NATIVE-MODE `config pb-keys` (`90-main.sh:2562-2606`, Part 5a): every
 /// active `Key = value` line of `playerbots.conf` (falling back to its
 /// `.dist` when the conf doesn't exist yet), each with its own `.dist`
-/// default when both files exist -- see [`crate::dml::config::key_browser_rows`]'s
+/// default when both files exist -- see [`dml_wow::config::key_browser_rows`]'s
 /// doc comment for the exact default-derivation rule.
 #[tauri::command]
 async fn wow_config_pb_keys_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfg_installed_err());
         }
         let pbconf =
             title_dir.join("env").join("dist").join("etc").join("modules").join("playerbots.conf");
-        let pbdist = crate::dml::config::dist_sibling(&pbconf);
+        let pbdist = dml_wow::config::dist_sibling(&pbconf);
 
         let (pbsrc, src_is_dist) =
             if pbconf.is_file() { (pbconf, false) } else { (pbdist.clone(), true) };
@@ -3491,7 +3486,7 @@ async fn wow_config_pb_keys_native() -> Result<serde_json::Value, CmdError> {
         let dist_content = (!src_is_dist && pbdist.is_file())
             .then(|| std::fs::read_to_string(&pbdist).unwrap_or_default());
 
-        let rows = crate::dml::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
+        let rows = dml_wow::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
         let keys: Vec<serde_json::Value> = rows
             .into_iter()
             .map(|r| serde_json::json!({ "key": r.key, "value": r.value, "default": r.default, "line": r.line }))
@@ -3505,7 +3500,7 @@ async fn wow_config_pb_keys_native() -> Result<serde_json::Value, CmdError> {
 
 /// NATIVE-MODE `config conf-keys` (`90-main.sh:2607-2669`, Part 5a):
 /// `pb-keys` generalized to any editable module conf, plus each key's
-/// comment-block help from the `.dist` ([`crate::dml::config::conf_help_lines`]).
+/// comment-block help from the `.dist` ([`dml_wow::config::conf_help_lines`]).
 #[tauri::command]
 async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
@@ -3519,8 +3514,8 @@ async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, 
         }
         // Order matches the oracle exactly (`90-main.sh:2624-2635`): the
         // installed-server check runs BEFORE the core-conf-name rejection.
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfg_installed_err());
         }
         if matches!(
@@ -3533,12 +3528,12 @@ async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, 
                 hint: "Core server settings live in the curated list: dml wow config list --json".into(),
             });
         }
-        let ckpath = crate::dml::config::direct_conf_path(&title_dir, &file).ok_or_else(|| CmdError {
+        let ckpath = dml_wow::config::direct_conf_path(&title_dir, &file).ok_or_else(|| CmdError {
             code: "NOT_FOUND".into(),
             message: format!("Not an editable module conf: {file}"),
             hint: "See: dml wow config files --json".into(),
         })?;
-        let ckdist = crate::dml::config::dist_sibling(&ckpath);
+        let ckdist = dml_wow::config::dist_sibling(&ckpath);
         let (cksrc, src_is_dist) =
             if ckpath.is_file() { (ckpath, false) } else { (ckdist.clone(), true) };
         let src_content = std::fs::read_to_string(&cksrc).unwrap_or_default();
@@ -3546,7 +3541,7 @@ async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, 
         let dist_content =
             (!src_is_dist && dist_exists).then(|| std::fs::read_to_string(&ckdist).unwrap_or_default());
 
-        let rows = crate::dml::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
+        let rows = dml_wow::config::key_browser_rows(&src_content, dist_content.as_deref(), src_is_dist);
 
         // Help source: the `.dist` when it exists, else the live conf itself
         // (`90-main.sh:2650-2651`). When `cksrc` IS the dist already
@@ -3560,7 +3555,7 @@ async fn wow_config_conf_keys_native(file: String) -> Result<serde_json::Value, 
             src_content.clone()
         };
         let help_map: std::collections::HashMap<String, String> =
-            crate::dml::config::conf_help_lines(&help_content).into_iter().collect();
+            dml_wow::config::conf_help_lines(&help_content).into_iter().collect();
 
         let keys: Vec<serde_json::Value> = rows
             .into_iter()
@@ -3641,15 +3636,15 @@ async fn wow_accountwide_set(
 async fn wow_accountwide_get_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = dml_wow::maint::resolve_server_dir(&title_dir) else {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "WoW Playerbots server not installed".into(),
                 hint: "Install it first.".into(),
             });
         };
-        Ok(crate::dml::accountwide::build_get(&server_dir))
+        Ok(dml_wow::accountwide::build_get(&server_dir))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -3674,7 +3669,7 @@ async fn wow_accountwide_set_native(
     if value != "on" && value != "off" {
         return Err(CmdError { code: "BAD_ARG".into(), message: "--value must be on or off".into(), hint: String::new() });
     }
-    if !crate::dml::accountwide::valid_flag(&key) {
+    if !dml_wow::accountwide::valid_flag(&key) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid flag name: {key}"),
@@ -3684,15 +3679,15 @@ async fn wow_accountwide_set_native(
     let config_lock = state.config_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        let Some(server_dir) = crate::dml::maint::resolve_server_dir(&title_dir) else {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        let Some(server_dir) = dml_wow::maint::resolve_server_dir(&title_dir) else {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
                 message: "WoW Playerbots server not installed".into(),
                 hint: "Install it first.".into(),
             });
         };
-        crate::dml::accountwide::set_flag(&server_dir, &key, &value, variant.as_deref())
+        dml_wow::accountwide::set_flag(&server_dir, &key, &value, variant.as_deref())
             .map_err(|e| CmdError { code: e.code.into(), message: e.message, hint: e.hint })
     })
     .await
@@ -3756,7 +3751,7 @@ fn flush_restart_authworld(
     label: &str,
     emit: &impl Fn(serde_json::Value),
 ) -> FlushRestartOutcome {
-    use crate::dml::{lifecycle, maint, modmgr, soap, status};
+    use dml_wow::{lifecycle, maint, modmgr, soap, status};
 
     emit(modmgr::line_event("info", "saving all characters (best effort)..."));
     {
@@ -3816,8 +3811,8 @@ fn flush_restart_authworld(
 /// (3) restart #1 (the wipe happens during this boot) -> (4)+(5) disarm
 /// (flag back to 0, remove marker) BEFORE the rebuild restart -> (6) restart
 /// #2 (rebuild) -> (7) done.
-fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: crate::dml::db::DbConfig, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{backup, config::ConfigReader, lifecycle, maint, modmgr, native};
+fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: dml_wow::db::DbConfig, emit: impl Fn(serde_json::Value)) {
+    use dml_wow::{backup, config::ConfigReader, lifecycle, maint, modmgr, native};
 
     emit(modmgr::section_start(BOTS_FLUSH_SECTION));
 
@@ -3836,7 +3831,7 @@ fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: crate::dml:
     };
 
     let conf_path = lifecycle::flush_conf_path(&sdir);
-    match crate::dml::config::conf_ensure(&conf_path) {
+    match dml_wow::config::conf_ensure(&conf_path) {
         Ok(true) => {}
         Ok(false) => {
             emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
@@ -3887,7 +3882,7 @@ fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: crate::dml:
     // `guard.disarm()` has already run.
     let marker_path = lifecycle::flush_marker_path(&sdir);
     let guard = lifecycle::FlushGuard::arm(conf_path.clone(), marker_path);
-    if crate::dml::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "1").is_err() {
+    if dml_wow::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "1").is_err() {
         emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
         emit(modmgr::error_event("WRITE_FAILED", "Could not write playerbots.conf", ""));
         return; // guard still armed -> Drop restores 0 + removes the marker.
@@ -3921,7 +3916,7 @@ fn wow_bots_flush_native_blocking(soap_lock: Arc<Mutex<()>>, db_cfg: crate::dml:
     // restart, or the next boot would wipe them again. Disarm the guard only
     // once this write has actually succeeded.
     emit(modmgr::line_event("info", "bots deleted - restoring the setting..."));
-    if crate::dml::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "0").is_err() {
+    if dml_wow::config::conf_write(&conf_path, "AiPlayerbot.DeleteRandomBotAccounts", "0").is_err() {
         emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
         emit(modmgr::error_event(
             "WRITE_FAILED",
@@ -3975,7 +3970,7 @@ async fn wow_bots_flush_native(on_event: Channel<serde_json::Value>, state: Stat
     let soap_lock = state.soap_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         wow_bots_flush_native_blocking(soap_lock, db_cfg, |v| {
             let _ = ch.send(v);
         });
@@ -4036,11 +4031,11 @@ async fn wow_config_raw_reset_native(
             return Err(cfg_missing_file_err());
         }
         let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfg_installed_err());
         }
-        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+        let fpath = dml_wow::config::cfg_file_path(&title_dir, &file)
             .ok_or_else(|| cfg_not_editable_err(&file))?;
         if matches!(file.as_str(), ".env" | "docker-compose.override.yml") {
             return Err(CmdError {
@@ -4049,7 +4044,7 @@ async fn wow_config_raw_reset_native(
                 hint: String::new(),
             });
         }
-        let dist = crate::dml::config::dist_sibling(&fpath);
+        let dist = dml_wow::config::dist_sibling(&fpath);
         if !dist.is_file() {
             return Err(CmdError {
                 code: "NOT_FOUND".into(),
@@ -4059,7 +4054,7 @@ async fn wow_config_raw_reset_native(
         }
         let mut backup = serde_json::Value::Null;
         if fpath.is_file() {
-            let bak = crate::dml::config::bak_sibling(&fpath);
+            let bak = dml_wow::config::bak_sibling(&fpath);
             std::fs::copy(&fpath, &bak).map_err(|e| CmdError {
                 code: "WRITE_FAILED".into(),
                 message: format!("Could not write {file}: {e}"),
@@ -4100,13 +4095,13 @@ async fn wow_config_raw_read_native(file: String) -> Result<serde_json::Value, C
         if file.is_empty() {
             return Err(cfg_missing_file_err());
         }
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfg_installed_err());
         }
-        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+        let fpath = dml_wow::config::cfg_file_path(&title_dir, &file)
             .ok_or_else(|| cfg_not_editable_err(&file))?;
-        let dist = crate::dml::config::dist_sibling(&fpath);
+        let dist = dml_wow::config::dist_sibling(&fpath);
         if !fpath.is_file() && dist.is_file() {
             let content = std::fs::read_to_string(&dist).unwrap_or_default();
             return Ok(serde_json::json!({
@@ -4152,11 +4147,11 @@ async fn wow_config_raw_write_native(
             return Err(cfg_missing_file_err());
         }
         let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
-        if !crate::dml::config::wow_server_installed(&title_dir) {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        if !dml_wow::config::wow_server_installed(&title_dir) {
             return Err(cfg_installed_err());
         }
-        let fpath = crate::dml::config::cfg_file_path(&title_dir, &file)
+        let fpath = dml_wow::config::cfg_file_path(&title_dir, &file)
             .ok_or_else(|| cfg_not_editable_err(&file))?;
 
         if file == "docker-compose.override.yml"
@@ -4186,7 +4181,7 @@ async fn wow_config_raw_write_native(
         }
         let mut backup = serde_json::Value::Null;
         if fpath.is_file() {
-            let bak = crate::dml::config::bak_sibling(&fpath);
+            let bak = dml_wow::config::bak_sibling(&fpath);
             std::fs::copy(&fpath, &bak).map_err(|e| CmdError {
                 code: "WRITE_FAILED".into(),
                 message: format!("Could not write {file}: {e}"),
@@ -4194,7 +4189,7 @@ async fn wow_config_raw_write_native(
             })?;
             backup = serde_json::Value::String(format!("{file}.bak"));
         }
-        crate::dml::config::atomic_write(&fpath, &content).map_err(|e| CmdError {
+        dml_wow::config::atomic_write(&fpath, &content).map_err(|e| CmdError {
             code: "WRITE_FAILED".into(),
             message: format!("Could not write {file}: {e}"),
             hint: String::new(),
@@ -4434,7 +4429,7 @@ fn wow_world_restart_native_blocking(
     soap_lock: Arc<Mutex<()>>,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{config::ConfigReader, maint, native, soap, status};
+    use dml_wow::{config::ConfigReader, maint, native, soap, status};
 
     emit(wr_event_section_start());
 
@@ -4624,7 +4619,7 @@ fn bs_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_j
 /// `spawn_blocking`. A port of the `bridge-setup)` arm (`90-main.sh:2941-
 /// 2979`): server installed? -> SOAP `server info` preflight -> deploy.
 fn wow_bridge_setup_native_blocking(soap_lock: Arc<Mutex<()>>, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{bridge, config::ConfigReader, maint, soap};
+    use dml_wow::{bridge, config::ConfigReader, maint, soap};
 
     emit(bs_event_section_start());
 
@@ -4793,10 +4788,10 @@ async fn wow_teleport_coords_native(
     z: f64,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+    if !dml_wow::soap_cmds::valid_charname(&char_name) {
         return Err(bad_arg(format!("Invalid character name: {char_name}")));
     }
-    if !crate::dml::soap_cmds::valid_map_id(map) {
+    if !dml_wow::soap_cmds::valid_map_id(map) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid map id: {map}"),
@@ -4807,7 +4802,7 @@ async fn wow_teleport_coords_native(
     // "Invalid coordinate: $value", the SAME wording for all three axes --
     // it never names which one failed, just echoes the bad value.
     for v in [x, y, z] {
-        if !crate::dml::soap_cmds::valid_coord(v) {
+        if !dml_wow::soap_cmds::valid_coord(v) {
             return Err(CmdError {
                 code: "BAD_ARG".into(),
                 message: format!("Invalid coordinate: {v}"),
@@ -4817,11 +4812,11 @@ async fn wow_teleport_coords_native(
     }
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         let params: Vec<mysql::Value> = vec![mysql::Value::from(char_name.as_str())];
-        let res = crate::dml::db::query_with_params(
+        let res = dml_wow::db::query_with_params(
             &cfg,
-            crate::dml::db::Database::Characters,
+            dml_wow::db::Database::Characters,
             TELEPORT_COORDS_SELECT_SQL,
             params,
         )
@@ -4848,7 +4843,7 @@ async fn wow_teleport_coords_native(
             mysql::Value::from(map),
             mysql::Value::from(guid as u64),
         ];
-        crate::dml::db::execute(&cfg, crate::dml::db::Database::Characters, TELEPORT_COORDS_UPDATE_SQL, update_params)
+        dml_wow::db::execute(&cfg, dml_wow::db::Database::Characters, TELEPORT_COORDS_UPDATE_SQL, update_params)
             .map_err(|_e| CmdError {
                 code: "DB_UNREACHABLE".into(),
                 message: "Could not update the character's position".into(),
@@ -4920,8 +4915,8 @@ async fn wow_gm_return_home(char_name: String, state: State<'_, AppState>) -> Re
 /// "heal", "revive", "summon"), spliced into the fixed fault message. Unlike
 /// the generic mappers, the SOAP_FAULT text here is NEVER the server's own
 /// fault string -- bash's `_party_fire` discards `$out` entirely on rc=2.
-fn party_fire_result(o: crate::dml::soap::SoapOutcome, label: &str) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn party_fire_result(o: dml_wow::soap::SoapOutcome, label: &str) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(_) => Err(CmdError {
@@ -4947,8 +4942,8 @@ fn party_fire_result(o: crate::dml::soap::SoapOutcome, label: &str) -> Result<St
 /// the server's fault text -- bash discards `$out` on rc=2), and the auth
 /// message is "SOAP auth failed" (shorter than the generic mappers'
 /// "SOAP authentication failed" -- this arm's own wording, not a typo).
-fn gm_level_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn gm_level_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(_) => Err(CmdError {
@@ -4973,13 +4968,13 @@ fn gm_level_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError>
 /// stock `character <flag>` command. The fault text IS the server's own
 /// (decoded) fault string here, unlike `gm_level_result` -- but the auth
 /// message is still the shorter "SOAP auth failed" this arm-family uses.
-fn gm_at_login_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn gm_at_login_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(t) => Err(CmdError {
             code: "SOAP_FAULT".into(),
-            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            message: dml_wow::soap_cmds::soap_text_decode(&t),
             hint: "The worldserver rejected the command.".into(),
         }),
         SoapOutcome::Auth => Err(CmdError {
@@ -4998,8 +4993,8 @@ fn gm_at_login_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdErr
 /// `SoapOutcome -> CmdError` for `mail-item` (`90-main.sh:1828-1833`): RAW
 /// (undecoded) fault text, its own hint, and empty-hint auth/a different
 /// unreachable hint than the generic mappers.
-fn mail_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn mail_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(t) => Err(CmdError {
@@ -5024,8 +5019,8 @@ fn mail_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
 /// B2a): RAW fault text with its own hint; a different (unstarted-server)
 /// unreachable hint than the generic mappers — this is the one arm where
 /// SOAP failure means "start the server first" rather than "is it running?".
-fn motd_result(o: crate::dml::soap::SoapOutcome) -> Result<(), CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn motd_result(o: dml_wow::soap::SoapOutcome) -> Result<(), CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(_) => Ok(()),
         SoapOutcome::Fault(t) => Err(CmdError {
@@ -5049,8 +5044,8 @@ fn motd_result(o: crate::dml::soap::SoapOutcome) -> Result<(), CmdError> {
 
 /// `SoapOutcome -> CmdError` for `teleport` (`90-main.sh:1888-1893`): RAW
 /// (undecoded) fault text with its own hint; empty-hint auth/unreachable.
-fn teleport_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn teleport_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(t) => Err(CmdError {
@@ -5077,13 +5072,13 @@ fn teleport_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError>
 /// combat/flight-path; "SOAP auth failed" (the shorter wording this arm
 /// family uses, like `gm_level_result`/`gm_at_login_result`); generic
 /// unreachable.
-fn return_home_online_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn return_home_online_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(t) => Err(CmdError {
             code: "SOAP_FAULT".into(),
-            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            message: dml_wow::soap_cmds::soap_text_decode(&t),
             hint: "The character can't be teleported in combat or on a flight path -- try again once it is idle."
                 .into(),
         }),
@@ -5141,10 +5136,10 @@ const RETURN_HOME_UPDATE_SQL: &str =
 /// `guid`/`race`/`online` are all integer columns, but [`db::SqlValue`]'s
 /// `Text` variant is the safe catch-all for anything the driver didn't map to
 /// `Int`.
-fn sql_row_int(v: Option<&crate::dml::db::SqlValue>) -> Option<i64> {
+fn sql_row_int(v: Option<&dml_wow::db::SqlValue>) -> Option<i64> {
     match v {
-        Some(crate::dml::db::SqlValue::Int(i)) => Some(*i),
-        Some(crate::dml::db::SqlValue::Text(s)) => s.parse::<i64>().ok(),
+        Some(dml_wow::db::SqlValue::Int(i)) => Some(*i),
+        Some(dml_wow::db::SqlValue::Text(s)) => s.parse::<i64>().ok(),
         _ => None,
     }
 }
@@ -5167,11 +5162,11 @@ fn not_online_err(player: &str) -> CmdError {
 /// so a DB error there surfaces as an empty guid (== not online) rather than
 /// a separate DB_UNREACHABLE branch -- this mirrors that swallow rather than
 /// inventing a new error path the oracle doesn't have.
-fn char_is_online(cfg: &crate::dml::db::DbConfig, player: &str) -> bool {
+fn char_is_online(cfg: &dml_wow::db::DbConfig, player: &str) -> bool {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(player)];
-    crate::dml::db::query_with_params(
+    dml_wow::db::query_with_params(
         cfg,
-        crate::dml::db::Database::Characters,
+        dml_wow::db::Database::Characters,
         "SELECT guid FROM characters WHERE name=? AND online=1 LIMIT 1",
         params,
     )
@@ -5201,13 +5196,13 @@ fn split_mail_items(items: &str) -> Vec<&str> {
 /// WSL). Unlike the generic `outcome_to_result_raw`, this arm entity-decodes
 /// BOTH the Ok result and the Fault text, and uses its own SOAP_UNREACHABLE
 /// wording (`Could not reach SOAP at $(soap_url)` / mentions `soap-setup`).
-fn console_send_result(o: crate::dml::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn console_send_result(o: dml_wow::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
-        SoapOutcome::Ok(t) => Ok(crate::dml::soap_cmds::soap_text_decode(&t)),
+        SoapOutcome::Ok(t) => Ok(dml_wow::soap_cmds::soap_text_decode(&t)),
         SoapOutcome::Fault(t) => Err(CmdError {
             code: "SOAP_FAULT".into(),
-            message: crate::dml::soap_cmds::soap_text_decode(&t),
+            message: dml_wow::soap_cmds::soap_text_decode(&t),
             hint: "The worldserver rejected the command.".into(),
         }),
         SoapOutcome::Auth => Err(CmdError {
@@ -5247,8 +5242,8 @@ async fn wow_console_send_native(
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &command);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &command);
         let result = console_send_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "result": result }))
     })
@@ -5263,15 +5258,15 @@ async fn wow_console_send_native(
 /// arm's Unreachable branch has its own wording -- `Could not reach SOAP at
 /// $(soap_url)` / `Is the worldserver running?` -- instead of the generic
 /// mapper's `Could not reach the server` / `Is it running?`.
-fn account_result(o: crate::dml::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn account_result(o: dml_wow::soap::SoapOutcome, soap_url: &str) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Unreachable(_) => Err(CmdError {
             code: "SOAP_UNREACHABLE".into(),
             message: format!("Could not reach SOAP at {soap_url}"),
             hint: "Is the worldserver running?".into(),
         }),
-        other => crate::dml::soap_cmds::outcome_to_result_decoded(other),
+        other => dml_wow::soap_cmds::outcome_to_result_decoded(other),
     }
 }
 
@@ -5283,12 +5278,12 @@ async fn wow_account_create_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::account_create_cmd(&user, &pass)?;
+    let cmd = dml_wow::soap_cmds::account_create_cmd(&user, &pass)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "created": true, "user": user }))
     })
@@ -5305,12 +5300,12 @@ async fn wow_account_set_password_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::account_set_password_cmd(&user, &pass)?;
+    let cmd = dml_wow::soap_cmds::account_set_password_cmd(&user, &pass)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "password_set": true, "user": user }))
     })
@@ -5330,12 +5325,12 @@ async fn wow_account_set_gm_native(
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     let level_str = level.to_string();
-    let cmd = crate::dml::soap_cmds::account_set_gm_cmd(&user, &level_str)?;
+    let cmd = dml_wow::soap_cmds::account_set_gm_cmd(&user, &level_str)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "gm_set": true, "user": user, "level": level }))
     })
@@ -5351,12 +5346,12 @@ async fn wow_account_delete_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::account_delete_cmd(&user)?;
+    let cmd = dml_wow::soap_cmds::account_delete_cmd(&user)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         account_result(outcome, &cfg.url)?;
         Ok(serde_json::json!({ "deleted": true, "user": user }))
     })
@@ -5373,12 +5368,12 @@ async fn wow_gm_level_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_level_cmd(&player, level)?;
+    let cmd = dml_wow::soap_cmds::gm_level_cmd(&player, level)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         gm_level_result(outcome)?;
         Ok(serde_json::json!({ "leveled": true, "player": player, "level": level }))
     })
@@ -5395,12 +5390,12 @@ async fn wow_gm_at_login_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_at_login_cmd(&player, &flag)?;
+    let cmd = dml_wow::soap_cmds::gm_at_login_cmd(&player, &flag)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         gm_at_login_result(outcome)?;
         Ok(serde_json::json!({ "applied": true, "player": player, "flag": flag }))
     })
@@ -5418,16 +5413,16 @@ async fn wow_gm_gold_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_gold_cmd(&player, gold)?;
+    let cmd = dml_wow::soap_cmds::gm_gold_cmd(&player, gold)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         if !char_is_online(&cfg, &player) {
             return Err(not_online_err(&player));
         }
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "gold")?;
         Ok(serde_json::json!({ "gold_set": true, "player": player, "gold": gold }))
     })
@@ -5443,16 +5438,16 @@ async fn wow_gm_heal_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_heal_cmd(&player)?;
+    let cmd = dml_wow::soap_cmds::gm_heal_cmd(&player)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         if !char_is_online(&cfg, &player) {
             return Err(not_online_err(&player));
         }
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "heal")?;
         Ok(serde_json::json!({ "healed": true, "player": player }))
     })
@@ -5468,16 +5463,16 @@ async fn wow_gm_revive_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_revive_cmd(&player)?;
+    let cmd = dml_wow::soap_cmds::gm_revive_cmd(&player)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         if !char_is_online(&cfg, &player) {
             return Err(not_online_err(&player));
         }
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "revive")?;
         Ok(serde_json::json!({ "revived": true, "player": player }))
     })
@@ -5496,14 +5491,14 @@ async fn wow_gm_summon_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::gm_summon_cmd(&player, entry)?;
+    let cmd = dml_wow::soap_cmds::gm_summon_cmd(&player, entry)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         let params: Vec<mysql::Value> = vec![mysql::Value::from(entry)];
-        let npc_res = crate::dml::db::query_with_params(
+        let npc_res = dml_wow::db::query_with_params(
             &cfg,
-            crate::dml::db::Database::World,
+            dml_wow::db::Database::World,
             "SELECT name FROM creature_template WHERE entry=? LIMIT 1",
             params,
         )
@@ -5514,9 +5509,9 @@ async fn wow_gm_summon_native(
         })?;
         let npc_name: Option<String> =
             npc_res.rows.first().and_then(|r| r.first()).and_then(|v| match v {
-                crate::dml::db::SqlValue::Text(s) => Some(s.clone()),
-                crate::dml::db::SqlValue::Int(i) => Some(i.to_string()),
-                crate::dml::db::SqlValue::Null => None,
+                dml_wow::db::SqlValue::Text(s) => Some(s.clone()),
+                dml_wow::db::SqlValue::Int(i) => Some(i.to_string()),
+                dml_wow::db::SqlValue::Null => None,
             });
         let npc_name = match npc_name {
             Some(n) if !n.is_empty() => n,
@@ -5532,8 +5527,8 @@ async fn wow_gm_summon_native(
             return Err(not_online_err(&player));
         }
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "summon")?;
         Ok(serde_json::json!({
             "summoned": true,
@@ -5572,40 +5567,40 @@ fn party_not_online_err(who: &str, hint: &str) -> CmdError {
 /// `_party_online_guid` (`50-party.sh:46-49`) over a direct MySQL
 /// connection. Any query failure reads as "not online" (`None`), matching
 /// the bash's own `2>/dev/null` swallow — same doctrine as `char_is_online`.
-fn party_online_guid(cfg: &crate::dml::db::DbConfig, name: &str) -> Option<i64> {
+fn party_online_guid(cfg: &dml_wow::db::DbConfig, name: &str) -> Option<i64> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
-    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::ONLINE_GUID_SQL, params)
+    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::ONLINE_GUID_SQL, params)
         .ok()
         .and_then(|res| sql_row_int(res.rows.first().and_then(|r| r.first())))
 }
 
 /// `_party_group_member_guids` (`50-party.sh:52-55`).
-fn group_member_guids(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Vec<i64> {
+fn group_member_guids(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Vec<i64> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::GROUP_MEMBER_GUIDS_SQL, params)
+    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::GROUP_MEMBER_GUIDS_SQL, params)
         .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
         .unwrap_or_default()
 }
 
-fn cell_string(v: Option<&crate::dml::db::SqlValue>) -> Option<String> {
+fn cell_string(v: Option<&dml_wow::db::SqlValue>) -> Option<String> {
     match v {
-        Some(crate::dml::db::SqlValue::Text(s)) if !s.is_empty() => Some(s.clone()),
-        Some(crate::dml::db::SqlValue::Int(i)) => Some(i.to_string()),
+        Some(dml_wow::db::SqlValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        Some(dml_wow::db::SqlValue::Int(i)) => Some(i.to_string()),
         _ => None,
     }
 }
 
 /// Bot's name-by-guid lookup after a successful join (`90-main.sh:3102,
 /// 3417`).
-fn char_name_by_guid(cfg: &crate::dml::db::DbConfig, guid: i64) -> Option<String> {
+fn char_name_by_guid(cfg: &dml_wow::db::DbConfig, guid: i64) -> Option<String> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(guid)];
-    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::CHAR_NAME_BY_GUID_SQL, params)
+    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::CHAR_NAME_BY_GUID_SQL, params)
         .ok()
         .and_then(|res| cell_string(res.rows.first().and_then(|r| r.first())))
 }
 
 /// The bot-members-of-a-party names query, shared by `dismiss-all` and
-/// `preset-load`'s kick phase ([`crate::dml::party::BOT_MEMBER_NAMES_SQL`]).
+/// `preset-load`'s kick phase ([`dml_wow::party::BOT_MEMBER_NAMES_SQL`]).
 /// Unlike `party_online_guid`/`group_member_guids`/`char_name_by_guid`
 /// (which swallow query failure exactly like the oracle's own `2>/dev/null`
 /// helpers do), a failure here MUST surface: `dismiss-all`'s bash caller
@@ -5613,22 +5608,22 @@ fn char_name_by_guid(cfg: &crate::dml::db::DbConfig, guid: i64) -> Option<String
 /// the party"` on failure (`90-main.sh:3195-3196`) rather than treating an
 /// unreachable DB as "zero bots" -- so this returns `Result`, not a
 /// silently-emptied `Vec`.
-fn bot_member_names(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
+fn bot_member_names(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_NAMES_SQL, params)
+    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::BOT_MEMBER_NAMES_SQL, params)
         .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))
 }
 
-/// `preset-save`'s bot-classes query ([`crate::dml::party::
+/// `preset-save`'s bot-classes query ([`dml_wow::party::
 /// BOT_MEMBER_CLASSES_SQL`]). Same doctrine as `bot_member_names`: the
 /// oracle's `preset-save` caller checks this query and exits
 /// `DB_UNREACHABLE "Could not read the party"` on failure
 /// (`90-main.sh:3302-3303`), so a query error must propagate rather than be
 /// swallowed into an empty (and thus falsely "no bots to save") list.
-fn bot_member_classes(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
+fn bot_member_classes(cfg: &dml_wow::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    crate::dml::db::query_with_params(cfg, crate::dml::db::Database::Characters, crate::dml::party::BOT_MEMBER_CLASSES_SQL, params)
+    dml_wow::db::query_with_params(cfg, dml_wow::db::Database::Characters, dml_wow::party::BOT_MEMBER_CLASSES_SQL, params)
         .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))
 }
@@ -5636,15 +5631,15 @@ fn bot_member_classes(cfg: &crate::dml::db::DbConfig, pguid: i64) -> Result<Vec<
 /// `_party_wait_new_member` (`50-party.sh:85-101`): poll up to
 /// `poll_tries_from_env()` times (sleeping `poll_sleep_from_env()` between)
 /// for a group member guid that wasn't in `before`. The per-iteration
-/// membership test is [`crate::dml::party::find_new_member`] (pure,
+/// membership test is [`dml_wow::party::find_new_member`] (pure,
 /// unit-tested); this wrapper owns only the retry/sleep mechanics.
-fn wait_new_member(cfg: &crate::dml::db::DbConfig, pguid: i64, before: &[i64]) -> Option<i64> {
+fn wait_new_member(cfg: &dml_wow::db::DbConfig, pguid: i64, before: &[i64]) -> Option<i64> {
     let before_set: std::collections::HashSet<i64> = before.iter().copied().collect();
-    let tries = crate::dml::party::poll_tries_from_env();
-    let sleep = crate::dml::party::poll_sleep_from_env();
+    let tries = dml_wow::party::poll_tries_from_env();
+    let sleep = dml_wow::party::poll_sleep_from_env();
     for i in 0..tries {
         let now = group_member_guids(cfg, pguid);
-        if let Some(g) = crate::dml::party::find_new_member(&now, pguid, &before_set) {
+        if let Some(g) = dml_wow::party::find_new_member(&now, pguid, &before_set) {
             return Some(g);
         }
         if i + 1 < tries && !sleep.is_zero() {
@@ -5661,10 +5656,10 @@ fn wait_new_member(cfg: &crate::dml::db::DbConfig, pguid: i64, before: &[i64]) -
 /// to `valid_bot_spec`'s static mirror), matching `_party_pb_conf`'s own
 /// "nothing deployed" case.
 fn live_spec_names(title_dir: &std::path::Path) -> Option<Vec<String>> {
-    let (conf_path, _source) = crate::dml::party_specs::find_conf(title_dir)?;
+    let (conf_path, _source) = dml_wow::party_specs::find_conf(title_dir)?;
     let content = std::fs::read_to_string(&conf_path).ok()?;
     Some(
-        crate::dml::party_specs::parse_spec_rows(&content)
+        dml_wow::party_specs::parse_spec_rows(&content)
             .into_iter()
             .map(|r| r.name)
             .filter(|n| !n.is_empty())
@@ -5677,8 +5672,8 @@ fn live_spec_names(title_dir: &std::path::Path) -> Option<Vec<String>> {
 /// `party_fire_result`, but the FAULT message is the arm's own fixed "Every
 /// dismiss was rejected" (not "The dismiss command was rejected" —
 /// `dismiss-all` has no single "the" command, it fires one per bot).
-fn dismiss_fire_result(o: crate::dml::soap::SoapOutcome) -> Result<String, CmdError> {
-    use crate::dml::soap::SoapOutcome;
+fn dismiss_fire_result(o: dml_wow::soap::SoapOutcome) -> Result<String, CmdError> {
+    use dml_wow::soap::SoapOutcome;
     match o {
         SoapOutcome::Ok(t) => Ok(t),
         SoapOutcome::Fault(_) => Err(CmdError {
@@ -5714,12 +5709,12 @@ async fn wow_party_add_native(
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     let gender = gender.unwrap_or_default();
-    let cmd = crate::dml::party::party_add_cmd(&player, &class, &gender)?;
+    let cmd = dml_wow::party::party_add_cmd(&player, &class, &gender)?;
     let spec = spec.filter(|s| !s.is_empty());
     if let Some(s) = &spec {
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
         let live = live_spec_names(&title_dir);
-        if !crate::dml::party::valid_bot_spec(s, live.as_deref()) {
+        if !dml_wow::party::valid_bot_spec(s, live.as_deref()) {
             return Err(CmdError {
                 code: "BAD_ARG".into(),
                 message: format!("Unknown spec: {s}"),
@@ -5729,14 +5724,14 @@ async fn wow_party_add_native(
     }
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         let pguid = party_online_guid(&db_cfg, &player)
             .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first, then try again."))?;
         let before = group_member_guids(&db_cfg, pguid);
         {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = crate::dml::soap::SoapConfig::load();
-            let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+            let soap_cfg = dml_wow::soap::SoapConfig::load();
+            let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
             party_fire_result(outcome, "add")?;
         }
         let Some(newguid) = wait_new_member(&db_cfg, pguid, &before) else {
@@ -5755,10 +5750,10 @@ async fn wow_party_add_native(
         };
         if let Some(s) = &spec {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = crate::dml::soap::SoapConfig::load();
-            let o1 = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::spec_whisper_cmd(&player, &botname, s));
+            let soap_cfg = dml_wow::soap::SoapConfig::load();
+            let o1 = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::spec_whisper_cmd(&player, &botname, s));
             party_fire_result(o1, "spec")?;
-            let o2 = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::autogear_whisper_cmd(&player, &botname));
+            let o2 = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::autogear_whisper_cmd(&player, &botname));
             party_fire_result(o2, "spec")?;
             Ok(serde_json::json!({"added":true,"joined":true,"bot":botname,"note":null,"spec":s,"spec_applied":true}))
         } else {
@@ -5780,22 +5775,22 @@ async fn wow_party_kick_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid player name: {player}"),
             hint: "Kick needs --player (the bot's master) so the bot can also be dismissed.".into(),
         });
     }
-    let cmd = crate::dml::party::party_uninvite_cmd(&bot)?;
-    let logout_cmd = crate::dml::party::party_logout_whisper_cmd(&player, &bot)?;
+    let cmd = dml_wow::party::party_uninvite_cmd(&bot)?;
+    let logout_cmd = dml_wow::party::party_logout_whisper_cmd(&player, &bot)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "kick")?;
-        let dismissed = matches!(crate::dml::soap::exec(&soap_cfg, &logout_cmd), crate::dml::soap::SoapOutcome::Ok(_));
+        let dismissed = matches!(dml_wow::soap::exec(&soap_cfg, &logout_cmd), dml_wow::soap::SoapOutcome::Ok(_));
         Ok(serde_json::json!({"kicked": true, "dismissed": dismissed}))
     })
     .await
@@ -5814,38 +5809,38 @@ async fn wow_party_dismiss_all_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
     }
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         let pguid = party_online_guid(&db_cfg, &player)
             .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
         let bots = bot_member_names(&db_cfg, pguid)?;
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
         let (mut dismissed, mut attempted) = (0i64, 0i64);
         let mut last_err: Option<CmdError> = None;
         let mut names = Vec::new();
         for b in bots {
-            if !crate::dml::soap_cmds::valid_charname(&b) {
+            if !dml_wow::soap_cmds::valid_charname(&b) {
                 continue;
             }
             attempted += 1;
             let outcome = {
                 let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                crate::dml::soap::exec(&soap_cfg, &format!("dml_uninvite {b}"))
+                dml_wow::soap::exec(&soap_cfg, &format!("dml_uninvite {b}"))
             };
             match dismiss_fire_result(outcome) {
                 Ok(_) => {
                     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+                    let _ = dml_wow::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
                     dismissed += 1;
                     names.push(b);
                 }
                 Err(e) => {
                     let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+                    let _ = dml_wow::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
                     last_err = Some(e);
                 }
             }
@@ -5867,12 +5862,12 @@ async fn wow_party_relogin_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::party::party_relogin_cmd(&player, &bot)?;
+    let cmd = dml_wow::party::party_relogin_cmd(&player, &bot)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
         party_fire_result(outcome, "relogin")?;
         Ok(serde_json::json!({"relogged": true}))
     })
@@ -5894,13 +5889,13 @@ async fn wow_party_botcmd_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
     }
-    if !crate::dml::soap_cmds::valid_charname(&bot) {
+    if !dml_wow::soap_cmds::valid_charname(&bot) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid bot name: {bot}"), hint: String::new() });
     }
-    let wmsg = if let Some(tail) = crate::dml::party::botcmd_fixed_tail(&action) {
+    let wmsg = if let Some(tail) = dml_wow::party::botcmd_fixed_tail(&action) {
         tail.to_string()
     } else if action == "spec" {
         let spec_val = spec.filter(|s| !s.is_empty()).ok_or_else(|| CmdError {
@@ -5908,16 +5903,16 @@ async fn wow_party_botcmd_native(
             message: "Action spec requires --spec <name>".into(),
             hint: "e.g. --spec 'frost pve'".into(),
         })?;
-        let title_dir = crate::dml::config::ConfigReader::title_dir_from_env();
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
         let live = live_spec_names(&title_dir);
-        if !crate::dml::party::valid_bot_spec(&spec_val, live.as_deref()) {
+        if !dml_wow::party::valid_bot_spec(&spec_val, live.as_deref()) {
             return Err(CmdError {
                 code: "BAD_ARG".into(),
                 message: format!("Unknown spec: {spec_val}"),
                 hint: "A premade spec name like 'frost pve'.".into(),
             });
         }
-        crate::dml::party::spec_action_wmsg(&spec_val)
+        dml_wow::party::spec_action_wmsg(&spec_val)
     } else {
         return Err(CmdError {
             code: "BAD_ARG".into(),
@@ -5927,7 +5922,7 @@ async fn wow_party_botcmd_native(
     };
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         if party_online_guid(&db_cfg, &player).is_none() {
             return Err(party_not_online_err(&player, "Log the character into the game first."));
         }
@@ -5935,8 +5930,8 @@ async fn wow_party_botcmd_native(
             return Err(party_not_online_err(&bot, "The bot must be in the world -- is it still in your party?"));
         }
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let soap_cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {bot} {wmsg}"));
+        let soap_cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&soap_cfg, &format!("dml_whisper {player} {bot} {wmsg}"));
         party_fire_result(outcome, "botcmd")?;
         Ok(serde_json::json!({"sent": true, "player": player, "bot": bot, "action": action}))
     })
@@ -5945,7 +5940,7 @@ async fn wow_party_botcmd_native(
 }
 
 fn preset_dir_or_internal_err() -> Result<std::path::PathBuf, CmdError> {
-    crate::dml::party::preset_dir().ok_or_else(|| CmdError {
+    dml_wow::party::preset_dir().ok_or_else(|| CmdError {
         code: "INTERNAL".into(),
         message: "could not resolve the DML state directory (USERPROFILE/HOME not set)".into(),
         hint: String::new(),
@@ -5964,10 +5959,10 @@ fn io_internal_err(e: std::io::Error) -> CmdError {
 #[tauri::command]
 async fn wow_party_preset_save_native(player: String, name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
     }
-    if !crate::dml::party::valid_preset_name(&name) {
+    if !dml_wow::party::valid_preset_name(&name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid preset name: {name}"),
@@ -5975,12 +5970,12 @@ async fn wow_party_preset_save_native(player: String, name: String) -> Result<se
         });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         let pguid = party_online_guid(&db_cfg, &player)
             .ok_or_else(|| party_not_online_err(&player, "Log the character into the game first."))?;
         let names: Vec<String> = bot_member_classes(&db_cfg, pguid)?
             .into_iter()
-            .filter_map(crate::dml::party_specs::class_name_from_id)
+            .filter_map(dml_wow::party_specs::class_name_from_id)
             .map(str::to_string)
             .collect();
         if names.is_empty() {
@@ -5992,9 +5987,9 @@ async fn wow_party_preset_save_native(player: String, name: String) -> Result<se
         }
         let dir = preset_dir_or_internal_err()?;
         std::fs::create_dir_all(&dir).map_err(io_internal_err)?;
-        let path = crate::dml::party::preset_path(&dir, &name);
+        let path = dml_wow::party::preset_path(&dir, &name);
         let overwrote = path.is_file();
-        std::fs::write(&path, crate::dml::party::preset_file_content(&names)).map_err(io_internal_err)?;
+        std::fs::write(&path, dml_wow::party::preset_file_content(&names)).map_err(io_internal_err)?;
         Ok(serde_json::json!({"saved": true, "name": name, "bots": names, "overwrote": overwrote}))
     })
     .await
@@ -6008,7 +6003,7 @@ async fn wow_party_preset_list_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
         let dir = preset_dir_or_internal_err()?;
-        let presets: Vec<serde_json::Value> = crate::dml::party::list_presets(&dir)
+        let presets: Vec<serde_json::Value> = dml_wow::party::list_presets(&dir)
             .into_iter()
             .map(|p| serde_json::json!({"name": p.name, "bots": p.bots}))
             .collect();
@@ -6022,12 +6017,12 @@ async fn wow_party_preset_list_native() -> Result<serde_json::Value, CmdError> {
 #[tauri::command]
 async fn wow_party_preset_delete_native(name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::party::valid_preset_name(&name) {
+    if !dml_wow::party::valid_preset_name(&name) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let dir = preset_dir_or_internal_err()?;
-        let path = crate::dml::party::preset_path(&dir, &name);
+        let path = dml_wow::party::preset_path(&dir, &name);
         if !path.is_file() {
             return Err(preset_not_found(&name));
         }
@@ -6042,17 +6037,17 @@ async fn wow_party_preset_delete_native(name: String) -> Result<serde_json::Valu
 #[tauri::command]
 async fn wow_party_preset_show_native(name: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::party::valid_preset_name(&name) {
+    if !dml_wow::party::valid_preset_name(&name) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let dir = preset_dir_or_internal_err()?;
-        let path = crate::dml::party::preset_path(&dir, &name);
+        let path = dml_wow::party::preset_path(&dir, &name);
         if !path.is_file() {
             return Err(preset_not_found(&name));
         }
         let content = std::fs::read_to_string(&path).map_err(io_internal_err)?;
-        let classes = crate::dml::party::parse_preset_classes(&content);
+        let classes = dml_wow::party::parse_preset_classes(&content);
         Ok(serde_json::json!({"name": name, "classes": classes}))
     })
     .await
@@ -6060,7 +6055,7 @@ async fn wow_party_preset_show_native(name: String) -> Result<serde_json::Value,
 }
 
 /// NATIVE-MODE `party preset-import` (`90-main.sh:3450-3483`): every token
-/// validated (via [`crate::dml::party::parse_import_classes`]) BEFORE any
+/// validated (via [`dml_wow::party::parse_import_classes`]) BEFORE any
 /// filesystem write, matching the oracle's abort-before-mutation contract.
 #[tauri::command]
 async fn wow_party_preset_import_native(
@@ -6069,18 +6064,18 @@ async fn wow_party_preset_import_native(
     force: Option<bool>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::party::valid_preset_name(&name) {
+    if !dml_wow::party::valid_preset_name(&name) {
         return Err(CmdError {
             code: "BAD_ARG".into(),
             message: format!("Invalid preset name: {name}"),
             hint: "Letters, digits, - and _ (max 32).".into(),
         });
     }
-    let parsed = crate::dml::party::parse_import_classes(&classes)?;
+    let parsed = dml_wow::party::parse_import_classes(&classes)?;
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let dir = preset_dir_or_internal_err()?;
-        let path = crate::dml::party::preset_path(&dir, &name);
+        let path = dml_wow::party::preset_path(&dir, &name);
         if path.is_file() && !force {
             return Err(CmdError {
                 code: "EXISTS".into(),
@@ -6089,7 +6084,7 @@ async fn wow_party_preset_import_native(
             });
         }
         std::fs::create_dir_all(&dir).map_err(io_internal_err)?;
-        std::fs::write(&path, crate::dml::party::preset_file_content(&parsed)).map_err(io_internal_err)?;
+        std::fs::write(&path, dml_wow::party::preset_file_content(&parsed)).map_err(io_internal_err)?;
         Ok(serde_json::json!({"imported": true, "name": name, "classes": parsed}))
     })
     .await
@@ -6110,7 +6105,7 @@ fn wow_party_preset_load_native_blocking(
     lock: Arc<std::sync::Mutex<()>>,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::modmgr::{done_event, error_event, line_event, section_end, section_start};
+    use dml_wow::modmgr::{done_event, error_event, line_event, section_end, section_start};
 
     emit(section_start(PRESET_LOAD_SECTION));
 
@@ -6122,14 +6117,14 @@ fn wow_party_preset_load_native_blocking(
             return;
         }
     };
-    let path = crate::dml::party::preset_path(&dir, &name);
+    let path = dml_wow::party::preset_path(&dir, &name);
     if !path.is_file() {
         emit(section_end(PRESET_LOAD_SECTION, "error"));
         emit(error_event("NOT_FOUND", format!("No preset named {name}"), ""));
         return;
     }
 
-    let db_cfg = crate::dml::db::DbConfig::from_env();
+    let db_cfg = dml_wow::db::DbConfig::from_env();
     let Some(pguid) = party_online_guid(&db_cfg, &player) else {
         emit(section_end(PRESET_LOAD_SECTION, "error"));
         emit(error_event(
@@ -6140,7 +6135,7 @@ fn wow_party_preset_load_native_blocking(
         return;
     };
 
-    let soap_cfg = crate::dml::soap::SoapConfig::load();
+    let soap_cfg = dml_wow::soap::SoapConfig::load();
 
     // Kick phase (replace semantics): every current bot goes. Byte-faithful
     // swallow here (unlike `dismiss-all`/`preset-save`'s propagation): bash's
@@ -6148,23 +6143,23 @@ fn wow_party_preset_load_native_blocking(
     // `90-main.sh:3383` silently treats a query failure as "nothing to kick"
     // too.
     for b in bot_member_names(&db_cfg, pguid).unwrap_or_default() {
-        if !crate::dml::soap_cmds::valid_charname(&b) {
+        if !dml_wow::soap_cmds::valid_charname(&b) {
             continue;
         }
         let kicked_ok = {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            matches!(crate::dml::soap::exec(&soap_cfg, &format!("dml_uninvite {b}")), crate::dml::soap::SoapOutcome::Ok(_))
+            matches!(dml_wow::soap::exec(&soap_cfg, &format!("dml_uninvite {b}")), dml_wow::soap::SoapOutcome::Ok(_))
         };
         emit(line_event(if kicked_ok { "info" } else { "warn" }, if kicked_ok { format!("kicked {b}") } else { format!("could not kick {b}") }));
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = crate::dml::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
+        let _ = dml_wow::soap::exec(&soap_cfg, &format!("dml_whisper {player} {b} logout"));
     }
 
     // Join phase: one addclass + new-member poll per preset class line.
     let content = std::fs::read_to_string(&path).unwrap_or_default();
     let (mut requested, mut joined) = (0u32, 0u32);
-    for cls in crate::dml::party::parse_preset_classes(&content) {
-        if !crate::dml::party::valid_bot_class(&cls) {
+    for cls in dml_wow::party::parse_preset_classes(&content) {
+        if !dml_wow::party::valid_bot_class(&cls) {
             emit(line_event("warn", format!("skipping unknown class: {cls}")));
             continue;
         }
@@ -6173,8 +6168,8 @@ fn wow_party_preset_load_native_blocking(
         let fired_ok = {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
             matches!(
-                crate::dml::soap::exec(&soap_cfg, &format!("dml_addclass {player} {cls}")),
-                crate::dml::soap::SoapOutcome::Ok(_)
+                dml_wow::soap::exec(&soap_cfg, &format!("dml_addclass {player} {cls}")),
+                dml_wow::soap::SoapOutcome::Ok(_)
             )
         };
         if !fired_ok {
@@ -6187,8 +6182,8 @@ fn wow_party_preset_load_native_blocking(
                 match char_name_by_guid(&db_cfg, g) {
                     Some(bname) => {
                         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                        let _ = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::talents_autopick_whisper_cmd(&player, &bname));
-                        let _ = crate::dml::soap::exec(&soap_cfg, &crate::dml::party::autogear_whisper_cmd(&player, &bname));
+                        let _ = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::talents_autopick_whisper_cmd(&player, &bname));
+                        let _ = dml_wow::soap::exec(&soap_cfg, &dml_wow::party::autogear_whisper_cmd(&player, &bname));
                         emit(line_event("info", format!("{bname} joined -- talents + gear applied")));
                     }
                     None => emit(line_event("info", format!("a {cls} joined"))),
@@ -6211,10 +6206,10 @@ async fn wow_party_preset_load_native(
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid player name: {player}"), hint: String::new() });
     }
-    if !crate::dml::party::valid_preset_name(&name) {
+    if !dml_wow::party::valid_preset_name(&name) {
         return Err(CmdError { code: "BAD_ARG".into(), message: format!("Invalid preset name: {name}"), hint: String::new() });
     }
     let lock = state.soap_lock.clone();
@@ -6245,12 +6240,12 @@ async fn wow_mail_item_native(
     let attachments = specs.len();
     let subject = subject.unwrap_or_else(|| "Dad's MMO Lab".into());
     let body = body.unwrap_or_else(|| "Enjoy!".into());
-    let cmd = crate::dml::soap_cmds::mail_items_cmd(&to, &specs, &subject, &body)?;
+    let cmd = dml_wow::soap_cmds::mail_items_cmd(&to, &specs, &subject, &body)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         mail_result(outcome)?;
         Ok(serde_json::json!({ "sent": true, "to": to, "attachments": attachments }))
     })
@@ -6266,12 +6261,12 @@ async fn wow_teleport_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    let cmd = crate::dml::soap_cmds::teleport_name_cmd(&char_name, &to)?;
+    let cmd = dml_wow::soap_cmds::teleport_name_cmd(&char_name, &to)?;
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let cfg = crate::dml::soap::SoapConfig::load();
-        let outcome = crate::dml::soap::exec(&cfg, &cmd);
+        let cfg = dml_wow::soap::SoapConfig::load();
+        let outcome = dml_wow::soap::exec(&cfg, &cmd);
         teleport_result(outcome)?;
         Ok(serde_json::json!({ "teleported": true, "char": char_name, "to": to }))
     })
@@ -6283,7 +6278,7 @@ async fn wow_teleport_native(
 /// character to its faction capital: ONLINE -> the same `.teleport name`
 /// SOAP fire [`wow_teleport_native`] uses (capital name is a fixed literal,
 /// never user input); OFFLINE -> a direct `characters`-table position
-/// UPDATE, the FIRST db-write path in the native core (see [`crate::dml::db::execute`]).
+/// UPDATE, the FIRST db-write path in the native core (see [`dml_wow::db::execute`]).
 /// Order matches the oracle exactly: validate -> lookup (guid/race/online)
 /// -> faction-capital case match -> online branch.
 #[tauri::command]
@@ -6292,16 +6287,16 @@ async fn wow_gm_return_home_native(
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
-    if !crate::dml::soap_cmds::valid_charname(&player) {
+    if !dml_wow::soap_cmds::valid_charname(&player) {
         return Err(bad_arg(format!("Invalid player name: {player}")));
     }
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let cfg = crate::dml::db::DbConfig::from_env();
+        let cfg = dml_wow::db::DbConfig::from_env();
         let params: Vec<mysql::Value> = vec![mysql::Value::from(player.as_str())];
-        let res = crate::dml::db::query_with_params(
+        let res = dml_wow::db::query_with_params(
             &cfg,
-            crate::dml::db::Database::Characters,
+            dml_wow::db::Database::Characters,
             RETURN_HOME_SELECT_SQL,
             params,
         )
@@ -6328,9 +6323,9 @@ async fn wow_gm_return_home_native(
 
         if online == 1 {
             let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-            let soap_cfg = crate::dml::soap::SoapConfig::load();
+            let soap_cfg = dml_wow::soap::SoapConfig::load();
             let cmd = format!("teleport name {player} {}", capital.name);
-            let outcome = crate::dml::soap::exec(&soap_cfg, &cmd);
+            let outcome = dml_wow::soap::exec(&soap_cfg, &cmd);
             return_home_online_result(outcome)?;
             Ok(serde_json::json!({
                 "sent_home": true,
@@ -6347,9 +6342,9 @@ async fn wow_gm_return_home_native(
                 mysql::Value::from(capital.map),
                 mysql::Value::from(guid),
             ];
-            crate::dml::db::execute(
+            dml_wow::db::execute(
                 &cfg,
-                crate::dml::db::Database::Characters,
+                dml_wow::db::Database::Characters,
                 RETURN_HOME_UPDATE_SQL,
                 update_params,
             )
@@ -6492,7 +6487,7 @@ fn ar_event_done(
         "applied": applied,
         "restart_required": restart_required,
         "module": module,
-        "manual_steps": crate::dml::ahbot::MANUAL_STEPS,
+        "manual_steps": dml_wow::ahbot::MANUAL_STEPS,
     }})
 }
 
@@ -6511,11 +6506,11 @@ fn wow_ahbot_repair_native_blocking(
     config_lock: Arc<Mutex<()>>,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{ahbot, config, db, maint, soap};
+    use dml_wow::{ahbot, config, db, maint, soap};
 
     emit(ar_event_section_start());
 
-    if !crate::dml::soap_cmds::valid_charname(&char_name) {
+    if !dml_wow::soap_cmds::valid_charname(&char_name) {
         emit(ar_event_section_end("error"));
         emit(ar_event_error(
             "BAD_ARG",
@@ -6778,10 +6773,10 @@ fn bc_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_j
 fn wow_backup_create_native_blocking(
     include_world: bool,
     raw_name: Option<String>,
-    db_cfg: crate::dml::db::DbConfig,
+    db_cfg: dml_wow::db::DbConfig,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{backup, maint, native};
+    use dml_wow::{backup, maint, native};
 
     emit(bc_event_section_start());
 
@@ -6854,7 +6849,7 @@ async fn wow_backup_create_native(
     // create only ever touches docker/fs, so this command takes no `State`.
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         wow_backup_create_native_blocking(include_world.unwrap_or(false), name, db_cfg, |v| {
             let _ = ch.send(v);
         });
@@ -6873,10 +6868,10 @@ async fn wow_backup_create_native(
 async fn wow_backup_list_native() -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(|| -> Result<serde_json::Value, CmdError> {
-        let Some(bdir) = crate::dml::backup::backup_dir() else {
+        let Some(bdir) = dml_wow::backup::backup_dir() else {
             return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
         };
-        let backups: Vec<serde_json::Value> = crate::dml::backup::list_backups(&bdir)
+        let backups: Vec<serde_json::Value> = dml_wow::backup::list_backups(&bdir)
             .into_iter()
             .map(|e| serde_json::json!({
                 "file": e.file, "size": e.size, "created": e.created, "world": e.world, "summary": e.summary,
@@ -6889,11 +6884,11 @@ async fn wow_backup_list_native() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
-/// Shared `--file` gate for `backup validate`/`delete`: [`crate::dml::backup::valid_backup_name`]
+/// Shared `--file` gate for `backup validate`/`delete`: [`dml_wow::backup::valid_backup_name`]
 /// (`BAD_ARG`) then on-disk existence (`NOT_FOUND`) — a port of both arms'
 /// identical two-step guard (`90-main.sh:3733,3735,3756,3758`).
 fn require_backup_file(bdir: &std::path::Path, file: &str) -> Result<std::path::PathBuf, CmdError> {
-    if !crate::dml::backup::valid_backup_name(file) {
+    if !dml_wow::backup::valid_backup_name(file) {
         return Err(bad_arg(format!("Invalid backup name: {file}")));
     }
     let path = bdir.join(file);
@@ -6911,12 +6906,12 @@ fn require_backup_file(bdir: &std::path::Path, file: &str) -> Result<std::path::
 async fn wow_backup_validate_native(file: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let Some(bdir) = crate::dml::backup::backup_dir() else {
+        let Some(bdir) = dml_wow::backup::backup_dir() else {
             return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
         };
         let path = require_backup_file(&bdir, &file)?;
-        let result = crate::dml::backup::validate_backup(&path);
-        Ok(crate::dml::backup::validate_result_json(&file, &result))
+        let result = dml_wow::backup::validate_backup(&path);
+        Ok(dml_wow::backup::validate_result_json(&file, &result))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
@@ -6929,11 +6924,11 @@ async fn wow_backup_validate_native(file: String) -> Result<serde_json::Value, C
 async fn wow_backup_delete_native(file: String) -> Result<serde_json::Value, CmdError> {
     require_native_backend()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
-        let Some(bdir) = crate::dml::backup::backup_dir() else {
+        let Some(bdir) = dml_wow::backup::backup_dir() else {
             return Err(CmdError { code: "INTERNAL".into(), message: "Could not resolve the backups directory".into(), hint: String::new() });
         };
         require_backup_file(&bdir, &file)?;
-        crate::dml::backup::delete_backup(&bdir, &file);
+        dml_wow::backup::delete_backup(&bdir, &file);
         Ok(serde_json::json!({ "deleted": true, "file": file }))
     })
     .await
@@ -6964,10 +6959,10 @@ const BACKUP_RESTORE_SECTION: &str = "backup-restore";
 fn wow_backup_restore_native_blocking(
     file: String,
     soap_lock: Arc<Mutex<()>>,
-    db_cfg: crate::dml::db::DbConfig,
+    db_cfg: dml_wow::db::DbConfig,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{backup, config::ConfigReader, lifecycle, maint, modmgr, native, restore, soap, status};
+    use dml_wow::{backup, config::ConfigReader, lifecycle, maint, modmgr, native, restore, soap, status};
 
     emit(modmgr::section_start(BACKUP_RESTORE_SECTION));
 
@@ -7074,7 +7069,7 @@ async fn wow_backup_restore_native(
     let soap_lock = state.soap_lock.clone();
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         wow_backup_restore_native_blocking(file, soap_lock, db_cfg, |v| {
             let _ = ch.send(v);
         });
@@ -7194,27 +7189,27 @@ fn validate_lan_request_native(
 
 /// `_lan_sql "SELECT address FROM realmlist WHERE id=1;"`, decoded to a
 /// plain `String` (NULL/an empty/unreadable result -> `None`).
-fn lan_current_address(db_cfg: &crate::dml::db::DbConfig) -> Option<String> {
-    let res = crate::dml::db::query(db_cfg, crate::dml::db::Database::Auth, "SELECT address FROM realmlist WHERE id = 1").ok()?;
+fn lan_current_address(db_cfg: &dml_wow::db::DbConfig) -> Option<String> {
+    let res = dml_wow::db::query(db_cfg, dml_wow::db::Database::Auth, "SELECT address FROM realmlist WHERE id = 1").ok()?;
     let row = res.rows.first()?;
     match row.first()? {
-        crate::dml::db::SqlValue::Text(s) => Some(s.clone()),
-        crate::dml::db::SqlValue::Int(i) => Some(i.to_string()),
-        crate::dml::db::SqlValue::Null => None,
+        dml_wow::db::SqlValue::Text(s) => Some(s.clone()),
+        dml_wow::db::SqlValue::Int(i) => Some(i.to_string()),
+        dml_wow::db::SqlValue::Null => None,
     }
 }
 
 /// `_lan_set` (`90-main.sh:976-997`): UPDATE + read-back verify. `Err`
 /// carries the already-formatted `[dml] ERROR: ...` text to return verbatim
 /// -- this is a TEXT-mode command (see the module doc comment above).
-fn lan_set(db_cfg: &crate::dml::db::DbConfig, ip: &str) -> Result<(), String> {
+fn lan_set(db_cfg: &dml_wow::db::DbConfig, ip: &str) -> Result<(), String> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(ip)];
-    if crate::dml::db::execute(db_cfg, crate::dml::db::Database::Auth, "UPDATE realmlist SET address = ? WHERE id = 1", params).is_err() {
-        return Err(crate::dml::lan::update_failed_message());
+    if dml_wow::db::execute(db_cfg, dml_wow::db::Database::Auth, "UPDATE realmlist SET address = ? WHERE id = 1", params).is_err() {
+        return Err(dml_wow::lan::update_failed_message());
     }
     let newaddr = lan_current_address(db_cfg);
     if newaddr.as_deref() != Some(ip) {
-        return Err(crate::dml::lan::address_mismatch_message(ip, newaddr.as_deref()));
+        return Err(dml_wow::lan::address_mismatch_message(ip, newaddr.as_deref()));
     }
     Ok(())
 }
@@ -7224,7 +7219,7 @@ fn lan_set(db_cfg: &crate::dml::db::DbConfig, ip: &str) -> Result<(), String> {
 /// gate -> installed? -> docker up? -> `ac-database` running? -> DB
 /// answering (retry loop)? -> the requested action.
 fn wow_lan_native_blocking(action: &str, ip_arg: Option<String>, inet: bool) -> String {
-    use crate::dml::{config::ConfigReader, db, lan, maint, native, status};
+    use dml_wow::{config::ConfigReader, db, lan, maint, native, status};
 
     if !inet {
         if let Some(ip) = ip_arg.as_deref() {
@@ -7661,7 +7656,7 @@ async fn dml_doctor(state: State<'_, AppState>) -> Result<String, CmdError> {
 /// every other command actually talks to.
 #[tauri::command]
 fn open_shell() -> Result<(), String> {
-    use crate::dml::runner::{DISTRO, USER};
+    use dml_wow::runner::{DISTRO, USER};
     let cwd = format!("/home/{USER}");
     let wsl_args = ["wsl", "-d", DISTRO, "-u", USER, "--cd", &cwd];
     if std::process::Command::new("wt.exe").args(wsl_args).spawn().is_ok() {
@@ -7731,7 +7726,7 @@ async fn tool_install(
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let text = dml_wow::envelope::decode_wsl_output(&buf[..n]);
                     let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
                 }
                 Err(_) => break,
@@ -7796,7 +7791,7 @@ async fn url_install(
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let text = dml_wow::envelope::decode_wsl_output(&buf[..n]);
                     let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
                 }
                 Err(_) => break,
@@ -7965,7 +7960,7 @@ async fn restart_wsl(state: State<'_, AppState>) -> Result<serde_json::Value, Cm
 /// admin themselves (the script's header says so too).
 #[tauri::command]
 fn generate_compact_script() -> Result<String, CmdError> {
-    use crate::dml::runner::DISTRO;
+    use dml_wow::runner::DISTRO;
     let profile = std::env::var("USERPROFILE")
         .map_err(|_| bad_arg("USERPROFILE is not set -- cannot locate Downloads"))?;
     let dir = std::path::PathBuf::from(profile).join("Downloads");
@@ -8015,7 +8010,7 @@ fn generate_mysql_proxy_script(port: Option<u32>) -> Result<String, CmdError> {
 /// null -- the card then shows generic instructions instead.
 #[tauri::command]
 fn defender_hint() -> Result<serde_json::Value, CmdError> {
-    use crate::dml::runner::DISTRO;
+    use dml_wow::runner::DISTRO;
     let mut cmd = std::process::Command::new("reg");
     cmd.args([
         "query",
@@ -8053,7 +8048,7 @@ fn defender_hint() -> Result<serde_json::Value, CmdError> {
 
 /// True when this process selected the native (Docker Desktop) backend.
 fn is_native_backend() -> bool {
-    crate::dml::backend::selected() == crate::dml::backend::Backend::Native
+    dml_wow::backend::selected() == dml_wow::backend::Backend::Native
 }
 
 /// Where native mode expects the `yq` exe: `DML_YQ_BIN` verbatim if set, else
@@ -8112,7 +8107,7 @@ fn wsl_distro_present(distro: &str) -> bool {
     }
     match cmd.output() {
         Ok(o) if o.status.success() => {
-            let text = crate::dml::envelope::decode_wsl_output(&o.stdout);
+            let text = dml_wow::envelope::decode_wsl_output(&o.stdout);
             text.lines().any(|l| l.trim() == distro)
         }
         _ => false,
@@ -8123,7 +8118,7 @@ fn wsl_distro_present(distro: &str) -> bool {
 /// active plus the pass/fail of each native-mode prerequisite. Never mutates.
 #[tauri::command]
 fn native_setup_status() -> Result<serde_json::Value, CmdError> {
-    let docker_prog = crate::dml::native::docker_program();
+    let docker_prog = dml_wow::native::docker_program();
     let docker_running = docker_info_ok(&docker_prog);
     let dp = std::path::Path::new(&docker_prog);
     let docker_path =
@@ -8138,7 +8133,7 @@ fn native_setup_status() -> Result<serde_json::Value, CmdError> {
         .as_ref()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let distro_available = wsl_distro_present(crate::dml::runner::DISTRO);
+    let distro_available = wsl_distro_present(dml_wow::runner::DISTRO);
 
     Ok(serde_json::json!({
         "native": is_native_backend(),
@@ -8157,7 +8152,7 @@ fn native_setup_status() -> Result<serde_json::Value, CmdError> {
 /// once the engine settles. Errors when Docker Desktop isn't installed.
 #[tauri::command]
 fn start_docker_desktop() -> Result<serde_json::Value, CmdError> {
-    let exe = crate::dml::native::docker_desktop_program().ok_or_else(|| {
+    let exe = dml_wow::native::docker_desktop_program().ok_or_else(|| {
         bad_arg("Could not find Docker Desktop.exe -- is Docker Desktop installed?")
     })?;
     let mut cmd = std::process::Command::new(&exe);
@@ -8236,9 +8231,9 @@ async fn native_soap_copy() -> Result<serde_json::Value, CmdError> {
         let mut cmd = std::process::Command::new("wsl.exe");
         cmd.args([
             "-d",
-            crate::dml::runner::DISTRO,
+            dml_wow::runner::DISTRO,
             "-u",
-            crate::dml::runner::USER,
+            dml_wow::runner::USER,
             "--",
             "cat",
             "/home/dml/.dml/soap.env",
@@ -8252,14 +8247,14 @@ async fn native_soap_copy() -> Result<serde_json::Value, CmdError> {
             .output()
             .map_err(|e| bad_arg(format!("could not run wsl cat: {e}")))?;
         if !out.status.success() {
-            let err = crate::dml::envelope::decode_wsl_output(&out.stderr);
+            let err = dml_wow::envelope::decode_wsl_output(&out.stderr);
             return Err(bad_arg(format!(
                 "could not read soap.env from the {} distro: {}",
-                crate::dml::runner::DISTRO,
+                dml_wow::runner::DISTRO,
                 err.trim()
             )));
         }
-        let cleaned = crate::nativesetup::strip_cr(&crate::dml::envelope::decode_wsl_output(
+        let cleaned = crate::nativesetup::strip_cr(&dml_wow::envelope::decode_wsl_output(
             &out.stdout,
         ));
         if cleaned.trim().is_empty() {
@@ -8293,7 +8288,7 @@ fn git_install_dir() -> String {
 /// The Docker Desktop bin dir (holding docker.exe) to exclude, when docker
 /// resolved to an absolute path.
 fn docker_bin_dir_for_exclusion() -> Option<String> {
-    let prog = crate::dml::native::docker_program();
+    let prog = dml_wow::native::docker_program();
     let p = std::path::Path::new(&prog);
     if p.is_absolute() {
         p.parent().map(|d| d.to_string_lossy().into_owned())
@@ -8470,7 +8465,7 @@ async fn games_install(
             match stdout.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let text = crate::dml::envelope::decode_wsl_output(&buf[..n]);
+                    let text = dml_wow::envelope::decode_wsl_output(&buf[..n]);
                     let _ = on_event.send(serde_json::json!({"event":"chunk","text": text}));
                 }
                 Err(_) => break,
@@ -8572,28 +8567,28 @@ fn games_remove_native_blocking(
     confirm: bool,
     emit: impl Fn(serde_json::Value),
 ) {
-    use crate::dml::{destructive, lifecycle, native, status};
+    use dml_wow::{destructive, lifecycle, native, status};
 
-    emit(crate::dml::modmgr::section_start(GAMES_REMOVE_SECTION));
+    emit(dml_wow::modmgr::section_start(GAMES_REMOVE_SECTION));
 
     let Some(row) = destructive::title_row(&id) else {
-        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(crate::dml::modmgr::error_event("BAD_ARG", format!("Unknown title: {id}"), ""));
+        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(dml_wow::modmgr::error_event("BAD_ARG", format!("Unknown title: {id}"), ""));
         return;
     };
 
     let games_dir = lifecycle::games_dir_from_env();
-    let home = crate::dml::home_dir();
+    let home = dml_wow::home_dir();
     if !destructive::title_installed(&games_dir, home.as_deref(), &id) {
-        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(crate::dml::modmgr::error_event("NOT_FOUND", format!("{id} is not installed"), ""));
+        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(dml_wow::modmgr::error_event("NOT_FOUND", format!("{id} is not installed"), ""));
         return;
     }
 
     if !confirm {
         let targets = destructive::removal_targets(&games_dir, home.as_deref(), &id, row.launcher);
-        emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
-        emit(crate::dml::modmgr::error_event(
+        emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "error"));
+        emit(dml_wow::modmgr::error_event(
             "CONFIRM_REQUIRED",
             format!("Removing {id} deletes: {targets}"),
             "Re-run with --yes (add --remove-images to also delete the server docker images). Backups under ~/.dml are kept.",
@@ -8611,7 +8606,7 @@ fn games_remove_native_blocking(
     let docker_program = native::docker_program();
 
     if let Some(compose_dir) = &tcompose {
-        emit(crate::dml::modmgr::line_event("info", format!("stopping {id}...")));
+        emit(dml_wow::modmgr::line_event("info", format!("stopping {id}...")));
         let mut down_cmd = std::process::Command::new(&docker_program);
         down_cmd.current_dir(compose_dir).args(["compose", "down"]);
         status::windows_no_window(&mut down_cmd);
@@ -8623,7 +8618,7 @@ fn games_remove_native_blocking(
         if destructive::compose_declares_client_data(compose_dir) {
             let tvol = destructive::client_data_volume_name(compose_dir);
             if keep_data {
-                emit(crate::dml::modmgr::line_event(
+                emit(dml_wow::modmgr::line_event(
                     "info",
                     format!("keeping the downloaded game data volume ({tvol}, ~6 GB) for a faster reinstall"),
                 ));
@@ -8633,9 +8628,9 @@ fn games_remove_native_blocking(
                 status::windows_no_window(&mut rm_cmd);
                 if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
                 {
-                    emit(crate::dml::modmgr::line_event("info", format!("removed game data volume {tvol}")));
+                    emit(dml_wow::modmgr::line_event("info", format!("removed game data volume {tvol}")));
                 } else {
-                    emit(crate::dml::modmgr::line_event(
+                    emit(dml_wow::modmgr::line_event(
                         "warn",
                         format!("could not remove game data volume {tvol} (may not exist or still in use)"),
                     ));
@@ -8655,21 +8650,21 @@ fn games_remove_native_blocking(
                 status::windows_no_window(&mut rm_cmd);
                 if matches!(status::output_bounded_draining(rm_cmd, destructive::QUICK_OP_TIMEOUT), Some(o) if o.status.success())
                 {
-                    emit(crate::dml::modmgr::line_event("info", format!("removed server image {img}")));
+                    emit(dml_wow::modmgr::line_event("info", format!("removed server image {img}")));
                     removed_count += 1;
                 } else {
-                    emit(crate::dml::modmgr::line_event(
+                    emit(dml_wow::modmgr::line_event(
                         "warn",
                         format!("could not remove image {img} (in use by another title, or already gone)"),
                     ));
                 }
             }
             if removed_count == 0 {
-                emit(crate::dml::modmgr::line_event("info", "no server images to remove"));
+                emit(dml_wow::modmgr::line_event("info", "no server images to remove"));
             }
         }
     } else if tcompose.is_some() {
-        emit(crate::dml::modmgr::line_event(
+        emit(dml_wow::modmgr::line_event(
             "info",
             "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)",
         ));
@@ -8677,9 +8672,9 @@ fn games_remove_native_blocking(
 
     destructive::remove_title_fs(&games_dir, home.as_deref(), &id, row.launcher);
 
-    emit(crate::dml::modmgr::line_event("info", "removed (backups under ~/.dml are kept)"));
-    emit(crate::dml::modmgr::section_end(GAMES_REMOVE_SECTION, "ok"));
-    emit(crate::dml::modmgr::done_event(serde_json::json!({"id": id, "removed": true})));
+    emit(dml_wow::modmgr::line_event("info", "removed (backups under ~/.dml are kept)"));
+    emit(dml_wow::modmgr::section_end(GAMES_REMOVE_SECTION, "ok"));
+    emit(dml_wow::modmgr::done_event(serde_json::json!({"id": id, "removed": true})));
 }
 
 /// NATIVE-MODE `games remove` — see the module comment above. Native mode
@@ -8731,7 +8726,7 @@ fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<S
 /// of composing against a dead engine. Blocking (real spawns + sleeps) — run
 /// under `spawn_blocking`.
 fn ensure_engine_up_blocking(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
-    use crate::dml::native;
+    use dml_wow::native;
     let program = native::docker_program();
     let desktop = native::docker_desktop_program();
     match native::ensure_decision(native::engine_running(&program), desktop.is_some()) {
@@ -8804,7 +8799,7 @@ async fn ensure_engine_up(on_event: &Channel<serde_json::Value>) -> Result<(), C
 /// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
 /// never fails the server-stop. Blocking — run under `spawn_blocking`.
 fn stop_engine_blocking(emit: impl Fn(serde_json::Value)) {
-    use crate::dml::native;
+    use dml_wow::native;
     let program = native::docker_program();
     engine_line(&emit, "info", "Stopping Docker Desktop...");
     match native::stop_engine(&program) {
@@ -8877,7 +8872,7 @@ async fn games_stop(
     // checked); `None` (a caller that omits it) still defaults ON, same as
     // the checkbox's default, so nothing regresses if a call site is ever
     // added that doesn't thread the toggle through.
-    let stop_docker = crate::dml::native::stop_engine_enabled(is_native_backend(), manage_docker);
+    let stop_docker = dml_wow::native::stop_engine_enabled(is_native_backend(), manage_docker);
     // Stop the server exactly as today (clone the channel so we can keep
     // streaming the engine-stop afterwards). Chunk 3b: native mode replaces
     // the inner `dml` shell-out with direct compose orchestration -- the
@@ -8967,7 +8962,7 @@ fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::V
 /// keep-10 prune pool as every other backup (see the `dml::backup` "Automatic
 /// backups" section doc comment).
 fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serde_json::Value)) {
-    use crate::dml::{backup, db, maint, status};
+    use dml_wow::{backup, db, maint, status};
 
     if !status::container_running(docker_program, "ac-database", maint::PROBE_TIMEOUT) {
         return;
@@ -8998,7 +8993,7 @@ fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serd
 /// The blocking flow itself (real docker spawns) — run under
 /// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
 fn games_lifecycle_native_blocking(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{lifecycle, maint, native, status};
+    use dml_wow::{lifecycle, maint, native, status};
 
     emit(serde_json::json!({"event": "section_start", "name": mode}));
 
@@ -9135,7 +9130,7 @@ async fn run_games_lifecycle_native(
 const WOW_UPDATE_SECTION: &str = "server-update";
 
 fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Value)) {
-    use crate::dml::{config::ConfigReader, maint, modmgr, native};
+    use dml_wow::{config::ConfigReader, maint, modmgr, native};
 
     emit(serde_json::json!({"event": "section_start", "name": WOW_UPDATE_SECTION}));
 
@@ -9205,7 +9200,7 @@ fn wow_update_native_blocking(backup: Option<bool>, emit: impl Fn(serde_json::Va
 
     if do_backup {
         let docker_program = native::docker_program();
-        let db_cfg = crate::dml::db::DbConfig::from_env();
+        let db_cfg = dml_wow::db::DbConfig::from_env();
         if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
             emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
             emit(gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
@@ -9284,7 +9279,7 @@ pub fn run() {
             // native Docker-Desktop path when DML_BACKEND=native. Same dml brain
             // either way — native just hosts it on Windows against Docker Desktop.
             runner: std::sync::Arc::new(DmlRunner::for_backend(
-                crate::dml::backend::selected(),
+                dml_wow::backend::selected(),
             )),
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
@@ -9302,7 +9297,7 @@ pub fn run() {
             // error is swallowed (the native files may be absent, Docker may
             // be closed), and it must never delay or panic app startup. In WSL
             // mode it does nothing: those pages keep calling the CLI directly.
-            if crate::dml::backend::selected() == crate::dml::backend::Backend::Native {
+            if dml_wow::backend::selected() == dml_wow::backend::Backend::Native {
                 let state = app.state::<AppState>();
                 let runner = state.runner.clone();
                 let config_cache = state.config_registry.clone();
@@ -9333,8 +9328,8 @@ pub fn run() {
                 // `last_run` from whatever's already on disk so a relaunch
                 // doesn't restart the 6h clock at zero.
                 let last_run = Arc::new(Mutex::new(
-                    crate::dml::backup::backup_dir()
-                        .and_then(|d| crate::dml::backup::latest_auto_interval_backup_unix(&d)),
+                    dml_wow::backup::backup_dir()
+                        .and_then(|d| dml_wow::backup::latest_auto_interval_backup_unix(&d)),
                 ));
                 std::thread::spawn(move || interval_backup_watcher(last_run));
             }
@@ -9764,7 +9759,7 @@ mod tests {
     fn lan_current_address_none_on_unreachable_db() {
         // A bogus port guarantees an unreachable connection without touching
         // the real DB -- exercises the `.ok()?` degrade-to-None path.
-        let cfg = crate::dml::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
+        let cfg = dml_wow::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
         assert_eq!(lan_current_address(&cfg), None);
     }
 
@@ -9940,14 +9935,14 @@ mod tests {
         // failed" code for teleport-list/bots/accounts/paperdoll), so a native
         // DbError::Query must collapse to the same code, not surface
         // DB_QUERY_FAILED and diverge from the CLI.
-        use crate::dml::db::DbError;
+        use dml_wow::db::DbError;
         assert_eq!(db_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
         assert_eq!(db_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
     }
 
     #[test]
     fn stats_err_to_cmd_collapses_every_variant_to_db_unreachable() {
-        use crate::dml::db::DbError;
+        use dml_wow::db::DbError;
         assert_eq!(stats_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
         assert_eq!(stats_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
     }
@@ -9958,7 +9953,7 @@ mod tests {
     // CmdError` mappers + the mail CSV-split helper, which carry all the
     // per-arm parity logic.
 
-    use crate::dml::soap::SoapOutcome;
+    use dml_wow::soap::SoapOutcome;
 
     #[test]
     fn party_fire_result_ok_passes_through() {
@@ -10244,7 +10239,7 @@ mod tests {
 
     #[test]
     fn sql_row_int_reads_int_and_text_variants() {
-        use crate::dml::db::SqlValue;
+        use dml_wow::db::SqlValue;
         assert_eq!(sql_row_int(Some(&SqlValue::Int(42))), Some(42));
         assert_eq!(sql_row_int(Some(&SqlValue::Text("7".into()))), Some(7));
         assert_eq!(sql_row_int(Some(&SqlValue::Text("nope".into()))), None);
@@ -10534,7 +10529,7 @@ mod tests {
         assert_eq!(out["restart_required"], true);
         assert_eq!(out["applied"], "restart");
         let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
-        assert!(!crate::dml::config::parse_override_env(&text).contains_key("AC_AI_PLAYERBOT_FOO"));
+        assert!(!dml_wow::config::parse_override_env(&text).contains_key("AC_AI_PLAYERBOT_FOO"));
     }
 
     fn curated_row(
@@ -10769,7 +10764,7 @@ mod tests {
         assert!(out.get("applied").is_none());
         let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
         assert_eq!(
-            crate::dml::config::parse_override_env(&text).get("AC_MADE_UP").map(String::as_str),
+            dml_wow::config::parse_override_env(&text).get("AC_MADE_UP").map(String::as_str),
             Some("5")
         );
     }
@@ -10947,7 +10942,7 @@ mod tests {
                 "applied": "live",
                 "restart_required": false,
                 "module": "mod-ah-bot-plus",
-                "manual_steps": crate::dml::ahbot::MANUAL_STEPS,
+                "manual_steps": dml_wow::ahbot::MANUAL_STEPS,
             }})
         );
     }

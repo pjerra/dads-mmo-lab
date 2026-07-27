@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::dml::runner::DmlRunner;
+use dml_wow::runner::DmlRunner;
 use crate::CmdError;
 
 /// Locale folders a 3.3.5 client can ship with. Matched case-insensitively:

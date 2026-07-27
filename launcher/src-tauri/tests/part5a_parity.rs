@@ -15,8 +15,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::config;
-use launcher_lib::dml::db::{self, Database, DbConfig, SqlValue};
+use dml_wow::config;
+use dml_wow::db::{self, Database, DbConfig, SqlValue};
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")
@@ -262,16 +262,16 @@ fn games_status_native_matches_cli_for_wow_server_playerbots() {
     assert_eq!(want["ok"], true, "games status not ok: {want}");
 
     let title_dir = h.games.join("wow-server-playerbots");
-    let program = launcher_lib::dml::native::docker_program();
+    let program = dml_wow::native::docker_program();
     let mut state = "stopped";
-    if let Some(compose_dir) = launcher_lib::dml::lifecycle::resolve_compose_dir(&title_dir) {
-        if let Some(name) = launcher_lib::dml::lifecycle::compose_file_name(&compose_dir) {
+    if let Some(compose_dir) = dml_wow::lifecycle::resolve_compose_dir(&title_dir) {
+        if let Some(name) = dml_wow::lifecycle::compose_file_name(&compose_dir) {
             let mut cmd = Command::new(&program);
             cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
             cmd.args(["ps", "--status", "running", "-q"]);
             let out = cmd.output().expect("spawn docker compose ps");
             let text = String::from_utf8_lossy(&out.stdout);
-            if launcher_lib::dml::lifecycle::count_running_ids(&text) > 0 {
+            if dml_wow::lifecycle::count_running_ids(&text) > 0 {
                 state = "running";
             }
         }

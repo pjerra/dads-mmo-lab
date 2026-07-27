@@ -23,7 +23,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::soap::{exec, SoapConfig, SoapOutcome};
+use dml_wow::soap::{exec, SoapConfig, SoapOutcome};
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

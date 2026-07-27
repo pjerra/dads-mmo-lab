@@ -33,8 +33,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::db::{self, Database, DbConfig};
-use launcher_lib::dml::moduletail;
+use dml_wow::db::{self, Database, DbConfig};
+use dml_wow::moduletail;
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

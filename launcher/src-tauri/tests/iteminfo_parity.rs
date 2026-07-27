@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use launcher_lib::dml::db::DbConfig;
-use launcher_lib::dml::iteminfo::{read_entity_info, read_item_info};
-use launcher_lib::dml::cachestatus::cache_dir;
+use dml_wow::db::DbConfig;
+use dml_wow::iteminfo::{read_entity_info, read_item_info};
+use dml_wow::cachestatus::cache_dir;
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

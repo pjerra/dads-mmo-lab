@@ -17,7 +17,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::tuning::TuningReader;
+use dml_wow::tuning::TuningReader;
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

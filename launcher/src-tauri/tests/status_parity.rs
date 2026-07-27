@@ -26,11 +26,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::config::ConfigReader;
-use launcher_lib::dml::db::DbConfig;
-use launcher_lib::dml::native::docker_program;
-use launcher_lib::dml::soap::{exec, SoapConfig, SoapOutcome};
-use launcher_lib::dml::status::{read_console_tail, read_server_detail, read_server_info};
+use dml_wow::config::ConfigReader;
+use dml_wow::db::DbConfig;
+use dml_wow::native::docker_program;
+use dml_wow::soap::{exec, SoapConfig, SoapOutcome};
+use dml_wow::status::{read_console_tail, read_server_detail, read_server_info};
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

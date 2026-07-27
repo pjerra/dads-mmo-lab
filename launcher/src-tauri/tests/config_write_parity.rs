@@ -31,7 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::config::{conf_path_in, conf_write};
+use dml_wow::config::{conf_path_in, conf_write};
 
 fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {

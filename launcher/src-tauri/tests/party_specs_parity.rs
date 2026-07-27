@@ -13,7 +13,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use launcher_lib::dml::party_specs::{build_specs_value, find_conf};
+use dml_wow::party_specs::{build_specs_value, find_conf};
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

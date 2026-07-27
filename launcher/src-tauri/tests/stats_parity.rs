@@ -34,9 +34,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use launcher_lib::dml::db::{self, Database, DbConfig};
-use launcher_lib::dml::paperdoll::read_paperdoll;
-use launcher_lib::dml::stats::read_stats;
+use dml_wow::db::{self, Database, DbConfig};
+use dml_wow::paperdoll::read_paperdoll;
+use dml_wow::stats::read_stats;
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

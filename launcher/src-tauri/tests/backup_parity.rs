@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use launcher_lib::dml::backup;
-use launcher_lib::dml::db::DbConfig;
-use launcher_lib::dml::native::docker_program;
+use dml_wow::backup;
+use dml_wow::db::DbConfig;
+use dml_wow::native::docker_program;
 
 fn games_dir() -> PathBuf {
     std::env::var_os("DML_GAMES_DIR")

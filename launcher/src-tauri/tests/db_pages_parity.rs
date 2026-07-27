@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use launcher_lib::dml::db::DbConfig;
-use launcher_lib::dml::pages::{
+use dml_wow::db::DbConfig;
+use dml_wow::pages::{
     clamp_limit, read_accounts, read_achievements, read_bots, read_char_progress,
     read_items_search, read_players_online, read_party_online, read_teleport_list, BotFilters,
     ItemSearchOpts,
