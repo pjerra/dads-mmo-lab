@@ -284,6 +284,25 @@ impl ConfigReader {
         }
         serde_json::json!({ "settings": Value::Array(out) })
     }
+
+    /// Single-row sibling of [`ConfigReader::assemble`]: the ONE registry row
+    /// whose `key` matches, with its live `value` filled in exactly as
+    /// `assemble` would, or `None` when no such row exists. Added for the
+    /// standalone CLI's `config get <KEY>` (Task 11), which maps `None` to a
+    /// `NOT_FOUND` envelope; the bash CLI has no single-row arm, so this is
+    /// deliberately just a filter over the same registry + the same
+    /// [`ConfigReader::compute_value`] — never a second resolution path.
+    pub fn assemble_key(&mut self, registry_rows: &[Value], key: &str) -> Option<Value> {
+        let row = registry_rows
+            .iter()
+            .find(|r| r.get("key").and_then(Value::as_str) == Some(key))?;
+        let assembled = self.assemble(std::slice::from_ref(row));
+        assembled
+            .get("settings")
+            .and_then(Value::as_array)
+            .and_then(|rows| rows.first())
+            .cloned()
+    }
 }
 
 /// `conf_write` (BYTE-PARITY with `_cfg_conf_write`)/`override_env_write`/
@@ -989,6 +1008,69 @@ pub fn config_set_curated(
     let changed = crate::config::override_env_write(&override_path, env, &value)
         .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write the config override: {e}"), ""))?;
     Ok(serde_json::json!({ "changed": changed, "restart_required": changed }))
+}
+
+/// NATIVE-MODE `config files` (`90-main.sh:2670-2691`, Batch 1 F3): the
+/// dynamic editable-file list that powers the GUI/CLI file picker — the fixed
+/// four (`.env`, the compose override, `worldserver.conf`, `authserver.conf`)
+/// plus every `*.conf` basename found under `env/dist/etc/modules/`, whether
+/// it exists as the conf itself or only as its `.conf.dist`. Read path, so it
+/// takes no lock. Added by Task 11: `raw_read`/`raw_write` were hoisted in
+/// Task 9b but their `files` sibling was still bash-only, and the standalone
+/// CLI needs all three.
+///
+/// Faithful to the oracle pipeline, step for step:
+///  - `ls -1 <moddir>` (files AND dirs; a dir simply fails the shape gate),
+///  - `sed 's/\.dist$//'` — strip ONE trailing `.dist`, so `foo.conf.dist`
+///    and `foo.conf` both fold to `foo.conf`,
+///  - `grep -E '^[A-Za-z0-9_.-]+\.conf$'` — the same shape gate
+///    [`is_module_conf_name`] applies (this drops `lua_scripts`,
+///    `transmog.conf.bak`, …),
+///  - `grep -vE '^(worldserver|authserver)\.conf$'` — those two are emitted
+///    from the fixed list instead, one directory up,
+///  - `sort -u`. Rust's `BTreeSet<String>` orders by BYTE value, i.e. the C
+///    locale. Every module conf AC ships is lowercase ASCII, so this only
+///    diverges from a locale-aware `sort` for a hypothetical mixed-case
+///    module conf name.
+///
+/// Each name is then resolved through [`cfg_file_path`] (an unresolvable name
+/// is skipped, like the oracle's `|| continue`), and reported as
+/// `{name, exists, dist, readonly}` — `readonly` being true for exactly the
+/// two files [`raw_write`] refuses to overwrite.
+pub fn config_files(title_dir: &Path) -> Result<serde_json::Value, CmdError> {
+    if !wow_server_installed(title_dir) {
+        return Err(cfg_installed_err());
+    }
+    let moddir = title_dir.join("env").join("dist").join("etc").join("modules");
+    let mut dynnames: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    if let Ok(rd) = std::fs::read_dir(&moddir) {
+        for entry in rd.flatten() {
+            let raw = entry.file_name().to_string_lossy().to_string();
+            let name = raw.strip_suffix(".dist").unwrap_or(&raw).to_string();
+            if !is_module_conf_name(&name) {
+                continue;
+            }
+            if name == "worldserver.conf" || name == "authserver.conf" {
+                continue;
+            }
+            dynnames.insert(name);
+        }
+    }
+
+    let fixed = [".env", "docker-compose.override.yml", "worldserver.conf", "authserver.conf"];
+    let mut files = Vec::with_capacity(fixed.len() + dynnames.len());
+    for name in fixed.iter().map(|s| s.to_string()).chain(dynnames) {
+        let Some(fpath) = cfg_file_path(title_dir, &name) else {
+            continue;
+        };
+        files.push(serde_json::json!({
+            "name": name,
+            "exists": fpath.is_file(),
+            "dist": dist_sibling(&fpath).is_file(),
+            "readonly": matches!(name.as_str(), ".env" | "docker-compose.override.yml"),
+        }));
+    }
+    Ok(serde_json::json!({ "files": files }))
 }
 
 /// NATIVE-MODE `config raw-read` (`90-main.sh:2692-2707`, Part 5a): read an
@@ -1964,5 +2046,94 @@ services:
             crate::config::parse_override_env(&text).get("AC_MADE_UP").map(String::as_str),
             Some("5")
         );
+    }
+
+    // -- `config files` + `assemble_key` (Task 11, the standalone CLI) ------
+
+    #[test]
+    fn config_files_lists_the_fixed_four_plus_module_confs() {
+        let t = TmpTitleDir::new("files");
+        // A live conf, a dist-only conf, both forms of a third, plus three
+        // entries that must all be filtered out by the shape gate.
+        t.write_module_conf("mod_ahbot.conf", "x\n");
+        t.write_module_conf("mod_learnspells.conf.dist", "x\n");
+        t.write_module_conf("transmog.conf", "x\n");
+        t.write_module_conf("transmog.conf.dist", "x\n");
+        t.write_module_conf("transmog.conf.bak", "x\n"); // not a .conf after the .dist strip
+        std::fs::create_dir_all(t.modules_dir().join("lua_scripts")).unwrap(); // a dir
+        t.write_module_conf("worldserver.conf", "x\n"); // excluded here; fixed entry instead
+        std::fs::write(t.0.join(".env"), "A=1\n").unwrap();
+
+        let out = config_files(&t.0).unwrap();
+        let files = out["files"].as_array().unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                ".env",
+                "docker-compose.override.yml",
+                "worldserver.conf",
+                "authserver.conf",
+                // module confs, deduped and byte-sorted
+                "mod_ahbot.conf",
+                "mod_learnspells.conf",
+                "transmog.conf",
+            ]
+        );
+
+        let by_name = |n: &str| files.iter().find(|f| f["name"] == n).unwrap().clone();
+        // The two protected files are the only read-only ones.
+        assert_eq!(by_name(".env")["readonly"], true);
+        assert_eq!(by_name(".env")["exists"], true);
+        assert_eq!(by_name("docker-compose.override.yml")["readonly"], true);
+        assert_eq!(by_name("docker-compose.override.yml")["exists"], false);
+        assert_eq!(by_name("mod_ahbot.conf")["readonly"], false);
+        // exists/dist are reported independently.
+        assert_eq!(by_name("mod_ahbot.conf")["exists"], true);
+        assert_eq!(by_name("mod_ahbot.conf")["dist"], false);
+        assert_eq!(by_name("mod_learnspells.conf")["exists"], false);
+        assert_eq!(by_name("mod_learnspells.conf")["dist"], true);
+        assert_eq!(by_name("transmog.conf")["exists"], true);
+        assert_eq!(by_name("transmog.conf")["dist"], true);
+        // The fixed worldserver.conf entry resolves one dir UP, so the decoy
+        // copy inside modules/ is not what got reported.
+        assert_eq!(by_name("worldserver.conf")["exists"], false);
+    }
+
+    #[test]
+    fn config_files_requires_an_installed_title() {
+        let dir = std::env::temp_dir().join(format!("dml-files-noinst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap(); // exists, but no compose file
+        let e = config_files(&dir).unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assemble_key_returns_one_filled_row_or_none() {
+        let t = TmpTitleDir::new("assemble-key");
+        t.write_module_conf("playerbots.conf", "AiPlayerbot.MaxRandomBots = 800\n");
+        let rows = vec![
+            curated_row(
+                "bots.population",
+                "int",
+                0.into(),
+                3000.into(),
+                "conf:playerbots.conf:AiPlayerbot.MaxRandomBots",
+                "World bot population",
+            ),
+            curated_row("other.row", "int", 0.into(), 1.into(), "conf:Other.Key", "Other"),
+        ];
+        let mut reader = ConfigReader::for_title(&t.0);
+        let got = reader.assemble_key(&rows, "bots.population").expect("row present");
+        // Identical to what the full assemble produces for that row.
+        let mut reader2 = ConfigReader::for_title(&t.0);
+        let all = reader2.assemble(&rows);
+        assert_eq!(got, all["settings"][0]);
+        assert_eq!(got["key"], "bots.population");
+        assert_eq!(got["value"], "800");
+        assert!(reader.assemble_key(&rows, "no.such.key").is_none());
     }
 }
