@@ -353,6 +353,33 @@ pub fn outcome_to_result_decoded(o: SoapOutcome) -> Result<String, CmdError> {
     }
 }
 
+/// `SoapOutcome -> CmdError` for `server.motd` (`90-main.sh:2475-2481`, Task
+/// B2a): RAW fault text with its own hint; a different (unstarted-server)
+/// unreachable hint than the generic mappers — this is the one arm where
+/// SOAP failure means "start the server first" rather than "is it running?".
+pub fn motd_result(o: crate::soap::SoapOutcome) -> Result<(), CmdError> {
+    use crate::soap::SoapOutcome;
+    match o {
+        SoapOutcome::Ok(_) => Ok(()),
+        SoapOutcome::Fault(t) => Err(CmdError {
+            code: "SOAP_FAULT".into(),
+            message: t,
+            hint: "The server rejected the motd command.".into(),
+        }),
+        SoapOutcome::Auth => Err(CmdError {
+            code: "SOAP_AUTH".into(),
+            message: "SOAP authentication failed".into(),
+            hint: "Check ~/.dml/soap.env".into(),
+        }),
+        SoapOutcome::Unreachable(_) => Err(CmdError {
+            code: "SOAP_UNREACHABLE".into(),
+            message: "Could not reach the server".into(),
+            hint: "The server must be running to change the message of the day - start it first."
+                .into(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,5 +792,29 @@ mod tests {
         assert_eq!(e.code, "SOAP_AUTH");
         let e = outcome_to_result_decoded(SoapOutcome::Unreachable("boom".into())).unwrap_err();
         assert_eq!(e.code, "SOAP_UNREACHABLE");
+    }
+
+    #[test]
+    fn motd_result_ok_and_error_shapes() {
+        assert!(motd_result(SoapOutcome::Ok("ignored".into())).is_ok());
+
+        let e = motd_result(SoapOutcome::Fault("a&lt;b".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_FAULT");
+        // RAW, not entity-decoded (matches the oracle's `$out` interpolation).
+        assert_eq!(e.message, "a&lt;b");
+        assert_eq!(e.hint, "The server rejected the motd command.");
+
+        let e = motd_result(SoapOutcome::Auth).unwrap_err();
+        assert_eq!(e.code, "SOAP_AUTH");
+        assert_eq!(e.message, "SOAP authentication failed");
+        assert_eq!(e.hint, "Check ~/.dml/soap.env");
+
+        let e = motd_result(SoapOutcome::Unreachable("x".into())).unwrap_err();
+        assert_eq!(e.code, "SOAP_UNREACHABLE");
+        assert_eq!(e.message, "Could not reach the server");
+        assert_eq!(
+            e.hint,
+            "The server must be running to change the message of the day - start it first."
+        );
     }
 }

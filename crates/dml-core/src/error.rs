@@ -27,3 +27,15 @@ impl From<RunnerError> for CmdError {
         }
     }
 }
+
+pub fn bad_arg(message: impl Into<String>) -> CmdError {
+    CmdError { code: "BAD_ARG".into(), message: message.into(), hint: "Check the value and try again.".into() }
+}
+
+pub fn not_found_err(message: impl Into<String>, hint: impl Into<String>) -> CmdError {
+    CmdError { code: "NOT_FOUND".into(), message: message.into(), hint: hint.into() }
+}
+
+pub fn io_internal_err(e: std::io::Error) -> CmdError {
+    CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() }
+}

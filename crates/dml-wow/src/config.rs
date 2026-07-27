@@ -19,12 +19,26 @@
 //! (`server.motd`, from `acore_auth.motd`) has no file to read, so — exactly
 //! like `list` does when the DB is unreachable — it falls back to the registry
 //! default. See `compute_value`.
+//!
+//! WRITES. Everything from [`cfg_installed_err`] down is the `config set` /
+//! `config raw-read` / `config raw-write` half, moved out of the launcher's
+//! `lib.rs` by the cargo-workspace refactor (Task 9b) so the standalone CLI
+//! can drive it too: [`config_set`] routes a key to [`config_set_direct`]
+//! (the `conf:` module-conf route) or [`config_set_curated`] (the registry
+//! route, including `server.motd`'s SOAP path and the ahbot/bots.population
+//! companion writes), and [`raw_read`]/[`raw_write`] are the raw file
+//! editor. Every writer takes the caller's `config_lock` (and, where SOAP is
+//! involved, `soap_lock`) as a plain `Arc<Mutex<()>>` — std, not Tauri.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use dml_core::error::CmdError;
 use dml_core::proc::output_bounded;
+
+use super::db::{db_err_to_cmd, sql_row_int};
+use super::soap_cmds::motd_result;
 
 use serde_json::Value;
 
@@ -628,6 +642,488 @@ pub fn env_frozen_with(
     }
 }
 
+// ---------------------------------------------------------------------------
+// NATIVE-MODE `config set` / `config raw-read` / `config raw-write` — moved
+// out of the launcher's `lib.rs` by the cargo-workspace refactor (Task 9b).
+//
+// Shared `_cfg_preamble` equivalent: every arm below needs the WoW Playerbots
+// title installed (native has no yq dependency to check). Read paths take no
+// lock; every writer takes the caller's `config_lock`, because Settings,
+// Module Tuning and the raw editor can all target the same conf file.
+//
+// `config set` routes like the oracle does (`90-main.sh:2344-2561`):
+//   A) `key` starts with `conf:` — a DIRECT module-conf write, no registry
+//      row involved (`config_set_direct`).
+//   B) otherwise — a CURATED registry-row write: SOAP for `server.motd`, a
+//      conf-file write for `conf:` env columns (with `ahbot.character` and
+//      `bots.population`'s special-case companion writes), or an override-env
+//      write for anything else (`config_set_curated`).
+// Both routes share `env_frozen` (the `_cfg_env_frozen` port) to decide
+// whether a legacy AC_* env still beats the conf in the RUNNING container.
+// ---------------------------------------------------------------------------
+
+pub fn cfg_installed_err() -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: "WoW Playerbots server not installed".into(),
+        hint: "Install it first, then re-run.".into(),
+    }
+}
+
+pub fn cfg_not_editable_err(fname: &str) -> CmdError {
+    CmdError {
+        code: "NOT_FOUND".into(),
+        message: format!("Not an editable file: {fname}"),
+        hint: "See: dml wow config files --json".into(),
+    }
+}
+
+/// `[[ -n "$fname" ]] || { json_err BAD_ARG "Missing --file <name>" ""; exit 1; }`
+/// -- shared verbatim by the raw-read/raw-reset/raw-write arms
+/// (`90-main.sh:2695,2714,2735`; NOTE the EMPTY hint here, unlike conf-keys'
+/// own missing-file message which carries a "See: ..." hint).
+pub fn cfg_missing_file_err() -> CmdError {
+    CmdError { code: "BAD_ARG".into(), message: "Missing --file <name>".into(), hint: String::new() }
+}
+
+/// The oracle's `raw-read` arm never reads the file directly -- it captures
+/// it through a `$(cat "$fpath")` command substitution
+/// (`90-main.sh:2702,2706`), and POSIX command substitution strips EVERY
+/// trailing newline from the captured text (not just one). A plain
+/// `std::fs::read_to_string` keeps the file's real trailing newline(s), so
+/// without this the native reader would hand back one extra `\n` at EOF for
+/// any conf that (like every conf in this codebase) ends in a newline --
+/// caught live by `part5a_parity.rs`.
+pub fn strip_command_sub_trailing_newlines(s: &str) -> &str {
+    s.trim_end_matches('\n')
+}
+
+/// Route A — the direct `conf:` route (`90-main.sh:2354-2438`). `full_key` is
+/// the ORIGINAL `--key` value (including the `conf:` prefix), used verbatim in
+/// the "Bad conf key" message exactly like the oracle.
+pub fn config_set_direct(
+    title_dir: &std::path::Path,
+    full_key: &str,
+    value: &str,
+    soap_lock: &Arc<std::sync::Mutex<()>>,
+) -> Result<serde_json::Value, CmdError> {
+    let Some((conf_file, conf_key)) = crate::config::route_conf(full_key) else {
+        return Err(cfgset_err("BAD_ARG", format!("Bad conf key: {full_key}"), ""));
+    };
+    if crate::config::is_core_conf_file(&conf_file) {
+        return Err(cfgset_err(
+            "BAD_ARG",
+            "Direct conf keys are limited to module confs",
+            "Core server settings live in the curated list: dml wow config list --json",
+        ));
+    }
+    if !crate::config::is_valid_direct_conf_key(&conf_key) {
+        return Err(cfgset_err(
+            "BAD_ARG",
+            format!("Invalid conf key: {conf_key}"),
+            "Letters, digits, dots and underscores only.",
+        ));
+    }
+    if crate::config::is_denylisted_direct_key(&conf_key) {
+        return Err(cfgset_err(
+            "BAD_ARG",
+            format!("{conf_key} is managed by the bot flush tool"),
+            "Use: dml wow bots flush --yes --ack flush (backs your characters up first and always disarms the flag afterwards).",
+        ));
+    }
+    if !crate::config::is_single_line(value) {
+        return Err(cfgset_err("BAD_ARG", "The value must be a single line", ""));
+    }
+    if !crate::config::within_max_len(value, 200) {
+        return Err(cfgset_err("BAD_ARG", "Value too long (max 200 characters)", ""));
+    }
+
+    let cpath = crate::config::direct_conf_path(title_dir, &conf_file).ok_or_else(|| {
+        cfgset_err(
+            "NOT_FOUND",
+            format!("Not an editable module conf: {conf_file}"),
+            "See: dml wow config files --json",
+        )
+    })?;
+    let ensured = crate::config::conf_ensure(&cpath)
+        .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+    if !ensured {
+        return Err(cfgset_err(
+            "NOT_FOUND",
+            format!("{conf_file} not found (nor its .dist)"),
+            "Is the WoW server fully installed?",
+        ));
+    }
+    let mut changed = crate::config::conf_write(&cpath, &conf_key, value)
+        .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+
+    let ename = crate::config::env_name_for(&conf_key);
+    let override_path = title_dir.join("docker-compose.override.yml");
+    let mut env_was = cfgset_clean_legacy_env(&override_path, &ename)?;
+    if env_was {
+        changed = true;
+    }
+
+    let mut applied = "none".to_string();
+    let mut restart_required = false;
+    if changed {
+        applied = "restart".to_string();
+        restart_required = true;
+        if let Some(reload_cmd) = crate::config::conf_reload_cmd(&conf_file) {
+            if !env_was && env_frozen(&ename) {
+                env_was = true;
+            }
+            if !env_was {
+                let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let soap_cfg = crate::soap::SoapConfig::load();
+                let outcome = crate::soap::exec(&soap_cfg, reload_cmd);
+                if matches!(outcome, crate::soap::SoapOutcome::Ok(_)) {
+                    applied = "live".to_string();
+                    restart_required = false;
+                }
+            }
+        }
+    }
+    Ok(serde_json::json!({
+        "changed": changed,
+        "restart_required": restart_required,
+        "applied": applied,
+    }))
+}
+
+/// Route B — the curated registry-row route (`90-main.sh:2440-2560`).
+pub fn config_set_curated(
+    title_dir: &std::path::Path,
+    key: &str,
+    raw_value: &str,
+    rows: &[serde_json::Value],
+    soap_lock: &Arc<std::sync::Mutex<()>>,
+) -> Result<serde_json::Value, CmdError> {
+    let row = rows
+        .iter()
+        .find(|r| r.get("key").and_then(|v| v.as_str()) == Some(key))
+        .ok_or_else(|| {
+            cfgset_err("NOT_FOUND", format!("Unknown setting: {key}"), "See: dml wow config list --json")
+        })?;
+    let kind = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let label = row.get("label").and_then(|v| v.as_str()).unwrap_or(key);
+    let env = row.get("env").and_then(|v| v.as_str()).unwrap_or("");
+    let min_num = row.get("min").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let max_num = row.get("max").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let min_disp = row.get("min").cloned().unwrap_or(serde_json::Value::Null);
+    let max_disp = row.get("max").cloned().unwrap_or(serde_json::Value::Null);
+
+    // `_cfg_preamble` (`40-config.sh:161-174`), inlined: the oracle resolves
+    // `cfg_sdir` right after parsing the row and BEFORE any type/range
+    // validation (`90-main.sh:2440-2445`), so a not-installed server always
+    // wins over a bad value with the SAME top-level verdict the oracle gives.
+    if !crate::config::wow_server_installed(title_dir) {
+        return Err(cfgset_err(
+            "NOT_FOUND",
+            "WoW Playerbots server not installed",
+            "Install it first, then re-run.",
+        ));
+    }
+
+    let mut value = raw_value.to_string();
+    match kind {
+        "float" => {
+            if !crate::config::float_in_range(&value, min_num, max_num) {
+                return Err(cfgset_err(
+                    "BAD_ARG",
+                    format!("{label} must be a number between {min_disp} and {max_disp}, got: {value}"),
+                    "",
+                ));
+            }
+        }
+        "int" => {
+            if !crate::config::int_in_range(&value, min_num as i64, max_num as i64) {
+                return Err(cfgset_err(
+                    "BAD_ARG",
+                    format!("{label} must be a whole number between {min_disp} and {max_disp}, got: {value}"),
+                    "",
+                ));
+            }
+        }
+        "bool" => {
+            if !crate::config::is_bool01(&value) {
+                return Err(cfgset_err(
+                    "BAD_ARG",
+                    format!("{label} takes 1 (on) or 0 (off), got: {value}"),
+                    "",
+                ));
+            }
+        }
+        "text" => {
+            value = crate::config::sanitize_text_value(&value);
+        }
+        "char" => {
+            if !crate::soap_cmds::valid_charname(&value) {
+                return Err(cfgset_err(
+                    "BAD_ARG",
+                    format!("Invalid character name: {value}"),
+                    "1-12 letters/digits/underscore.",
+                ));
+            }
+        }
+        _ => {}
+    }
+
+    if key == "server.motd" {
+        let cmd = crate::soap_cmds::motd_cmd(&value);
+        let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let soap_cfg = crate::soap::SoapConfig::load();
+        let outcome = crate::soap::exec(&soap_cfg, &cmd);
+        motd_result(outcome)?;
+        return Ok(serde_json::json!({ "changed": true, "restart_required": false }));
+    }
+
+    if let Some((conf_file, conf_key)) = crate::config::route_conf(env) {
+        let mut write_value = value.clone();
+        let mut extra_writes: Vec<(String, String)> = Vec::new();
+
+        if key == "ahbot.character" {
+            let db_cfg = crate::db::DbConfig::from_env();
+            let params: Vec<mysql::Value> = vec![mysql::Value::from(value.as_str())];
+            let res = crate::db::query_with_params(
+                &db_cfg,
+                crate::db::Database::Characters,
+                "SELECT guid, account FROM characters WHERE name = ? LIMIT 1",
+                params,
+            )
+            .map_err(db_err_to_cmd)?;
+            let row0 = res
+                .rows
+                .first()
+                .ok_or_else(|| cfgset_err("NOT_FOUND", format!("No such character: {value}"), ""))?;
+            let guid = sql_row_int(row0.first()).filter(|g| *g >= 0);
+            let acct = sql_row_int(row0.get(1)).filter(|a| *a >= 0);
+            let (guid, acct) = match (guid, acct) {
+                (Some(g), Some(a)) => (g, a),
+                _ => {
+                    return Err(cfgset_err(
+                        "DB_UNREACHABLE",
+                        "Unexpected character lookup result",
+                        "",
+                    ))
+                }
+            };
+            write_value = guid.to_string();
+            extra_writes.push(("AuctionHouseBot.Account".to_string(), acct.to_string()));
+        }
+
+        let cpath = crate::config::conf_path_in(title_dir, &conf_file);
+        let ensured = crate::config::conf_ensure(&cpath)
+            .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+        if !ensured {
+            return Err(cfgset_err(
+                "NOT_FOUND",
+                format!("{conf_file} not found (nor its .dist)"),
+                "Is the WoW server fully installed?",
+            ));
+        }
+        let mut changed = crate::config::conf_write(&cpath, &conf_key, &write_value)
+            .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+
+        for (k, v) in &extra_writes {
+            let c = crate::config::conf_write(&cpath, k, v)
+                .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+            changed = changed || c;
+        }
+        if key == "bots.population" {
+            let c = crate::config::conf_write(&cpath, "AiPlayerbot.MinRandomBots", &write_value)
+                .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {conf_file}: {e}"), ""))?;
+            changed = changed || c;
+        }
+
+        let mut envnames = vec![crate::config::env_name_for(&conf_key)];
+        if key == "bots.population" {
+            envnames.push(crate::config::env_name_for("AiPlayerbot.MinRandomBots"));
+        }
+        if key == "ahbot.character" {
+            envnames.push(crate::config::env_name_for("AuctionHouseBot.Account"));
+        }
+
+        let override_path = title_dir.join("docker-compose.override.yml");
+        let mut env_was = false;
+        for ename in &envnames {
+            if cfgset_clean_legacy_env(&override_path, ename)? {
+                env_was = true;
+                changed = true;
+            }
+        }
+        if !env_was {
+            for ename in &envnames {
+                if env_frozen(ename) {
+                    env_was = true;
+                    break;
+                }
+            }
+        }
+
+        let mut applied = "none".to_string();
+        let mut restart_required = false;
+        if changed {
+            applied = "restart".to_string();
+            restart_required = true;
+            if (conf_file == "worldserver.conf" || conf_file == "mod_ahbot.conf") && !env_was {
+                let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
+                let soap_cfg = crate::soap::SoapConfig::load();
+                let outcome = crate::soap::exec(&soap_cfg, "reload config");
+                if matches!(outcome, crate::soap::SoapOutcome::Ok(_)) {
+                    applied = "live".to_string();
+                    restart_required = false;
+                }
+            }
+        }
+        return Ok(serde_json::json!({
+            "changed": changed,
+            "restart_required": restart_required,
+            "applied": applied,
+        }));
+    }
+
+    // Non-conf env column (currently unreachable — every real registry row is
+    // either `conf:` or `server.motd`'s `-`; kept for oracle parity).
+    let override_path = title_dir.join("docker-compose.override.yml");
+    let changed = crate::config::override_env_write(&override_path, env, &value)
+        .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write the config override: {e}"), ""))?;
+    Ok(serde_json::json!({ "changed": changed, "restart_required": changed }))
+}
+
+/// NATIVE-MODE `config raw-read` (`90-main.sh:2692-2707`, Part 5a): read an
+/// allowlisted file, falling back to its `.dist` when only that exists yet
+/// (the first save then creates the real conf via [`raw_write`]). Read path,
+/// so it takes no config lock. Moved out of the launcher's `lib.rs` by the
+/// cargo-workspace refactor (Task 9b).
+pub fn raw_read(file: String) -> Result<serde_json::Value, CmdError> {
+    if file.is_empty() {
+        return Err(cfg_missing_file_err());
+    }
+    let title_dir = crate::config::ConfigReader::title_dir_from_env();
+    if !crate::config::wow_server_installed(&title_dir) {
+        return Err(cfg_installed_err());
+    }
+    let fpath = crate::config::cfg_file_path(&title_dir, &file)
+        .ok_or_else(|| cfg_not_editable_err(&file))?;
+    let dist = crate::config::dist_sibling(&fpath);
+    if !fpath.is_file() && dist.is_file() {
+        let content = std::fs::read_to_string(&dist).unwrap_or_default();
+        return Ok(serde_json::json!({
+            "file": file,
+            "source": "dist",
+            "content": strip_command_sub_trailing_newlines(&content),
+        }));
+    }
+    if !fpath.is_file() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("File does not exist yet: {file}"),
+            hint: String::new(),
+        });
+    }
+    let content = std::fs::read_to_string(&fpath).unwrap_or_default();
+    Ok(serde_json::json!({
+        "file": file,
+        "source": "conf",
+        "content": strip_command_sub_trailing_newlines(&content),
+    }))
+}
+
+/// NATIVE-MODE `config raw-write` (`90-main.sh:2733-2774`, Part 5a):
+/// full-file write with the arm's exact guards, in the SAME order as the
+/// oracle -- override-YAML syntax validation happens BEFORE the `.env`/
+/// override read-only rejection (so submitting broken YAML for the override
+/// reports "not valid YAML", never "read-only"), tmp+rename atomic, with an
+/// automatic `.bak` of any existing file. THAT ORDER IS LOAD-BEARING; the
+/// SECURITY comment inside says why the two files are read-only at all.
+/// `config_lock` serializes against every other native conf/override write
+/// (Settings, Module Tuning and the raw editor can all target one file) --
+/// the caller supplies it, same shape as every other hoisted body that
+/// needs it. Moved out of the launcher's `lib.rs` (Task 9b).
+pub fn raw_write(
+    file: String,
+    content: String,
+    config_lock: Arc<Mutex<()>>,
+) -> Result<serde_json::Value, CmdError> {
+    if file.is_empty() {
+        return Err(cfg_missing_file_err());
+    }
+    let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let title_dir = crate::config::ConfigReader::title_dir_from_env();
+    if !crate::config::wow_server_installed(&title_dir) {
+        return Err(cfg_installed_err());
+    }
+    let fpath = crate::config::cfg_file_path(&title_dir, &file)
+        .ok_or_else(|| cfg_not_editable_err(&file))?;
+
+    if file == "docker-compose.override.yml"
+        && serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content).is_err()
+    {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "That is not valid YAML - not saved".into(),
+            hint: "Fix the syntax and save again.".into(),
+        });
+    }
+    // SECURITY: same posture as `_cfg_file_path`'s writable module-conf
+    // allowlist -- `.env`/the compose override are readable (raw-read)
+    // but NOT writable here (see `cli/src/90-main.sh:2752-2765`'s own
+    // comment for the exact rationale: this + `games restart` would let
+    // the editor drive host command execution).
+    if matches!(file.as_str(), ".env" | "docker-compose.override.yml") {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: "That file is read-only in the editor".into(),
+            hint: "Change these settings from the Settings tab; .env and the compose override can't be overwritten here.".into(),
+        });
+    }
+
+    if let Some(parent) = fpath.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut backup = serde_json::Value::Null;
+    if fpath.is_file() {
+        let bak = crate::config::bak_sibling(&fpath);
+        std::fs::copy(&fpath, &bak).map_err(|e| CmdError {
+            code: "WRITE_FAILED".into(),
+            message: format!("Could not write {file}: {e}"),
+            hint: String::new(),
+        })?;
+        backup = serde_json::Value::String(format!("{file}.bak"));
+    }
+    crate::config::atomic_write(&fpath, &content).map_err(|e| CmdError {
+        code: "WRITE_FAILED".into(),
+        message: format!("Could not write {file}: {e}"),
+        hint: String::new(),
+    })?;
+    Ok(serde_json::json!({ "written": true, "backup": backup }))
+}
+
+/// `dml wow config set` port (`90-main.sh:2344-2561`, Task B2a): the route
+/// decision itself -- a `conf:`-prefixed key goes to [`config_set_direct`],
+/// anything else to [`config_set_curated`] against the registry rows. Moved
+/// out of the launcher's `lib.rs` by the cargo-workspace refactor (Task 9b);
+/// both locks and `title_dir` are resolved by the caller, none of them Tauri
+/// types.
+pub fn config_set(
+    key: String,
+    value: String,
+    soap_lock: Arc<Mutex<()>>,
+    config_lock: Arc<Mutex<()>>,
+    title_dir: PathBuf,
+) -> Result<serde_json::Value, CmdError> {
+    // Serializes against every other native conf/override write (Settings
+    // AND Module Tuning can both target the same conf file) -- see the
+    // doc comment on `AppState::config_lock`.
+    let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if key.starts_with("conf:") {
+        return config_set_direct(&title_dir, &key, &value, &soap_lock);
+    }
+    let rows = crate::registry::config_registry_rows();
+    config_set_curated(&title_dir, &key, &value, rows, &soap_lock)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1084,5 +1580,389 @@ services:
             "AC_RATE_XP_KILL",
             std::time::Duration::from_millis(500)
         ));
+    }
+
+    #[test]
+    fn strip_command_sub_trailing_newlines_strips_every_trailing_newline() {
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n"), "A = 1");
+        // Command substitution strips EVERY trailing newline, not just one.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n\n\n"), "A = 1");
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1"), "A = 1");
+        assert_eq!(strip_command_sub_trailing_newlines(""), "");
+        // Only trailing -- interior blank lines are untouched.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\n\nB = 2\n"), "A = 1\n\nB = 2");
+        // CR right before the final \n is not itself a newline char -- left alone.
+        assert_eq!(strip_command_sub_trailing_newlines("A = 1\r\n"), "A = 1\r");
+    }
+
+    // -- config_set_direct / config_set_curated ---------------------------
+
+    struct TmpTitleDir(std::path::PathBuf);
+    impl TmpTitleDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir()
+                .join(format!("dml-b2a-cfgset-test-{}-{}", std::process::id(), name));
+            let _ = std::fs::remove_dir_all(&dir);
+            let modules = dir.join("env").join("dist").join("etc").join("modules");
+            std::fs::create_dir_all(&modules).unwrap();
+            // Marks the title as "installed" for `wow_server_installed`'s
+            // compose-file check, matching a real title dir.
+            std::fs::write(dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+            TmpTitleDir(dir)
+        }
+        fn modules_dir(&self) -> std::path::PathBuf {
+            self.0.join("env").join("dist").join("etc").join("modules")
+        }
+        fn write_module_conf(&self, name: &str, content: &str) {
+            std::fs::write(self.modules_dir().join(name), content).unwrap();
+        }
+        fn write_override(&self, yaml: &str) {
+            std::fs::write(self.0.join("docker-compose.override.yml"), yaml).unwrap();
+        }
+        fn read_module_conf(&self, name: &str) -> String {
+            std::fs::read_to_string(self.modules_dir().join(name)).unwrap()
+        }
+    }
+    impl Drop for TmpTitleDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn no_soap_lock() -> Arc<std::sync::Mutex<()>> {
+        Arc::new(std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn config_set_direct_rejects_core_conf() {
+        let t = TmpTitleDir::new("core");
+        let e = config_set_direct(&t.0, "conf:Rate.XP.Kill", "3", &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Direct conf keys are limited to module confs");
+        assert_eq!(
+            e.hint,
+            "Core server settings live in the curated list: dml wow config list --json"
+        );
+    }
+
+    #[test]
+    fn config_set_direct_rejects_denylisted_key() {
+        let t = TmpTitleDir::new("denylist");
+        let e = config_set_direct(
+            &t.0,
+            "conf:playerbots.conf:AiPlayerbot.DeleteRandomBotAccounts",
+            "1",
+            &no_soap_lock(),
+        )
+        .unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(
+            e.message,
+            "AiPlayerbot.DeleteRandomBotAccounts is managed by the bot flush tool"
+        );
+        assert!(e.hint.starts_with("Use: dml wow bots flush"));
+    }
+
+    #[test]
+    fn config_set_direct_rejects_bad_conf_key_shape() {
+        let t = TmpTitleDir::new("shape");
+        let e =
+            config_set_direct(&t.0, "conf:playerbots.conf:Has Space", "1", &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Invalid conf key: Has Space");
+        assert_eq!(e.hint, "Letters, digits, dots and underscores only.");
+    }
+
+    #[test]
+    fn config_set_direct_rejects_multiline_and_overlong_values() {
+        let t = TmpTitleDir::new("valueshape");
+        let e = config_set_direct(&t.0, "conf:playerbots.conf:AiPlayerbot.Foo", "a\nb", &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "The value must be a single line");
+
+        let long = "x".repeat(201);
+        let e =
+            config_set_direct(&t.0, "conf:playerbots.conf:AiPlayerbot.Foo", &long, &no_soap_lock())
+                .unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Value too long (max 200 characters)");
+    }
+
+    #[test]
+    fn config_set_direct_not_found_when_conf_and_dist_both_absent() {
+        let t = TmpTitleDir::new("notfound");
+        let e =
+            config_set_direct(&t.0, "conf:ghost.conf:Some.Key", "1", &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "Not an editable module conf: ghost.conf");
+        assert_eq!(e.hint, "See: dml wow config files --json");
+    }
+
+    #[test]
+    fn config_set_direct_writes_conf_and_reports_restart_when_no_reload_cmd() {
+        let t = TmpTitleDir::new("success");
+        t.write_module_conf("playerbots.conf", "AiPlayerbot.Foo = 1\n");
+        let out =
+            config_set_direct(&t.0, "conf:playerbots.conf:AiPlayerbot.Foo", "42", &no_soap_lock())
+                .unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        assert_eq!(out["applied"], "restart");
+        assert_eq!(t.read_module_conf("playerbots.conf"), "AiPlayerbot.Foo = 42\n");
+    }
+
+    #[test]
+    fn config_set_direct_cleans_legacy_env_and_still_reports_restart() {
+        let t = TmpTitleDir::new("legacyenv");
+        t.write_module_conf("playerbots.conf", "AiPlayerbot.Foo = 1\n");
+        t.write_override(
+            "services:\n  ac-worldserver:\n    environment:\n      AC_AI_PLAYERBOT_FOO: \"1\"\n",
+        );
+        let out =
+            config_set_direct(&t.0, "conf:playerbots.conf:AiPlayerbot.Foo", "42", &no_soap_lock())
+                .unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        assert_eq!(out["applied"], "restart");
+        let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
+        assert!(!crate::config::parse_override_env(&text).contains_key("AC_AI_PLAYERBOT_FOO"));
+    }
+
+    fn curated_row(
+        key: &str,
+        kind: &str,
+        min: serde_json::Value,
+        max: serde_json::Value,
+        env: &str,
+        label: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "key": key, "group": "Test", "label": label, "explain": "x",
+            "type": kind, "min": min, "max": max, "value": "", "default": "0",
+            "restart_required": true, "env": env,
+        })
+    }
+
+    #[test]
+    fn config_set_curated_unknown_key_is_not_found() {
+        let t = TmpTitleDir::new("curated-unknown");
+        let rows = vec![curated_row("rates.xp_kill", "float", 0.5.into(), 20.into(), "conf:Rate.XP.Kill", "XP")];
+        let e =
+            config_set_curated(&t.0, "no.such.key", "1", &rows, &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "Unknown setting: no.such.key");
+        assert_eq!(e.hint, "See: dml wow config list --json");
+    }
+
+    #[test]
+    fn config_set_curated_not_found_when_server_not_installed() {
+        // A title dir that doesn't exist at all -- `wow_server_installed`
+        // must fail closed, mirroring `_wow_server_dir` (`90-main.sh:106-110`)
+        // returning empty when `$GAMES_DIR/wow-server-playerbots` is absent.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-at-all", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row("rates.xp_kill", "float", 0.5.into(), 20.into(), "conf:Rate.XP.Kill", "XP")];
+        let e = config_set_curated(&missing_dir, "rates.xp_kill", "3", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+        assert_eq!(e.hint, "Install it first, then re-run.");
+    }
+
+    #[test]
+    fn config_set_curated_not_installed_check_wins_over_bad_arg() {
+        // Server not installed AND the value is out of range -- the oracle's
+        // `_cfg_preamble` (`90-main.sh:2443`) runs BEFORE the type/range
+        // switch (`90-main.sh:2445`), so the top-level verdict must be
+        // NOT_FOUND, never BAD_ARG.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-badval", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row(
+            "rates.xp_kill",
+            "float",
+            0.5.into(),
+            20.into(),
+            "conf:Rate.XP.Kill",
+            "XP from kills",
+        )];
+        let e = config_set_curated(&missing_dir, "rates.xp_kill", "999.9", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+    }
+
+    #[test]
+    fn config_set_curated_motd_not_found_when_server_not_installed() {
+        // The `server.motd` sub-branch has no conf-write of its own (it goes
+        // straight to SOAP) -- confirm it still gets the install-check gate
+        // instead of ever reaching the SOAP call.
+        let missing_dir = std::env::temp_dir()
+            .join(format!("dml-b2a-cfgset-test-{}-not-installed-motd", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing_dir);
+        let rows = vec![curated_row(
+            "server.motd",
+            "text",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "-",
+            "Message of the day",
+        )];
+        let e = config_set_curated(&missing_dir, "server.motd", "hi", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "WoW Playerbots server not installed");
+    }
+
+    #[test]
+    fn config_set_curated_float_out_of_range_is_bad_arg() {
+        let t = TmpTitleDir::new("curated-floatrange");
+        let rows = vec![curated_row(
+            "rates.xp_kill",
+            "float",
+            0.5.into(),
+            20.into(),
+            "conf:Rate.XP.Kill",
+            "XP from kills",
+        )];
+        let e = config_set_curated(&t.0, "rates.xp_kill", "20.5", &rows, &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "XP from kills must be a number between 0.5 and 20, got: 20.5");
+        assert_eq!(e.hint, "");
+    }
+
+    #[test]
+    fn config_set_curated_bool_non01_is_bad_arg() {
+        let t = TmpTitleDir::new("curated-bool");
+        let rows = vec![curated_row(
+            "crossfaction.group",
+            "bool",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "conf:AllowTwoSide.Interaction.Group",
+            "Group across factions",
+        )];
+        let e =
+            config_set_curated(&t.0, "crossfaction.group", "2", &rows, &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Group across factions takes 1 (on) or 0 (off), got: 2");
+    }
+
+    #[test]
+    fn config_set_curated_int_out_of_range_is_bad_arg() {
+        let t = TmpTitleDir::new("curated-int");
+        let rows = vec![curated_row(
+            "bots.population",
+            "int",
+            0.into(),
+            3000.into(),
+            "conf:playerbots.conf:AiPlayerbot.MaxRandomBots",
+            "World bot population",
+        )];
+        let e = config_set_curated(&t.0, "bots.population", "3001", &rows, &no_soap_lock()).unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(
+            e.message,
+            "World bot population must be a whole number between 0 and 3000, got: 3001"
+        );
+    }
+
+    #[test]
+    fn config_set_curated_char_invalid_is_bad_arg() {
+        let t = TmpTitleDir::new("curated-char");
+        let rows = vec![curated_row(
+            "ahbot.character",
+            "char",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "conf:mod_ahbot.conf:AuctionHouseBot.GUID",
+            "Seller character",
+        )];
+        let e = config_set_curated(&t.0, "ahbot.character", "bad name!", &rows, &no_soap_lock())
+            .unwrap_err();
+        assert_eq!(e.code, "BAD_ARG");
+        assert_eq!(e.message, "Invalid character name: bad name!");
+        assert_eq!(e.hint, "1-12 letters/digits/underscore.");
+    }
+
+    #[test]
+    fn config_set_curated_text_row_sanitizes_and_writes_conf() {
+        // Deliberately NOT worldserver.conf/mod_ahbot.conf -- keeps this test
+        // network-free (those two conf files are the only ones that attempt a
+        // live SOAP `reload config`, which is smoke-gated per the brief).
+        let t = TmpTitleDir::new("curated-text");
+        t.write_module_conf("mod_something.conf", "Some.Text = old\n");
+        let rows = vec![curated_row(
+            "some.text",
+            "text",
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            "conf:mod_something.conf:Some.Text",
+            "Some text",
+        )];
+        let out = config_set_curated(
+            &t.0,
+            "some.text",
+            "has \"quotes\" and\nnewline",
+            &rows,
+            &no_soap_lock(),
+        )
+        .unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        assert_eq!(out["applied"], "restart");
+        assert_eq!(t.read_module_conf("mod_something.conf"), "Some.Text = has quotes and newline\n");
+    }
+
+    #[test]
+    fn config_set_curated_bots_population_writes_min_and_max() {
+        let t = TmpTitleDir::new("curated-botspop");
+        t.write_module_conf(
+            "playerbots.conf",
+            "AiPlayerbot.MaxRandomBots = 500\nAiPlayerbot.MinRandomBots = 500\n",
+        );
+        let rows = vec![curated_row(
+            "bots.population",
+            "int",
+            0.into(),
+            3000.into(),
+            "conf:playerbots.conf:AiPlayerbot.MaxRandomBots",
+            "World bot population",
+        )];
+        let out =
+            config_set_curated(&t.0, "bots.population", "800", &rows, &no_soap_lock()).unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["applied"], "restart");
+        let text = t.read_module_conf("playerbots.conf");
+        assert!(text.contains("AiPlayerbot.MaxRandomBots = 800"));
+        assert!(text.contains("AiPlayerbot.MinRandomBots = 800"));
+    }
+
+    #[test]
+    fn config_set_curated_non_conf_env_column_writes_override() {
+        let t = TmpTitleDir::new("curated-envcol");
+        // No real registry row has a bare env column today (every row is
+        // `conf:` or motd's `-`) -- this exercises the oracle's fallback
+        // `else` branch (`90-main.sh:2557-2560`) for parity anyway.
+        let rows = vec![curated_row(
+            "made.up",
+            "int",
+            0.into(),
+            10.into(),
+            "AC_MADE_UP",
+            "Made up",
+        )];
+        let out = config_set_curated(&t.0, "made.up", "5", &rows, &no_soap_lock()).unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        // NOTE: no `applied` field on this branch, matching the bash oracle.
+        assert!(out.get("applied").is_none());
+        let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
+        assert_eq!(
+            crate::config::parse_override_env(&text).get("AC_MADE_UP").map(String::as_str),
+            Some("5")
+        );
     }
 }

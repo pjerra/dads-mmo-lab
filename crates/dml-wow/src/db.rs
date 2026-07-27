@@ -381,6 +381,29 @@ pub fn db_unreachable_err(message: impl Into<String>) -> CmdError {
     CmdError { code: "DB_UNREACHABLE".into(), message: message.into(), hint: "Is ac-database running?".into() }
 }
 
+/// Map a native-mode [`crate::db::DbError`] to the [`CmdError`] the frontend
+/// already knows how to render. Both variants collapse to `DB_UNREACHABLE`,
+/// matching the CLI: every one of these arms (`teleport-list` / `bots list` /
+/// `accounts` / `paperdoll`) reports `DB_UNREACHABLE` for ANY `db_*_query`
+/// failure in `90-main.sh` — the bash has no separate "connected but the query
+/// itself failed" code path, so a native `DbError::Query` (e.g. a genuinely
+/// malformed statement) must still read as `DB_UNREACHABLE` to stay
+/// byte-identical to `dml`. Same collapse [`stats_err_to_cmd`] already does for
+/// the `stats` arm — see its comment for the fuller rationale.
+pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
+    CmdError {
+        code: "DB_UNREACHABLE".into(),
+        message: e.to_string(),
+        hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    }
+}
+
+/// One row's `COUNT(*)` decoded as `i64` (defaulting to 0 on anything odd —
+/// every caller only ever asks "is this nonzero").
+pub fn count_result(res: crate::db::QueryResult) -> i64 {
+    sql_row_int(res.rows.first().and_then(|r| r.first())).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

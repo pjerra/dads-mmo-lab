@@ -22,10 +22,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::config::{self, parse_conf, strip_conf_quotes};
+use dml_core::envelope::envelope_to_result;
+use dml_core::error::CmdError;
+use dml_core::runner::DmlRunner;
+
+use crate::config::{self, cfgset_err, parse_conf, strip_conf_quotes};
 
 /// The conf/lua key token for one tuning row key — the `confkey` column of
 /// `_mtune_rows` (40-config.sh:878), which the `tuning-registry` arm does not
@@ -282,6 +287,131 @@ impl TuningReader {
         }
         serde_json::json!({ "settings": Value::Array(out) })
     }
+}
+
+/// `dml wow config tuning-set` port (`90-main.sh:2859-2934`, Task B2b).
+/// Looks up the row in the tuning registry, validates by `type` (shared by
+/// BOTH backends, exactly like the oracle validates once before branching),
+/// then writes it: the `conf` backend is fully native (mirrors
+/// `config::config_set_curated`'s conf-write tail almost verbatim, minus the
+/// ahbot/bots.population special-case companion writes that don't apply to
+/// tuning rows); the `lua` backend defers to the `dml` CLI through `runner`
+/// -- see the TODO on that arm below. Moved out of the launcher's `lib.rs`
+/// by the cargo-workspace refactor (Task 9b); `runner`, `config_lock` and
+/// `title_dir` are all resolved by the caller, none of them Tauri types.
+// ---------------------------------------------------------------------------
+// `config tuning-set` (Task B2b) — moved out of the launcher's `lib.rs` by
+// the cargo-workspace refactor (Task 9b).
+// ---------------------------------------------------------------------------
+
+pub fn tuning_set(
+    key: String,
+    value: String,
+    runner: Arc<DmlRunner>,
+    config_lock: Arc<Mutex<()>>,
+    title_dir: PathBuf,
+) -> Result<serde_json::Value, CmdError> {
+    // Serializes against every other native conf/override write -- see
+    // the doc comment on `AppState::config_lock`.
+    let _guard = config_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let rows = crate::registry::tuning_registry_rows();
+    let row = rows
+        .iter()
+        .find(|r| r.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
+        .ok_or_else(|| {
+            cfgset_err(
+                "NOT_FOUND",
+                format!("Unknown tuning setting: {key}"),
+                "See: dml wow config tuning-list --json",
+            )
+        })?;
+
+    let backend = row.get("backend").and_then(|v| v.as_str()).unwrap_or("");
+    let file = row.get("file").and_then(|v| v.as_str()).unwrap_or("");
+    let ty = row.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let label = row.get("label").and_then(|v| v.as_str()).unwrap_or(key.as_str());
+    let module = row.get("module").and_then(|v| v.as_str()).unwrap_or("");
+    let min = row.get("min").and_then(|v| v.as_i64()).unwrap_or(0);
+    let max = row.get("max").and_then(|v| v.as_i64()).unwrap_or(0);
+    // The registry JSON carries no `confkey` column (Task 1's cheap
+    // sibling arm deliberately omits it); `tuning_confkey` is the source
+    // of truth, kept in lock-step with `_mtune_rows` by `tuning.rs`'s own
+    // parity test. Every row the registry can ever emit has an entry
+    // here, so this is unreachable in practice -- defensive, not a real
+    // oracle branch.
+    let confkey = crate::tuning::tuning_confkey(&key).ok_or_else(|| {
+        cfgset_err(
+            "NOT_FOUND",
+            format!("Unknown tuning setting: {key}"),
+            "See: dml wow config tuning-list --json",
+        )
+    })?;
+
+    let norm_value = crate::tuning::validate_tuning_value(ty, &value, label, min, max)
+        .map_err(|msg| cfgset_err("BAD_ARG", msg, ""))?;
+
+    if backend == "lua" {
+        // TODO: native lua-tuning writer (deferred). Porting
+        // `_lua_cfg_write` + `_mtune_to_lua` (the `.lua` assignment
+        // editor with re-verify, `40-config.sh:969-1019`) is out of scope
+        // for this pass -- only 2 of 13 tuning rows are lua-backend
+        // (unlimitedammo.enabled, sitmeansrest.*'s file is also lua but
+        // that's 4 rows total; still a small minority). Shell the
+        // existing CLI so lua-backend rows keep working (byte-parity,
+        // since `dml` does the actual write) without porting the lua
+        // editor tonight. The CLI re-validates independently; the
+        // validation above still runs first so a bad value fails fast
+        // without a subprocess, and to keep both backends going through
+        // one shared validation path exactly like the oracle does.
+        let env = runner
+            .run_json(&["wow", "config", "tuning-set", "--key", &key, "--value", &value])
+            .map_err(CmdError::from)?;
+        return envelope_to_result(env);
+    }
+
+    // `_wow_server_dir` re-check (`90-main.sh:2888-2892`): the oracle runs
+    // this AFTER type/range validation but BEFORE either backend branch
+    // (it feeds the lua branch's `_lua_cfg_path` too, at 2913) -- for the
+    // conf backend specifically, that puts it before `_cfg_conf_ensure`'s
+    // own NOT_INSTALLED check, so a not-installed server reports the
+    // oracle's uniform "server not installed" rather than "{module} is
+    // not installed". The lua branch above already shelled out to the CLI
+    // before we get here, so it gets this same check for free.
+    if !crate::config::wow_server_installed(&title_dir) {
+        return Err(cfgset_err(
+            "NOT_FOUND",
+            "WoW Playerbots server not installed",
+            "Install it first, then re-run.",
+        ));
+    }
+
+    // backend == "conf" -- same `_cfg_conf_path` resolution as B2a's
+    // curated route (`conf_path_in`: worldserver/authserver.conf under
+    // `env/dist/etc/`, else `env/dist/etc/modules/{file}`).
+    let cpath = crate::config::conf_path_in(&title_dir, file);
+    let ensured = crate::config::conf_ensure(&cpath)
+        .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
+    if !ensured {
+        return Err(cfgset_err(
+            "NOT_INSTALLED",
+            format!("{module} is not installed"),
+            format!("Install {module} from the Modules page first, then reopen this page."),
+        ));
+    }
+    let changed = crate::config::conf_write(&cpath, confkey, &norm_value)
+        .map_err(|e| cfgset_err("WRITE_FAILED", format!("Could not write {file}: {e}"), ""))?;
+
+    Ok(if changed {
+        serde_json::json!({
+            "key": key, "backend": "conf", "changed": true,
+            "restart_required": true, "applied": "restart",
+        })
+    } else {
+        serde_json::json!({
+            "key": key, "backend": "conf", "changed": false,
+            "restart_required": false, "applied": "none",
+        })
+    })
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::CmdError;
+
 fn default_hint() -> String {
     String::new()
 }
@@ -54,6 +56,19 @@ pub fn ok_envelope(data: Value) -> Value {
 /// Emit-side `{ok:false,error:{code,message,hint}}` envelope.
 pub fn error_envelope(code: &str, message: &str, hint: &str) -> Value {
     serde_json::json!({ "ok": false, "error": { "code": code, "message": message, "hint": hint } })
+}
+
+pub fn envelope_to_result(env: Envelope) -> Result<serde_json::Value, CmdError> {
+    if env.ok {
+        Ok(env.data)
+    } else {
+        let e = env.error.unwrap_or(crate::envelope::ErrorInfo {
+            code: "CLI_BAD_OUTPUT".into(),
+            message: "ok=false with no error object".into(),
+            hint: String::new(),
+        });
+        Err(CmdError { code: e.code, message: e.message, hint: e.hint })
+    }
 }
 
 #[cfg(test)]
