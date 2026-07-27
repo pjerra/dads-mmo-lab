@@ -1,0 +1,25 @@
+name: rust
+on:
+  push:
+    branches: ["feat/rust-cli-workspace", "spike/**"]
+  pull_request:
+    paths: ["crates/**", "launcher/src-tauri/**", "Cargo.*", ".github/workflows/rust.yml"]
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The launcher crate is Tauri/Windows-focused and needs webkit system libs;
+      # the community CLI story on Linux is the three crates — test exactly those.
+      - run: cargo build -p dml-core -p dml-wow -p dml-wow-cli --locked
+      - run: cargo test -p dml-core -p dml-wow -p dml-wow-cli --locked

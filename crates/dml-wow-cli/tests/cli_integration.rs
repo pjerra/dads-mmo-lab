@@ -1754,15 +1754,27 @@ fn install_preflight_missing_bash_and_script_reports_install_prereqs_and_spawns_
 }
 
 /// BOTH halves are required, not just one: a REAL, resolvable executable for
-/// `DML_BASH` (a harmless stand-in -- `cmd.exe`, present on every Windows
-/// install, is never actually invoked here) with the script STILL missing
+/// `DML_BASH` (a harmless stand-in -- never actually invoked here, just
+/// `Path::is_file()`-checked by the preflight) with the script STILL missing
 /// must still refuse — proving the check isn't a short-circuiting OR that
 /// would let a present bash alone through.
+///
+/// The stand-in is picked per-platform (`cmd.exe` on Windows, `/bin/sh`
+/// elsewhere) so the "bash resolves" half of the claim is actually true on
+/// Linux CI too (Task 16) — a hardcoded Windows path would silently fail to
+/// resolve on Linux as well, and the test would still pass, but vacuously:
+/// it would be exercising "neither half resolves" instead of the "script
+/// missing, bash present" case the name and doc comment promise.
+#[cfg(windows)]
+const RESOLVABLE_BASH_STANDIN: &str = r"C:\Windows\System32\cmd.exe";
+#[cfg(not(windows))]
+const RESOLVABLE_BASH_STANDIN: &str = "/bin/sh";
+
 #[test]
 fn install_preflight_bash_resolves_but_missing_script_still_refuses() {
     let out = bin()
         .args(["install", "wow-server-playerbots"])
-        .env("DML_BASH", r"C:\Windows\System32\cmd.exe")
+        .env("DML_BASH", RESOLVABLE_BASH_STANDIN)
         // An explicit NONEXISTENT ABSOLUTE path, not `.env_remove` (Task 15
         // review Minor 7): removing the var lets `find_dml_script` fall back
         // to the bare name "dml", and the assertion then rests on THAT not
