@@ -201,6 +201,28 @@ fn native_tracking(cfg: &DbConfig, sdir: &Path, key: &str) -> serde_json::Value 
     serde_json::json!({"key": key, "dbs": serde_json::Value::Object(dbs)})
 }
 
+/// Both sides' file lists, normalised to byte order by name.
+///
+/// The bash oracle sorts with `sort(1)`, whose collation follows the CALLER'S
+/// LOCALE: under en_US.UTF-8 it is case-insensitive
+/// (`..._NPC.sql`, `..._texts.sql`, `..._VendorItems.sql`) while under
+/// LC_ALL=C it is byte order (`..._NPC.sql`, `..._VendorItems.sql`,
+/// `..._texts.sql`) — the latter being what the native reader's `Vec::sort`
+/// always produces. Comparing the arrays positionally therefore made this test
+/// pass or fail on the DEVELOPER'S LOCALE rather than on the code: it passed
+/// for years only because no installed module shipped SQL files whose
+/// case-insensitive and byte orders disagreed, and mod-transmog's
+/// `trasm_world_VendorItems.sql` broke that tie.
+///
+/// The file SET and each file's `tracked` flag are the contract; the order is
+/// an artifact of the oracle's environment. Returns `None` for a non-array so
+/// a present-vs-missing divergence still fails (None != Some).
+fn files_by_name(v: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
+    let mut rows = v.as_array()?.clone();
+    rows.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    Some(rows)
+}
+
 #[test]
 fn module_tracking_native_matches_cli_for_installed_module() {
     let Some(h) = harness("module tracking parity") else { return };
@@ -222,7 +244,8 @@ fn module_tracking_native_matches_cli_for_installed_module() {
             "{db_short} tracked_rows diverged"
         );
         assert_eq!(
-            got["dbs"][db_short]["files"], want["data"]["dbs"][db_short]["files"],
+            files_by_name(&got["dbs"][db_short]["files"]),
+            files_by_name(&want["data"]["dbs"][db_short]["files"]),
             "{db_short} files diverged"
         );
     }

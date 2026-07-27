@@ -200,9 +200,25 @@ impl Drop for CleanupGuard {
     }
 }
 
+/// Serializes the two live tests below.
+///
+/// Both dump the LIVE database into the REAL `~/.dml/backups` directory, and
+/// `backup create` prunes that directory to the newest N. Run concurrently —
+/// cargo's default, one thread per test — they collide two ways:
+/// `new_backup_file_name` is second-resolution, so two dumps started in the
+/// same second claim the SAME file name; and either test's prune can delete
+/// the other's file out from under its assertions. Both tests passed for a
+/// while on timing luck and then failed together the moment the live gate ran
+/// them back to back.
+///
+/// `e.into_inner()` on a poisoned lock deliberately: a panic in one test must
+/// not convert the other into a misleading cascade failure.
+static LIVE_BACKUP_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn bash_created_backup_is_readable_and_deletable_natively() {
     let Some(h) = harness("bash-create / native-read+delete") else { return };
+    let _serial = LIVE_BACKUP_DIR.lock().unwrap_or_else(|e| e.into_inner());
 
     let bdir = backup::backup_dir().expect("resolve backups dir");
 
@@ -241,6 +257,7 @@ fn bash_created_backup_is_readable_and_deletable_natively() {
 #[test]
 fn native_created_backup_is_readable_and_deletable_by_bash() {
     let Some(h) = harness("native-create / bash-read+delete") else { return };
+    let _serial = LIVE_BACKUP_DIR.lock().unwrap_or_else(|e| e.into_inner());
 
     let bdir = backup::backup_dir().expect("resolve backups dir");
     std::fs::create_dir_all(&bdir).expect("mkdir backups dir");
