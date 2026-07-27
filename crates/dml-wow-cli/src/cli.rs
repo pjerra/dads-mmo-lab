@@ -196,6 +196,173 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: PartyCmd,
     },
+
+    // -- Task 14: lifecycle, module mutations, backup/restore, destructive --
+    //
+    // Same loose-typing doctrine as Task 13's block above: a value whose rule
+    // already lives in `dml-wow` (a module family, a `--level`, a module key)
+    // arrives here unfiltered so the library owns the wording of its own
+    // rejection. What clap DOES enforce is argv SHAPE — a flag that must be
+    // present at all (`module remove --key`), same class of check as Task 12's
+    // `items-search --name`.
+    //
+    // `--yes` is the exception, and the reason this block exists as its own
+    // section: four of these subcommands are IRREVERSIBLE, and their gate is
+    // the CLI's own (neither sibling has one — the launcher's gate is a
+    // typed-id/two-click confirm UI, and its native commands hardcode
+    // `confirm = true`). See `run.rs::confirm_refusal`.
+    /// Start the server — brings the Docker Desktop engine up first.
+    /// STREAMS NDJSON events.
+    Start {
+        /// Title id. Defaults to this CLI's own title, the one every other
+        /// subcommand resolves implicitly (`dml_wow::config::TITLE`).
+        #[arg(long, default_value = dml_wow::config::TITLE)]
+        id: String,
+    },
+    /// Stop the server — STREAMS NDJSON events. Also stops Docker Desktop
+    /// unless `--no-stop-engine` is given (the launcher's default-ON
+    /// "Stop Docker Desktop when the server stops" preference).
+    Stop {
+        #[arg(long, default_value = dml_wow::config::TITLE)]
+        id: String,
+        /// Stop the Docker Desktop engine afterwards (the default).
+        #[arg(long)]
+        stop_engine: bool,
+        /// Leave the Docker Desktop engine running afterwards.
+        #[arg(long, conflicts_with = "stop_engine")]
+        no_stop_engine: bool,
+    },
+    /// Restart the server — STREAMS NDJSON events. No engine wrapping (a
+    /// restart assumes the engine is already up, matching the launcher).
+    Restart {
+        #[arg(long, default_value = dml_wow::config::TITLE)]
+        id: String,
+        /// "Faster restart": skip the pre-stop saveall. A no-op on the native
+        /// compose path — see `lifecycle::SKIP_SAVEALL_NOTE`.
+        #[arg(long)]
+        no_saveall: bool,
+    },
+    /// Database backups: create / list / validate / delete / restore
+    Backup {
+        #[command(subcommand)]
+        cmd: BackupCmd,
+    },
+    /// Reclaim Docker disk space (build cache, dangling images, stale
+    /// volumes). DESTRUCTIVE — requires `--yes`. STREAMS NDJSON events.
+    DockerClean {
+        /// 1, 2 or 3. NOT range-gated here: `destructive::docker_clean_stream`
+        /// owns that check (and its exact BAD_ARG wording), unlike
+        /// `console-tail --lines`, which has no library-side check behind it.
+        #[arg(long)]
+        level: u8,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Delete every random playerbot and rebuild the population from the
+    /// current settings. DESTRUCTIVE — requires `--yes` AND `--ack flush`.
+    /// STREAMS NDJSON events.
+    BotsFlush {
+        /// The typed acknowledgement. Must be exactly `flush`; defaults to
+        /// empty so an omitted one is a CONFIRM_REQUIRED domain refusal
+        /// (exit 1), not a clap usage error (exit 2) — bash's own `btack=""`.
+        #[arg(long, default_value = "")]
+        ack: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Uninstall a title: its containers, its directory and its launcher.
+    /// DESTRUCTIVE — requires `--yes`. STREAMS NDJSON events.
+    GamesRemove {
+        /// Title id — REQUIRED and never defaulted, unlike `start`/`stop`/
+        /// `restart`: typing the id out is itself part of the confirmation,
+        /// mirroring the launcher's typed-id UI gate.
+        id: String,
+        /// Keep the ~6 GB downloaded client-data volume for a faster reinstall.
+        #[arg(long)]
+        keep_data: bool,
+        /// Also delete the AzerothCore/MySQL images (~3-5 GB).
+        #[arg(long)]
+        remove_images: bool,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Update AzerothCore + mod-playerbots from git — STREAMS NDJSON events.
+    SelfUpdate {
+        #[command(flatten)]
+        backup: BackupChoice,
+    },
+}
+
+/// The `--backup` / `--no-backup` pair, flattened into every subcommand whose
+/// `dml-wow` orchestration takes a `backup: Option<bool>`.
+///
+/// `None` (NEITHER flag) is a REAL, load-bearing third state, not a missing
+/// value to default away: `modmgr::module_rebuild_stream` and
+/// `modmgr::install_lua`/`install_sql` answer it with their own
+/// `BAD_ARG "Pick --backup or --no-backup"` (module SQL lands during the
+/// operation, so the choice must be explicit), while `install_cpp`/`remove_cpp`/
+/// `remove_lua` answer the OPPOSITE way — they reject a backup flag that IS
+/// present ("cpp installs don't take backup flags"). Both rules are the
+/// library's; collapsing `None` into a default here would silently break both.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct BackupChoice {
+    /// Take a safety database backup first
+    #[arg(long)]
+    pub backup: bool,
+    /// Skip the safety database backup
+    #[arg(long = "no-backup", conflicts_with = "backup")]
+    pub no_backup: bool,
+}
+
+impl BackupChoice {
+    /// `Some(true)`/`Some(false)` when exactly one flag was given, `None` when
+    /// neither was — see the struct's doc comment for why `None` matters.
+    /// (`--backup --no-backup` together is a clap conflict, so the two can
+    /// never both be set.)
+    pub fn choice(&self) -> Option<bool> {
+        match (self.backup, self.no_backup) {
+            (true, _) => Some(true),
+            (_, true) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// `dml-wow backup …` — the launcher's native backup family
+/// (`wow_backup_{create,list,validate,delete,restore}_native`).
+#[derive(Subcommand, Debug)]
+pub enum BackupCmd {
+    /// Take a new gzipped mysqldump — STREAMS NDJSON events
+    Create {
+        /// Also dump `acore_world` (much larger, and only needed if you have
+        /// edited world data by hand)
+        #[arg(long)]
+        include_world: bool,
+        /// Display name for the Backups page. Sanitized/bounded by
+        /// `backup::sanitize_backup_name`; empty/absent gets an auto name.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Every backup in `~/.dml/backups`, newest first
+    List,
+    /// Check one backup's gzip integrity and SQL markers
+    Validate {
+        /// File name as reported by `backup list`
+        file: String,
+    },
+    /// Delete one backup file (and its sidecar)
+    Delete {
+        /// File name as reported by `backup list`
+        file: String,
+    },
+    /// Overwrite the live databases from a backup. DESTRUCTIVE — requires
+    /// `--yes`. STREAMS NDJSON events.
+    Restore {
+        /// File name as reported by `backup list`
+        file: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 /// `dml-wow account …` — the four SOAP account actions
@@ -376,13 +543,74 @@ pub enum TuningCmd {
     },
 }
 
-/// `dml-wow module …` — bash's `module list` / `module catalog`.
+/// `dml-wow module …` — bash's `module list` / `module catalog` (Task 11) plus
+/// the five MUTATING arms (Task 14).
+///
+/// The mutating arms keep bash's FLAG spelling (`--family`/`--key`/`--url`/
+/// `--variant`/`--db`/`--mode`/`--files`) rather than this CLI's usual
+/// positional house style, and deliberately: the library's own rejections name
+/// those flags in their message/hint text ("--url and --key are mutually
+/// exclusive", "Invalid --db: x", "Usage: dml wow module update --key
+/// mod-<name>"). Positionals would have made every one of those hints a lie.
 #[derive(Subcommand, Debug)]
 pub enum ModuleCmd {
     /// Every module with its live install/deploy/rebuild state
     List,
     /// The static catalog only — no state read, no files touched
     Catalog,
+    /// Install (or pull) one module — STREAMS NDJSON events
+    Install {
+        /// cpp | lua | sql. Unvalidated here — `modmgr::module_install_stream`
+        /// owns the allowlist and its "Unknown family: x" wording.
+        #[arg(long)]
+        family: String,
+        /// Registry key, e.g. `mod-transmog` (mutually exclusive with `--url`,
+        /// enforced by `modmgr::install_cpp`)
+        #[arg(long)]
+        key: Option<String>,
+        /// Custom C++ module git URL; the key is derived from it
+        #[arg(long)]
+        url: Option<String>,
+        /// Family-specific variant (e.g. a hearthstone/teleporter flavour)
+        #[arg(long)]
+        variant: Option<String>,
+        #[command(flatten)]
+        backup: BackupChoice,
+    },
+    /// Remove one module — STREAMS NDJSON events
+    Remove {
+        #[arg(long)]
+        family: String,
+        #[arg(long)]
+        key: String,
+        #[command(flatten)]
+        backup: BackupChoice,
+    },
+    /// `git pull` one installed C++ module — STREAMS NDJSON events
+    Update {
+        #[arg(long)]
+        key: String,
+    },
+    /// Recompile the server with the pending module changes (30-90 min on a
+    /// cold build) — STREAMS NDJSON events
+    Rebuild {
+        #[command(flatten)]
+        backup: BackupChoice,
+    },
+    /// Mark/clear a module's rows in a database's `updates` tracking table
+    Repair {
+        #[arg(long)]
+        key: String,
+        /// world | characters | auth
+        #[arg(long)]
+        db: String,
+        /// mark | clear
+        #[arg(long)]
+        mode: String,
+        /// Space-separated `.sql` file names; omitted = discover them
+        #[arg(long)]
+        files: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -1075,6 +1303,340 @@ mod tests {
             vec!["dml-wow", "party", "nope"],
         ] {
             assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    // -- Task 14: lifecycle / module mutations / backup / destructive -------
+
+    #[test]
+    fn lifecycle_arms_default_the_title_id() {
+        match Cli::try_parse_from(["dml-wow", "start"]).unwrap().command {
+            Cmd::Start { id } => assert_eq!(id, "wow-server-playerbots"),
+            other => panic!("expected Start, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "stop"]).unwrap().command {
+            Cmd::Stop { id, stop_engine, no_stop_engine } => {
+                assert_eq!(id, "wow-server-playerbots");
+                assert!(!stop_engine);
+                assert!(!no_stop_engine);
+            }
+            other => panic!("expected Stop, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "restart"]).unwrap().command {
+            Cmd::Restart { id, no_saveall } => {
+                assert_eq!(id, "wow-server-playerbots");
+                assert!(!no_saveall);
+            }
+            other => panic!("expected Restart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_arms_take_their_flags() {
+        match Cli::try_parse_from(["dml-wow", "start", "--id", "wow-tbc-server"]).unwrap().command {
+            Cmd::Start { id } => assert_eq!(id, "wow-tbc-server"),
+            other => panic!("expected Start, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "stop", "--no-stop-engine"]).unwrap().command {
+            Cmd::Stop { no_stop_engine, .. } => assert!(no_stop_engine),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "stop", "--stop-engine"]).unwrap().command {
+            Cmd::Stop { stop_engine, .. } => assert!(stop_engine),
+            other => panic!("expected Stop, got {other:?}"),
+        }
+        // The two engine flags are mutually exclusive.
+        assert!(
+            Cli::try_parse_from(["dml-wow", "stop", "--stop-engine", "--no-stop-engine"]).is_err()
+        );
+        match Cli::try_parse_from(["dml-wow", "restart", "--no-saveall"]).unwrap().command {
+            Cmd::Restart { no_saveall, .. } => assert!(no_saveall),
+            other => panic!("expected Restart, got {other:?}"),
+        }
+    }
+
+    /// `BackupChoice` is a THREE-state flag pair, not a defaulted bool — the
+    /// library rejects both "neither given" (rebuild/lua/sql) and "one given"
+    /// (cpp), so `None` has to survive the parse.
+    #[test]
+    fn backup_choice_is_three_state() {
+        let neither = BackupChoice { backup: false, no_backup: false };
+        assert_eq!(neither.choice(), None);
+        assert_eq!(BackupChoice { backup: true, no_backup: false }.choice(), Some(true));
+        assert_eq!(BackupChoice { backup: false, no_backup: true }.choice(), Some(false));
+
+        match Cli::try_parse_from(["dml-wow", "module", "rebuild"]).unwrap().command {
+            Cmd::Module { cmd: ModuleCmd::Rebuild { backup } } => assert_eq!(backup.choice(), None),
+            other => panic!("expected Module Rebuild, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "module", "rebuild", "--backup"]).unwrap().command {
+            Cmd::Module { cmd: ModuleCmd::Rebuild { backup } } => {
+                assert_eq!(backup.choice(), Some(true))
+            }
+            other => panic!("expected Module Rebuild, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "module", "rebuild", "--no-backup"]).unwrap().command {
+            Cmd::Module { cmd: ModuleCmd::Rebuild { backup } } => {
+                assert_eq!(backup.choice(), Some(false))
+            }
+            other => panic!("expected Module Rebuild, got {other:?}"),
+        }
+        // Both at once is a usage error, so `choice()` can never see (true,true).
+        assert!(
+            Cli::try_parse_from(["dml-wow", "module", "rebuild", "--backup", "--no-backup"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_module_mutating_arms() {
+        match Cli::try_parse_from([
+            "dml-wow", "module", "install", "--family", "cpp", "--key", "mod-transmog",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Install { family, key, url, variant, backup } } => {
+                assert_eq!(family, "cpp");
+                assert_eq!(key.as_deref(), Some("mod-transmog"));
+                assert_eq!(url, None);
+                assert_eq!(variant, None);
+                assert_eq!(backup.choice(), None);
+            }
+            other => panic!("expected Module Install, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "module", "install", "--family", "sql", "--key", "hearthstone", "--variant",
+            "dalaran", "--backup",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Install { variant, backup, .. } } => {
+                assert_eq!(variant.as_deref(), Some("dalaran"));
+                assert_eq!(backup.choice(), Some(true));
+            }
+            other => panic!("expected Module Install, got {other:?}"),
+        }
+        // An UNKNOWN family parses fine -- `module_install_stream` owns the
+        // allowlist, exactly like Task 13's builders own theirs.
+        match Cli::try_parse_from(["dml-wow", "module", "install", "--family", "perl"])
+            .unwrap()
+            .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Install { family, .. } } => assert_eq!(family, "perl"),
+            other => panic!("expected Module Install, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "module", "remove", "--family", "cpp", "--key", "mod-transmog",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Remove { family, key, .. } } => {
+                assert_eq!(family, "cpp");
+                assert_eq!(key, "mod-transmog");
+            }
+            other => panic!("expected Module Remove, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "module", "update", "--key", "mod-transmog"])
+            .unwrap()
+            .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Update { key } } => assert_eq!(key, "mod-transmog"),
+            other => panic!("expected Module Update, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "module", "repair", "--key", "mod-transmog", "--db", "world", "--mode",
+            "mark", "--files", "a.sql b.sql",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Module { cmd: ModuleCmd::Repair { key, db, mode, files } } => {
+                assert_eq!(key, "mod-transmog");
+                assert_eq!(db, "world");
+                assert_eq!(mode, "mark");
+                assert_eq!(files.as_deref(), Some("a.sql b.sql"));
+            }
+            other => panic!("expected Module Repair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn module_mutating_arms_require_their_flags() {
+        for argv in [
+            vec!["dml-wow", "module", "install"],              // --family
+            vec!["dml-wow", "module", "remove", "--family", "cpp"], // --key
+            vec!["dml-wow", "module", "remove", "--key", "mod-x"], // --family
+            vec!["dml-wow", "module", "update"],               // --key
+            vec!["dml-wow", "module", "repair", "--key", "mod-x", "--db", "world"], // --mode
+            vec!["dml-wow", "module", "repair", "--db", "world", "--mode", "mark"], // --key
+            vec!["dml-wow", "module", "repair", "--key", "mod-x", "--mode", "mark"], // --db
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn parses_backup_arms() {
+        match Cli::try_parse_from(["dml-wow", "backup", "create"]).unwrap().command {
+            Cmd::Backup { cmd: BackupCmd::Create { include_world, name } } => {
+                assert!(!include_world);
+                assert_eq!(name, None);
+            }
+            other => panic!("expected Backup Create, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "backup", "create", "--include-world", "--name", "before the raid",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::Backup { cmd: BackupCmd::Create { include_world, name } } => {
+                assert!(include_world);
+                assert_eq!(name.as_deref(), Some("before the raid"));
+            }
+            other => panic!("expected Backup Create, got {other:?}"),
+        }
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "backup", "list"]).unwrap().command,
+            Cmd::Backup { cmd: BackupCmd::List }
+        ));
+        match Cli::try_parse_from(["dml-wow", "backup", "validate", "wow-20260101-000000.sql.gz"])
+            .unwrap()
+            .command
+        {
+            Cmd::Backup { cmd: BackupCmd::Validate { file } } => {
+                assert_eq!(file, "wow-20260101-000000.sql.gz")
+            }
+            other => panic!("expected Backup Validate, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "backup", "delete", "wow-20260101-000000.sql.gz"])
+            .unwrap()
+            .command
+        {
+            Cmd::Backup { cmd: BackupCmd::Delete { file } } => {
+                assert_eq!(file, "wow-20260101-000000.sql.gz")
+            }
+            other => panic!("expected Backup Delete, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "backup", "restore", "wow-x.sql.gz", "--yes"])
+            .unwrap()
+            .command
+        {
+            Cmd::Backup { cmd: BackupCmd::Restore { file, yes } } => {
+                assert_eq!(file, "wow-x.sql.gz");
+                assert!(yes);
+            }
+            other => panic!("expected Backup Restore, got {other:?}"),
+        }
+    }
+
+    /// The four destructive arms all PARSE without `--yes` — the refusal is a
+    /// domain CONFIRM_REQUIRED envelope (exit 1) from `run.rs`, deliberately
+    /// NOT a clap usage error (exit 2): a machine consumer must be able to
+    /// tell "you meant this but must confirm" apart from "you typed it wrong".
+    #[test]
+    fn destructive_arms_parse_without_yes_and_default_it_false() {
+        match Cli::try_parse_from(["dml-wow", "backup", "restore", "wow-x.sql.gz"]).unwrap().command
+        {
+            Cmd::Backup { cmd: BackupCmd::Restore { yes, .. } } => assert!(!yes),
+            other => panic!("expected Backup Restore, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "docker-clean", "--level", "2"]).unwrap().command {
+            Cmd::DockerClean { level, yes } => {
+                assert_eq!(level, 2);
+                assert!(!yes);
+            }
+            other => panic!("expected DockerClean, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "bots-flush"]).unwrap().command {
+            Cmd::BotsFlush { ack, yes } => {
+                assert_eq!(ack, "", "an omitted --ack must reach the confirm gate, not clap");
+                assert!(!yes);
+            }
+            other => panic!("expected BotsFlush, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "games-remove", "wow-tbc-server"]).unwrap().command {
+            Cmd::GamesRemove { id, keep_data, remove_images, yes } => {
+                assert_eq!(id, "wow-tbc-server");
+                assert!(!keep_data);
+                assert!(!remove_images);
+                assert!(!yes);
+            }
+            other => panic!("expected GamesRemove, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn destructive_arms_take_their_flags() {
+        match Cli::try_parse_from(["dml-wow", "bots-flush", "--yes", "--ack", "flush"])
+            .unwrap()
+            .command
+        {
+            Cmd::BotsFlush { ack, yes } => {
+                assert_eq!(ack, "flush");
+                assert!(yes);
+            }
+            other => panic!("expected BotsFlush, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow", "games-remove", "wow-tbc-server", "--yes", "--keep-data", "--remove-images",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::GamesRemove { keep_data, remove_images, yes, .. } => {
+                assert!(keep_data);
+                assert!(remove_images);
+                assert!(yes);
+            }
+            other => panic!("expected GamesRemove, got {other:?}"),
+        }
+        // An out-of-range --level still PARSES (u8): the 1..=3 rule is
+        // `docker_clean_stream`'s, so it must reach the library to be refused
+        // in its own words -- the opposite of `console-tail --lines`.
+        match Cli::try_parse_from(["dml-wow", "docker-clean", "--level", "9", "--yes"])
+            .unwrap()
+            .command
+        {
+            Cmd::DockerClean { level, yes } => {
+                assert_eq!(level, 9);
+                assert!(yes);
+            }
+            other => panic!("expected DockerClean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn destructive_and_lifecycle_arms_reject_malformed_argv() {
+        for argv in [
+            vec!["dml-wow", "docker-clean"],                    // --level required
+            vec!["dml-wow", "docker-clean", "--level", "abc"],  // not a number
+            vec!["dml-wow", "docker-clean", "--level", "999"],  // does not fit u8
+            vec!["dml-wow", "games-remove"],                    // id required
+            vec!["dml-wow", "backup"],                          // subcommand required
+            vec!["dml-wow", "backup", "restore"],               // file required
+            vec!["dml-wow", "backup", "validate"],
+            vec!["dml-wow", "backup", "delete"],
+            vec!["dml-wow", "backup", "nope"],
+            vec!["dml-wow", "start", "extra"],
+            vec!["dml-wow", "self-update", "--backup", "--no-backup"],
+        ] {
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?} should be a usage error");
+        }
+    }
+
+    #[test]
+    fn parses_self_update() {
+        match Cli::try_parse_from(["dml-wow", "self-update"]).unwrap().command {
+            Cmd::SelfUpdate { backup } => assert_eq!(backup.choice(), None),
+            other => panic!("expected SelfUpdate, got {other:?}"),
+        }
+        match Cli::try_parse_from(["dml-wow", "self-update", "--no-backup"]).unwrap().command {
+            Cmd::SelfUpdate { backup } => assert_eq!(backup.choice(), Some(false)),
+            other => panic!("expected SelfUpdate, got {other:?}"),
         }
     }
 

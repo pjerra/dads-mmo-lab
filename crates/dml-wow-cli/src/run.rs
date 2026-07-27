@@ -16,7 +16,7 @@
 //! path to keep in sync.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use dml_core::engine::docker_program;
@@ -26,7 +26,7 @@ use dml_wow::db::{DbConfig, DbError};
 use dml_wow::soap::{SoapConfig, SoapOutcome};
 use serde_json::{json, Value};
 
-use crate::cli::{AccountCmd, Cmd, ConfigCmd, GmCmd, ModuleCmd, PartyCmd, TuningCmd};
+use crate::cli::{AccountCmd, BackupCmd, Cmd, ConfigCmd, GmCmd, ModuleCmd, PartyCmd, TuningCmd};
 use crate::out::{emit_err, emit_ok, stream_exit, stream_sink, TerminalSeen};
 
 /// Print a `dml-wow` call's `Result` as the one envelope it maps to, and
@@ -133,6 +133,144 @@ fn soap_fire<T>(
 /// never disagree about which files they are editing.
 fn title_dir() -> PathBuf {
     ConfigReader::title_dir_from_env()
+}
+
+// -- Task 14 shared helpers -------------------------------------------------
+
+/// Run one `dml-wow` streaming orchestration to completion and return the
+/// process exit code, wiring `out.rs`'s documented composition ONCE instead of
+/// in each of the fourteen streaming arms in this file: the stateless NDJSON printer
+/// and the terminal-event tracker are separate objects, and the closure handed
+/// to the orchestration feeds both. `run` takes `&dyn Fn(Value)` (rather than
+/// being generic over the sink) so a single arm can drive SEVERAL streams onto
+/// the same tracker — which `start` (engine-ensure then compose) and `stop`
+/// (compose then engine-stop) both need.
+///
+/// Exit code: `0` iff the last terminal event seen was `done`; `1` for
+/// `error`, and `1` for a stream that ended with NEITHER (a silent death is a
+/// failure to report, not a success).
+fn stream_dispatch(run: impl FnOnce(&dyn Fn(Value))) -> i32 {
+    let seen = TerminalSeen::new();
+    let sink = stream_sink();
+    {
+        let emit = |v: Value| {
+            seen.observe(&v);
+            sink(v);
+        };
+        run(&emit);
+    }
+    stream_exit(&seen)
+}
+
+/// The `--yes` refusal envelope, shared by the four IRREVERSIBLE subcommands
+/// (`backup restore`, `docker-clean`, `bots-flush`, `games-remove`). PURE — no
+/// I/O, no library call — so the gate is unit-testable without a server, a
+/// docker engine, or even a stdout write, and so it CANNOT accidentally run
+/// after something with a side effect.
+///
+/// This gate is the CLI's OWN: neither sibling has a `--yes` parameter at the
+/// API level. The launcher's gate is a UI one (a typed-id / typed-"flush" /
+/// two-click confirm) and its native commands hardcode `confirm = true`;
+/// bash's `games remove`/`bots flush` arms do have `--yes`, but the launcher
+/// hardcodes those too. A CLI has no UI to confirm in, so the flag IS the
+/// confirmation. (`dml_wow::destructive::games_remove_stream` carries its own
+/// ported CONFIRM_REQUIRED gate with a richer, targets-listing message; the
+/// pre-gate here shadows it exactly the way the launcher's hardcoded
+/// `confirm = true` does, and for the same reason — nothing may be probed,
+/// stopped or deleted on the way to telling the caller to confirm.)
+fn confirm_required(cmd: &str) -> CmdError {
+    CmdError {
+        code: "CONFIRM_REQUIRED".into(),
+        message: format!("{cmd} is destructive; re-run with --yes"),
+        hint: String::new(),
+    }
+}
+
+/// `Some(refusal)` when `--yes` was not given, `None` when the command may
+/// proceed. See [`confirm_required`].
+fn confirm_refusal(cmd: &str, yes: bool) -> Option<CmdError> {
+    (!yes).then(|| confirm_required(cmd))
+}
+
+/// `bots-flush`'s gate: BOTH `--yes` and the typed `--ack flush`.
+///
+/// The RULE is not reimplemented here — `dml_wow::lifecycle::
+/// bots_flush_confirmed(confirm, ack)` already encodes it (it is the ported
+/// `90-main.sh:3963` gate), and this only decides which of the two halves to
+/// name in the refusal so the message is actionable rather than merely
+/// correct.
+fn bots_flush_refusal(yes: bool, ack: &str) -> Option<CmdError> {
+    if dml_wow::lifecycle::bots_flush_confirmed(yes, ack) {
+        return None;
+    }
+    let mut refusal = confirm_required("bots-flush");
+    if yes {
+        // `--yes` was given, so what is missing is the acknowledgement itself.
+        refusal.message.push_str(" --ack flush");
+    }
+    Some(refusal)
+}
+
+/// The launcher's `validate_game_id` (`launcher/src-tauri/src/lib.rs:97-102`),
+/// reproduced for the three lifecycle arms because `games_start`/`games_stop`/
+/// `games_restart` run it before their native branch ever reaches
+/// `games_lifecycle_stream` — which itself has NO id check (it goes straight to
+/// `title_dir_for_id`, i.e. `DML_GAMES_DIR`-join-`id`). Controller ruling D1:
+/// the guard stayed in the wrapper, so the CLI must carry its own copy.
+///
+/// Reproduced EXACTLY, warts included: this allows `.` and `..`, so
+/// `--id ..` resolves to the games dir's PARENT. That is the launcher's
+/// behaviour today and the CLI matches it rather than silently diverging; see
+/// the task report's Concerns for the (pre-existing, launcher-side) finding.
+fn valid_game_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The launcher's `bad_id` (`lib.rs:104-110`), same code/message/hint.
+fn bad_id(id: &str) -> CmdError {
+    CmdError {
+        code: "BAD_ID".into(),
+        message: format!("invalid game id: {id:?}"),
+        hint: "Game ids come from games_list".into(),
+    }
+}
+
+/// `~/.dml/backups`, or the launcher's own INTERNAL envelope when it cannot be
+/// resolved — `wow_backup_{list,validate,delete}_native` each open with this
+/// exact check.
+fn backup_dir_or_err() -> Result<PathBuf, CmdError> {
+    dml_wow::backup::backup_dir().ok_or_else(|| CmdError {
+        code: "INTERNAL".into(),
+        message: "Could not resolve the backups directory".into(),
+        hint: String::new(),
+    })
+}
+
+/// The launcher's `require_backup_file` (`lib.rs:4299-4308`), reproduced: the
+/// shared `--file` gate for `backup validate`/`delete` — name shape first
+/// (`BAD_ARG`, and this is the traversal guard, so it MUST precede the join),
+/// then on-disk existence (`NOT_FOUND`). `backup restore` deliberately does
+/// NOT use it: `restore::backup_restore_stream` runs both checks itself, in
+/// the same order, in-stream — matching `wow_backup_restore_native`, which
+/// likewise passes the name straight through.
+fn require_backup_file(bdir: &Path, file: &str) -> Result<PathBuf, CmdError> {
+    if !dml_wow::backup::valid_backup_name(file) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("Invalid backup name: {file}"),
+            hint: String::new(),
+        });
+    }
+    let path = bdir.join(file);
+    if !path.is_file() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: format!("No backup named {file}"),
+            hint: String::new(),
+        });
+    }
+    Ok(path)
 }
 
 /// Read a `config write` body from stdin. Bytes must be valid UTF-8 — the
@@ -413,6 +551,179 @@ pub fn dispatch(command: Cmd) -> i32 {
                 write_lock(),
                 title_dir(),
             ))
+        }
+
+        // -- Task 14: lifecycle, backup/restore, destructive ----------------
+        //
+        // Every arm from here down STREAMS (see [`stream_dispatch`]) except
+        // `backup list`/`validate`/`delete`. The `--yes` gates run FIRST, on
+        // the pure [`confirm_refusal`]/[`bots_flush_refusal`] decisions, so a
+        // refusal is one ordinary error envelope: no stream is opened, no
+        // docker/SOAP/DB call is made, nothing on disk is read or written.
+        Cmd::Start { id } => {
+            // GUARD (`games_start`): the id, before `title_dir_for_id` joins it
+            // onto `DML_GAMES_DIR`.
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // `games_start`'s native branch, in order: the Docker Desktop
+            // engine is a HARD prerequisite (regardless of any toggle) — bring
+            // it up first or abort before touching compose. Its failure path
+            // already emits a terminal `error` event, so the tracker turns that
+            // into exit 1 without this arm inventing an envelope of its own.
+            stream_dispatch(|emit| {
+                if dml_wow::native::ensure_engine_up_stream(emit).is_err() {
+                    return;
+                }
+                dml_wow::lifecycle::games_lifecycle_stream("start", id, false, emit);
+            })
+        }
+
+        Cmd::Stop { id, stop_engine, no_stop_engine } => {
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // `games_stop`'s native branch: stop the stack, THEN free the VM's
+            // RAM by stopping the engine — best-effort, and only when the
+            // manage-docker preference says so. The decision is
+            // `dml_core::engine::stop_engine_enabled`'s, not a second copy:
+            // `None` (neither flag) means "the caller didn't thread the
+            // toggle", which that function documents as default-ON, the same
+            // answer the launcher's default-checked Tools-page checkbox gives.
+            // `native = true` unconditionally — this binary IS the native
+            // backend (`version` reports `"backend":"native"`).
+            let manage = match (stop_engine, no_stop_engine) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            stream_dispatch(|emit| {
+                dml_wow::lifecycle::games_lifecycle_stream("stop", id, false, emit);
+                if dml_wow::native::stop_engine_enabled(true, manage) {
+                    // Emits `line` events only — never a terminal one — so the
+                    // exit code still comes from the stop above, exactly as the
+                    // launcher's `result` does.
+                    dml_wow::native::stop_engine_stream(emit);
+                }
+            })
+        }
+
+        Cmd::Restart { id, no_saveall } => {
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // No engine wrapping, matching `games_restart`: a restart assumes
+            // the server -- and so the engine -- is already up.
+            stream_dispatch(|emit| {
+                dml_wow::lifecycle::games_lifecycle_stream("restart", id, no_saveall, emit)
+            })
+        }
+
+        Cmd::Backup { cmd } => dispatch_backup(cmd),
+
+        Cmd::DockerClean { level, yes } => {
+            if let Some(e) = confirm_refusal("docker-clean", yes) {
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // `--level`'s 1..=3 rule is `docker_clean_stream`'s own first check
+            // (in-stream BAD_ARG, before it touches docker) — `wow_docker_clean_native`
+            // adds nothing either.
+            stream_dispatch(|emit| dml_wow::destructive::docker_clean_stream(level, emit))
+        }
+
+        Cmd::BotsFlush { ack, yes } => {
+            if let Some(e) = bots_flush_refusal(yes, &ack) {
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            let db_cfg = DbConfig::from_env();
+            stream_dispatch(|emit| {
+                dml_wow::destructive::bots_flush_stream(soap_lock(), db_cfg, emit)
+            })
+        }
+
+        Cmd::GamesRemove { id, keep_data, remove_images, yes } => {
+            if let Some(e) = confirm_refusal("games-remove", yes) {
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // No id guard here, matching `games_remove_native` exactly: the
+            // traversal guard is `destructive::title_row`'s EXACT registry
+            // match, which `games_remove_stream` runs before any path is built
+            // (see its doc comment) — a stricter check here would only change
+            // the error code for garbage input. `confirm = true` because
+            // `--yes` was given; the gate above is what enforces that.
+            stream_dispatch(|emit| {
+                dml_wow::destructive::games_remove_stream(id, keep_data, remove_images, true, emit)
+            })
+        }
+
+        Cmd::SelfUpdate { backup } => {
+            // `backup.choice() == None` is passed THROUGH, not defaulted: it is
+            // `update_stream`'s own last fail-closed gate ("Pick --backup or
+            // --no-backup"), matching `wow_update_native`'s `Option<bool>`.
+            stream_dispatch(|emit| dml_wow::maint::update_stream(backup.choice(), emit))
+        }
+    }
+}
+
+/// `dml-wow backup …` — the launcher's five native backup commands.
+/// `create`/`restore` stream; `list`/`validate`/`delete` are plain envelopes.
+fn dispatch_backup(cmd: BackupCmd) -> i32 {
+    match cmd {
+        BackupCmd::Create { include_world, name } => {
+            // Additive: writes ONE new `.sql.gz` (plus its sidecar) under
+            // `~/.dml/backups` and prunes to the keep-N pool. No guards in
+            // `wow_backup_create_native` beyond the backend check; `name` is
+            // sanitized inside `backup_create_stream`.
+            let db_cfg = DbConfig::from_env();
+            stream_dispatch(|emit| {
+                dml_wow::backup::backup_create_stream(include_world, name, db_cfg, emit)
+            })
+        }
+
+        BackupCmd::List => emit_result(backup_dir_or_err().map(|bdir| {
+            let backups: Vec<Value> = dml_wow::backup::list_backups(&bdir)
+                .into_iter()
+                .map(|e| {
+                    json!({
+                        "file": e.file, "size": e.size, "created": e.created,
+                        "world": e.world, "summary": e.summary, "name": e.name,
+                    })
+                })
+                .collect();
+            json!({ "backups": backups })
+        })),
+
+        BackupCmd::Validate { file } => emit_result(backup_dir_or_err().and_then(|bdir| {
+            let path = require_backup_file(&bdir, &file)?;
+            let result = dml_wow::backup::validate_backup(&path);
+            Ok(dml_wow::backup::validate_result_json(&file, &result))
+        })),
+
+        BackupCmd::Delete { file } => emit_result(backup_dir_or_err().and_then(|bdir| {
+            // The name gate runs BEFORE the delete, and the existence check
+            // before that decides NOT_FOUND vs a silent no-op — both are
+            // `require_backup_file`'s, so `delete_backup` (which also drops the
+            // `.meta.json` sidecar) only ever sees a validated, present file.
+            require_backup_file(&bdir, &file)?;
+            dml_wow::backup::delete_backup(&bdir, &file);
+            Ok(json!({ "deleted": true, "file": file }))
+        })),
+
+        BackupCmd::Restore { file, yes } => {
+            if let Some(e) = confirm_refusal("backup restore", yes) {
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // No name/existence pre-check, matching `wow_backup_restore_native`:
+            // `backup_restore_stream` runs `valid_backup_name` then the on-disk
+            // check as its own first two steps, in-stream, before it stops a
+            // single container.
+            let db_cfg = DbConfig::from_env();
+            stream_dispatch(|emit| {
+                dml_wow::restore::backup_restore_stream(file, soap_lock(), db_cfg, emit)
+            })
         }
     }
 }
@@ -748,14 +1059,14 @@ fn dispatch_party(cmd: PartyCmd) -> i32 {
             // stateless printer and the terminal-event tracker are separate,
             // and the closure feeds both. Exit code comes from which terminal
             // event ended the stream — `done` -> 0, `error` (or no terminal
-            // event at all) -> 1.
-            let seen = TerminalSeen::new();
-            let sink = stream_sink();
-            dml_wow::party::party_preset_load_stream(player, name, soap_lock(), |v| {
-                seen.observe(&v);
-                sink(v);
-            });
-            stream_exit(&seen)
+            // event at all) -> 1. That composition now lives in ONE place,
+            // [`stream_dispatch`] (Task 14): this arm was where it was first
+            // spelled out, and hand-inlining it a second time in each of the
+            // thirteen arms that task added would have been thirteen chances
+            // for one of them to forget the tracker and always exit 0.
+            stream_dispatch(|emit| {
+                dml_wow::party::party_preset_load_stream(player, name, soap_lock(), emit)
+            })
         }
     }
 }
@@ -835,8 +1146,24 @@ fn dispatch_tuning(cmd: TuningCmd) -> i32 {
     }
 }
 
-/// `dml-wow module …` — the launcher's `wow_module_read` path (`list`) and
-/// the embedded static catalog it is assembled from (`catalog`).
+/// `dml-wow module …` — the launcher's `wow_module_read` path (`list`), the
+/// embedded static catalog it is assembled from (`catalog`), and the five
+/// MUTATING commands (Task 14).
+///
+/// GUARD NOTE (controller ruling D1). `install`/`remove`/`update`/`rebuild`
+/// need NO guards here, and that is a checked fact rather than an assumption:
+/// `wow_module_{install,remove,update,rebuild}_native` run `require_native_backend()`
+/// and NOTHING else before `spawn_blocking` — every rule (the family
+/// allowlist, `valid_cpp_key`, `valid_module_url`, the `--url`/`--key`
+/// exclusivity, the per-family backup-flag rules, "not installed", "not a git
+/// checkout", the mod-playerbots refusal) lives inside the `_stream` functions
+/// and their `install_*`/`remove_*`/`update_module` bodies, which emit their
+/// own in-stream BAD_ARG/NOT_FOUND before any git/docker/SQL call.
+/// `repair` is the exception, and the one this task's brief names: its three
+/// closed-allowlist checks STAYED in the Tauri wrapper, and
+/// `moduletail::module_repair` PANICS (`database_for_short(&db).expect(
+/// "validated above")`) on a `--db` that never passed one. All three are
+/// reproduced below, in the wrapper's order.
 fn dispatch_module(cmd: ModuleCmd) -> i32 {
     match cmd {
         ModuleCmd::List => {
@@ -844,5 +1171,194 @@ fn dispatch_module(cmd: ModuleCmd) -> i32 {
             emit_ok(reader.assemble(dml_wow::registry::module_catalog()))
         }
         ModuleCmd::Catalog => emit_ok(dml_wow::registry::module_catalog().clone()),
+
+        ModuleCmd::Install { family, key, url, variant, backup } => {
+            let db_cfg = DbConfig::from_env();
+            let backup = backup.choice();
+            stream_dispatch(|emit| {
+                dml_wow::modmgr::module_install_stream(family, key, url, backup, variant, db_cfg, emit)
+            })
+        }
+
+        ModuleCmd::Remove { family, key, backup } => {
+            let db_cfg = DbConfig::from_env();
+            let backup = backup.choice();
+            stream_dispatch(|emit| {
+                dml_wow::modmgr::module_remove_stream(family, key, backup, db_cfg, emit)
+            })
+        }
+
+        ModuleCmd::Update { key } => {
+            stream_dispatch(|emit| dml_wow::modmgr::module_update_stream(key, emit))
+        }
+
+        ModuleCmd::Rebuild { backup } => {
+            let db_cfg = DbConfig::from_env();
+            let backup = backup.choice();
+            stream_dispatch(|emit| dml_wow::modmgr::module_rebuild_stream(backup, db_cfg, emit))
+        }
+
+        ModuleCmd::Repair { key, db, mode, files } => {
+            // GUARDS (`wow_module_repair_native`, lib.rs:1050-1058), same
+            // order, same code/message/hint. The `--db` one is load-bearing
+            // beyond input hygiene: without it `module_repair`'s
+            // `database_for_short(&db).expect("validated above")` PANICS
+            // (exit 101, no envelope at all) instead of answering BAD_ARG.
+            if !dml_wow::modules::valid_cpp_key(&key) {
+                return emit_err("BAD_ARG", &format!("Invalid module key: {key}"), "");
+            }
+            if !matches!(db.as_str(), "world" | "characters" | "auth") {
+                return emit_err(
+                    "BAD_ARG",
+                    &format!("Invalid --db: {db}"),
+                    "Use world, characters, or auth.",
+                );
+            }
+            if !matches!(mode.as_str(), "mark" | "clear") {
+                return emit_err("BAD_ARG", &format!("Invalid --mode: {mode}"), "Use mark or clear.");
+            }
+            emit_result(dml_wow::moduletail::module_repair(key, db, mode, files))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Task 14: the `--yes` gate ------------------------------------------
+    //
+    // These are the PURE halves of the destructive arms' guards, unit-tested
+    // in-process with no server, no docker engine, no filesystem and no stdout
+    // write — which is exactly what makes them safe to assert on: a test that
+    // could only observe the gate by letting the command run would have to run
+    // the command. The "fires BEFORE any side effect" half is proven
+    // separately, at the process boundary, in `tests/cli_integration.rs`
+    // (sealed environment + before/after snapshots).
+
+    #[test]
+    fn confirm_refusal_is_none_when_yes_is_given() {
+        assert!(confirm_refusal("backup restore", true).is_none());
+        assert!(confirm_refusal("docker-clean", true).is_none());
+        assert!(confirm_refusal("games-remove", true).is_none());
+    }
+
+    #[test]
+    fn confirm_refusal_is_the_briefs_exact_envelope_without_yes() {
+        for cmd in ["backup restore", "docker-clean", "games-remove"] {
+            let e = confirm_refusal(cmd, false).expect("must refuse without --yes");
+            assert_eq!(e.code, "CONFIRM_REQUIRED");
+            assert_eq!(e.message, format!("{cmd} is destructive; re-run with --yes"));
+            assert_eq!(e.hint, "");
+        }
+    }
+
+    /// `bots-flush` needs BOTH halves. The rule itself is
+    /// `lifecycle::bots_flush_confirmed`'s (asserted here against the same
+    /// truth table so a drift in either direction fails), and only the WORDING
+    /// distinguishes which half was missing.
+    #[test]
+    fn bots_flush_refusal_requires_both_yes_and_the_typed_ack() {
+        // Passes only for (true, "flush") -- and agrees with the library rule.
+        assert!(bots_flush_refusal(true, "flush").is_none());
+        assert!(dml_wow::lifecycle::bots_flush_confirmed(true, "flush"));
+
+        for (yes, ack) in [(false, "flush"), (false, ""), (true, ""), (true, "FLUSH"), (true, "yes")]
+        {
+            assert!(
+                !dml_wow::lifecycle::bots_flush_confirmed(yes, ack),
+                "library rule changed for ({yes}, {ack:?})"
+            );
+            let e = bots_flush_refusal(yes, ack)
+                .unwrap_or_else(|| panic!("must refuse ({yes}, {ack:?})"));
+            assert_eq!(e.code, "CONFIRM_REQUIRED");
+            assert_eq!(e.hint, "");
+            if yes {
+                assert_eq!(e.message, "bots-flush is destructive; re-run with --yes --ack flush");
+            } else {
+                assert_eq!(e.message, "bots-flush is destructive; re-run with --yes");
+            }
+        }
+    }
+
+    // -- the reproduced launcher guards --------------------------------------
+
+    #[test]
+    fn valid_game_id_matches_the_launchers_rule() {
+        assert!(valid_game_id("wow-server-playerbots"));
+        assert!(valid_game_id("wow_tbc.server-1"));
+        assert!(!valid_game_id(""));
+        assert!(!valid_game_id("wow/../etc"));
+        assert!(!valid_game_id("wow server"));
+        assert!(!valid_game_id("wow;rm"));
+        assert!(!valid_game_id("wow\\evil"));
+        // Reproduced warts (see `valid_game_id`'s doc comment + the report):
+        // the launcher's rule accepts bare dots.
+        assert!(valid_game_id(".."));
+    }
+
+    #[test]
+    fn bad_id_is_the_launchers_exact_envelope() {
+        let e = bad_id("wow server");
+        assert_eq!(e.code, "BAD_ID");
+        assert_eq!(e.message, "invalid game id: \"wow server\"");
+        assert_eq!(e.hint, "Game ids come from games_list");
+    }
+
+    /// Controller ruling D1, made a checkable fact rather than a claim:
+    /// `moduletail::module_repair` ends its argument handling with
+    /// `database_for_short(&db).expect("validated above")`, so the `--db`
+    /// allowlist in [`dispatch_module`]'s `Repair` arm is the ONLY thing
+    /// standing between a bad `--db` and a process panic (exit 101, no
+    /// envelope at all — a broken contract, not an error). This pins that:
+    /// exactly the three allowlisted spellings resolve, and every near-miss
+    /// the guard rejects would indeed have reached the `expect`.
+    #[test]
+    fn the_repair_db_allowlist_is_load_bearing_not_decorative() {
+        for good in ["world", "characters", "auth"] {
+            assert!(
+                dml_wow::moduletail::database_for_short(good).is_some(),
+                "{good} must be accepted by BOTH the guard and the library"
+            );
+        }
+        for bad in ["acore_world", "World", "AUTH", "", "world ", "world;drop"] {
+            assert!(
+                dml_wow::moduletail::database_for_short(bad).is_none(),
+                "`module repair --db {bad}` would hit `.expect(\"validated above\")` and PANIC"
+            );
+        }
+    }
+
+    #[test]
+    fn require_backup_file_rejects_a_bad_name_before_touching_the_dir() {
+        // A dir that does NOT exist: if the name gate did not run first, the
+        // join+`is_file` would be the thing that failed, and with the WRONG
+        // code (NOT_FOUND instead of BAD_ARG).
+        let nowhere = std::env::temp_dir().join("dml-cli-t14-no-such-backup-dir");
+        for bad in ["../../etc/passwd", "wow.sql.gz\0", "not a backup", ""] {
+            let e = require_backup_file(&nowhere, bad).expect_err("must reject");
+            assert_eq!(e.code, "BAD_ARG", "{bad:?}");
+            assert_eq!(e.message, format!("Invalid backup name: {bad}"));
+        }
+    }
+
+    #[test]
+    fn require_backup_file_reports_not_found_for_a_wellformed_absent_file() {
+        let nowhere = std::env::temp_dir().join("dml-cli-t14-no-such-backup-dir");
+        let e = require_backup_file(&nowhere, "wow-20260101-000000.sql.gz").expect_err("absent");
+        assert_eq!(e.code, "NOT_FOUND");
+        assert_eq!(e.message, "No backup named wow-20260101-000000.sql.gz");
+    }
+
+    #[test]
+    fn require_backup_file_accepts_a_present_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-cli-t14-backupdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = "wow-20260101-000000.sql.gz";
+        std::fs::write(dir.join(name), b"not really gzip").unwrap();
+        assert_eq!(require_backup_file(&dir, name).unwrap(), dir.join(name));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

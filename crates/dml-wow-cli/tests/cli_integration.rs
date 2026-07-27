@@ -935,6 +935,381 @@ fn preset_list_and_delete_round_trip_in_a_private_home() {
     assert!(s.presets().join("raiders").exists());
 }
 
+// ---------------------------------------------------------------------------
+// Task 14: lifecycle, module mutations, backup/restore and the four DESTRUCTIVE
+// subcommands.
+//
+// SAFETY RULE FOR THIS WHOLE SECTION, and it is absolute: `backup restore`,
+// `docker-clean`, `bots-flush` and `games-remove` are NEVER invoked with
+// `--yes` anywhere in this file — not even in a sealed environment, not even
+// with an argument the library would refuse at its first statement. Every test
+// below exercises the REFUSAL side of those four, plus the non-destructive
+// arms. What the `--yes` path actually does when it is allowed to run is owed
+// to the user's supervised smoke session, and is recorded as such in the task
+// report.
+//
+// Everything reuses [`Sealed`] from the Task 13 block above: a dead SOAP
+// endpoint, a dead MySQL port, and a private HOME/USERPROFILE + games dir. A
+// guard that fires produces its own envelope; a guard that DIDN'T fire would
+// instead reach the sealed wall (SOAP_UNREACHABLE / DB_UNREACHABLE) or, for
+// the streaming arms, an NDJSON stream whose `section_start` line is visible
+// in stdout. Asserting the envelope AND the line count therefore pins the
+// ordering, not merely that an error happened.
+// ---------------------------------------------------------------------------
+
+impl Sealed {
+    /// `~/.dml/backups`, the dir `backup::backup_dir()` resolves to inside
+    /// this sandbox.
+    fn backups(&self) -> PathBuf {
+        self.home().join(".dml").join("backups")
+    }
+
+    /// Run `dml-wow <args>` sealed and return (exit code, every non-blank
+    /// stdout line parsed as JSON). For a single-envelope command that is one
+    /// element; for a streaming one it is the whole NDJSON event list.
+    fn run_lines(&self, args: &[&str]) -> (i32, Vec<serde_json::Value>) {
+        let out = self
+            .cmd(args)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn dml-wow {args:?}: {e}"));
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let lines = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l:?}"))
+            })
+            .collect();
+        (out.status.code().unwrap_or(-1), lines)
+    }
+}
+
+/// Assert one sealed invocation is refused by the `--yes` gate: exit 1,
+/// EXACTLY ONE line on stdout (an envelope, never a half-opened NDJSON
+/// stream), and the brief's CONFIRM_REQUIRED shape.
+fn assert_confirm_required(s: &Sealed, args: &[&str], message: &str) {
+    let (code, lines) = s.run_lines(args);
+    assert_eq!(code, 1, "{args:?} must exit 1, got lines: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "{args:?} must print ONE envelope and open no stream, got: {lines:?}"
+    );
+    let envelope = &lines[0];
+    assert!(envelope["event"].is_null(), "{args:?}: an envelope, not a stream event: {envelope}");
+    assert_eq!(envelope["ok"], false, "{args:?}: {envelope}");
+    assert_eq!(envelope["error"]["code"], "CONFIRM_REQUIRED", "{args:?}: {envelope}");
+    assert_eq!(envelope["error"]["message"], message, "{args:?}: {envelope}");
+    assert_eq!(envelope["error"]["hint"], "", "{args:?}: {envelope}");
+}
+
+/// THE plan-required test #1: `backup restore` without `--yes` refuses, and
+/// the backups directory is byte-identical afterwards — no pre-restore safety
+/// dump was taken, nothing was renamed, and (the point) no container was ever
+/// asked to stop, because the gate runs before the stream opens.
+#[test]
+fn backup_restore_without_yes_is_refused_and_touches_no_file() {
+    let s = Sealed::new("restoreguard");
+    fs::create_dir_all(s.backups()).unwrap();
+    // A well-formed, PRESENT backup name: so the refusal cannot be mistaken for
+    // the library's own `Invalid backup name`/`No backup named` checks, which
+    // would both have been reached only by opening the stream.
+    let file = "wow-20260101-000000.sql.gz";
+    fs::write(s.backups().join(file), b"pretend gzip").unwrap();
+    let before = s.home_snapshot();
+
+    assert_confirm_required(
+        &s,
+        &["backup", "restore", file],
+        "backup restore is destructive; re-run with --yes",
+    );
+
+    assert_eq!(s.home_snapshot(), before, "a refused restore must not change ANY file");
+    assert!(s.backups().join(file).exists(), "the backup itself must still be there");
+    // A restore that had started would have written this alongside it.
+    let (prerestore, _) = ("wow-20260101-000000-prerestore.sql.gz", ());
+    assert!(!s.backups().join(prerestore).exists(), "no pre-restore dump may be taken");
+}
+
+/// THE plan-required test #2: `bots-flush` needs BOTH halves, and neither the
+/// arm marker nor the conf flag may be written on the way to saying so. (An
+/// interrupted flush is exactly what `lifecycle::flush_heal_flag` exists to
+/// clean up — so a refusal that armed the flag first would be a bot-wipe
+/// hazard, not merely an untidy error path.)
+#[test]
+fn bots_flush_without_yes_or_ack_is_refused_and_arms_nothing() {
+    let s = Sealed::new("flushguard");
+    let before = s.home_snapshot();
+
+    assert_confirm_required(
+        &s,
+        &["bots-flush"],
+        "bots-flush is destructive; re-run with --yes",
+    );
+    assert_confirm_required(
+        &s,
+        &["bots-flush", "--ack", "flush"],
+        "bots-flush is destructive; re-run with --yes",
+    );
+    // `--yes` alone is NOT enough, and the message says which half is missing.
+    assert_confirm_required(
+        &s,
+        &["bots-flush", "--yes"],
+        "bots-flush is destructive; re-run with --yes --ack flush",
+    );
+    assert_confirm_required(
+        &s,
+        &["bots-flush", "--yes", "--ack", "FLUSH"],
+        "bots-flush is destructive; re-run with --yes --ack flush",
+    );
+    assert_confirm_required(
+        &s,
+        &["bots-flush", "--yes", "--ack", "yes"],
+        "bots-flush is destructive; re-run with --yes --ack flush",
+    );
+
+    assert_eq!(s.home_snapshot(), before, "a refused flush must not change ANY file");
+    // The arm marker lives next to the compose file, in the games dir.
+    let marker = s.root.join("games").join("wow-server-playerbots").join(".dml-bot-flush-armed");
+    assert!(!marker.exists(), "the delete-flag marker must never be written by a refusal");
+}
+
+#[test]
+fn docker_clean_and_games_remove_without_yes_are_refused_and_change_nothing() {
+    let s = Sealed::new("destructiveguards");
+    // A title dir that LOOKS installed, so `games-remove`'s refusal cannot be
+    // the library's own `NOT_FOUND` (which would mean the stream had opened).
+    let title = s.root.join("games").join("wow-tbc-server");
+    fs::create_dir_all(&title).unwrap();
+    fs::write(title.join("docker-compose.yml"), "services: {}\n").unwrap();
+
+    assert_confirm_required(
+        &s,
+        &["docker-clean", "--level", "1"],
+        "docker-clean is destructive; re-run with --yes",
+    );
+    // The `--yes` gate precedes even the library's own `--level` 1..=3 check:
+    // an out-of-range level with no `--yes` is still CONFIRM_REQUIRED, not
+    // BAD_ARG. (This is the ONLY place an out-of-range level is exercised at
+    // all — `docker-clean --yes` is never run in this suite.)
+    assert_confirm_required(
+        &s,
+        &["docker-clean", "--level", "9"],
+        "docker-clean is destructive; re-run with --yes",
+    );
+    assert_confirm_required(
+        &s,
+        &["games-remove", "wow-tbc-server"],
+        "games-remove is destructive; re-run with --yes",
+    );
+    assert_confirm_required(
+        &s,
+        &["games-remove", "wow-tbc-server", "--keep-data", "--remove-images"],
+        "games-remove is destructive; re-run with --yes",
+    );
+    // Even a title that isn't in the registry at all stops at the CONFIRM gate
+    // rather than at `title_row`'s "Unknown title" — nothing is probed on the
+    // way to asking for confirmation.
+    assert_confirm_required(
+        &s,
+        &["games-remove", "definitely-not-a-title"],
+        "games-remove is destructive; re-run with --yes",
+    );
+
+    assert!(title.join("docker-compose.yml").is_file(), "the title dir must be untouched");
+}
+
+/// The three lifecycle arms reproduce the launcher's `validate_game_id` guard,
+/// and it fires before ANY docker call — including, for `start`, the Docker
+/// Desktop engine-ensure step that would otherwise be the very first thing to
+/// run. One envelope, no stream, exit 1.
+#[test]
+fn lifecycle_arms_reject_a_bad_id_before_touching_docker() {
+    let s = Sealed::new("badid");
+    for verb in ["start", "stop", "restart"] {
+        let (code, lines) = s.run_lines(&[verb, "--id", "wow/../etc"]);
+        assert_eq!(code, 1, "{verb}: {lines:?}");
+        assert_eq!(lines.len(), 1, "{verb} must open no stream, got: {lines:?}");
+        assert_eq!(lines[0]["error"]["code"], "BAD_ID", "{verb}: {}", lines[0]);
+        assert_eq!(lines[0]["error"]["message"], "invalid game id: \"wow/../etc\"", "{verb}");
+        assert_eq!(lines[0]["error"]["hint"], "Game ids come from games_list", "{verb}");
+    }
+    // An empty id is refused the same way (and never becomes a bare join).
+    let (code, lines) = s.run_lines(&["restart", "--id", ""]);
+    assert_eq!(code, 1);
+    assert_eq!(lines[0]["error"]["code"], "BAD_ID", "{}", lines[0]);
+}
+
+/// `module repair`'s three closed-allowlist guards (controller ruling D1). The
+/// `--db` one is the load-bearing case: `moduletail::module_repair` does
+/// `database_for_short(&db).expect("validated above")`, so WITHOUT this guard
+/// a bad `--db` is a PANIC (exit 101, no envelope at all) rather than a
+/// BAD_ARG. Exit 1 + a well-formed envelope is what proves the guard is there.
+#[test]
+fn module_repair_rejects_bad_key_db_and_mode_before_any_sql() {
+    let s = Sealed::new("repairguard");
+
+    let (code, lines) = s.run_lines(&["module", "repair", "--key", "transmog", "--db", "world", "--mode", "mark"]);
+    assert_eq!(code, 1, "{lines:?}");
+    assert_eq!(lines[0]["error"]["code"], "BAD_ARG", "{}", lines[0]);
+    assert_eq!(lines[0]["error"]["message"], "Invalid module key: transmog");
+
+    for bad_db in ["acore_world", "world; DROP DATABASE acore_world", "World", ""] {
+        let (code, lines) =
+            s.run_lines(&["module", "repair", "--key", "mod-transmog", "--db", bad_db, "--mode", "mark"]);
+        assert_eq!(code, 1, "--db {bad_db:?} must be a clean BAD_ARG, not a panic: {lines:?}");
+        assert_eq!(lines.len(), 1, "--db {bad_db:?}: {lines:?}");
+        assert_eq!(lines[0]["error"]["code"], "BAD_ARG", "--db {bad_db:?}: {}", lines[0]);
+        assert_eq!(lines[0]["error"]["message"], format!("Invalid --db: {bad_db}"));
+        assert_eq!(lines[0]["error"]["hint"], "Use world, characters, or auth.");
+    }
+
+    for bad_mode in ["delete", "Mark", ""] {
+        let (code, lines) =
+            s.run_lines(&["module", "repair", "--key", "mod-transmog", "--db", "world", "--mode", bad_mode]);
+        assert_eq!(code, 1, "--mode {bad_mode:?}: {lines:?}");
+        assert_eq!(lines[0]["error"]["code"], "BAD_ARG", "--mode {bad_mode:?}: {}", lines[0]);
+        assert_eq!(lines[0]["error"]["message"], format!("Invalid --mode: {bad_mode}"));
+        assert_eq!(lines[0]["error"]["hint"], "Use mark or clear.");
+    }
+
+    // ORDERING PROOF: with all three arguments valid, the guards pass and the
+    // library is reached — where the sealed (empty) games dir stops it at
+    // "server not installed", before any DB round trip.
+    let (code, lines) =
+        s.run_lines(&["module", "repair", "--key", "mod-transmog", "--db", "world", "--mode", "mark"]);
+    assert_eq!(code, 1, "{lines:?}");
+    assert_eq!(lines[0]["error"]["code"], "NOT_FOUND", "{}", lines[0]);
+    assert_eq!(lines[0]["error"]["message"], "WoW Playerbots server not installed");
+}
+
+/// `module rebuild` with NEITHER `--backup` nor `--no-backup` is the
+/// three-state flag pair's whole reason for existing: the library refuses it
+/// ("Module SQL lands during the rebuild -- decide explicitly"), and it does so
+/// as its FIRST statement, before the server dir is even resolved. Also the
+/// smallest end-to-end proof that a module arm's streaming wiring is correct:
+/// section_start -> section_end(error) -> error, exit 1.
+#[test]
+fn module_rebuild_without_a_backup_choice_streams_bad_arg_and_exits_1() {
+    let s = Sealed::new("rebuildchoice");
+    let (code, lines) = s.run_lines(&["module", "rebuild"]);
+    assert_eq!(code, 1, "{lines:?}");
+    assert_eq!(lines.first().map(|e| e["event"].clone()), Some(serde_json::json!("section_start")));
+    assert_eq!(lines[0]["name"], "module-rebuild");
+    let last = lines.last().expect("a terminal event");
+    assert_eq!(last["event"], "error", "{lines:?}");
+    assert_eq!(last["error"]["code"], "BAD_ARG");
+    assert_eq!(last["error"]["message"], "Pick --backup or --no-backup");
+
+    // ...and WITH an explicit choice the gate passes, so the next gate (server
+    // installed?) is what answers. Same stream shape, different code — which is
+    // what proves the assertion above was the backup gate and not a blanket
+    // refusal of `module rebuild`.
+    let (code, lines) = s.run_lines(&["module", "rebuild", "--no-backup"]);
+    assert_eq!(code, 1, "{lines:?}");
+    let last = lines.last().expect("a terminal event");
+    assert_eq!(last["error"]["code"], "NOT_FOUND", "{lines:?}");
+    assert_eq!(last["error"]["message"], "WoW Playerbots server not installed");
+}
+
+/// The other module mutators and `self-update` are wired and stream: with no
+/// server in the sealed games dir every one of them stops at its first gate,
+/// having run no git, no docker and no SQL.
+#[test]
+fn module_mutators_and_self_update_stream_their_first_gate() {
+    let s = Sealed::new("modstreams");
+    for args in [
+        vec!["module", "install", "--family", "cpp", "--key", "mod-transmog"],
+        vec!["module", "install", "--family", "perl"],
+        vec!["module", "remove", "--family", "cpp", "--key", "mod-transmog"],
+        vec!["module", "update", "--key", "mod-transmog"],
+        vec!["self-update", "--no-backup"],
+        vec!["self-update"],
+    ] {
+        let (code, lines) = s.run_lines(&args);
+        assert_eq!(code, 1, "{args:?}: {lines:?}");
+        assert_eq!(
+            lines.first().map(|e| e["event"].clone()),
+            Some(serde_json::json!("section_start")),
+            "{args:?} must STREAM: {lines:?}"
+        );
+        let last = lines.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{args:?}: {lines:?}");
+        assert_eq!(
+            last["error"]["code"], "NOT_FOUND",
+            "{args:?} must stop at the server-dir gate: {lines:?}"
+        );
+        assert_eq!(last["error"]["message"], "WoW Playerbots server not installed", "{args:?}");
+    }
+}
+
+/// The read/write backup family, end to end inside the private home — the
+/// non-destructive half of `backup`, and the proof that `require_backup_file`'s
+/// two-step gate (name shape, then existence) is reproduced faithfully.
+#[test]
+fn backup_list_validate_and_delete_round_trip_in_a_private_home() {
+    let s = Sealed::new("backuprt");
+
+    // (1) No backups dir at all -> an empty list, not an error, and nothing
+    // created just by asking.
+    let (code, envelope) = s.run(&["backup", "list"]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["backups"].as_array().expect("backups[]").len(), 0);
+    assert!(!s.backups().exists(), "listing must not create the directory");
+
+    // (2) A traversal name is BAD_ARG on BOTH gated arms, and the join never
+    // happens — proven by the dir still not existing and nothing appearing
+    // outside it.
+    for verb in ["validate", "delete"] {
+        for bad in ["../../evil.sql.gz", "wow-x.sql.gz", "not a backup"] {
+            let (code, envelope) = s.run(&["backup", verb, bad]);
+            assert_eq!(code, 1, "backup {verb} {bad:?}: {envelope}");
+            assert_eq!(envelope["error"]["code"], "BAD_ARG", "backup {verb} {bad:?}: {envelope}");
+            assert_eq!(envelope["error"]["message"], format!("Invalid backup name: {bad}"));
+        }
+    }
+    assert!(!s.home().join("evil.sql.gz").exists());
+
+    // (3) A well-formed but absent name is NOT_FOUND (the second gate).
+    fs::create_dir_all(s.backups()).unwrap();
+    let absent = "wow-20260101-000000.sql.gz";
+    let (code, envelope) = s.run(&["backup", "validate", absent]);
+    assert_eq!(code, 1, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "NOT_FOUND");
+    assert_eq!(envelope["error"]["message"], format!("No backup named {absent}"));
+
+    // (4) A real (if bogus) file: it lists, it validates (as INVALID — it is
+    // not gzip), and deleting it removes exactly that file.
+    let file = "wow-20260102-030405.sql.gz";
+    fs::write(s.backups().join(file), b"not gzip at all").unwrap();
+    let keep = "wow-20260103-030405-full.sql.gz";
+    fs::write(s.backups().join(keep), b"also not gzip").unwrap();
+
+    let (code, envelope) = s.run(&["backup", "list"]);
+    assert_eq!(code, 0, "{envelope}");
+    let listed: Vec<&str> = envelope["data"]["backups"]
+        .as_array()
+        .expect("backups[]")
+        .iter()
+        .map(|b| b["file"].as_str().expect("file"))
+        .collect();
+    assert_eq!(listed, vec![keep, file], "newest first");
+    assert_eq!(envelope["data"]["backups"][0]["world"], true, "the -full name means world-inclusive");
+
+    let (code, envelope) = s.run(&["backup", "validate", file]);
+    assert_eq!(code, 0, "a validate RESULT is an ok envelope even when invalid: {envelope}");
+    assert_eq!(envelope["data"]["valid"], false);
+    assert_eq!(envelope["data"]["gzip_ok"], false);
+    assert_eq!(envelope["data"]["file"], file);
+
+    let (code, envelope) = s.run(&["backup", "delete", file]);
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["data"]["deleted"], true);
+    assert_eq!(envelope["data"]["file"], file);
+    assert!(!s.backups().join(file).exists());
+    assert!(s.backups().join(keep).exists(), "only the named file may go");
+}
+
 /// (5b) item-info's 25-id CAP (review finding 2) is a `run.rs` domain
 /// rejection, exit 1 -- distinct from the exit-2 format check above, and
 /// matching the bash/launcher siblings' exact wording ("--entries max 25 ids
