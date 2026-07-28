@@ -351,6 +351,51 @@ the release-build self-configuration item above: a tray app that launches at
 login is exactly the case where "needs four env vars set by a wrapper script"
 breaks down.
 
+### Installer: offer Defender exclusions for the build folders (user request, 2026-07-27)
+
+Defender scans every file `cargo` writes, which is a measurable drag on
+`target/`-heavy rebuilds. The fix is two `Add-MpPreference` calls, but they
+need elevation — so today it's a manual "open an admin terminal and paste"
+step that nobody will remember on the next machine.
+
+[`Install-DML.ps1`](guides/DML-Windows/Install-DML.ps1) is the right home: it
+already carries `#Requires -RunAsAdministrator` (line 1) and already does
+admin-only host work (portproxy + firewall, ~2726-2762). Adding the step
+there costs the user **no extra UAC prompt** — the elevation is already spent.
+Note there is no way to avoid that first prompt entirely; nothing unelevated
+can grant itself admin. Exclusions are permanent once set, so this is a
+one-time action, not something to re-apply on a schedule.
+
+Design constraints:
+
+- **Opt-in, with the tradeoff stated.** This narrows the user's AV coverage.
+  An installer that does that silently is misbehaving — prompt, explain what
+  is excluded and why, and default to *no* if unattended.
+- **Two different audiences.** `cargo.exe`/`rustc.exe`/`link.exe`/`node.exe`
+  plus the repo's `target/` only help someone building from source. A plain
+  DML user never runs cargo; for them the candidate exclusions are the WSL
+  vhdx and the games directory, which is a *separate* decision and should not
+  be bundled in by default.
+- **Compute the paths.** The repo location is per-user; the installer already
+  knows `$InstallRoot`. Nothing hardcoded.
+- **Non-fatal.** Tamper Protection can make `Add-MpPreference` fail even when
+  elevated. On failure, warn with the Windows Security GUI route (Virus &
+  threat protection → Manage settings → Exclusions) and carry on — an
+  optional perf tweak must never fail the install.
+- **Verify by read-back** (`Get-MpPreference -ExclusionPath`) rather than
+  trusting the call's exit.
+- **Uninstall symmetry.** [`Uninstall-DML.ps1`](guides/DML-Windows/Uninstall-DML.ps1)
+  already tears down the portproxy rules (~171); it must remove these
+  exclusions too, or uninstalling DML leaves Defender permanently ignoring a
+  folder that no longer exists.
+
+Editing-the-installer cautions (see CLAUDE.md): keep the change **outside**
+the embedded CLI here-string (~836-1633) and away from `$ExpectedCliVersion`
+(line 813) — this must not drag in the installer↔CLI sync work, which is its
+own later plan. Put the step next to the existing portproxy/firewall block.
+The file is PS 5.1 under the ANSI codepage, so any added text stays ASCII (or
+the BOM rules from CLAUDE.md apply).
+
 ### Incident follow-ups (2026-07-21 docker-network wedge — diagnosed live)
 
 Root cause that night: the distro's Docker network black-holed (connect
@@ -396,6 +441,30 @@ live DB — every stat below ran sub-second. User picked the groups:
   100% ahbot); arena ratings are seeded fiction — never show a ladder; deaths
   are not tracked in stock AC (impossible); server-stopped → the in-page
   greeting. Read-only only — never extend the sanctioned-write list.
+
+### App icon — reuse the old DML Launcher mark (user request, 2026-07-28)
+
+Ship the launcher under the ORIGINAL DML Launcher icon: the purple one with an
+hourglass. Today `launcher/src-tauri/icons/` still carries the stock Tauri
+placeholder set, so the exe, taskbar entry and both installers all show a
+generic mark.
+
+- **Source asset first.** The original purple/hourglass art is not in this
+  repo — it has to be recovered from the old launcher (the same place The Lab
+  intel came from) or recreated. Everything below is blocked on having one
+  square, transparent, high-res PNG (1024×1024 is the safe input size).
+- **Regenerate the whole set, do not hand-edit.** `npm run tauri icon
+  <source.png>` from `launcher/` rewrites every file in `src-tauri/icons/`
+  (`icon.ico`, `icon.png`, `icon.icns`, `32x32`, `128x128`, `128x128@2x`, and
+  the nine `Square*Logo.png` + `StoreLogo.png` Windows Store sizes). Replacing
+  only `icon.ico` leaves the NSIS/MSI and Store tiles mismatched.
+- **Feeds the system tray.** The tray round (plan
+  `2026-07-27-launcher-self-config-and-tray.md`, Tasks 7–14) needs a tray
+  icon; it should use this same mark. A 32×32 at tray size needs the hourglass
+  to stay legible — check it before settling on the art, since a detailed logo
+  usually turns to mush in the notification area.
+- Verify by building (`npm run tauri build`) and confirming the icon on the
+  bare `launcher.exe`, both installers, the taskbar, and the tray.
 
 ## Round 3 — Shareable release / installer
 
