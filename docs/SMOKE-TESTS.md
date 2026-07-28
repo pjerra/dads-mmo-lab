@@ -51,9 +51,16 @@ thing from **Config ▸ Module files** (editing conf files).
 
 ## 3. Library / titles (Round D)
 
+**Run this section on the WSL backend.** The six title installers are Linux
+scripts (sudo, pacman/apt, systemd, `usermod -aG docker`), so they cannot run
+on the Docker Desktop (native) backend at all. On native, Library correctly
+shows the "Installing titles needs the WSL backend" notice and the disabled
+Install buttons say so — that is the expected native behaviour, not a bug.
+
 | Status | Test | Steps / expected |
 |---|---|---|
 | ⬜ | [title-install] Install a title | Install MapleStory (smallest). Prompts appear in the install terminal; answer them in the input row; installer completes; title appears in Installed. |
+| ⬜ | Install unavailable on native | On the native backend, Library → Available titles shows the "needs the WSL backend" notice; hovering a disabled Install says the same and never mentions `cli/dev-install.ps1`. Switch Settings → Launcher → Server backend to WSL, relaunch, and the Install buttons arm again. |
 | ⬜ | [title-install] **Cancel kills the distro process?** | Start an install, click Cancel (confirm). **FIRST CHECK:** in the distro run `top` / `docker ps` — did the installer bash/docker actually die? If it survives, report it (guest-side kill is the planned fix). UI must recover (buttons re-enable). |
 | ⬜ | [title-install] Retry same title | After a failed/cancelled install, click Install on the SAME title again → the terminal reopens and runs (regression: used to soft-lock the page). |
 | ⬜ | [title-remove] Remove a title | Remove the test title (typed-id confirm) → server dir + symlink + launcher script gone; `~/.dml` backups untouched. |

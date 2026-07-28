@@ -7,6 +7,31 @@
 
 _installers_dir() { echo "${DML_INSTALLERS_DIR:-/usr/local/share/dml/installers}"; }
 
+# Can THIS HOST run the title installers at all?
+#
+# All six are Linux-only by construction: they `sudo -v`, drive pacman/apt,
+# `usermod -aG docker`, `systemctl enable/start docker`, write
+# /etc/sudoers.d/docker-nopasswd and chmod /var/run/docker.sock. In NATIVE
+# mode this same CLI runs under Git Bash on WINDOWS, where none of that
+# exists -- a run dies at `sudo -v` ("Could not cache sudo credentials"),
+# which explains nothing. Reporting the host verdict lets `games catalog`'s
+# consumers say the true reason instead of blaming the shipping step.
+#
+# Deliberately a HOST check, NOT a backend check: a Linux user on the native
+# backend runs these scripts on a real Linux box, where they work fine. The
+# launcher's "native mode" and "cannot install" are only the same thing on
+# Windows, so the answer has to come from where bash actually runs.
+# _host_bash_is_windows (00-head.sh) carries the flavour test and its
+# DML_OSTYPE seam.
+_installers_supported() {
+    ! _host_bash_is_windows
+}
+
+# One sentence for the text path, kept next to the check it explains.
+_installers_unsupported_msg() {
+    printf '%s' "installing titles needs the WSL backend: the DML installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host"
+}
+
 # id|display name|installer script|kind(games=installer manages ~/games itself,
 # home=legacy $HOME/<id> layout needing a post-install symlink)|launcher file
 _title_registry() {

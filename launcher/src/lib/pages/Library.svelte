@@ -15,8 +15,14 @@
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
+  import { titleInstallGate, installUnavailableNotice, urlInstallGate } from "$lib/title-install";
 
   let catalog: TitleInfo[] = $state([]);
+  // Whether the backend's HOST can run the title installers at all (the CLI's
+  // `install_supported`). Starts true so a slow/failed first catalog read
+  // never flashes "you can't install here" -- the honest default is the one
+  // that matches every WSL install.
+  let installSupported = $state(true);
   let loadError: string | null = $state(null);
   let actionError: string | null = $state(null);
   let note: string | null = $state(null);
@@ -71,10 +77,19 @@
 
   const installed = $derived(catalog.filter((t) => t.installed));
   const available = $derived(catalog.filter((t) => !t.installed));
+  const installNotice = $derived(
+    installUnavailableNotice({ installSupported, availableCount: available.length }),
+  );
+  // A URL install runs a community installer the same way on the same host, so
+  // the host verdict binds it too -- it is only exempt from the shipped-scripts
+  // half of the question.
+  const urlGate = $derived(urlInstallGate({ installSupported }));
 
   async function refresh() {
     try {
-      catalog = await gamesCatalog();
+      const c = await gamesCatalog();
+      catalog = c.titles;
+      installSupported = c.installSupported;
       loadError = null;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
@@ -296,14 +311,21 @@
   {#if available.length === 0}
     <p class="muted">No available titles.</p>
   {/if}
+  {#if installNotice}
+    <div class="notice-card">
+      <strong>{installNotice.title}</strong>
+      <p>{installNotice.body}</p>
+    </div>
+  {/if}
   <div class="cards">
     {#each available as t (t.id)}
+      {@const gate = titleInstallGate({ installSupported, scriptAvailable: t.script_available })}
       <div class="card">
         <div class="card-row">
           <div class="card-title">{t.name}</div>
           <div class="card-actions">
             {#if !installBlocked}
-              {#if t.script_available}
+              {#if gate.canInstall}
                 <button
                   class="primary"
                   disabled={featureLocked("title-install")}
@@ -313,7 +335,11 @@
                   Install
                 </button>
               {:else}
-                <button disabled title="Re-run cli/dev-install.ps1 to ship installer scripts">Install</button>
+                <!-- One hint per REASON (title-install.ts). The old copy named
+                     cli/dev-install.ps1 unconditionally, which sent every
+                     native-backend user to re-run a step that was already
+                     fine and could never have helped. -->
+                <button disabled title={gate.hint}>Install</button>
               {/if}
             {/if}
           </div>
@@ -338,13 +364,13 @@
         placeholder="https://github.com/user/some-game-server.git"
         bind:value={urlValue}
         oninput={cancelUrlArm}
-        disabled={installBlocked}
+        disabled={installBlocked || !urlGate.canInstall}
       />
       {#if !urlArmed}
         <button
           class="primary"
-          disabled={installBlocked || !urlValue.trim().startsWith("https://") || featureLocked("title-url-install")}
-          title={featureLocked("title-url-install") ? LOCKED_HINT : undefined}
+          disabled={installBlocked || !urlGate.canInstall || !urlValue.trim().startsWith("https://") || featureLocked("title-url-install")}
+          title={!urlGate.canInstall ? urlGate.hint : featureLocked("title-url-install") ? LOCKED_HINT : undefined}
           onclick={armUrlInstall}
         >
           Install
@@ -431,4 +457,15 @@
   button:disabled { opacity: 0.5; cursor: default; }
   .muted { color: #8b949e; margin: 0; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+  /* Explanation, not a failure: this is the state of the backend, nothing
+     went wrong. Blue-grey, matching the informational cards elsewhere. */
+  .notice-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-left: 3px solid #58a6ff;
+    border-radius: 8px;
+    padding: 12px 16px;
+    max-width: 640px;
+  }
+  .notice-card p { margin: 6px 0 0; color: #8b949e; font-size: 13px; line-height: 1.5; }
 </style>

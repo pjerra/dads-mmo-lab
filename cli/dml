@@ -7,6 +7,35 @@ VERSION="3.0.0"
 # at a fixture dir, and native Windows mode (Git Bash + Docker Desktop)
 # points it at a Windows-side folder instead of the MSYS2 $HOME.
 GAMES_DIR="${DML_GAMES_DIR:-$HOME/games}"
+
+# True when THIS bash is a Windows-native flavour (Git Bash / MSYS2 / Cygwin)
+# rather than a Linux one.
+#
+# Two callers need the same answer for different reasons -- `doctor` reports
+# a missing systemd as informational there (_host_is_native_windows), and
+# `games catalog` / `games install` report that the Linux-only title
+# installers can never run there (_installers_supported) -- so the flavour
+# test lives in ONE place instead of drifting in two.
+#
+# DML_OSTYPE is the test seam (mirrors DML_GAMES_DIR / DML_SYSTEMD_DIR): bats
+# runs inside the dml-arch distro, which is always linux-gnu, so the Windows
+# branch is otherwise unreachable from the suite.
+_host_bash_is_windows() {
+    # uname FIRST, and it is authoritative for the positive answer: a genuine
+    # Git Bash / Cygwin host says so here whatever the environment claims.
+    # That ordering is load-bearing -- read the override first and an exported
+    # DML_OSTYPE=linux-gnu would talk a real Windows host OUT of the guard,
+    # re-arming `games install` and restoring the bare `sudo -v` failure this
+    # whole change exists to explain. The override can only ever ADD a Windows
+    # verdict (which is all the test seam needs), never remove one.
+    local os; os="$(uname -o 2>/dev/null || true)"
+    [[ "$os" == *Msys* || "$os" == *Cygwin* ]] && return 0
+    case "${DML_OSTYPE:-$OSTYPE}" in
+        msys*|cygwin*|win32*|MINGW*|MSYS*) return 0 ;;
+    esac
+    # A bare `case` with no match exits 0, so the verdict must be explicit.
+    return 1
+}
 # ---------------------------------------------------------------------------
 # JSON / NDJSON emit helpers (machine-readable mode for the DML Launcher).
 # Pure bash — no jq at runtime. DML_JSON is set by the arg parser (see main).
@@ -3778,6 +3807,31 @@ _wow_pull_repo() {
 
 _installers_dir() { echo "${DML_INSTALLERS_DIR:-/usr/local/share/dml/installers}"; }
 
+# Can THIS HOST run the title installers at all?
+#
+# All six are Linux-only by construction: they `sudo -v`, drive pacman/apt,
+# `usermod -aG docker`, `systemctl enable/start docker`, write
+# /etc/sudoers.d/docker-nopasswd and chmod /var/run/docker.sock. In NATIVE
+# mode this same CLI runs under Git Bash on WINDOWS, where none of that
+# exists -- a run dies at `sudo -v` ("Could not cache sudo credentials"),
+# which explains nothing. Reporting the host verdict lets `games catalog`'s
+# consumers say the true reason instead of blaming the shipping step.
+#
+# Deliberately a HOST check, NOT a backend check: a Linux user on the native
+# backend runs these scripts on a real Linux box, where they work fine. The
+# launcher's "native mode" and "cannot install" are only the same thing on
+# Windows, so the answer has to come from where bash actually runs.
+# _host_bash_is_windows (00-head.sh) carries the flavour test and its
+# DML_OSTYPE seam.
+_installers_supported() {
+    ! _host_bash_is_windows
+}
+
+# One sentence for the text path, kept next to the check it explains.
+_installers_unsupported_msg() {
+    printf '%s' "installing titles needs the WSL backend: the DML installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host"
+}
+
 # id|display name|installer script|kind(games=installer manages ~/games itself,
 # home=legacy $HOME/<id> layout needing a post-install symlink)|launcher file
 _title_registry() {
@@ -4386,9 +4440,7 @@ _check_port_conflicts() {
 # override seam (mirrors DML_GAMES_DIR / DML_YQ_BIN).
 _host_is_native_windows() {
     [[ -d "${DML_SYSTEMD_DIR:-/run/systemd/system}" ]] && return 1
-    [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && return 0
-    local os; os="$(uname -o 2>/dev/null || true)"
-    [[ "$os" == *Msys* || "$os" == *Cygwin* ]]
+    _host_bash_is_windows
 }
 
 # --- machine-readable mode: strip --json from argv anywhere -----------------
@@ -5261,6 +5313,13 @@ case "$cmd" in
         fi
         ;;
       catalog)
+        # Whether this HOST can run the installers at all (see
+        # _installers_supported in 80-titles.sh). Separate from the per-title
+        # script_available below, which stays a pure "is the file there?"
+        # answer: the two causes need different words on screen, and
+        # collapsing them is what made the Library page tell a user with a
+        # perfectly good dev-install to re-run dev-install.
+        tinstsup=true; _installers_supported || tinstsup=false
         tout='['; first=1
         while IFS='|' read -r tid tname tscript tkind tlauncher; do
           [[ -z "$tid" ]] && continue
@@ -5281,7 +5340,7 @@ case "$cmd" in
           first=0
         done < <(_title_registry)
         tout+=']'
-        json_ok "{\"titles\":$tout}"
+        json_ok "{\"titles\":$tout,\"install_supported\":$tinstsup}"
         ;;
       install)
         gid="${1:-}"
@@ -5298,6 +5357,15 @@ case "$cmd" in
         fi
         tscript="$(printf '%s' "$trow" | cut -d'|' -f3)"
         tkind="$(printf '%s' "$trow" | cut -d'|' -f4)"
+        # Host check BEFORE the file check: on Windows the installers dir is
+        # absent too, so the file check would fire first and send the user to
+        # re-run cli/dev-install.ps1 -- a step that is already fine and that
+        # could never make these Linux scripts runnable here.
+        if ! _installers_supported; then
+          echo "[dml] ERROR: $(_installers_unsupported_msg)"
+          echo "[dml] Switch Settings -> Launcher -> Server backend to \"WSL (dml-arch distro)\" and install from there."
+          exit 1
+        fi
         tfile="$(_installers_dir)/$tscript"
         if [[ ! -f "$tfile" ]]; then
           echo "[dml] ERROR: installer script not found: $tfile (re-run cli/dev-install.ps1)"; exit 1

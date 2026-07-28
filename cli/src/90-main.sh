@@ -575,9 +575,7 @@ _check_port_conflicts() {
 # override seam (mirrors DML_GAMES_DIR / DML_YQ_BIN).
 _host_is_native_windows() {
     [[ -d "${DML_SYSTEMD_DIR:-/run/systemd/system}" ]] && return 1
-    [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]] && return 0
-    local os; os="$(uname -o 2>/dev/null || true)"
-    [[ "$os" == *Msys* || "$os" == *Cygwin* ]]
+    _host_bash_is_windows
 }
 
 # --- machine-readable mode: strip --json from argv anywhere -----------------
@@ -1450,6 +1448,13 @@ case "$cmd" in
         fi
         ;;
       catalog)
+        # Whether this HOST can run the installers at all (see
+        # _installers_supported in 80-titles.sh). Separate from the per-title
+        # script_available below, which stays a pure "is the file there?"
+        # answer: the two causes need different words on screen, and
+        # collapsing them is what made the Library page tell a user with a
+        # perfectly good dev-install to re-run dev-install.
+        tinstsup=true; _installers_supported || tinstsup=false
         tout='['; first=1
         while IFS='|' read -r tid tname tscript tkind tlauncher; do
           [[ -z "$tid" ]] && continue
@@ -1470,7 +1475,7 @@ case "$cmd" in
           first=0
         done < <(_title_registry)
         tout+=']'
-        json_ok "{\"titles\":$tout}"
+        json_ok "{\"titles\":$tout,\"install_supported\":$tinstsup}"
         ;;
       install)
         gid="${1:-}"
@@ -1487,6 +1492,15 @@ case "$cmd" in
         fi
         tscript="$(printf '%s' "$trow" | cut -d'|' -f3)"
         tkind="$(printf '%s' "$trow" | cut -d'|' -f4)"
+        # Host check BEFORE the file check: on Windows the installers dir is
+        # absent too, so the file check would fire first and send the user to
+        # re-run cli/dev-install.ps1 -- a step that is already fine and that
+        # could never make these Linux scripts runnable here.
+        if ! _installers_supported; then
+          echo "[dml] ERROR: $(_installers_unsupported_msg)"
+          echo "[dml] Switch Settings -> Launcher -> Server backend to \"WSL (dml-arch distro)\" and install from there."
+          exit 1
+        fi
         tfile="$(_installers_dir)/$tscript"
         if [[ ! -f "$tfile" ]]; then
           echo "[dml] ERROR: installer script not found: $tfile (re-run cli/dev-install.ps1)"; exit 1

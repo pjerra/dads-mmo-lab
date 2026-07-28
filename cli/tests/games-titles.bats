@@ -36,6 +36,78 @@ EOF
   [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .running')" = "null" ]
 }
 
+# --- install_supported (host verdict) --------------------------------------
+# script_available answers "is the installer FILE there?"; install_supported
+# answers "could a script run on this host AT ALL?". They are separate fields
+# because they need different words on screen: the launcher used to collapse
+# both into one hint that blamed cli/dev-install.ps1, so a Windows-native user
+# whose dev-install was perfectly fine was told to re-run it forever.
+#
+# bats runs inside a Linux distro, so DML_OSTYPE is the seam for the Windows
+# branch (see _installers_supported, cli/src/80-titles.sh).
+
+@test "games catalog: install_supported true on a Linux host, independent of script_available" {
+  # No installer files shipped at all -- the HOST verdict must still be true,
+  # or the UI can't tell "not shipped yet" from "can never work here".
+  run bash "$DML" games catalog --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.install_supported')" = "true" ]
+  [ "$(echo "$output" | jq -r '[.data.titles[].script_available] | unique | .[]')" = "false" ]
+}
+
+@test "games catalog: install_supported false under Git Bash on Windows, script_available unchanged" {
+  fake_installer install-maplestory.sh "$FIXTURE/maplestory-server"
+  run env DML_OSTYPE=msys bash "$DML" games catalog --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.install_supported')" = "false" ]
+  # script_available stays a pure file-existence answer: the host verdict must
+  # not overwrite it, otherwise the two causes are indistinguishable again.
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="maplestory-server") | .script_available')" = "true" ]
+}
+
+@test "games catalog: cygwin/MSYS OSTYPE flavours are also unsupported hosts" {
+  run env DML_OSTYPE=cygwin bash "$DML" games catalog --json
+  [ "$(echo "$output" | jq -r '.data.install_supported')" = "false" ]
+  run env DML_OSTYPE=MINGW64_NT-10.0 bash "$DML" games catalog --json
+  [ "$(echo "$output" | jq -r '.data.install_supported')" = "false" ]
+}
+
+# CHARACTERIZATION, not evidence for install_supported: this pins pre-existing
+# behaviour and passes with the host guard reverted (verified by revert during
+# review). It is here so a future change cannot quietly re-hardcode the
+# installers path -- the original half of this bug.
+@test "games catalog: script_available follows DML_INSTALLERS_DIR, never a fixed path" {
+  # The live blocker was a hardcoded Linux default that no Windows host has.
+  # Pin the override seam so a future edit can't reintroduce a fixed location.
+  other="$FIXTURE/elsewhere"
+  mkdir -p "$other"
+  run env DML_INSTALLERS_DIR="$other" bash "$DML" games catalog --json
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .script_available')" = "false" ]
+  touch "$other/install-runescape.sh"
+  run env DML_INSTALLERS_DIR="$other" bash "$DML" games catalog --json
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .script_available')" = "true" ]
+}
+
+@test "games install: unsupported host refuses BEFORE the file check and never blames dev-install" {
+  # Script present + host unsupported: without the guard the installer runs
+  # and exits 0, creating the server dir.
+  fake_installer install-maplestory.sh "$FIXTURE/maplestory-server"
+  run env DML_OSTYPE=msys bash "$DML" games install maplestory-server
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'WSL backend'
+  ! echo "$output" | grep -q 'dev-install.ps1'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+}
+
+@test "games install: unsupported host wins over a MISSING installer file too" {
+  # No script AND no supported host -- the honest reason is the host, not the
+  # shipping step, so dev-install.ps1 must not be named here either.
+  run env DML_OSTYPE=msys bash "$DML" games install maplestory-server
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'WSL backend'
+  ! echo "$output" | grep -q 'dev-install.ps1'
+}
+
 @test "games install: --json rejected, unknown id rejected, EXISTS when installed" {
   run bash "$DML" games install maplestory-server --json
   [ "$status" -eq 1 ]

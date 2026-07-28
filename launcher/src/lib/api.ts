@@ -9,7 +9,12 @@ import type { LiveSpec } from "./party-specs";
 // time), but keep it in mind if page-cache.svelte.ts ever grows a
 // module-level side effect that runs before its exports are initialized.
 import { resolveBackendMode } from "./page-cache.svelte";
+// Same mutual-import shape as page-cache.svelte above: title-install.ts pulls
+// only the TitleInfo TYPE from here (erased at build time), so there is no
+// runtime cycle.
+import { normalizeCatalog, type TitleCatalog } from "./title-install";
 export type { LiveSpec };
+export type { TitleCatalog };
 
 export interface DmlErr {
   code: string;
@@ -1421,9 +1426,14 @@ export interface TitleInfo {
   running: "running" | "stopped" | null;
   script_available: boolean;
 }
-export async function gamesCatalog(): Promise<TitleInfo[]> {
-  const d = await invoke<{ titles: TitleInfo[] }>("games_catalog");
-  return d.titles;
+// Returns the WHOLE envelope, not just the rows: `install_supported` is a
+// per-host verdict that belongs to the catalog, not to any one title, and
+// Library needs it to explain a disabled Install honestly. Normalization
+// (including the fail-open default for a `dml` that predates the field) lives
+// in title-install.ts so it is testable without Tauri.
+export async function gamesCatalog(): Promise<TitleCatalog> {
+  const d = await invoke<{ titles: TitleInfo[]; install_supported?: boolean }>("games_catalog");
+  return normalizeCatalog(d);
 }
 export interface InstallEvent {
   event: "chunk" | "exit";

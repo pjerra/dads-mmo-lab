@@ -30,7 +30,20 @@ Commands:
 - `dml games list --json` → `{"games":[{"id","path","running"}]}`
 - `dml games status <id> --json` → `{"id","state":"running"|"stopped"}`
 - `dml games start|restart|stop <id> --json` → NDJSON stream
+- `dml games catalog --json` → `{"titles":[{"id","name","installed","running","script_available"}],"install_supported":<bool>}`
 - `dml version --json` → `{"version":"3.0.0"}`
+
+`games catalog` answers TWO separate questions, and a consumer must not collapse
+them. `script_available` is per title: is that title's installer script shipped
+on this backend (`DML_INSTALLERS_DIR`, default `/usr/local/share/dml/installers`)?
+`install_supported` is per HOST: can this machine run the installers at all? All
+six are Linux scripts (sudo, pacman/apt, systemd, `usermod -aG docker`), so on a
+Windows-native host running under Git Bash the answer is `false` and `games
+install` refuses BEFORE the file check. Collapsing the two is the bug this field
+was added to fix: on native every title reported `script_available:false` and the
+launcher told the user to re-run a dev-install step that was already fine and
+could never have helped. A `dml` predating the field omits it; treat ABSENT as
+supported (fail open), never as blocked.
 
 `dml games list` and `dml games status` are JSON-first: they always emit JSON,
 even without `--json`. A JSON-mode `games start|stop|restart|status` call with
