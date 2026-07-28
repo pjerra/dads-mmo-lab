@@ -112,7 +112,7 @@ still being tested by hand, and unlocks gradually as each piece is verified.*
 **Get it**
 
 ```
-git clone --branch feat/dml-launcher-windows https://github.com/pjerra/dads-mmo-lab.git
+git clone --branch rust-main https://github.com/pjerra/dads-mmo-lab.git
 ```
 
 Requires Windows 10/11 with WSL2 and the Dad's MMO Lab server environment —

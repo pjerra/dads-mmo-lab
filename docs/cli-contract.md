@@ -1,6 +1,6 @@
 # dml-wow CLI contract (`dml-json-v3`)
 
-As of the `feat/rust-cli-workspace` branch.
+As of the `rust-main` branch (renamed from `feat/rust-cli-workspace` 2026-07-28).
 
 `dml-wow` is a clap 4 binary (crate `crates/dml-wow-cli`, library `crates/dml-wow`, shared
 plumbing `crates/dml-core`) that drives a WoW (AzerothCore + mod-playerbots) private server and

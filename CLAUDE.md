@@ -2,7 +2,15 @@
 
 Dad's MMO Lab: self-hosted MMO private-server tooling (WoW WotLK via AzerothCore + mod-playerbots, and other titles) targeting WSL2 on Windows. Fork of the upstream dads-mmo-lab repo (remotes: `origin` = pjerra fork, `upstream`). License AGPL-3.0.
 
-## Current work: Rust CLI workspace (branch `feat/rust-cli-workspace`)
+## Current work: branch `rust-main` — THE branch to use
+
+`rust-main` (renamed from `feat/rust-cli-workspace` on 2026-07-28) is the single
+integration line: the Rust CLI workspace + the launcher + the native-Docker
+spike + the round-2 launcher batch, all merged. `spike/docker-desktop-native`
+and `feat/round2-launcher-batch` are fully contained in it and are historical
+refs only — do not start new work on them. Standing policy: NO merge to `main`.
+
+### Rust CLI workspace
 
 The Rust that used to live only inside the launcher is now a cargo workspace, so any frontend can drive the server without the launcher. Spec `docs/superpowers/specs/2026-07-26-rust-cli-workspace-design.md`, plan `docs/superpowers/plans/2026-07-26-rust-cli-workspace.md` (18 tasks), ledger `.superpowers/sdd/2026-07-26-rust-cli-workspace/progress.md`. See the `crates/` section below. Tasks 1–17 done; Task 18's gates are cleared except the user click-through of the release exe and a Linux community smoke. NO merge to main — standing user policy.
 

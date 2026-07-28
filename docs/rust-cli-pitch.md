@@ -1,6 +1,6 @@
 # Per-game CLI binaries on a shared core — the `dml-wow` Rust workspace
 
-**Branch:** `feat/rust-cli-workspace` (pjerra fork)
+**Branch:** `rust-main` (pjerra fork; renamed from `feat/rust-cli-workspace` 2026-07-28)
 **Date:** 2026-07-27
 **Companion doc:** `docs/cli-contract.md` — the machine contract (envelope shapes, event
 vocabulary, error codes, per-command payloads). This document is the *why*; that one is the *what*.
