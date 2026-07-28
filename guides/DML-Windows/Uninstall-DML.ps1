@@ -30,6 +30,64 @@ function Write-Ok   ($msg) { Write-Host "  [ok]   $msg" -ForegroundColor Green }
 function Write-Warn ($msg) { Write-Host "  [warn] $msg" -ForegroundColor Yellow }
 function Write-Info ($msg) { Write-Host "  [info] $msg" -ForegroundColor Gray }
 
+function Test-ExclusionRecorded ($Recorded, $Wanted) {
+    # Mirrors the installer's comparison: Defender can hand a path back with a
+    # trailing separator it was not given, and a cosmetic difference must not
+    # read as "nothing to remove" and leave the exclusion behind.
+    $needle = ([string]$Wanted).TrimEnd('\')
+    foreach ($entry in $Recorded) {
+        if ($null -eq $entry) { continue }
+        if (([string]$entry).TrimEnd('\') -eq $needle) { return $true }
+    }
+    return $false
+}
+
+function Remove-BuildToolDefenderExclusions ($Record) {
+    # Symmetry for the installer's source-builder prompt. Current installs record
+    # DIRECTORIES only (the repo's target/, CARGO_HOME, RUSTUP_HOME); the
+    # Processes loop stays because installers up to 1.3.x recorded bare-name
+    # process exclusions and those records must still be cleaned up.
+    # These paths are not in install-state and cannot be recomputed here, so we
+    # remove exactly the entries that were recorded -- and the installer records
+    # only what IT added, so anything the user excluded themselves survives.
+    if (-not $Record) { return }
+    Write-Step "Checking for the DML build-tool Defender exclusions..."
+    $liveProcesses = @()
+    $livePaths     = @()
+    try { $liveProcesses = @((Get-MpPreference).ExclusionProcess) } catch { }
+    try { $livePaths     = @((Get-MpPreference).ExclusionPath) }    catch { }
+
+    $removed = 0
+    foreach ($proc in @($Record.Processes)) {
+        if (-not $proc) { continue }
+        if (-not (Test-ExclusionRecorded $liveProcesses $proc)) { continue }
+        try {
+            Remove-MpPreference -ExclusionProcess $proc -ErrorAction Stop
+            $removed++
+        } catch {
+            Write-Warn "Could not remove the Defender exclusion for ${proc}: $($_.Exception.Message)"
+            Write-Warn "Remove it by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+        }
+    }
+    foreach ($path in @($Record.Paths)) {
+        if (-not $path) { continue }
+        if (-not (Test-ExclusionRecorded $livePaths $path)) { continue }
+        try {
+            Remove-MpPreference -ExclusionPath $path -ErrorAction Stop
+            $removed++
+        } catch {
+            Write-Warn "Could not remove the Defender exclusion for ${path}: $($_.Exception.Message)"
+            Write-Warn "Remove it by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+        }
+    }
+
+    if ($removed -gt 0) {
+        Write-Ok "$removed build-tool Defender exclusion(s) removed"
+    } else {
+        Write-Info "No DML build-tool Defender exclusions found"
+    }
+}
+
 $DistroName  = 'dml-arch'
 $TaskName    = 'DadsMmoLab-Phase2'
 $LauncherDir = 'C:\DML'
@@ -46,6 +104,15 @@ $InstallRoot = $null
 $StateFile   = "$StateDir\install-state.json"
 if (Test-Path $StateFile) {
     try { $InstallRoot = (Get-Content $StateFile -Raw | ConvertFrom-Json).InstallRoot } catch { }
+}
+
+# Same deal for the build-tool exclusions (source checkouts only): the installer
+# writes down what it actually put in, in its own file, and Step 8c below reads
+# it. Absent on a normal install -- that is the common case, not an error.
+$BuildExclusions     = $null
+$BuildExclusionFile  = "$StateDir\defender-build-exclusions.json"
+if (Test-Path $BuildExclusionFile) {
+    try { $BuildExclusions = (Get-Content $BuildExclusionFile -Raw | ConvertFrom-Json) } catch { }
 }
 
 Write-Header
@@ -219,6 +286,10 @@ if ($InstallRoot) {
 } else {
     Write-Info "Install location unknown -- skipping the Defender exclusion check"
 }
+
+# Step 8c -- Remove the build-tool exclusions the installer optionally added on
+# a source checkout. Nothing to do on a normal install.
+Remove-BuildToolDefenderExclusions $BuildExclusions
 
 # Step 9 -- Disable WSL Windows features (-RemoveWSL switch)
 if ($RemoveWSL) {

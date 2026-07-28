@@ -115,6 +115,194 @@ function Clear-DistroStepMarkers {
 }
 
 # =============================================================================
+# Defender exclusions for the build tools (source checkouts only)
+# =============================================================================
+# Two audiences, two prompts. Phase 2 offers everyone an exclusion for the
+# install root; these entries only pay off for someone REBUILDING DML from
+# source, where Defender scans every object file cargo writes into target/.
+# A plain user never runs cargo, so this must never ride along on that answer.
+#
+# DIRECTORY exclusions only, deliberately. -ExclusionProcess takes a bare image
+# name and exempts every file that process touches ANYWHERE on the machine, for
+# good -- a blast radius no short consent prompt can honestly describe (and a
+# future 'node.exe' running a hostile postinstall would inherit it). Excluding
+# the directories the build actually hammers keeps essentially all of the
+# rebuild-speed win, and the prompt can then name exactly what stops being
+# scanned and be literally true.
+function Get-SourceCheckoutRoot([string]$FromScript) {
+    # In the source tree this script lives at <repo>\guides\DML-Windows\; the
+    # standalone download lives nowhere in particular. The workspace marker
+    # files are what tell the two apart -- no repo, nothing to exclude.
+    #
+    # Every level is guarded separately: Split-Path -Parent of a drive root
+    # ('D:\') returns an EMPTY STRING, and passing that back into Split-Path is
+    # a TERMINATING binding error -- which, this late in Phase 2, would abort a
+    # fully successful install with a bogus [FAIL].
+    if (-not $FromScript) { return $null }
+    $dir = Split-Path -Parent $FromScript
+    if (-not $dir) { return $null }
+    $guidesDir = Split-Path -Parent $dir
+    if (-not $guidesDir) { return $null }
+    $root = Split-Path -Parent $guidesDir
+    if (-not $root) { return $null }
+    if (-not (Test-Path (Join-Path $root 'Cargo.toml'))) { return $null }
+    if (-not (Test-Path (Join-Path $root 'crates')))     { return $null }
+    return $root
+}
+
+function Test-ExclusionRecorded($Recorded, [string]$Wanted) {
+    # Defender can hand a path back with a trailing separator it was not given.
+    # Comparing the trimmed forms keeps a cosmetic difference from reading as
+    # "the exclusion was not recorded" here, or as "nothing to remove" later.
+    $needle = $Wanted.TrimEnd('\')
+    foreach ($entry in $Recorded) {
+        if ($null -eq $entry) { continue }
+        if (([string]$entry).TrimEnd('\') -eq $needle) { return $true }
+    }
+    return $false
+}
+
+function Get-BuildToolExclusionPaths([string]$RepoRoot) {
+    # Computed, never hardcoded. The three directories a DML rebuild churns:
+    #   <repo>\target   -- everything cargo writes, by far the biggest share
+    #   CARGO_HOME      -- the registry cache and its unpacked crate sources
+    #   RUSTUP_HOME     -- the toolchains, rewritten wholesale on 'rustup update'
+    # cargo and rustup honour those env vars and otherwise sit in the current
+    # user's profile, so both are resolved here rather than assumed. Anything
+    # that cannot be resolved is simply left out -- never an empty entry.
+    if (-not $RepoRoot) { return @() }
+    $paths = @((Join-Path $RepoRoot 'target'))
+
+    $cargoHome = $env:CARGO_HOME
+    if (-not $cargoHome -and $env:USERPROFILE) { $cargoHome = Join-Path $env:USERPROFILE '.cargo' }
+    $rustupHome = $env:RUSTUP_HOME
+    if (-not $rustupHome -and $env:USERPROFILE) { $rustupHome = Join-Path $env:USERPROFILE '.rustup' }
+
+    foreach ($candidate in @($cargoHome, $rustupHome)) {
+        if (-not $candidate) { continue }
+        $trimmed = ([string]$candidate).Trim().TrimEnd('\')
+        if (-not $trimmed) { continue }
+        # Test-ExclusionRecorded compares trimmed and case-insensitively, which
+        # is exactly the dedupe rule wanted if two of these point at one dir.
+        if (Test-ExclusionRecorded $paths $trimmed) { continue }
+        $paths = @($paths) + $trimmed
+    }
+    return @($paths)
+}
+
+function Add-BuildToolDefenderExclusions([string]$RepoRoot, [string]$StateDirectory = $StateDir) {
+    if (-not $RepoRoot) {
+        Write-Diag "Not a source checkout -- skipping the build-tool Defender prompt."
+        return
+    }
+    if (Test-StepDone 'defender-build-exclusions') {
+        Write-Diag "Build-tool Defender exclusions already added -- not asking again."
+        return
+    }
+
+    $paths = @(Get-BuildToolExclusionPaths $RepoRoot)
+    if ($paths.Count -eq 0) {
+        Write-Diag "No build-tool directories could be resolved -- skipping the prompt."
+        return
+    }
+
+    Write-Host ""
+    Write-Host "  Optional, FOR SOURCE BUILDERS ONLY -- a separate question from the one"
+    Write-Host "  above. If you rebuild DML from source, Defender scans every file cargo"
+    Write-Host "  writes and rebuilds get noticeably slower. This excludes FOLDERS only,"
+    Write-Host "  so nothing outside them changes. Defender will stop scanning files"
+    Write-Host "  inside these directories:"
+    foreach ($p in $paths) {
+        Write-Host "    $p"
+    }
+    Write-Host "  That is the whole change -- no programs are exempted, so files those"
+    Write-Host "  tools write anywhere else are still scanned as usual."
+    Write-Host "  Say no if you are not building DML yourself -- nothing else needs it."
+    $answer = Read-Host "  Add the build-tool exclusions? (y/N)"
+    if ($answer -notmatch '^\s*(y|yes)\s*$') {
+        Write-Diag "Build-tool Defender exclusions declined by the user."
+        return
+    }
+
+    # Never fatal: an optional speed tweak must not fail the install.
+    $failed = $false
+
+    # Snapshot BEFORE adding anything. Add-MpPreference on an entry that is
+    # already there is a silent no-op, so without this the read-back below
+    # cannot tell "we added it" from "the developer already had it" -- and the
+    # uninstaller would later delete an exclusion DML never created.
+    $preExisting = @()
+    $snapshotOk  = $true
+    try { $preExisting = @((Get-MpPreference).ExclusionPath) } catch { $snapshotOk = $false; $failed = $true }
+
+    foreach ($path in $paths) {
+        if ($snapshotOk -and (Test-ExclusionRecorded $preExisting $path)) {
+            Write-Diag "Already excluded before this install -- leaving it alone: $path"
+            continue
+        }
+        try {
+            Add-MpPreference -ExclusionPath $path -ErrorAction Stop
+        } catch {
+            $failed = $true
+            Write-Warn "Could not exclude ${path}: $($_.Exception.Message)"
+        }
+    }
+
+    # Read back rather than trusting the calls: with Tamper Protection on,
+    # Add-MpPreference can return without adding anything.
+    $livePaths = @()
+    try { $livePaths = @((Get-MpPreference).ExclusionPath) } catch { $failed = $true }
+    $confirmedPaths = @($paths | Where-Object { Test-ExclusionRecorded $livePaths $_ })
+
+    # Record only what WE put there, and only what is verifiably in place: the
+    # uninstaller cannot recompute these paths (the checkout may move, or the
+    # uninstall may be run from another copy), so it removes exactly what is
+    # written here -- which must therefore never include someone else's entry.
+    $ourPaths = @()
+    if ($snapshotOk) {
+        $ourPaths = @($confirmedPaths | Where-Object { -not (Test-ExclusionRecorded $preExisting $_) })
+    }
+    if ($ourPaths.Count -gt 0) {
+        try {
+            $recordFile = Join-Path $StateDirectory 'defender-build-exclusions.json'
+            # MERGE with whatever is already recorded, never overwrite. A Phase 2
+            # retry after a partially-failed first attempt would otherwise drop
+            # the paths that attempt recorded, and since the uninstaller removes
+            # exactly what is written here, those exclusions would survive an
+            # uninstall forever.
+            $recordedPaths = @()
+            if (Test-Path $recordFile) {
+                try {
+                    $previous = Get-Content -Raw -Path $recordFile | ConvertFrom-Json
+                    if ($previous -and $previous.Paths) { $recordedPaths = @($previous.Paths) }
+                } catch {
+                    Write-Warn "Could not read the existing exclusion record; it will be rewritten from this run only."
+                }
+            }
+            foreach ($newPath in $ourPaths) {
+                # -eq on strings is case-insensitive, which is what Windows paths want.
+                if (-not ($recordedPaths | Where-Object { $_ -eq $newPath })) { $recordedPaths += $newPath }
+            }
+            @{
+                Processes = @()   # kept for shape: older installs recorded process exclusions
+                Paths     = $recordedPaths
+                Timestamp = (Get-Date -Format 'o')
+            } | ConvertTo-Json | Set-Content -Path $recordFile -Encoding UTF8
+        } catch {
+            Write-Warn "Could not record the build-tool exclusions for uninstall: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $failed -and $confirmedPaths.Count -eq $paths.Count) {
+        Write-Ok "Defender build-tool exclusions in place ($($confirmedPaths -join ', '))"
+        Mark-StepDone 'defender-build-exclusions'
+    } else {
+        Write-Warn "Defender did not record every build-tool exclusion (Tamper Protection is the usual cause)."
+        Write-Warn "Add the rest by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+    }
+}
+
+# =============================================================================
 # Preflight checks
 # =============================================================================
 function Assert-WindowsBuild {
@@ -2778,9 +2966,9 @@ class TrayApp : ApplicationContext
     # Excluding it is OPT-IN and asked plainly: an exclusion narrows real-time
     # protection, and an installer must not quietly do that to someone.
     #
-    # Deliberately scoped to the install root only. Build-tool exclusions
-    # (cargo/rustc/link) belong to people building DML from source, not to
-    # everyone who installs it, and are left to be added by hand.
+    # Deliberately scoped to the install root only. The build-tool directories
+    # (target/, CARGO_HOME, RUSTUP_HOME) belong to people building DML from
+    # source, not to everyone who installs it, and are a separate question.
     #
     # Never fatal: an optional speed tweak must not fail the install.
     Write-Host ""
@@ -2810,6 +2998,11 @@ class TrayApp : ApplicationContext
     } else {
         Write-Diag "Defender exclusion declined by the user."
     }
+
+    # The build-tool exclusions are a SEPARATE opt-in with a different audience
+    # (see Add-BuildToolDefenderExclusions): they must never ride along on the
+    # answer above. Silent unless this script is running from a source checkout.
+    Add-BuildToolDefenderExclusions (Get-SourceCheckoutRoot $ScriptPath)
 
     # -------------------------------------------------------------------------
     # Done
