@@ -204,6 +204,16 @@ pub fn classify_wsl_list(outcome: &ProbeOutcome, distro: &str) -> WslProbe {
         ProbeOutcome::ProgramMissing => WslProbe { wsl: Tri::No, distro: Tri::No },
         ProbeOutcome::CouldNotTell => WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown },
         ProbeOutcome::Ran { code, stdout, stderr } => {
+            let text = format!("{stdout}\n{stderr}").to_lowercase();
+            // Checked BEFORE the exit code, because the exit code lies here.
+            // Windows ships an inbox wsl.exe stub on every machine; with WSL
+            // not installed it prints this and STILL EXITS 0. Trusting exit 0
+            // first is the exact bug that shipped in Install-DML.ps1 and cost
+            // a clean-VM install run tonight (f304629) -- the same mistake had
+            // been made independently here.
+            if text.contains("is not installed") {
+                return WslProbe { wsl: Tri::No, distro: Tri::No };
+            }
             if *code == Some(0) {
                 let present = stdout.lines().any(|l| clean_line(l) == distro);
                 return WslProbe {
@@ -211,7 +221,6 @@ pub fn classify_wsl_list(outcome: &ProbeOutcome, distro: &str) -> WslProbe {
                     distro: if present { Tri::Yes } else { Tri::No },
                 };
             }
-            let text = format!("{stdout}\n{stderr}").to_lowercase();
             if text.contains("no installed distributions") {
                 // WSL itself works; the machine simply has nothing installed.
                 WslProbe { wsl: Tri::Yes, distro: Tri::No }
@@ -581,6 +590,20 @@ mod tests {
         // that is genuinely not a dml banner, which is what it now uses.
         let got = classify_cli_version(&ran(0, "some other program v3.0.0"));
         assert_eq!(got, CliProbe { cli: Tri::Unknown, version: None });
+    }
+
+    #[test]
+    fn the_inbox_wsl_stub_saying_not_installed_beats_its_own_exit_zero() {
+        // Windows' inbox wsl.exe exits 0 while printing that WSL is missing.
+        // Believing the exit code here would report a WORKING WSL with no
+        // distro, and the first-run screen would send the user to create a
+        // distro on a machine that cannot host one. Same lie, same evening,
+        // as the Install-DML.ps1 bug (f304629).
+        let got = classify_wsl_list(
+            &ran(0, "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'."),
+            "dml-arch",
+        );
+        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No });
     }
 
     #[test]

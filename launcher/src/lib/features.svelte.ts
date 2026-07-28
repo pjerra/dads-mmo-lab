@@ -16,12 +16,7 @@ export type FeatureStatus = "tested" | "untested";
 export const FEATURES: Record<string, FeatureStatus> = {
   restart: "tested",
   "console-send": "tested",
-  // UNLOCKED for v0.1.0 by necessity, not by evidence: the first-run screen
-  // ends by sending a new user to Library to install a title. With this
-  // locked, that button is disabled and the stranger has nowhere to go --
-  // the release would ship with its own onboarding leading to a dead end.
-  // Its smoke row is being validated in the v0.1.0 fresh-VM run.
-  "title-install": "tested",
+  "title-install": "untested",
   "title-remove": "untested",
   "teleport-named": "tested",
   "teleport-coords": "tested",
@@ -90,12 +85,28 @@ export const FEATURES: Record<string, FeatureStatus> = {
   // Writes a name file into the server's own directory. Benign and reversible,
   // but it is still a write to a title dir, so it follows the same rule.
   "server-rename": "untested",
-  // Provisions the distro (installs the CLI, lua bridges and installer scripts
-  // from the bundled resources). It is the route a NEW user must take, so it
-  // ships unlocked -- locking it would lock a stranger out of their own setup.
-  // Listed here so the registry stays a complete inventory of mutating keys.
-  "backend-setup": "tested",
+  "backend-setup": "untested",
 };
+
+// Keys a BRAND-NEW user must be able to press before anything has been smoke
+// tested, because the app's own onboarding sends them there. Being on this list
+// says nothing about whether the feature works -- only that locking it would
+// strand someone who has no way to unlock it.
+//
+// This list exists because the alternative was corrupting the registry: twice
+// in one evening, a control needed by first-run got marked "tested" purely to
+// unlock it, once by an agent and once by me. "tested" drives docs/SMOKE-TESTS.md
+// and the release notes' claim about what has actually been verified, so
+// spending it as an unlock token makes the release dishonest. Separating the
+// two questions -- "is it verified?" vs "may a newcomer press it?" -- keeps the
+// status field meaning exactly one thing.
+export const ONBOARDING_KEYS: ReadonlySet<string> = new Set([
+  // The first-run screen's own button.
+  "backend-setup",
+  // First-run ends by sending the user to Library to install a title; with
+  // this locked that button is disabled and onboarding dead-ends.
+  "title-install",
+]);
 
 export const LOCKED_HINT =
   "Untested — enable untested features in Settings to try it (see docs/SMOKE-TESTS.md)";
@@ -155,5 +166,8 @@ export function lockedFor(status: FeatureStatus | undefined, testingOn: boolean)
 }
 
 export function featureLocked(key: string): boolean {
+  // Onboarding keys are never locked, whatever their smoke status -- see
+  // ONBOARDING_KEYS. Their status stays honest and their smoke row stays open.
+  if (ONBOARDING_KEYS.has(key)) return false;
   return lockedFor(FEATURES[key], testingModeOn());
 }

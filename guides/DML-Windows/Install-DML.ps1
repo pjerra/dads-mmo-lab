@@ -1067,9 +1067,26 @@ echo "[docker] Socket ready"
         if ($installedCliRaw) { $installedCliRaw = ($installedCliRaw -replace "`0","").Trim() }
     } catch { }
     Write-Diag "dml CLI: installed='$installedCliRaw'  expected='$ExpectedCliVersion'"
-    if ($installedCliRaw -ne $ExpectedCliVersion) {
-        Write-Diag "CLI version mismatch -- clearing phase3-bootstrap marker to force re-install"
+    # NEWER IS NOT A MISMATCH. This used to test `-ne` and re-install on any
+    # difference, which meant that once the LAUNCHER provisioned its bundled
+    # CLI (v3.0.0, SHIP-LIST Phase 4), re-running this installer -- which the
+    # first-run screen itself tells people to do, and which is deliberately
+    # re-runnable -- silently downgraded them back to this script's embedded
+    # 2.6.0 and returned the app to its "outdated CLI" state. Two provisioners,
+    # and the wrong one won. Only install when the CLI is absent or genuinely
+    # OLDER than what is embedded here.
+    $installedCliVer = $null
+    $bundledCliVer   = $null
+    if ($installedCliRaw -match '(\d+\.\d+\.\d+)')  { $installedCliVer = [version]$Matches[1] }
+    if ($ExpectedCliVersion -match '(\d+\.\d+\.\d+)') { $bundledCliVer  = [version]$Matches[1] }
+    if ($null -eq $installedCliVer) {
+        Write-Diag "No usable dml version reported -- clearing phase3-bootstrap marker to install it"
         Remove-Item "$StateDir\done-phase3-bootstrap" -Force -ErrorAction SilentlyContinue
+    } elseif ($null -ne $bundledCliVer -and $installedCliVer -lt $bundledCliVer) {
+        Write-Diag "Installed CLI $installedCliVer is older than the bundled $bundledCliVer -- forcing re-install"
+        Remove-Item "$StateDir\done-phase3-bootstrap" -Force -ErrorAction SilentlyContinue
+    } else {
+        Write-Diag "Installed CLI $installedCliVer is current or newer than the bundled $bundledCliVer -- leaving it alone"
     }
 
     # -------------------------------------------------------------------------
