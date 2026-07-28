@@ -518,6 +518,142 @@ hard. Smoke testing may resolve the blockers.
 - **HD graphics packs** — BLOCKED: the pinned source (btground.tk) is dead
   (HTTP 503, no Wayback copy). Needs a live mirror or it stays impossible.
 
+## Round 2.5 — RECOVERED BACKLOG (filed 2026-07-28)
+
+**Why this section exists.** Everything below was asked for or approved by the
+user and then went missing, because its only record was a file under
+`.superpowers/` — which is **gitignored**. Work parked there is invisible to
+git, to this roadmap, and to every audit run against them: a 24-agent sweep of
+outstanding work on 2026-07-28 could not see any of it. Two later sweeps (a
+`.superpowers/` orphan hunt, and a read of all 9 session transcripts — 192 asks,
+94 verified delivered) recovered the list. **Never let `.superpowers/` be the
+only home for an approved decision — file it here the same day.**
+
+### 2026-07-26 smoke-test feature batch (13 items, user-dictated, none built)
+
+Captured verbatim during a live smoke run into `.superpowers/sdd/feature-batch-2026-07-26.md`.
+
+1. **Backups: on/off toggles for the two automatic backups** (on-stop + 6h
+   interval). Both are hard-wired always-on today; `interval_backup_watcher`'s
+   own doc comment says there is no UI control. Backups.svelte has no settings
+   section at all.
+2. **Tools: open `.wslconfig` in the default editor.** The card edits it through
+   curated fields with no way to see the raw file. `tauri_plugin_opener` is
+   already registered app-wide and unused here.
+3. **Tools: realmlist target picker** — local / LAN / Tailscale / public /
+   custom typed address. UI-only gap: `realmlist_fix` already accepts an
+   arbitrary target string and the Tailscale IP is already resolved on the same
+   page; only the two fixed buttons exist.
+4. **Statistics: characters-online over time.** The current-online tiles exist;
+   the time series does not (no sampler, no history store). Shares
+   infrastructure with the Performance Advisor below — build once, both consume.
+5. **Modules: sort installed first; show playerbots in Module tuning.** The cpp
+   list renders in raw registry order. mod-playerbots cannot appear in tuning at
+   all: tuning cards derive from cpp catalog rows and there is no mod-playerbots
+   entry — its keys live only under Config → Bot World.
+6. **Teleport: group locations into per-zone dropdowns/accordion.** Still one
+   flat chip list with a filter; no zone field in the derivation.
+7. **Backups: pin/keep a backup** so the prune never deletes it and it does not
+   count toward the 10. `prune()` currently deletes everything past the window
+   with no exclusion.
+8. **Search-box labelling** — the Bot Browser's "Name prefix" placeholder (the
+   one misread during smoke) and the generic "Search keys…" browsers. Pure copy.
+9. **Bots: log the random bots OUT and back IN on demand** (non-destructive).
+   The `wow bots` namespace has only `list` and `flush`; the user explicitly
+   said flush is NOT the tool for this.
+10. **Surface that native mode is RUN-ONLY** — gate Rebuild / Core update /
+    cpp-module install. Asked for FIRST as cheap interim safety before handing
+    native to a tester. ModuleManager has no backend awareness; the native
+    rebuild path runs to `compose up --build` with no check that the compose
+    file even has a `build:` context, so the silent no-op is still reachable.
+11. **Native standalone: real build support** (AC source + build-capable
+    compose). Explicit user decision 2026-07-27: "YES — make native a true
+    replacement, not a companion." Nothing built.
+12. **Six small native ports** — `wow_config_files`, `wow_party_list`,
+    `wow_party_setup`, `games_catalog`, `games_list`, `dml_version`. All still
+    shell bash `dml`, i.e. Git Bash in native mode — the dependency the
+    all-native goal exists to remove.
+13. **Native install path** (`games install` / url install). The user's own note
+    calls this the genuine blocker for a WSL-free story.
+
+### Recovered from session transcripts
+
+- **Tray multi-server + server naming** (asked 2026-07-28). The tray's
+  Start/Stop are static items that act on a hardcoded `WOW_ID`; with several
+  servers installed it always drives the WoW playerbots title. Wants: pick which
+  server, name a server at install, rename it later, show that name in the tray.
+  NEEDS DESIGN — see the open questions at the end of this section.
+- **Open the upstream PR** to DadsMmoLab/dads-mmo-lab for the
+  games-folder/mnt-hints/updater fixes. Built, committed and pushed to the fork
+  on 2026-07-14 (`2e2b139` / `2931f60` / `38b3a9c`); the session ended one
+  command short, and `gh pr list` confirms no PR exists. The branch is ready.
+- **Retire the old C# tray app + port its WSL keepalive.** A fresh
+  `Install-DML.ps1` run still installs `DML-Launcher.exe`, so a user ends up
+  with TWO tray apps. Tray/sleep-block/autostart/single-instance were absorbed;
+  the retirement half was silently dropped.
+- **Promote the dml CLI out of the installer here-doc.** A fresh installer run
+  still ships CLI **v2.6.0** against the repo's v3.0.0. CLAUDE.md calls this "a
+  dedicated later plan"; no such plan exists, so nothing schedules it.
+- **SOAP setup without a terminal.** `soap-setup` was meant to happen at
+  install; it became a manual CLI verb with no GUI button, and the launcher's
+  own error hints tell the user to run a terminal command.
+- **Substrate wizard** (GUI owns first-run: WSL2 enablement, UAC, reboot-and-
+  resume). A v1 decision, silently reversed in favour of "no elevation from the
+  app" — but the design spec still lists it as v1 scope, so the docs contradict
+  the shipped product. DECIDE: reinstate, or formally retire it in the spec.
+- **Steam integration + item-DB favorites** — the last two Lab-parity features
+  absent from both the app and the Round-5 "still missing" list.
+- **`wow-manage.sh` shared-libs refactor** so the Deck TUI and the GUI run the
+  same code. Plan 1 extracted the CLI from the installer instead, creating a
+  SECOND implementation; the Deck TUI and the dml CLI now drift independently.
+- **Keep terminal history across runs.** Asked during the Plan-2 live gate,
+  answered "by design, offered as an enhancement", never filed. Round N made
+  transcripts survive navigation, but `beginRun` still resets the buffer.
+- **GM equip freedom** — macros to learn everything needed to wear anything,
+  whether class-restricted items can be allowed for a GM character, and whether
+  stripping class requirements is easier. Chat-only deliverables; note the third
+  option needs an explicit exception to the read-only-MySQL rule.
+- **Sheathed shield sits offset** on the back instead of centred (cosmetic, low
+  priority). Still the single hardcoded SheatheType 4.
+- **ConfigEditor backlog leftovers**: docs-aware Files tab and the dirty-guard.
+  (Reset-to-default shipped; the Dashboard auto-poll was superseded by the
+  shared polled status card; settings search exists only in the key browsers.)
+- **Commit the youtube-transcript skill.** It lives only in
+  `C:\Users\perzi\.claude\skills\`, which is not a git repository — a profile
+  wipe loses it with no recovery path.
+
+### Also recovered: the Server Performance Advisor
+
+Approved 2026-07-27; spec now committed at
+[`docs/superpowers/specs/2026-07-27-perf-advisor-design.md`](../specs/2026-07-27-perf-advisor-design.md).
+Auto-detects RAM/CPU/disk telemetry plus world-tick latency and says whether you
+can add more bots or should give Docker/WSL more resources. It carries a real
+golden acceptance test AND a verified A/B result (`MapUpdate.Threads 1→3` took
+p99 from ~98ms to ~36ms on this box). A validated build plan exists; two
+CRITICAL findings must be handled before executing it:
+
+- the live box now runs `MapUpdate.Threads = 3`, so it can no longer reproduce
+  the spec's single-thread diagnosis — the acceptance gate needs fixture data,
+  not the live server;
+- the stats JSON fragment shape is pinned in THREE bash places, not the one the
+  plan names, so a naive edit ships asymmetric envelopes.
+
+Further plan findings worth keeping: the sampler must not ride the unbounded
+`run_json` seam (the DB query and `df` would have no timeout); it needs a
+metrics-dir override or its own tests will prune the operator's real
+`~/.dml/metrics`; and Rust std has no free-space API, so the disk-free step
+needs a real mechanism chosen before it is built.
+
+### Open questions for the user (blocking the tray/naming work)
+
+1. Where should a server's display name live — a per-title file in the title
+   directory, or `~/.dml/launcher.json`? (The title dir travels with the
+   server; the launcher config is easier to edit from the GUI.)
+2. Should the tray list EVERY installed server with its own Start/Stop, or keep
+   one "active server" that the whole app follows?
+3. Home is hardcoded to `wow-server-playerbots`. Does it follow the active
+   server, or stay WoW-only for now?
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.

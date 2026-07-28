@@ -84,3 +84,5 @@ Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-sou
 ## SDD bookkeeping
 
 `.superpowers/sdd/` (untracked) holds the progress ledger, task briefs/reports, and review packages for plan execution. Ledger: `.superpowers/sdd/progress.md`.
+
+**`.superpowers/` IS GITIGNORED — never let it be the only home for an approved decision.** This cost real work: a user-approved perf-advisor spec and a 13-item user-dictated feature batch sat there unbuilt and INVISIBLE to git, to the roadmap, and to a 24-agent audit of outstanding work; the user had to remember them. Anything the user asks for or approves gets filed into `docs/superpowers/plans/2026-07-20-post-smoke-roadmap.md` (see Round 2.5 for the recovered set) the same day — the ledger is for execution bookkeeping, not for the record of what was promised. Same trap in a second form: a plan file can sit in `docs/superpowers/plans/` and still be untracked because nobody `git add`ed it; check `git status` for `??` before trusting that a plan is safe.
