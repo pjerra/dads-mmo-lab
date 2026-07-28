@@ -168,6 +168,18 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       the app and needs no system-wide install at all (~180MB). Decide which
       once we know whether the failure was at install time or at launch.
 
+- [ ] **4.0b — Two launchers, and a stranger cannot tell them apart.** FOUND ON
+      THE VM, 2026-07-28: after `Install-DML.ps1` + the new installer, the
+      tester could not find the app they had just installed -- the Start menu
+      offers the OLD C# tray (`C:\DML\DML-Launcher.exe`, installed by
+      Install-DML.ps1) alongside the new one (`DML Launcher\launcher.exe`),
+      differing only by a hyphen. Both were running simultaneously on the dev
+      box too. Cheapest honest fix for v0.1.0: stop installing the C# tray from
+      Install-DML.ps1, or rename ours so the two are visibly different. Until
+      then it MUST be in the release notes -- "which of these two icons is the
+      app?" is a first-30-seconds question, and this is item 7 of the recovered
+      backlog (retire the C# tray) arriving as a real user-facing bug.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
