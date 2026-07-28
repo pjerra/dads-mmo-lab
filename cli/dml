@@ -2546,15 +2546,24 @@ _party_spec_rows() {
 # drift from what the playerbots `talents spec <name>` command actually
 # accepts -- a wrong name replies only IN-GAME ("Spec <x> not found",
 # invisible to SOAP), so the CLI must reject anything the conf does not define.
-# The [a-z ] charset guard is enforced regardless (injection-safe whisper
-# tail; the no-free-text-whisper rule holds because the value must still be a
-# conf-listed name). When no conf is deployed (server not installed / tests)
-# it FALLS BACK to a static mirror of the shipped defaults so validation keeps
-# working. DK (class 6) specs are deliberately absent (no DK in the wizard).
+# The charset guard is enforced regardless (injection-safe whisper tail; the
+# no-free-text-whisper rule holds because the value must still be a conf-listed
+# name). When no conf is deployed (server not installed / tests) it FALLS BACK
+# to a static mirror of the shipped defaults so validation keeps working. DK
+# (class 6) specs are deliberately absent (no DK in the wizard).
 _valid_bot_spec() {
     local want="$1" names
-    # Injection guard first: live spec names are lowercase words + spaces only.
-    [[ "$want" =~ ^[a-z][a-z\ ]*$ ]] || return 1
+    # Injection guard first. The charset is WIDER than the shipped names' plain
+    # lowercase-and-spaces: playerbots.conf is hand-editable (and raw-writable
+    # from the Modules editor), the picker offers every conf name verbatim, and
+    # refusing "Arms PvE" here just made the picker offer specs this function
+    # rejected. What it must never admit is anything unsafe in the
+    # `dml_whisper <p> <b> talents spec <name>` tail -- no quotes, no
+    # backslash, no CR/LF, no shell/SQL metacharacters -- hence alphanumerics
+    # plus space . _ - only, and an alphanumeric first character.
+    # Keep this in sync with valid_bot_spec_shape (crates/dml-wow/src/party.rs)
+    # and isValidSpecShape (launcher/src/lib/party-specs.ts).
+    [[ "$want" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]*$ ]] || return 1
     names="$(_party_spec_names)"
     if [[ -n "$names" ]]; then
         if grep -qxF -- "$want" <<< "$names"; then return 0; else return 1; fi
@@ -5408,20 +5417,24 @@ case "$cmd" in
           ndjson_section_end world-restart error
           ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
         fi
-        # Running precondition (Batch 1 CLI robustness): `docker restart` on a
-        # STOPPED container STARTS it. On a fully-stopped stack that boots the
-        # worldserver ALONE against a down database, where it blocks on the DB
-        # handshake until READY_TIMEOUT (~30 min) -- a half-hour hang for what
-        # should be an instant "the server is not running" answer. Require BOTH
-        # the world and database containers to already be up; a stopped stack
-        # means the user wants the full Start, not a world-only restart.
+        # Database precondition (Batch 1 CLI robustness): `docker restart` on a
+        # STOPPED container STARTS it. With the DATABASE down that boots the
+        # worldserver ALONE against nothing, where it blocks on the DB handshake
+        # until READY_TIMEOUT (~30 min) -- a half-hour hang for what should be an
+        # instant answer. So the database must already be up. The WORLD may be
+        # down: restarting a crashed/stopped world against a healthy database is
+        # a legitimate recovery (it is what the Home card's crashed verdict
+        # offers), so that case proceeds with a note instead of being refused.
         wr_wrun="$(docker inspect -f '{{.State.Running}}' ac-worldserver 2>/dev/null || true)"; wr_wrun="${wr_wrun%%$'\n'*}"
         wr_drun="$(docker inspect -f '{{.State.Running}}' ac-database 2>/dev/null || true)"; wr_drun="${wr_drun%%$'\n'*}"
-        if [[ "$wr_wrun" != true || "$wr_drun" != true ]]; then
+        if [[ "$wr_drun" != true ]]; then
           ndjson_section_end world-restart error
-          ndjson_error NOT_RUNNING "The server is not running" "A world-only restart needs the world server and database already up. Start the server (full Start) first."; exit 1
+          ndjson_error NOT_RUNNING "The database is not running" "A world-only restart needs the database already up. Start the server (full Start) first."; exit 1
         fi
         ndjson_line warn "world-only restart does NOT apply settings changes -- use full Restart for that"
+        if [[ "$wr_wrun" != true ]]; then
+          ndjson_line info "the world server is not running -- this restart will start it back up"
+        fi
         # --no-saveall (GUI "faster" option): skip the redundant pre-stop
         # saveall. `docker restart -t 300` below stops gracefully first, so the
         # worldserver still saves every character on shutdown -- safe in normal
@@ -5440,8 +5453,37 @@ case "$cmd" in
           ndjson_error RESTART_FAILED "docker restart failed for ac-worldserver" "Is the server installed and started? Check: dml doctor"; exit 1
         fi
         ndjson_line info "waiting for the world to come back..."
-        wr_timeout="${DML_READY_TIMEOUT_SECS:-1800}"; wr_t0=$SECONDS; wr_note=0
+        # Liveness strikes (Round 2 F1): waiting for a container that is not
+        # even running can only ever end in READY_TIMEOUT -- and the DB-only
+        # precondition above deliberately admits a crashed world, so an
+        # exited/crash-looping worldserver (bad conf value, missing map/DBC
+        # data, OOM) is now a REACHABLE state here. WHY 5: `docker restart` has
+        # already returned by this point and it only returns once the engine
+        # started the container again, so the healthy case sees it running on
+        # the very first probe; a single stray `false` is still possible (a
+        # crash-looping container sits in `restarting`, where .State.Running is
+        # false), so one observation must not be enough. Five CONSECUTIVE
+        # misses 2s apart is ~8s of continuous downtime -- far longer than any
+        # gap `docker restart` itself leaves behind, and ~200x shorter than the
+        # 1800s budget it replaces. One live observation clears the count.
+        wr_timeout="${DML_READY_TIMEOUT_SECS:-1800}"; wr_t0=$SECONDS; wr_note=0; wr_down=0
         until _world_ready; do
+          wr_live="$(docker inspect -f '{{.State.Running}}' ac-worldserver 2>/dev/null || true)"; wr_live="${wr_live%%$'\n'*}"
+          # NB `false` is checked LITERALLY, not as "anything but true": an
+          # empty reading is docker failing to answer (engine hiccup, inspect
+          # timeout), not a down container, and counting that as a strike would
+          # abort a HEALTHY restart with a fabricated boot-failure error.
+          # Inconclusive readings neither strike nor clear; the readiness
+          # timeout below stays the backstop.
+          if [[ "$wr_live" == true ]]; then
+            wr_down=0
+          elif [[ "$wr_live" == false ]]; then
+            wr_down=$(( wr_down + 1 ))
+            if (( wr_down >= 5 )); then
+              ndjson_section_end world-restart error
+              ndjson_error RESTART_FAILED "The world server exited instead of coming back up" "Check the Console logs for the boot error; fix it and try a full Restart."; exit 1
+            fi
+          fi
           wr_elapsed=$(( SECONDS - wr_t0 ))
           if (( wr_elapsed >= wr_timeout )); then
             ndjson_section_end world-restart error
@@ -6766,6 +6808,13 @@ case "$cmd" in
             first=1; out='['
             while IFS=$'\t' read -r guid name cls lvl || [[ -n "$guid" ]]; do
               [[ -z "$guid" ]] && continue
+              # Guard EVERY interpolated numeric, same as `players online`
+              # above: a NULL/empty cell would emit `"class":NULL,` -> invalid
+              # JSON that blanks the party card. Degrade each to 0 (NOT null --
+              # the native backend's twin in pages.rs matches this).
+              [[ "$guid" =~ ^[0-9]+$ ]] || guid=0
+              [[ "$cls" =~ ^[0-9]+$ ]] || cls=0
+              [[ "$lvl" =~ ^[0-9]+$ ]] || lvl=0
               [[ $first -eq 0 ]] && out+=','
               out+="{\"guid\":$guid,\"name\":\"$(json_escape "$name")\",\"class\":$cls,\"level\":$lvl}"
               first=0

@@ -58,15 +58,23 @@ pub fn valid_bot_class(s: &str) -> bool {
     )
 }
 
-/// `_valid_bot_spec`'s injection guard (`50-party.sh:211`):
-/// `^[a-z][a-z ]*$` — lowercase words + spaces only, non-empty.
+/// `_valid_bot_spec`'s injection guard (`50-party.sh`):
+/// `^[A-Za-z0-9][A-Za-z0-9 ._-]*$` — non-empty, starts alphanumeric, then
+/// alphanumerics plus space/dot/underscore/hyphen. Deliberately wider than
+/// the shipped names' plain lowercase-and-spaces: playerbots.conf is
+/// hand-editable and the picker offers every conf name verbatim, so a
+/// narrower rule here only produced specs the UI offered and this refused.
+/// It stays narrow enough that the value is safe in the
+/// `dml_whisper <p> <b> talents spec <name>` tail — no quotes, no backslash,
+/// no CR/LF, no shell/SQL metacharacters. Mirrored by `isValidSpecShape` in
+/// `launcher/src/lib/party-specs.ts`.
 pub fn valid_bot_spec_shape(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
-        Some(c) if c.is_ascii_lowercase() => {}
+        Some(c) if c.is_ascii_alphanumeric() => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_lowercase() || c == ' ')
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
 }
 
 /// Static fallback spec-name mirror — the `_valid_bot_spec` fallback case
@@ -803,12 +811,33 @@ mod tests {
     // -- valid_bot_spec_shape / valid_bot_spec -------------------------------
 
     #[test]
-    fn valid_bot_spec_shape_rejects_uppercase_and_symbols() {
+    fn valid_bot_spec_shape_accepts_the_names_a_conf_can_realistically_carry() {
         assert!(valid_bot_spec_shape("frost pve"));
-        assert!(!valid_bot_spec_shape("Frost pve"));
-        assert!(!valid_bot_spec_shape("frost-pve"));
+        // A hand-written conf entry is not obliged to be lowercase-with-spaces;
+        // rejecting these made the picker offer specs the validator refused.
+        assert!(valid_bot_spec_shape("Frost PvE"));
+        assert!(valid_bot_spec_shape("frost-pve"));
+        assert!(valid_bot_spec_shape("frost_pve"));
+        assert!(valid_bot_spec_shape("frost pve 2.0"));
+    }
+
+    #[test]
+    fn valid_bot_spec_shape_still_rejects_everything_whisper_unsafe() {
+        // The tail is spliced into `dml_whisper <p> <b> talents spec <name>`,
+        // so quotes/backslashes/CR-LF/shell+SQL metacharacters stay out.
         assert!(!valid_bot_spec_shape(""));
-        assert!(!valid_bot_spec_shape(" frost"));
+        assert!(!valid_bot_spec_shape(" frost")); // leading space
+        assert!(!valid_bot_spec_shape("-frost")); // must start alphanumeric
+        assert!(!valid_bot_spec_shape("frost'pve"));
+        assert!(!valid_bot_spec_shape("frost\"pve"));
+        assert!(!valid_bot_spec_shape("frost\\pve"));
+        assert!(!valid_bot_spec_shape("frost\npve"));
+        assert!(!valid_bot_spec_shape("frost\rpve"));
+        assert!(!valid_bot_spec_shape("frost pve; .server shutdown"));
+        assert!(!valid_bot_spec_shape("frost'; DROP TABLE bots; --"));
+        assert!(!valid_bot_spec_shape("$(id)"));
+        assert!(!valid_bot_spec_shape("frost<pve>"));
+        assert!(!valid_bot_spec_shape("frost&pve"));
     }
 
     #[test]
@@ -817,6 +846,11 @@ mod tests {
         assert!(valid_bot_spec("custom spec", Some(&live)));
         // Not in the live list, and live list is non-empty -> fallback NOT consulted.
         assert!(!valid_bot_spec("frost pve", Some(&live)));
+        // A non-lowercase conf name is now shape-legal, so membership decides:
+        // the picker offers it and the validator accepts the same string.
+        let live_mixed = vec!["Arms PvE".to_string()];
+        assert!(valid_bot_spec("Arms PvE", Some(&live_mixed)));
+        assert!(!valid_bot_spec("arms pve", Some(&live_mixed)));
     }
 
     #[test]

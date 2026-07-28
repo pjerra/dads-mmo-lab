@@ -356,14 +356,17 @@ fn wr_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_j
     }})
 }
 
-/// Both containers must already be running for a world-only restart to
-/// proceed — a port of the precondition gate at `90-main.sh:1686-1689`. A
-/// `docker restart` on a STOPPED container STARTS it, which on a fully
-/// stopped stack would boot the worldserver alone against a down database
-/// and hang until `READY_TIMEOUT` (~30 min); requiring both up first turns
-/// that into an instant, correct `NOT_RUNNING` answer instead.
-fn wr_preconditions_ok(world_running: bool, db_running: bool) -> bool {
-    world_running && db_running
+/// The DATABASE must already be running for a world-only restart to proceed —
+/// a port of the precondition gate at `90-main.sh:1722-1735`. A `docker
+/// restart` on a STOPPED container STARTS it, which with the database down
+/// would boot the worldserver alone against nothing and hang until
+/// `READY_TIMEOUT` (~30 min); requiring the database up first turns that into
+/// an instant, correct `NOT_RUNNING` answer instead. `world_running` is
+/// deliberately NOT part of the verdict (it is kept for the truth table this
+/// pins): restarting a crashed/stopped world against a healthy database is a
+/// legitimate recovery, not an error.
+fn wr_preconditions_ok(_world_running: bool, db_running: bool) -> bool {
+    db_running
 }
 
 /// `90-main.sh:1716`'s `(( wr_elapsed - wr_note >= 60 ))` cadence check, pure
@@ -390,6 +393,90 @@ pub fn wr_timeout_exceeded(elapsed_secs: u64, timeout_secs: u64) -> bool {
 /// which never validates the override either).
 pub fn wr_ready_timeout_secs() -> u64 {
     std::env::var("DML_READY_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(1800)
+}
+
+/// Poll cadence of the readiness wait — `90-main.sh:1769`'s `sleep 2`.
+const WR_POLL: Duration = Duration::from_secs(2);
+
+/// How many CONSECUTIVE not-running observations of `ac-worldserver` the
+/// readiness wait tolerates before it gives up (Round 2 F1). WHY FIVE: by the
+/// time the wait starts, `docker restart` has already RETURNED, and it only
+/// returns once the engine has started the container again — so in the healthy
+/// case the very first probe already sees it running. A single stray `false`
+/// is still possible (a crash-looping container spends its restart backoff in
+/// `restarting`, where `.State.Running` is false), so one observation must not
+/// be enough. Five consecutive misses at [`WR_POLL`] apart is ~8s of
+/// continuous downtime — an order of magnitude longer than any gap `docker
+/// restart` itself leaves behind, and ~200x shorter than the 1800s readiness
+/// budget this replaces for the exited/crash-looping world the DB-only
+/// precondition now admits.
+pub const WR_WORLD_DOWN_STRIKES: u32 = 5;
+
+/// The world-died-during-the-wait error, byte-identical to the bash twin at
+/// `90-main.sh`'s `world-restart)` arm. Reuses the arm's existing
+/// `RESTART_FAILED` code rather than inventing one: the restart, as an
+/// operation, failed — the container came back and went straight back down.
+const WR_WORLD_DOWN_MSG: &str = "The world server exited instead of coming back up";
+const WR_WORLD_DOWN_HINT: &str = "Check the Console logs for the boot error; fix it and try a full Restart.";
+
+/// How the readiness wait ended. `WorldDown` is the Round-2 F1 fast-fail: the
+/// world container is not running while we are waiting for it to become ready.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WrWaitOutcome {
+    Ready,
+    WorldDown,
+    Timeout,
+}
+
+/// The readiness wait itself, parameterized over its two probes and its poll
+/// interval so it can be unit-tested without docker (production passes
+/// [`WR_POLL`] and the live `status::world_ready` / `status::container_running`
+/// probes). Same decision order as the `until _world_ready` loop in
+/// `90-main.sh`'s `world-restart)` arm: readiness first (so an already-ready
+/// world never even reaches the liveness probe), then liveness, then the
+/// timeout, then the 60s progress note.
+pub fn wr_wait_for_world(
+    timeout_secs: u64,
+    poll: Duration,
+    mut ready: impl FnMut() -> bool,
+    mut world_running: impl FnMut() -> Option<bool>,
+    on_note: impl Fn(u64),
+) -> WrWaitOutcome {
+    let t0 = std::time::Instant::now();
+    let mut last_note: u64 = 0;
+    let mut down_strikes: u32 = 0;
+    loop {
+        if ready() {
+            return WrWaitOutcome::Ready;
+        }
+        // Liveness (Round 2 F1): waiting for a container that is not even
+        // running can only ever end in READY_TIMEOUT. Consecutive misses only
+        // -- one live observation clears the count (see WR_WORLD_DOWN_STRIKES).
+        //
+        // `None` is docker failing to answer, NOT a down container: counting it
+        // as a strike would let a few seconds of engine hiccup abort a healthy
+        // restart with a fabricated boot-failure error. Inconclusive probes
+        // neither strike nor clear; the readiness timeout stays the backstop.
+        match world_running() {
+            Some(true) => down_strikes = 0,
+            Some(false) => {
+                down_strikes += 1;
+                if down_strikes >= WR_WORLD_DOWN_STRIKES {
+                    return WrWaitOutcome::WorldDown;
+                }
+            }
+            None => {}
+        }
+        let elapsed = t0.elapsed().as_secs();
+        if wr_timeout_exceeded(elapsed, timeout_secs) {
+            return WrWaitOutcome::Timeout;
+        }
+        if wr_should_note_wait(elapsed, last_note) {
+            last_note = elapsed;
+            on_note(elapsed);
+        }
+        std::thread::sleep(poll);
+    }
 }
 
 pub fn gl_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
@@ -514,13 +601,16 @@ pub fn world_restart_stream(
         emit(wr_event_section_end("error"));
         emit(wr_event_error(
             "NOT_RUNNING",
-            "The server is not running",
-            "A world-only restart needs the world server and database already up. Start the server (full Start) first.",
+            "The database is not running",
+            "A world-only restart needs the database already up. Start the server (full Start) first.",
         ));
         return;
     }
 
     emit(wr_event_line("warn", "world-only restart does NOT apply settings changes -- use full Restart for that"));
+    if !world_running {
+        emit(wr_event_line("info", "the world server is not running -- this restart will start it back up"));
+    }
 
     if no_saveall {
         emit(wr_event_line(
@@ -555,14 +645,21 @@ pub fn world_restart_stream(
 
     emit(wr_event_line("info", "waiting for the world to come back..."));
     let timeout_secs = wr_ready_timeout_secs();
-    let t0 = std::time::Instant::now();
-    let mut last_note: u64 = 0;
-    loop {
-        if status::world_ready(&program, maint::PROBE_TIMEOUT) {
-            break;
+    let outcome = wr_wait_for_world(
+        timeout_secs,
+        WR_POLL,
+        || status::world_ready(&program, maint::PROBE_TIMEOUT),
+        || status::container_running_probe(&program, "ac-worldserver", maint::PROBE_TIMEOUT),
+        |elapsed| emit(wr_event_line("info", wr_wait_note_text(elapsed))),
+    );
+    match outcome {
+        WrWaitOutcome::Ready => {}
+        WrWaitOutcome::WorldDown => {
+            emit(wr_event_section_end("error"));
+            emit(wr_event_error("RESTART_FAILED", WR_WORLD_DOWN_MSG, WR_WORLD_DOWN_HINT));
+            return;
         }
-        let elapsed = t0.elapsed().as_secs();
-        if wr_timeout_exceeded(elapsed, timeout_secs) {
+        WrWaitOutcome::Timeout => {
             emit(wr_event_section_end("error"));
             emit(wr_event_error(
                 "READY_TIMEOUT",
@@ -571,11 +668,6 @@ pub fn world_restart_stream(
             ));
             return;
         }
-        if wr_should_note_wait(elapsed, last_note) {
-            last_note = elapsed;
-            emit(wr_event_line("info", wr_wait_note_text(elapsed)));
-        }
-        std::thread::sleep(std::time::Duration::from_secs(2));
     }
 
     emit(wr_event_section_end("ok"));
@@ -1014,10 +1106,12 @@ mod tests {
     }
 
     #[test]
-    fn wr_preconditions_ok_requires_both_running() {
+    fn wr_preconditions_ok_requires_only_the_database() {
         assert!(wr_preconditions_ok(true, true));
         assert!(!wr_preconditions_ok(true, false));
-        assert!(!wr_preconditions_ok(false, true));
+        // The recovery case: a crashed/stopped world against a healthy DB is
+        // exactly what a world-only restart is for -- `docker restart` starts it.
+        assert!(wr_preconditions_ok(false, true));
         assert!(!wr_preconditions_ok(false, false));
     }
 
@@ -1043,6 +1137,154 @@ mod tests {
         assert!(!wr_timeout_exceeded(1799, 1800));
         assert!(wr_timeout_exceeded(1800, 1800));
         assert!(wr_timeout_exceeded(1801, 1800));
+    }
+
+    #[test]
+    fn wr_wait_for_world_fails_fast_when_the_world_is_not_running() {
+        // Round 2 F1: the readiness wait's ONLY exit used to be the boot
+        // marker, so an exited/crash-looping world -- exactly what the DB-only
+        // precondition now admits through -- pinned the stream (and the
+        // launcher's "Restarting..." UI) for the whole readiness budget.
+        let timeout_secs = 10;
+        let poll = Duration::from_millis(10);
+        let t0 = std::time::Instant::now();
+        let outcome = wr_wait_for_world(timeout_secs, poll, || false, || Some(false), |_| {});
+        let elapsed = t0.elapsed();
+        assert_eq!(outcome, WrWaitOutcome::WorldDown, "a world that is never running must not be waited out");
+        // The load-bearing assertion (see CLAUDE.md's vacuous-pass trap): the
+        // wait must end WELL INSIDE the budget, not merely return an error.
+        // The pre-fix loop satisfies "an error came back" -- at t=timeout.
+        assert!(elapsed < Duration::from_secs(timeout_secs), "did not fast-fail: took {elapsed:?} of {timeout_secs}s");
+        assert!(elapsed < Duration::from_secs(2), "fast-fail should be ~5 polls, took {elapsed:?}");
+        // ...and NOT on the first observation: a restart legitimately passes
+        // through a brief not-running window.
+        assert!(
+            elapsed >= poll * (WR_WORLD_DOWN_STRIKES - 1),
+            "gave up before {WR_WORLD_DOWN_STRIKES} consecutive probes ({elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn wr_wait_for_world_tolerates_a_transient_not_running_blip() {
+        // One short of the strike count, then the container is live again: the
+        // counter resets and the wait proceeds to a normal Ready.
+        let mut ready_calls = 0u32;
+        let mut running_calls = 0u32;
+        let outcome = wr_wait_for_world(
+            10,
+            Duration::from_millis(1),
+            || {
+                ready_calls += 1;
+                ready_calls > 2 * WR_WORLD_DOWN_STRIKES
+            },
+            || {
+                running_calls += 1;
+                Some(running_calls >= WR_WORLD_DOWN_STRIKES)
+            },
+            |_| {},
+        );
+        assert_eq!(outcome, WrWaitOutcome::Ready, "a {}-poll blip must not abort the wait", WR_WORLD_DOWN_STRIKES - 1);
+    }
+
+    #[test]
+    fn wr_wait_for_world_never_strikes_on_an_inconclusive_probe() {
+        // Round 2 fix-wave residual: `container_running` collapses "docker did
+        // not answer" into `false`, so a few seconds of engine hiccup during
+        // the wait used to look exactly like an exited world and aborted a
+        // HEALTHY restart with a fabricated boot-failure error. An
+        // inconclusive probe must neither strike nor clear -- the readiness
+        // timeout stays the backstop.
+        // The budget must be generous and the probe count must EXCEED the
+        // strike threshold, or the wait exits on the timeout before the strikes
+        // could ever have accumulated and the test passes whatever the code
+        // does (the first cut of this test made exactly that mistake).
+        let mut probes = 0u32;
+        let mut ready_calls = 0u32;
+        let outcome = wr_wait_for_world(
+            10,
+            Duration::from_millis(1),
+            || {
+                ready_calls += 1;
+                ready_calls > 3 * WR_WORLD_DOWN_STRIKES
+            },
+            || {
+                probes += 1;
+                None
+            },
+            |_| {},
+        );
+        assert_eq!(outcome, WrWaitOutcome::Ready, "an unreadable docker must not be reported as a dead world");
+        assert!(
+            probes > WR_WORLD_DOWN_STRIKES,
+            "only {probes} inconclusive probes: fewer than the {WR_WORLD_DOWN_STRIKES} strikes needed to trip the guard, so this proves nothing"
+        );
+    }
+
+    #[test]
+    fn wr_wait_for_world_does_not_let_hiccups_break_a_strike_streak() {
+        // The strikes are CONSECUTIVE-down; an inconclusive probe in the middle
+        // must not silently reset them either, or a container that is genuinely
+        // down while docker is flaky would never trip the guard.
+        // The hiccup must RECUR, or a counter that resets on it still reaches
+        // the threshold from the probes that follow and the test proves nothing
+        // (the first cut of this test made exactly that mistake). With every
+        // Nth probe inconclusive, only a counter that SURVIVES the hiccup can
+        // ever reach N consecutive downs.
+        let mut calls = 0u32;
+        let t0 = std::time::Instant::now();
+        let outcome = wr_wait_for_world(
+            1,
+            Duration::from_millis(1),
+            || false,
+            || {
+                calls += 1;
+                if calls % WR_WORLD_DOWN_STRIKES == 0 { None } else { Some(false) }
+            },
+            |_| {},
+        );
+        assert_eq!(outcome, WrWaitOutcome::WorldDown);
+        // A reset-on-hiccup would never trip the guard and would instead burn
+        // the whole budget, so the speed is the discriminating assertion.
+        assert!(t0.elapsed() < Duration::from_millis(500), "reached the verdict only by timing out ({:?})", t0.elapsed());
+    }
+
+    #[test]
+    fn wr_wait_for_world_still_times_out_when_the_world_is_up_but_never_ready() {
+        // The liveness check must not swallow the READY_TIMEOUT path: a
+        // running-but-slow world (bots respawning) still ends at the budget.
+        let outcome = wr_wait_for_world(0, Duration::from_millis(1), || false, || Some(true), |_| {});
+        assert_eq!(outcome, WrWaitOutcome::Timeout);
+    }
+
+    #[test]
+    fn wr_wait_for_world_returns_ready_without_probing_liveness() {
+        // Readiness is checked FIRST -- the crashed-world recovery restart that
+        // boots fine must never touch the liveness probe.
+        let mut liveness_probes = 0u32;
+        let outcome = wr_wait_for_world(
+            10,
+            Duration::from_millis(1),
+            || true,
+            || {
+                liveness_probes += 1;
+                Some(false)
+            },
+            |_| {},
+        );
+        assert_eq!(outcome, WrWaitOutcome::Ready);
+        assert_eq!(liveness_probes, 0);
+    }
+
+    #[test]
+    fn wr_world_down_error_shape_matches_the_bash_twin() {
+        assert_eq!(
+            wr_event_error("RESTART_FAILED", WR_WORLD_DOWN_MSG, WR_WORLD_DOWN_HINT),
+            serde_json::json!({"event":"error","error":{
+                "code":"RESTART_FAILED",
+                "message":"The world server exited instead of coming back up",
+                "hint":"Check the Console logs for the boot error; fix it and try a full Restart.",
+            }})
+        );
     }
 
     #[test]

@@ -6,7 +6,9 @@
 // CLI validation both come from the deployed playerbots.conf at runtime --
 // `wow party specs` parses it, buildSpecIndex() below turns that into the
 // picker's option lists, and the same conf drives the CLI's _valid_bot_spec.
-// So the picker can no longer offer a spec the validator would reject. The
+// So the picker can no longer offer a spec the validator would reject --
+// membership is shared by construction, and buildSpecIndex applies the same
+// charset guard (isValidSpecShape) the CLI applies. The
 // static ROLE_MAP / PVE_SPECS_BY_CLASS_ID / SPEC_ALLOWLIST below are the
 // ROLE grouping (which class fills which role -- a UI concept absent from the
 // conf) and the OFFLINE FALLBACK used only when the live conf isn't readable
@@ -15,6 +17,17 @@
 //
 // No DK anywhere -- class 6 is excluded from the party system entirely
 // (_valid_bot_class). "bear pvp" / "frostfire pvp" do not exist in the conf.
+
+// The CLI's spec-name charset guard, mirrored (bash `_valid_bot_spec` in
+// cli/src/50-party.sh, Rust `valid_bot_spec_shape` in crates/dml-wow/src/
+// party.rs -- all three must agree). Wide enough for anything a hand-written
+// conf realistically carries (mixed case, digits, . _ -), narrow enough that
+// the name is safe in the `dml_whisper <p> <b> talents spec <name>` tail: no
+// quotes, no backslash, no CR/LF, no shell/SQL metacharacters.
+const SPEC_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]*$/;
+export function isValidSpecShape(name: string): boolean {
+  return SPEC_NAME_RE.test(name);
+}
 
 // A live premade spec parsed from the deployed playerbots.conf. Defined here
 // (the dependency-free data module) so api.ts and the picker share one shape.
@@ -39,6 +52,11 @@ export function buildSpecIndex(specs: LiveSpec[]): SpecIndex {
   const byName: Record<string, LiveSpec[]> = {};
   const byId: Record<number, LiveSpec[]> = {};
   for (const s of specs) {
+    // A conf name the CLI's charset guard would refuse can only ever be a dead
+    // option ("Unknown spec" on click), so it is dropped here rather than
+    // offered. This is the ONLY name-based filter -- everything the validator
+    // accepts reaches the picker verbatim.
+    if (!isValidSpecShape(s.name)) continue;
     (byName[s.class] ??= []).push(s);
     (byId[s.class_id] ??= []).push(s);
   }

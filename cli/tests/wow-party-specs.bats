@@ -111,6 +111,22 @@ EOF
   [ ! -f "$FIXTURE/curl.log" ]
 }
 
+@test "a custom conf spec that is not lowercase-with-spaces is accepted, not silently refused" {
+  # The picker offers every conf name verbatim, so the validator's charset must
+  # be wide enough to accept what a hand-written conf can carry -- otherwise the
+  # user picks their own spec and gets "Unknown spec". Passes spec-validation,
+  # then fails only at the online-guard (NOT_FOUND), never BAD_ARG.
+  seed_conf
+  printf 'AiPlayerbot.PremadeSpecName.8.10 = Arctic-PvE 2.0\n' >> "$MODS/playerbots.conf"
+  use_mysql_stub
+  printf '' > "$FIXTURE/none.tsv"; export DML_STUB_DB_ROWS="$FIXTURE/none.tsv"
+  use_curl_stub
+  export DML_STUB_SOAP_RESPONSE="$BATS_TEST_DIRNAME/fixtures/soap-ok.xml"
+  run bash "$DML" wow party add --player Testen --class mage --spec "Arctic-PvE 2.0" --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
+}
+
 @test "spec validation rejects injection metacharacters before touching the conf" {
   seed_conf
   use_curl_stub
@@ -118,5 +134,31 @@ EOF
   run bash "$DML" wow party add --player Testen --class mage --spec "frost pve; .server shutdown" --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  [ ! -f "$FIXTURE/curl.log" ]
+}
+
+@test "the wider charset is still injection-safe for the whisper tail" {
+  # Every one of these is present VERBATIM in the conf, so only the charset
+  # guard can reject them -- membership would otherwise let them through into
+  # `dml_whisper <p> <b> talents spec <name>`.
+  seed_conf
+  use_curl_stub
+  export DML_STUB_CURL_LOG="$FIXTURE/curl.log"
+  while IFS= read -r bad; do
+    printf 'AiPlayerbot.PremadeSpecName.8.11 = %s\n' "$bad" > "$MODS/playerbots.conf.extra"
+    cat "$MODS/playerbots.conf.extra" >> "$MODS/playerbots.conf"
+    run bash "$DML" wow party add --player Testen --class mage --spec "$bad" --json
+    [ "$status" -eq 1 ]
+    [ "$(echo "$output" | jq -r '.error.code')" = "BAD_ARG" ]
+  done <<'EOF'
+frost'pve
+frost"pve
+frost\pve
+frost&pve
+frost<pve>
+frost|pve
+frost$(id)
+frost`id`
+EOF
   [ ! -f "$FIXTURE/curl.log" ]
 }

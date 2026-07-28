@@ -200,15 +200,24 @@ _party_spec_rows() {
 # drift from what the playerbots `talents spec <name>` command actually
 # accepts -- a wrong name replies only IN-GAME ("Spec <x> not found",
 # invisible to SOAP), so the CLI must reject anything the conf does not define.
-# The [a-z ] charset guard is enforced regardless (injection-safe whisper
-# tail; the no-free-text-whisper rule holds because the value must still be a
-# conf-listed name). When no conf is deployed (server not installed / tests)
-# it FALLS BACK to a static mirror of the shipped defaults so validation keeps
-# working. DK (class 6) specs are deliberately absent (no DK in the wizard).
+# The charset guard is enforced regardless (injection-safe whisper tail; the
+# no-free-text-whisper rule holds because the value must still be a conf-listed
+# name). When no conf is deployed (server not installed / tests) it FALLS BACK
+# to a static mirror of the shipped defaults so validation keeps working. DK
+# (class 6) specs are deliberately absent (no DK in the wizard).
 _valid_bot_spec() {
     local want="$1" names
-    # Injection guard first: live spec names are lowercase words + spaces only.
-    [[ "$want" =~ ^[a-z][a-z\ ]*$ ]] || return 1
+    # Injection guard first. The charset is WIDER than the shipped names' plain
+    # lowercase-and-spaces: playerbots.conf is hand-editable (and raw-writable
+    # from the Modules editor), the picker offers every conf name verbatim, and
+    # refusing "Arms PvE" here just made the picker offer specs this function
+    # rejected. What it must never admit is anything unsafe in the
+    # `dml_whisper <p> <b> talents spec <name>` tail -- no quotes, no
+    # backslash, no CR/LF, no shell/SQL metacharacters -- hence alphanumerics
+    # plus space . _ - only, and an alphanumeric first character.
+    # Keep this in sync with valid_bot_spec_shape (crates/dml-wow/src/party.rs)
+    # and isValidSpecShape (launcher/src/lib/party-specs.ts).
+    [[ "$want" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._-]*$ ]] || return 1
     names="$(_party_spec_names)"
     if [[ -n "$names" ]]; then
         if grep -qxF -- "$want" <<< "$names"; then return 0; else return 1; fi

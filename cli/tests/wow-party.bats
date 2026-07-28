@@ -31,6 +31,28 @@ teardown() { teardown_fixture; }
   grep -q 'online' "$FIXTURE/q.log"
 }
 
+@test "party online: a NULL guid/class/level degrades to 0 instead of breaking the JSON" {
+  # cols: guid, name, class(NULL), level(NULL) -- mysql -N emits NULLs as the
+  # literal "NULL"; unguarded that yields `"class":NULL,` -> invalid JSON that
+  # blanks the party card. Same 0 degradation as `players online`.
+  printf '2503\tTesten\tNULL\tNULL\n' > "$FIXTURE/on.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/on.tsv"
+  run bash "$DML" wow party online --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.online | length')" = "1" ]
+  [ "$(echo "$output" | jq -r '.data.online[0].guid')" = "2503" ]
+  [ "$(echo "$output" | jq -r '.data.online[0].class')" = "0" ]
+  [ "$(echo "$output" | jq -r '.data.online[0].level')" = "0" ]
+}
+
+@test "party online: a non-numeric guid degrades to 0 rather than emitting invalid JSON" {
+  printf 'NULL\tTesten\t8\t1\n' > "$FIXTURE/on.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/on.tsv"
+  run bash "$DML" wow party online --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.online[0].guid')" = "0" ]
+}
+
 @test "party online maps db failure to DB_UNREACHABLE" {
   export DML_STUB_DB_EXIT=1
   run bash "$DML" wow party online --json

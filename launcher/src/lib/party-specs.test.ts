@@ -6,6 +6,7 @@ import {
   SPEC_ALLOWLIST,
   VALID_BOT_CLASSES,
   buildSpecIndex,
+  isValidSpecShape,
   type LiveSpec,
 } from "./party-specs";
 
@@ -44,8 +45,12 @@ describe("party-specs map integrity", () => {
     expect(new Set(SPEC_ALLOWLIST).size).toBe(SPEC_ALLOWLIST.length);
     expect(SPEC_ALLOWLIST).not.toContain("bear pvp");
     expect(SPEC_ALLOWLIST).not.toContain("frostfire pvp");
-    // spec-name shape matches the CLI's injection-safe charset ([a-z ] only)
-    for (const s of SPEC_ALLOWLIST) expect(s).toMatch(/^[a-z ]+$/);
+    // The shipped names are plain lowercase-and-spaces; that is a strict
+    // subset of the CLI's (wider) injection-safe charset.
+    for (const s of SPEC_ALLOWLIST) {
+      expect(s).toMatch(/^[a-z ]+$/);
+      expect(isValidSpecShape(s)).toBe(true);
+    }
   });
 
   it("classId matches the CLI class name in every pick", () => {
@@ -57,6 +62,34 @@ describe("party-specs map integrity", () => {
       for (const pick of ROLE_MAP[role]) {
         expect(pick.classId).toBe(idByName[pick.class]);
       }
+    }
+  });
+});
+
+// The charset guard mirrored from the CLI (_valid_bot_spec / valid_bot_spec_shape).
+describe("isValidSpecShape", () => {
+  it("accepts what a hand-written playerbots.conf realistically carries", () => {
+    for (const s of ["frost pve", "Frost PvE", "frost-pve", "frost_pve", "Arctic-PvE 2.0", "spec1"]) {
+      expect(isValidSpecShape(s)).toBe(true);
+    }
+  });
+
+  it("rejects anything unsafe in the whisper tail", () => {
+    for (const s of [
+      "",
+      " frost",
+      "-frost",
+      "frost'pve",
+      'frost"pve',
+      "frost\\pve",
+      "frost\npve",
+      "frost\rpve",
+      "frost pve; .server shutdown",
+      "$(id)",
+      "frost<pve>",
+      "frost&pve",
+    ]) {
+      expect(isValidSpecShape(s)).toBe(false);
     }
   });
 });
@@ -94,6 +127,20 @@ describe("buildSpecIndex (live spec picker)", () => {
     // 'custom test pve' is not in SPEC_ALLOWLIST, yet the live index offers it.
     expect(SPEC_ALLOWLIST).not.toContain("custom test pve");
     expect(idx.byId[8].some((s) => s.name === "custom test pve")).toBe(true);
+  });
+
+  it("never offers a spec name the CLI validator would reject", () => {
+    // playerbots.conf is raw-writable from the Modules editor, so a conf value
+    // can carry anything. Mixed case / punctuation is legal and must survive
+    // (the picker offering it and the CLI refusing it was the drift); a name
+    // that is whisper-unsafe is dropped instead of becoming a dead option.
+    const idx = buildSpecIndex([
+      { class_id: 1, class: "warrior", specno: 5, name: "Arctic-PvE 2.0", link: null, tree: null },
+      { class_id: 1, class: "warrior", specno: 6, name: "frost pve; .server shutdown", link: null, tree: null },
+      { class_id: 1, class: "warrior", specno: 7, name: 'frost"pve', link: null, tree: null },
+    ]);
+    expect(idx.byName["warrior"].map((s) => s.name)).toEqual(["Arctic-PvE 2.0"]);
+    expect(idx.byId[1].map((s) => s.name)).toEqual(["Arctic-PvE 2.0"]);
   });
 
   it("empty live data yields empty indexes (UI then uses the static fallback)", () => {

@@ -406,10 +406,10 @@ pub fn assemble_players_online(res: &QueryResult) -> Value {
 }
 
 /// Assemble `{"online":[{guid,name,class,level}]}` — a port of the `party
-/// online` while-loop. Rows with an empty guid are skipped; unlike `players
-/// online` the bash splices guid/class/level RAW here (no digit guard), so
-/// this mirrors [`assemble_teleport`]'s raw-splice handling instead
-/// (`num_token` degrades non-numeric text to `null`).
+/// online` while-loop. Rows with an empty guid are skipped; `guid`/`class`/
+/// `level` each guard to `0` when non-numeric, exactly like `players online`
+/// (0 and not `null`: both backends serve the same page, so a malformed row
+/// must not mean two different things depending on which one answered).
 pub fn assemble_party_online(res: &QueryResult) -> Value {
     let mut online = Vec::with_capacity(res.rows.len());
     for row in &res.rows {
@@ -420,11 +420,16 @@ pub fn assemble_party_online(res: &QueryResult) -> Value {
         if guid.is_empty() {
             continue;
         }
+        let guid = if is_all_digits(&guid) { guid } else { "0".to_string() };
+        let cls = cell_text(&row[2]);
+        let cls = if is_all_digits(&cls) { cls } else { "0".to_string() };
+        let lvl = cell_text(&row[3]);
+        let lvl = if is_all_digits(&lvl) { lvl } else { "0".to_string() };
         online.push(json!({
             "guid": num_token(&guid),
             "name": cell_text(&row[1]),
-            "class": num_token(&cell_text(&row[2])),
-            "level": num_token(&cell_text(&row[3])),
+            "class": num_token(&cls),
+            "level": num_token(&lvl),
         }));
     }
     json!({ "online": online })
@@ -985,10 +990,20 @@ mod tests {
                 vec![i(2502), t("Hypeer"), i(1), i(80)],
                 // empty guid -> skipped
                 vec![t(""), t("X"), i(1), i(1)],
+                // non-numeric guid/class/level -> guard to 0, same as
+                // `players online` (0, never null: the two backends must not
+                // disagree on what a malformed row means).
+                vec![t("NULL"), t("Weird"), t(""), t("x")],
             ],
         };
         let got = assemble_party_online(&res);
-        assert_eq!(got, json!({"online":[{"guid":2502,"name":"Hypeer","class":1,"level":80}]}));
+        assert_eq!(
+            got,
+            json!({"online":[
+                {"guid":2502,"name":"Hypeer","class":1,"level":80},
+                {"guid":0,"name":"Weird","class":0,"level":0}
+            ]})
+        );
     }
 
     // -- items search ---------------------------------------------------

@@ -2775,7 +2775,8 @@ async fn wow_party_online(state: State<'_, AppState>) -> Result<serde_json::Valu
 // Batch 5 F5 follow-up: read-only dump of the LIVE premade specs parsed from
 // the deployed playerbots.conf. Drives the launcher's spec picker AND (CLI
 // side) _valid_bot_spec, so the picker can never offer a spec the validator
-// would reject.
+// would reject -- membership by construction, charset via the frontend's
+// buildSpecIndex/isValidSpecShape mirror of the CLI guard.
 #[tauri::command]
 async fn wow_party_specs(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
     run_json_cmd(state, vec!["wow".into(), "party".into(), "specs".into()]).await

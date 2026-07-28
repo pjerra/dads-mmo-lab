@@ -108,3 +108,55 @@ teardown() { teardown_fixture; }
   run grep -q '^restart -t 300 ac-worldserver$' "$FIXTURE/calls.log"
   [ "$status" -ne 0 ]
 }
+
+@test "world-restart: a down database with the world up -> NOT_RUNNING (the hang guard)" {
+  # Only the DB half guards the ~30min READY_TIMEOUT hang, so it stays strict.
+  export DML_STUB_RUNNING_STATE_DB=false
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"code":"NOT_RUNNING"'
+  echo "$output" | tail -1 | grep -q 'database'
+  run grep -q '^restart -t 300 ac-worldserver$' "$FIXTURE/calls.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "world-restart: a world that never comes back up fails fast, not at READY_TIMEOUT" {
+  # Round 2 F1: the DB-only precondition deliberately ADMITS a crashed world
+  # (that is the recovery path below). If the world then exits again instead of
+  # booting -- bad conf value, missing map/DBC data, OOM -- the readiness wait
+  # must notice the container is not running instead of burning the whole
+  # DML_READY_TIMEOUT_SECS budget (30 min by default) while the launcher holds
+  # the UI on "Restarting...".
+  printf 'still booting...\n' > "$FIXTURE/ready.log"   # marker never appears...
+  export DML_STUB_RUNNING_STATE_WORLD=false           # ...and the world is down
+  export DML_READY_TIMEOUT_SECS=60
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  t0=$SECONDS
+  run bash "$DML" wow world-restart --json
+  elapsed=$(( SECONDS - t0 ))
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"event":"section_end","name":"world-restart","status":"error"'
+  echo "$output" | tail -1 | grep -q '"code":"RESTART_FAILED"'
+  echo "$output" | tail -1 | grep -q 'The world server exited instead of coming back up'
+  # The restart WAS attempted -- this is the crashed-world recovery path, not
+  # the precondition bail.
+  grep -q '^restart -t 300 ac-worldserver$' "$FIXTURE/calls.log"
+  # The load-bearing assertion: the stream ended WELL INSIDE the readiness
+  # budget. A wait that only watches for the boot marker cannot satisfy this --
+  # it returns at 60s. (Fast-fail costs ~8s: 5 consecutive down probes, 2s apart.)
+  [ "$elapsed" -lt 30 ]
+}
+
+@test "world-restart: a down world with a healthy database is a legitimate recovery restart" {
+  # `docker restart` on a stopped container STARTS it, and with the DB up
+  # there is nothing to hang on -- this is the Home card's crashed-verdict
+  # recovery path, so it must proceed instead of claiming nothing is running.
+  export DML_STUB_RUNNING_STATE_WORLD=false
+  export DML_STUB_CALL_LOG="$FIXTURE/calls.log"
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"level":"info".*world server is not running'
+  [ "$(echo "$output" | tail -1 | jq -r '.data.restarted')" = "world-only" ]
+  grep -q '^restart -t 300 ac-worldserver$' "$FIXTURE/calls.log"
+}

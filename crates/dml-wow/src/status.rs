@@ -379,6 +379,29 @@ pub fn container_running(program: &OsStr, name: &str, timeout: Duration) -> bool
     }
 }
 
+/// Tri-state sibling of [`container_running`]: `None` means *docker could not
+/// answer* (engine hiccup, inspect timeout, garbage output), as opposed to
+/// `Some(false)` = it answered and the container is down.
+///
+/// The "can't tell -> not running" collapse above is the right default for a
+/// PRECONDITION (refusing to act on an unreadable stack is safe). It is the
+/// wrong default for the world-restart liveness strike counter, where it turns
+/// a few seconds of Docker unavailability into a fabricated "the world server
+/// exited" abort of a perfectly healthy restart. Callers that count strikes
+/// must use this and ignore `None`.
+pub fn container_running_probe(program: &OsStr, name: &str, timeout: Duration) -> Option<bool> {
+    let mut cmd = Command::new(program);
+    cmd.args(["inspect", "-f", "{{.State.Running}}", name]);
+    windows_no_window(&mut cmd);
+    let out = output_bounded_draining(cmd, timeout)?;
+    match String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("") {
+        "true" => Some(true),
+        "false" => Some(false),
+        // Empty or an error message: docker did not give us a verdict.
+        _ => None,
+    }
+}
+
 /// The four-state (five-string) verdict machine — a faithful port of the
 /// `detail_verdict` derivation (`90-main.sh:1454-1492`). `exit_code` must
 /// already be the CALLER's decision of "is there a usable exit code to

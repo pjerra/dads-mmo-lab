@@ -743,16 +743,90 @@ fn party_add_rejects_bad_player_class_gender_and_spec_before_any_soap_or_db_call
     );
 }
 
-/// `valid_bot_spec_shape`'s `^[a-z][a-z ]*$` injection guard (review Fix 2):
-/// `bear pvp` above is shape-VALID (lowercase words + spaces) and fails only
-/// on membership, so it proves nothing about whether the shape guard itself
+impl Sealed {
+    /// Deploy a `playerbots.conf` under this sandbox's title dir carrying
+    /// `names` as premade spec names, VERBATIM (one
+    /// `AiPlayerbot.PremadeSpecName.8.<n>` row each) -- the same seeding
+    /// `cli/tests/wow-party-specs.bats`'s "the wider charset is still
+    /// injection-safe for the whisper tail" does.
+    ///
+    /// WHY IT MATTERS: without a conf the games dir is empty,
+    /// `party::live_spec_names` returns `None`, and `valid_bot_spec` falls
+    /// back to the static `FALLBACK_SPEC_NAMES` mirror -- where every hostile
+    /// name is already a non-member, so the membership lookup alone produces
+    /// the exact rejection envelope and the shape guard could be deleted with
+    /// no test noticing (round-2 review finding). Seeding the hostile names
+    /// makes them MEMBERS, which leaves `valid_bot_spec_shape` as the only
+    /// thing that can still reject them.
+    fn seed_playerbots_conf(&self, names: &[&str]) {
+        let title = self.root.join("games").join("wow-server-playerbots");
+        let mods = title.join("env").join("dist").join("etc").join("modules");
+        fs::create_dir_all(&mods).unwrap();
+        // `party_specs::find_conf` resolves through `maint::resolve_server_dir`,
+        // which only accepts a dir that HAS a compose file -- without this the
+        // conf is invisible and the seeding would silently do nothing.
+        fs::write(
+            title.join("docker-compose.yml"),
+            "services:\n  ac-worldserver:\n    image: dummy\n",
+        )
+        .unwrap();
+        let mut conf = String::from("# seeded by cli_integration.rs\n");
+        for (i, name) in names.iter().enumerate() {
+            conf.push_str(&format!("AiPlayerbot.PremadeSpecName.8.{i} = {name}\n"));
+        }
+        fs::write(mods.join("playerbots.conf"), conf).unwrap();
+    }
+}
+
+/// Shape-INVALID spec names, all seeded into the live conf by the test below.
+/// SQL/shell-metacharacter, quote and backslash shapes that would be dangerous
+/// concatenated into the `dml_whisper <p> <b> talents spec <name>` tail, plus
+/// `.frost` for the "must START alphanumeric" branch (`.` is legal in the TAIL,
+/// so nothing but the first-character rule can refuse it). NB a hyphen/dot/
+/// underscore/uppercase INSIDE a name is deliberately absent: the charset was
+/// widened to cover hand-written conf names (a picker offering a spec the
+/// validator refused was the drift being fixed), so `Frost-PvE 2.0` is
+/// shape-VALID and only membership decides it. A leading SPACE is likewise not
+/// here: `parse_spec_rows` trims the conf value, so ` frost` can never be a
+/// member and would be a vacuous case again.
+const SHAPE_INVALID_SPECS: &[&str] = &[
+    "frost'; DROP TABLE bots; --",
+    "frost\"pve",
+    "frost\\pve",
+    "frost&pve",
+    "frost<pve>",
+    "frost|pve",
+    "$(id)",
+    "frost`id`",
+    ".frost",
+];
+
+/// The other first-character case, kept apart because clap swallows a bare
+/// `--spec -frost` as an unknown FLAG (BAD_ARGS/exit 2) long before the guard
+/// runs, so it can only be delivered in the `--spec=<value>` form.
+const LEADING_HYPHEN_SPEC: &str = "-frost";
+
+/// Shape-VALID, and absent from `FALLBACK_SPEC_NAMES` on purpose: it can only
+/// pass validation when the seeded conf was really read. The test's
+/// non-vacuity control.
+const SEEDED_CONTROL_SPEC: &str = "custom test pve";
+
+/// `valid_bot_spec_shape`'s `^[A-Za-z0-9][A-Za-z0-9 ._-]*$` injection guard
+/// (review Fix 2): `bear pvp` above is shape-VALID and fails only on
+/// membership, so it proves nothing about whether the shape guard itself
 /// still runs -- deleting `valid_bot_spec_shape` entirely would not change
-/// that assertion's outcome. These inputs are chosen to be shape-INVALID
-/// specifically (uppercase, digits, and SQL/shell-metacharacter shapes that
-/// would be dangerous if ever concatenated into a whisper string), so they
-/// pin down that the shape guard -- not just the membership lookup -- is what
-/// fires, on BOTH `party add --spec` and `party botcmd ... spec --spec`. The
-/// message asserted is the SAME shape for every shape-invalid input
+/// that assertion's outcome.
+///
+/// The same trap applies to shape-INVALID inputs run against an EMPTY games
+/// dir, which is how this test used to work: with no conf deployed the
+/// membership lookup falls back to the static mirror, which rejects every
+/// hostile name too, so `valid_bot_spec_shape` could be replaced by `true` and
+/// this test stayed green (round-2 review finding). So every hostile name is
+/// now SEEDED into a live `playerbots.conf` verbatim -- making it a MEMBER --
+/// which leaves the shape guard as the only thing that can still refuse it, on
+/// BOTH `party add --spec` and `party botcmd ... spec --spec`.
+///
+/// The message asserted is the SAME shape for every shape-invalid input
 /// ("Unknown spec: <value>"): `valid_bot_spec` collapses shape and membership
 /// failures into one BAD_ARG, so the value round-tripping into the message
 /// unmangled is itself the proof the guard rejected the raw string rather
@@ -760,39 +834,84 @@ fn party_add_rejects_bad_player_class_gender_and_spec_before_any_soap_or_db_call
 #[test]
 fn party_add_and_botcmd_spec_reject_shape_invalid_values_before_any_soap_or_db_call() {
     let s = Sealed::new("specshape");
+    let mut seeded: Vec<&str> = SHAPE_INVALID_SPECS.to_vec();
+    seeded.push(LEADING_HYPHEN_SPEC);
+    seeded.push(SEEDED_CONTROL_SPEC);
+    s.seed_playerbots_conf(&seeded);
+
     let add_hint =
         "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list.";
     let botcmd_hint = "A premade spec name like 'frost pve'.";
 
-    for bad_spec in ["Frost PvE", "frost1", "frost'; DROP TABLE bots; --", "frost-pve", " frost"] {
-        let (code, envelope) =
-            s.run(&["party", "add", "Testen", "warrior", "--spec", bad_spec]);
-        assert_eq!(code, 1, "party add --spec {bad_spec:?}: {envelope}");
-        assert_eq!(envelope["error"]["code"], "BAD_ARG", "party add --spec {bad_spec:?}: {envelope}");
+    // NON-VACUITY CONTROL, first: the seeded conf must actually be found,
+    // parsed and consulted, or the loop below is back to proving nothing.
+    // `custom test pve` is shape-valid and NOT in the static mirror, so it can
+    // only get past the spec guard via the live conf -- and then dies at the
+    // next guard, the sealed DB's online lookup (NOT_FOUND). A BAD_ARG here
+    // means the seeding broke.
+    for args in [
+        vec!["party", "add", "Testen", "warrior", "--spec", SEEDED_CONTROL_SPEC],
+        vec!["party", "botcmd", "Testen", "Botty", "spec", "--spec", SEEDED_CONTROL_SPEC],
+    ] {
+        let (code, envelope) = s.run(&args);
+        assert_eq!(code, 1, "{args:?}: {envelope}");
         assert_eq!(
-            envelope["error"]["message"],
-            format!("Unknown spec: {bad_spec}"),
-            "party add --spec {bad_spec:?}: {envelope}"
-        );
-        assert_eq!(envelope["error"]["hint"], add_hint, "party add --spec {bad_spec:?}: {envelope}");
-
-        let (code, envelope) =
-            s.run(&["party", "botcmd", "Testen", "Botty", "spec", "--spec", bad_spec]);
-        assert_eq!(code, 1, "party botcmd spec --spec {bad_spec:?}: {envelope}");
-        assert_eq!(
-            envelope["error"]["code"], "BAD_ARG",
-            "party botcmd spec --spec {bad_spec:?}: {envelope}"
-        );
-        assert_eq!(
-            envelope["error"]["message"],
-            format!("Unknown spec: {bad_spec}"),
-            "party botcmd spec --spec {bad_spec:?}: {envelope}"
+            envelope["error"]["code"], "NOT_FOUND",
+            "{args:?}: the seeded playerbots.conf must be the live spec source \
+             (BAD_ARG here = the conf was not read, so the shape assertions below \
+             would be vacuous): {envelope}"
         );
         assert_eq!(
-            envelope["error"]["hint"], botcmd_hint,
-            "party botcmd spec --spec {bad_spec:?}: {envelope}"
+            envelope["error"]["message"], "Character not online: Testen",
+            "{args:?}: {envelope}"
         );
     }
+
+    // One shape rejection, asserted whole. Factored out so the `--spec=<value>`
+    // form below can reuse it verbatim.
+    let assert_unknown_spec = |args: &[&str], bad_spec: &str, hint: &str| {
+        let (code, envelope) = s.run(args);
+        assert_eq!(code, 1, "{args:?}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "BAD_ARG",
+            "{args:?}: this name IS in the seeded conf, so only the shape guard \
+             can refuse it: {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"],
+            format!("Unknown spec: {bad_spec}"),
+            "{args:?}: {envelope}"
+        );
+        assert_eq!(envelope["error"]["hint"], hint, "{args:?}: {envelope}");
+    };
+
+    for &bad_spec in SHAPE_INVALID_SPECS {
+        assert_unknown_spec(
+            &["party", "add", "Testen", "warrior", "--spec", bad_spec],
+            bad_spec,
+            add_hint,
+        );
+        assert_unknown_spec(
+            &["party", "botcmd", "Testen", "Botty", "spec", "--spec", bad_spec],
+            bad_spec,
+            botcmd_hint,
+        );
+    }
+
+    // The leading-hyphen case, in the only form that reaches the guard (see
+    // `LEADING_HYPHEN_SPEC`) -- and the form a front end that builds argv
+    // itself would naturally produce.
+    let add_eq = format!("--spec={LEADING_HYPHEN_SPEC}");
+    assert_unknown_spec(
+        &["party", "add", "Testen", "warrior", &add_eq],
+        LEADING_HYPHEN_SPEC,
+        add_hint,
+    );
+    assert_unknown_spec(
+        &["party", "botcmd", "Testen", "Botty", "spec", &add_eq],
+        LEADING_HYPHEN_SPEC,
+        botcmd_hint,
+    );
 }
 
 #[test]

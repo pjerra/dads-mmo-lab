@@ -74,8 +74,17 @@ if [[ "${1:-}" == "inspect" ]]; then
   # '{{.State.Running}}' <container>`. DML_STUB_RUNNING_STATE drives it
   # (default true so the happy path sees an up stack); set it to false to
   # model a stopped stack -> NOT_RUNNING with no long readiness wait.
+  # DML_STUB_RUNNING_STATE_WORLD / _DB override per container: the precondition
+  # probes ac-worldserver and ac-database separately and treats them
+  # differently (a down world with a healthy DB is a legitimate recovery
+  # restart), which one shared variable cannot model.
   if [[ "$*" == *State.Running* ]]; then
-    printf '%s\n' "${DML_STUB_RUNNING_STATE:-true}"
+    run_state="${DML_STUB_RUNNING_STATE:-true}"
+    case "$*" in
+      *ac-worldserver*) run_state="${DML_STUB_RUNNING_STATE_WORLD:-$run_state}" ;;
+      *ac-database*)    run_state="${DML_STUB_RUNNING_STATE_DB:-$run_state}" ;;
+    esac
+    printf '%s\n' "$run_state"
     exit 0
   fi
   # server-detail crashed-vs-stopped (Batch 2 F8): the ExitCode format string
