@@ -82,6 +82,9 @@ export const FEATURES: Record<string, FeatureStatus> = {
   // Restarting dockerd inside dml-arch kills every running container, so this
   // is destructive by nature and stays locked until its smoke row passes.
   "docker-restart": "untested",
+  // Writes a name file into the server's own directory. Benign and reversible,
+  // but it is still a write to a title dir, so it follows the same rule.
+  "server-rename": "untested",
 };
 
 export const LOCKED_HINT =

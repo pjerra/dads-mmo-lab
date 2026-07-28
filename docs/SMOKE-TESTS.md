@@ -37,6 +37,16 @@ thing from **Config ▸ Module files** (editing conf files).
 | ⬜ | [docker-restart] One-click Restart Docker in the distro | (WSL backend only — native mode has no distro, so the card must NOT render there.) Tools → **Restart Docker in the distro** card, locked until "Enable untested features" is ticked. It is destructive: restarting dockerd kills every running container, so it must arm/confirm before acting. Run it with the server UP → the containers go down and the daemon comes back; Home then shows stopped/crashed and a normal Start works. On the soap_unreachable card, the restart-Docker hint is now a BUTTON that navigates to that Tools card. If sudo or systemd is unavailable in the distro, expect a clear error (never a hang on a password prompt). |
 | ✅ | Bots line (Round N) | With world up: online card shows `Bots: <n> / <max>` and the expanded health panel a "Bots online" row — numbers match reality (`server info` chars-in-world ≈ bots+you; max = the compose override, e.g. 2000). Items & Bots ▸ My Party header shows the same bots-online chip. |
 
+## 1b. Multi-server tray + naming (Round 2.5)
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ⬜ | Tray lists every installed server | Right-click the tray icon: one entry PER INSTALLED SERVER, each with its own Start / Stop / Restart. A server you have not installed never appears. Start one from the tray with the window hidden → the window comes forward and the run streams into the terminal (the tray must not run the lifecycle silently behind your back). |
+| ⬜ | Tray Doctor | Tray → Doctor opens the window and runs the doctor report. |
+| ⬜ | [server-rename] Rename a server | Library → an installed title → Rename → type a name → the tray entry, Home's status card and Library all show it. Restart the launcher → the name persists (it lives in the server's own directory, not launcher config). Clear the name → everything falls back to the built-in title name. |
+| ⬜ | Name a server at install | Install a title with a name filled in → that name shows everywhere afterwards. Install with the field empty → the built-in name is used, no blank labels anywhere. |
+| ⬜ | Home follows the active server | With 2+ servers installed, switch the active server on Home → the status card, Start/Stop/Restart and the sidebar chip all follow it. Relaunch → the same server is still active. NB the WoW-only pages (GM Tools, My Party, Item Database, Character) stay bound to the WoW server by design — they are meaningless for another title. |
+
 ## 2. Console (Round B)
 
 | Status | Test | Steps / expected |
