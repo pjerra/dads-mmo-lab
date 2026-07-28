@@ -353,6 +353,15 @@ breaks down.
 
 ### Installer: offer Defender exclusions for the build folders (user request, 2026-07-27)
 
+> **PARTLY SHIPPED 2026-07-28** (commit `45e222a`, merged from
+> `feat/round2-launcher-batch`): the installer now offers an opt-in exclusion
+> for **`$InstallRoot`** and the uninstaller removes it again, with the
+> read-back verification and non-fatal handling below. What is NOT shipped is
+> the half this entry opens with — the **build-tool** exclusions
+> (`cargo`/`rustc`/`link`/`node` + `target/`), deliberately left manual because
+> they only help someone building from source. If the cargo-rebuild drag is
+> what you wanted fixed, that part is still open.
+
 Defender scans every file `cargo` writes, which is a measurable drag on
 `target/`-heavy rebuilds. The fix is two `Add-MpPreference` calls, but they
 need elevation — so today it's a manual "open an admin terminal and paste"
