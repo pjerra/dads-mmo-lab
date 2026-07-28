@@ -11,17 +11,31 @@ modules and backups — all from one window, no terminal needed.
 
 ## Getting it
 
+**As a user — no repo, no Rust, no Node.**
+
+1. Run `Install-DML.ps1` once from an elevated PowerShell. It enables WSL2 and
+   creates the `dml-arch` distro; that step needs admin, so it stays a script.
+2. Install the launcher (`DML Launcher_x.y.z_x64-setup.exe`). It is unsigned,
+   so SmartScreen will warn — *More info* then *Run anyway*.
+3. Open it. The first-run screen walks the rest: it ships the `dml` CLI, the
+   lua bridges and the title installers inside it, and provisions them into the
+   distro from a **Set up backend** button. There is no `dev-install.ps1` step.
+
+Requirements: Windows 10/11 (WSL2 capable). In a VM, nested virtualization must
+be enabled on the host or WSL2 cannot start.
+
+**As a developer — from source.**
+
 ```
-git clone --branch feat/dml-launcher-windows https://github.com/pjerra/dads-mmo-lab.git
+git clone --branch rust-main https://github.com/pjerra/dads-mmo-lab.git
 cd dads-mmo-lab\launcher
-powershell -File ..\cli\dev-install.ps1
 npm install
 npm run tauri dev
 ```
 
-Requirements: Windows 10/11 with WSL2 and the Dad's MMO Lab `dml-arch` distro
-(set up by the [DML installer](https://github.com/DadsMmoLab/dads-mmo-lab)),
-Node.js 18+, and Rust (for building the app shell).
+`cli\dev-install.ps1` still exists for the dev loop, but it hardcodes a repo
+path and is no longer any user's route. Requirements for building: Node.js 18+
+and Rust.
 
 ## What it does
 

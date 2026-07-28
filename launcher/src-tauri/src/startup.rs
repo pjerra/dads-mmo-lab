@@ -110,8 +110,23 @@ pub fn resolve_and_export() {
                 .map(|g| g.join("tools").join("yq.exe").to_string_lossy().into_owned())
         });
 
-    // --- script: NO invented default. Absent means absent. ---------------
-    let script: Option<String> = cfg.dml_script.clone().filter(|s| !s.trim().is_empty());
+    // --- script: NO invented default, but a SHIPPED one is not invented ---
+    //
+    // Precedence stays env > launcher.json, then falls back to the copy of
+    // `cli/dml` this build bundles next to the exe (SHIP-LIST 4.1). Without
+    // that last step the whole point of bundling the payload was lost for
+    // native mode: `find_dml_script` fell back to a bare `dml`, so a packaged
+    // launcher still needed a repo checkout to run natively -- exactly the
+    // "clone the repo, be named perzi" problem Phase 4 exists to end.
+    //
+    // Only used when the file is actually THERE, so a dev build without a
+    // bundled payload still behaves as before. Consumed by DmlRunner::native()
+    // alone; WSL mode never reads DML_SCRIPT, so this cannot disturb it.
+    let script: Option<String> = cfg
+        .dml_script
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(bundled_cli_script);
 
     let exports: Vec<(&str, Option<String>)> = vec![
         ("DML_BACKEND", value_to_export(env_backend_raw.as_deref(), Some(backend_str))),
@@ -131,6 +146,18 @@ pub fn resolve_and_export() {
             std::env::set_var(name, v);
         }
     }
+}
+
+/// The `cli/dml` this build bundles beside the exe, when it is really there.
+///
+/// Resolved from the executable's own directory rather than tauri's resource
+/// API because this runs BEFORE the app is built (see `resolve_and_export`'s
+/// placement) — and on Windows tauri's `resource_dir()` returns exactly that
+/// directory anyway, so the two agree.
+fn bundled_cli_script() -> Option<String> {
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let script = crate::payload::paths(&exe_dir).cli_script;
+    script.is_file().then(|| script.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

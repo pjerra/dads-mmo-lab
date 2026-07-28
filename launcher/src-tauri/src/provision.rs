@@ -632,6 +632,10 @@ pub fn destinations() -> [(&'static str, &'static str); 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the tests build paths; production here only ever borrows them, so
+    // PathBuf lives with its user rather than as an import the release build
+    // warns about.
+    use std::path::PathBuf;
 
     const DISTRO: &str = "dml-arch";
     const USER: &str = "dml";
