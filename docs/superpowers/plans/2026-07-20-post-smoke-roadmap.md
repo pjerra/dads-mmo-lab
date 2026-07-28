@@ -622,6 +622,38 @@ Captured verbatim during a live smoke run into `.superpowers/sdd/feature-batch-2
   `C:\Users\perzi\.claude\skills\`, which is not a git repository — a profile
   wipe loses it with no recovery path.
 
+### Requested 2026-07-28, after the SHIP-LIST (QUEUED — not started)
+
+Filed here immediately rather than acted on: the SHIP-LIST's standing rule is
+no new features until Phase 4 (the release gate) ships. Recorded the same day
+it was asked so it cannot go the way of the items above.
+
+- **Install a WoW addon from a URL.** Paste an addon's URL in the launcher; it
+  fetches it and drops it into the client's `Interface/AddOns` folder.
+  Both halves already exist and only need joining:
+  - the AddOns destination is already computed and written to today —
+    `cli/src/70-modules.sh:549-550` copies BlackMarketUI into
+    `<client>/Interface/AddOns/<name>/`, using the saved client path from
+    `~/.dml/client-path` (`_client_path`, 70-modules.sh:326);
+  - fetching-and-installing from a remote URL already exists too — the Wrath
+    Unbound flow downloads its installer over `curl -fsSL --max-time 30` and
+    validates the payload before use (`cli/src/90-main.sh:1061-1098`).
+  So the work is a URL → archive → extract → verify → copy pipeline plus a UI,
+  not new capability. Design notes for whoever builds it:
+  - **Decide the accepted source shapes up front**: a direct `.zip` (CurseForge
+    /WoWInterface style), a git repo (clone or tarball), or both. A raw `.lua`
+    is NOT an addon and must be refused with a real message.
+  - **This writes into the user's game client**, which nothing else in the app
+    does casually — it needs the untested-feature lock, a named destination
+    shown before the write, and a refusal to overwrite an existing addon folder
+    without an explicit confirm.
+  - **The archive is untrusted input.** Reject path traversal (`../`) and
+    absolute paths inside the zip, cap the extracted size, and require the addon
+    to land in exactly one top-level folder under AddOns — a malicious or merely
+    sloppy archive must not be able to write outside `Interface/AddOns/`.
+  - No client path saved yet → say so and point at the setting, rather than
+    failing at copy time.
+
 ### Also recovered: the Server Performance Advisor
 
 Approved 2026-07-27; spec now committed at

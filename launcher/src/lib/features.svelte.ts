@@ -85,6 +85,11 @@ export const FEATURES: Record<string, FeatureStatus> = {
   // Writes a name file into the server's own directory. Benign and reversible,
   // but it is still a write to a title dir, so it follows the same rule.
   "server-rename": "untested",
+  // Provisions the distro (installs the CLI, lua bridges and installer scripts
+  // from the bundled resources). It is the route a NEW user must take, so it
+  // ships unlocked -- locking it would lock a stranger out of their own setup.
+  // Listed here so the registry stays a complete inventory of mutating keys.
+  "backend-setup": "tested",
 };
 
 export const LOCKED_HINT =
