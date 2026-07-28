@@ -180,6 +180,17 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       app?" is a first-30-seconds question, and this is item 7 of the recovered
       backlog (retire the C# tray) arriving as a real user-facing bug.
 
+      MEASURED ON THE VM, shortcut targets resolved:
+          Startup\DML Launcher.lnk  -> C:\DML\DML-Launcher.exe          (OLD)
+          Desktop\DML Launcher.lnk  -> C:\DML\DML-Launcher.exe          (OLD)
+          Programs\DML Launcher.lnk -> %LOCALAPPDATA%\DML Launcher\launcher.exe (NEW)
+      All three carry the SAME display name. The desktop icon and the login
+      auto-start are both the OLD app; the new one is reachable only from the
+      Start-menu list. The tester -- who built the thing -- could not find it.
+      A stranger has no chance, and any old-tray bug gets reported against the
+      new app. Fix before any release: stop Install-DML.ps1 creating those two
+      shortcuts (and installing the C# tray at all).
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
