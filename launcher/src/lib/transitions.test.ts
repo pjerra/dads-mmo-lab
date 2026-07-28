@@ -1,19 +1,35 @@
 import { describe, expect, it } from "vitest";
-import { parseLanStatus, verdictTransitionActions } from "./transitions";
+import { parseLanStatus, shouldEngageKeepAwake, verdictTransitionActions } from "./transitions";
 
-const allowed = { keepAwakeAllowed: true, lanAutoAllowed: true };
-const denied = { keepAwakeAllowed: false, lanAutoAllowed: false };
+const allowed = { lanAutoAllowed: true };
+const denied = { lanAutoAllowed: false };
 
-describe("verdictTransitionActions — keep-awake", () => {
-  it("engages on any transition into online when allowed", () => {
-    expect(verdictTransitionActions("stopped", "online", allowed).keepAwake).toBe("on");
-    expect(verdictTransitionActions("starting", "online", allowed).keepAwake).toBe("on");
-    expect(verdictTransitionActions(null, "online", allowed).keepAwake).toBe("on");
+// Engaging the sleep block is a per-poll assertion, NOT a transition: two
+// release paths (the 3-failed-poll release and the Rust 120s watchdog) drop
+// the block with no transition left to recover on. See the wiring cover in
+// keep-awake.test.ts.
+describe("shouldEngageKeepAwake", () => {
+  it("engages on every online poll, not just the transition into online", () => {
+    expect(shouldEngageKeepAwake("online", true)).toBe(true);
   });
 
   it("never engages when the flag is locked or the toggle is off", () => {
-    expect(verdictTransitionActions("starting", "online", denied).keepAwake).toBeNull();
-    expect(verdictTransitionActions(null, "online", denied).keepAwake).toBeNull();
+    expect(shouldEngageKeepAwake("online", false)).toBe(false);
+  });
+
+  it("never engages for a non-online verdict", () => {
+    for (const v of ["starting", "stopped", "crashed", "soap_unreachable"] as const) {
+      expect(shouldEngageKeepAwake(v, true)).toBe(false);
+    }
+    expect(shouldEngageKeepAwake(null, true)).toBe(false);
+  });
+});
+
+describe("verdictTransitionActions — keep-awake", () => {
+  it("does not decide engagement at all (that is shouldEngageKeepAwake's job)", () => {
+    expect(verdictTransitionActions("stopped", "online", allowed).keepAwake).toBeNull();
+    expect(verdictTransitionActions("starting", "online", allowed).keepAwake).toBeNull();
+    expect(verdictTransitionActions(null, "online", allowed).keepAwake).toBeNull();
   });
 
   it("releases on transitions into stopped and crashed, even when no longer allowed", () => {

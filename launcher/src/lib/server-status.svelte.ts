@@ -21,7 +21,7 @@ import {
 } from "./api";
 import { featureLocked } from "./features.svelte";
 import { toolPrefs } from "./tool-prefs.svelte";
-import { parseLanStatus, verdictTransitionActions } from "./transitions";
+import { parseLanStatus, shouldEngageKeepAwake, verdictTransitionActions } from "./transitions";
 
 export const serverStatus = $state({
   detail: null as ServerDetail | null,
@@ -94,16 +94,18 @@ export async function refreshServerStatus(): Promise<void> {
 // effect must never break the status poll itself.
 function runTransitionActions(prev: ServerDetail["verdict"] | null, next: ServerDetail["verdict"]): void {
   const actions = verdictTransitionActions(prev, next, {
-    keepAwakeAllowed: !featureLocked("keep-awake") && toolPrefs.keepAwake,
     lanAutoAllowed: !featureLocked("lan-auto-refresh") && toolPrefs.lanAutoRefresh,
   });
-  if (actions.keepAwake === "on") {
-    setKeepAwake(true)
-      .then(() => (serverStatus.keepAwakeActive = true))
-      .catch(() => {});
-  } else if (actions.keepAwake === "off") {
+  if (actions.keepAwake === "off") {
     setKeepAwake(false)
       .then(() => (serverStatus.keepAwakeActive = false))
+      .catch(() => {});
+  } else if (shouldEngageKeepAwake(next, !featureLocked("keep-awake") && toolPrefs.keepAwake)) {
+    // Asserted on EVERY online poll, not just the transition into online --
+    // see shouldEngageKeepAwake for the two releases that would otherwise be
+    // unrecoverable. Same heartbeat doctrine as the tray push below.
+    setKeepAwake(true)
+      .then(() => (serverStatus.keepAwakeActive = true))
       .catch(() => {});
   }
   if (actions.lanRefresh) void lanAutoRefresh();
@@ -113,9 +115,11 @@ function runTransitionActions(prev: ServerDetail["verdict"] | null, next: Server
   // transitions. It doubles as the heartbeat the Rust keep-awake watchdog
   // waits on: gating this on `prev !== next` meant a steady online server
   // pushed nothing, the watchdog saw >2min of silence and released the sleep
-  // block, and it could never re-engage (verdictTransitionActions only
-  // returns keepAwake:"on" on a transition INTO online). The PC then slept
-  // mid-session while the sidebar still claimed it was being kept awake.
+  // block, and back then engagement was transition-only so it could never
+  // re-engage. The PC then slept mid-session while the sidebar still claimed
+  // it was being kept awake. (Engagement is now a per-poll assertion too, so
+  // a watchdog release self-heals on the next poll — but the heartbeat is
+  // still what stops the watchdog firing in the first place.)
   // `apply_status` is an idempotent set_tooltip, so a 7s cadence is free.
   void traySetStatus(next).catch(() => {});
 }
