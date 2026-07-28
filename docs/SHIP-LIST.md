@@ -158,6 +158,16 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       → no `dml` CLI in it → no titles installed. Each state gets one sentence
       and one button. A stranger must never see an empty status card with no
       next step.
+- [x] **4.0 — WebView2 is not guaranteed to be present.** FOUND ON THE VM,
+      2026-07-28: the launcher would not start -- "missing WebView2". The
+      config had no `bundle.windows` block at all, so the install mode was
+      whatever Tauri defaulted to. Now declared explicitly as
+      `embedBootstrapper` (ships the bootstrapper inside the installer instead
+      of fetching it mid-install). ESCALATION PATH if debloated/modified
+      Windows images keep failing: `fixedRuntime` embeds a WebView2 build in
+      the app and needs no system-wide install at all (~180MB). Decide which
+      once we know whether the failure was at install time or at launch.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
