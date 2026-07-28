@@ -2771,6 +2771,47 @@ class TrayApp : ApplicationContext
     }
 
     # -------------------------------------------------------------------------
+    # Optional: Windows Defender exclusion for the DML folder
+    # -------------------------------------------------------------------------
+    # Defender scans every file written under the install root -- the WSL disk
+    # image and the game data live there, so that scanning is a steady drag.
+    # Excluding it is OPT-IN and asked plainly: an exclusion narrows real-time
+    # protection, and an installer must not quietly do that to someone.
+    #
+    # Deliberately scoped to the install root only. Build-tool exclusions
+    # (cargo/rustc/link) belong to people building DML from source, not to
+    # everyone who installs it, and are left to be added by hand.
+    #
+    # Never fatal: an optional speed tweak must not fail the install.
+    Write-Host ""
+    Write-Host "  Optional: exclude the DML folder from Windows Defender scanning."
+    Write-Host "  This speeds up the server and installs noticeably, but Defender"
+    Write-Host "  will stop scanning files inside:"
+    Write-Host "    $InstallRoot"
+    Write-Host "  Everything works either way -- skip it if you are unsure."
+    $defenderAnswer = Read-Host "  Add the exclusion? (y/N)"
+    if ($defenderAnswer -match '^\s*(y|yes)\s*$') {
+        try {
+            Add-MpPreference -ExclusionPath $InstallRoot -ErrorAction Stop
+            # Read back rather than trusting the call: with Tamper Protection
+            # on, Add-MpPreference can return without adding anything.
+            $currentExclusions = @()
+            try { $currentExclusions = @((Get-MpPreference).ExclusionPath) } catch { }
+            if ($currentExclusions -contains $InstallRoot) {
+                Write-Ok "Defender exclusion added: $InstallRoot"
+            } else {
+                Write-Warn "Defender did not record the exclusion (Tamper Protection is the usual cause)."
+                Write-Warn "Add it by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+            }
+        } catch {
+            Write-Warn "Could not add the Defender exclusion: $($_.Exception.Message)"
+            Write-Warn "Add it by hand: Windows Security -> Virus and threat protection -> Manage settings -> Exclusions."
+        }
+    } else {
+        Write-Diag "Defender exclusion declined by the user."
+    }
+
+    # -------------------------------------------------------------------------
     # Done
     # -------------------------------------------------------------------------
     Write-Host ""

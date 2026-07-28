@@ -1,5 +1,6 @@
 <script module lang="ts">
   import type { ItemInfo, EntityInfo } from "$lib/api";
+  import { cacheSet } from "$lib/item-info-cache";
 
   // Module-level: persists across (re)instantiation -- switching sidebar
   // pages (or Bot Browser rows) unmounts/remounts this component, and this
@@ -18,16 +19,8 @@
   // These caches are module-level (app-session lifetime) and hold payloads
   // that include base64 icon images, so without a ceiling a long Bot Browser
   // session (every distinct item/spell/achievement ever inspected) grows them
-  // unbounded. Cap with approximate-LRU eviction: a Map keeps insertion order,
-  // so the first key is the oldest -- evict it when full on a fresh insert.
-  const MAX_INFO_CACHE = 800;
-  function cacheSet<K, V>(cache: Map<K, V>, key: K, value: V): void {
-    if (cache.size >= MAX_INFO_CACHE && !cache.has(key)) {
-      const oldest = cache.keys().next().value;
-      if (oldest !== undefined) cache.delete(oldest);
-    }
-    cache.set(key, value);
-  }
+  // unbounded. `cacheSet` applies the shared approximate-LRU ceiling (see
+  // $lib/item-info-cache, vitest-pinned and shared with the Item Database).
 </script>
 
 <script lang="ts">
@@ -45,6 +38,7 @@
   import { loadPaperdoll } from "$lib/page-cache.svelte";
   import { QUALITY_COLORS, className } from "$lib/wow";
   import { sanitizeTooltipHtml } from "$lib/tooltip";
+  import { anchorTooltip, clampTooltipTop, resolveItemHover } from "$lib/item-tooltip";
   import { chunkIds, formatEpochDate } from "$lib/progress";
   import { inferClassId, learnedRank, treePoints, treeRows, type Tree, type Talent } from "$lib/talent-trees";
   import {
@@ -424,13 +418,8 @@
   function showTooltip(e: MouseEvent | FocusEvent, target: HoverSource) {
     const el = e.currentTarget as HTMLElement;
     const rect = el.getBoundingClientRect();
-    const flip = rect.right + 340 > window.innerWidth;
-    hovered = {
-      target,
-      top: rect.top,
-      left: flip ? null : rect.right + 8,
-      right: flip ? window.innerWidth - rect.left + 8 : null,
-    };
+    const at = anchorTooltip(rect, { width: window.innerWidth, height: window.innerHeight });
+    hovered = { target, top: at.top, left: at.left, right: at.right };
   }
   function hideTooltip() {
     hovered = null;
@@ -450,14 +439,7 @@
   }
   function resolveHover(target: HoverSource): ResolvedHover {
     if (target.source === "item") {
-      const info = itemInfo(target.item.entry);
-      return {
-        wowhead: info?.source === "wowhead" ? (info.wowhead ?? null) : null,
-        localHtml: info?.source === "local" ? (info.tooltip_html ?? null) : null,
-        label: target.item.name,
-        color: QUALITY_COLORS[target.item.quality] ?? "#c9d1d9",
-        sub: `ilvl ${target.item.item_level}`,
-      };
+      return resolveItemHover(itemInfo(target.item.entry), target.item);
     }
     const info = entityInfo(target.source, target.id);
     return {
@@ -476,8 +458,7 @@
   $effect(() => {
     if (!hovered || !tooltipEl) return;
     const h = tooltipEl.getBoundingClientRect().height;
-    const maxTop = Math.max(8, window.innerHeight - h - 8);
-    const clamped = Math.min(Math.max(hovered.top, 8), maxTop);
+    const clamped = clampTooltipTop(hovered.top, h, window.innerHeight);
     if (hovered.top !== clamped) hovered.top = clamped;
   });
 </script>

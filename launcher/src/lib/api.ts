@@ -1482,11 +1482,21 @@ export type LanAction = "on" | "off" | "status" | "refresh";
 // Native-mode routing (Chunk 2, task C2c item 3): `wow_lan_native` is
 // AC-only (direct MySQL against acore_auth.realmlist, no `docker exec`) --
 // same text shape, so this needs no branching beyond which command to call.
-export async function wowLan(action: LanAction, ip?: string, internet?: boolean): Promise<string> {
+// `local` (internet-play LAN fix): this host's LAN address, written to
+// realmlist.localAddress so players INSIDE the house keep reaching the world
+// server while `address` advertises a public IP/hostname. Omit it and the
+// realm address is the only thing touched (previous behaviour); `off` always
+// reverts localAddress to 127.0.0.1 regardless.
+export async function wowLan(
+  action: LanAction,
+  ip?: string,
+  internet?: boolean,
+  local?: string,
+): Promise<string> {
   const mode = await resolveBackendMode();
   return mode === "native"
-    ? invoke("wow_lan_native", { action, ip, internet })
-    : invoke("wow_lan", { action, ip, internet });
+    ? invoke("wow_lan_native", { action, ip, internet, local })
+    : invoke("wow_lan", { action, ip, internet, local });
 }
 
 // Best-effort public IPv4 (Batch 4 F15) -- null means "couldn't tell",

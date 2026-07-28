@@ -30,7 +30,7 @@ use dml_wow::db::{cell_string, count_result, db_err_to_cmd, db_unreachable_err, 
 // `validate_ip`/`validate_host` are `pub use`d: `realmlist.rs` reaches
 // `validate_ip` as `crate::validate_ip`.
 pub use dml_wow::lan::{validate_host, validate_ip};
-use dml_wow::lan::{LAN_ACTIONS, LAN_TITLE};
+use dml_wow::lan::{is_loopback_or_private, LAN_ACTIONS, LAN_TITLE};
 use dml_wow::party::{
     bot_member_classes, bot_member_names, live_spec_names, party_not_online_err, party_online_guid,
     preset_dir_or_internal_err,
@@ -4469,6 +4469,7 @@ async fn wow_lan(
     action: String,
     ip: Option<String>,
     internet: Option<bool>,
+    local: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, CmdError> {
     if !LAN_ACTIONS.contains(&action.as_str()) {
@@ -4492,9 +4493,29 @@ async fn wow_lan(
     } else {
         None
     };
+    // Internet-play LAN fix: `--local <lan-ip>` also points realmlist's
+    // localAddress at this host, so players inside the house aren't routed
+    // out to the public address (which needs router NAT hairpinning). Always
+    // a private/loopback IPv4 -- it is this PC's own address.
+    let local_arg = match local {
+        Some(l) => {
+            if !validate_ip(&l) {
+                return Err(bad_arg(format!("invalid IPv4 address: {l:?}")));
+            }
+            if !is_loopback_or_private(&l) {
+                return Err(bad_arg(format!("not a private LAN address: {l:?}")));
+            }
+            Some(l)
+        }
+        None => None,
+    };
     let mut args: Vec<String> = vec!["lan".into(), LAN_TITLE.into()];
     if inet {
         args.push("--internet".into());
+    }
+    if let Some(l) = local_arg {
+        args.push("--local".into());
+        args.push(l);
     }
     args.push(action);
     if let Some(ip) = ip_arg {
@@ -4524,10 +4545,16 @@ async fn wow_lan_public_ip(state: State<'_, AppState>) -> Result<serde_json::Val
 /// `LAN_TITLE`; WSL keeps handling every title (including MaNGOS/Tortoise
 /// ones) via `wow_lan` above. Native mode only.
 #[tauri::command]
-async fn wow_lan_native(action: String, ip: Option<String>, internet: Option<bool>) -> Result<String, CmdError> {
+async fn wow_lan_native(
+    action: String,
+    ip: Option<String>,
+    internet: Option<bool>,
+    local: Option<String>,
+) -> Result<String, CmdError> {
     require_native_backend()?;
     let (inet, ip_arg) = dml_wow::lan::validate_lan_request(&action, ip, internet.unwrap_or(false))?;
-    tauri::async_runtime::spawn_blocking(move || dml_wow::lan::lan_action(&action, ip_arg, inet))
+    let local_ip = dml_wow::lan::validate_lan_local(local)?;
+    tauri::async_runtime::spawn_blocking(move || dml_wow::lan::lan_action(&action, ip_arg, inet, local_ip))
         .await
         .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
 }

@@ -31,6 +31,8 @@
   import Commands from "$lib/pages/Commands.svelte";
   import Backups from "$lib/pages/Backups.svelte";
   import Help from "$lib/pages/Help.svelte";
+  import ServerRequired from "$lib/ServerRequired.svelte";
+  import { requiresServer, serverGate } from "$lib/server-gate";
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -70,6 +72,17 @@
   });
 
   let status = $derived(statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting));
+
+  // Server-required greeting (DECIDED 2026-07-21): pages that can't function
+  // with the server down are replaced by ServerRequired rather than mounted
+  // and left to error. Gating here (not per page) also means the page's own
+  // onMount fetches never fire while the server is down. Null = render the
+  // page normally.
+  let pageGate = $derived(
+    requiresServer(page)
+      ? serverGate(serverStatus.detail?.verdict ?? null, restartState.restarting)
+      : null,
+  );
   let showChipStart = $derived(
     chipStartVisible(serverStatus.detail?.verdict ?? null, restartState.restarting),
   );
@@ -218,22 +231,26 @@
     </div>
   </nav>
 
-  {#if page === "home"}<Home />{/if}
-  {#if page === "library"}<Library />{/if}
-  {#if page === "console"}<Console />{/if}
-  {#if page === "tools"}<Tools />{/if}
-  {#if page === "accounts"}<Accounts />{/if}
-  {#if page === "statistics"}<Statistics />{/if}
-  {#if page === "modmanager"}<ModuleManager />{/if}
-  {#if page === "dashboard"}<Dashboard />{/if}
-  {#if page === "teleport"}<Teleport />{/if}
-  {#if page === "gmtools"}<GMTools />{/if}
-  {#if page === "items"}<Items />{/if}
-  {#if isBotsView}<Bots view={page} />{/if}
-  {#if page === "commands"}<Commands />{/if}
-  {#if isConfigView}<Config view={page} />{/if}
-  {#if page === "backups"}<Backups />{/if}
-  {#if page === "help"}<Help onnav={(p) => go(p)} />{/if}
+  {#if pageGate}
+    <ServerRequired gate={pageGate} onstart={requestChipStart} />
+  {:else}
+    {#if page === "home"}<Home />{/if}
+    {#if page === "library"}<Library />{/if}
+    {#if page === "console"}<Console />{/if}
+    {#if page === "tools"}<Tools />{/if}
+    {#if page === "accounts"}<Accounts />{/if}
+    {#if page === "statistics"}<Statistics />{/if}
+    {#if page === "modmanager"}<ModuleManager />{/if}
+    {#if page === "dashboard"}<Dashboard />{/if}
+    {#if page === "teleport"}<Teleport />{/if}
+    {#if page === "gmtools"}<GMTools />{/if}
+    {#if page === "items"}<Items />{/if}
+    {#if isBotsView}<Bots view={page} />{/if}
+    {#if page === "commands"}<Commands />{/if}
+    {#if isConfigView}<Config view={page} />{/if}
+    {#if page === "backups"}<Backups />{/if}
+    {#if page === "help"}<Help onnav={(p) => go(p)} />{/if}
+  {/if}
 
   {#if serverStatus.readyToast}
     <!-- Batch 3 F10: in-app "world just came up" toast, visible from any

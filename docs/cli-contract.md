@@ -203,7 +203,7 @@ prints them.
 | `bots-flush` | `--yes --ack flush` (`--ack` must be exactly `flush`; defaults to `""`, so omission is a `CONFIRM_REQUIRED` refusal/exit 1, not exit 2) | stream, guarded | Delete every random playerbot and rebuild the population. **DESTRUCTIVE** |
 | `games-remove` | `<ID>` (**required** positional, never defaulted — typing it is part of the confirmation) `[--keep-data]` (keep the ~6 GB client-data volume) `[--remove-images]` (also delete the AzerothCore/MySQL images, ~3–5 GB) `--yes` | stream, guarded | Uninstall a title: its containers, its directory and its launcher. **DESTRUCTIVE** |
 | `self-update` | `[--backup \| --no-backup]` (neither → fail-closed `BAD_ARG` "Pick --backup or --no-backup") | stream | Update AzerothCore + mod-playerbots from git |
-| `lan` | `<on\|off\|status\|refresh>` (allowlist owned by the library; unknown = `BAD_ARG`/exit 1) `[IP]` (required for on/refresh; ignored for off/status) `[--internet]` (only honored when action is `on`) | envelope | LAN address control for this CLI's fixed AC title |
+| `lan` | `<on\|off\|status\|refresh>` (allowlist owned by the library; unknown = `BAD_ARG`/exit 1) `[IP]` (required for on/refresh; ignored for off/status) `[--internet]` (only honored when action is `on`) `[--local <LAN-IP>]` (private/loopback IPv4 only — `BAD_ARG` otherwise; honored on `on`, ignored by `status`/`refresh`, and always forced to `127.0.0.1` by `off`) | envelope | LAN address control for this CLI's fixed AC title |
 | `cache status` | — | envelope | Wowhead item-info cache size |
 | `cache clean` | — | envelope | Wipe the wowhead item-info cache |
 | `client-path get` | — | envelope | The saved client folder, if any |
@@ -421,6 +421,16 @@ Wire and behavior:
   (`LAN_ERROR`, exit 1); refresh no-ops start with bare `[dml] ` and correctly exit 0 — the
   `ERROR:` token in the classifier is load-bearing (14/14 exit-code agreement measured against
   the bash oracle).
+- **`lan --local` writes a second column, and reports nothing extra.** `on --local <LAN-IP>`
+  updates `realmlist.localAddress` (and pins `localSubnetMask` to `255.255.255.0`) in addition
+  to `address`; `off` always resets `localAddress` to `127.0.0.1`. The success text is
+  deliberately UNCHANGED from the no-`--local` case, so the bash/Rust text-parity fixtures
+  keep matching — the only observable difference is in the database. Unlike `address`, the
+  local write is not read back and verified: it is a companion write on the same row, and a
+  silent no-op there cannot mislead the way one on `address` would. Rationale for the column
+  at all: AzerothCore hands `localAddress` to clients inside that subnet, so without it every
+  player on the home LAN is routed out to the public `address` and reaches the world server
+  only if the router hairpins NAT.
 - **Two hints cite bash-CLI syntax that does not exist in this binary** (kept for launcher
   byte-parity): the empty `console` command's hint
   `Example: dml wow console-send --command "server info" --json`, and `accountwide set`'s

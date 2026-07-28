@@ -150,6 +150,10 @@ pub fn update_failed_message() -> String {
     "[dml] ERROR: Could not update the realm address.".to_string()
 }
 
+pub fn local_update_failed_message() -> String {
+    "[dml] ERROR: Could not update the realm's local address.".to_string()
+}
+
 pub fn address_mismatch_message(wanted: &str, got: Option<&str>) -> String {
     format!(
         "[dml] ERROR: The realm address did not change (no realm with id 1?).\n[dml]   Wanted '{wanted}' but the database says '{}'.",
@@ -215,13 +219,46 @@ pub fn lan_set(db_cfg: &crate::db::DbConfig, ip: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `_lan_set_local` (`90-main.sh`): point `localAddress` at this host's LAN
+/// address and pin the stock /24 mask.
+///
+/// AzerothCore hands `localAddress` to any client whose IP falls inside that
+/// subnet (and to loopback clients when neither address is loopback), so this
+/// is what keeps players inside the house connectable while `address` carries
+/// a public IP or hostname. Without it they are routed out to the public
+/// address and only reach the world server if the router hairpins NAT.
+///
+/// No read-back verify, unlike [`lan_set`]: `address` is what the user
+/// actually asked to change and a silent no-op there would send them chasing
+/// ghosts, whereas this is a best-effort companion write on the same row --
+/// the UPDATE either affected realm 1 or the `address` write already failed.
+pub fn lan_set_local(db_cfg: &crate::db::DbConfig, ip: &str) -> Result<(), String> {
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(ip)];
+    if crate::db::execute(
+        db_cfg,
+        crate::db::Database::Auth,
+        "UPDATE realmlist SET localAddress = ?, localSubnetMask = '255.255.255.0' WHERE id = 1",
+        params,
+    )
+    .is_err()
+    {
+        return Err(crate::lan::local_update_failed_message());
+    }
+    Ok(())
+}
+
 /// `dml lan on/off/status/refresh`'s full flow (real docker/DB I/O) -- run
 /// off the caller's async runtime. Named `lan_action` rather than the bare
 /// `lan` the Task 9 naming rule literally produces, purely to avoid a
 /// `lan::lan` stutter. Order mirrors the oracle top-to-bottom: private-address
 /// gate -> installed? -> docker up? -> `ac-database` running? -> DB
 /// answering (retry loop)? -> the requested action.
-pub fn lan_action(action: &str, ip_arg: Option<String>, inet: bool) -> String {
+pub fn lan_action(
+    action: &str,
+    ip_arg: Option<String>,
+    inet: bool,
+    local_ip: Option<String>,
+) -> String {
     use crate::{config::ConfigReader, db, lan, maint, native, status};
 
     if !inet {
@@ -267,12 +304,24 @@ pub fn lan_action(action: &str, ip_arg: Option<String>, inet: bool) -> String {
         "on" => {
             let ip = ip_arg.expect("validated: ip required for on");
             match lan_set(&db_cfg, &ip) {
-                Ok(()) => lan::on_message(LAN_TITLE, &ip),
+                Ok(()) => match local_ip {
+                    Some(local) => match lan_set_local(&db_cfg, &local) {
+                        Ok(()) => lan::on_message(LAN_TITLE, &ip),
+                        Err(e) => e,
+                    },
+                    None => lan::on_message(LAN_TITLE, &ip),
+                },
                 Err(e) => e,
             }
         }
+        // Revert the local override too, back to AC's stock default -- else a
+        // previous internet session leaves LAN clients pinned at an address
+        // that may no longer be this PC's.
         "off" => match lan_set(&db_cfg, "127.0.0.1") {
-            Ok(()) => lan::off_message(LAN_TITLE),
+            Ok(()) => match lan_set_local(&db_cfg, "127.0.0.1") {
+                Ok(()) => lan::off_message(LAN_TITLE),
+                Err(e) => e,
+            },
             Err(e) => e,
         },
         "status" => match current.as_deref() {
@@ -372,6 +421,25 @@ pub fn validate_lan_request(
         None
     };
     Ok((inet, ip_arg))
+}
+
+/// Input gate for `--local <lan-ip>` (the internet-play LAN fix).
+///
+/// Unlike `address`, which may be a public IP or a hostname under
+/// `--internet`, the local override is ALWAYS a private/loopback IPv4: it is
+/// this host's own LAN address, and AzerothCore compares it numerically
+/// against the connecting client's subnet. Accepting a public value here
+/// would send players inside the house out to the internet -- precisely the
+/// breakage the flag exists to fix -- so the gate is deliberately narrow.
+pub fn validate_lan_local(local: Option<String>) -> Result<Option<String>, CmdError> {
+    let Some(ip) = local else { return Ok(None) };
+    if !validate_ip(&ip) {
+        return Err(bad_arg(format!("invalid IPv4 address: {ip:?}")));
+    }
+    if !is_loopback_or_private(&ip) {
+        return Err(bad_arg(format!("not a private LAN address: {ip:?}")));
+    }
+    Ok(Some(ip))
 }
 
 #[cfg(test)]
@@ -559,6 +627,65 @@ mod tests {
     fn validate_lan_request_native_rejects_unknown_action() {
         let e = validate_lan_request("reset", None, false).unwrap_err();
         assert_eq!(e.code, "BAD_ARG");
+    }
+
+    // -- validate_lan_local (internet-play LAN fix) --------------------------
+    //
+    // `--local` carries the HOST's LAN address, so it is private-only by
+    // construction: a public value here would route players inside the house
+    // out to the internet, the exact failure the flag exists to prevent.
+
+    #[test]
+    fn validate_lan_local_accepts_absence() {
+        assert_eq!(validate_lan_local(None).unwrap(), None);
+    }
+
+    #[test]
+    fn validate_lan_local_accepts_a_private_lan_address() {
+        assert_eq!(
+            validate_lan_local(Some("192.168.1.50".into())).unwrap(),
+            Some("192.168.1.50".to_string())
+        );
+        assert_eq!(
+            validate_lan_local(Some("10.0.0.4".into())).unwrap(),
+            Some("10.0.0.4".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_lan_local_accepts_loopback_the_revert_value() {
+        // `lan off` restores localAddress to AC's stock 127.0.0.1.
+        assert_eq!(
+            validate_lan_local(Some("127.0.0.1".into())).unwrap(),
+            Some("127.0.0.1".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_lan_local_rejects_a_public_address() {
+        assert_eq!(
+            validate_lan_local(Some("84.210.13.37".into())).unwrap_err().code,
+            "BAD_ARG"
+        );
+    }
+
+    #[test]
+    fn validate_lan_local_rejects_a_hostname() {
+        // Unlike `address`, the local override is never a hostname: AC
+        // compares it numerically against the client's subnet.
+        assert_eq!(
+            validate_lan_local(Some("wow.pkflix.no".into())).unwrap_err().code,
+            "BAD_ARG"
+        );
+    }
+
+    #[test]
+    fn validate_lan_local_rejects_junk() {
+        assert_eq!(validate_lan_local(Some("".into())).unwrap_err().code, "BAD_ARG");
+        assert_eq!(
+            validate_lan_local(Some("192.168.1.5; DROP".into())).unwrap_err().code,
+            "BAD_ARG"
+        );
     }
 
     #[test]

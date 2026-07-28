@@ -702,15 +702,22 @@ pub fn dispatch(command: Cmd) -> i32 {
 
         // -- Task 15: misc reads + the interactive `install` passthrough ----
 
-        Cmd::Lan { action, ip, internet } => {
+        Cmd::Lan { action, ip, internet, local } => {
             // GUARD (`wow_lan_native`, lib.rs:4430-4437): `validate_lan_request`
             // owns the closed LAN_ACTIONS allowlist and the IP-vs-hostname
             // shape check, and MUST run before `lan_action` ever touches
             // docker/DB -- `lan_action` itself `.expect()`s ("validated: ip
             // required for on/refresh") and `unreachable!()`s on an
             // unvalidated action (see the task report's D1 section).
-            match dml_wow::lan::validate_lan_request(&action, ip, internet) {
-                Ok((inet, ip_arg)) => {
+            match dml_wow::lan::validate_lan_request(&action, ip, internet)
+                .and_then(|(inet, ip_arg)| {
+                    // `--local` gets the same up-front gate: private IPv4
+                    // only (it is this host's own address), rejected before
+                    // any docker/DB work.
+                    dml_wow::lan::validate_lan_local(local).map(|l| (inet, ip_arg, l))
+                })
+            {
+                Ok((inet, ip_arg, local_ip)) => {
                     // `lan_action` is TEXT-mode (its own doc comment): every
                     // domain-level outcome (not installed, docker down, DB not
                     // answering yet, ...) is folded into the returned
@@ -731,7 +738,7 @@ pub fn dispatch(command: Cmd) -> i32 {
                     // precedent (`90-main.sh:1742`) rather than inventing a
                     // second key for the same "raw text output" shape
                     // `console` already uses (Task 15 review Minor 8).
-                    let text = dml_wow::lan::lan_action(&action, ip_arg, inet);
+                    let text = dml_wow::lan::lan_action(&action, ip_arg, inet, local_ip);
                     if dml_wow::lan::text_is_error(&text) {
                         // Code choice: `LAN_ERROR`, a single generic code
                         // rather than trying to name the specific failure
