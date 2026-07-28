@@ -14,6 +14,7 @@
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   let catalog: TitleInfo[] = $state([]);
   let loadError: string | null = $state(null);
@@ -92,6 +93,7 @@
     actionError = null;
     note = null;
     beginRun("library");
+    taskbarBusy();
     try {
       const run = action === "start" ? gamesStart : gamesStop;
       await run(id, (e) => {
@@ -108,6 +110,7 @@
         },
       });
     } finally {
+      taskbarIdle();
       busyId = null;
       await refresh();
     }
@@ -140,6 +143,7 @@
     actionError = null;
     note = null;
     beginRun("library");
+    taskbarBusy();
     let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
     let outcomeErr: unknown = null;
@@ -160,6 +164,7 @@
     } catch (e) {
       outcomeErr = e;
     } finally {
+      taskbarIdle();
       removeBusy = false;
       await refresh();
       if (outcomeErr) showActionErr(outcomeErr);

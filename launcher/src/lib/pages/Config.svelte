@@ -257,6 +257,7 @@
     ahRepairing = true;
     error = null;
     beginRun("config");
+    taskbarBusy();
     try {
       await wowAhbotRepair(ahRepairChar, (e) => {
         buf.term = applyEvent(buf.term, e);
@@ -270,6 +271,7 @@
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
     } finally {
+      taskbarIdle();
       ahRepairing = false;
     }
   }

@@ -13,6 +13,7 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import {
     ROLES,
     ROLE_MAP,
@@ -272,7 +273,7 @@
     }
     confirmingPreset = null;
     const p = player;
-    loadingPreset = true; error = null; note = null; beginRun("playerbots");
+    loadingPreset = true; error = null; note = null; beginRun("playerbots"); taskbarBusy();
     let requested = 0, joined = 0;
     let sawDone = false;
     let streamErr: { message?: string; hint?: string } | null = null;
@@ -290,6 +291,7 @@
       });
     } catch (e) { outcomeErr = e; }
     finally {
+      taskbarIdle();
       loadingPreset = false;
       await refresh();
       await refreshPresets();
@@ -351,7 +353,7 @@
   }
   async function enableMyParty() {
     if (!confirmSetup) { confirmSetup = true; return; }
-    confirmSetup = false; setting = true; beginRun("playerbots");
+    confirmSetup = false; setting = true; beginRun("playerbots"); taskbarBusy();
     try {
       await wowPartySetup((e) => {
         buf.term = applyEvent(buf.term, e);
@@ -363,7 +365,7 @@
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
-    } finally { setting = false; }
+    } finally { taskbarIdle(); setting = false; }
   }
 </script>
 

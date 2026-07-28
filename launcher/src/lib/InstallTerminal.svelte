@@ -3,6 +3,7 @@
   import { gamesInstall, gamesInstallInput, gamesInstallCancel, saveTextFile, type InstallEvent } from "$lib/api";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { installStore, claimInstallInvoke } from "$lib/term-store.svelte";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   // `runner` defaults to gamesInstall (Library's game installs) but can be
   // swapped for another Channel-streamed InstallEvent call with the same
@@ -101,8 +102,23 @@
   // there would hit its BUSY error and (pre-fix) falsely flip a still-
   // running session to "exited", hiding Cancel for good. A remount that
   // loses the claim just renders installStore reactively instead.
+  // The taskbar cue is taken HERE, not at Library's startInstall(), because
+  // this function is where the stream actually begins and ends -- an install
+  // is the longest op in the app (tens of minutes) and the one a minimized
+  // user most needs a cue for. Placement rules, both load-bearing:
+  //   * AFTER the claim guard. A nav-away-and-back remount loses the claim and
+  //     returns early; a busy taken above that return would never be released
+  //     and would pin the cue on for the rest of the session.
+  //   * idle in a finally around the awaited runner(), which is the true end
+  //     of the stream: games_install/url_install/tool_install all .await their
+  //     spawn_blocking, so the invoke promise settles only after the child
+  //     exits (and after the exit event was sent) -- and it settles on the
+  //     reject path too (e.g. the backend's BUSY error). Unmounting this
+  //     panel by navigating away does NOT abort this async function, so the
+  //     pair stays balanced across the exact nav the cue exists for.
   async function run() {
     if (!claimInstallInvoke(installStore.nonce)) return;
+    taskbarBusy();
     try {
       await runner(id, (e: InstallEvent) => {
         if (e.event === "chunk") {
@@ -119,6 +135,8 @@
       installStore.exitCode = -1;
       installStore.running = false;
       onExit(-1);
+    } finally {
+      taskbarIdle();
     }
   }
   onMount(run);

@@ -4,11 +4,16 @@
   import { loadTeleportList } from "$lib/page-cache.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
+  import { locListNotice } from "$lib/teleport-list";
 
   let search = $state("");
   let locations: TeleLocation[] = $state([]);
   let loading = $state(false);
   let error: string | null = $state(null);
+  // Tracked apart from `error` because a failed teleport ACTION also sets
+  // that, and an action failure must not relabel a genuinely empty filter
+  // result as a broken location list.
+  let loadFailed = $state(false);
   let charName = $state("");
   let picked: string | null = $state(null);
   let confirming = $state(false);
@@ -63,6 +68,7 @@
   const sortedLocations = $derived(
     [...locations].sort((a, b) => Number(favs.includes(b.name)) - Number(favs.includes(a.name))),
   );
+  const listNotice = $derived(locListNotice(loading, loadFailed, sortedLocations.length));
   const mapValid = $derived(MAP_RE.test(coordMap));
   const coordsValid = $derived(mapValid && validCoord(coordX) && validCoord(coordY) && validCoord(coordZ));
 
@@ -76,11 +82,13 @@
   async function load() {
     loading = true;
     error = null;
+    loadFailed = false;
     try {
       locations = await loadTeleportList(search.trim() || undefined);
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       error = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      loadFailed = true;
     } finally {
       loading = false;
     }
@@ -186,15 +194,19 @@
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if doneMsg}<div class="ok-card"><p>{doneMsg}</p></div>{/if}
+  <!-- The stale note is the one notice that sits beside the rows rather than
+       replacing them, so it renders here and not inside .loclist (a flex-wrap
+       row of chips). -->
+  {#if listNotice?.kind === "stale"}
+    <p class="muted">{listNotice.text}</p>
+  {/if}
   {#if locations.length === 500}
     <p class="muted">Showing the first 500 — narrow the filter to see the rest.</p>
   {/if}
 
   <div class="loclist">
-    {#if loading}
-      <p class="muted">Loading locations…</p>
-    {:else if sortedLocations.length === 0}
-      <p class="muted">No locations match the filter.</p>
+    {#if listNotice && listNotice.kind !== "stale"}
+      <p class="muted">{listNotice.text}</p>
     {:else}
       {#each sortedLocations as l (l.name)}
       <span class="locrow" class:sel={picked === l.name}>

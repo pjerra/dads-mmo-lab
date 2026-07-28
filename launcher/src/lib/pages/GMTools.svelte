@@ -11,6 +11,7 @@
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { summonModuleHint } from "$lib/gm-summon";
+  import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
 
   let charName = $state("");
   let online: OnlineChar[] = $state([]);
@@ -111,7 +112,7 @@
 
   async function deployBridges() {
     if (!confirmDeploy) { confirmDeploy = true; return; }
-    confirmDeploy = false; deploying = true; error = null; note = null; beginRun("gmtools");
+    confirmDeploy = false; deploying = true; error = null; note = null; beginRun("gmtools"); taskbarBusy();
     try {
       await wowBridgeSetup((e) => {
         buf.term = applyEvent(buf.term, e);
@@ -123,7 +124,7 @@
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, { event: "error", error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" } });
-    } finally { deploying = false; }
+    } finally { taskbarIdle(); deploying = false; }
   }
 </script>
 

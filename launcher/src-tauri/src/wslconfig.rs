@@ -296,6 +296,21 @@ pub fn mysql_expose_script(port: u16) -> String {
 $ErrorActionPreference = 'Stop'
 Write-Host '== DML expose MySQL to LAN =='
 
+# 0. Refuse to run without Administrator rights: the IP Helper service change,
+#    the port proxy and the firewall rule below all need elevation. Without this
+#    a non-admin run throws mid-script, and under the documented right-click
+#    route the window closes before the error can be read. Exit BEFORE anything.
+$admin = ([Security.Principal.WindowsPrincipal] `
+    [Security.Principal.WindowsIdentity]::GetCurrent() `
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $admin) {{
+    Write-Host 'ERROR: This script must be run as Administrator.'
+    Write-Host 'Right-click the file and choose "Run with PowerShell", or start an'
+    Write-Host 'elevated PowerShell (Run as administrator) and run it from there.'
+    pause
+    exit 1
+}}
+
 # 1. This PC's LAN IPv4 = the up adapter that has a default gateway.
 $lanIp = (Get-NetIPConfiguration |
     Where-Object {{ $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq 'Up' }} |
@@ -331,6 +346,28 @@ pause
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Byte span of a generated script's `if (-not $admin) {{ … }}` block:
+    /// (start, one past the closing brace). Both generated scripts open with
+    /// the same guard, and the closing brace is the first one at column 0
+    /// after it (the later one-line `if (-not $lanIp) {{ … }}` guards keep
+    /// their brace mid-line). Used to assert what is INSIDE the branch --
+    /// asserting only that `IsInRole` exists and comes first says nothing
+    /// about whether the branch actually stops the script.
+    fn admin_guard_span(s: &str) -> (usize, usize) {
+        let start = s.find("if (-not $admin) {").expect("admin guard block present");
+        let end = start + s[start..].find("\n}").expect("admin guard block is closed") + 2;
+        (start, end)
+    }
+
+    fn admin_guard_block(s: &str) -> &str {
+        let (start, end) = admin_guard_span(s);
+        &s[start..end]
+    }
+
+    fn admin_guard_end(s: &str) -> usize {
+        admin_guard_span(s).1
+    }
 
     #[test]
     fn read_from_absent_file_is_none() {
@@ -476,6 +513,18 @@ mod tests {
         let shutdown_at = s.find("wsl --shutdown").expect("shutdown present");
         assert!(admin_at < fstrim_at, "admin check must precede fstrim");
         assert!(admin_at < shutdown_at, "admin check must precede wsl --shutdown");
+        // ...and ABORTS rather than merely warning -- see the identical
+        // assertion in `mysql_expose_script_has_the_safety_rails_and_uses_the_port`
+        // for why existing + ordered is not enough.
+        let guard = admin_guard_block(&s);
+        assert!(
+            guard.contains("exit 1"),
+            "the non-admin branch must abort, not just warn: {guard:?}"
+        );
+        assert!(
+            admin_guard_end(&s) < fstrim_at,
+            "the admin guard must abort BEFORE fstrim, not somewhere after it"
+        );
         assert!(s.contains("fstrim /"));
         assert!(s.contains("wsl --shutdown"));
         assert!(s.contains("attach vdisk readonly"));
@@ -492,6 +541,41 @@ mod tests {
     fn mysql_expose_script_has_the_safety_rails_and_uses_the_port() {
         let s = mysql_expose_script(13306);
         assert!(s.contains("RUN AS ADMINISTRATOR"));
+        // Admin self-check that bails BEFORE any privileged step.
+        assert!(s.contains("IsInRole"));
+        assert!(s.contains("Administrator"));
+        let admin_at = s.find("IsInRole").expect("admin check present");
+        let service_at = s.find("Set-Service").expect("Set-Service present");
+        // `find`, not `rfind`: the undo header mentions the portproxy DELETE, so
+        // anchor on the `add` verb to hit the real privileged call.
+        let netsh_at = s
+            .find("netsh interface portproxy add")
+            .expect("portproxy add present");
+        assert!(admin_at < service_at, "admin check must precede Set-Service");
+        assert!(admin_at < netsh_at, "admin check must precede the netsh portproxy add");
+        // ...and it must ABORT, not merely warn (round-2 review finding).
+        // Existing + ordered is satisfied by three Write-Host lines and a
+        // `pause`: drop the `exit 1` and a non-admin who follows the documented
+        // right-click route presses Enter and falls straight into Set-Service,
+        // which throws mid-script under `$ErrorActionPreference = 'Stop'` and
+        // closes the window before the error can be read -- the exact failure
+        // the guard exists to prevent. Assert the abort INSIDE the guard block
+        // (a stray `exit 1` further down the script must not satisfy this),
+        // and that the whole block is over before the first privileged call.
+        let guard = admin_guard_block(&s);
+        assert!(
+            guard.contains("exit 1"),
+            "the non-admin branch must abort, not just warn: {guard:?}"
+        );
+        let guard_end = admin_guard_end(&s);
+        assert!(
+            guard_end < service_at,
+            "the admin guard must abort BEFORE Set-Service, not somewhere after it"
+        );
+        assert!(
+            guard_end < netsh_at,
+            "the admin guard must abort BEFORE the netsh portproxy add"
+        );
         // security warnings
         assert!(s.contains("SECURITY"));
         assert!(s.contains("NEVER port-forward"));

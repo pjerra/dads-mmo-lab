@@ -11,6 +11,7 @@
   import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { toolPrefs } from "$lib/tool-prefs.svelte";
+  import { saveallPref, setSaveBeforeRestart, wouldSkipSaveall, saveallBoxChecked } from "$lib/saveall-pref.svelte";
 
   const WOW_ID = "wow-server-playerbots";
   const ROLE_LABELS: Record<string, string> = {
@@ -27,33 +28,16 @@
   let busy = $state(false);
   const buf = termBuf("home");
 
-  // "Save characters before restart" preference (persisted). Default ON =
-  // safe. The pre-stop saveall is a redundant FIRST save -- the graceful
+  // "Save characters before restart". Default ON = safe, and NOT persisted --
+  // saveall-pref.svelte.ts re-asserts saving on every app start after the
+  // 2026-07-21 incident, where an unticked box outlived the session that
+  // armed it. The pre-stop saveall is a redundant FIRST save -- the graceful
   // `docker stop -t 300` also saves everyone on shutdown -- so turning this
   // OFF just skips the redundant save for a faster restart. Gated by
   // [skip-saveall]: while that feature is locked we never skip, and the box
   // shows checked+disabled so the display matches the forced-save behavior.
-  let saveBeforeRestart = $state(readSavePref());
-  function readSavePref(): boolean {
-    try {
-      return localStorage.getItem("dml.saveBeforeRestart") !== "0";
-    } catch {
-      return true;
-    }
-  }
-  function setSavePref(on: boolean): void {
-    saveBeforeRestart = on;
-    try {
-      localStorage.setItem("dml.saveBeforeRestart", on ? "1" : "0");
-    } catch {
-      /* storage blocked -- in-memory value still applies this session */
-    }
-  }
-  // Effective skip: only when the feature is unlocked AND the user turned
-  // saving off. Locked -> always save.
-  function skipSaveallNow(): boolean {
-    return !featureLocked("skip-saveall") && !saveBeforeRestart;
-  }
+  const saveallLocked = $derived(featureLocked("skip-saveall"));
+  const skipSaveall = $derived(wouldSkipSaveall(saveallPref.saveBeforeRestart, saveallLocked));
 
   // `detail`/`detailError` now live in the server-status store (server-status.svelte.ts)
   // so the sidebar chip and Console see the same last-known data instantly on
@@ -139,7 +123,7 @@
     if (action === "restart") restartState.restarting = true;
     try {
       if (action === "restart") {
-        await gamesRestart(WOW_ID, skipSaveallNow(), (e) => {
+        await gamesRestart(WOW_ID, skipSaveall, (e) => {
           buf.term = applyEvent(buf.term, e);
         });
       } else if (action === "start") {
@@ -187,7 +171,7 @@
     restartState.restarting = true;
     taskbarBusy();
     try {
-      await wowWorldRestart(skipSaveallNow(), (e) => {
+      await wowWorldRestart(skipSaveall, (e) => {
         buf.term = applyEvent(buf.term, e);
       });
     } catch (e) {
@@ -332,18 +316,23 @@
       {#if containerState === "running"}
         <label
           class="saveall-opt"
-          title={featureLocked("skip-saveall")
+          title={saveallLocked
             ? LOCKED_HINT
             : "On (safe): saves every character before restarting. Off: skips that extra save for a faster restart — the graceful stop still saves your characters on shutdown, so only turn this off if restarts feel slow."}
         >
           <input
             type="checkbox"
-            checked={saveBeforeRestart || featureLocked("skip-saveall")}
-            disabled={busy || featureLocked("skip-saveall")}
-            onchange={(e) => setSavePref(e.currentTarget.checked)}
+            checked={saveallBoxChecked(saveallPref.saveBeforeRestart, saveallLocked)}
+            disabled={busy || saveallLocked}
+            onchange={(e) => setSaveBeforeRestart(e.currentTarget.checked)}
           />
           Save characters before restart <span class="opt-sub">(safer; off = faster)</span>
         </label>
+        <!-- The incident's other half: the risky state was invisible. While
+             the skip is actually armed, say so in amber right under the box. -->
+        {#if skipSaveall}
+          <p class="saveall-warn">⚠ Faster mode — characters will NOT be saved before a restart (resets on next launch).</p>
+        {/if}
       {/if}
       {#if expanded}
         <div class="health">
@@ -409,6 +398,8 @@
   .saveall-opt input { cursor: pointer; margin: 0; }
   .saveall-opt input:disabled { cursor: default; }
   .saveall-opt .opt-sub { color: #6e7681; }
+  /* Amber = the card's existing "mid/attention" color (.dot.mid). */
+  .saveall-warn { margin: 6px 2px 0; font-size: 12.5px; color: #d29922; }
   .row { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
   .card-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
   .expander { background: none; border: none; padding: 0; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: inherit; color: inherit; cursor: pointer; }

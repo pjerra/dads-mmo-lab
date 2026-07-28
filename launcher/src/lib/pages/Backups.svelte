@@ -8,6 +8,7 @@
   import { restartState } from "$lib/restart-state.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
+  import { backupSummaryLine } from "$lib/backup-summary";
 
   let backups: BackupInfo[] = $state([]);
   let error: string | null = $state(null);
@@ -202,7 +203,7 @@
           </div>
           {#if b.summary}
             <p class="bsummary muted">
-              {b.summary.characters} character{b.summary.characters === 1 ? "" : "s"} · {b.summary.accounts} account{b.summary.accounts === 1 ? "" : "s"}{b.summary.bots ? ` · ${b.summary.bots} bots` : ""}
+              {backupSummaryLine(b.summary)}
             </p>
           {/if}
           {#if verdicts[b.file]}
