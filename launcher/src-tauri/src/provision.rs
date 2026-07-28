@@ -38,7 +38,7 @@
 //! in, and a fake `run` in the tests below sees the probe calls happen.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use dml_core::events::{done_event, error_event, line_event, section_end, section_start};
