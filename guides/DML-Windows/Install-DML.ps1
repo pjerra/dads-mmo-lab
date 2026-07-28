@@ -804,6 +804,25 @@ localhostForwarding=true
             Write-Host $archInstallRaw
             Write-Diag "wsl --install archlinux exit code: $archInstallExit"
             if ($archInstallExit -ne 0) {
+                # Diagnose before blaming the network. "Check your internet
+                # connection" was the message a clean VM got when the real
+                # cause was Virtual Machine Platform being switched off
+                # (HCS_E_HYPERV_NOT_INSTALLED) -- an answer that sends the user
+                # to their router while the actual fix is one command away.
+                if ($archInstallRaw -match 'HCS_E_HYPERV_NOT_INSTALLED|virtualization is not enabled|Virtual Machine Platform') {
+                    Write-Fail @"
+Windows cannot start WSL2 because the "Virtual Machine Platform" component is not enabled.
+
+Fix it with:
+    wsl.exe --install --no-distribution
+then restart Windows and run this installer again.
+
+If that command fails, this Windows image is missing the component (some
+"debloated"/modified builds remove it) and WSL2 cannot run here.
+In a VM, also confirm the host exposes nested virtualization -- on Hyper-V:
+    Set-VMProcessor -VMName "<vm>" -ExposeVirtualizationExtensions `$true
+"@
+                }
                 Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit).`nCheck your internet connection and try again."
             }
             # wsl --install can succeed (exit 0) and still say the machine must
@@ -1873,8 +1892,22 @@ echo "[phase3] Installing core dependencies..."
 pacman -S --noconfirm --needed base-devel git curl jq
 
 echo "[phase3] Installing dml CLI..."
-printf '%s' '$DmlCliB64' | base64 -d > /usr/local/bin/dml
-chmod 0755 /usr/local/bin/dml
+# NEVER downgrade. This script embeds a BOOTSTRAP CLI (v2.6.0) purely so a
+# brand-new distro has something to run. The launcher then provisions the
+# current CLI from its bundled resources. Because this installer is documented
+# as safe to re-run, an unconditional overwrite meant that re-running it AFTER
+# the launcher had set things up silently reverted the CLI by two majors and
+# un-provisioned the backend. Compare first: only write when what is there is
+# older than, or unreadable as, a version.
+_installed_ver="`$( (dml version 2>/dev/null || true) | sed -n 's/^dml v\{0,1\}\([0-9][0-9.]*\).*/\1/p' | head -n1 )"
+_embedded_ver="2.6.0"
+_newest="`$(printf '%s\n%s\n' "`$_installed_ver" "`$_embedded_ver" | sort -V | tail -n1)"
+if [ -n "`$_installed_ver" ] && [ "`$_newest" != "`$_embedded_ver" ]; then
+    echo "[phase3] Keeping the installed dml v`$_installed_ver (newer than this installer's v`$_embedded_ver)"
+else
+    printf '%s' '$DmlCliB64' | base64 -d > /usr/local/bin/dml
+    chmod 0755 /usr/local/bin/dml
+fi
 
 echo "[phase3] Verifying dml CLI..."
 dml version

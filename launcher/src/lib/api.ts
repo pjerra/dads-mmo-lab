@@ -13,8 +13,12 @@ import { resolveBackendMode } from "./page-cache.svelte";
 // only the TitleInfo TYPE from here (erased at build time), so there is no
 // runtime cycle.
 import { normalizeCatalog, type TitleCatalog } from "./title-install";
+// Same arrangement again: first-run.ts owns the `backend_status` wire shape
+// because it is the module that reasons about it; api.ts only transports it.
+import type { BackendStatusReport } from "./first-run";
 export type { LiveSpec };
 export type { TitleCatalog };
+export type { BackendStatusReport };
 
 export interface DmlErr {
   code: string;
@@ -1676,6 +1680,41 @@ export async function generateMysqlProxyScript(port?: number): Promise<string> {
 export async function defenderHint(): Promise<{ vhdx_dir: string | null; command: string | null }> {
   return await invoke("defender_hint");
 }
+
+// --- First-run backend setup (SHIP-LIST Phase 4) ---------------------------
+// The probe chain and the provisioning command a stranger needs before any of
+// the rest of this file can work. The report SHAPE lives in first-run.ts (the
+// module that reasons about it) and is re-exported here, the same arrangement
+// title-install.ts / TitleCatalog uses above.
+
+/**
+ * Probe this machine and report the FIRST thing standing between the user and
+ * a running server: no WSL → no distro → no `dml` CLI in it (or an outdated
+ * one) → no titles.
+ *
+ * NEVER rejects on a machine that is merely unset-up: an unreachable probe
+ * comes back as `state: "unknown"` with `blocked_at` naming the step. A
+ * rejection here means the IPC itself failed, which firstRunState() treats as
+ * one more could-not-tell.
+ */
+export async function backendStatus(): Promise<BackendStatusReport> {
+  return await invoke("backend_status");
+}
+
+/**
+ * Provision the distro from the resources bundled into this exe: the `dml`
+ * CLI, the Eluna bridge scripts and the six title installers. This is the
+ * user-facing replacement for `cli/dev-install.ps1`, which hardcoded one
+ * developer's repo path and could never run on anybody else's machine.
+ *
+ * Streams the ordinary TermEvent vocabulary, so the first-run screen renders
+ * it through the same Terminal component every other long job uses.
+ */
+export const backendSetup = (onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("backend_setup", { onEvent: ch });
+};
 
 // --- Native-mode setup bootstrap (spike/docker-desktop-native) -------------
 // Read-only status the "Native setup" Tools card loads on mount, plus the

@@ -26,6 +26,17 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../../cli/dml": "cli/dml",
+      "../../cli/lua/party": "cli/lua/party",
+      "../../cli/lua/gm": "cli/lua/gm",
+      "../../guides/wow-wotlk/install-wow-wotlk.sh": "installers/install-wow-wotlk.sh",
+      "../../guides/wow-vanilla/install-wow-vanilla.sh": "installers/install-wow-vanilla.sh",
+      "../../guides/wow-tbc/install-wow-tbc.sh": "installers/install-wow-tbc.sh",
+      "../../guides/Maplestory/install-maplestory.sh": "installers/install-maplestory.sh",
+      "../../guides/runescape/install-runescape.sh": "installers/install-runescape.sh",
+      "../../guides/Mu-online/install-muonline.sh": "installers/install-muonline.sh"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

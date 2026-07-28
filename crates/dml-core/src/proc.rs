@@ -49,21 +49,40 @@ pub fn windows_no_window(cmd: &mut Command) {
     }
 }
 
-/// Bounded `Command` runner, deliberately NOT a non-draining `output()`
-/// call: output must stay small with that shape — a modestly-chatty
-/// long-running child can emit output larger than the OS pipe buffer (64KiB
-/// on Windows), which blocks the child writing to a full pipe nobody is
-/// reading while a bare `try_wait()`-poller never observes it exit, silently
-/// timing out every call. This variant drains both pipes on background
-/// threads WHILE polling for exit, so the child can never block on a full
-/// buffer, no matter the output size. `launcher::dml::status` re-exports
-/// this under the same name for its own (much more numerous) call sites —
-/// `docker inspect`/`ps`/`port`/`logs`, `git fetch`, and more.
-pub fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+/// Why a bounded run did not produce output — the distinction
+/// [`output_bounded_draining`] throws away by collapsing everything into
+/// `None`.
+///
+/// This exists for the setup probe chain (`crate::setup`), where "the program
+/// is not on this machine" is a DEFINITIVE no and "it ran past its deadline"
+/// is evidence of NOTHING. Collapsing those two is the tri-state mistake this
+/// codebase keeps re-learning, so the probe layer gets a runner that keeps
+/// them apart at the source instead of guessing afterwards.
+#[derive(Debug)]
+pub enum BoundedOutcome {
+    /// The spawn itself failed. `kind() == NotFound` means the program does
+    /// not exist; any other kind is an unknown.
+    SpawnFailed(std::io::Error),
+    /// The child was still alive at the deadline and was killed + reaped.
+    TimedOut,
+    /// It ran to completion. The exit status may still be non-zero.
+    Ran(std::process::Output),
+}
+
+/// [`output_bounded_draining`] with the failure reason preserved. Same
+/// draining semantics (both pipes drained on background threads while the
+/// main thread polls for exit), same kill-and-reap on the deadline — the only
+/// difference is that the caller learns WHY there is no output.
+pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcome {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = cmd.spawn().ok()?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        // The ONE definitive negative the probe layer can act on: keep the
+        // io::Error so the caller can read its `kind()`.
+        Err(e) => return BoundedOutcome::SpawnFailed(e),
+    };
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
 
@@ -106,9 +125,45 @@ pub fn output_bounded_draining(mut cmd: Command, timeout: Duration) -> Option<st
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
     if timed_out {
-        return None;
+        return BoundedOutcome::TimedOut;
     }
-    status.map(|status| std::process::Output { status, stdout: stdout_buf, stderr: stderr_buf })
+    match status {
+        Some(status) => BoundedOutcome::Ran(std::process::Output {
+            status,
+            stdout: stdout_buf,
+            stderr: stderr_buf,
+        }),
+        // Unreachable: the `None` break above always sets `timed_out`. A
+        // panic in a diagnostic path would be worse than a conservative shrug.
+        None => BoundedOutcome::TimedOut,
+    }
+}
+
+/// Bounded `Command` runner, deliberately NOT a non-draining `output()`
+/// call: output must stay small with that shape — a modestly-chatty
+/// long-running child can emit output larger than the OS pipe buffer (64KiB
+/// on Windows), which blocks the child writing to a full pipe nobody is
+/// reading while a bare `try_wait()`-poller never observes it exit, silently
+/// timing out every call. This variant drains both pipes on background
+/// threads WHILE polling for exit, so the child can never block on a full
+/// buffer, no matter the output size. `launcher::dml::status` re-exports
+/// this under the same name for its own (much more numerous) call sites —
+/// `docker inspect`/`ps`/`port`/`logs`, `git fetch`, and more.
+///
+/// A thin wrapper over [`run_bounded_outcome`] since the setup probe chain
+/// needed the failure reason: every existing caller keeps the identical
+/// `Option` contract (spawn failure, timeout and a try_wait error all read as
+/// `None`).
+///
+/// A thin wrapper over [`run_bounded_outcome`] since the setup probe chain
+/// needed the failure reason. Every existing caller keeps the identical
+/// `Option` contract: a spawn failure, a timeout and a `try_wait` error all
+/// still read as `None`.
+pub fn output_bounded_draining(cmd: Command, timeout: Duration) -> Option<std::process::Output> {
+    match run_bounded_outcome(cmd, timeout) {
+        BoundedOutcome::Ran(out) => Some(out),
+        BoundedOutcome::SpawnFailed(_) | BoundedOutcome::TimedOut => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +365,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // -- run_bounded_outcome ---------------------------------------------------
+    // The setup probe chain (`crate::setup`) needs "the program is not on this
+    // machine" (a definitive NO) kept apart from "it ran past its deadline"
+    // (evidence of nothing). `output_bounded_draining` collapses both into
+    // `None`, so these three tests pin the distinction at the source.
+
+    #[test]
+    fn run_bounded_outcome_missing_program_is_spawn_failed_not_found() {
+        let cmd = Command::new("definitely-not-a-real-exe-9f2.exe");
+        match run_bounded_outcome(cmd, Duration::from_secs(5)) {
+            BoundedOutcome::SpawnFailed(e) => {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "a missing program must be reported as NotFound, not a generic failure"
+                );
+            }
+            other => panic!("expected SpawnFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_bounded_outcome_returns_ran_with_output_and_exit_code() {
+        let path = fixture("captured_exit7");
+        let mut cmd = Command::new(shell_program());
+        cmd.args(shell_args(&path));
+        match run_bounded_outcome(cmd, Duration::from_secs(10)) {
+            BoundedOutcome::Ran(out) => {
+                assert_eq!(out.status.code(), Some(7));
+            }
+            other => panic!("expected Ran, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_bounded_outcome_times_out_after_actually_spanning_the_deadline() {
+        // The vacuous-pass guard (CLAUDE.md): a stubbed/broken runner that
+        // returns TimedOut immediately would satisfy the variant assertion, so
+        // assert something only a real wall-clock wait can satisfy — elapsed
+        // must reach the deadline — while still returning promptly after it.
+        let start = std::time::Instant::now();
+        let mut cmd = hang_command();
+        windows_no_window(&mut cmd);
+        let outcome = run_bounded_outcome(cmd, Duration::from_millis(400));
+        let elapsed = start.elapsed();
+        assert!(
+            matches!(outcome, BoundedOutcome::TimedOut),
+            "an overrunning child must report TimedOut, got {outcome:?}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "must have actually waited out the deadline, elapsed only {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must return promptly after the deadline, took {elapsed:?}"
+        );
+    }
+
+    /// A child that outlives any short deadline, spawned DIRECTLY (one
+    /// process, so the kill closes the pipes the draining threads read — the
+    /// grandchild trap documented in `dml_wow::backup`'s timeout test).
+    #[cfg(windows)]
+    fn hang_command() -> Command {
+        let mut cmd = Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        cmd
+    }
+    #[cfg(not(windows))]
+    fn hang_command() -> Command {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        cmd
     }
 
     // -- combined_nonempty_lines -----------------------------------------------

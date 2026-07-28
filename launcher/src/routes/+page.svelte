@@ -14,7 +14,7 @@
   import { listen } from "@tauri-apps/api/event";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { charStore, charView, setSelectedChar } from "$lib/char-store.svelte";
-  import { wowAccounts, type Account, type CharacterSummary } from "$lib/api";
+  import { backendStatus, wowAccounts, type Account, type CharacterSummary } from "$lib/api";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
@@ -33,6 +33,8 @@
   import Help from "$lib/pages/Help.svelte";
   import ServerRequired from "$lib/ServerRequired.svelte";
   import { requiresServer, serverGate } from "$lib/server-gate";
+  import FirstRun from "$lib/FirstRun.svelte";
+  import { firstRunState, firstRunNeedsProbe, type BackendStatusReport } from "$lib/first-run";
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -50,15 +52,59 @@
   function go(pid: PageId) {
     page = pid;
     expanded[sectionOf(pid)] = true;
+    // Coming back to Home is the moment the first-run screen has to be right:
+    // the user may have just installed a title in the Library. firstRunNeedsProbe
+    // stops this once the machine is set up, so an established user pays one
+    // probe per session, not one per Home visit.
+    if (pid === "home" && firstRunNeedsProbe(backend, backendEverReady)) void probeBackend();
   }
   // The Config/Bots components take the nav page id as their `view` prop.
   const isConfigView = $derived((CONFIG_VIEWS as readonly string[]).includes(page));
   const isBotsView = $derived((BOTS_VIEWS as readonly string[]).includes(page));
 
+  // First-run backend probe (SHIP-LIST 4.4). Owned by the shell, not by Home,
+  // for two reasons: Home must not mount (and fire its own status fetches) on
+  // a machine that has no server yet, and the sidebar/Settings/Help have to
+  // stay reachable throughout -- a user may need to switch backend or read Help
+  // BEFORE they can set anything up, so this never blocks more than the Home
+  // content area.
+  let backend: BackendStatusReport | null = $state(null);
+  let backendErr: string | null = $state(null);
+  // Session latch: once this machine has answered "ready", the first-run screen
+  // is done with it. Without it a single timed-out probe would evict an
+  // established user's working Home and replace it with "couldn't check".
+  let backendEverReady = $state(false);
+  // Plain (non-reactive) re-entry guard -- nothing renders it.
+  let probing = false;
+
+  async function probeBackend() {
+    if (probing) return;
+    probing = true;
+    try {
+      const r = await backendStatus();
+      backend = r;
+      backendErr = null;
+      if (r.state === "ready") backendEverReady = true;
+    } catch (e) {
+      // backend_status is documented never to fail for a merely unset-up
+      // machine, so a rejection is the IPC itself -- which tells us nothing
+      // about what is installed. firstRunState renders that as could-not-tell.
+      const err = e as { message?: string };
+      backendErr = err.message ?? String(e);
+    } finally {
+      probing = false;
+    }
+  }
+
+  let firstRun = $derived(
+    firstRunState({ report: backend, error: backendErr, everReady: backendEverReady }),
+  );
+
   // Polling is idempotent (module-level flag) and lives here so it starts
   // once for the whole app regardless of which page the user lands on --
   // the status chip below must be live even when Home is never visited.
   onMount(() => {
+    void probeBackend();
     startStatusPolling();
     // Re-asserts the persisted auto-shutdown toggle to the Rust watcher and
     // hooks its event channel -- idempotent, like startStatusPolling.
@@ -67,6 +113,11 @@
     // hand the request over, so Home runs the SAME act() its own buttons do.
     void listen<string>("tray-action", (e) => {
       go("home");
+      // Home is what consumes this, and on an unset-up machine Home is not
+      // mounted -- the first-run screen is. Dropping the request here keeps it
+      // from sitting in the store and firing an unasked-for start minutes
+      // later, once setup finishes and Home finally mounts.
+      if (firstRun) return;
       trayAction.pending = e.payload === "stop" ? "stop" : "start";
     });
   });
@@ -92,8 +143,13 @@
   // terminal exactly like a normal Start click. Deliberately NO stop
   // counterpart on the chip (accidental-click risk).
   function requestChipStart() {
-    chipStart.requested = true;
     go("home");
+    // Same reason as the tray handler above: Home is the consumer, and it is
+    // not mounted while the first-run screen is up. Land the user on the
+    // screen that tells them what is actually missing instead of queueing a
+    // start for later.
+    if (firstRun) return;
+    chipStart.requested = true;
   }
 
   // Cross-page full-character-view request (smoke item 4b): Bot Browser's
@@ -233,6 +289,11 @@
 
   {#if pageGate}
     <ServerRequired gate={pageGate} onstart={requestChipStart} />
+  {:else if page === "home" && firstRun}
+    <!-- Nothing to run yet: Home's status card would describe a server that
+         does not exist. Replaces the Home CONTENT only -- the sidebar stays
+         live, so Settings (backend switch) and Help remain reachable. -->
+    <FirstRun state={firstRun} onnav={(p) => go(p)} onrecheck={() => void probeBackend()} />
   {:else}
     {#if page === "home"}<Home onnav={(p) => go(p)} />{/if}
     {#if page === "library"}<Library />{/if}

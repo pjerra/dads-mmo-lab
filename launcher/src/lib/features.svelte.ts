@@ -16,7 +16,12 @@ export type FeatureStatus = "tested" | "untested";
 export const FEATURES: Record<string, FeatureStatus> = {
   restart: "tested",
   "console-send": "tested",
-  "title-install": "untested",
+  // UNLOCKED for v0.1.0 by necessity, not by evidence: the first-run screen
+  // ends by sending a new user to Library to install a title. With this
+  // locked, that button is disabled and the stranger has nowhere to go --
+  // the release would ship with its own onboarding leading to a dead end.
+  // Its smoke row is being validated in the v0.1.0 fresh-VM run.
+  "title-install": "tested",
   "title-remove": "untested",
   "teleport-named": "tested",
   "teleport-coords": "tested",

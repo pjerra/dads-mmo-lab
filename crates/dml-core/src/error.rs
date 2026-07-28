@@ -19,10 +19,26 @@ impl From<RunnerError> for CmdError {
                 message: m,
                 hint: "Default mode: is WSL + the dml-arch distro present? (wsl -d dml-arch). Native mode (DML_BACKEND=native): are Git Bash and Docker Desktop installed and running?".into(),
             },
+            // SHIP-LIST 4.3. This hint used to read "Run: powershell -File
+            // cli\dev-install.ps1" — a file that exists only inside a git
+            // checkout of this repo. The people who hit this error are, almost
+            // by definition, the ones who do NOT have a checkout: a freshly
+            // created distro arrives with the old bootstrap CLI that
+            // `Install-DML.ps1` embeds, which does not speak this envelope.
+            // The launcher now installs the matching CLI itself, so the hint
+            // names that button. Version comes from the contract constant so
+            // this copy cannot drift away from what the probe chain and the
+            // setup command actually compare against.
             RunnerError::BadOutput { raw } => CmdError {
                 code: "CLI_BAD_OUTPUT".into(),
                 message: raw,
-                hint: "Is the dml CLI v3.0.0 installed? Run: powershell -File cli\\dev-install.ps1".into(),
+                // Both backends, same reason the Spawn arm covers both: this
+                // mapping has no runner context, and a native-mode user has no
+                // distro and no "Set up backend" button to press.
+                hint: format!(
+                    "The DML backend answered with something this launcher does not understand - usually an older CLI than the v{} it speaks. Default mode: press \"Set up backend\" on the launcher's start screen to install the copy that shipped with it. Native mode (DML_BACKEND=native): point DML_SCRIPT at a matching cli/dml.",
+                    crate::setup::EXPECTED_CLI_VERSION
+                ),
             },
         }
     }
@@ -38,4 +54,67 @@ pub fn not_found_err(message: impl Into<String>, hint: impl Into<String>) -> Cmd
 
 pub fn io_internal_err(e: std::io::Error) -> CmdError {
     CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SHIP-LIST 4.3. This is the hint a STRANGER actually hits: their distro
+    /// answered with something that is not our envelope, which on a fresh
+    /// machine means the old bootstrap CLI `Install-DML.ps1` embeds. It used to
+    /// read "Run: powershell -File cli\dev-install.ps1" — a file that exists
+    /// only inside a git checkout of this repo, which by definition they do not
+    /// have, and which had one developer's repo path hardcoded in it anyway.
+    #[test]
+    fn the_bad_output_hint_points_at_the_in_app_setup_not_a_dev_script() {
+        let err = CmdError::from(RunnerError::BadOutput { raw: "not json".into() });
+        assert_eq!(err.code, "CLI_BAD_OUTPUT");
+        assert!(
+            !err.hint.contains("dev-install"),
+            "the hint still sends the user to a dev script they do not have: {}",
+            err.hint
+        );
+        assert!(
+            !err.hint.to_lowercase().contains("powershell -file"),
+            "the hint still tells the user to run a script from a repo: {}",
+            err.hint
+        );
+        assert!(
+            err.hint.contains("Set up backend"),
+            "the hint must name the in-app setup button (first-run.ts's label): {}",
+            err.hint
+        );
+    }
+
+    /// The version in the copy must come from the contract constant, not a
+    /// literal: `EXPECTED_CLI_VERSION` is what the probe chain and the setup
+    /// command both compare against, and a hint quoting a different number is
+    /// how a user ends up chasing the wrong version.
+    #[test]
+    fn the_bad_output_hint_quotes_the_contract_version() {
+        let err = CmdError::from(RunnerError::BadOutput { raw: "x".into() });
+        assert!(
+            err.hint.contains(crate::setup::EXPECTED_CLI_VERSION),
+            "{}",
+            err.hint
+        );
+    }
+
+    /// Native mode has no distro and no "Set up backend" button to press, so a
+    /// hint that ONLY names the WSL route strands those users — the same
+    /// two-backends care the `Spawn` arm above already takes.
+    #[test]
+    fn the_bad_output_hint_still_says_something_to_a_native_mode_user() {
+        let err = CmdError::from(RunnerError::BadOutput { raw: "x".into() });
+        assert!(err.hint.contains("DML_BACKEND=native"), "{}", err.hint);
+    }
+
+    #[test]
+    fn the_bad_output_message_carries_the_raw_output_through_unchanged() {
+        // The hint explains; the message is evidence. Losing the raw output
+        // would leave a bug report with nothing in it.
+        let err = CmdError::from(RunnerError::BadOutput { raw: "<html>502</html>".into() });
+        assert_eq!(err.message, "<html>502</html>");
+    }
 }

@@ -1,5 +1,7 @@
 pub mod nativesetup;
+pub mod payload;
 pub mod power;
+pub mod provision;
 pub mod realmlist;
 mod startup;
 mod tray;
@@ -1442,6 +1444,135 @@ fn backend_mode() -> &'static str {
         dml_wow::backend::Backend::Native => "native",
         dml_wow::backend::Backend::Wsl => "wsl",
     }
+}
+
+// ---------------------------------------------------------------------------
+// First-run backend probe (SHIP-LIST Phase 4). The chain and its state machine
+// live in `dml_core::setup` (no tauri there); this is the adapter plus the one
+// launcher-only fact the chain cannot know — whether the payload the setup
+// command would install actually shipped inside this exe.
+// ---------------------------------------------------------------------------
+
+/// The typed answer `backend_status` returns.
+///
+/// [`dml_core::setup::BackendStatus`] is FLATTENED, so `state` sits at the top
+/// level: this is a switch target, not a tree to walk. The two extra fields
+/// exist so a consumer never needs a second round trip:
+///
+/// * `backend_mode` — a native-mode user runs a real server with no distro at
+///   all. Without this, a first-run screen would read `NoWsl` and tell someone
+///   with a working server to go install WSL.
+/// * `payload` — `NoCli`/`CliOutdated` are the states with an "install the
+///   backend" button on them, and that button is powered by the bundled
+///   resources. If they did not ship, the honest screen says so instead of
+///   offering a fix that cannot work.
+#[derive(Debug, Serialize)]
+pub struct BackendStatusReport {
+    #[serde(flatten)]
+    pub backend: dml_core::setup::BackendStatus,
+    pub backend_mode: &'static str,
+    pub payload: crate::payload::PayloadStatus,
+}
+
+/// Assemble the report. Pure, so the JSON shape the first-run screen and the
+/// setup command build against is pinned by a test rather than by a click.
+pub fn backend_status_report(
+    backend: dml_core::setup::BackendStatus,
+    payload: crate::payload::PayloadStatus,
+    native: bool,
+) -> BackendStatusReport {
+    BackendStatusReport {
+        backend,
+        backend_mode: if native { "native" } else { "wsl" },
+        payload,
+    }
+}
+
+/// Probe this machine and report the FIRST thing standing between the user and
+/// a running server: no WSL → no `dml-arch` distro → no `dml` CLI in it (or an
+/// outdated one) → no titles installed.
+///
+/// SHIP-LIST Phase 4's seam. Both the first-run screen (4.4) and the setup
+/// command (4.2) consume THIS — one chain, one answer, so the two can never
+/// disagree about what state the machine is in.
+///
+/// Bounded end to end: each spawn is capped at
+/// [`dml_core::setup::DEFAULT_PROBE_TIMEOUT`] and the chain short-circuits at
+/// the first missing link, so a machine with no WSL answers immediately and a
+/// wedged `wsl.exe` costs one timeout, not four. Runs on the blocking pool —
+/// it shells subprocesses and must never sit on the IPC thread.
+///
+/// NEVER fails: an unreachable probe is reported as
+/// [`dml_core::setup::SetupState::Unknown`] with the step named, not as a
+/// command error. A first-run screen that throws has nothing to show, which is
+/// the exact failure this whole phase exists to remove.
+#[tauri::command]
+async fn backend_status(app: tauri::AppHandle) -> Result<BackendStatusReport, CmdError> {
+    // Resolve the resource dir on THIS side: `AppHandle::path()` is the only
+    // piece that needs tauri, and `Option` already carries the could-not-tell.
+    let resource_dir = app.path().resource_dir().ok();
+    let native = is_native_backend();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = dml_core::setup::SetupProbeEnv::new(
+            dml_core::runner::DISTRO,
+            dml_core::runner::USER,
+        );
+        backend_status_report(
+            dml_core::setup::probe(&env),
+            crate::payload::resolve_opt(resource_dir.as_deref()),
+            native,
+        )
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
+}
+
+/// Provision the `dml-arch` distro from the resources bundled INTO THIS EXE:
+/// the `dml` CLI to `/usr/local/bin`, the Eluna bridge scripts to
+/// `/usr/local/share/dml/lua/{party,gm}`, and the six title installers to
+/// `/usr/local/share/dml/installers`.
+///
+/// SHIP-LIST 4.2 — the user's replacement for `cli/dev-install.ps1`, which
+/// hardcoded one developer's repo path and therefore could not run on anybody
+/// else's machine. Everything here resolves at runtime: the sources come from
+/// [`tauri::path::PathResolver::resource_dir`], never a repo path, and the
+/// flow's own `wslpath` call translates that into something the distro can
+/// read.
+///
+/// STREAMED, because it is slow enough to look hung: the first `wsl.exe` call
+/// on a cold machine boots the WSL2 VM. Emits the ordinary TermEvent
+/// vocabulary through the same `Channel` seam every other long job uses, so
+/// the first-run screen renders it in the standard Terminal component.
+///
+/// NEVER returns `Err` for an unhappy machine — a missing distro, a failed
+/// copy and a version mismatch are all `error` events on the stream (the
+/// contract the rest of the streamed commands keep: the UI derives its verdict
+/// from `done`/`error`, not from the promise). An `Err` here means the
+/// blocking task itself could not be joined.
+///
+/// The state machine, the messages and the argv are all in
+/// [`crate::provision`], where they are unit-tested without a machine that
+/// happens to be in the right state; this is only the adapter.
+#[tauri::command]
+async fn backend_setup(
+    app: tauri::AppHandle,
+    on_event: Channel<serde_json::Value>,
+) -> Result<(), CmdError> {
+    // Resolve the resource dir on THIS side: `AppHandle::path()` is the only
+    // piece that needs tauri, and `Option` already carries the could-not-tell
+    // (which `provision` reports as PAYLOAD_UNKNOWN rather than as "missing").
+    let resource_dir = app.path().resource_dir().ok();
+    tauri::async_runtime::spawn_blocking(move || {
+        let env = crate::provision::ProvisionEnv::new(
+            dml_core::runner::DISTRO,
+            dml_core::runner::USER,
+        );
+        crate::provision::provision(&env, resource_dir.as_deref(), |v| {
+            let _ = on_event.send(v);
+        });
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
 }
 
 /// `~/.dml` or a typed error. Both launcher-config commands need it and both
@@ -6241,6 +6372,8 @@ pub fn run() {
             wow_item_info_read,
             wow_entity_info_read,
             backend_mode,
+            backend_status,
+            backend_setup,
             wow_config_set,
             wow_config_set_native,
             wow_config_tuning_list,
@@ -6399,6 +6532,98 @@ mod tests {
     #[test]
     fn wsl_backend_guard_allows_wsl_mode() {
         assert!(wsl_backend_guard(false).is_ok());
+    }
+
+    // -- backend_status report shape (SHIP-LIST Phase 4) --------------------
+    // This is the wire contract two other lanes build against (the first-run
+    // screen and the setup command), so it is pinned here rather than
+    // discovered by clicking. Breaking change = renaming/moving any key
+    // asserted below.
+
+    fn probes_ready() -> dml_core::setup::Probes {
+        dml_core::setup::Probes {
+            wsl: dml_core::setup::Tri::Yes,
+            distro: dml_core::setup::Tri::Yes,
+            cli: dml_core::setup::Tri::Yes,
+            cli_version: Some(dml_core::setup::EXPECTED_CLI_VERSION.to_string()),
+            titles: Some(2),
+        }
+    }
+
+    #[test]
+    fn backend_status_report_puts_state_at_the_top_level() {
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes_ready()),
+            crate::payload::resolve_opt(None),
+            false,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        // Flattened: `state` is a sibling of `payload`, not nested under a
+        // `backend` object the UI would have to reach through.
+        assert_eq!(v["state"], "ready");
+        assert_eq!(v["distro"], "dml-arch");
+        assert_eq!(v["expected_cli_version"], dml_core::setup::EXPECTED_CLI_VERSION);
+        assert!(v["blocked_at"].is_null());
+        assert_eq!(v["probes"]["wsl"], "yes");
+        assert_eq!(v["probes"]["titles"], 2);
+        assert_eq!(v["backend_mode"], "wsl");
+        assert_eq!(v["payload"]["present"], "unknown");
+    }
+
+    #[test]
+    fn backend_status_report_serializes_states_in_snake_case() {
+        let mut probes = probes_ready();
+        probes.distro = dml_core::setup::Tri::No;
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes),
+            crate::payload::resolve_opt(None),
+            false,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["state"], "no_distro");
+    }
+
+    #[test]
+    fn backend_status_report_names_the_blocked_step_for_unknown() {
+        let mut probes = probes_ready();
+        probes.wsl = dml_core::setup::Tri::Unknown;
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes),
+            crate::payload::resolve_opt(None),
+            false,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["state"], "unknown");
+        assert_eq!(v["blocked_at"], "wsl");
+    }
+
+    #[test]
+    fn backend_status_report_reports_native_mode() {
+        // Without this a native-mode user -- who has no distro by design --
+        // would be told to go install WSL.
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes_ready()),
+            crate::payload::resolve_opt(None),
+            true,
+        );
+        assert_eq!(serde_json::to_value(&report).unwrap()["backend_mode"], "native");
+    }
+
+    #[test]
+    fn backend_status_report_carries_the_payload_verdict_through() {
+        let payload = crate::payload::PayloadStatus {
+            present: dml_core::setup::Tri::No,
+            dir: Some("C:/somewhere".into()),
+            missing: vec![crate::payload::CLI_SCRIPT.to_string()],
+        };
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes_ready()),
+            payload,
+            false,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["payload"]["present"], "no");
+        assert_eq!(v["payload"]["missing"][0], crate::payload::CLI_SCRIPT);
     }
 
     #[test]
