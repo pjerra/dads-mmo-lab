@@ -453,6 +453,12 @@ live DB — every stat below ran sub-second. User picked the groups:
 
 ### App icon — reuse the old DML Launcher mark (user request, 2026-07-28)
 
+> **SHIPPED 2026-07-28** (commit `c84d30d`). Source supplied by the user as
+> `C:\DML\dml.ico`; the 256x256 PNG frame inside it is committed as
+> `launcher/src-tauri/icons/source-dml-256.png`. NB the mark is a purple LAB
+> FLASK, not an hourglass as written below. Only open item: the source is
+> 256px where tauri wants 1024, so the Windows Store tiles are upscaled.
+
 Ship the launcher under the ORIGINAL DML Launcher icon: the purple one with an
 hourglass. Today `launcher/src-tauri/icons/` still carries the stock Tauri
 placeholder set, so the exe, taskbar entry and both installers all show a
