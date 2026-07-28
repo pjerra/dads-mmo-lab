@@ -63,3 +63,104 @@ _title_server_dir() {
 _title_installed() {
     [[ -d "$GAMES_DIR/$1" || -d "$HOME/$1" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Custom display names (`dml games name`).
+#
+# WHERE THE NAME LIVES, and why: <title dir>/.dml-name, i.e. WITH THE SERVER.
+# It is a property of the server, not of one frontend -- so it survives a
+# launcher reinstall, travels with the directory if it is moved or copied, and
+# is readable by this CLI under either backend without a shared config file.
+# Putting it in ~/.dml/launcher.json would tie a server's identity to one
+# launcher install on one machine.
+# ---------------------------------------------------------------------------
+
+DML_NAME_FILE=".dml-name"
+DML_NAME_MAX=40
+
+# Title ids become a path component and (for `games name`) the directory a
+# file is WRITTEN into, so the write path validates them rather than trusting
+# the caller. Same character class as the launcher's validate_game_id, plus an
+# explicit `..` refusal: every character of ".." is individually allowed, so
+# the class alone would let a name file land in the games dir's parent.
+_valid_title_id() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$1" != *..* ]]
+}
+
+# Echoes the directory a title is installed in ($GAMES_DIR first, then the
+# legacy $HOME/<id> layout -- the same resolution `games catalog` uses), or
+# nothing when it is not installed anywhere.
+_title_dir() {
+    if [[ -d "$GAMES_DIR/$1" ]]; then printf '%s' "$GAMES_DIR/$1"
+    elif [[ -d "$HOME/$1" ]]; then printf '%s' "$HOME/$1"
+    fi
+    return 0
+}
+
+# Echoes a title's CUSTOM name, or nothing when it has none.
+#
+# The reader never trusts the file: it is plain text a user may hand-edit or
+# copy over from Windows. First line only, control characters (incl. a CRLF's
+# \r) dropped, trimmed, and capped at the same length the writer enforces --
+# a hand-written oddity must degrade to a sane label or to no label at all,
+# never to a broken one.
+_title_name_read() {
+    local f name
+    f="$(_title_dir "$1")"
+    [[ -n "$f" && -f "$f/$DML_NAME_FILE" ]] || return 0
+    # `read` returns nonzero at EOF-without-newline but HAS already assigned,
+    # so the failure is swallowed rather than treated as "no name".
+    IFS= read -r name < "$f/$DML_NAME_FILE" 2>/dev/null || true
+    name="${name//[[:cntrl:]]/}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    printf '%s' "${name:0:$DML_NAME_MAX}"
+}
+
+# The label to show for a title: custom name, else the registry name, else the
+# id. A server must NEVER render as a blank label anywhere, which is why the
+# chain ends at the id (always non-empty) rather than at the registry, which
+# only knows the six shipped titles.
+_title_display_name() {
+    local name row
+    name="$(_title_name_read "$1")"
+    if [[ -n "$name" ]]; then printf '%s' "$name"; return 0; fi
+    row="$(_title_row "$1")"
+    if [[ -n "$row" ]]; then
+        # Field 2 by parameter expansion, not `cut`: this runs once per row of
+        # `games list`, and on native Git Bash every fork costs ~165ms.
+        name="${row#*|}"; name="${name%%|*}"
+        [[ -n "$name" ]] && { printf '%s' "$name"; return 0; }
+    fi
+    printf '%s' "$1"
+}
+
+# Validates + trims a user-supplied name. Returns 0 with the normalized value
+# in _NAME_OUT, or 1 with the reason in _NAME_ERR.
+#
+# Two globals rather than stdout because the caller needs BOTH the value and
+# the failure reason, and a `$( )` capture would run this in a subshell where
+# any second channel is lost. Call it directly, never in a command substitution.
+_title_name_normalize() {
+    local n="${1-}"
+    _NAME_OUT=""; _NAME_ERR=""
+    # Control characters are REFUSED, not stripped: the name is stored as a
+    # whole file body and read back first-line-only, so a value containing a
+    # newline would come back as a different name with no explanation.
+    if [[ "$n" == *[[:cntrl:]]* ]]; then
+        _NAME_ERR="Name cannot contain line breaks, tabs or control characters"
+        return 1
+    fi
+    n="${n#"${n%%[![:space:]]*}"}"
+    n="${n%"${n##*[![:space:]]}"}"
+    if [[ -z "$n" ]]; then
+        _NAME_ERR="Name cannot be empty"
+        return 1
+    fi
+    if (( ${#n} > DML_NAME_MAX )); then
+        _NAME_ERR="Name is too long (${#n} characters, max $DML_NAME_MAX)"
+        return 1
+    fi
+    _NAME_OUT="$n"
+    return 0
+}

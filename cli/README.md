@@ -27,11 +27,29 @@ Error codes: UNKNOWN_COMMAND, NOT_FOUND, NO_COMPOSE, DOCKER_DOWN,
 START_FAILED, STOP_FAILED.
 
 Commands:
-- `dml games list --json` → `{"games":[{"id","path","running"}]}`
+- `dml games list --json` → `{"games":[{"id","path","running","display_name"}]}`
 - `dml games status <id> --json` → `{"id","state":"running"|"stopped"}`
 - `dml games start|restart|stop <id> --json` → NDJSON stream
-- `dml games catalog --json` → `{"titles":[{"id","name","installed","running","script_available"}],"install_supported":<bool>}`
+- `dml games catalog --json` → `{"titles":[{"id","name","installed","running","script_available","display_name","custom_name"}],"install_supported":<bool>}`
+- `dml games name <id> --set "<name>"` → `{"id","name"}`
+- `dml games name <id> --clear` → `{"id","name":null}`
 - `dml version --json` → `{"version":"3.0.0"}`
+
+**Display names.** A server's custom name lives in `<title dir>/.dml-name`
+(UTF-8, first line) — WITH THE SERVER, not in launcher config: it is a property
+of the server, so it survives a launcher reinstall, travels with the directory,
+and is readable under either backend. `display_name` is what to render (custom
+name → registry name → id, so a server is NEVER a blank label); `custom_name`
+(catalog only) is the rename's own value, `null` when unset, which is what a
+Rename dialog needs to tell "no name yet" from "named the same as the default".
+`name` keeps meaning the built-in title name. Write rules: trimmed, non-empty,
+max 40 characters, control characters/CR/LF REFUSED (`BAD_ARG`) rather than
+stripped — the file is read back first-line-only, so accepting a newline would
+silently store a different name. The reader is defensive about hand edits (first
+line, control characters dropped, trimmed, capped at 40). The value is written
+as a plain file body and never spliced into a shell command. `games name` needs
+the title to be installed (`NOT_FOUND` otherwise) and validates the id
+(`^[A-Za-z0-9._-]+$`, no `..`) before touching the filesystem.
 
 `games catalog` answers TWO separate questions, and a consumer must not collapse
 them. `script_available` is per title: is that title's installer script shipped

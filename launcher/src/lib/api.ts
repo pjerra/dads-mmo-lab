@@ -26,6 +26,8 @@ export interface Game {
   id: string;
   path: string;
   running: boolean;
+  /** What to render. Guaranteed non-empty by `gamesList` -- see below. */
+  display_name: string;
 }
 
 export type TermEvent =
@@ -42,9 +44,17 @@ export async function saveTextFile(defaultName: string, content: string): Promis
   return invoke("save_text_file", { defaultName, content });
 }
 
+// `display_name` FAILS OPEN to the id: a `dml` predating the field (an older
+// copy still installed in dml-arch that the launcher has not re-shipped) omits
+// it, and a server that renders as an empty label is worse than one that
+// renders as its id. The CLI already guarantees a non-empty value; this is the
+// belt for the version-skew case, so no caller has to repeat the fallback.
 export async function gamesList(): Promise<Game[]> {
-  const data = await invoke<{ games: Game[] }>("games_list");
-  return data.games;
+  const data = await invoke<{ games: Partial<Game>[] }>("games_list");
+  return (data.games ?? []).map((g) => ({
+    ...(g as Game),
+    display_name: g.display_name?.trim() ? g.display_name : (g.id ?? ""),
+  }));
 }
 
 export async function gamesStatus(id: string): Promise<{ id: string; state: "running" | "stopped" }> {
@@ -1421,10 +1431,15 @@ export const wowAhbotRepair = async (charName: string, onEvent: (e: TermEvent) =
 
 export interface TitleInfo {
   id: string;
+  /** The BUILT-IN title name. Stays the default a Rename dialog offers. */
   name: string;
   installed: boolean;
   running: "running" | "stopped" | null;
   script_available: boolean;
+  /** What to render: the custom name when set, else `name`. Never blank. */
+  display_name: string;
+  /** The rename's own value; null when the user has not set one. */
+  custom_name: string | null;
 }
 // Returns the WHOLE envelope, not just the rows: `install_supported` is a
 // per-host verdict that belongs to the catalog, not to any one title, and
@@ -1771,6 +1786,51 @@ export async function setKeepAwake(on: boolean): Promise<void> {
 // comment for why duplicating the poll there would be wrong.
 export async function traySetStatus(verdict: string): Promise<void> {
   return await invoke("tray_set_status", { verdict });
+}
+
+// --- Server display names + the active server ------------------------------
+
+// One row of the tray's server list. snake_case on BOTH sides: Rust
+// deserializes TrayServer with plain serde (no rename_all), and the rows come
+// straight off `games list`, which already speaks snake_case.
+export interface TrayServer {
+  id: string;
+  display_name: string;
+  running: boolean;
+}
+
+// Same reason as traySetStatus: the webview owns the poll and the list, so it
+// pushes them. A second lister in Rust would drift from what is on screen.
+export async function traySetServers(servers: TrayServer[]): Promise<void> {
+  return await invoke("tray_set_servers", { servers });
+}
+
+// Set (a string) or CLEAR (null) a server's display name. The name is stored
+// in the server's own directory (<title dir>/.dml-name), not in launcher
+// config, so it survives a launcher reinstall and travels with the directory.
+// Rules enforced by the CLI: trimmed, non-empty, max 40 chars, no line breaks
+// or control characters (BAD_ARG).
+export async function gamesName(
+  id: string,
+  name: string | null,
+): Promise<{ id: string; name: string | null }> {
+  return await invoke("games_name", { id, name });
+}
+
+// Which server the LIFECYCLE surfaces act on (Home's status card and its
+// Start/Stop/Restart, the sidebar chip, the tray) -- deliberately NOT the
+// WoW-specific pages, which stay bound to the WoW title. Rust resolves the
+// stored choice against what is installed right now and falls back
+// deterministically (see active_game.rs), so `null` means "nothing is
+// installed", never "nobody has chosen yet".
+export async function activeGameGet(): Promise<string | null> {
+  return await invoke<string | null>("active_game_get");
+}
+
+// Rejects an id that is not installed rather than persisting it -- the only
+// symptom of a stored phantom would be a Start button that fails.
+export async function activeGameSet(id: string): Promise<void> {
+  return await invoke("active_game_set", { id });
 }
 
 // Start-with-Windows, backed by an HKCU\...\Run entry. `autostartGet` reports

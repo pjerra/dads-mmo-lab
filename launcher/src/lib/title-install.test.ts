@@ -21,6 +21,8 @@ const row = (over: Partial<TitleInfo> = {}): TitleInfo => ({
   installed: false,
   running: null,
   script_available: true,
+  display_name: "RuneScape",
+  custom_name: null,
   ...over,
 });
 
@@ -113,6 +115,32 @@ describe("normalizeCatalog", () => {
 
   it("tolerates a payload with no titles array", () => {
     expect(normalizeCatalog({}).titles).toEqual([]);
+  });
+
+  // display_name / custom_name fail open the same way install_supported does:
+  // an older `dml` omits them entirely, and a title card rendering a blank
+  // label is a worse failure than one showing the built-in name.
+  it("fills display_name from the built-in name when a dml predates the field", () => {
+    const t = normalizeCatalog({
+      titles: [{ ...row(), display_name: undefined, custom_name: undefined } as unknown as TitleInfo],
+    }).titles[0];
+    expect(t.display_name).toBe("RuneScape");
+    expect(t.custom_name).toBeNull();
+  });
+
+  it("falls back to the id when even the built-in name is missing", () => {
+    const t = normalizeCatalog({
+      titles: [{ id: "mystery-server" } as unknown as TitleInfo],
+    }).titles[0];
+    expect(t.display_name).toBe("mystery-server");
+  });
+
+  it("keeps a real custom name and renders it", () => {
+    const t = normalizeCatalog({
+      titles: [row({ display_name: "Dad's Server", custom_name: "Dad's Server" })],
+    }).titles[0];
+    expect(t.display_name).toBe("Dad's Server");
+    expect(t.custom_name).toBe("Dad's Server");
   });
 });
 

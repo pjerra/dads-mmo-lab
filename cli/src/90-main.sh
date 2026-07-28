@@ -1380,7 +1380,11 @@ case "$cmd" in
                 running=true
             fi
             [[ $first -eq 0 ]] && out+=','
-            out+="{\"id\":\"$(json_escape "$gid")\",\"path\":\"$(json_escape "${gdir:-$GAMES_DIR/$gid}")\",\"running\":$running}"
+            # display_name is APPENDED -- every existing key keeps its name,
+            # type and position, because the launcher and the old C# tray both
+            # parse this envelope.
+            out+="{\"id\":\"$(json_escape "$gid")\",\"path\":\"$(json_escape "${gdir:-$GAMES_DIR/$gid}")\",\"running\":$running"
+            out+=",\"display_name\":\"$(json_escape "$(_title_display_name "$gid")")\"}"
             first=0
         done < <(_scan_games)
         out+=']}'
@@ -1470,12 +1474,71 @@ case "$cmd" in
               trun='"stopped"'
             fi
           fi
+          # custom_name is the RENAME's own value (null when the user has not
+          # set one); display_name is what to render (custom, else the registry
+          # name). Both appended -- `name` keeps meaning "the built-in title
+          # name", which is what a Rename dialog needs to show as the default.
+          tcustom="$(_title_name_read "$tid")"
+          if [[ -n "$tcustom" ]]; then
+            tcustomj="\"$(json_escape "$tcustom")\""; tdisp="$tcustom"
+          else
+            tcustomj=null; tdisp="$tname"
+          fi
           [[ $first -eq 0 ]] && tout+=','
-          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
+          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok"
+          tout+=",\"display_name\":\"$(json_escape "$tdisp")\",\"custom_name\":$tcustomj}"
           first=0
         done < <(_title_registry)
         tout+=']'
         json_ok "{\"titles\":$tout,\"install_supported\":$tinstsup}"
+        ;;
+      name)
+        # Set or clear a server's display name. JSON-first like the rest of
+        # the games namespace (list/status/catalog): one envelope, always.
+        nusage='Usage: dml games name <title> --set "<name>" | --clear'
+        gid="${1:-}"; shift || true
+        if [[ -z "$gid" || "$gid" == --* ]]; then
+          json_err BAD_ARG "Missing title" "$nusage"; exit 1
+        fi
+        if ! _valid_title_id "$gid"; then
+          json_err BAD_ARG "Invalid title id: $gid" "$nusage"; exit 1
+        fi
+        nmode=""; nval=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --set) _need_flag_val "$1" $#; nmode=set; nval="$2"; shift 2 ;;
+            --clear) nmode=clear; shift ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "$nusage"; exit 1 ;;
+          esac
+        done
+        if [[ -z "$nmode" ]]; then
+          json_err BAD_ARG "Missing --set or --clear" "$nusage"; exit 1
+        fi
+        # The title must actually be installed: the name file lives in the
+        # server's own directory, so there is nowhere to put it otherwise.
+        ndir="$(_title_dir "$gid")"
+        if [[ -z "$ndir" ]]; then
+          json_err NOT_FOUND "Title not found: $gid" "Run: dml games list --json"; exit 1
+        fi
+        if [[ "$nmode" == clear ]]; then
+          # Idempotent: clearing a name that was never set is a success, not
+          # an error -- the end state the caller asked for is the end state.
+          rm -f "$ndir/$DML_NAME_FILE" 2>/dev/null || true
+          if [[ -e "$ndir/$DML_NAME_FILE" ]]; then
+            json_err WRITE_FAILED "Could not clear the name for $gid" "Check permissions on $ndir"; exit 1
+          fi
+          json_ok "{\"id\":\"$(json_escape "$gid")\",\"name\":null}"
+        else
+          if ! _title_name_normalize "$nval"; then
+            json_err BAD_ARG "$_NAME_ERR" "$nusage"; exit 1
+          fi
+          # Written as a plain file body -- the value is never spliced into a
+          # shell command, so no quoting/escaping question arises at all.
+          if ! printf '%s\n' "$_NAME_OUT" > "$ndir/$DML_NAME_FILE" 2>/dev/null; then
+            json_err WRITE_FAILED "Could not write the name for $gid" "Check permissions on $ndir"; exit 1
+          fi
+          json_ok "{\"id\":\"$(json_escape "$gid")\",\"name\":\"$(json_escape "$_NAME_OUT")\"}"
+        fi
         ;;
       install)
         gid="${1:-}"

@@ -135,13 +135,23 @@ export interface TitleCatalog {
  * and on that backend installs genuinely work -- treating "absent" as "not
  * supported" would swap one wrong story for another. Only an explicit `false`
  * blocks.
+ *
+ * `display_name` / `custom_name` (server rename) fail open for the SAME
+ * version-skew reason: an older `dml` omits them, and the label chain must
+ * still end somewhere non-empty -- custom name, else the built-in name, else
+ * the id. A title card with a blank heading is a worse failure than one
+ * showing an id.
  */
 export function normalizeCatalog(d: {
   titles?: TitleInfo[];
   install_supported?: boolean;
 }): TitleCatalog {
   return {
-    titles: d.titles ?? [],
+    titles: (d.titles ?? []).map((t) => ({
+      ...t,
+      display_name: t.display_name?.trim() ? t.display_name : (t.name?.trim() ? t.name : t.id),
+      custom_name: t.custom_name ?? null,
+    })),
     installSupported: d.install_supported !== false,
   };
 }

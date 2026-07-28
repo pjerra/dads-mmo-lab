@@ -3864,6 +3864,107 @@ _title_installed() {
     [[ -d "$GAMES_DIR/$1" || -d "$HOME/$1" ]]
 }
 
+# ---------------------------------------------------------------------------
+# Custom display names (`dml games name`).
+#
+# WHERE THE NAME LIVES, and why: <title dir>/.dml-name, i.e. WITH THE SERVER.
+# It is a property of the server, not of one frontend -- so it survives a
+# launcher reinstall, travels with the directory if it is moved or copied, and
+# is readable by this CLI under either backend without a shared config file.
+# Putting it in ~/.dml/launcher.json would tie a server's identity to one
+# launcher install on one machine.
+# ---------------------------------------------------------------------------
+
+DML_NAME_FILE=".dml-name"
+DML_NAME_MAX=40
+
+# Title ids become a path component and (for `games name`) the directory a
+# file is WRITTEN into, so the write path validates them rather than trusting
+# the caller. Same character class as the launcher's validate_game_id, plus an
+# explicit `..` refusal: every character of ".." is individually allowed, so
+# the class alone would let a name file land in the games dir's parent.
+_valid_title_id() {
+    [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] && [[ "$1" != *..* ]]
+}
+
+# Echoes the directory a title is installed in ($GAMES_DIR first, then the
+# legacy $HOME/<id> layout -- the same resolution `games catalog` uses), or
+# nothing when it is not installed anywhere.
+_title_dir() {
+    if [[ -d "$GAMES_DIR/$1" ]]; then printf '%s' "$GAMES_DIR/$1"
+    elif [[ -d "$HOME/$1" ]]; then printf '%s' "$HOME/$1"
+    fi
+    return 0
+}
+
+# Echoes a title's CUSTOM name, or nothing when it has none.
+#
+# The reader never trusts the file: it is plain text a user may hand-edit or
+# copy over from Windows. First line only, control characters (incl. a CRLF's
+# \r) dropped, trimmed, and capped at the same length the writer enforces --
+# a hand-written oddity must degrade to a sane label or to no label at all,
+# never to a broken one.
+_title_name_read() {
+    local f name
+    f="$(_title_dir "$1")"
+    [[ -n "$f" && -f "$f/$DML_NAME_FILE" ]] || return 0
+    # `read` returns nonzero at EOF-without-newline but HAS already assigned,
+    # so the failure is swallowed rather than treated as "no name".
+    IFS= read -r name < "$f/$DML_NAME_FILE" 2>/dev/null || true
+    name="${name//[[:cntrl:]]/}"
+    name="${name#"${name%%[![:space:]]*}"}"
+    name="${name%"${name##*[![:space:]]}"}"
+    printf '%s' "${name:0:$DML_NAME_MAX}"
+}
+
+# The label to show for a title: custom name, else the registry name, else the
+# id. A server must NEVER render as a blank label anywhere, which is why the
+# chain ends at the id (always non-empty) rather than at the registry, which
+# only knows the six shipped titles.
+_title_display_name() {
+    local name row
+    name="$(_title_name_read "$1")"
+    if [[ -n "$name" ]]; then printf '%s' "$name"; return 0; fi
+    row="$(_title_row "$1")"
+    if [[ -n "$row" ]]; then
+        # Field 2 by parameter expansion, not `cut`: this runs once per row of
+        # `games list`, and on native Git Bash every fork costs ~165ms.
+        name="${row#*|}"; name="${name%%|*}"
+        [[ -n "$name" ]] && { printf '%s' "$name"; return 0; }
+    fi
+    printf '%s' "$1"
+}
+
+# Validates + trims a user-supplied name. Returns 0 with the normalized value
+# in _NAME_OUT, or 1 with the reason in _NAME_ERR.
+#
+# Two globals rather than stdout because the caller needs BOTH the value and
+# the failure reason, and a `$( )` capture would run this in a subshell where
+# any second channel is lost. Call it directly, never in a command substitution.
+_title_name_normalize() {
+    local n="${1-}"
+    _NAME_OUT=""; _NAME_ERR=""
+    # Control characters are REFUSED, not stripped: the name is stored as a
+    # whole file body and read back first-line-only, so a value containing a
+    # newline would come back as a different name with no explanation.
+    if [[ "$n" == *[[:cntrl:]]* ]]; then
+        _NAME_ERR="Name cannot contain line breaks, tabs or control characters"
+        return 1
+    fi
+    n="${n#"${n%%[![:space:]]*}"}"
+    n="${n%"${n##*[![:space:]]}"}"
+    if [[ -z "$n" ]]; then
+        _NAME_ERR="Name cannot be empty"
+        return 1
+    fi
+    if (( ${#n} > DML_NAME_MAX )); then
+        _NAME_ERR="Name is too long (${#n} characters, max $DML_NAME_MAX)"
+        return 1
+    fi
+    _NAME_OUT="$n"
+    return 0
+}
+
 _require_docker() {
     if ! docker info &>/dev/null; then
         echo "[dml] Docker is not running. Try: sudo systemctl start docker" >&2
@@ -5245,7 +5346,11 @@ case "$cmd" in
                 running=true
             fi
             [[ $first -eq 0 ]] && out+=','
-            out+="{\"id\":\"$(json_escape "$gid")\",\"path\":\"$(json_escape "${gdir:-$GAMES_DIR/$gid}")\",\"running\":$running}"
+            # display_name is APPENDED -- every existing key keeps its name,
+            # type and position, because the launcher and the old C# tray both
+            # parse this envelope.
+            out+="{\"id\":\"$(json_escape "$gid")\",\"path\":\"$(json_escape "${gdir:-$GAMES_DIR/$gid}")\",\"running\":$running"
+            out+=",\"display_name\":\"$(json_escape "$(_title_display_name "$gid")")\"}"
             first=0
         done < <(_scan_games)
         out+=']}'
@@ -5335,12 +5440,71 @@ case "$cmd" in
               trun='"stopped"'
             fi
           fi
+          # custom_name is the RENAME's own value (null when the user has not
+          # set one); display_name is what to render (custom, else the registry
+          # name). Both appended -- `name` keeps meaning "the built-in title
+          # name", which is what a Rename dialog needs to show as the default.
+          tcustom="$(_title_name_read "$tid")"
+          if [[ -n "$tcustom" ]]; then
+            tcustomj="\"$(json_escape "$tcustom")\""; tdisp="$tcustom"
+          else
+            tcustomj=null; tdisp="$tname"
+          fi
           [[ $first -eq 0 ]] && tout+=','
-          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
+          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok"
+          tout+=",\"display_name\":\"$(json_escape "$tdisp")\",\"custom_name\":$tcustomj}"
           first=0
         done < <(_title_registry)
         tout+=']'
         json_ok "{\"titles\":$tout,\"install_supported\":$tinstsup}"
+        ;;
+      name)
+        # Set or clear a server's display name. JSON-first like the rest of
+        # the games namespace (list/status/catalog): one envelope, always.
+        nusage='Usage: dml games name <title> --set "<name>" | --clear'
+        gid="${1:-}"; shift || true
+        if [[ -z "$gid" || "$gid" == --* ]]; then
+          json_err BAD_ARG "Missing title" "$nusage"; exit 1
+        fi
+        if ! _valid_title_id "$gid"; then
+          json_err BAD_ARG "Invalid title id: $gid" "$nusage"; exit 1
+        fi
+        nmode=""; nval=""
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --set) _need_flag_val "$1" $#; nmode=set; nval="$2"; shift 2 ;;
+            --clear) nmode=clear; shift ;;
+            *) json_err BAD_ARG "Unknown flag: $1" "$nusage"; exit 1 ;;
+          esac
+        done
+        if [[ -z "$nmode" ]]; then
+          json_err BAD_ARG "Missing --set or --clear" "$nusage"; exit 1
+        fi
+        # The title must actually be installed: the name file lives in the
+        # server's own directory, so there is nowhere to put it otherwise.
+        ndir="$(_title_dir "$gid")"
+        if [[ -z "$ndir" ]]; then
+          json_err NOT_FOUND "Title not found: $gid" "Run: dml games list --json"; exit 1
+        fi
+        if [[ "$nmode" == clear ]]; then
+          # Idempotent: clearing a name that was never set is a success, not
+          # an error -- the end state the caller asked for is the end state.
+          rm -f "$ndir/$DML_NAME_FILE" 2>/dev/null || true
+          if [[ -e "$ndir/$DML_NAME_FILE" ]]; then
+            json_err WRITE_FAILED "Could not clear the name for $gid" "Check permissions on $ndir"; exit 1
+          fi
+          json_ok "{\"id\":\"$(json_escape "$gid")\",\"name\":null}"
+        else
+          if ! _title_name_normalize "$nval"; then
+            json_err BAD_ARG "$_NAME_ERR" "$nusage"; exit 1
+          fi
+          # Written as a plain file body -- the value is never spliced into a
+          # shell command, so no quoting/escaping question arises at all.
+          if ! printf '%s\n' "$_NAME_OUT" > "$ndir/$DML_NAME_FILE" 2>/dev/null; then
+            json_err WRITE_FAILED "Could not write the name for $gid" "Check permissions on $ndir"; exit 1
+          fi
+          json_ok "{\"id\":\"$(json_escape "$gid")\",\"name\":\"$(json_escape "$_NAME_OUT")\"}"
+        fi
         ;;
       install)
         gid="${1:-}"

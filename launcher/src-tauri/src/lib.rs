@@ -1,3 +1,4 @@
+pub mod active_game;
 pub mod nativesetup;
 pub mod power;
 pub mod realmlist;
@@ -425,6 +426,121 @@ fn tray_set_status(app: tauri::AppHandle, verdict: String, state: State<'_, AppS
         *t = Some(std::time::Instant::now());
     }
     tray::apply_status(&app, &verdict);
+}
+
+/// Replace the tray's server list. Pushed from the frontend for the same
+/// reason `tray_set_status` is: the webview already owns the poll, and a
+/// second lister in Rust would drift from what the user sees on screen. Sync
+/// and infallible — a cosmetic surface must never fail a caller.
+#[tauri::command]
+fn tray_set_servers(app: tauri::AppHandle, servers: Vec<tray::TrayServer>) {
+    tray::set_servers(&app, &servers);
+}
+
+// --- Active server (lifecycle only) ----------------------------------------
+//
+// Home's status card + Start/Stop/Restart, the sidebar chip and the tray
+// follow this id. The WoW-specific pages stay bound to the WoW title on
+// purpose (see active_game.rs).
+
+/// The ids of every installed title, or `None` when the list could not be
+/// read. Tri-state on purpose: "the CLI did not answer" is not the same as
+/// "no servers are installed", and treating it as the latter would discard a
+/// perfectly good stored choice.
+fn installed_game_ids(runner: &DmlRunner) -> Option<Vec<String>> {
+    let env = runner.run_json(&["games", "list"]).ok().filter(|e| e.ok)?;
+    let rows = env.data.get("games")?.as_array()?;
+    Some(
+        rows.iter()
+            .filter_map(|g| g.get("id").and_then(|v| v.as_str()).map(str::to_string))
+            .collect(),
+    )
+}
+
+/// The active server, resolved against what is installed RIGHT NOW.
+///
+/// Never fails: this is read on mount, and a getter that rejects would leave
+/// the shell with nothing to render. When the installed list cannot be read
+/// (WSL/Docker hiccup) the STORED value is returned unchanged — the best
+/// answer available, and better than silently re-pointing the user's Start
+/// button at a different server because one CLI call failed.
+#[tauri::command]
+async fn active_game_get(state: State<'_, AppState>) -> Result<Option<String>, CmdError> {
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let stored = launcher_home().ok().and_then(|h| dml_core::launcher_config::load(&h).active_game);
+        match installed_game_ids(&runner) {
+            Some(installed) => Ok(active_game::resolve(stored.as_deref(), &installed)),
+            None => Ok(stored),
+        }
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Persist the user's choice of active server.
+///
+/// Validated then VERIFIED: the id must pass `validate_game_id` (it becomes a
+/// spawn argument) and must actually be installed. Persisting an id that is
+/// not installed would put the launcher into a state whose only symptom is a
+/// Start button that fails, so it is refused at the point of choice instead.
+#[tauri::command]
+async fn active_game_set(id: String, state: State<'_, AppState>) -> Result<(), CmdError> {
+    if !validate_game_id(&id) {
+        return Err(bad_id(&id));
+    }
+    let runner = state.runner.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let installed = installed_game_ids(&runner).ok_or_else(|| CmdError {
+            code: "NOT_FOUND".into(),
+            message: "Could not read the installed server list".into(),
+            hint: "Is the backend reachable? Try the Library page.".into(),
+        })?;
+        if !installed.iter().any(|i| *i == id) {
+            return Err(CmdError {
+                code: "NOT_FOUND".into(),
+                message: format!("Title not found: {id}"),
+                hint: "Pick a server from the Library page.".into(),
+            });
+        }
+        let home = launcher_home()?;
+        // Read-modify-write the WHOLE config: the active server shares
+        // launcher.json with the tray/autostart preferences, and writing a
+        // fresh struct here would silently reset them.
+        let mut cfg = dml_core::launcher_config::load(&home);
+        cfg.active_game = Some(id);
+        dml_core::launcher_config::save(&home, &cfg).map_err(|e| CmdError {
+            code: "WRITE_FAILED".into(),
+            message: format!("Could not write launcher.json: {e}"),
+            hint: String::new(),
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
+/// Set (`Some`) or clear (`None`) a server's display name. The name lives in
+/// the server's OWN directory (`<title dir>/.dml-name`), so this is a CLI call
+/// on both backends rather than a launcher-side file write — in WSL mode the
+/// directory is not even reachable from Windows.
+#[tauri::command]
+async fn games_name(
+    id: String,
+    name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    if !validate_game_id(&id) {
+        return Err(bad_id(&id));
+    }
+    let mut args: Vec<String> = vec!["games".into(), "name".into(), id];
+    match name {
+        Some(n) => {
+            args.push("--set".into());
+            args.push(n);
+        }
+        None => args.push("--clear".into()),
+    }
+    run_json_cmd(state, args).await
 }
 
 /// Whether a Windows Run entry exists AND points at a file that still exists.
@@ -6359,6 +6475,10 @@ pub fn run() {
             launcher_config_read,
             launcher_config_write,
             tray_set_status,
+            tray_set_servers,
+            active_game_get,
+            active_game_set,
+            games_name,
             autostart_get,
             autostart_set
         ])

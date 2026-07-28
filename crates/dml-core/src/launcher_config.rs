@@ -35,6 +35,15 @@ pub struct LauncherConfig {
     pub close_to_tray: bool,
     #[serde(default)]
     pub start_with_windows: bool,
+    /// Which installed server the LIFECYCLE surfaces act on (Home's status
+    /// card and its Start/Stop/Restart, the sidebar chip, the tray). Launcher
+    /// state, not server state — which is why it lives here and NOT next to
+    /// the server like its display name does: "which server am I looking at"
+    /// is a per-user, per-install view preference, whereas the name belongs to
+    /// the directory. `None` = the user has never chosen; callers resolve a
+    /// fallback rather than rendering nothing.
+    #[serde(default)]
+    pub active_game: Option<String>,
 }
 
 impl Default for LauncherConfig {
@@ -46,6 +55,7 @@ impl Default for LauncherConfig {
             yq_bin: None,
             close_to_tray: true,
             start_with_windows: false,
+            active_game: None,
         }
     }
 }
@@ -120,6 +130,59 @@ mod tests {
     }
 
     #[test]
+    fn active_game_defaults_to_none_and_round_trips_as_camel_case() {
+        let d = tmp_dir("activegame");
+        assert_eq!(load(&d).active_game, None, "no stored choice on first run");
+        let cfg = LauncherConfig {
+            active_game: Some("wow-server-playerbots".into()),
+            ..LauncherConfig::default()
+        };
+        save(&d, &cfg).unwrap();
+        let raw = std::fs::read_to_string(config_path(&d)).unwrap();
+        assert!(raw.contains("activeGame"), "on-disk key is camelCase: {raw}");
+        assert_eq!(load(&d).active_game.as_deref(), Some("wow-server-playerbots"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn active_game_survives_a_write_that_changes_another_field() {
+        // The active server and the tray/autostart preferences share one file:
+        // a settings save that dropped the active game (or vice versa) would
+        // silently re-point the lifecycle buttons at another server.
+        let d = tmp_dir("activegame-merge");
+        save(
+            &d,
+            &LauncherConfig { active_game: Some("maplestory-server".into()), ..Default::default() },
+        )
+        .unwrap();
+        let mut cfg = load(&d);
+        cfg.close_to_tray = false;
+        save(&d, &cfg).unwrap();
+        let got = load(&d);
+        assert_eq!(got.active_game.as_deref(), Some("maplestory-server"));
+        assert!(!got.close_to_tray);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_config_written_before_active_game_existed_still_loads() {
+        // Forward/backward compatibility: an older launcher.json has no
+        // activeGame key at all, and must load as "no choice yet" rather than
+        // failing the whole parse back to defaults.
+        let d = tmp_dir("activegame-legacy");
+        std::fs::write(
+            config_path(&d),
+            "{\"backend\":\"wsl\",\"closeToTray\":false,\"startWithWindows\":true}",
+        )
+        .unwrap();
+        let cfg = load(&d);
+        assert_eq!(cfg.active_game, None);
+        assert_eq!(cfg.backend.as_deref(), Some("wsl"), "the rest still parsed");
+        assert!(!cfg.close_to_tray);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn round_trips_through_save_with_camel_case_keys() {
         let d = tmp_dir("roundtrip");
         let cfg = LauncherConfig {
@@ -129,6 +192,7 @@ mod tests {
             yq_bin: None,
             close_to_tray: false,
             start_with_windows: true,
+            active_game: Some("wow-server-playerbots".into()),
         };
         save(&d, &cfg).unwrap();
         let raw = std::fs::read_to_string(config_path(&d)).unwrap();
