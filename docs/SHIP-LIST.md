@@ -191,6 +191,17 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       new app. Fix before any release: stop Install-DML.ps1 creating those two
       shortcuts (and installing the C# tray at all).
 
+- [ ] **4.0c — The title installer talks to Steam Deck owners.** Seen on the VM
+      run, 2026-07-28: the WoW installer says "This will take 2-4 hours on your
+      Steam Deck", "Keep it plugged in and on a hard flat surface", "The fan
+      will be loud", and "Keep your Steam Deck plugged in!". A Windows user
+      installing from the launcher is not on a Steam Deck, and the timing
+      estimate is wrong for their hardware too (a 4-vCPU VM is slower). These
+      are shared scripts, so the fix is conditional copy rather than a rewrite:
+      detect the host and say something true. Cheap, and it is the first long
+      wait a new user ever sits through -- the moment they most need to trust
+      what they are reading.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
