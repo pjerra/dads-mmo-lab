@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, type PlayerOnline } from "$lib/api";
+  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, type PlayerOnline, type NativeSetupStatus } from "$lib/api";
+  import { dockerRestartCardVisible } from "$lib/docker-restart";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -12,6 +13,13 @@
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { toolPrefs } from "$lib/tool-prefs.svelte";
   import { saveallPref, setSaveBeforeRestart, wouldSkipSaveall, saveallBoxChecked } from "$lib/saveall-pref.svelte";
+  import type { PageId } from "$lib/nav";
+
+  // Cross-page nav, wired by the shell exactly like Help's (+page.svelte).
+  // Home needs it for one thing only: the soap_unreachable card's advice used
+  // to be prose with nothing to click -- it now hands the user to the Tools
+  // card that actually performs the fix.
+  let { onnav }: { onnav?: (p: PageId) => void } = $props();
 
   const WOW_ID = "wow-server-playerbots";
   const ROLE_LABELS: Record<string, string> = {
@@ -19,6 +27,16 @@
     auth: "Auth server",
     database: "Database",
   };
+
+  // Backend probe, for ONE decision: whether the soap_unreachable card may
+  // offer the jump to Tools' "Restart Docker in the distro" card. That card is
+  // WSL-only (native mode drives Docker Desktop and has no dml-arch to
+  // restart), so an ungated jump button would navigate to a page where the
+  // promised card does not render. The visibility rule is not restated here --
+  // Home asks dockerRestartCardVisible(), the same predicate the card itself
+  // uses, so the two can never disagree (including on a null probe, which
+  // hides rather than guesses).
+  let nativeStatus: NativeSetupStatus | null = $state(null);
 
   let containerState: "running" | "stopped" | null = $state(null);
   let statusError: string | null = $state(null);
@@ -57,6 +75,20 @@
     refreshing = false;
   }
   onMount(refresh);
+
+  // Read once on mount, off the status path: the backend cannot change while
+  // the app runs (AppState builds its runner once, so a backend switch needs a
+  // relaunch). A failed probe leaves it null, which hides the jump button --
+  // the same "don't offer it if we can't confirm the backend" stance the card
+  // takes.
+  onMount(async () => {
+    try {
+      nativeStatus = await nativeSetupStatus();
+    } catch {
+      // Best-effort: the status card's own error handling already tells the
+      // user when the bridge is unhappy.
+    }
+  });
 
   // Players-online card (Batch 3 F11a): fetched only while the world is
   // actually up (the DB query would just error otherwise). Refetches on
@@ -236,10 +268,23 @@
       {:else if d.verdict === "starting"}
         <p class="muted">The world is still loading — this takes a couple of minutes while bots spawn.</p>
       {:else if d.verdict === "soap_unreachable"}
-        <p class="muted">
-          If this persists for more than a minute, Docker's networking in the distro is likely stuck —
-          restarting Docker inside dml-arch usually fixes it.
-        </p>
+        <div class="recover-row">
+          {#if dockerRestartCardVisible(nativeStatus)}
+            <p class="muted">
+              If this persists for more than a minute, Docker's networking in the distro is likely stuck —
+              restarting Docker inside dml-arch usually fixes it.
+            </p>
+            <button onclick={() => onnav?.("tools")} title="Opens the Restart Docker card on the Tools page">
+              Restart Docker in the distro…
+            </button>
+          {:else}
+            <p class="muted">
+              If this persists for more than a minute, the world is running but isn't answering the
+              launcher — restart the server below, and check that Docker itself is healthy if that
+              doesn't help.
+            </p>
+          {/if}
+        </div>
       {:else if d.verdict === "crashed"}
         <div class="recover-row">
           <p class="muted">

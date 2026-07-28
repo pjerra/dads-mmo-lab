@@ -27,6 +27,7 @@
     nativeYqInstall,
     nativeSoapCopy,
     nativeDefenderScript,
+    wowDockerRestart,
     type LanAction,
     type ToolName,
     type RealmlistStatus,
@@ -36,6 +37,14 @@
     type NativeSetupStatus,
   } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
+  import {
+    DOCKER_RESTART_CONFIRM,
+    dockerRestartButtonDisabled,
+    dockerRestartCardVisible,
+    dockerRestartConfirmed,
+    dockerRestartErrorText,
+    dockerRestartNote,
+  } from "$lib/docker-restart";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { installStore } from "$lib/term-store.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
@@ -633,6 +642,37 @@
       wslRestartNote = fmtErr(e);
     } finally {
       wslRestartBusy = false;
+    }
+  }
+
+  // --- Restart Docker in the distro (incident follow-up 1) -----------------
+  // The 2026-07-21 incident (wedged Docker networking inside dml-arch ->
+  // soap_unreachable) was fixed by one command nothing in the launcher could
+  // run. This card runs it. WSL-backend only + [docker-restart]-locked +
+  // typed confirm; the render/arm decisions and every outcome sentence live
+  // in lib/docker-restart.ts so they are vitest-pinned.
+  let dockerInput = $state("");
+  let dockerBusy = $state(false);
+  let dockerNote: string | null = $state(null);
+  let dockerError: string | null = $state(null);
+
+  async function runDockerRestart() {
+    // Same belt-and-braces guard as runRestartWsl: never act on an unconfirmed
+    // field even if the button's disabled state were somehow bypassed.
+    if (!dockerRestartConfirmed(dockerInput)) return;
+    dockerInput = "";
+    dockerBusy = true;
+    dockerError = null;
+    dockerNote = null;
+    try {
+      const r = await wowDockerRestart();
+      dockerNote = dockerRestartNote(r.restarted);
+    } catch (e) {
+      // NOT_SUPPORTED / NO_SUDO / RESTART_FAILED / DOCKER_STILL_DOWN each get
+      // their own sentence -- fmtErr would print the bare code.
+      dockerError = dockerRestartErrorText(e);
+    } finally {
+      dockerBusy = false;
     }
   }
 
@@ -1469,6 +1509,43 @@
       {#if wcNote}<span class="notice">{wcNote}</span>{/if}
     </div>
   </div>
+
+  {#if dockerRestartCardVisible(nativeStatus)}
+    <div class="card">
+      <h3>Restart Docker in the distro</h3>
+      <p class="muted">
+        The "off and on again" fix for when the server is running but the launcher can't reach
+        it — Docker's networking inside dml-arch gets stuck now and then, and restarting the
+        Docker service unwedges it. Your containers come back by themselves afterwards.
+      </p>
+      <p class="warn-text">
+        This kills every running container at once. Docker only gives them a few seconds to
+        shut down, so a live world is cut off WITHOUT its usual save — stop the server from
+        Home first whenever you can. Type "{DOCKER_RESTART_CONFIRM}" to confirm:
+      </p>
+      {#if dockerError}<p class="inline-error">{dockerError}</p>{/if}
+      <div class="row">
+        <input
+          type="text"
+          placeholder={`Type "${DOCKER_RESTART_CONFIRM}" to confirm`}
+          bind:value={dockerInput}
+          disabled={dockerBusy}
+        />
+        <button
+          onclick={runDockerRestart}
+          disabled={dockerRestartButtonDisabled({
+            busy: dockerBusy,
+            input: dockerInput,
+            locked: featureLocked("docker-restart"),
+          })}
+          title={featureLocked("docker-restart") ? LOCKED_HINT : undefined}
+        >
+          {dockerBusy ? "Restarting Docker…" : "Restart Docker"}
+        </button>
+      </div>
+      {#if dockerNote}<p class="notice">{dockerNote}</p>{/if}
+    </div>
+  {/if}
 
   <div class="card">
     <h3>Restart WSL</h3>

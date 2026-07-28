@@ -700,6 +700,119 @@ _world_ready() {
     [[ "${hits:-0}" -gt 0 ]]
 }
 
+# _boot_loop_note <new-restarts> [container]: the diagnosis line a readiness
+# wait emits once it has established (from a climbing .State.RestartCount) that
+# the world is CRASH-RETRYING rather than slow-booting -- incident follow-up 2.
+# On the night of the 2026-07-21 incident the world retried on "Can't connect to
+# MySQL (110)" for ten minutes while the wait printed "still waiting ... bots
+# respawning takes a while...".
+#
+# Rust twin: `lifecycle::boot_loop_note`. The two texts must stay
+# byte-identical (CLAUDE.md: a new NDJSON line lands on BOTH surfaces or the
+# parity suites diverge).
+#
+# The log scan only ever NAMES a cause; it never establishes the loop. Two hits
+# minimum, because a single connect failure is normal on a cold start (the
+# world races the database container's own boot and retries). `--tail 200` is a
+# few crash cycles' worth, and `grep -c` reads to EOF so it cannot SIGPIPE
+# `docker logs` the way an early-exiting `grep -q`/`-m1` would under pipefail.
+_boot_loop_note() {
+    local n="$1" c="${2:-ac-worldserver}" hits head
+    hits="$(timeout -k 5 10 docker logs --tail 200 "$c" 2>&1 | grep -icE "could not connect to mysql|can't connect to mysql" || true)"
+    head="boot loop detected: the world server has restarted $n times since this wait began -- it is crash-retrying, not slow-booting."
+    if [[ "${hits:-0}" -ge 2 ]]; then
+        printf '%s Its log shows repeated MySQL connection errors, so the world cannot reach the database. Try Restart Docker (Tools), then start the server again.' "$head"
+    else
+        printf '%s Check the Console log for the boot error; if it shows database connection errors, try Restart Docker (Tools), then start the server again.' "$head"
+    fi
+}
+
+# --- the shared boot-loop tracker ------------------------------------------
+# ONE implementation of the decision, used by EVERY readiness wait on the
+# start/restart path:
+#   * `wow world-restart`'s `until _world_ready` loop (90-main.sh), and
+#   * `games start|restart`'s watch over the `dml-start.sh` hook
+#     (`_stream_cmd_bootwatch`, 90-main.sh) -- the path Home's primary Start
+#     and Restart buttons take, which is where the 2026-07-21 incident
+#     actually happened.
+# A second copy with its own threshold or wording is the failure mode this
+# exists to prevent (round-2 findings G3/G9). Rust twin:
+# `lifecycle::BootLoopWatch`.
+
+# How many restarts NEW SINCE THE WAIT BEGAN make it a boot loop rather than a
+# slow boot. WHY 3: docker's restart policy increments .State.RestartCount only
+# when it revives a container that DIED, so a healthy boot -- however slow,
+# however many bots it is creating -- never increments it at all and even ONE
+# is already abnormal. Three is about tolerating a ONE-OFF (a single OOM-kill
+# the next boot survives is a hiccup, not a loop); crying wolf would train
+# users to ignore the line. Rust twin: `BOOT_LOOP_RESTART_STRIKES`.
+DML_BOOT_LOOP_STRIKES=3
+
+# Seconds between polls for the watch that runs ALONGSIDE a streaming child
+# (the world-restart arm has its own 2s readiness cadence and does not use
+# this). 15s is ~1/100th of the 1800s budget it watches -- fine-grained enough
+# to name a loop minutes before the timeout, cheap enough that a 30-minute cold
+# start costs ~120 `docker inspect` calls. Test-only override seam, same shape
+# as DML_READY_TIMEOUT_SECS; a non-numeric value falls back to the default
+# rather than making `read -t` fail.
+_boot_loop_poll_secs() {
+    local p="${DML_BOOT_LOOP_POLL_SECS:-15}"
+    [[ "$p" =~ ^[1-9][0-9]*$ ]] || p=15
+    echo "$p"
+}
+
+# Tracker state. Module-level (not local) because the two callers drive it
+# across many polls; _boot_loop_reset is mandatory before each wait.
+_BOOT_LOOP_BASE=""
+_BOOT_LOOP_NOTED=0
+BOOT_LOOP_NOTE=""
+_boot_loop_reset() { _BOOT_LOOP_BASE=""; _BOOT_LOOP_NOTED=0; BOOT_LOOP_NOTE=""; return 0; }
+
+# _boot_loop_check <container>: ONE poll. Returns 0 exactly ONCE per wait -- on
+# the poll that proves the loop, with the diagnosis line in the global
+# BOOT_LOOP_NOTE -- and 1 on every other poll. ADVISORY ONLY: no caller changes
+# its outcome or exit code because of it.
+#
+# CALL IT WITHOUT `$(...)`, the same no-fork convention `json_escape_var` uses
+# and for a harder reason: a command substitution runs this in a SUBSHELL, so
+# the baseline and the latch would be discarded after every poll -- the tracker
+# would re-baseline forever and could never reach the threshold.
+#
+# TRI-STATE, the lesson every probe in this codebase has now learned the hard
+# way: an unreadable/non-numeric reading is DOCKER FAILING TO ANSWER, not zero
+# restarts. It is skipped entirely -- it neither sets nor resets the baseline
+# -- because collapsing it to 0 fabricates a loop on a long-lived server and
+# re-baselining on it hides a real one on the wedged daemon this feature
+# exists for. An empty container argument is the same kind of non-answer.
+#
+# The baseline is the FIRST READABLE reading rather than a fixed zero, so a
+# server carrying hundreds of historical restarts can never trip it. A reading
+# BELOW the baseline can only mean the container was RECREATED (a fresh
+# container starts at 0), which re-baselines: `games restart` recreates
+# containers mid-wait via compose, and measuring a new container against the
+# old one's count would blind the watch for the rest of the boot.
+#
+# The inspect is time-bounded: this runs inline in a stream reader, so a
+# dockerd that accepts the socket and then never answers would stall the
+# child's output instead of just missing a poll.
+_boot_loop_check() {
+    local c="${1:-}" rc delta
+    BOOT_LOOP_NOTE=""
+    [[ -n "$c" ]] || return 1
+    (( _BOOT_LOOP_NOTED == 0 )) || return 1
+    rc="$(timeout -k 5 10 docker inspect -f '{{.State.RestartCount}}' "$c" 2>/dev/null || true)"
+    rc="${rc%%$'\n'*}"; rc="${rc//$'\r'/}"
+    [[ "$rc" =~ ^[0-9]+$ ]] || return 1
+    if [[ -z "$_BOOT_LOOP_BASE" ]]; then _BOOT_LOOP_BASE="$rc"; return 1; fi
+    if (( rc < _BOOT_LOOP_BASE )); then _BOOT_LOOP_BASE="$rc"; return 1; fi
+    delta=$(( rc - _BOOT_LOOP_BASE ))
+    (( delta >= DML_BOOT_LOOP_STRIKES )) || return 1
+    _BOOT_LOOP_NOTED=1
+    # This substitution is safe: _boot_loop_note is pure output, no state.
+    BOOT_LOOP_NOTE="$(_boot_loop_note "$delta" "$c")"
+    return 0
+}
+
 # --- `wow bots flush` helpers (Batch 1 F4) ---------------------------------
 
 # _flush_restart_authworld <sdir> <label>: one staged auth+world restart,

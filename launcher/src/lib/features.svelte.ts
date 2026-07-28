@@ -79,6 +79,9 @@ export const FEATURES: Record<string, FeatureStatus> = {
   "tailscale-play": "untested",
   "port-proxy": "untested",
   "cache-maint": "tested",
+  // Restarting dockerd inside dml-arch kills every running container, so this
+  // is destructive by nature and stays locked until its smoke row passes.
+  "docker-restart": "untested",
 };
 
 export const LOCKED_HINT =

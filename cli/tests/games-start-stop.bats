@@ -6,6 +6,9 @@ setup() {
   bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
   make_fixture
   use_docker_stub
+  # stop/restart now write a pre-down worldserver log snapshot -- sandbox
+  # ~/.dml/logs so this suite can never litter the real home dir.
+  export HOME="$FIXTURE"
 }
 
 teardown() { teardown_fixture; }

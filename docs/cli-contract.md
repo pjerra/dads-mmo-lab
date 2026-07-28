@@ -289,6 +289,26 @@ the tailscale family, the realmlist (client-side `realmlist.wtf`) family, and `b
 (the Eluna bridge deploy is wired only from the launcher on this branch). The CLI's `lan`
 actions are exactly `on|off|status|refresh`.
 
+#### `wow docker-restart` — bash-only, and deliberately so
+
+`dml wow docker-restart` (bash, documented in `cli/README.md`) restarts the Docker **daemon**
+inside the `dml-arch` WSL distro via `sudo -n systemctl restart docker`. It has **no** `dml-wow`
+twin, and that asymmetry is the design, not a gap:
+
+- `dml-wow` is the **native Windows** binary. It runs on the Windows host against Docker
+  Desktop and never runs inside `dml-arch`. There is no systemd, no `sudo`, and no
+  `docker.service` unit on that side, so there is nothing for a twin to call.
+- A twin that shelled `wsl.exe -d dml-arch -u dml -- dml wow docker-restart` would be a
+  re-entrant wrapper around the bash arm and would make the native CLI depend on the very
+  distro it exists to avoid.
+- The native equivalent of the same user problem ("the engine is wedged/down") is already a
+  different action with different machinery: launching Docker Desktop, wired as the launcher's
+  `start_docker_desktop` command. Two problems that look alike, two mechanisms.
+
+A stub arm returning `NOT_SUPPORTED` on Windows was considered and rejected: it would advertise
+a capability the binary does not have. The launcher's `wow_docker_restart` command therefore
+refuses in native mode with `WRONG_BACKEND` rather than dispatching anywhere.
+
 ## 5. Error codes
 
 Codes constructed by the CLI crate itself (`crates/dml-wow-cli/src`), with verbatim wording:
@@ -349,8 +369,11 @@ settings: `DML_GAMES_DIR` whenever the process cwd is not the games directory; `
 | `DML_DOCKER` | docker.exe discovery | Override used verbatim when set non-empty (even if nonexistent — intentional); else first existing of `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin\docker.exe`, `%ProgramFiles%\Docker\Docker\resources\bin\docker.exe`, `%ProgramFiles(x86)%\...`; else bare `docker` off PATH. Used by essentially every engine-touching arm. |
 | `DML_DOCKER_DESKTOP` | Docker Desktop.exe discovery | Override verbatim; else the three standard `Docker Desktop.exe` locations; **no bare-name fallback**. Engine down + exe not found → `DOCKER_DESKTOP_MISSING` with hint `Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.` |
 | `DML_BACKEND` | (unset → Wsl) | **Launcher-only switch** on this branch: `native`/`docker` (case-insensitive, trimmed) → Native, else Wsl. `dml-wow` does not read it — its `version` envelope hardcodes `"backend":"native"`. |
-| `DML_READY_TIMEOUT_SECS` | 1800 | World-ready wait timeout (seconds); unparseable → 1800. Bounds the world-ready waits in the launcher-invoked world-restart stream **and** in `dml-wow bots-flush`, which restarts auth+world twice. The world-restart wait can also end EARLY, well inside this budget: if `ac-worldserver` is observed not running on 5 consecutive 2s polls it fails fast with the arm's existing `RESTART_FAILED` code (`The world server exited instead of coming back up`) instead of waiting out the timeout. |
+| `DML_READY_TIMEOUT_SECS` | 1800 | World-ready wait timeout (seconds); unparseable → 1800. Bounds the world-ready waits in the launcher-invoked world-restart stream **and** in `dml-wow bots-flush`, which restarts auth+world twice. The world-restart wait can also end EARLY, well inside this budget: if `ac-worldserver` is observed not running on 5 consecutive 2s polls it fails fast with the arm's existing `RESTART_FAILED` code (`The world server exited instead of coming back up`) instead of waiting out the timeout. The wait is also ADVISORY about boot loops: if `ac-worldserver`'s `.State.RestartCount` climbs by 3 since the wait began it emits one extra `warn` line (`boot loop detected: …`) naming the likely cause and the Restart Docker action — a diagnosis only, the outcome and exit code are unchanged. The SAME diagnosis is armed for `games start`/`restart` (the path Home's primary buttons take) — see `DML_BOOT_LOOP_POLL_SECS`. |
+| `DML_BOOT_LOOP_POLL_SECS` | 15 | Poll cadence of the boot-loop watch that runs ALONGSIDE a `games start`/`restart` (the `world-restart` readiness wait keeps its own 2s cadence and ignores this); unparseable or `0` → 15. Every tick reads `.State.RestartCount` for the world container **this title's compose project owns** (`compose ps -a -q ac-worldserver`, re-resolved each tick because compose recreates containers mid-boot); +3 since the boot began emits one latched `warn` line. Tri-state: an unreadable count neither sets nor resets the baseline, and a count that DROPS re-baselines (only a recreated container can count down). Advisory only — no event ordering, outcome or exit code changes. WSL runs it in the CLI's stream reader (`_stream_cmd_bootwatch`), native on a background thread inside `games_lifecycle_stream`; both share one decision (`_boot_loop_check` / `lifecycle::BootLoopWatch`). |
 | `DML_BACKUP_KEEP` | 10 | Keep-newest-N retention for `~/.dml/backups`; trimmed usize; unparseable → 10. `prune` runs after every `backup create`. |
+| `DML_LOG_SNAPSHOT_KEEP` | 10 | Keep-newest-N retention for `~/.dml/logs`; trimmed usize; unparseable → 10. Prune runs after every snapshot write, over `world-*.log` only, and **never over the snapshot just written** — retention is a plain descending NAME sort, so a backwards clock jump would otherwise delete the file the caller reports as saved. The others are trimmed to `keep - 1`, so the directory still holds at most `keep`. `0` = the feature is **off**: no read, no file, no line (rather than write-then-delete). |
+| `DML_LOG_SNAPSHOT_TIMEOUT` | 20 | Seconds cap on the snapshot's `docker logs` read; unparseable **or `0`** → 20 (coreutils' `timeout 0` means *no* limit to the bash twin, so zero is refused on both surfaces rather than meaning opposite things). The read sits in FRONT of the compose `down`, and a dockerd wedged during startup accepts the socket-activated connection and never answers — unbounded, evidence capture would block the stop the user asked for. The container-resolution call (`compose ps -a -q`) has its own fixed 10s cap. |
 | `DML_PARTY_POLL_TRIES` | 12 | Party add-bot new-member poll retries (u32, trimmed). |
 | `DML_PARTY_POLL_SLEEP` | 0.5 | Poll sleep in fractional seconds (f64 → Duration; default 500 ms). |
 | `DML_CLIENT_SCAN_ROOTS` | built-in root list | `client-path detect` roots, split with the platform path-list separator (`;` on Windows). Absent: `home\Games`, `home\wow wotlk`, home itself, then per existing drive letter A–Z: `<drive>:\Games`, `<drive>:\Program Files (x86)`, `<drive>:\wow wotlk`, `<drive>:\`. One level deep, dirs only, capped at 10 candidates. |
@@ -371,7 +394,14 @@ any of it.
 ### Files under `~/.dml`
 
 `~/.dml` = `%USERPROFILE%\.dml` on Windows, `$HOME/.dml` otherwise. Children used by the CLI:
-`soap.env`, `backups/`, `wowhead-cache/`, `client-path`, `party-presets/`.
+`soap.env`, `backups/`, `wowhead-cache/`, `client-path`, `party-presets/`, `logs/`.
+
+`logs/` holds the pre-stop worldserver log snapshots (`world-<UTC ts>-<title>-<mode>.log`),
+created on demand by the first `games stop|restart` that has something to preserve and pruned to
+`DML_LOG_SNAPSHOT_KEEP`. The snapshot is scoped to the title being stopped: the world container
+is resolved through THAT title's compose project (`docker compose ps -a -q ac-worldserver` in its
+compose dir), so stopping a non-WoW title never files the WoW world's log under its name nor
+consumes a slot in the shared retention pool. No such container → no snapshot, silently.
 
 Two `KEY=VALUE` file parsers exist with **opposite** duplicate-key rules:
 

@@ -42,6 +42,41 @@ terminal event is never needed.
 (staged AzerothCore start that avoids re-running ac-db-import); otherwise
 `docker compose up -d` / `down`.
 
+While that hook runs, `games start|restart --json` **watches for a boot loop**.
+The hook owns the whole readiness wait (up to `DML_READY_TIMEOUT_SECS`, 30 min
+by default) and cannot tell a crash loop from a slow boot — on 2026-07-21 it
+narrated ten minutes of `Can't connect to MySQL (110)` crash-retrying as "still
+waiting … world is loading". Every `DML_BOOT_LOOP_POLL_SECS` (default 15) the
+CLI reads `.State.RestartCount` for the world container **this title's compose
+project owns**, and if it has climbed by 3 since the boot began it emits one
+latched `warn` line (`boot loop detected: …`) naming the likely cause and the
+Restart Docker action. Purely a diagnosis: the stream, the outcome and the exit
+code are unchanged, and an unreadable count is evidence of nothing (it never
+sets or resets the baseline). A title whose project owns no world container is
+never watched, so a non-WoW start is never accused of the WoW world's loop. The
+watch lives in the CLI rather than in `dml-start.sh` on purpose — that hook is
+a deployed artifact no CLI update refreshes, so a fix inside it would only
+reach fresh installs. Text mode is deliberately unwatched (frozen legacy-tray
+output). Native mode arms the same watch in `games_lifecycle_stream`.
+
+`games stop|restart` first write a bounded tail of the worldserver log to
+`~/.dml/logs/world-<UTC ts>-<title>-<mode>.log` (a compose recreate destroys
+the old container's log, which is how freeze evidence was lost twice during
+the 2026-07-21 incident). Strictly best-effort: a failure is one `warn` line
+and the stop continues. The container is resolved through the stopping title's
+OWN compose project (`docker compose ps -a -q ac-worldserver` in its compose
+dir), so a title whose project owns no world container — any non-WoW title —
+is skipped silently even while the WoW stack is up; a bare `docker logs
+ac-worldserver` would instead file the WoW log under the other title's name
+and evict the real evidence from the shared retention pool. Both docker calls
+are time-bounded (`DML_LOG_SNAPSHOT_TIMEOUT`, default 20s, for the read; 10s
+for the resolution) — evidence capture must never block a stop. Retention
+keeps the newest `DML_LOG_SNAPSHOT_KEEP` (default 10) `world-*.log` files and
+never prunes the snapshot just written, so the reported name always exists;
+`DML_LOG_SNAPSHOT_KEEP=0` turns the feature off entirely. Prunes are silent on
+both surfaces. `games start` takes no snapshot — a cold start has no prior run
+of its own container to preserve.
+
 Tests: `bats tests/` inside the distro; `tests/windows-smoke.ps1` from Windows.
 
 ## wow subcommands
@@ -62,7 +97,9 @@ not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
 (the MySQL query against `ac-database` failed), `CHAR_ONLINE`
 (`teleport-coords` refused to write an online character's position —
 "Character must be logged out."), `EXISTS` (`preset-import` refused to
-overwrite an existing preset without `--force`). `NOT_FOUND` and
+overwrite an existing preset without `--force`), and the five
+`docker-restart` codes `NOT_SUPPORTED` / `NO_SUDO` / `RESTART_FAILED` /
+`RESTART_TIMEOUT` / `DOCKER_STILL_DOWN` (see `docker-restart` below). `NOT_FOUND` and
 `UNKNOWN_COMMAND` are reused from the base list.
 
 **Security posture:**
@@ -370,6 +407,60 @@ silently ignored (treated as if omitted), rather than rejected.
   message specific if malformed content is ever submitted). Both verbs run
   the shared config preamble first, so `NOT_FOUND` (wow title not
   installed) and `MISSING_DEP` (yq) apply here too.
+
+- `dml wow docker-restart --json` →
+  `{"restarted":true,"waited_seconds":<int>}`
+  Restarts the Docker **daemon** inside `dml-arch`
+  (`sudo -n systemctl restart docker`). Incident follow-up 1 (2026-07-21):
+  that outage was a wedged Docker network in the distro and the whole fix
+  was this one command, which nothing in the launcher could click.
+  **DESTRUCTIVE** — this is the daemon, not a container: every running
+  container goes down with it, and dockerd only grants them its own short
+  shutdown grace (the worldserver needs minutes to save a live world), so
+  the GUI gates it behind a typed confirmation. One envelope, never a
+  stream. Two properties are load-bearing:
+  - **Every blocking call is bounded, so it always settles.** The CLI runs
+    as the unprivileged `dml` user, so the restart goes through `sudo -n`
+    (the tailscaled precedent): a box without the passwordless-sudo rule
+    fails immediately with `NO_SUDO` instead of sitting on a password
+    prompt with no tty while the GUI spins. That is not enough on its own:
+    `docker.service` in `dml-arch` is `Type=notify` with
+    `TimeoutStartSec=0`, so `systemctl restart docker` waits *indefinitely*
+    for a `READY=1` that a dockerd wedged during startup never sends — the
+    exact failure this button exists for. So the restart itself runs under
+    `timeout` (90s; `DML_DOCKER_RESTART_CMD_TIMEOUT` overrides), the
+    systemd probe under 10s, and each `docker info` poll under 5s (the
+    socket is socket-activated, so it *accepts* and then blocks). A bound
+    that is hit is a `RESTART_TIMEOUT` envelope — never a spinner that
+    never settles.
+  - **It waits for real evidence.** `systemctl` exiting 0 means the unit
+    was *told* to restart — a daemon that stopped answering is exactly what
+    brought the user here — so the arm then polls `docker info` until
+    Docker answers again, bounded (30s; `DML_DOCKER_RESTART_TIMEOUT`
+    overrides, and `DML_SYSTEMCTL_BIN` is a test-only seam for the
+    no-systemd path). The budget is measured in *elapsed* time, so a probe
+    that burns its own bound spends the budget instead of multiplying it.
+    `waited_seconds` is how long that took.
+
+  The systemd probe reads the *state* `systemctl is-system-running` prints,
+  never its exit code: it exits nonzero for everything except `running`,
+  and `degraded` (some unrelated unit failed at boot) is the normal state
+  inside a WSL distro, so exit-code gating would refuse on most real boxes.
+  Errors: `NOT_SUPPORTED` (no `systemctl`, or systemd is not running —
+  nothing was restarted), `NO_SUDO` (no `sudo`, or `sudo -n` was refused),
+  `RESTART_FAILED` (systemctl itself failed; the hint carries its stderr),
+  `RESTART_TIMEOUT` (a bounded call was killed at its cap — the systemd
+  probe or the restart command itself; the restart may still be in
+  progress, so the hint says to re-check and offers Restart WSL),
+  `DOCKER_STILL_DOWN` (restarted, but Docker never answered again within
+  the wait), `BAD_ARG` (unknown flag).
+
+  **No `dml-wow` (Rust) twin, by design.** `dml-wow` is the native Windows
+  binary — it never runs inside `dml-arch`, and Windows has no systemd,
+  no `sudo` and no `docker.service` to restart. The native answer to the
+  same problem is a different action entirely (launch Docker Desktop, the
+  launcher's `start_docker_desktop`). See "Deliberately not ported" in
+  `docs/cli-contract.md`.
 
 ## party subcommands (My Party)
 

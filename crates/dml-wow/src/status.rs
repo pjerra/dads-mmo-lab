@@ -402,6 +402,91 @@ pub fn container_running_probe(program: &OsStr, name: &str, timeout: Duration) -
     }
 }
 
+// ---------------------------------------------------------------------------
+// Boot-loop evidence (incident follow-up 2). On the night of the 2026-07-21
+// incident the world crash-retried on "Can't connect to MySQL (110)" for ten
+// minutes while the readiness wait kept printing "still waiting ... bots
+// respawning". These are the two primitives that tell the two situations
+// apart; the decision itself lives in `lifecycle::wr_wait_for_world`.
+// ---------------------------------------------------------------------------
+
+/// Parse a `docker inspect -f '{{.State.RestartCount}}'` result: first line,
+/// trimmed, must be `^[0-9]+$`. TRI-STATE ON PURPOSE, exactly like
+/// [`container_running_probe`] and for the same reason: `None` means *docker
+/// did not answer* (`<no value>`, an error message, an empty read), which is
+/// evidence of NOTHING. Collapsing it to `Some(0)` would let an engine hiccup
+/// silently reset the baseline and either fabricate or mask a boot loop.
+pub fn parse_restart_count(raw: &str) -> Option<u64> {
+    let first_line = raw.lines().next().unwrap_or("").trim();
+    if is_digits(first_line) {
+        first_line.parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
+/// Live restart-count probe (bounded). `None` on any failure/timeout/
+/// non-numeric output — see [`parse_restart_count`] for why that is not zero.
+///
+/// This is the CHEAP half of boot-loop detection: docker's own restart policy
+/// increments `RestartCount` every time it revives a container that died, so a
+/// climbing count is direct evidence of crash-retrying that no log heuristic
+/// can be fooled about. A healthy (even very slow) boot never increments it —
+/// the process simply stays up.
+pub fn container_restart_count(program: &OsStr, name: &str, timeout: Duration) -> Option<u64> {
+    let mut cmd = Command::new(program);
+    cmd.args(["inspect", "-f", "{{.State.RestartCount}}", name]);
+    windows_no_window(&mut cmd);
+    let out = output_bounded_draining(cmd, timeout)?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_restart_count(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// How many log lines report the world failing to reach the database. Matches
+/// BOTH spellings seen in the field: MySQL's own "Can't connect to MySQL
+/// server on 'ac-database' (110)" (the incident's line) and AzerothCore's
+/// "Could not connect to MySQL" (the roadmap's). Case-insensitive; used only
+/// to NAME a cause once a boot loop has already been established by the
+/// restart count, never to establish one.
+pub fn mysql_connect_failures(logs: &str) -> usize {
+    logs.lines()
+        .filter(|l| {
+            let l = l.to_lowercase();
+            l.contains("could not connect to mysql") || l.contains("can't connect to mysql")
+        })
+        .count()
+}
+
+/// Bounded `docker logs --tail <lines> ac-worldserver` read, combined
+/// stdout+stderr, empty string on any failure — the raw text half of
+/// [`mysql_connect_failures`]. Same `output_bounded_draining` discipline as
+/// every other log read here (a long-lived world's output exceeds the OS pipe
+/// buffer and deadlocks the non-draining helper).
+pub fn world_log_tail(program: &OsStr, lines: u32, timeout: Duration) -> String {
+    world_log_tail_of(program, "ac-worldserver", lines, timeout)
+}
+
+/// [`world_log_tail`] against an EXPLICIT container. The `games start|restart`
+/// boot-loop watch resolves its container through the title's own compose
+/// project rather than trusting the shared `ac-worldserver` name (a name that
+/// answers for whichever title happens to own it), so it needs to name what it
+/// reads. Bash twin: `_boot_loop_note`'s optional container argument.
+pub fn world_log_tail_of(program: &OsStr, container: &str, lines: u32, timeout: Duration) -> String {
+    let mut cmd = Command::new(program);
+    cmd.args(["logs", "--tail", &lines.to_string(), container]);
+    windows_no_window(&mut cmd);
+    match output_bounded_draining(cmd, timeout) {
+        Some(out) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            combined
+        }
+        None => String::new(),
+    }
+}
+
 /// The four-state (five-string) verdict machine — a faithful port of the
 /// `detail_verdict` derivation (`90-main.sh:1454-1492`). `exit_code` must
 /// already be the CALLER's decision of "is there a usable exit code to
@@ -676,6 +761,45 @@ pub fn read_console_tail(program: &OsStr, lines: u32) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- boot-loop evidence (incident follow-up 2) ---------------------------
+
+    #[test]
+    fn parse_restart_count_is_tri_state() {
+        assert_eq!(parse_restart_count("0\n"), Some(0));
+        assert_eq!(parse_restart_count("47\n"), Some(47));
+        assert_eq!(parse_restart_count("3"), Some(3));
+        // Everything below is docker FAILING TO ANSWER, not "zero restarts" --
+        // collapsing these to Some(0) is what would let an engine hiccup
+        // fabricate (or mask) a boot loop. Same lesson as
+        // `container_running_probe`'s tri-state.
+        assert_eq!(parse_restart_count(""), None);
+        assert_eq!(parse_restart_count("\n"), None);
+        assert_eq!(parse_restart_count("<no value>"), None);
+        assert_eq!(parse_restart_count("Error: No such object: ac-worldserver"), None);
+        assert_eq!(parse_restart_count("-1"), None);
+    }
+
+    #[test]
+    fn mysql_connect_failures_counts_both_spellings_case_insensitively() {
+        // The incident's own line is MySQL's "Can't connect ..."; the roadmap
+        // item quotes AzerothCore's "Could not connect ...". Both are the same
+        // symptom, so both count.
+        let logs = "\
+AzerothCore rev. deadbeef
+[MySQL] Can't connect to MySQL server on 'ac-database' (110)
+Could not connect to MySQL database at ac-database
+CAN'T CONNECT TO MYSQL server on 'ac-database' (110)
+World Initialized In 42 seconds
+";
+        assert_eq!(mysql_connect_failures(logs), 3);
+    }
+
+    #[test]
+    fn mysql_connect_failures_ignores_unrelated_lines() {
+        assert_eq!(mysql_connect_failures("World Initialized In 1 seconds\nLoading MySQL tables\n"), 0);
+        assert_eq!(mysql_connect_failures(""), 0);
+    }
 
     // -- parse_server_info_fields / server_info_down / assemble_server_info --
 

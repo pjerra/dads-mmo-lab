@@ -148,6 +148,128 @@ teardown() { teardown_fixture; }
   [ "$elapsed" -lt 30 ]
 }
 
+# --- boot-loop detection (incident follow-up 2) ------------------------------
+# On the night of the 2026-07-21 incident the world crash-retried on "Can't
+# connect to MySQL (110)" for ten minutes while this wait printed "still
+# waiting (~Nm) - bots respawning takes a while...". Rust twin:
+# crates/dml-wow/src/lifecycle.rs (wr_wait_for_world + boot_loop_note).
+
+@test "world-restart: a boot loop is named, and the outcome is unchanged" {
+  printf 'still booting...\n' > "$FIXTURE/ready.log"   # readiness never appears
+  # The container is UP between crashes (State.Running stays true), so the
+  # liveness guard never trips -- a climbing RestartCount is the ONLY thing
+  # that distinguishes this from a genuinely slow boot.
+  export DML_STUB_RESTART_COUNT_SEQ="0 1 2 3 4 5 6 7 8 9"
+  export DML_STUB_RESTART_COUNT_SEQ_STATE="$FIXTURE/rc.seq"
+  cat > "$FIXTURE/full.log" <<'EOS'
+[MySQL] Can't connect to MySQL server on 'ac-database' (110)
+[MySQL] Can't connect to MySQL server on 'ac-database' (110)
+EOS
+  export DML_STUB_LOGS_FILE="$FIXTURE/full.log"
+  export DML_READY_TIMEOUT_SECS=10
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 1 ]
+  # A DIAGNOSIS, not a new failure mode: same terminal event, same exit code.
+  echo "$output" | tail -1 | grep -q '"code":"READY_TIMEOUT"'
+  echo "$output" | grep -q '"level":"warn".*boot loop detected'
+  echo "$output" | grep -q 'crash-retrying, not slow-booting'
+  echo "$output" | grep -q 'repeated MySQL connection errors'
+  echo "$output" | grep -q 'Restart Docker'
+  # Latched: one line per wait, not one per two-second poll.
+  [ "$(echo "$output" | grep -c 'boot loop detected')" -eq 1 ]
+}
+
+@test "world-restart: a slow but healthy boot is never called a boot loop" {
+  printf 'still booting...\n' > "$FIXTURE/ready.log"
+  export DML_STUB_RESTART_COUNT=0        # never climbs
+  export DML_READY_TIMEOUT_SECS=6
+  t0=$SECONDS
+  run bash "$DML" wow world-restart --json
+  elapsed=$(( SECONDS - t0 ))
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"code":"READY_TIMEOUT"'
+  [[ "$output" != *"boot loop"* ]]
+  # Load-bearing: the wait really did run to the budget (>=3 polls at 2s), so
+  # the absence above is a decision and not "it never got that far".
+  [ "$elapsed" -ge 6 ]
+}
+
+@test "world-restart: an unreadable restart count is never read as a boot loop" {
+  # Same lesson the liveness guard already learned: "docker could not answer"
+  # is evidence of nothing. An empty inspect reading must not manufacture a
+  # diagnosis (nor reset the baseline into one).
+  printf 'still booting...\n' > "$FIXTURE/ready.log"
+  export DML_STUB_RESTART_COUNT=""
+  export DML_READY_TIMEOUT_SECS=6
+  t0=$SECONDS
+  run bash "$DML" wow world-restart --json
+  elapsed=$(( SECONDS - t0 ))
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"code":"READY_TIMEOUT"'
+  [[ "$output" != *"boot loop"* ]]
+  [ "$elapsed" -ge 6 ]
+}
+
+# The two tests below exist because the constant-unreadable one above CANNOT
+# discriminate: with every reading unreadable, "skip the reading", "collapse it
+# to 0" and "reset the baseline" all produce the same empty output. Each of
+# these feeds INTERLEAVED readable/unreadable readings, where the three
+# implementations disagree. (Rust twin:
+# wr_wait_for_world_survives_a_hiccup_between_restart_count_readings.)
+
+@test "world-restart: an inspect hiccup between readings does not hide a boot loop" {
+  # 0, then docker fails to answer, then 3 -- a real +3 climb interrupted by
+  # one bad reading. Skipping the bad reading keeps the baseline (0) and the
+  # loop is still named; RESETTING the baseline on it (wr_rc_base="") re-bases
+  # at 3 and the loop is never diagnosed, which on a box with a wedged daemon
+  # is every few polls.
+  printf 'still booting...\n' > "$FIXTURE/ready.log"
+  export DML_STUB_RESTART_COUNT_SEQ="0 - 3 4"
+  export DML_STUB_RESTART_COUNT_SEQ_STATE="$FIXTURE/rc.seq"
+  export DML_READY_TIMEOUT_SECS=10
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"code":"READY_TIMEOUT"'
+  # The DELTA is measured from the pre-hiccup baseline, not from the reading
+  # after it -- a re-based implementation could at best report 1.
+  echo "$output" | grep -q 'restarted 3 times since this wait began'
+}
+
+@test "world-restart: an unreadable FIRST reading does not become a fake baseline" {
+  # docker misses the very first poll, then answers 7 -- a long-lived server
+  # carrying historical restarts. Skipping the bad reading makes 7 the
+  # baseline (delta 0, no note); collapsing it to 0 makes 0 the baseline and
+  # the next reading is a +7 "boot loop" on a perfectly healthy server.
+  printf 'still booting...\n' > "$FIXTURE/ready.log"
+  export DML_STUB_RESTART_COUNT_SEQ="- 7 7 7"
+  export DML_STUB_RESTART_COUNT_SEQ_STATE="$FIXTURE/rc.seq"
+  export DML_READY_TIMEOUT_SECS=8
+  t0=$SECONDS
+  run bash "$DML" wow world-restart --json
+  elapsed=$(( SECONDS - t0 ))
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"code":"READY_TIMEOUT"'
+  [[ "$output" != *"boot loop"* ]]
+  # Load-bearing: the wait really did poll past the readable readings, so the
+  # absence above is a decision and not "it never got that far".
+  [ "$elapsed" -ge 8 ]
+}
+
+@test "world-restart: with no MySQL evidence the note points at the log, not the database" {
+  printf 'still booting...\n' > "$FIXTURE/ready.log"
+  export DML_STUB_RESTART_COUNT_SEQ="0 1 2 3 4 5 6 7 8 9"
+  export DML_STUB_RESTART_COUNT_SEQ_STATE="$FIXTURE/rc.seq"
+  printf 'terminate called after throwing an instance of std::bad_alloc\n' > "$FIXTURE/full.log"
+  export DML_STUB_LOGS_FILE="$FIXTURE/full.log"
+  export DML_READY_TIMEOUT_SECS=10
+  run bash "$DML" wow world-restart --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q 'boot loop detected'
+  # It must not assert a cause it did not observe.
+  [[ "$output" != *"MySQL connection errors"* ]]
+  echo "$output" | grep -q 'Check the Console log for the boot error'
+}
+
 @test "world-restart: a down world with a healthy database is a legitimate recovery restart" {
   # `docker restart` on a stopped container STARTS it, and with the DB up
   # there is nothing to hang on -- this is the Home card's crashed-verdict

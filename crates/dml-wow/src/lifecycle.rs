@@ -284,25 +284,16 @@ pub const COMPOSE_UP_TIMEOUT: Duration = Duration::from_secs(600);
 /// of silently swallowing the option.
 pub const SKIP_SAVEALL_NOTE: &str = "faster-restart requested -- the native compose path has no separate pre-stop saveall to skip; the graceful `docker compose down` already saves characters on shutdown.";
 
-/// The ordered HIGH-LEVEL steps `games_lifecycle_stream`
-/// runs for `mode` -- `"backup"` = the automatic chars-only pre-down safety
-/// dump (`backup::AUTO_STOP_NAME`, `lib.rs`'s `auto_backup_before_stop`),
-/// `"down"`/`"up"` = one [`compose_sequence_for_mode`] step. Exists so the
-/// invariant "the automatic backup always runs before the FIRST `down`" is a
-/// pure, independently-testable fact rather than only visible by reading
-/// `lib.rs`'s call order -- `games_lifecycle_stream` is itself only
-/// integration-testable (it shells real `docker`), same doctrine as every
-/// other pure-primitives-here/orchestration-in-lib.rs split in this module.
-/// `start` has no backup step (nothing is stopping, so there is nothing to
-/// snapshot first).
-pub fn lifecycle_steps_for_mode(mode: &str) -> Vec<&'static str> {
-    match mode {
-        "start" => vec!["up"],
-        "restart" => vec!["backup", "down", "up"],
-        "stop" => vec!["backup", "down"],
-        _ => vec![],
-    }
-}
+// The ordered HIGH-LEVEL steps a `games` mode runs -- the pre-stop worldserver
+// log snapshot, then the automatic chars-only safety dump, then the
+// `compose_sequence_for_mode` steps -- USED to be restated here as a pure
+// `lifecycle_steps_for_mode(mode) -> Vec<&str>` list so the ordering
+// invariants were "independently testable". Deleted (round-2 finding G17): no
+// production code ever read that list, so moving or deleting the REAL snapshot
+// call in `games_lifecycle_stream_with` left all four of its tests green while
+// native stops silently stopped preserving the log. The order now lives in one
+// place only -- that call site -- and is asserted there, against a fake
+// `docker`, via `LifecycleEnv`.
 
 // ---------------------------------------------------------------------------
 // STREAMED / blocking orchestration, moved out of the launcher's `lib.rs` by
@@ -428,6 +419,188 @@ pub enum WrWaitOutcome {
     Timeout,
 }
 
+// ---------------------------------------------------------------------------
+// Boot-loop detection inside the readiness wait (incident follow-up 2).
+//
+// THE INCIDENT: the world crash-retried on "Can't connect to MySQL (110)" for
+// ten minutes while this wait printed "still waiting (~Nm) - bots respawning
+// takes a while...". Every one of those lines was true about the elapsed time
+// and false about what was happening. The wait now recognises the loop and
+// says so.
+//
+// ADVISORY ONLY. This never aborts a wait and never changes an outcome or an
+// exit code -- the 1800s budget exists precisely because bot creation really
+// is that slow, and a diagnosis that could cut a legitimately slow boot short
+// would be worse than the silence it replaces.
+// ---------------------------------------------------------------------------
+
+/// How many restarts NEW SINCE THIS WAIT BEGAN make it a boot loop rather than
+/// a slow boot.
+///
+/// WHY THREE. Docker's restart policy increments `RestartCount` only when it
+/// revives a container that DIED; a healthy boot — however slow, however many
+/// bots it is creating — never increments it at all, because the process stays
+/// up. So even ONE new restart is already abnormal, and the threshold is not
+/// about tolerating slowness. It is about tolerating a one-off: a single
+/// OOM-kill or a transient that the next boot survives is a hiccup, not a
+/// loop, and calling that a boot loop would train users to ignore the warning.
+/// Three consecutive failures to get through boot is a pattern no healthy
+/// start produces. The count is a DELTA against a baseline taken at the start
+/// of the wait (see [`wr_wait_for_world`]), so a long-lived server carrying
+/// hundreds of historical restarts can never trip it.
+pub const BOOT_LOOP_RESTART_STRIKES: u64 = 3;
+
+/// How many `Could not connect to MySQL`/`Can't connect to MySQL` lines in the
+/// log tail before the note NAMES the database as the cause. Two, not one: a
+/// single connect failure is normal during a cold start (the world races the
+/// database container's own boot and retries), so only a REPEATED failure is
+/// worth pinning the blame on.
+pub const BOOT_LOOP_MYSQL_HITS_MIN: usize = 2;
+
+/// Log tail read once, at detection time, to classify the cause. 200 lines is
+/// several crash cycles' worth of the tail — enough to see a repeating
+/// failure without pulling a large read into a loop that is already polling.
+pub const BOOT_LOOP_CAUSE_TAIL_LINES: u32 = 200;
+
+/// The single `warn` line the wait emits when it recognises a boot loop. Must
+/// stay byte-identical to the bash twin in `90-main.sh`'s `world-restart)` arm
+/// (CLAUDE.md: any new NDJSON line lands on BOTH sides or the two surfaces
+/// diverge).
+///
+/// `mysql_evidence` is the ONLY thing that changes the wording: with repeated
+/// connect failures in the log the note names the database and the Restart
+/// Docker action directly; without them it must not assert a cause it did not
+/// observe, so it points at the Console log first and offers Restart Docker as
+/// the follow-up. One line, no newlines — it is an NDJSON `text` field.
+pub fn boot_loop_note(new_restarts: u64, mysql_evidence: bool) -> String {
+    let head = format!(
+        "boot loop detected: the world server has restarted {new_restarts} times since this wait began -- it is crash-retrying, not slow-booting."
+    );
+    if mysql_evidence {
+        format!("{head} Its log shows repeated MySQL connection errors, so the world cannot reach the database. Try Restart Docker (Tools), then start the server again.")
+    } else {
+        format!("{head} Check the Console log for the boot error; if it shows database connection errors, try Restart Docker (Tools), then start the server again.")
+    }
+}
+
+/// The tri-state delta latch itself — ONE implementation of the decision,
+/// shared by every readiness wait on the start path (bash twin:
+/// `_boot_loop_check` in `cli/src/40-config.sh`).
+///
+/// Round-2 findings G3/G9: the detection originally lived only inside
+/// [`wr_wait_for_world`], i.e. behind the feature-locked `wow world-restart`
+/// button, while Home's primary Start/Restart buttons went somewhere else
+/// entirely. Both call sites now drive THIS type, so a threshold or wording
+/// can never drift between them.
+///
+/// RULES, all of them load-bearing:
+/// * `None` is docker failing to answer, NOT zero restarts — skipped
+///   entirely, so it neither sets nor resets the baseline. Collapsing it to
+///   `Some(0)` fabricates a loop on a long-lived server; re-baselining on it
+///   hides a real one on the wedged daemon this feature exists for.
+/// * The baseline is the FIRST READABLE reading, never a fixed zero — a
+///   server carrying hundreds of historical restarts must not trip it.
+/// * A reading BELOW the baseline can only mean the container was RECREATED
+///   (a fresh container starts at 0), so it re-baselines. `games restart`
+///   recreates containers mid-boot via compose, and measuring a new container
+///   against the old one's count would blind the watch for the rest of the
+///   boot.
+/// * Latched: at most one accusation per watch.
+#[derive(Debug, Default)]
+pub struct BootLoopWatch {
+    baseline: Option<u64>,
+    reported: bool,
+}
+
+impl BootLoopWatch {
+    pub fn new() -> Self {
+        Self { baseline: None, reported: false }
+    }
+
+    /// Feed one `.State.RestartCount` reading. `Some(new_restarts)` exactly
+    /// once — on the reading that proves the loop — and `None` otherwise.
+    pub fn observe(&mut self, reading: Option<u64>) -> Option<u64> {
+        // `?`, not `unwrap_or(0)`: a missed reading falls straight out and
+        // leaves every field exactly as it was.
+        let current = reading?;
+        let Some(base) = self.baseline else {
+            self.baseline = Some(current);
+            return None;
+        };
+        if current < base {
+            // Only a recreated container can count DOWN.
+            self.baseline = Some(current);
+            return None;
+        }
+        let new_restarts = current - base;
+        if self.reported || new_restarts < BOOT_LOOP_RESTART_STRIKES {
+            return None;
+        }
+        self.reported = true;
+        Some(new_restarts)
+    }
+}
+
+/// Poll cadence for the watch that runs ALONGSIDE another operation (the
+/// readiness wait in [`wr_wait_for_world`] keeps its own 2s cadence and does
+/// not use this). Bash twin: `_boot_loop_poll_secs`. `DML_BOOT_LOOP_POLL_SECS`
+/// is a test-only override seam, same shape as `DML_READY_TIMEOUT_SECS`.
+pub const BOOT_LOOP_POLL_SECS: u64 = 15;
+
+pub fn boot_loop_poll() -> Duration {
+    let secs = std::env::var("DML_BOOT_LOOP_POLL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|s| *s > 0)
+        .unwrap_or(BOOT_LOOP_POLL_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Which `games` modes arm the boot-loop watch. `stop` does not: a boot loop
+/// is a boot-time phenomenon and there is no boot to diagnose. Called by
+/// [`games_lifecycle_stream`] itself — not a fact only a test knows.
+pub fn watches_boot_loop(mode: &str) -> bool {
+    matches!(mode, "start" | "restart")
+}
+
+/// Longest the watch will sleep before re-checking `stop`. The poll cadence is
+/// coarse (15s) but a lifecycle command that finishes must not be held open
+/// waiting for the next tick, so the sleep is sliced.
+const BOOT_LOOP_STOP_SLICE: Duration = Duration::from_millis(100);
+
+/// The standalone watch loop: poll `restart_count` every `poll` until `stop`
+/// is set, reporting at most one boot loop. Parameterized over its probe, its
+/// cadence and its stop signal so it is unit-testable without docker or
+/// threads — production runs it on a background thread for the duration of a
+/// native `games start`/`restart` (see [`games_lifecycle_stream`]).
+///
+/// ADVISORY ONLY: it observes and reports; it never cancels anything and never
+/// influences the caller's outcome or exit code.
+pub fn boot_loop_watch_run(
+    poll: Duration,
+    stop: &std::sync::atomic::AtomicBool,
+    mut restart_count: impl FnMut() -> Option<u64>,
+    mut on_boot_loop: impl FnMut(u64),
+) {
+    use std::sync::atomic::Ordering;
+
+    let mut watch = BootLoopWatch::new();
+    while !stop.load(Ordering::Relaxed) {
+        if let Some(new_restarts) = watch.observe(restart_count()) {
+            on_boot_loop(new_restarts);
+        }
+        // Sliced sleep: the cadence is deliberately coarse, but a lifecycle
+        // command that has finished must not wait out a whole period before
+        // this thread can be joined.
+        let mut slept = Duration::ZERO;
+        while slept < poll && !stop.load(Ordering::Relaxed) {
+            let slice = std::cmp::min(BOOT_LOOP_STOP_SLICE, poll - slept);
+            std::thread::sleep(slice);
+            slept += slice;
+        }
+    }
+}
+
 /// The readiness wait itself, parameterized over its two probes and its poll
 /// interval so it can be unit-tested without docker (production passes
 /// [`WR_POLL`] and the live `status::world_ready` / `status::container_running`
@@ -440,14 +613,29 @@ pub fn wr_wait_for_world(
     poll: Duration,
     mut ready: impl FnMut() -> bool,
     mut world_running: impl FnMut() -> Option<bool>,
+    mut restart_count: impl FnMut() -> Option<u64>,
     on_note: impl Fn(u64),
+    mut on_boot_loop: impl FnMut(u64),
 ) -> WrWaitOutcome {
     let t0 = std::time::Instant::now();
     let mut last_note: u64 = 0;
     let mut down_strikes: u32 = 0;
+    // Boot-loop state (incident follow-up 2) — the SHARED latch, the same one
+    // the native `games start|restart` watch drives (round-2 findings G3/G9).
+    // See [`BootLoopWatch`] for why every one of its rules is load-bearing.
+    let mut boot_loop = BootLoopWatch::new();
     loop {
         if ready() {
             return WrWaitOutcome::Ready;
+        }
+        // Diagnosis BEFORE the liveness verdict below: a crash-looping
+        // container spends its backoff in `restarting` (.State.Running ==
+        // false), so the liveness guard can legitimately give up on the very
+        // iteration the loop becomes provable -- and the user must get the
+        // explanation before the error, not instead of it. Latched: one line
+        // per wait, never one per poll.
+        if let Some(new_restarts) = boot_loop.observe(restart_count()) {
+            on_boot_loop(new_restarts);
         }
         // Liveness (Round 2 F1): waiting for a container that is not even
         // running can only ever end in READY_TIMEOUT. Consecutive misses only
@@ -487,9 +675,55 @@ pub fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_jso
     serde_json::json!({"event": "error", "error": {"code": code, "message": message.into(), "hint": hint}})
 }
 
-/// Automatic pre-stop/-restart safety dump (see `dml::lifecycle::
-/// lifecycle_steps_for_mode`'s doc comment for why this always runs before
-/// the sequence's first `down`): if `ac-database` isn't running there is
+/// Pre-stop/-restart worldserver log snapshot (incident follow-up 3): the
+/// compose `down`+`up` below RECREATES the containers, and the old
+/// container's log dies with it — twice during the 2026-07-21 incident the
+/// freeze evidence was destroyed by the very restart meant to fix it.
+///
+/// STRICTLY BEST-EFFORT, same doctrine as [`auto_backup_before_stop`]: a
+/// failure is one `warn` line and the lifecycle continues. A `Skipped`
+/// outcome (this title's compose project owns no world container — i.e. every
+/// non-WoW title — or a docker that could not answer) is reported as NOTHING
+/// at all: there was no evidence to lose, so a warning would be noise on every
+/// other game in the library. Both docker calls inside `logsnap` are bounded
+/// and pipe-draining.
+///
+/// SCOPED BY `compose_dir`, not by container name: `docker logs
+/// ac-worldserver` answers for whichever title owns that container, so a
+/// non-WoW title's stop used to file the WoW world's log under its own name
+/// and evict the real evidence from the shared newest-N window.
+///
+/// The lines themselves come from `logsnap::snapshot_lines` — one place, so
+/// the bash twin (`_snapshot_world_log_report`) has one thing to match.
+fn snapshot_world_log_before_stop(
+    docker_program: &std::ffi::OsStr,
+    logs_dir: Option<&std::path::Path>,
+    keep: usize,
+    compose_dir: &std::path::Path,
+    title: &str,
+    mode: &str,
+    emit: &impl Fn(serde_json::Value),
+) {
+    use crate::logsnap;
+
+    // No resolvable `~/.dml` (no HOME/USERPROFILE at all) -- nowhere to put a
+    // snapshot, and a stop the user asked for is not the place to complain
+    // about it.
+    let Some(dir) = logs_dir else { return };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let outcome = logsnap::snapshot_world_log_into(dir, docker_program, compose_dir, title, mode, keep, now);
+    for (level, text) in logsnap::snapshot_lines(&outcome) {
+        gl_line(emit, level, text);
+    }
+}
+
+/// Automatic pre-stop/-restart safety dump — always AFTER
+/// [`snapshot_world_log_before_stop`] and BEFORE the sequence's first `down`
+/// (see [`games_lifecycle_stream_with`]'s call site, which is where that order
+/// is decided and asserted): if `ac-database` isn't running there is
 /// nothing to dump — skipped silently, no line at all, matching every other
 /// best-effort backup call site's "DB unreachable -> no sidecar" doctrine.
 /// A dump failure only warns and returns — an automatic backup must NEVER
@@ -498,14 +732,18 @@ pub fn gl_error(code: &str, message: impl Into<String>, hint: &str) -> serde_jso
 /// so the Backups page can tell it apart from a manual one. Feeds the SAME
 /// keep-10 prune pool as every other backup (see the `dml::backup` "Automatic
 /// backups" section doc comment).
-fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serde_json::Value)) {
+fn auto_backup_before_stop(
+    docker_program: &std::ffi::OsStr,
+    backups_dir: Option<&std::path::Path>,
+    emit: &impl Fn(serde_json::Value),
+) {
     use crate::{backup, db, maint, status};
 
     if !status::container_running(docker_program, "ac-database", maint::PROBE_TIMEOUT) {
         return;
     }
-    let Some(bdir) = backup::backup_dir() else { return };
-    if std::fs::create_dir_all(&bdir).is_err() {
+    let Some(bdir) = backups_dir else { return };
+    if std::fs::create_dir_all(bdir).is_err() {
         return;
     }
 
@@ -517,7 +755,7 @@ fn auto_backup_before_stop(docker_program: &std::ffi::OsStr, emit: &impl Fn(serd
         Ok(()) => {
             backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_STOP_NAME));
             gl_line(emit, "info", format!("automatic backup saved: {file_name}"));
-            for p in backup::prune(&bdir) {
+            for p in backup::prune(bdir) {
                 gl_line(emit, "info", format!("pruned old backup: {p}"));
             }
         }
@@ -650,7 +888,21 @@ pub fn world_restart_stream(
         WR_POLL,
         || status::world_ready(&program, maint::PROBE_TIMEOUT),
         || status::container_running_probe(&program, "ac-worldserver", maint::PROBE_TIMEOUT),
+        || status::container_restart_count(&program, "ac-worldserver", maint::PROBE_TIMEOUT),
         |elapsed| emit(wr_event_line("info", wr_wait_note_text(elapsed))),
+        // Boot-loop diagnosis (incident follow-up 2). The cause read happens
+        // HERE, not in the wait loop: it costs one extra `docker logs` call
+        // and only ever runs once, on the single iteration the loop is
+        // recognised — polling it every 2s would double the log traffic of a
+        // 30-minute wait to answer a question asked at most once.
+        |restarts| {
+            let hits = status::mysql_connect_failures(&status::world_log_tail(
+                &program,
+                BOOT_LOOP_CAUSE_TAIL_LINES,
+                maint::PROBE_TIMEOUT,
+            ));
+            emit(wr_event_line("warn", boot_loop_note(restarts, hits >= BOOT_LOOP_MYSQL_HITS_MIN)));
+        },
     );
     match outcome {
         WrWaitOutcome::Ready => {}
@@ -674,14 +926,71 @@ pub fn world_restart_stream(
     emit(wr_event_done());
 }
 
+/// Everything [`games_lifecycle_stream`] resolves from the process
+/// environment before it orchestrates anything: the games root, the docker
+/// executable, and the two `~/.dml` children its best-effort pre-stop steps
+/// write to (each `None` when the home dir cannot be resolved at all).
+///
+/// WHY IT EXISTS. The pre-stop ORDER — worldserver log snapshot, then the
+/// automatic mysqldump, then the first `compose down` — is the entire point of
+/// incident follow-up 3, and it is decided in exactly one place: the call site
+/// in [`games_lifecycle_stream_with`]. Hoisting these four lookups one level up
+/// makes that call site drivable against a fake `docker` and temp directories,
+/// so the order is asserted WHERE IT IS DECIDED. It used to be restated in a
+/// parallel `lifecycle_steps_for_mode` list that no production code read, and
+/// that list stayed green when the real snapshot call was moved or deleted
+/// (round-2 finding G17) — a stop would silently stop preserving the log with
+/// every test still passing.
+pub struct LifecycleEnv {
+    /// `DML_GAMES_DIR` (`GAMES_DIR`), the parent of every title dir.
+    pub games_dir: PathBuf,
+    /// The `docker` executable (`DML_DOCKER` / the Docker Desktop candidates).
+    pub docker: std::ffi::OsString,
+    /// `~/.dml/logs` — where the pre-stop worldserver snapshot lands.
+    pub logs_dir: Option<PathBuf>,
+    /// `DML_LOG_SNAPSHOT_KEEP`; `0` turns snapshots off entirely.
+    pub log_snapshot_keep: usize,
+    /// `~/.dml/backups` — where the automatic pre-stop safety dump lands.
+    pub backups_dir: Option<PathBuf>,
+}
+
+impl LifecycleEnv {
+    /// The live resolution, done once at the top of a lifecycle command.
+    pub fn from_env() -> Self {
+        use crate::{backup, lifecycle, logsnap, native};
+
+        Self {
+            games_dir: lifecycle::games_dir_from_env(),
+            docker: native::docker_program(),
+            logs_dir: logsnap::logs_dir(),
+            log_snapshot_keep: logsnap::snapshot_keep_from_env(),
+            backups_dir: backup::backup_dir(),
+        }
+    }
+}
+
 /// The blocking flow itself (real docker spawns) — run under
 /// `spawn_blocking`. `mode` is `"start"`/`"restart"`/`"stop"`.
 pub fn games_lifecycle_stream(mode: &str, id: String, skip_saveall: bool, emit: impl Fn(serde_json::Value)) {
-    use crate::{lifecycle, maint, native, status};
+    games_lifecycle_stream_with(&LifecycleEnv::from_env(), mode, id, skip_saveall, emit);
+}
+
+/// [`games_lifecycle_stream`] with its environment supplied rather than read —
+/// the seam the ordering tests drive (see [`LifecycleEnv`]). Production reaches
+/// this through the wrapper above, so this IS the real orchestration, not a
+/// test-only restatement of it.
+pub fn games_lifecycle_stream_with(
+    env: &LifecycleEnv,
+    mode: &str,
+    id: String,
+    skip_saveall: bool,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{lifecycle, maint, status};
 
     emit(serde_json::json!({"event": "section_start", "name": mode}));
 
-    let title_dir = lifecycle::title_dir_for_id(&id);
+    let title_dir = env.games_dir.join(&id);
     if !title_dir.is_dir() {
         emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
         emit(gl_error("NOT_FOUND", format!("Title not found: {id}"), "Run: dml games list --json"));
@@ -697,19 +1006,41 @@ pub fn games_lifecycle_stream(mode: &str, id: String, skip_saveall: bool, emit: 
         return;
     };
 
-    let docker_program = native::docker_program();
+    let docker_program = env.docker.clone();
     if !maint::docker_engine_up(&docker_program, maint::PROBE_TIMEOUT) {
         emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
         emit(gl_error("DOCKER_DOWN", "Docker is not running.", "Try: dml doctor"));
         return;
     }
 
-    // Automatic pre-down safety backup -- stop/restart only, BEFORE anything
-    // below touches compose (see `lifecycle::lifecycle_steps_for_mode`'s doc
-    // comment for the pure "backup precedes the first down" invariant this
-    // mirrors). Best-effort: never aborts the stop/restart.
+    // THE ORDERING DECISION, and the only place it is made: pre-down
+    // worldserver log snapshot, THEN the automatic safety backup, THEN (below)
+    // the compose sequence -- stop/restart only, all of it ahead of anything
+    // that touches compose.
+    //
+    // WHY THE SNAPSHOT IS FIRST: the compose `down`+`up` RECREATES the
+    // containers and the old container's log dies with it (2026-07-21, twice),
+    // and the backup between them is a full mysqldump that can run for minutes
+    // and can fail -- capturing the log first means the evidence is already on
+    // disk however that goes. A cold `start` has neither step: nothing is
+    // stopping, so there is nothing to snapshot or dump first.
+    //
+    // Both are best-effort: neither ever aborts the stop/restart. The order is
+    // pinned by `games_stop_snapshots_the_world_log_before_the_backup_and_the_
+    // compose_down` in this module's tests, which drives THIS function against
+    // a fake `docker` and reads the order back off the calls it made -- the
+    // same oracle the bash twin's `games-log-snapshot.bats` uses.
     if mode == "stop" || mode == "restart" {
-        auto_backup_before_stop(&docker_program, &emit);
+        snapshot_world_log_before_stop(
+            &docker_program,
+            env.logs_dir.as_deref(),
+            env.log_snapshot_keep,
+            &compose_dir,
+            &id,
+            mode,
+            &emit,
+        );
+        auto_backup_before_stop(&docker_program, env.backups_dir.as_deref(), &emit);
     }
 
     // Self-heal an interrupted `wow bots flush` -- start+restart only (a
@@ -733,6 +1064,63 @@ pub fn games_lifecycle_stream(mode: &str, id: String, skip_saveall: bool, emit: 
         gl_line(&emit, "info", lifecycle::SKIP_SAVEALL_NOTE);
     }
 
+    // Boot-loop watch (round-2 findings G3/G9): the SAME detection the
+    // `world-restart` wait and the WSL `dml-start.sh` watch use, armed for the
+    // whole of a native start/restart. It runs on its own thread because the
+    // compose steps below block; notes come back over a channel and are
+    // emitted between steps, so `emit` stays single-threaded and needs no
+    // `Send` bound.
+    //
+    // SCOPED BY COMPOSE PROJECT, never by the bare `ac-worldserver` name --
+    // that name answers for whichever title owns it, so an unscoped watch
+    // would accuse a MapleStory start of looping because the WoW world was
+    // crash-looping beside it. Re-resolved every poll: `compose up` recreates
+    // containers mid-boot, and a cached id would go stale exactly when the
+    // evidence starts.
+    //
+    // HONEST LIMIT (reported with the fix, not hidden): unlike the WSL path,
+    // the native path has NO readiness wait -- `compose up -d` returns as soon
+    // as its dependency conditions are met -- so this watch only spans the
+    // lifecycle command itself. It is armed here so both backends share one
+    // decision and so a native readiness wait inherits it for free; the
+    // missing native wait is its own change.
+    let watch_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (note_tx, note_rx) = std::sync::mpsc::channel::<String>();
+    let watch_thread = if lifecycle::watches_boot_loop(mode) {
+        let prog = docker_program.clone();
+        let cdir = compose_dir.clone();
+        let stop = watch_stop.clone();
+        Some(std::thread::spawn(move || {
+            lifecycle::boot_loop_watch_run(
+                lifecycle::boot_loop_poll(),
+                &stop,
+                || {
+                    crate::logsnap::resolve_world_container(&prog, &cdir)
+                        .and_then(|cid| status::container_restart_count(&prog, &cid, maint::PROBE_TIMEOUT))
+                },
+                |restarts| {
+                    // The cause read happens HERE, once, on the single poll the
+                    // loop is recognised -- polling it every cadence would
+                    // double the log traffic to answer a question asked once.
+                    let hits = crate::logsnap::resolve_world_container(&prog, &cdir)
+                        .map(|cid| {
+                            status::mysql_connect_failures(&status::world_log_tail_of(
+                                &prog,
+                                &cid,
+                                lifecycle::BOOT_LOOP_CAUSE_TAIL_LINES,
+                                maint::PROBE_TIMEOUT,
+                            ))
+                        })
+                        .unwrap_or(0);
+                    let _ = note_tx
+                        .send(lifecycle::boot_loop_note(restarts, hits >= lifecycle::BOOT_LOOP_MYSQL_HITS_MIN));
+                },
+            );
+        }))
+    } else {
+        None
+    };
+
     let mut rc: Result<(), i32> = Ok(());
     for argv in lifecycle::compose_sequence_for_mode(mode) {
         let is_down = lifecycle::is_compose_down(&argv);
@@ -750,9 +1138,24 @@ pub fn games_lifecycle_stream(mode: &str, id: String, skip_saveall: bool, emit: 
             Some(out) => Err(out.status.code().unwrap_or(-1)),
             None => Err(-1),
         };
+        for note in note_rx.try_iter() {
+            gl_line(&emit, "warn", note);
+        }
         if rc.is_err() {
             break;
         }
+    }
+
+    // Wind the watch down BEFORE the terminal event: the diagnosis has to
+    // reach the terminal ahead of the done/error line, or the launcher's
+    // stream would have already closed the run. Best-effort throughout -- a
+    // watch that somehow panicked must not turn a healthy start into a failure.
+    watch_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(h) = watch_thread {
+        let _ = h.join();
+    }
+    for note in note_rx.try_iter() {
+        gl_line(&emit, "warn", note);
     }
 
     match rc {
@@ -1001,28 +1404,210 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    // -- automatic-backup step ordering ---------------------------------------
+    // -- the pre-stop step ORDER, asserted where it is DECIDED ---------------
+    //
+    // These drive the REAL orchestration (`games_lifecycle_stream_with`, the
+    // one and only place the order is chosen) against a fake `docker` and temp
+    // directories, and read the order back off the calls it actually made.
+    // Round-2 finding G17: the previous coverage asserted on a pure
+    // `lifecycle_steps_for_mode` list that NO production code read, so moving
+    // or deleting the real snapshot call left every test green while native
+    // stops silently stopped preserving the worldserver log.
 
-    #[test]
-    fn lifecycle_steps_backup_always_precedes_the_first_down() {
-        for mode in ["stop", "restart"] {
-            let steps = lifecycle_steps_for_mode(mode);
-            let backup_pos = steps.iter().position(|s| *s == "backup").unwrap_or_else(|| panic!("mode={mode} has no backup step"));
-            let down_pos = steps.iter().position(|s| *s == "down").unwrap_or_else(|| panic!("mode={mode} has no down step"));
-            assert!(backup_pos < down_pos, "mode={mode} steps={steps:?}");
-        }
+    /// A body only the `docker logs` read can produce — no `(`/`)`/quotes/`&`,
+    /// which would terminate the `.cmd` `if (...)` block or the `sh` quoting.
+    const FAKE_WORLD_LOG: &str = "WORLD-LOG-EVIDENCE-abc123";
+
+    fn lifecycle_fixture(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dml-lifecycle-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A stand-in `docker` for the whole lifecycle flow: appends
+    /// `<argv[0]> <argv[1]>` to `log` for EVERY call (that pair alone separates
+    /// `compose ps` / `logs --tail` / `exec ac-database` / `compose down` /
+    /// `compose up`, and it keeps shell-hostile argv — the `-p<password>`, the
+    /// `{{.State.Running}}` templates — out of the echo), answers `inspect`
+    /// with `true` so the automatic backup's "is the database up" gate opens,
+    /// `compose ps -a -q` with a container id so the snapshot resolves one, and
+    /// `logs` with [`FAKE_WORLD_LOG`]. Per-platform, per CLAUDE.md's
+    /// test-portability rule — never a hardcoded interpreter.
+    #[cfg(windows)]
+    fn write_lifecycle_fake_docker(dir: &Path, log: &Path) -> PathBuf {
+        let p = dir.join("fake-docker-lifecycle.cmd");
+        let script = format!(
+            "@echo off\r\n\
+             >>\"{log}\" echo %~1 %~2\r\n\
+             if \"%~1\"==\"inspect\" (\r\necho true\r\nexit /b 0\r\n)\r\n\
+             if \"%~1\"==\"logs\" (\r\necho {FAKE_WORLD_LOG}\r\nexit /b 0\r\n)\r\n\
+             if \"%~2\"==\"ps\" (\r\necho c0ffee1234ab\r\nexit /b 0\r\n)\r\n\
+             exit /b 0\r\n",
+            log = log.display()
+        );
+        std::fs::write(&p, script).unwrap();
+        p
+    }
+    #[cfg(not(windows))]
+    fn write_lifecycle_fake_docker(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-docker-lifecycle.sh");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$1 $2\" >> '{log}'\n\
+             case \"$1\" in\n\
+             \x20 inspect) echo true; exit 0;;\n\
+             \x20 logs) echo {FAKE_WORLD_LOG}; exit 0;;\n\
+             esac\n\
+             if [ \"$2\" = \"ps\" ]; then echo c0ffee1234ab; fi\n\
+             exit 0\n",
+            log = log.display()
+        );
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// `<games>/<title>/docker-compose.yml` + a fake docker, wired into a
+    /// [`LifecycleEnv`] whose `~/.dml` children are temp dirs (the real ones
+    /// must never be touched: this flow WRITES snapshots and backups and PRUNES
+    /// both pools).
+    fn lifecycle_env_fixture(name: &str, title: &str) -> (PathBuf, PathBuf, PathBuf, LifecycleEnv) {
+        let base = lifecycle_fixture(name);
+        let games = base.join("games");
+        let compose_dir = games.join(title);
+        std::fs::create_dir_all(&compose_dir).unwrap();
+        std::fs::write(compose_dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+        let calls = base.join("docker-calls.log");
+        let docker = write_lifecycle_fake_docker(&base, &calls);
+        let logs = base.join("logs");
+        let env = LifecycleEnv {
+            games_dir: games,
+            docker: docker.into_os_string(),
+            logs_dir: Some(logs.clone()),
+            log_snapshot_keep: 10,
+            backups_dir: Some(base.join("backups")),
+        };
+        (base, calls, logs, env)
+    }
+
+    fn event_texts(events: &[serde_json::Value]) -> Vec<String> {
+        events.iter().filter_map(|e| e.get("text").and_then(|t| t.as_str()).map(str::to_string)).collect()
+    }
+
+    fn text_pos(texts: &[String], prefix: &str) -> usize {
+        texts
+            .iter()
+            .position(|t| t.starts_with(prefix))
+            .unwrap_or_else(|| panic!("no line starting `{prefix}` in the stream:\n{texts:#?}"))
     }
 
     #[test]
-    fn lifecycle_steps_start_has_no_backup_step() {
-        assert_eq!(lifecycle_steps_for_mode("start"), vec!["up"]);
+    fn games_stop_snapshots_the_world_log_before_the_backup_and_the_compose_down() {
+        // Incident follow-up 3: `compose down` RECREATES the container and the
+        // old container's log dies with it. The snapshot therefore has to be
+        // the FIRST thing a stop does -- ahead of the automatic mysqldump too,
+        // which can run for minutes and can fail.
+        let title = "wow-server-playerbots";
+        let (base, calls, logs, env) = lifecycle_env_fixture("stop-order", title);
+
+        let events = std::cell::RefCell::new(Vec::new());
+        games_lifecycle_stream_with(&env, "stop", title.to_string(), false, |v| events.borrow_mut().push(v));
+        let events = events.into_inner();
+
+        // 1. The order, read off the docker calls the run ACTUALLY made -- the
+        //    same oracle the bash twin's bats test uses.
+        let calls_text = std::fs::read_to_string(&calls).unwrap();
+        let at = |needle: &str| {
+            calls_text
+                .find(needle)
+                .unwrap_or_else(|| panic!("no `{needle}` among the docker calls:\n{calls_text}"))
+        };
+        let snapshot_read = at("logs --tail");
+        let dump = at("exec ac-database");
+        let down = at("compose down");
+        assert!(
+            snapshot_read < dump,
+            "the worldserver log must be captured BEFORE the mysqldump that can run for minutes:\n{calls_text}"
+        );
+        assert!(
+            dump < down,
+            "the safety dump must run BEFORE the compose down:\n{calls_text}"
+        );
+
+        // 2. The evidence is really on disk, in the injected logs dir, with the
+        //    log body in it -- a call that merely happened cannot satisfy this.
+        let written: Vec<PathBuf> = std::fs::read_dir(&logs).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(written.len(), 1, "exactly one snapshot expected, got {written:?}");
+        assert!(
+            std::fs::read_to_string(&written[0]).unwrap().contains(FAKE_WORLD_LOG),
+            "the snapshot must hold the worldserver log body"
+        );
+
+        // 3. The stream narrates it in that same order, and the stop still
+        //    finished (both pre-steps are best-effort, never a gate).
+        let texts = event_texts(&events);
+        assert!(
+            text_pos(&texts, "worldserver log snapshot saved:") < text_pos(&texts, "automatic backup before stop"),
+            "{texts:#?}"
+        );
+        assert!(
+            text_pos(&texts, "automatic backup before stop") < text_pos(&texts, "stopping containers"),
+            "{texts:#?}"
+        );
+        assert_eq!(events.last().unwrap()["event"], "done", "{events:#?}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn lifecycle_steps_exact_sequences() {
-        assert_eq!(lifecycle_steps_for_mode("stop"), vec!["backup", "down"]);
-        assert_eq!(lifecycle_steps_for_mode("restart"), vec!["backup", "down", "up"]);
-        assert!(lifecycle_steps_for_mode("bogus").is_empty());
+    fn games_restart_snapshots_the_world_log_before_the_down_that_recreates_it() {
+        // The incident case itself: the restart reached for to FIX the freeze
+        // is what erased the reason for it. Asserted on the event stream rather
+        // than the docker call log because `restart` also arms the boot-loop
+        // watch, which calls docker from its own thread -- the call log's byte
+        // order is not a sound oracle with a second writer, while events are
+        // emitted from this thread alone.
+        let title = "wow-server-playerbots";
+        let (base, _calls, logs, env) = lifecycle_env_fixture("restart-order", title);
+
+        let events = std::cell::RefCell::new(Vec::new());
+        games_lifecycle_stream_with(&env, "restart", title.to_string(), false, |v| events.borrow_mut().push(v));
+        let events = events.into_inner();
+
+        let texts = event_texts(&events);
+        assert!(
+            text_pos(&texts, "worldserver log snapshot saved:") < text_pos(&texts, "stopping containers"),
+            "{texts:#?}"
+        );
+        let written: Vec<PathBuf> = std::fs::read_dir(&logs).unwrap().flatten().map(|e| e.path()).collect();
+        assert_eq!(written.len(), 1, "exactly one snapshot expected, got {written:?}");
+        assert!(std::fs::read_to_string(&written[0]).unwrap().contains(FAKE_WORLD_LOG));
+        assert_eq!(events.last().unwrap()["event"], "done", "{events:#?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn games_start_neither_snapshots_nor_dumps() {
+        // A cold start destroys no evidence it could have preserved (there is
+        // no previous run of THIS container to read) and has nothing to dump
+        // before -- so neither pre-stop step may fire.
+        let title = "wow-server-playerbots";
+        let (base, calls, logs, env) = lifecycle_env_fixture("start-no-presteps", title);
+
+        let events = std::cell::RefCell::new(Vec::new());
+        games_lifecycle_stream_with(&env, "start", title.to_string(), false, |v| events.borrow_mut().push(v));
+        let events = events.into_inner();
+
+        let calls_text = std::fs::read_to_string(&calls).unwrap();
+        assert!(calls_text.contains("compose up"), "the start itself must have run:\n{calls_text}");
+        assert!(!calls_text.contains("logs --tail"), "a start must not read a log tail:\n{calls_text}");
+        assert!(!calls_text.contains("exec ac-database"), "a start must not dump:\n{calls_text}");
+        assert!(!logs.exists(), "a start must not even create the logs dir");
+        assert_eq!(events.last().unwrap()["event"], "done", "{events:#?}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1148,7 +1733,7 @@ mod tests {
         let timeout_secs = 10;
         let poll = Duration::from_millis(10);
         let t0 = std::time::Instant::now();
-        let outcome = wr_wait_for_world(timeout_secs, poll, || false, || Some(false), |_| {});
+        let outcome = wr_wait_for_world(timeout_secs, poll, || false, || Some(false), || None, |_| {}, |_| {});
         let elapsed = t0.elapsed();
         assert_eq!(outcome, WrWaitOutcome::WorldDown, "a world that is never running must not be waited out");
         // The load-bearing assertion (see CLAUDE.md's vacuous-pass trap): the
@@ -1181,6 +1766,8 @@ mod tests {
                 running_calls += 1;
                 Some(running_calls >= WR_WORLD_DOWN_STRIKES)
             },
+            || None,
+            |_| {},
             |_| {},
         );
         assert_eq!(outcome, WrWaitOutcome::Ready, "a {}-poll blip must not abort the wait", WR_WORLD_DOWN_STRIKES - 1);
@@ -1211,6 +1798,8 @@ mod tests {
                 probes += 1;
                 None
             },
+            || None,
+            |_| {},
             |_| {},
         );
         assert_eq!(outcome, WrWaitOutcome::Ready, "an unreadable docker must not be reported as a dead world");
@@ -1240,6 +1829,8 @@ mod tests {
                 calls += 1;
                 if calls % WR_WORLD_DOWN_STRIKES == 0 { None } else { Some(false) }
             },
+            || None,
+            |_| {},
             |_| {},
         );
         assert_eq!(outcome, WrWaitOutcome::WorldDown);
@@ -1252,7 +1843,7 @@ mod tests {
     fn wr_wait_for_world_still_times_out_when_the_world_is_up_but_never_ready() {
         // The liveness check must not swallow the READY_TIMEOUT path: a
         // running-but-slow world (bots respawning) still ends at the budget.
-        let outcome = wr_wait_for_world(0, Duration::from_millis(1), || false, || Some(true), |_| {});
+        let outcome = wr_wait_for_world(0, Duration::from_millis(1), || false, || Some(true), || None, |_| {}, |_| {});
         assert_eq!(outcome, WrWaitOutcome::Timeout);
     }
 
@@ -1269,10 +1860,303 @@ mod tests {
                 liveness_probes += 1;
                 Some(false)
             },
+            || None,
+            |_| {},
             |_| {},
         );
         assert_eq!(outcome, WrWaitOutcome::Ready);
         assert_eq!(liveness_probes, 0);
+    }
+
+    // -- boot-loop detection (incident follow-up 2) --------------------------
+
+    #[test]
+    fn boot_loop_note_names_the_count_the_loop_and_the_action() {
+        let n = boot_loop_note(4, false);
+        assert!(n.contains("boot loop"), "{n}");
+        assert!(n.contains('4'), "the note must say how many restarts were seen: {n}");
+        assert!(n.contains("Restart Docker"), "the note must point at the action: {n}");
+        // It must contradict the "still loading" story the wait otherwise tells.
+        assert!(n.to_lowercase().contains("not slow-booting") || n.to_lowercase().contains("crash-retrying"), "{n}");
+        assert!(!n.contains('\n'), "one NDJSON line only: {n}");
+    }
+
+    #[test]
+    fn boot_loop_note_names_mysql_only_when_the_log_shows_it() {
+        let with = boot_loop_note(3, true).to_lowercase();
+        let without = boot_loop_note(3, false).to_lowercase();
+        assert!(with.contains("mysql") && with.contains("database"), "{with}");
+        // Without evidence it must NOT assert a cause it did not observe.
+        assert!(!without.contains("mysql"), "{without}");
+        assert!(without.contains("console"), "with no cause evidence, point at the log: {without}");
+        assert!(with.contains("restart docker") && without.contains("restart docker"));
+    }
+
+    // -- BootLoopWatch: the shared latch both call sites drive ---------------
+
+    #[test]
+    fn boot_loop_watch_baselines_the_first_readable_reading_and_latches_once() {
+        // A long-lived server carrying 47 historical restarts: only restarts
+        // NEW since the watch began are evidence, so 47 is the baseline and
+        // the accusation lands at 47+3 -- never on the first reading.
+        let mut w = BootLoopWatch::new();
+        assert_eq!(w.observe(Some(47)), None, "the first reading is the baseline, never an accusation");
+        assert_eq!(w.observe(Some(48)), None);
+        assert_eq!(w.observe(Some(49)), None, "+2 is under the {BOOT_LOOP_RESTART_STRIKES}-strike threshold");
+        assert_eq!(w.observe(Some(50)), Some(3), "+3 since the baseline is the loop");
+        assert_eq!(w.observe(Some(51)), None, "latched: one accusation per watch, not one per poll");
+        assert_eq!(w.observe(Some(99)), None);
+    }
+
+    #[test]
+    fn boot_loop_watch_skips_unreadable_readings_without_touching_the_baseline() {
+        // "docker could not answer" is evidence of NOTHING. Two failure modes
+        // this pins apart, both of which a constant-unreadable feed would hide:
+        // an unreadable FIRST reading must not become a fake zero baseline...
+        let mut w = BootLoopWatch::new();
+        assert_eq!(w.observe(None), None);
+        assert_eq!(w.observe(Some(7)), None, "7 is the baseline; collapsing the miss to 0 would call this +7");
+        assert_eq!(w.observe(Some(7)), None);
+        // ...and a miss BETWEEN readings must not re-base and hide a real climb.
+        let mut w2 = BootLoopWatch::new();
+        assert_eq!(w2.observe(Some(0)), None);
+        assert_eq!(w2.observe(None), None);
+        assert_eq!(w2.observe(Some(3)), Some(3), "the delta is measured from the pre-miss baseline");
+    }
+
+    #[test]
+    fn boot_loop_watch_rebaselines_when_the_container_is_recreated() {
+        // `games restart` recreates containers mid-boot (compose down+up), and
+        // a fresh container's RestartCount starts at 0. Measuring it against
+        // the old container's 40 would make every delta negative and blind the
+        // watch for the whole boot -- exactly the boot it is there to watch.
+        let mut w = BootLoopWatch::new();
+        assert_eq!(w.observe(Some(40)), None);
+        assert_eq!(w.observe(Some(0)), None, "a drop can only mean a new container: re-baseline, never accuse");
+        assert_eq!(w.observe(Some(1)), None);
+        assert_eq!(w.observe(Some(3)), Some(3), "the new container's own climb is still caught");
+    }
+
+    // -- boot_loop_watch_run: the standalone watch the games path arms -------
+
+    #[test]
+    fn boot_loop_watch_run_never_accuses_a_slow_but_healthy_boot() {
+        // The whole point of the threshold: a boot can be arbitrarily slow --
+        // thousands of bots -- and still be healthy. A healthy process never
+        // dies, so RestartCount never moves, however long the wait.
+        let poll = Duration::from_millis(5);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let probes = std::sync::atomic::AtomicU32::new(0);
+        let mut accusations = Vec::new();
+        let t0 = std::time::Instant::now();
+        boot_loop_watch_run(
+            poll,
+            &stop,
+            || {
+                // A long-lived server that is simply booting slowly.
+                let n = probes.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n >= 12 {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Some(4)
+            },
+            |n| accusations.push(n),
+        );
+        let elapsed = t0.elapsed();
+        assert!(accusations.is_empty(), "a healthy boot was accused: {accusations:?}");
+        // ANTI-VACUITY: the two assertions a watch that returns early -- or
+        // never polls at all -- cannot satisfy. The absence above has to be a
+        // decision, not a no-op.
+        let n = probes.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(n >= 12, "the watch only polled {n} times; it never ran long enough to conclude anything");
+        assert!(
+            elapsed >= poll * 10,
+            "the watch finished in {elapsed:?}, less than 10 poll periods -- it did not actually wait"
+        );
+    }
+
+    #[test]
+    fn boot_loop_watch_run_names_a_climbing_restart_count_once() {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut count = 0u64;
+        let mut accusations = Vec::new();
+        boot_loop_watch_run(
+            Duration::from_millis(1),
+            &stop,
+            || {
+                count += 1;
+                if count >= 10 {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Some(count)
+            },
+            |n| accusations.push(n),
+        );
+        assert_eq!(accusations.len(), 1, "latched: {accusations:?}");
+        assert!(accusations[0] >= BOOT_LOOP_RESTART_STRIKES, "reported {}", accusations[0]);
+    }
+
+    #[test]
+    fn boot_loop_watch_run_stops_when_asked_even_with_a_long_poll() {
+        // The watch must never hold a finished lifecycle command open waiting
+        // for its next tick.
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let t0 = std::time::Instant::now();
+        boot_loop_watch_run(
+            Duration::from_secs(30),
+            &stop,
+            || {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                None
+            },
+            |_| panic!("an unreadable reading must never accuse anything"),
+        );
+        assert!(t0.elapsed() < Duration::from_secs(5), "took {:?} to notice the stop flag", t0.elapsed());
+    }
+
+    #[test]
+    fn games_lifecycle_watches_boot_loop_on_start_and_restart_but_not_stop() {
+        // The Home buttons that boot the server get the watch; `stop` has no
+        // boot to diagnose.
+        assert!(watches_boot_loop("start"));
+        assert!(watches_boot_loop("restart"));
+        assert!(!watches_boot_loop("stop"));
+        assert!(!watches_boot_loop(""));
+    }
+
+    #[test]
+    fn wr_wait_for_world_reports_a_boot_loop_once_without_changing_the_outcome() {
+        // The incident: the world crash-retried for ten minutes while the
+        // stream kept printing "still waiting ... bots respawning". The wait
+        // must SAY SO -- and must still end exactly as it did before (this is
+        // a diagnosis, not a new failure mode).
+        let mut count = 0u64;
+        let mut loops = Vec::new();
+        let outcome = wr_wait_for_world(
+            1,
+            Duration::from_millis(1),
+            || false,
+            || Some(true), // up between crashes -- the liveness guard never trips
+            || {
+                count += 1;
+                Some(count)
+            },
+            |_| {},
+            |restarts| loops.push(restarts),
+        );
+        assert_eq!(outcome, WrWaitOutcome::Timeout, "the terminal outcome must be untouched");
+        assert_eq!(loops.len(), 1, "the diagnosis must be latched, not repeated every poll: {loops:?}");
+        assert!(
+            loops[0] >= BOOT_LOOP_RESTART_STRIKES,
+            "reported {} new restarts, fewer than the {BOOT_LOOP_RESTART_STRIKES} needed to conclude anything",
+            loops[0]
+        );
+    }
+
+    #[test]
+    fn wr_wait_for_world_baselines_the_restart_count_instead_of_trusting_zero() {
+        // A long-lived server can legitimately carry a big RestartCount from
+        // days ago. Only restarts NEW since this wait began are evidence --
+        // an absolute-threshold check would scream on the first poll.
+        let mut probes = 0u32;
+        let mut fired = 0u32;
+        let outcome = wr_wait_for_world(
+            1,
+            Duration::from_millis(1),
+            || false,
+            || Some(true),
+            || {
+                probes += 1;
+                Some(47)
+            },
+            |_| {},
+            |_| fired += 1,
+        );
+        assert_eq!(outcome, WrWaitOutcome::Timeout);
+        assert_eq!(fired, 0, "a stable (even large) restart count is a healthy slow boot");
+        assert!(
+            u64::from(probes) > BOOT_LOOP_RESTART_STRIKES,
+            "only {probes} probes: fewer than the {BOOT_LOOP_RESTART_STRIKES} strikes needed, so this proves nothing"
+        );
+    }
+
+    #[test]
+    fn wr_wait_for_world_never_calls_a_boot_loop_on_an_unreadable_container() {
+        // Same lesson the liveness guard already learned: "docker could not
+        // answer" is not evidence of anything. An inconclusive restart-count
+        // probe must never manufacture a boot-loop diagnosis.
+        let mut probes = 0u32;
+        let mut fired = 0u32;
+        let outcome = wr_wait_for_world(
+            1,
+            Duration::from_millis(1),
+            || false,
+            || Some(true),
+            || {
+                probes += 1;
+                None
+            },
+            |_| {},
+            |_| fired += 1,
+        );
+        assert_eq!(outcome, WrWaitOutcome::Timeout);
+        assert_eq!(fired, 0);
+        assert!(u64::from(probes) > BOOT_LOOP_RESTART_STRIKES, "only {probes} probes -- proves nothing");
+    }
+
+    #[test]
+    fn wr_wait_for_world_survives_a_hiccup_between_restart_count_readings() {
+        // The baseline is the first READABLE reading; a later unreadable one
+        // must neither reset it nor be counted as a restart.
+        let mut probes = 0u32;
+        let mut loops = Vec::new();
+        let outcome = wr_wait_for_world(
+            1,
+            Duration::from_millis(1),
+            || false,
+            || Some(true),
+            || {
+                probes += 1;
+                if probes % 2 == 0 {
+                    None
+                } else {
+                    Some(10 + u64::from(probes) / 2)
+                }
+            },
+            |_| {},
+            |restarts| loops.push(restarts),
+        );
+        assert_eq!(outcome, WrWaitOutcome::Timeout);
+        assert_eq!(loops.len(), 1, "a hiccup must not stop the loop from being recognised: {loops:?}");
+    }
+
+    #[test]
+    fn wr_wait_for_world_reports_the_boot_loop_even_on_the_iteration_it_gives_up() {
+        // A crash-looping container spends its backoff in `restarting`
+        // (.State.Running == false), so the liveness guard may well fire first.
+        // The user must still get the explanation before the error.
+        //
+        // The probes are tuned so BOTH conclusions land on the SAME iteration
+        // (the restart count only crosses the threshold on the probe where the
+        // liveness strikes reach WR_WORLD_DOWN_STRIKES). That makes this test
+        // sensitive to the ORDER of the two checks: a boot-loop check placed
+        // after the liveness `return` would never emit the note at all.
+        let mut probes = 0u32;
+        let mut loops = Vec::new();
+        let outcome = wr_wait_for_world(
+            10,
+            Duration::from_millis(1),
+            || false,
+            || Some(false), // down every probe -> WorldDown at WR_WORLD_DOWN_STRIKES
+            || {
+                probes += 1;
+                Some(if probes >= WR_WORLD_DOWN_STRIKES { BOOT_LOOP_RESTART_STRIKES } else { 0 })
+            },
+            |_| {},
+            |restarts| loops.push(restarts),
+        );
+        assert_eq!(outcome, WrWaitOutcome::WorldDown, "the liveness guard still owns the outcome");
+        assert_eq!(loops.len(), 1, "the diagnosis must be emitted before giving up: {loops:?}");
     }
 
     #[test]

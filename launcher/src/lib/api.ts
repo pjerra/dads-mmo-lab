@@ -1688,6 +1688,22 @@ export async function startDockerDesktop(): Promise<{ launched: boolean; path: s
   return await invoke("start_docker_desktop");
 }
 
+// Incident follow-up 1 (2026-07-21): restart the Docker DAEMON inside dml-arch
+// (`dml wow docker-restart`). The WSL-mode twin of startDockerDesktop above --
+// same user problem (the engine is wedged), different machinery.
+//
+// DESTRUCTIVE: every running container goes down with the daemon, so the Tools
+// card gates it behind a typed confirmation. Rejects with the CLI's own codes:
+// NOT_SUPPORTED (no systemd) / NO_SUDO (no passwordless sudo) / RESTART_FAILED
+// / RESTART_TIMEOUT (a blocking call hit its bound -- raised for BOTH a wedged
+// systemd and a slow daemon, which need opposite advice, so its copy must quote
+// the hint) / DOCKER_STILL_DOWN (the daemon did not answer again within the
+// CLI's bounded wait) -- docker-restart.ts turns each into copy. Resolving means dockerd
+// answered again, not merely that systemctl returned.
+export async function wowDockerRestart(): Promise<{ restarted: boolean }> {
+  return await invoke("wow_docker_restart");
+}
+
 export async function nativeYqInstall(): Promise<{ installed: boolean; path: string; bytes: number }> {
   return await invoke("native_yq_install");
 }

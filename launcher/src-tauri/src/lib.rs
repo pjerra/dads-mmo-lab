@@ -1568,6 +1568,31 @@ fn require_native_backend() -> Result<(), CmdError> {
     }
 }
 
+/// Pure half of the mirror-image guard: some commands act on the dml-arch
+/// DISTRO itself, and native mode has no distro at all. Split from the env read
+/// so the decision is unit-testable without mutating `DML_BACKEND` in a
+/// threaded test runner — the risk worth pinning is the one-keyword inversion
+/// that would let such a command through in exactly the mode it cannot work in.
+fn wsl_backend_guard(native: bool) -> Result<(), CmdError> {
+    if native {
+        Err(CmdError {
+            code: "WRONG_BACKEND".into(),
+            message: "This command only works in WSL mode -- native mode has no dml-arch distro"
+                .into(),
+            hint: "The launcher is running in native (Docker Desktop) mode; restart the engine \
+                   from the Native setup card instead."
+                .into(),
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// WSL-mode counterpart of [`require_native_backend`].
+fn require_wsl_backend() -> Result<(), CmdError> {
+    wsl_backend_guard(is_native_backend())
+}
+
 /// NATIVE-MODE fast read of the teleport locations: same shape as
 /// `wow_teleport_list` (`{"locations":[…≤500 rows…]}`), read over a direct MySQL
 /// connection instead of `docker exec ac-database mysql`. Native mode only — WSL
@@ -5392,6 +5417,33 @@ fn start_docker_desktop() -> Result<serde_json::Value, CmdError> {
     Ok(serde_json::json!({ "launched": true, "path": exe.to_string_lossy() }))
 }
 
+/// Incident follow-up 1 (2026-07-21): restart the Docker DAEMON inside
+/// dml-arch (`dml wow docker-restart`). The WSL-mode counterpart of
+/// [`start_docker_desktop`] above — same user problem (the engine is wedged or
+/// dead), completely different machinery, which is why they are two commands
+/// rather than one with a branch.
+///
+/// WSL-mode ONLY, and the guard is not decoration: native mode has no distro to
+/// shell into, so without it a stale webview would spawn `wsl.exe -d dml-arch`
+/// against a distro the user may not even have installed. The Tools card
+/// already hides itself in native mode; this is the backstop.
+///
+/// A single captured envelope, not a stream — the CLI arm's own bounded wait
+/// for dockerd is what takes the time, and there is nothing to narrate while it
+/// polls.
+///
+/// Deliberately does NOT do `restart_wsl`'s graceful-stop-first dance. That
+/// exists because `wsl --shutdown` is a scheduled hard kill of a HEALTHY stack;
+/// this command is reached when Docker is already wedged, so a `games stop`
+/// would be issued through the very daemon that stopped answering and would
+/// stall for its full timeout before the fix could even start. The typed
+/// confirmation on the Tools card owns the blast radius instead.
+#[tauri::command]
+async fn wow_docker_restart(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    require_wsl_backend()?;
+    run_json_cmd(state, vec!["wow".into(), "docker-restart".into()]).await
+}
+
 /// Download the pinned mikefarah `yq` Windows exe into the native tools dir and
 /// verify it is a plausible size (>1MB) before saving. Written tmp-then-rename
 /// so a half-download never leaves a truncated yq.exe at the target. LOCKED
@@ -6293,6 +6345,7 @@ pub fn run() {
             defender_hint,
             native_setup_status,
             start_docker_desktop,
+            wow_docker_restart,
             native_yq_install,
             native_soap_copy,
             native_defender_script,
@@ -6324,6 +6377,29 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- WSL-only backend guard (incident follow-up 1: wow_docker_restart) ---
+    // Tested through the pure half so the decision is provable without
+    // mutating DML_BACKEND in a threaded test runner (same doctrine as
+    // `resolve_tailscale_from_candidates`). The inversion is the whole risk
+    // here: `require_native_backend` is one keyword away and would let the
+    // command through in exactly the mode that has no distro.
+
+    #[test]
+    fn wsl_backend_guard_refuses_native_mode() {
+        let err = wsl_backend_guard(true).expect_err("native mode must be refused");
+        assert_eq!(err.code, "WRONG_BACKEND");
+        // The message has to name the reason a parent can act on -- a bare
+        // "wrong backend" on screen means nothing.
+        let text = format!("{} {}", err.message, err.hint).to_lowercase();
+        assert!(text.contains("native"), "message/hint should name native mode: {text}");
+        assert!(text.contains("distro"), "message/hint should say there is no distro: {text}");
+    }
+
+    #[test]
+    fn wsl_backend_guard_allows_wsl_mode() {
+        assert!(wsl_backend_guard(false).is_ok());
+    }
 
     #[test]
     fn game_id_validation() {

@@ -159,6 +159,86 @@ _stream_cmd() {
     fi
 }
 
+# _stream_cmd_bootwatch <compose_dir> <cmd...>: _stream_cmd plus the shared
+# boot-loop watch (round-2 findings G3/G9).
+#
+# WHY THIS EXISTS AT ALL. `games start|restart` -- Home's primary Start and
+# Restart buttons -- hands the entire boot to the title's own
+# `<compose_dir>/dml-start.sh`, whose readiness wait narrated the 2026-07-21
+# crash loop as "still waiting ... world is loading" for the full 30-minute
+# budget. That hook is a DEPLOYED artifact: a copy is written into each title
+# dir at install time (guides/wow-wotlk/install-wow-wotlk.sh) and NOTHING ever
+# refreshes it, so fixing the repo's copy would only help a fresh install.
+# The CLI is what an existing install actually gets updated to, so the
+# detection lives HERE and watches the hook from the outside.
+#
+# HOW IT TICKS. `read -t <poll>` instead of a plain `read`, so the loop wakes
+# on its own clock even while the child is silent -- the real hook's keepalive
+# is 60s apart and an older deployed copy may print nothing at all, so a
+# per-line watch would be at the mercy of the very thing it is watching.
+# A timed-out `read` leaves any PARTIAL line in the variable, so partials are
+# accumulated in `_bw_pend` and only emitted once their newline arrives;
+# without that a tick landing mid-line would split one line into two events.
+# The probe itself is rate-limited to the same cadence, so a burst of compose
+# output cannot turn into one `docker inspect` per line.
+#
+# SCOPED BY COMPOSE PROJECT, never by the bare `ac-worldserver` name: that name
+# answers for whichever title owns it, so an unscoped watch would accuse a
+# MapleStory start of looping because the WoW world was crash-looping beside it
+# (the same trap the log snapshot fell into -- see `_world_container_of`).
+# Re-resolved every tick rather than cached: `compose up` RECREATES containers
+# mid-boot, and a cached id would go stale exactly when the evidence starts.
+#
+# ADVISORY ONLY: one extra `warn` line, latched. Outcome, exit code and the
+# child's own stream are untouched -- the pipeline still returns the child's
+# status under `pipefail`, exactly like `_stream_cmd`.
+#
+# TEXT MODE IS DELIBERATELY UNWATCHED: it is a raw passthrough with no line
+# reader to tick from, and its output is the frozen contract the legacy C#
+# tray parses. The launcher (the surface this diagnosis is for) is always
+# --json.
+_stream_cmd_bootwatch() {
+    local _bw_dir="$1"; shift
+    if [[ "$DML_JSON" != 1 ]]; then
+        "$@" 2>&1
+        return
+    fi
+    local _bw_poll; _bw_poll="$(_boot_loop_poll_secs)"
+    "$@" 2>&1 | {
+        # _bw_last starts one full period in the past so the FIRST tick runs
+        # immediately: the baseline must be taken at the start of the boot, or
+        # restarts from the seconds before it would count against it.
+        local _bw_l="" _bw_rc=0 _bw_pend="" _bw_last=$(( SECONDS - _bw_poll )) _bw_cid=""
+        _boot_loop_reset
+        while :; do
+            _bw_rc=0
+            IFS= read -r -t "$_bw_poll" _bw_l || _bw_rc=$?
+            if (( _bw_rc == 0 )); then
+                ndjson_line info "$_bw_pend$_bw_l"
+                _bw_pend=""
+            elif (( _bw_rc > 128 )); then
+                # read(1) timed out: keep the partial, tick below.
+                _bw_pend="$_bw_pend$_bw_l"
+            else
+                # EOF: flush a trailing line the child left unterminated.
+                _bw_pend="$_bw_pend$_bw_l"
+                [[ -n "$_bw_pend" ]] && ndjson_line info "$_bw_pend"
+                break
+            fi
+            if (( SECONDS - _bw_last >= _bw_poll )); then
+                _bw_last=$SECONDS
+                _bw_cid="$(_world_container_of "$_bw_dir" 2>/dev/null || true)"
+                # No `$(...)`: _boot_loop_check carries the latch and the
+                # baseline in globals, which a command substitution's subshell
+                # would throw away after every poll.
+                if _boot_loop_check "$_bw_cid"; then
+                    ndjson_line warn "$BOOT_LOOP_NOTE"
+                fi
+            fi
+        done
+    }
+}
+
 # Shared guard for games start/stop/restart. Sets gid, dir, compose_dir or
 # emits the right error (respecting DML_JSON) and exits 1.
 _games_resolve_or_fail() {
@@ -190,6 +270,187 @@ _games_resolve_or_fail() {
     fi
 }
 
+# --- pre-stop worldserver log snapshot (incident follow-up 3) --------------
+# `docker compose down` + `up` RECREATES the containers, and a recreated
+# container starts with an EMPTY log -- everything the previous worldserver
+# printed is gone the moment the restart runs. During the 2026-07-21 freeze
+# incident that destroyed the evidence TWICE: the restart reached for to fix
+# the freeze was also what erased the reason for it. So every stop/restart now
+# leaves a bounded tail of the worldserver log under ~/.dml/logs first.
+#
+# Rust twin (native mode): crates/dml-wow/src/logsnap.rs. WSL runs this path,
+# native runs that one; a snapshot on only one of them half-ships the feature,
+# so keep the two in step.
+_logs_dir() { echo "$HOME/.dml/logs"; }
+
+# Newest-N retention, same knob shape and default as _backup_dir's DML_BACKUP_KEEP.
+# 0 is a legal value and means the feature is OFF (see _snapshot_world_log).
+_log_snapshot_keep() { echo "${DML_LOG_SNAPSHOT_KEEP:-10}"; }
+
+# Seconds cap on the `docker logs` read (Rust twin: SNAPSHOT_TIMEOUT_SECS +
+# DML_LOG_SNAPSHOT_TIMEOUT). A dockerd wedged during startup ACCEPTS the
+# socket-activated connection and then never answers, and a stop the user
+# asked for must not wait on evidence capture.
+# 0 falls back to the default rather than being honoured: `timeout 0` means
+# NO limit in coreutils, which would reintroduce exactly the hang this bounds
+# (and the Rust twin would read the same 0 as "no time at all" -- opposite
+# behaviours from one value is worse than not accepting it).
+_log_snapshot_timeout() {
+    local t="${DML_LOG_SNAPSHOT_TIMEOUT:-20}"
+    [[ "$t" =~ ^[1-9][0-9]*$ ]] || t=20
+    echo "$t"
+}
+
+# Delete snapshots past the retention window. The pool is PREFIX-SCOPED
+# (world-*.log) on purpose: retention is a plain descending NAME sort, so a
+# foreign file would neither sort chronologically among these nor deserve a
+# keep slot. LC_ALL=C makes that sort byte order, matching the Rust twin's
+# `Vec::sort` exactly (en_US collation is case/punctuation-insensitive --
+# see CLAUDE.md's "list order is NOT contractual" note).
+#
+# $2 = the snapshot JUST WRITTEN, excluded from the pool and given a keep slot
+# of its own (so the others are trimmed to keep-1 and the directory still holds
+# at most `keep`). WHY: the sort is over NAMES, so a backwards clock jump
+# (WSL2's clock lagging the host after sleep/resume) sorts the fresh file LAST
+# and this prune would delete the very file the caller is about to report as
+# saved. Excluding it makes "snapshot saved: X" true by construction, and it
+# keeps the freshest evidence -- the one the operator came for. Rust twin:
+# `logsnap::prune_excluding`.
+_log_snapshot_prune() {
+    local dir="$1" fresh="${2:-}" keep n f
+    keep="$(_log_snapshot_keep)"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=10
+    keep=$(( 10#$keep ))   # base 10, or "08" would be an octal arithmetic error
+    if (( keep > 0 )); then keep=$(( keep - 1 )); fi
+    n=0
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        [[ -n "$fresh" && "$f" == "$fresh" ]] && continue
+        n=$(( n + 1 ))
+        if (( n > keep )); then rm -f "$dir/$f" 2>/dev/null || true; fi
+    done < <(ls -1 "$dir" 2>/dev/null | grep -E '^world-.*\.log$' | LC_ALL=C sort -r || true)
+    return 0
+}
+
+# _world_container_of <compose_dir>: the container id THIS title's compose
+# project owns for the ac-worldserver service, or nothing.
+#
+# WHY NOT THE BARE NAME `ac-worldserver`. `docker logs ac-worldserver` answers
+# for whichever title happens to own that container, so stopping a non-WoW
+# title while the WoW stack was up saved the WoW world's log under the other
+# title's name -- and, because retention is ONE shared newest-N pool, evicted
+# the genuine WoW evidence this whole feature exists to keep. Asking the
+# stopping title's own compose project is what scopes it. `-a` because an
+# already-EXITED container still holds the log worth preserving.
+# Rust twin: `logsnap::resolve_world_container`.
+_world_container_of() {
+    local cdir="$1" name cfile="" out cid
+    [[ -n "$cdir" ]] || return 1
+    for name in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        if [[ -f "$cdir/$name" ]]; then cfile="$cdir/$name"; break; fi
+    done
+    [[ -n "$cfile" ]] || return 1
+    # Bounded like every other docker call here; a non-zero exit ("no such
+    # service: ac-worldserver", engine down) means nothing to snapshot.
+    out="$(timeout -k 5 10 docker compose -f "$cfile" ps -a -q ac-worldserver 2>/dev/null)" || return 1
+    cid="${out%%$'\n'*}"; cid="${cid//$'\r'/}"
+    # The id goes straight into the next command's argv: anything that is not
+    # an id is no id at all.
+    [[ "$cid" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+    printf '%s' "$cid"
+}
+
+# _snapshot_world_log <title> <mode> <compose_dir>: bounded, best-effort tail
+# of the worldserver log. Prints the file NAME on success.
+# Returns 0 = saved / 1 = attempted but failed (caller warns) / 2 = nothing to
+# preserve (this title's compose project owns no world container -- i.e. any
+# non-WoW title -- an empty log, or retention turned off; caller stays silent).
+# NEVER fails its caller: every step here is guarded, a stop the user asked for
+# must not be blocked by evidence capture.
+#
+# BOUNDS. --tail 2000: the console page already reads 1000 lines, and a boot
+# loop's evidence is a banner plus a few hundred lines PER CYCLE, so 2000 keeps
+# several cycles (the pattern, not just the last death). The 2 MiB cap is the
+# separate bound the line cap cannot give -- one pathological line (stack dump,
+# binary splat down stderr) is arbitrarily long. `tail -c`, never `head -c`:
+# the crash is at the END of a log, so head-truncating would discard exactly
+# what this exists to preserve -- and `tail` reads to EOF, so it can never
+# SIGPIPE `docker logs` the way an early-exiting `head` would under pipefail.
+# The TIME bound is _log_snapshot_timeout: unbounded, this read sits in FRONT
+# of the compose down and a wedged daemon blocks the stop itself.
+_snapshot_world_log() {
+    local title="$1" mode="$2" cdir="${3:-}" dir out tmp ts safe safemode cid keep readrc
+    keep="$(_log_snapshot_keep)"
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=10
+    keep=$(( 10#$keep ))   # base 10, or "08" would be an octal arithmetic error
+    # Retention 0 = the feature is off. Writing a snapshot and deleting it on
+    # the way out (what the whole-pool prune used to do) still reported
+    # "snapshot saved: <name>" for a file that no longer existed.
+    if (( keep == 0 )); then return 2; fi
+    cid="$(_world_container_of "$cdir")" || return 2
+    [[ -n "$cid" ]] || return 2
+    safe="${title//[^A-Za-z0-9._-]/_}"
+    safemode="${mode//[^A-Za-z0-9._-]/_}"
+    dir="$(_logs_dir)"
+    tmp="$(mktemp 2>/dev/null)" || return 1
+    # 2>&1: AzerothCore logs plenty to stderr (the same reason _world_ready
+    # merges both streams). A missing container's "No such container" lands
+    # here too, which is why the EXIT STATUS -- not the output -- decides.
+    # 2>&1: AzerothCore logs plenty to stderr (the same reason _world_ready
+    # merges both streams), and the EXIT STATUS -- not the output -- decides.
+    #
+    # The deadline is the one read failure that WARNS (rc 1). A container that
+    # simply vanished between the resolve above and this read exits non-zero
+    # with "No such container": nothing was lost, so that stays a silent skip
+    # (rc 2). Hitting the deadline is different -- the container is there and
+    # the daemon would not answer, which is the wedged-dockerd incident this
+    # whole feature exists for; skipping silently would lose the evidence AND
+    # leave the operator believing a snapshot was taken.
+    readrc=0
+    timeout -k 5 "$(_log_snapshot_timeout)" docker logs --tail 2000 "$cid" > "$tmp" 2>&1 || readrc=$?
+    if (( readrc != 0 )); then
+        rm -f "$tmp" 2>/dev/null || true
+        # timeout(1) reports 124 when it killed the child at the deadline, and
+        # 137 (128+SIGKILL) when the -k grace kill was the one that landed.
+        (( readrc == 124 || readrc == 137 )) && return 1
+        return 2
+    fi
+    if [[ ! -s "$tmp" ]]; then rm -f "$tmp" 2>/dev/null || true; return 2; fi
+    mkdir -p "$dir" 2>/dev/null || { rm -f "$tmp" 2>/dev/null || true; return 1; }
+    # Timestamp FIRST in the name: retention sorts these as plain strings, and
+    # a title-led name would sort by title, interleaving two titles' snapshots
+    # so "newest N" deletes the wrong files.
+    ts="$(date -u +%Y%m%d-%H%M%S)"
+    out="$dir/world-$ts-$safe-$safemode.log"
+    if ! tail -c 2097152 "$tmp" > "$out" 2>/dev/null; then
+        rm -f "$tmp" "$out" 2>/dev/null || true
+        return 1
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    _log_snapshot_prune "$dir" "${out##*/}"
+    printf '%s' "${out##*/}"
+    return 0
+}
+
+# The call-site wrapper: run the snapshot and report it in whichever output
+# mode we are in. Always returns 0 -- see _snapshot_world_log's contract.
+# ONE line on success and one on failure, nothing for a skip and nothing for
+# the prune: the Rust twin's line set (`logsnap::snapshot_lines`) is exactly
+# this, and a line on only one surface narrates the same stop differently
+# depending on the backend.
+_snapshot_world_log_report() {
+    local snap="" rc=0
+    snap="$(_snapshot_world_log "$1" "$2" "${3:-}")" || rc=$?
+    if [[ $rc -eq 0 && -n "$snap" ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_line info "worldserver log snapshot saved: $snap"
+        else echo "[dml] worldserver log snapshot saved: $snap"; fi
+    elif [[ $rc -eq 1 ]]; then
+        if [[ "$DML_JSON" == 1 ]]; then ndjson_line warn "could not snapshot the worldserver log -- continuing"
+        else echo "[dml] WARN: could not snapshot the worldserver log -- continuing" >&2; fi
+    fi
+    return 0
+}
+
 # Start or restart with hook support. $1 = title, $2 = start|restart
 _games_start_impl() {
     local mode="$2"
@@ -207,6 +468,12 @@ _games_start_impl() {
         else echo "[dml] WARN: $_fheal" >&2; fi
     fi
     cd "$compose_dir"
+    # Restart only, and BEFORE anything below recreates containers (both the
+    # dml-start.sh hook and the raw `compose down` branch do). A cold start
+    # destroys no evidence it could have preserved, so it gets no snapshot.
+    if [[ "$mode" == "restart" ]]; then
+        _snapshot_world_log_report "$gid" restart "$compose_dir"
+    fi
     # Cold starts only: during a restart the ports are (expectedly) held by
     # this server's own still-running containers, so the conflict check would
     # cry wolf on every healthy restart. (The 3306 remap inside it is also
@@ -224,7 +491,12 @@ _games_start_impl() {
     fi
     local rc=0
     if [[ -x "./dml-start.sh" ]]; then
-        _stream_cmd bash ./dml-start.sh "$mode" || rc=$?
+        # Watched, not plain-streamed: the hook owns the whole readiness wait
+        # (up to DML_READY_TIMEOUT_SECS, 30 min) and cannot tell a crash loop
+        # from a slow boot -- and it is a deployed artifact a CLI update never
+        # refreshes, so the diagnosis has to come from out here to reach an
+        # existing install. See `_stream_cmd_bootwatch`.
+        _stream_cmd_bootwatch "$compose_dir" bash ./dml-start.sh "$mode" || rc=$?
     else
         if [[ "$mode" == "restart" ]]; then
             # -t 180: game servers (AC saves characters during graceful
@@ -1157,6 +1429,8 @@ case "$cmd" in
         _games_resolve_or_fail "${1:-}"
         [[ "$DML_JSON" == 1 ]] && ndjson_section_start stop
         cd "$compose_dir"
+        # Before the down that recreates/destroys the container log.
+        _snapshot_world_log_report "$gid" stop "$compose_dir"
         rc=0
         _stream_cmd docker compose down -t 180 || rc=$?
         if [[ $rc -ne 0 ]]; then
@@ -1561,6 +1835,127 @@ case "$cmd" in
         dfarr+=']'
         json_ok "{\"lines\":$dfarr}"
         ;;
+      docker-restart)
+        # Incident follow-up 1 (2026-07-21): the outage that night was a wedged
+        # Docker network inside dml-arch, and the entire fix was one
+        # `systemctl restart docker` that was not clickable anywhere in the
+        # launcher. This is that click. It restarts the DAEMON, not a
+        # container: every running container goes down with it and dockerd
+        # only grants them its own short shutdown grace (the worldserver needs
+        # minutes to save), so the GUI gates this behind a typed confirmation.
+        #
+        # One envelope, never a stream -- there is nothing to narrate between
+        # "restarting" and the readiness poll's verdict.
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow docker-restart --json"; exit 1 ;;
+          esac
+        done
+        # DML_SYSTEMCTL_BIN is a test-only override seam (mirrors DML_TS_BIN /
+        # DML_YQ_BIN): pointing it at a name that does not exist is how the
+        # suite exercises the no-systemd path deterministically, since the
+        # real distro this runs in always HAS systemctl.
+        DR_SYSTEMCTL="${DML_SYSTEMCTL_BIN:-systemctl}"
+        if ! command -v "$DR_SYSTEMCTL" >/dev/null 2>&1; then
+          json_err NOT_SUPPORTED "This distro has no systemctl -- Docker is not a systemd service here" "Start Docker the way this distro does, or use Tools -> Restart WSL."
+          exit 1
+        fi
+        # EVERY blocking call below is wrapped in timeout(1). docker.service in
+        # dml-arch is Type=notify with TimeoutStartSec=0, so systemd waits
+        # INDEFINITELY for dockerd's READY=1 -- and a dockerd wedged during
+        # startup (rebuilding the bridge / netfilter state) is precisely the
+        # case this button exists for. Unbounded, the one control offered for a
+        # wedged daemon hangs on the wedged daemon, with the GUI stuck on
+        # "Restarting Docker..." and no cancel. Exit 124 (or 137 after the -k
+        # grace) is timeout's "I killed it" and becomes RESTART_TIMEOUT.
+        # DML_DOCKER_RESTART_CMD_TIMEOUT is the seconds cap on the restart
+        # command itself (default 90: a healthy dockerd restart is seconds, a
+        # cold one on a busy box tens of seconds).
+        # 0 is refused, not honoured: `timeout 0` means NO limit in coreutils,
+        # so accepting it would silently restore the unbounded call.
+        dr_cmd_cap="${DML_DOCKER_RESTART_CMD_TIMEOUT:-90}"
+        [[ "$dr_cmd_cap" =~ ^[1-9][0-9]*$ ]] || dr_cmd_cap=90
+        # Read the STATE systemd prints, never the exit code: `is-system-running`
+        # exits nonzero for everything except "running", and "degraded" (some
+        # unrelated unit failed at boot) is the normal state inside a WSL
+        # distro -- gating on the exit code would refuse on most real boxes.
+        # A hung probe (systemd itself not answering the bus) is its own
+        # answer, so it gets its own short cap rather than the state check's
+        # "unknown" branch.
+        dr_probe_rc=0
+        dr_sys="$(timeout -k 5 10 "$DR_SYSTEMCTL" is-system-running 2>/dev/null)" || dr_probe_rc=$?
+        if [[ "$dr_probe_rc" -eq 124 || "$dr_probe_rc" -eq 137 ]]; then
+          json_err RESTART_TIMEOUT "systemd did not answer within 10s" "The distro's systemd is not responding. From Windows run: wsl --shutdown, then reopen -- or use Tools -> Restart WSL."
+          exit 1
+        fi
+        dr_sys="${dr_sys%%$'\n'*}"
+        case "$dr_sys" in
+          running|degraded|starting) ;;
+          *)
+            json_err NOT_SUPPORTED "systemd is not running in this distro (state: ${dr_sys:-unknown})" "From Windows run: wsl --shutdown, then reopen -- or use Tools -> Restart WSL."
+            exit 1
+            ;;
+        esac
+        if ! command -v sudo >/dev/null 2>&1; then
+          json_err NO_SUDO "sudo is not available in the distro" "Open the DML shell (Tools -> DML shell) and run as root: systemctl restart docker"
+          exit 1
+        fi
+        # -n is load-bearing (tailscale precedent below): without it, a box
+        # missing the NOPASSWD rule would sit on a password prompt with no tty,
+        # hanging the GUI forever. With it, a refusal is an immediate clean
+        # NO_SUDO.
+        if dr_out="$(timeout -k 5 "$dr_cmd_cap" sudo -n "$DR_SYSTEMCTL" restart docker 2>&1)"; then
+          dr_rc=0
+        else
+          dr_rc=$?
+        fi
+        if [[ "$dr_rc" -eq 124 || "$dr_rc" -eq 137 ]]; then
+          # The wedged-daemon case itself: systemd is still waiting for a
+          # READY=1 that is not coming. Say so -- the restart may yet complete
+          # on its own, and the bigger hammer is the next card over.
+          json_err RESTART_TIMEOUT "Restarting the Docker daemon timed out after ${dr_cmd_cap}s" "systemd is still waiting for Docker to come up. Give it a minute and re-check from Home; if it stays down, use Tools -> Restart WSL."
+          exit 1
+        fi
+        if [[ "$dr_rc" -ne 0 ]]; then
+          dr_tail="$(printf '%s' "$dr_out" | tail -c 400 | tr -d '\r' | tr '\n' ' ')" || dr_tail=""
+          if printf '%s' "$dr_out" | grep -qiE 'password is required|sudo:.*(no tty|askpass)|a terminal is required'; then
+            json_err NO_SUDO "Restarting Docker needs admin rights not available without a password" "Open the DML shell (Tools -> DML shell) and run: sudo systemctl restart docker"
+          else
+            json_err RESTART_FAILED "Could not restart the Docker daemon (systemctl exit $dr_rc)" "${dr_tail:-Try Tools -> Restart WSL, which restarts the whole distro.}"
+          fi
+          exit 1
+        fi
+        # systemctl exiting 0 means the unit was TOLD to restart -- it is not
+        # evidence that dockerd is answering again, and a daemon that stopped
+        # answering is exactly what brought the user here. Poll docker itself
+        # until it responds, bounded so the GUI can never hang.
+        # DML_DOCKER_RESTART_TIMEOUT is the seconds cap (test seam; the 30s
+        # default covers a cold dockerd on a busy box).
+        dr_cap="${DML_DOCKER_RESTART_TIMEOUT:-30}"
+        [[ "$dr_cap" =~ ^[0-9]+$ ]] || dr_cap=30
+        dr_t0=$SECONDS
+        dr_waited=0
+        dr_back=false
+        while true; do
+          # Each probe is bounded too: docker.service Requires=docker.socket,
+          # so a connect to the socket-activated socket SUCCEEDS and the
+          # request then blocks while dockerd starts -- the very first
+          # iteration could sit there forever, never consulting dr_cap.
+          if timeout -k 2 5 docker info >/dev/null 2>&1; then dr_back=true; break; fi
+          # Elapsed time, not iteration count: a probe that burns its whole
+          # 5s bound must spend the budget, or the "bounded" wait stretches to
+          # 6x the cap.
+          dr_waited=$(( SECONDS - dr_t0 ))
+          if (( dr_waited >= dr_cap )); then break; fi
+          sleep 1
+        done
+        dr_waited=$(( SECONDS - dr_t0 ))
+        if [[ "$dr_back" != true ]]; then
+          json_err DOCKER_STILL_DOWN "Docker was restarted but is still not responding after ${dr_waited}s" "Give it a few more seconds and re-check; if it stays down, use Tools -> Restart WSL."
+          exit 1
+        fi
+        json_ok "{\"restarted\":true,\"waited_seconds\":$dr_waited}"
+        ;;
       docker-clean)
         # Port of the manager's cleanup_docker (guides/wow-wotlk/wow-manage.sh
         # ~6688-6769): reclaims disk space from stale build cache / CMake
@@ -1769,7 +2164,23 @@ case "$cmd" in
         # gap `docker restart` itself leaves behind, and ~200x shorter than the
         # 1800s budget it replaces. One live observation clears the count.
         wr_timeout="${DML_READY_TIMEOUT_SECS:-1800}"; wr_t0=$SECONDS; wr_note=0; wr_down=0
+        # Boot-loop detection (incident follow-up 2), via the SHARED tracker in
+        # 40-config.sh -- the same threshold, tri-state rule and wording the
+        # `games start|restart` watch uses (`_stream_cmd_bootwatch`). Two
+        # copies with drifting thresholds is exactly the failure this round
+        # was opened to fix; see `_boot_loop_check` for the reasoning.
+        # ADVISORY ONLY: this changes no outcome and no exit code -- the wait
+        # still ends exactly where it did before.
+        _boot_loop_reset
         until _world_ready; do
+          # Diagnosis BEFORE the liveness verdict below: a crash-looping
+          # container spends its backoff in `restarting` (.State.Running is
+          # false there), so the liveness guard can legitimately give up on the
+          # very poll that makes the loop provable -- the user must get the
+          # explanation before the error, not instead of it.
+          if _boot_loop_check ac-worldserver; then
+            ndjson_line warn "$BOOT_LOOP_NOTE"
+          fi
           wr_live="$(docker inspect -f '{{.State.Running}}' ac-worldserver 2>/dev/null || true)"; wr_live="${wr_live%%$'\n'*}"
           # NB `false` is checked LITERALLY, not as "anything but true": an
           # empty reading is docker failing to answer (engine hiccup, inspect

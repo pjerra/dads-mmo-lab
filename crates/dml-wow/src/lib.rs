@@ -22,6 +22,7 @@ pub mod iteminfo;
 pub mod lan;
 pub mod lanip;
 pub mod lifecycle;
+pub mod logsnap;
 pub mod maint;
 pub mod modmgr;
 pub mod moduletail;

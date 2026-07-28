@@ -234,7 +234,7 @@
   {#if pageGate}
     <ServerRequired gate={pageGate} onstart={requestChipStart} />
   {:else}
-    {#if page === "home"}<Home />{/if}
+    {#if page === "home"}<Home onnav={(p) => go(p)} />{/if}
     {#if page === "library"}<Library />{/if}
     {#if page === "console"}<Console />{/if}
     {#if page === "tools"}<Tools />{/if}

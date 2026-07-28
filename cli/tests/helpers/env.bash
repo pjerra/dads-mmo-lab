@@ -54,6 +54,19 @@ if [[ "${1:-}" == "compose" ]]; then
     fi
     exit 0
   fi
+  if [[ "$rest" == *"ps -a -q"* ]]; then
+    # Log-snapshot container resolution: `docker compose -f <file> ps -a -q
+    # ac-worldserver` asks THIS title's compose project whether it owns a
+    # worldserver container. DML_STUB_COMPOSE_PS_ID is the id it answers with
+    # (default: present); set it EMPTY to model a project that has no such
+    # service/container -- the case that must take no snapshot at all even
+    # while some other project's ac-worldserver is alive.
+    # DML_STUB_COMPOSE_PS_EXIT models compose failing outright ("no such
+    # service"), which real compose reports as a nonzero exit.
+    ps_id="${DML_STUB_COMPOSE_PS_ID-stub-world-cid}"
+    [[ -n "$ps_id" ]] && printf '%s\n' "$ps_id"
+    exit "${DML_STUB_COMPOSE_PS_EXIT:-0}"
+  fi
   if [[ "$rest" == *"up -d"* || "$rest" == *"down"* ]]; then
     echo "stub compose: $rest"
     exit "${DML_STUB_COMPOSE_EXIT:-0}"
@@ -87,6 +100,27 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf '%s\n' "$run_state"
     exit 0
   fi
+  # Boot-loop detection (incident follow-up 2): `docker inspect -f
+  # '{{.State.RestartCount}}'`. DML_STUB_RESTART_COUNT_SEQ is a space-separated
+  # list consumed one per call (sticky on the last; state file in
+  # DML_STUB_RESTART_COUNT_SEQ_STATE -- same convention as DML_STUB_DB_ROWS_SEQ)
+  # so a test can make the count CLIMB across readiness polls;
+  # DML_STUB_RESTART_COUNT is the constant fallback. Set either to an empty or
+  # non-numeric value to model docker failing to answer, which must never be
+  # read as evidence of anything.
+  if [[ "$*" == *RestartCount* ]]; then
+    if [[ -n "${DML_STUB_RESTART_COUNT_SEQ:-}" ]]; then
+      st="${DML_STUB_RESTART_COUNT_SEQ_STATE:-/tmp/dml_rc_seq.$$}"
+      i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+      vals=($DML_STUB_RESTART_COUNT_SEQ)
+      idx=$i; (( idx >= ${#vals[@]} )) && idx=$(( ${#vals[@]} - 1 ))
+      printf '%s\n' "${vals[$idx]}"
+      echo $(( i + 1 )) > "$st"
+    else
+      printf '%s\n' "${DML_STUB_RESTART_COUNT-0}"
+    fi
+    exit 0
+  fi
   # server-detail crashed-vs-stopped (Batch 2 F8): the ExitCode format string
   # is served from DML_STUB_EXIT_CODE (default 0 = clean exit); the StartedAt
   # form keeps its canned timestamp for the world-ready checks.
@@ -114,6 +148,19 @@ fi
 if [[ "${1:-}" == "logs" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
   [[ -n "${DML_STUB_LOGS_ARGS_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_LOGS_ARGS_LOG"
+  # DML_STUB_LOGS_HANG=<secs>: a read that never comes back (dockerd wedged on
+  # a socket-activated start). `exec` so the sleep REPLACES this shell -- a
+  # `sleep` left as a child would outlive the TERM `timeout(1)` sends and keep
+  # the caller's pipe open, which is precisely the hang being modelled.
+  [[ -n "${DML_STUB_LOGS_HANG:-}" ]] && exec sleep "${DML_STUB_LOGS_HANG}"
+  # DML_STUB_LOGS_EXIT models `Error: No such container` (real docker exits 1
+  # and prints to stderr). Distinct from "answered with an empty log": the log
+  # snapshot treats the former as nothing-to-preserve and the latter the same,
+  # but only the exit status can tell a caller which happened.
+  if [[ "${DML_STUB_LOGS_EXIT:-0}" != 0 ]]; then
+    echo "Error: No such container: ${*: -1}" >&2
+    exit "${DML_STUB_LOGS_EXIT}"
+  fi
   # The REAL --since filtering is docker's job, so the stub emulates it:
   # when the caller passed --since and DML_STUB_LOGS_SINCE_FILE is set,
   # serve that file (the "current run only" view); otherwise serve the
@@ -559,4 +606,105 @@ EOS
 
   export PATH="$STUB_BIN:$PATH"
   export DML_TS_BIN="$STUB_BIN/tailscale"
+}
+
+# Incident follow-up 1 (2026-07-21): `wow docker-restart`. Stubs the three
+# tools that arm shells out to -- sudo (transparent pass-through minus its
+# flags), systemctl (the systemd probe AND the restart itself), and docker
+# (only `info`, which is the readiness poll). Deliberately a dedicated stub
+# rather than use_docker_stub + use_tailscale_stub: this arm is the ONLY one
+# whose docker stub must be able to answer differently on successive `info`
+# calls, and it needs none of the tailscale tool-chain. Behaviour knobs:
+#   DML_STUB_SUDO_FAIL=1             sudo fails like a missing NOPASSWD rule
+#   DML_STUB_SUDO_LOG                append one line of sudo's argv per call
+#                                    (how the suite proves -n is always passed)
+#   DML_STUB_SYSTEMD_STATE           what `systemctl is-system-running` prints
+#                                    (default running; e.g. offline = no systemd)
+#   DML_STUB_SYSTEMCTL_LOG           append one line of systemctl's argv per call
+#   DML_STUB_SYSTEMCTL_RESTART_EXIT  exit code of `systemctl restart docker`
+#   DML_STUB_SYSTEMCTL_RESTART_HANG  seconds `systemctl restart docker` blocks
+#                                    without ever returning (Type=notify +
+#                                    TimeoutStartSec=0 = the wedged daemon)
+#   DML_STUB_DOCKER_INFO_HANG        seconds each `docker info` blocks without
+#                                    answering (socket accepted, daemon mute)
+#   DML_STUB_DOCKER_DOWN=1           `docker info` always fails (never comes back)
+#   DML_STUB_DOCKER_INFO_SEQ         space-separated exit codes consumed one per
+#                                    `docker info` call, sticky on the last
+#                                    (state file in ..._SEQ_STATE) -- the same
+#                                    seq convention as DML_STUB_RESTART_COUNT_SEQ
+#                                    above. Lets a test make the daemon come back
+#                                    only after N polls, which is the only way to
+#                                    prove the arm actually WAITED.
+use_docker_restart_stub() {
+  STUB_BIN="${STUB_BIN:-$FIXTURE/bin}"
+  mkdir -p "$STUB_BIN"
+
+  cat > "$STUB_BIN/sudo" <<'EOS'
+#!/usr/bin/env bash
+[[ -n "${DML_STUB_SUDO_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_SUDO_LOG"
+if [[ "${DML_STUB_SUDO_FAIL:-0}" == 1 ]]; then
+  echo "sudo: a password is required" >&2
+  exit 1
+fi
+while [[ "${1:-}" == -* ]]; do shift; done
+exec "$@"
+EOS
+  chmod +x "$STUB_BIN/sudo"
+
+  cat > "$STUB_BIN/systemctl" <<'EOS'
+#!/usr/bin/env bash
+[[ -n "${DML_STUB_SYSTEMCTL_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_SYSTEMCTL_LOG"
+if [[ "${1:-}" == "is-system-running" ]]; then
+  state="${DML_STUB_SYSTEMD_STATE:-running}"
+  printf '%s\n' "$state"
+  # Real systemd exits NONZERO for every state except "running" -- "degraded"
+  # (some unrelated unit failed) is the normal state inside a WSL distro, so a
+  # caller that reads the exit code instead of the printed state would refuse
+  # on most real boxes. The stub reproduces that exactly.
+  [[ "$state" == "running" ]] && exit 0
+  exit 1
+fi
+if [[ "${1:-}" == "restart" ]]; then
+  # DML_STUB_SYSTEMCTL_RESTART_HANG=<secs>: docker.service is Type=notify with
+  # TimeoutStartSec=0, so a dockerd wedged during startup leaves `systemctl
+  # restart docker` waiting for READY=1 forever -- the exact wedged-daemon case
+  # this arm exists for. `exec` so the sleep REPLACES this shell: a `sleep`
+  # left as a child would survive timeout(1)'s TERM and keep the caller's
+  # command-substitution pipe open, hiding the bound under test.
+  [[ -n "${DML_STUB_SYSTEMCTL_RESTART_HANG:-}" ]] && exec sleep "${DML_STUB_SYSTEMCTL_RESTART_HANG}"
+  rc="${DML_STUB_SYSTEMCTL_RESTART_EXIT:-0}"
+  if [[ "$rc" != 0 ]]; then
+    echo "Failed to restart docker.service: Unit docker.service not found." >&2
+    exit "$rc"
+  fi
+  exit 0
+fi
+exit 0
+EOS
+  chmod +x "$STUB_BIN/systemctl"
+
+  cat > "$STUB_BIN/docker" <<'EOS'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "info" ]]; then
+  # DML_STUB_DOCKER_INFO_HANG=<secs>: docker.service Requires=docker.socket, so
+  # a connect to the socket-activated socket SUCCEEDS and the request then
+  # blocks while dockerd starts -- a poll that never answers rather than one
+  # that refuses. `exec` for the same reason as the systemctl arm above.
+  [[ -n "${DML_STUB_DOCKER_INFO_HANG:-}" ]] && exec sleep "${DML_STUB_DOCKER_INFO_HANG}"
+  if [[ -n "${DML_STUB_DOCKER_INFO_SEQ:-}" ]]; then
+    st="${DML_STUB_DOCKER_INFO_SEQ_STATE:-/tmp/dml_docker_info_seq.$$}"
+    i=0; [[ -f "$st" ]] && i="$(cat "$st")"
+    codes=($DML_STUB_DOCKER_INFO_SEQ)
+    idx=$i; (( idx >= ${#codes[@]} )) && idx=$(( ${#codes[@]} - 1 ))
+    echo $(( i + 1 )) > "$st"
+    exit "${codes[$idx]}"
+  fi
+  [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
+  exit 0
+fi
+exit 0
+EOS
+  chmod +x "$STUB_BIN/docker"
+
+  export PATH="$STUB_BIN:$PATH"
 }
