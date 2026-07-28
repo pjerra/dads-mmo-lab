@@ -410,18 +410,33 @@ function Enable-Wsl2Features {
     try { $hvPresent = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).HypervisorPresent } catch {}
     Write-Diag "HypervisorPresent: $hvPresent"
 
+    # Ask wsl.exe for a VERSION STRING, never for an exit code.
+    #
+    # Windows ships an inbox wsl.exe stub that exists on every machine. With WSL
+    # not installed it prints "The Windows Subsystem for Linux is not installed"
+    # and STILL EXITS 0, so an exit-code test reports the opposite of the truth.
+    # HypervisorPresent cannot rescue it either: inside a Hyper-V guest that is
+    # True because the VM itself runs under a hypervisor, nothing to do with WSL.
+    # On a fresh Hyper-V VM -- i.e. exactly a new user's machine -- both signals
+    # fail together, the installer skipped the reboot, and the run died later at
+    # WSL_E_DISTRO_NOT_FOUND. Found on a clean Windows 11 VM, 2026-07-28.
+    #
+    # A real installation prints a "WSL version: x.y.z" line; nothing else does.
     Write-Diag "Running: wsl --version (idempotency check)"
-    wsl --version | Out-Null
+    $wslVersionRaw = ""
+    try { $wslVersionRaw = ((wsl --version 2>&1) -replace "`0", "") -join "`n" } catch {}
     $wslVersionExit = $LASTEXITCODE
-    Write-Diag "wsl --version exit code: $wslVersionExit"
+    $wslInstalled = [bool]($wslVersionRaw -match 'WSL version')
+    Write-Diag "wsl --version exit code: $wslVersionExit  (exit code is NOT trusted)"
+    Write-Diag "wsl --version reports an installation: $wslInstalled"
 
     # Case A: everything is working
-    if ($wslVersionExit -eq 0 -and $hvPresent) {
+    if ($wslInstalled -and $hvPresent) {
         Write-Ok "WSL2 already installed and working -- no reboot needed"
         return $false
     }
 
-    if ($wslVersionExit -eq 0 -and -not $hvPresent) {
+    if ($wslInstalled -and -not $hvPresent) {
         Write-Diag "WSL executable present but hypervisor not loaded -- checking Windows feature state"
     }
 
@@ -784,11 +799,39 @@ localhostForwarding=true
 
         if (-not $archlinuxPreExisted) {
             Write-Step "Downloading official Arch Linux WSL image (source for import)..."
-            wsl --install -d archlinux --no-launch
+            $archInstallRaw = ((wsl --install -d archlinux --no-launch 2>&1) -replace "`0", "") -join "`n"
             $archInstallExit = $LASTEXITCODE
+            Write-Host $archInstallRaw
             Write-Diag "wsl --install archlinux exit code: $archInstallExit"
             if ($archInstallExit -ne 0) {
                 Write-Fail "Failed to download Arch Linux from the Microsoft Store (exit $archInstallExit).`nCheck your internet connection and try again."
+            }
+            # wsl --install can succeed (exit 0) and still say the machine must
+            # reboot before the distro exists. Continuing past that produced
+            # three WSL_E_DISTRO_NOT_FOUND errors and a [FAIL] on a clean VM
+            # (2026-07-28) -- the distro was never going to be there. Believe
+            # the message, not the exit code.
+            if ($archInstallRaw -match 'will not be effective until the system is rebooted') {
+                Register-Phase2Task
+                Write-Host ""
+                Write-Host "============================================================" -ForegroundColor Yellow
+                Write-Host "  Windows needs one reboot before Arch Linux can be used" -ForegroundColor Yellow
+                Write-Host "============================================================" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  Windows enabled the WSL components but they only take effect" -ForegroundColor White
+                Write-Host "  after a restart. Phase 2 continues automatically when you log" -ForegroundColor White
+                Write-Host "  back in." -ForegroundColor White
+                Write-Host ""
+                $goArch = Read-Host "  Restart now? (y/n)"
+                if ($goArch -match '^[Yy]') {
+                    Write-Diag "Initiating restart (post wsl --install archlinux)..."
+                    Restart-Computer -Force
+                } else {
+                    Write-Host ""
+                    Write-Host "  No problem -- restart whenever you're ready." -ForegroundColor Yellow
+                    Write-Host "  Phase 2 kicks off automatically when you log back in." -ForegroundColor Yellow
+                }
+                return
             }
         } else {
             Write-Diag "Using pre-existing 'archlinux' as import source"
