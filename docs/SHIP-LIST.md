@@ -307,11 +307,43 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       IMMEDIATE FIX (given to the user): delete the two `_RANDOM_BOTS` lines from
       the override, then `docker compose up -d` (NOT restart — restart reuses the
       old container's environment).
-      STILL TO DO: (a) stop the installer writing env keys that shadow curated
-      conf rows; (b) when a conf row IS shadowed by a frozen container env, the
-      editor must say so instead of reporting a clean save — the machinery for
-      exactly this already exists for the legacy-env migration rows in
-      `config set`, so this is a matter of extending coverage, not inventing it.
+      **ROOT CAUSE FOUND 2026-07-30, and it is NOT the installer's env keys.**
+      The save path is already correct: `config set bots.population` writes the
+      conf AND removes both legacy `AC_*` env keys from
+      `docker-compose.override.yml` (pinned by `wow-config-pb.bats` "removes both
+      legacy envs", and the conf-row route does the same — "legacy env override is
+      removed and forces restart even with SOAP up"). The edit landed.
+
+      What fails is **APPLYING** it. The launcher then says "restart to apply",
+      and its restart button calls `wow_world_restart` →
+      `lifecycle::world_restart_stream` → **`docker restart -t 300
+      ac-worldserver` and nothing else** (`lifecycle.rs`, verified: no `compose
+      up` anywhere on that path). `docker restart` restarts the SAME container
+      object, and a container's environment is fixed when it is CREATED. So the
+      env keys were removed from the file, the container kept them anyway, and the
+      old value came back — exactly five times, as reported.
+
+      Two distinct kinds of apply are being conflated:
+        * a conf-FILE change needs only the worldserver process restarted →
+          `docker restart` is sufficient;
+        * an override/env change (including REMOVING a shadowing key) needs the
+          container RECREATED → `docker compose up -d`, which is what `games
+          restart` does (it goes down → up) but `world-restart` does not.
+      `config set bots.population` does BOTH kinds at once, so it needs a
+      recreate, and the UI offers the one action that cannot deliver it.
+
+      STILL TO DO: (a) have `config set`/the conf-row route report WHICH apply is
+      needed (e.g. `apply: recreate | world-restart | live`) instead of a bare
+      `restart_required: true`; (b) make the pending-restart banner choose the
+      action that can actually apply the change it just made — a recreate when an
+      env key was touched; (c) stop the installer writing env keys that shadow
+      curated conf rows in the first place
+      (`guides/wow-wotlk/install-wow-wotlk.sh`'s override sets
+      `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS`), so the migration is not needed on
+      fresh installs at all.
+      NB this also explains why the workaround that DID work was `docker compose
+      up -d` rather than a restart — that was the right instruction for the wrong
+      stated reason.
       NB a config save that silently does nothing is worse than a refusal: it
       teaches the user the product does not work.
 

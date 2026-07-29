@@ -177,6 +177,15 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "restart" ]
+  # Asserted HERE, while $output is still the envelope: the `run yq` calls below
+  # REPLACE $output, which silently turned an earlier placement of this assertion
+  # into a check against yq's stdout ("true") instead of the envelope.
+  # Removing a shadowing env key leaves the RUNNING container carrying the old
+  # value -- a container's environment is fixed at CREATE time -- so only a
+  # down->up can apply it. `restart_required:true` alone let the launcher offer
+  # `docker restart`, which cannot, and the change reverted five times on the
+  # user's VM (2026-07-29).
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "recreate" ]
   grep -q '^AiPlayerbot.MinRandomBots = 750$' "$PB"
   grep -q '^AiPlayerbot.MaxRandomBots = 750$' "$PB"
   run yq -e '.services.ac-worldserver.environment | has("AC_AI_PLAYERBOT_MIN_RANDOM_BOTS")' "$OVR"
@@ -185,6 +194,19 @@ EOF
   [ "$status" -ne 0 ]
   # unrelated env keys survive
   yq -e '.services.ac-worldserver.environment.AC_RATE_XP_KILL == "3"' "$OVR"
+}
+
+@test "a conf save with NO shadowing env only needs the world restarted, not a recreate" {
+  # The other half: without an env key in the way there is nothing baked into the
+  # container, so the cheap restart is the honest answer. This fails if someone
+  # makes every save claim it needs a recreate, which would turn a 5-second
+  # restart into a full stack down->up for no reason.
+  _seed_pb
+  printf 'services:\n  ac-worldserver:\n    environment:\n      AC_RATE_XP_KILL: "3"\n' > "$OVR"
+  run bash "$DML" wow config set --key bots.population --value 640 --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "world-restart" ]
 }
 
 @test "config list shows a still-present legacy env value for a conf row (truthful pre-migration read)" {

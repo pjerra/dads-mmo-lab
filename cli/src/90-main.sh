@@ -2959,9 +2959,30 @@ case "$cmd" in
                 envwas=true
                 CFG_CHANGED=true
               fi
-              applied="none"; rreq=false
+              applied="none"; rreq=false; applyneed="none"
               if [[ "$CFG_CHANGED" == true ]]; then
                 applied="restart"; rreq=true
+                # WHICH restart can actually apply this. A bare
+                # `restart_required:true` was not enough information, and the gap
+                # cost a real bug: the launcher's restart button calls
+                # world-restart, i.e. `docker restart -t 300 ac-worldserver`,
+                # which restarts the SAME container -- and a container's
+                # environment is fixed when it is CREATED. So when a save REMOVES
+                # a legacy AC_* env key that was shadowing this conf row, the file
+                # ends up correct, the container keeps the old value anyway, and
+                # the user watches the change revert (found live on the Bot World
+                # page, five times, 2026-07-29).
+                #
+                # `envwas` already records that an env key was present and
+                # removed, so this needs no docker call: removing an env key means
+                # the container must be RECREATED -- the down->up that `games
+                # restart` performs -- not merely restarted.
+                # NB do NOT "fix" this by adding `compose up -d` to world-restart:
+                # recreation stops the container on compose's short default
+                # timeout, and `-t 300` exists precisely so the world can save
+                # every character first.
+                applyneed="world-restart"
+                if [[ "$envwas" == true ]]; then applyneed="recreate"; fi
                 # Live-apply only for modules with a VERIFIED reload console
                 # command (currently mod-transmog's `transmog reload`), and
                 # only when no legacy env still beats the conf -- in the
@@ -2974,11 +2995,14 @@ case "$cmd" in
                 fi
                 if [[ -n "$reloadcmd" && "$envwas" == false ]]; then
                   if soap_exec "$reloadcmd" >/dev/null 2>&1; then
-                    applied="live"; rreq=false
+                    applied="live"; rreq=false; applyneed="none"
                   fi
                 fi
+                # The frozen-container check above can flip envwas to true after
+                # applyneed was first set, so settle it once more here.
+                if [[ "$envwas" == true && "$applied" != live ]]; then applyneed="recreate"; fi
               fi
-              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\",\"apply_needed\":\"$applyneed\"}"
               exit 0
             fi
             row="$(_cfg_rows | grep -F "$key|" | head -1)" || true
@@ -3088,16 +3112,25 @@ case "$cmd" in
                   if _cfg_env_frozen "$ename"; then envwas=true; break; fi
                 done
               fi
-              applied="none"; rreq=false
+              applied="none"; rreq=false; applyneed="none"
               if [[ "$CFG_CHANGED" == true ]]; then
                 applied="restart"; rreq=true
+                # See the twin comment on the direct conf route: a bare
+                # restart_required could not distinguish "restart the world
+                # process" from "the container must be RECREATED", and the
+                # launcher's restart button can only do the former -- so a save
+                # that removed a shadowing AC_* env key silently reverted. When
+                # envwas is true (the key was in the override, or is still frozen
+                # into the running container) only a down->up can apply this.
+                applyneed="world-restart"
+                if [[ "$envwas" == true ]]; then applyneed="recreate"; fi
                 if [[ ( "$conf_file" == "worldserver.conf" || "$conf_file" == "mod_ahbot.conf" ) && "$envwas" == false ]]; then
                   if soap_exec "reload config" >/dev/null 2>&1; then
-                    applied="live"; rreq=false
+                    applied="live"; rreq=false; applyneed="none"
                   fi
                 fi
               fi
-              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\"}"
+              json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$rreq,\"applied\":\"$applied\",\"apply_needed\":\"$applyneed\"}"
             else
               _cfg_env_write "$env" "$value"
               json_ok "{\"changed\":$CFG_CHANGED,\"restart_required\":$CFG_CHANGED}"
