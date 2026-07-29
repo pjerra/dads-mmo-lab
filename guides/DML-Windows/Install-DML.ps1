@@ -1906,7 +1906,12 @@ esac
         $exit10 = Invoke-WslBash -Distro $DmlDistroName -User root -Label 'phase3' -Script @"
 set -euo pipefail
 echo "[phase3] Installing core dependencies..."
-pacman -S --noconfirm --needed base-devel git curl jq
+# go-yq, NOT jq-only: `dml wow config` (the launcher's config editor) and
+# `dml wow soap-setup` both hard-require yq and fail with MISSING_DEP
+# without it. Found on a clean VM 2026-07-29 -- the config editor was dead
+# on a fresh install, AND the missing dep blocked its own remedy, since
+# soap-setup is what turns SOAP on.
+pacman -S --noconfirm --needed base-devel git curl jq go-yq
 
 echo "[phase3] Installing dml CLI..."
 # NEVER downgrade. This script embeds a BOOTSTRAP CLI (v2.6.0) purely so a

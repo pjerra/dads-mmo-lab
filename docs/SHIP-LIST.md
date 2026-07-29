@@ -254,6 +254,28 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
         change, and two read as if they pin the reordering. Worth relabelling
         so nobody mistakes them for coverage.
 
+- [ ] **4.0e — A FRESH INSTALL PRODUCES A SERVER THE LAUNCHER CANNOT TALK TO.**
+      Found on the clean VM, 2026-07-29, and it is a two-bug chain:
+      1. The title installer leaves `SOAP.IP = "127.0.0.1"`, i.e. SOAP bound to
+         the CONTAINER's own loopback. Publishing the port cannot help — nothing
+         outside the container can reach it. The server runs perfectly and every
+         SOAP feature (status, GM tools, My Party, Console) is dead. The status
+         card then blames Docker networking, which will never fix it.
+      2. The remedy, `dml wow soap-setup` (it sets `AC_SOAP_IP=0.0.0.0` and pins
+         the published port), hard-requires `yq` — which NOTHING installs. The
+         installer's pacman line has `jq`, not `go-yq`. So the bug blocks its
+         own fix, and the error tells the user to run pacman by hand in a
+         product whose premise is that they never open a terminal.
+      FIXED SO FAR: `go-yq` added to Install-DML.ps1's phase3 (fresh installs).
+      STILL TO DO: (a) make the title install enable SOAP itself so no
+      post-install step is needed at all; (b) have the launcher's backend
+      provisioning ensure `yq`, since that is what reaches EXISTING installs —
+      the installer only helps new ones (same lesson as the dml-start.sh
+      boot-loop finding); (c) stop the soap_unreachable card blaming Docker when
+      the real cause is that SOAP was never reachable in the first place.
+      The new native compose generator already prevents this class by shipping
+      SOAP enabled and bound to 0.0.0.0 by default.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
