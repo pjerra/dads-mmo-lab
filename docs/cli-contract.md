@@ -64,9 +64,9 @@ Rules:
 ## 2. NDJSON streams
 
 Long-running commands print an NDJSON event stream instead of one envelope: one compact JSON
-object per line, flushed per line. Exactly 14 subcommands stream (marked in the command table):
-`start`, `stop`, `restart`, `backup create`, `backup restore`, `docker-clean`, `bots-flush`,
-`games-remove`, `self-update`, `module install`, `module remove`, `module update`,
+object per line, flushed per line. Exactly 15 subcommands stream (marked in the command table):
+`start`, `stop`, `restart`, `install-native`, `backup create`, `backup restore`, `docker-clean`,
+`bots-flush`, `games-remove`, `self-update`, `module install`, `module remove`, `module update`,
 `module rebuild`, `party preset-load`.
 
 Event vocabulary (one verbatim wire example each, Rust key order):
@@ -213,6 +213,7 @@ prints them.
 | `accountwide set` | `<KEY>` (e.g. `ENABLE_ACCOUNTWIDE_MOUNTS`) `<on\|off>` `[--variant <V>]` (for the reputation pick-one) | envelope | Flip one account-wide sharing flag |
 | `commands` | — | envelope | The in-game `.` commands cheat sheet (`NOT_FOUND` if the server is not installed) |
 | `install` | `[ID]` (positional, default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`) | passthrough | Interactively install a title — stdio passthrough, no envelope on success |
+| `install-native` | `[--id <ID>]` (default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`, else `BAD_ID`) `[--allow-underspec]` | stream | Install the WoW server natively on Docker Desktop, no WSL — resumable |
 
 Not yet documented: the `data` payload schema of each command's ok envelope (known payloads:
 `version` as above; `lan` and `console` return `{"result": "<text>"}` on success).
@@ -278,6 +279,71 @@ only on failure paths (exit 1): `BAD_ID` (before anything runs); `INSTALL_PREREQ
 `INSTALL_WAIT_FAILED` `the installer started but could not be waited on: {e}`. On success the
 process exits with the installer's own exit code (`status.code().unwrap_or(1)` — a signal-killed
 child maps to 1).
+
+### `install-native` (the native Route A install)
+
+`dml-wow install-native` builds a WoW server on Docker Desktop with **no WSL distro anywhere**. It
+is a normal streaming subcommand (unlike `install`, which is the interactive WSL passthrough above
+and is unchanged). **Native-only by design, and it has no bash mirror**: bash's
+`_installers_supported()` (`cli/src/80-titles.sh`) deliberately refuses on Windows because the six
+title installers under `guides/*/install-*.sh` are Linux scripts, so there is nothing to mirror.
+
+Stages, in the order they run — each is one `section_start`/`section_end` pair using these exact
+names:
+
+| Section | What it does |
+|---|---|
+| `preflight` | Hardware/prereq gate: docker reachable, git present, Docker Hub reachable, RAM/CPU and free disk on **both** the games-dir drive and Docker's data-root drive |
+| `guard` | Refuses to generate over a compose file DML did not write; refuses when another stack owns the `ac-*` container names |
+| `clone-core` | `git clone --config core.autocrlf=input --branch Playerbot` of the playerbots AzerothCore fork into the title dir (not shallow) |
+| `clone-module` | The same for `mod-playerbots`, `--depth 1`, into `<title>/modules/mod-playerbots` |
+| `generate-compose` | Writes the three compose files (`composegen`); SOAP is **on** by default |
+| `build` | `docker compose -f <base> -f <override> -f <build> build`, streamed and teed to `<title>/logs/build-<UTC ts>.log` |
+| `up` | `docker compose up -d` (**no** `-f`, so the build overlay cannot be reloaded later) |
+| `ready` | Polls the compose-**project**-scoped worldserver container's logs for the ready marker, with the boot-loop watch armed; default cap 30 min, poll 10 s |
+
+Terminal `done` data: `{"id":…,"title_dir":…,"project":…,"resumed":<bool>}`.
+
+**Resumability.** Progress is recorded in `.dml-install.json` in the title dir (`version: 1`),
+written **only after** a stage actually completed, so an interrupted stage simply re-runs. The file
+is bound to its directory by an install id derived from the absolute path — a state file that is
+absent, unreadable, of another version, or **copied from another directory** is ignored entirely,
+and the stages then fall back to on-disk evidence (an existing checkout with the right `origin`, a
+built worldserver image). `preflight` and `guard` are never recorded: a guard a resume skips is not
+a guard. Re-running after a cancelled build is cheap because Docker's BuildKit layer cache — not
+this command — is what recovers the compilation that already finished.
+
+Error codes (all exit 1, all arriving as in-stream terminal `error` events unless noted):
+
+| Code | When |
+|---|---|
+| `BAD_ID` | the `--id` rule, as a bare **envelope** before the stream opens |
+| `BAD_ARG` | the engine's own stricter id rule (also refuses `.` and `..`), before any stage opens |
+| `INSTALL_DOCKER_UNREACHABLE` | preflight: the Docker engine did not answer |
+| `INSTALL_GIT_MISSING` | preflight: no `git` found |
+| `INSTALL_UNDERSPEC` | preflight: below the RAM/disk floor — the one refusal `--allow-underspec` downgrades to a warning (which still carries the numbers) |
+| `INSTALL_COMPOSE_EXISTS` | a compose file DML did not generate is already in the title dir |
+| `INSTALL_STACK_CONFLICT` | another compose project owns an `ac-*` container name |
+| `INSTALL_DIR_NOT_EMPTY` | the clone destination exists and holds files that are not ours |
+| `INSTALL_WRONG_REMOTE` | an existing checkout points at a different repository |
+| `INSTALL_CLONE_FAILED` / `INSTALL_BUILD_FAILED` / `INSTALL_UP_FAILED` | that stage's command failed |
+| `INSTALL_READY_TIMEOUT` | the world did not report ready in time (the containers are left running) |
+
+Two behaviours a consumer should not mistake for bugs:
+
+- **A `docker ps` that cannot answer is not a conflict.** The stack-name guard warns and proceeds
+  rather than refusing, because docker failing to answer is evidence of nothing — refusing on it
+  would block installs on a slow engine, and asserting "no conflict" would race one.
+- **The boot-loop `warn` is advisory only.** It never changes the outcome or the exit code.
+
+The `ac-*` container names are global to the Docker **engine**, not per compose project, so exactly
+one generated stack can exist per PC; `INSTALL_STACK_CONFLICT` says so in those words. Making them
+per-install is a recorded follow-up, not this command's job.
+
+**Not yet wired into the launcher.** Today `install-native` is reachable only by running the
+`dml-wow` binary directly; the Library-page flow that drives it is a separate task. The bash copy in
+`games install`'s Windows refusal already points at this command, so keep that in mind when reading
+it as a user-facing promise.
 
 ### Deliberately not ported
 
@@ -380,13 +446,15 @@ settings: `DML_GAMES_DIR` whenever the process cwd is not the games directory; `
 | `DML_WOWHEAD_BASE` | `https://nether.wowhead.com` | `item-info` fetch base; every fetch degrades gracefully — never required. |
 | `DML_ZAMIMG_BASE` | `https://wow.zamimg.com` | `item-info` icon base. |
 | `DML_WOWHEAD_XML_BASE` | `https://www.wowhead.com` | `item-info` XML base. |
+| `DML_GIT` | first existing absolute candidate, else bare `git` off PATH | The `git` used by `install-native`'s clones and by the preflight's git probe. The fallbacks are deliberate: Git for Windows can be installed without modifying PATH, and refusing an install because a perfectly present git is not on PATH would be a fabricated refusal. **An earlier version of this document stated that no such override existed — that was wrong.** |
+| `DML_TS_UP_TIMEOUT` | `45s` | How long `tailscale up` may wait for the login to be answered, on **both** surfaces. 45s is measured, not guessed: a live control plane took 30s to return the auth URL while the old 8s default gave up first, so the user got a timeout instead of the URL. Bash passes the value straight to `--timeout=`, so it must carry a unit (`45s`, `2m`) — a bare `90` is rejected by Go's duration parser. The native side additionally caps it (a value large enough to overflow the outer process bound is ignored in favour of the default). |
 | `USERPROFILE` / `HOME` | — | At least one required for any `~/.dml` feature (`USERPROFILE` wins when both set). Both unset: `item-info` errors `INTERNAL` `Could not resolve the wowhead cache directory`; `soap.env` is skipped (SOAP falls back to env/defaults). |
 | `LOCALAPPDATA`, `ProgramFiles`, `ProgramFiles(x86)` | — | Only build the docker.exe / Docker Desktop.exe discovery candidate lists; missing vars just shrink the list. |
 | `PATH` | — | Resolved docker bin dir is prepended for spawned children (so docker + credential helpers resolve); `install`'s preflight walks PATH manually for bare `bash` (with `.exe` fallback on Windows, **no PATHEXT** — fails closed). |
 
 Not read by the Rust CLI crates: `DML_YQ_BIN` and `DML_AWK` (parity-test harnesses and the
 launcher only), `DML_LUA_DIR` (deliberately not ported — the lua root derives from
-`DML_SCRIPT`). `git` is a hardcoded bare `git` off PATH — no `DML_GIT` override exists.
+`DML_SCRIPT`).
 
 Title/DB/SOAP configuration is env-vars only, deliberately: no config file and no CLI flags for
 any of it.

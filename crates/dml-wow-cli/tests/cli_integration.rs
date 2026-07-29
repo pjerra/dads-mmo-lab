@@ -1944,3 +1944,107 @@ fn install_reports_install_spawn_failed_for_a_non_executable_bash() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------------
+// install-native — the Route A engine's CLI surface
+// ---------------------------------------------------------------------------
+
+/// The refusal that exists so nobody loses three hours: `install-native` asks
+/// the machine BEFORE it clones anything, and a Docker engine it cannot reach
+/// stops the run at the very first stage — exit 1 on a terminal `error` event,
+/// with nothing created on disk.
+///
+/// Hermetic by construction, which matters more here than anywhere else in this
+/// file, because this command's happy path clones gigabytes and then compiles
+/// for hours:
+///
+/// * `DML_DOCKER` and `DML_GIT` both name a path that does not exist, so every
+///   spawn dies at `CreateProcess`. Even a regression that skipped the preflight
+///   outright could not reach the network or start a build from this test.
+/// * the proxy vars name a dead local port, so the preflight's Docker Hub probe
+///   fails locally instead of reaching the real registry. That probe is
+///   warn-only and cannot change this verdict (`preflight::decide`: docker
+///   outranks everything), so pinning it costs the test no coverage — it just
+///   stops a unit test from depending on the internet.
+#[test]
+fn install_native_refuses_an_unreachable_docker_before_it_creates_anything() {
+    let s = Sealed::new("installnative");
+    let missing = s.root.join("no-such-program-9f8e7d.exe");
+    let out = s
+        .cmd(&["install-native", "--id", "wow-test"])
+        .env("DML_DOCKER", &missing)
+        .env("DML_GIT", &missing)
+        .env("HTTPS_PROXY", "http://127.0.0.1:1")
+        .env("HTTP_PROXY", "http://127.0.0.1:1")
+        .output()
+        .expect("spawn dml-wow install-native");
+
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l:?}")))
+        .collect();
+
+    assert_eq!(out.status.code(), Some(1), "stdout: {stdout}");
+    let last = events.last().unwrap_or_else(|| panic!("no events at all: {stdout:?}"));
+    assert_eq!(last["event"], "error", "the stream must END on a terminal event: {stdout}");
+    assert_eq!(last["error"]["code"], "INSTALL_DOCKER_UNREACHABLE", "{last}");
+
+    // The documented NDJSON vocabulary, and the order: the preflight section
+    // opens first and closes as an error before any other stage exists.
+    assert_eq!(events[0]["event"], "section_start", "{stdout}");
+    assert_eq!(events[0]["name"], "preflight", "{stdout}");
+    assert!(
+        events.iter().any(|e| {
+            e["event"] == "section_end" && e["name"] == "preflight" && e["status"] == "error"
+        }),
+        "{stdout}"
+    );
+    assert!(
+        !events.iter().any(|e| e["name"] == "clone-core" || e["name"] == "build"),
+        "no stage past the preflight may even open: {stdout}"
+    );
+
+    // The whole point of a preflight: it costs nothing and leaves nothing.
+    assert!(
+        !s.root.join("games").join("wow-test").exists(),
+        "a refused install must not create the title dir"
+    );
+
+    let _ = fs::remove_dir_all(&s.root);
+}
+
+/// Both id guards, which report through DIFFERENT surfaces on purpose.
+///
+/// `../escape` fails the CLI's `valid_game_id` (it contains a separator), so it
+/// is one ordinary BAD_ID envelope and no stream is ever opened. `..` PASSES
+/// that rule — it is only dots, and the rule mirrors the launcher's warts and
+/// all — and is caught by the engine's stricter `valid_title_id`, which reports
+/// BAD_ARG as a terminal stream event. Either way nothing is spawned, so a
+/// traversal id can never reach a path join; this test fails if either layer is
+/// removed on the assumption that the other one covers it.
+#[test]
+fn install_native_refuses_a_traversal_id_at_both_layers_without_spawning_anything() {
+    let s = Sealed::new("installnativeid");
+
+    let (code, lines) = s.run_lines(&["install-native", "--id", "../escape"]);
+    assert_eq!(code, 1, "{lines:?}");
+    assert_eq!(lines.len(), 1, "one envelope, no stream opened: {lines:?}");
+    assert!(lines[0]["event"].is_null(), "an envelope, not a stream event: {}", lines[0]);
+    assert_eq!(lines[0]["ok"], false, "{}", lines[0]);
+    assert_eq!(lines[0]["error"]["code"], "BAD_ID", "{}", lines[0]);
+
+    let (code, lines) = s.run_lines(&["install-native", "--id", ".."]);
+    assert_eq!(code, 1, "{lines:?}");
+    let last = lines.last().unwrap_or_else(|| panic!("no events: {lines:?}"));
+    assert_eq!(last["event"], "error", "the engine's own guard reports in-stream: {last}");
+    assert_eq!(last["error"]["code"], "BAD_ARG", "{last}");
+    // It refuses BEFORE the preflight, so not even a section is opened.
+    assert!(
+        !lines.iter().any(|l| l["event"] == "section_start"),
+        "the id is checked before any stage begins: {lines:?}"
+    );
+
+    let _ = fs::remove_dir_all(&s.root);
+}

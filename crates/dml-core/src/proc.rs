@@ -289,9 +289,41 @@ pub fn run_streamed_unbounded(
     log_path: &Path,
     mut on_line: impl FnMut(&str),
 ) -> Option<std::process::ExitStatus> {
+    use std::io::Write;
     let mut log_file = std::fs::File::create(log_path).ok()?;
+    // The tee is the ONLY thing this wrapper adds; the supervision itself lives
+    // in [`run_streamed_lines`] so a caller that wants the same unbounded,
+    // both-pipes-drained streaming WITHOUT a log file (the native install
+    // engine's git/docker probes) does not have to reimplement it — or invent a
+    // scratch file per probe just to satisfy this signature.
+    run_streamed_lines(program, args, Some(cwd), |line| {
+        let _ = writeln!(log_file, "{line}");
+        let _ = log_file.flush();
+        on_line(line);
+    })
+}
+
+/// [`run_streamed_unbounded`] without the tee, and with an OPTIONAL working
+/// directory (`None` inherits this process's — which is what a call whose
+/// arguments are all absolute wants, and what keeps a probe from failing merely
+/// because some directory does not exist yet).
+///
+/// Same contract as its tee-ing wrapper, and for the same reasons: deliberately
+/// unbounded (no timeout, no `kill()` — a first-time AzerothCore build runs for
+/// hours), both pipes drained concurrently by their own threads so the child can
+/// never block on a full OS pipe, and `None` returned ONLY on a spawn failure —
+/// which is a could-not-tell, never an exit code.
+pub fn run_streamed_lines(
+    program: &OsStr,
+    args: &[&str],
+    cwd: Option<&Path>,
+    mut on_line: impl FnMut(&str),
+) -> Option<std::process::ExitStatus> {
     let mut cmd = Command::new(program);
-    cmd.args(args).current_dir(cwd);
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
     windows_no_window(&mut cmd);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
@@ -303,12 +335,9 @@ pub fn run_streamed_unbounded(
     let out_handle = std::thread::spawn(move || stream_reader(stdout, tx));
     let err_handle = std::thread::spawn(move || stream_reader(stderr, tx_err));
 
-    use std::io::Write;
     // Ends when BOTH reader threads have dropped their `Sender` (EOF on both
     // pipes) — not on any timer.
     while let Ok(line) = rx.recv() {
-        let _ = writeln!(log_file, "{line}");
-        let _ = log_file.flush();
         on_line(&line);
     }
 

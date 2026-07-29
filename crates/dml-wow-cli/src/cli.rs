@@ -355,6 +355,33 @@ pub enum Cmd {
         #[arg(default_value = dml_wow::config::TITLE)]
         id: String,
     },
+    /// Install a WoW server NATIVELY on Docker Desktop, with no WSL distro
+    /// anywhere — STREAMS NDJSON events, and is RESUMABLE: run it again after
+    /// a cancel, a crash or a reboot and it continues from the first stage
+    /// that did not finish (Docker's build cache does the rest).
+    ///
+    /// Distinct from `install`, which stays exactly as it was: the
+    /// interactive WSL/Linux route, stdio passthrough, no envelope. This one
+    /// is native-only BY DESIGN and has no bash mirror — bash's
+    /// `_installers_supported()` deliberately refuses on Windows.
+    ///
+    /// `--id` rather than `install`'s positional argument: this command is
+    /// what `start`/`stop`/`restart` follow on from, and they all name their
+    /// title with `--id`.
+    InstallNative {
+        /// Title id — ALSO the directory name created under `DML_GAMES_DIR`,
+        /// which is why it is validated (`run.rs::valid_game_id`) before it is
+        /// joined onto anything. The engine re-checks it with a stricter rule
+        /// that additionally refuses `.` and `..`.
+        #[arg(long, default_value = dml_wow::config::TITLE)]
+        id: String,
+        /// Install even though this PC is below the recommended hardware
+        /// floor. Only ever downgrades the RAM/disk refusals to warnings that
+        /// still carry their numbers; it can never clear the Docker or git
+        /// refusals, because no amount of insisting makes up for those.
+        #[arg(long)]
+        allow_underspec: bool,
+    },
 }
 
 /// `dml-wow cache …` — `dml_wow::cachestatus`.
@@ -1933,5 +1960,52 @@ mod tests {
             other => panic!("expected Install, got {other:?}"),
         }
         assert!(Cli::try_parse_from(["dml-wow", "install", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn parses_install_native_and_leaves_the_wsl_install_route_alone() {
+        match Cli::try_parse_from(["dml-wow", "install-native"]).unwrap().command {
+            Cmd::InstallNative { id, allow_underspec } => {
+                assert_eq!(id, "wow-server-playerbots");
+                assert!(!allow_underspec, "the hardware floor is ON unless asked otherwise");
+            }
+            other => panic!("expected InstallNative, got {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "dml-wow",
+            "install-native",
+            "--id",
+            "wow-test",
+            "--allow-underspec",
+        ])
+        .unwrap()
+        .command
+        {
+            Cmd::InstallNative { id, allow_underspec } => {
+                assert_eq!(id, "wow-test");
+                assert!(allow_underspec);
+            }
+            other => panic!("expected InstallNative, got {other:?}"),
+        }
+        // A malformed id still PARSES — `run.rs`'s `valid_game_id` (and then the
+        // engine's stricter `valid_title_id`) is what refuses it.
+        match Cli::try_parse_from(["dml-wow", "install-native", "--id", "../escape"])
+            .unwrap()
+            .command
+        {
+            Cmd::InstallNative { id, .. } => assert_eq!(id, "../escape"),
+            other => panic!("expected InstallNative, got {other:?}"),
+        }
+        // The id is a FLAG here, not a positional: a bare word is a usage error
+        // rather than a silently-installed title of that name.
+        assert!(Cli::try_parse_from(["dml-wow", "install-native", "wow-test"]).is_err());
+
+        // The two routes must stay separate commands. This fails if anyone
+        // "unifies" them, which would put the interactive WSL passthrough
+        // behind the native name (or vice versa) with no other test noticing.
+        assert!(matches!(
+            Cli::try_parse_from(["dml-wow", "install"]).unwrap().command,
+            Cmd::Install { .. }
+        ));
     }
 }

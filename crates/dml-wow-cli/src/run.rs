@@ -787,6 +787,43 @@ pub fn dispatch(command: Cmd) -> i32 {
         }
 
         Cmd::Install { id } => cmd_install(&id),
+
+        Cmd::InstallNative { id, allow_underspec } => {
+            // GUARD, same as the lifecycle arms: the id before anything joins
+            // it onto `DML_GAMES_DIR`. The engine carries its own STRICTER
+            // check (`install_native::valid_title_id` also refuses `.`/`..`,
+            // which this launcher-mirroring rule deliberately allows), so a
+            // traversal id is refused either way — this one just refuses it
+            // with the launcher's exact BAD_ARG copy.
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // NOT `games_dir_from_env()`: that falls back to the process's cwd,
+            // which is harmless for the reading commands that use it and wrong
+            // for one that clones gigabytes. `games_dir_for_install` refuses
+            // instead, and the rule lives in the library so the launcher cannot
+            // reintroduce the cwd default when it wires this up.
+            let games_dir = match dml_wow::install_native::games_dir_for_install() {
+                Ok(d) => d,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let mut opts = dml_wow::install_native::InstallOpts::new(&id, games_dir);
+            opts.allow_underspec = allow_underspec;
+            // The engine's own `i32` is DISCARDED on purpose: every streaming
+            // arm in this file takes its exit code from the terminal-event
+            // tracker, so that a consumer which truncates the stream can never
+            // see exit 0 without a terminal event. The engine always emits one
+            // (`done` or `error`), so the two agree — and the tracker stays the
+            // single source of that truth.
+            stream_dispatch(|emit| {
+                let _ = dml_wow::install_native::install_native_stream_with(
+                    &dml_wow::install_native::ProcIo::from_env(),
+                    &opts,
+                    emit,
+                );
+            })
+        }
     }
 }
 
