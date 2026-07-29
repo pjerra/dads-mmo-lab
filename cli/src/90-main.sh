@@ -1557,6 +1557,14 @@ case "$cmd" in
         fi
         tdir="$GAMES_DIR/$gid"; [[ -d "$tdir" ]] || tdir="$HOME/$gid"
         tcompose="$(_resolve_compose_dir "$tdir/")"
+        # An image this title actually uses, captured BEFORE anything is
+        # deleted: _rm_title_tree prefers it for the root-owned cleanup because
+        # a title's own image is certain to be pulled. With --remove-images it
+        # may be gone by then, and the helper falls back to any local image.
+        rmimg_first=""
+        if [[ -n "$tcompose" ]]; then
+          rmimg_first="$(_compose_server_images "$tcompose" 2>/dev/null | head -n1 || true)"
+        fi
         if [[ -n "$tcompose" ]]; then
           ndjson_line info "stopping $gid..."
           (cd "$tcompose" && docker compose down >/dev/null 2>&1) || true
@@ -1622,20 +1630,48 @@ case "$cmd" in
               ndjson_line warn "could not remove image $_img (in use by another title, or already gone)"
             fi
           done < <(_compose_server_images "$tcompose")
-          [[ "$rmimg_count" -eq 0 ]] && ndjson_line info "no server images to remove"
+          # `if`, NOT `[[ ... ]] && cmd`. As the LAST statement of this branch,
+          # the && form returns 1 whenever the test is false -- i.e. whenever
+          # images WERE removed -- which makes the whole `if` return 1 and
+          # `set -e` kill the script on the spot. The removal then died here,
+          # after deleting images but BEFORE deleting the title directory,
+          # emitting no terminal event: the launcher showed CLI_CRASH and the
+          # title stayed half-removed. It only ever fired on SUCCESS, which is
+          # why it survived every test that removed nothing.
+          # Found on a clean VM removing MapleStory, 2026-07-28.
+          if [[ "$rmimg_count" -eq 0 ]]; then
+            ndjson_line info "no server images to remove"
+          fi
         elif [[ "$rmimages" != 1 && -n "$tcompose" ]]; then
           ndjson_line info "kept the downloaded server images for a faster reinstall (use --remove-images to delete them)"
         fi
         # ---------------------------------------------------------------------
+        # Every delete below goes through _rm_title_tree, which copes with
+        # container-owned files (a bind-mounted DB dir belongs to the image's
+        # uid, not to us) and REPORTS rather than dying. A bare `rm -rf` here
+        # returned non-zero on those files and `set -e` killed the arm
+        # mid-delete with no terminal event -- see _rm_title_tree's comment.
+        rmfail=""
         if [[ -L "$GAMES_DIR/$gid" ]]; then
           ttarget="$(readlink -f "$GAMES_DIR/$gid" 2>/dev/null || true)"
-          rm -f "$GAMES_DIR/$gid"
-          [[ -n "$ttarget" && -d "$ttarget" ]] && rm -rf "$ttarget"
+          rm -f "$GAMES_DIR/$gid" 2>/dev/null || true
+          if [[ -n "$ttarget" && -d "$ttarget" ]]; then
+            _rm_title_tree "$ttarget" "$rmimg_first" || rmfail+="$ttarget "
+          fi
         elif [[ -d "$GAMES_DIR/$gid" ]]; then
-          rm -rf "$GAMES_DIR/$gid"
+          _rm_title_tree "$GAMES_DIR/$gid" "$rmimg_first" || rmfail+="$GAMES_DIR/$gid "
         fi
-        [[ -d "$HOME/$gid" ]] && rm -rf "$HOME/$gid"
-        [[ -n "$tlauncher" ]] && rm -f "$HOME/$tlauncher"
+        if [[ -d "$HOME/$gid" ]]; then
+          _rm_title_tree "$HOME/$gid" "$rmimg_first" || rmfail+="$HOME/$gid "
+        fi
+        if [[ -n "$tlauncher" && -e "$HOME/$tlauncher" ]]; then
+          rm -f "$HOME/$tlauncher" 2>/dev/null || rmfail+="$HOME/$tlauncher "
+        fi
+        if [[ -n "$rmfail" ]]; then
+          ndjson_section_end games-remove error
+          ndjson_error REMOVE_FAILED "Could not fully remove $gid" "Left behind: ${rmfail% }. Some files belong to a container user (a bind-mounted database directory). Delete them as root, e.g. from Windows: wsl -d dml-arch -u root -- rm -rf ${rmfail%% *}"
+          exit 1
+        fi
         ndjson_line info "removed (backups under ~/.dml are kept)"
         ndjson_section_end games-remove ok
         ndjson_done "{\"id\":\"$(json_escape "$gid")\",\"removed\":true}"

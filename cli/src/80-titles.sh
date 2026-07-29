@@ -63,3 +63,46 @@ _title_server_dir() {
 _title_installed() {
     [[ -d "$GAMES_DIR/$1" || -d "$HOME/$1" ]]
 }
+
+# Delete a title tree that may contain CONTAINER-OWNED files.
+#
+# A bind-mounted database directory belongs to the image's own user (mysql
+# writes as uid 999), so a plain user-level `rm -rf` deletes what it can, hits
+# EPERM on the rest, and returns non-zero. Under `set -eu` that killed the
+# whole removal MID-DELETE, after the games/ symlink was gone but before the
+# real directory, the launcher script, or any terminal event -- the launcher
+# showed CLI_CRASH and the title could never be removed, because every retry
+# failed identically. Found removing MapleStory on a clean VM, 2026-07-29:
+# ~/maplestory-server/database/docker-db-data was owned by uid 999.
+#
+# So: try as the user, and if anything survives, delete as root INSIDE a
+# container with the parent bind-mounted. That needs no sudo and no new
+# dependency -- we are removing a docker-based title, so a docker daemon is
+# definitionally available. Any locally-present image will do; `$2` lets the
+# caller pass one it knows exists (the title's own), and we fall back to
+# whatever is already pulled rather than reaching for the network.
+#
+# Returns 0 only when the path is really gone, so the caller can report an
+# honest failure instead of dying.
+_rm_title_tree() {
+    local target="$1" preferred="${2:-}"
+    [[ -n "$target" && -e "$target" ]] || return 0
+
+    rm -rf "$target" 2>/dev/null || true
+    [[ -e "$target" ]] || return 0
+
+    local parent base img
+    parent="$(cd "$(dirname "$target")" 2>/dev/null && pwd)" || return 1
+    base="$(basename "$target")"
+    [[ -n "$parent" && -n "$base" && "$base" != "/" && "$base" != "." ]] || return 1
+
+    for img in "$preferred" $(docker image ls --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v '<none>' | head -3); do
+        [[ -n "$img" ]] || continue
+        # --rm so the helper never lingers; the mount is the PARENT so the
+        # container removes a child path and can never be handed "/".
+        if docker run --rm -v "$parent:/dml-rm" "$img" rm -rf "/dml-rm/$base" >/dev/null 2>&1; then
+            [[ -e "$target" ]] || return 0
+        fi
+    done
+    [[ ! -e "$target" ]]
+}

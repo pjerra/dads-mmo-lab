@@ -347,3 +347,41 @@ EOF
   [ "$status" -eq 0 ]
   grep -q '^image rm acore/ac-wotlk-worldserver:v1.2.3$' "$FIXTURE/calls.log"
 }
+
+# --- undeletable files (found on a clean VM, 2026-07-29) --------------------
+# A bind-mounted database directory belongs to the image's user (mysql writes
+# as uid 999), so a user-level `rm -rf` cannot delete it. That returned
+# non-zero and `set -e` killed the removal MID-DELETE: the games/ symlink was
+# gone, the real directory was half-emptied, and NO terminal event was emitted
+# -- the launcher reported CLI_CRASH and every retry failed identically.
+# Simulated here with a read-only parent directory, which produces the same
+# EPERM without needing a container.
+
+@test "games remove: an undeletable file reports REMOVE_FAILED instead of crashing" {
+  mkdir -p "$FIXTURE/maplestory-server/database/docker-db-data"
+  echo data > "$FIXTURE/maplestory-server/database/docker-db-data/ibdata1"
+  # Read-only dir => its entries cannot be unlinked, exactly like root-owned
+  # container files for an unprivileged user.
+  chmod 500 "$FIXTURE/maplestory-server/database/docker-db-data"
+
+  run bash "$DML" games remove maplestory-server --yes --json
+  chmod 700 "$FIXTURE/maplestory-server/database/docker-db-data" || true
+
+  # The load-bearing assertion: a TERMINAL event, not a silent death. Before
+  # the fix the stream ended with no done/error at all and the runner had to
+  # synthesize CLI_CRASH.
+  [ "$status" -eq 1 ]
+  echo "$output" | tail -1 | grep -q '"event":"error"'
+  echo "$output" | tail -1 | grep -q 'REMOVE_FAILED'
+  # And it must name what was left behind, so the user can finish the job.
+  echo "$output" | tail -1 | grep -q 'maplestory-server'
+}
+
+@test "games remove: a normal title still removes cleanly and reports done" {
+  mkdir -p "$FIXTURE/maplestory-server/database"
+  echo x > "$FIXTURE/maplestory-server/database/f"
+  run bash "$DML" games remove maplestory-server --yes --json
+  [ "$status" -eq 0 ]
+  echo "$output" | tail -1 | grep -q '"event":"done"'
+  [ ! -e "$FIXTURE/maplestory-server" ]
+}
