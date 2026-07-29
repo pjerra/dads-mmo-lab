@@ -98,7 +98,26 @@ This table is the single most useful artifact for the conversation in Phase 5.1.
 
 ## Phase 3 — the three sharp edges (do these while smoking, they're small)
 
-- [ ] **3.1 — Audit `unwrap()`/`expect()` in exactly three files:**
+- [x] **3.1 — DONE, and the job was far smaller than this item assumed.**
+      Audited 2026-07-29. Of ~76 `unwrap()`/`expect()` calls across the three
+      files, only **five** are in production code; the rest are inside
+      `#[cfg(test)]`, where panicking is the correct behaviour. All five are the
+      same idiom -- `child.stdout.take().expect("stdout was piped")` -- and all
+      five are provably unreachable: the `Stdio::piped()` call that guarantees
+      the handle sits TWO LINES ABOVE each one (restore.rs:148, backup.rs:728),
+      and they run before any data flows, so none can fire mid-write.
+      `backup.rs` correctly takes only the two handles it pipes (stdin is
+      `Stdio::null()`).
+      The wider check was also clean: no `panic!`, `assert!`, `unreachable!` or
+      `todo!` anywhere in those files' production paths, and every
+      `unwrap_or_else` supplies a DEFAULT VALUE rather than panicking.
+      So there is nothing to convert. Converting them would add error paths that
+      cannot be taken, for a risk that does not exist. The item's instinct was
+      right -- those three files ARE the only place a panic costs characters --
+      but the panics it feared were never there.
+      (Original item kept below for the reasoning, which is still correct.)
+
+- [ ] ~~**3.1 — Audit `unwrap()`/`expect()` in exactly three files:**~~
       `crates/dml-wow/src/restore.rs`, `destructive.rs`, `backup.rs`.
       There are ~874 across the workspace; **do not audit all of them.** Almost
       everywhere a panic is just a crash and the user restarts the app. In those
