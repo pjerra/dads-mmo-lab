@@ -173,16 +173,21 @@ itself up on anybody else's computer.** Evidence, all verified 2026-07-28:
 So today the install path is: *clone the repo, be called perzi, live at
 C:\Users\perzi.* Everything else on this list is downstream of fixing that.
 
-- [ ] **4.1 — Bundle the backend payload into the installer.** Add
-      `bundle.resources` to `tauri.conf.json`: `cli/dml`, `cli/lua/**`,
-      `guides/*/install-*.sh`. The exe must carry everything the distro needs.
-- [ ] **4.2 — Replace `dev-install.ps1` with a real command.** A Tauri
-      command that provisions the distro from the **bundled** resources
-      (resolved via Tauri's resource dir, never a hardcoded path). Same
-      `install -m` steps, no repo required. Keep `dev-install.ps1` for your own
-      dev loop if you like, but it stops being the user's route.
-- [ ] **4.3 — Fix the hint in `crates/dml-core/src/error.rs:25`.** It should
-      point at the in-app setup button, not at a dev script.
+- [x] **4.1 — DONE 2026-07-28.** `bundle.resources` in `tauri.conf.json` carries
+      `cli/dml`, `cli/lua/party`, `cli/lua/gm` and the six title installers;
+      the layout is owned by `launcher/src-tauri/src/payload.rs`, which FAILS
+      THE TEST RUN if the manifest drifts from what the code expects.
+- [x] **4.2 — DONE 2026-07-28.** `backend_setup`
+      (`launcher/src-tauri/src/provision.rs`) provisions the distro from the
+      bundled resources, streamed over the usual `Channel<Value>` TermEvent
+      seam, idempotent, and it CONSUMES the `backend_status` probe chain both
+      before and after rather than asking its own questions. `dev-install.ps1`
+      is now the dev loop only, and `provision.rs`'s
+      `dev_install_ps1_installs_the_same_destinations_at_the_same_modes` reads
+      the `.ps1` and fails when the two drift.
+- [x] **4.3 — DONE.** `crates/dml-core/src/error.rs`'s hint now names the
+      backend/distro state ("is WSL + the dml-arch distro present?" / native
+      mode's Git Bash + Docker Desktop), not a dev script.
 - [ ] **4.4 — Add a first-run screen.** Detect, in order: no `dml-arch` distro
       → no `dml` CLI in it → no titles installed. Each state gets one sentence
       and one button. A stranger must never see an empty status card with no
@@ -255,17 +260,29 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
         so nobody mistakes them for coverage.
 
 - [ ] **4.0e — A FRESH INSTALL PRODUCES A SERVER THE LAUNCHER CANNOT TALK TO.**
-      Found on the clean VM, 2026-07-29, and it is a two-bug chain:
-      1. The title installer leaves `SOAP.IP = "127.0.0.1"`, i.e. SOAP bound to
-         the CONTAINER's own loopback. Publishing the port cannot help — nothing
-         outside the container can reach it. The server runs perfectly and every
-         SOAP feature (status, GM tools, My Party, Console) is dead. The status
-         card then blames Docker networking, which will never fix it.
-      2. The remedy, `dml wow soap-setup` (it sets `AC_SOAP_IP=0.0.0.0` and pins
-         the published port), hard-requires `yq` — which NOTHING installs. The
-         installer's pacman line has `jq`, not `go-yq`. So the bug blocks its
-         own fix, and the error tells the user to run pacman by hand in a
-         product whose premise is that they never open a terminal.
+      Found on the clean VM, 2026-07-29.
+
+      **CORRECTION, 2026-07-29 (diagnosed over SSH against the live VM): item 1
+      below was WRONG and is struck out.** SOAP was reachable the whole time.
+      `docker port` showed `7878/tcp -> 127.0.0.1:7878`, the worldserver log
+      showed `Found config value 'SOAP.IP' from environment variable
+      'AC_SOAP_IP'`, and `dml wow server-info` returned **`SOAP_AUTH`** — an
+      HTTP 401, which is proof the world ANSWERED and rejected the login. The
+      `SOAP.IP = "127.0.0.1"` the user pasted was the conf-file default, already
+      overridden by the env var. Anyone acting on the struck-out theory would
+      re-plumb networking that was never broken.
+
+      **The actual cause: a fresh install has NO SOAP ACCOUNT.** `~/.dml/soap.env`
+      does not exist and the AC docker image's `admin/admin` is not usable for
+      SOAP, so every SOAP feature fails auth. Creating a GM3 account is a manual
+      worldserver-console step no button performs.
+
+      1. ~~The title installer leaves `SOAP.IP = "127.0.0.1"`, i.e. SOAP bound to
+         the CONTAINER's own loopback.~~ **DISPROVEN — see the correction above.**
+      2. The remedy, `dml wow soap-setup`, hard-requires `yq` — which NOTHING
+         installed. The installer's pacman line had `jq`, not `go-yq`. So the bug
+         blocked its own fix, and the error told the user to run pacman by hand in
+         a product whose premise is that they never open a terminal.
       FIXED SO FAR: `go-yq` added to Install-DML.ps1's phase3 (fresh installs).
       STILL TO DO: (a) make the title install enable SOAP itself so no
       post-install step is needed at all; (b) have the launcher's backend
@@ -276,13 +293,88 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       The new native compose generator already prevents this class by shipping
       SOAP enabled and bound to 0.0.0.0 by default.
 
+- [ ] **4.0f — `AC_*` env vars SILENTLY DISCARD the launcher's own config saves.**
+      Found live on the VM, 2026-07-29, and it is a release-grade honesty bug: the
+      user changed the world bot population in Bot World, saved, restarted — and
+      the old value came back, five times. Cause: the title installer's
+      `docker-compose.override.yml` sets
+      `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS: 1600/2000`, the AzerothCore image
+      applies `AC_*` env vars ON TOP of `playerbots.conf`, and the launcher's
+      editor writes the conf. So the save landed, was reported as saved, and was
+      then overridden at boot. `server-detail` even reported `bots.max: 100` from
+      the conf while the server ran 2000 — the UI and the server disagreed and
+      neither was lying about what it read.
+      IMMEDIATE FIX (given to the user): delete the two `_RANDOM_BOTS` lines from
+      the override, then `docker compose up -d` (NOT restart — restart reuses the
+      old container's environment).
+      STILL TO DO: (a) stop the installer writing env keys that shadow curated
+      conf rows; (b) when a conf row IS shadowed by a frozen container env, the
+      editor must say so instead of reporting a clean save — the machinery for
+      exactly this already exists for the legacy-env migration rows in
+      `config set`, so this is a matter of extending coverage, not inventing it.
+      NB a config save that silently does nothing is worse than a refusal: it
+      teaches the user the product does not work.
+
+- [ ] **4.0g — Tailscale "Play Together" could never complete a login.** FOUND
+      ON THE VM, 2026-07-29 — **FIXED the same day**, both surfaces,
+      mutation-verified. `tailscale up --timeout=8s` gave up before the control
+      plane answered (measured at **30s** in tailscaled's own journal), so the
+      user got "timeout waiting for Tailscale service to enter a Running state"
+      and never received the auth URL that is the entire point of the flow. Fix:
+      45s default via `DML_TS_UP_TIMEOUT`, an outer bound guaranteed to outlive
+      the inner timeout, the pending URL recovered from `tailscale status --json`
+      when `up` printed none, and the daemon-start failure REPORTED rather than
+      discarded. Full detail in the post-smoke roadmap. Not a release blocker
+      (Play Together is optional) but it was 100% broken for everyone.
+
+- [ ] **4.0h — "DOWNLOAD ONE FILE, DOUBLE-CLICK, PLAY" (user requirement,
+      2026-07-30).** The user does not want an installer: one file, fast, the
+      consumer just uses it. Related standing decision: **the launcher IS the
+      product on Windows** — CLIs and scripts are bootstrap plumbing, never the
+      user surface.
+      He asked whether a prerequisites `.ps1` could do the checking. RECOMMENDED
+      ANSWER: the logic yes, a user-facing `.ps1` no. A DOWNLOADED script is a
+      worse front door than an installer — Windows blocks downloaded scripts by
+      default, so the user must Unblock the file or type an `-ExecutionPolicy
+      Bypass` incantation, and it becomes a second artifact to keep in sync with
+      the launcher. Instead: ONE button in the launcher ("Set up my PC") that
+      probes and provisions, invoking PowerShell/DISM INTERNALLY as an
+      implementation detail. No script on disk means no execution-policy prompt.
+      Most of this already exists — `backend_status` (`dml_core::setup`) answers
+      "what is the first thing missing" and `backend_setup` (`provision.rs`)
+      provisions from bundled resources.
+      THE THREE REAL OBSTACLES, so nobody plans around a fantasy:
+      1. **The payload ships as `bundle.resources`, i.e. files NEXT TO the exe —
+         an installer concept.** A single portable exe must embed it
+         (`include_bytes!`) or fetch it on first run. This is the biggest delta.
+      2. **WebView2.** Win11 ships it; Win10 may not, and `embedBootstrapper`
+         (item 4.0) is an INSTALLER feature. A portable exe on a machine without
+         WebView2 fails exactly as the VM did. Either detect-and-offer, or accept
+         `fixedRuntime`'s ~180 MB.
+      3. **Enabling WSL/Hyper-V needs elevation AND a reboot.** A portable exe can
+         request UAC; it cannot avoid the reboot.
+      HONEST SCOPE: true one-file-double-click works today for Win11 machines that
+      already have WSL or Docker. Everyone else needs a fallback, and pretending
+      otherwise is how 4.0 and 4.0e happened. Decide the fallback before shipping
+      the portable exe, not after.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes
       v0.2.0 rather than a release blocker. (Note: 4.1/4.2 build exactly the
       plumbing Phase 6.3 needs to ship the Linux `dml-wow` binary into the
       distro later — this work is not throwaway.)
-- [ ] **4.6 — Test on a machine that has never seen DML.** A fresh Windows VM,
+- [ ] **4.6 — Test on a machine that has never seen DML. IN PROGRESS since
+      2026-07-28** on a clean Windows 11 Pro VM (Hyper-V, 2 vCPU / 4 GB, nested
+      virtualisation enabled after `ExposeVirtualizationExtensions` was turned
+      on). It has already paid for itself: EVERY blocker in 4.0-4.0g was found
+      there and NONE of them reproduced on the dev machine. Reached so far:
+      installer → distro → WoW WotLK installed → server reaches ready (2m19s) →
+      status green. Still unverified BY A HUMAN on that box: the five Lab-parity
+      rounds (GM Tools, My Party, Summon NPCs, party presets, Backups) and the
+      module config-files page. That untested surface — not the remaining
+      checkboxes — is the real distance to a beta.
+      A fresh Windows VM,
       or a friend's PC. No Docker, no WSL, no Rust, no Node, no repo. Download
       → install → running server, following only the README.
       **This is the release gate.** Everything else is polish. If a stranger

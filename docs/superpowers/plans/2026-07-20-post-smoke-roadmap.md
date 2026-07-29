@@ -654,6 +654,134 @@ it was asked so it cannot go the way of the items above.
   - No client path saved yet → say so and point at the setting, rather than
     failing at copy time.
 
+### Per-install container names — the prerequisite for the multi-server tray (filed 2026-07-30)
+
+**Why this is filed and not built:** the user asked whether two WotLK servers can
+run at once (e.g. one with Wrath Unbound + playerbots, one plain playerbots). The
+answer today is **no**, and the modules are irrelevant — both want a container
+literally named `ac-worldserver`, and container names are unique per Docker
+ENGINE, not per compose project.
+
+Everything else is ALREADY per-install, which is what makes this worth doing:
+`name: {{PROJECT_NAME}}`, the images (`{{IMAGE_PREFIX}}…:{{IMAGE_TAG}}`), the
+`db-data`/`client-data` volumes (unnamed → project-prefixed) and `ac-network` all
+differ per install. Only five hardcoded `container_name:` lines in
+`crates/dml-wow/data/native-compose.yml.tmpl` collide.
+
+**What already works today, and may be enough:** two WotLK installs can coexist
+ON DISK — separate directories, projects, volumes and images. Only one may be
+UP at a time. So "try Wrath Unbound without endangering my playerbots server"
+works now: stop one, start the other; neither can touch the other's data. The
+tray could make that a one-click switch. The refusal
+(`INSTALL_STACK_CONFLICT`) already names the owning stack.
+
+**The real cost, measured 2026-07-30 (not guessed):** deleting/templating the five
+`container_name:` lines is trivial. The work is the consumers — **20 bash call
+sites** and **73 Rust references across 13 modules** (`backup`, `restore`,
+`config`, `modmgr`, `maint`, `status`, `lifecycle`, `lan`, `destructive`,
+`moduletail`, `logsnap`, `engine`, `install_native`) that address containers by
+BARE NAME. Every one is a place where resolving the wrong container means acting
+on the wrong server — the exact class of the 2026-07-28 log-snapshot incident,
+where `docker logs ac-worldserver` answered for whichever title owned the name.
+`docker exec ac-database mysqldump` is a WRITE path.
+
+The pattern to follow already exists: `logsnap` resolves through
+`compose ps -a -q ac-worldserver` in the stopping title's own compose dir.
+Deleting `container_name:` entirely (letting compose name them
+`<project>-<service>-1`) forces every consumer through that resolution, which is
+the honest end state.
+
+**Sequencing:** this must land BEFORE the parked `feat/multi-server-tray` work,
+or the tray silently promises something the engine refuses. Mirror bash↔Rust; the
+18 parity suites are the safety net. NOT a release blocker — the release is WSL
+mode, and one WoW server at a time is fine for v0.1.0.
+
+### Tailscale login fails with a timeout that cannot name its cause (found live on the VM, 2026-07-29) — FIXED 2026-07-29
+
+**FIXED, mirrored on both surfaces, mutation-verified.** Diagnosis from the
+VM's own tailscaled journal: `RegisterReq` at 22:37:52, `AuthURL is …` at
+22:38:22 — the control plane took **30 seconds**, and `tailscale up` was waiting
+**8**. The daemon was `active (running)` with TUN present the entire time. So the
+login was SUCCEEDING and we threw it away, then reported a timeout.
+
+What changed:
+- the login wait defaults to **45s** (`DML_TS_UP_TIMEOUT` overrides it — the same
+  seam name and default on both surfaces; the native arm had no seam at all and
+  hardcoded 8s inside a 15s outer bound, so raising the inner one alone would
+  have let our own kill land first — `TS_UP_OUTER_SLACK_SECS` now guarantees the
+  outer bound outlives the inner);
+- when `up` prints no URL, the **pending URL is read back from
+  `tailscale status --json`'s `AuthURL`** — the daemon keeps it, which is exactly
+  the state the VM was left in. grep, not jq (jq is test-only here);
+- the daemon step's failure is **no longer discarded**: if it could not be started
+  and is not answering, the arm refuses immediately with `TAILSCALE_DAEMON_FAILED`
+  carrying systemctl's own words (or `SUDO_REQUIRED` when that is the cause)
+  instead of spending the login timeout to say nothing;
+- the stale doc comment claiming the native arm runs an MSI installer is gone.
+
+Tests: 3 new bats (`cli/tests/wow-tailscale.bats`, suite now 17) + 4 new Rust
+(`launcher/src-tauri/src/lib.rs`). All three bats tests were mutation-verified —
+each one goes red against the pre-fix behaviour. Two harness bugs were found and
+fixed while writing them: the stub used `${DML_STUB_TS_UP_URL:-default}`, so an
+explicitly empty value silently fell back to a real URL and a "no URL" test
+proved nothing.
+
+**Still open** (needs a UI decision, not a bug): on native mode the Install
+button only PROBES for `tailscale.exe` and cannot install it. The error copy is
+honest ("Install the free Windows app from tailscale.com/download") but the
+button's label is not. Either download+run the MSI or rename the action.
+
+Original diagnosis, kept for the record:
+
+Reported from the clean Windows 11 VM: Install Tailscale appears to work, then Log
+in fails with
+
+> Could not start Tailscale login — timeout waiting for Tailscale service to
+> enter a Running state; check health with "tailscale status"
+
+The quoted half is Tailscale's OWN CLI text, emitted by `tailscale up` when the
+backend does not reach `Running` before `--timeout`. Ours is the
+`TAILSCALE_UP_FAILED` wrapper, which pastes the tail of tailscale's output into
+the hint. So the wrapper is working as designed — and that is the problem: it can
+only ever report "it timed out", never WHY.
+
+Three defects, all confirmed by reading, none needing the VM to see:
+
+1. **The daemon-start failure is discarded, so the real cause is unrecoverable.**
+   `cli/src/90-main.sh:6494-6510` brings `tailscaled` up best-effort
+   (`sudo -n systemctl enable --now tailscaled`, else a detached
+   `tailscaled --tun=userspace-networking`) and throws away the result — the
+   comment says "`tailscale up` below surfaces the real error if it did not". It
+   does not: `up` reports only its own timeout. A `sudo -n` refusal, a missing
+   unit, a `tailscaled` that starts and dies, and a healthy daemon that is merely
+   slow all produce the SAME message. `ts_daemon` is computed and returned but
+   nothing gates on it. Fix: check the daemon reached a usable state before
+   running `up`, and when it did not, fail with THAT cause
+   (`systemctl status`/journal tail, or the sudo refusal) instead of a timeout.
+   The `SUDO_REQUIRED` branch at :6541 only catches sudo text that reaches
+   `up`'s own output, which the `-n` refusal on the *systemctl* call never does.
+
+2. **8 seconds is too short for a first-ever login, and native has no override.**
+   Bash uses `--timeout="${DML_TS_UP_TIMEOUT:-8s}"` (:6516) — an env seam, but
+   undocumented and defaulted low. `launcher/src-tauri/src/lib.rs:4962`
+   HARDCODES `["up", "--timeout=8s"]` inside a 15s bound with no seam at all. A
+   cold daemon on a 2-vCPU VM can exceed that before it prints the auth URL, and
+   the URL is the entire point of the flow: no URL means the user cannot even
+   complete the login manually. Fix: raise the default, add the seam natively,
+   and treat "no URL yet" as retryable rather than terminal.
+
+3. **On native mode the Install button cannot install anything.**
+   `tailscale_install_native` (`lib.rs:4914-4920`) only PROBES for
+   `tailscale.exe` and returns `NOT_INSTALLED` when it is absent — yet the doc
+   comment at :5004 describes "running its MSI installer", which no code does.
+   The button's label promises an install it never performs. Fix: either
+   download+run the MSI, or rename the action and say plainly that the Windows
+   app must be installed from tailscale.com first.
+
+Not yet known: which arm the VM actually hit (WSL vs native) — the message is
+byte-identical on both surfaces, which is itself worth fixing, since a user
+report cannot distinguish them. Awaiting the VM diagnostic.
+
 ### Also recovered: the Server Performance Advisor
 
 Approved 2026-07-27; spec now committed at
