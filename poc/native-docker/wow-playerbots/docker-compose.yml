@@ -19,13 +19,17 @@
 #   * All data lives in named volumes, so the stack is self-contained: nothing
 #     on the Windows host to prepare before `up`.
 #
-# The launcher pins the project name with `-p dml-wow-native`; volumes below are
-# named so this stack never collides with the distro server's containers.
+# The launcher pins the project name with `-p dml-wow-native`. The container
+# names MUST stay ac-* : many `dml wow` arms address containers by exactly those
+# names (`docker exec ac-database ...`, `docker restart ac-worldserver`), so a
+# stack with dml-native-* names is invisible to every one of them. There is no
+# collision with the distro server - Docker Desktop is a separate engine
+# (README increment 4, and the WORKING migrated compose does the same).
 name: dml-wow-native
 
 services:
   ac-database:
-    container_name: dml-native-database
+    container_name: ac-database
     image: mysql:8.4
     networks: [ac-network]
     ports:
@@ -42,7 +46,7 @@ services:
       retries: 40
 
   ac-db-import:
-    container_name: dml-native-db-import
+    container_name: ac-db-import
     image: acore/ac-wotlk-db-import:${IMAGE_TAG:-master}
     networks: [ac-network]
     environment:
@@ -54,7 +58,7 @@ services:
         condition: service_healthy
 
   ac-authserver:
-    container_name: dml-native-authserver
+    container_name: ac-authserver
     image: acore/ac-wotlk-authserver:${IMAGE_TAG:-master}
     networks: [ac-network]
     tty: true
@@ -70,13 +74,13 @@ services:
         condition: service_completed_successfully
 
   ac-client-data-init:
-    container_name: dml-native-client-data
+    container_name: ac-client-data-init
     image: acore/ac-wotlk-client-data:${IMAGE_TAG:-master}
     volumes:
       - client-data:/azerothcore/env/dist/data
 
   ac-worldserver:
-    container_name: dml-native-worldserver
+    container_name: ac-worldserver
     image: acore/ac-wotlk-worldserver:${IMAGE_TAG:-master}
     networks: [ac-network]
     stdin_open: true

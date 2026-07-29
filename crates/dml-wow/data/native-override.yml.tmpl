@@ -1,0 +1,23 @@
+# Runtime settings for the native stack.
+#
+# THIS FILE IS THE CONFIG SYSTEM'S PROPERTY. `dml wow config` (and its Rust
+# twin `config::override_env_write`) read AND rewrite
+# .services.ac-worldserver.environment here; the writer preserves sibling keys
+# but DROPS COMMENTS and restyles the YAML, so this header will disappear on
+# the first save from the launcher. That is precisely why structural things —
+# services, ports, image tags, build config — live in docker-compose.yml and
+# docker-compose.build.yml instead.
+#
+# Compose auto-loads this file next to docker-compose.yml. Do NOT add a
+# ports: entry here: compose CONCATENATES ports lists, so it would create a
+# SECOND binding rather than replacing the base one.
+services:
+  ac-worldserver:
+    volumes:
+      # LOAD-BEARING. The playerbots DB updater scans /azerothcore/modules at
+      # boot and shuts the worldserver down when it is missing — found live
+      # during the migration. It lives here, next to the env the config system
+      # already owns, so the round-trip through that writer is tested.
+      - ./modules:/azerothcore/modules
+    environment:
+{{ENVIRONMENT}}

@@ -219,9 +219,12 @@ end-to-end:         the user logged in with the real WoW client and played —
 `Playerbots.Updates.EnableDatabases = 1`, the playerbots DB updater scans
 `/azerothcore/modules/mod-playerbots` at startup and SHUTS DOWN if missing.
 Those module sources live in the server *checkout* (bind-mounted context), not
-in the image — so a migration must carry `modules/` too and mount it
-(`./modules-src:/azerothcore/modules:ro`). The worldserver crash-looped on
-exactly this until the mount was added; nothing else failed.
+in the image — so a migration must carry `modules/` too and mount it. The
+mount that actually shipped is `./modules:/azerothcore/modules` (read-write,
+exactly like the distro's own override — see the working
+`C:\Users\perzi\dml-native\wow-server-playerbots\docker-compose.override.yml`).
+The worldserver crash-looped on exactly this until the mount was added;
+nothing else failed.
 
 The migrated runtime lives OUTSIDE the repo at
 `C:\Users\perzi\dml-native\wow-server-playerbots\` (it contains real server
@@ -249,6 +252,49 @@ worldserver service. Also: launcher-side SOAP needs `~/.dml/soap.env` copied to
 the Windows home (strip CRs — wsl.exe piping adds them), since native `dml`
 reads `$HOME/.dml/` on Windows.
 
+## The migration scripts now match these lessons (fixed 2026-07-29)
+
+Every lesson above was recorded — and then contradicted by the code sitting
+directly under it. `import-to-desktop.sh` polled and `exec`'d
+`dml-native-database` / `dml-native-worldserver` while the comment three lines
+higher said the compose must keep `ac-*` names, so the committed script could
+only ever stop at `[import] database never became healthy`. That is the class
+this round closes:
+
+| Was | Now |
+|---|---|
+| import polled/`exec`'d `dml-native-*` | `ac-database` / `ac-worldserver` — the names the working compose actually creates |
+| `wow-playerbots/docker-compose.yml` declared `container_name: dml-native-*` | `ac-*`. Its "namespaced so it never collides with the distro" rationale was stale: Docker Desktop is a **separate engine**, and every `dml wow` arm addresses containers by the `ac-*` names |
+| export defaulted to `…\dml-native\wow-playerbots`, import to `…\wow-server-playerbots` | both default to `…\dml-native\wow-server-playerbots` — the folder name IS the title id |
+| import made a bare `./logs` and never placed the exported `etc/` anywhere | creates `env/dist/etc` + `env/dist/logs` and stages `etc/` into it — the paths the working compose binds |
+| `~/.dml/soap.env` called required here, carried by neither script | export writes `conf/soap.env` (mode 600); import installs it to the Windows home with CRs stripped |
+| export finished with a project-wide `docker compose down` | restores **only** `ac-database` |
+| …and skipped the restore entirely when it failed early | an `EXIT`/`INT`/`TERM` trap restores on every path |
+| export hardcoded the distro's client-data volume name, and `docker save`d unchecked | volume name derives from the compose project (`DML_CLIENT_DATA_VOLUME` overrides) behind a `volume inspect` guard; `image inspect` gates every save (`DML_IMAGE_TAG`) |
+| import silently skipped a missing `img-*.tar.gz`, never checked the override | refuses up front on a missing tarball, `etc/`, compose or `docker-compose.override.yml`, and validates the compose declares the `ac-*` names — all **before** the database write |
+| export resolved `ac-database` through its own compose project and then addressed it by **bare name** anyway (health poll, `SHOW DATABASES`, `mysqldump`) | the resolved container id is re-resolved after the `up` that creates the container and used for every call; an unresolvable id **refuses** instead of falling back to a name a second stack may own |
+| import validated only `container_name` — none of the properties whose absence was actually recorded as a live failure | it now reads the MERGED config and, **scoped to `ac-worldserver`**, requires the `env/dist/etc` bind and (for a playerbots export) the `./modules` mount + `AC_PLAYERBOTS_DATABASE_INFO`; a missing `env/dist/logs` bind warns |
+| the header told users to copy `../wow-playerbots/docker-compose.yml` — the CLEAN stock-image stack, which fails every check above | `migrate/docker-compose.migrated.yml`, copied from the working migrated server, is the starting point; the harness copies **that** file as its fixture, so "the template we recommend passes our own validation" is asserted, not assumed |
+
+**The export's read-only contract, precisely:** it starts `ac-database` ALONE,
+only when it is not already running, and puts it back the way it found it —
+`compose stop ac-database` when the container existed and was stopped,
+`compose rm -sf ac-database` when the export created it. No other service is
+ever touched. The old project-wide `down` was not merely untidy: any time the
+database alone happened to be down under a LIVE worldserver, an "export" would
+have torn the running server down.
+
+Guardrails: `bash poc/native-docker/migrate/check-migrate-scripts.sh` (126
+checks; 129 where shellcheck is installed — it is reported as an explicit SKIP
+otherwise, never as a pass, and `DML_REQUIRE_SHELLCHECK=1` makes the skip a
+failure). Roughly half the checks RUN the scripts against a recorded fake
+`docker`, so the read-only claim is asserted as behaviour on the success and
+failure paths instead of being read off the comments. The fake's
+`compose config` answers from the fixture's REAL compose files rather than a
+canned blob — a fixed happy answer is how the harness previously green-lit a
+template that its own recommendation pointed at and that the import should
+have rejected.
+
 ## Remaining for a real "native mode" release
 
 - Wire the remaining launcher features through native mode and triage the
@@ -256,3 +302,8 @@ reads `$HOME/.dml/` on Windows.
 - Cosmetic: native doctor still says "/home"/"ext4" in disk messages.
 - A migration UI (the scripts are proven; a launcher flow would make it
   one-click) and a "which server is active" guard against port collisions.
+- The scripts still do not GENERATE `docker-compose.yml` /
+  `docker-compose.override.yml`. The base stack is now a committed file to copy
+  (`migrate/docker-compose.migrated.yml`, validated by the import), but merging
+  the exported `conf/docker-compose.override.yml.orig` into the override is
+  still a human step (compose generation is the native-install plan's own task).

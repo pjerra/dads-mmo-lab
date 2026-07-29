@@ -41,3 +41,15 @@ cli/tests/fixtures/*.tsv text eol=lf
 # from the bash `dml` oracle in WSL (LF-native); keep LF on Windows checkouts
 # so the committed blob and working tree byte-match regardless of autocrlf.
 crates/dml-wow/data/*.json text eol=lf
+
+# The migration stack's compose is COPIED VERBATIM into the runtime title dir
+# and read by docker compose against the Linux VM; check-migrate-scripts.sh
+# asserts it carries no CR bytes, so pin it here rather than leaving that
+# assertion at the mercy of core.autocrlf. Scoped to this dir on purpose — a
+# repo-wide *.yml rule would rewrite unrelated upstream YAML.
+poc/native-docker/migrate/*.yml text eol=lf
+
+# Compose templates embedded via include_str! in dml-wow's composegen — their
+# bytes ARE the docker-compose files a native install writes out. Keep LF so a
+# Windows checkout can't hand the Linux containers CRLF YAML.
+crates/dml-wow/data/*.tmpl text eol=lf

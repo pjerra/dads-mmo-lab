@@ -1,0 +1,41 @@
+# BUILD-ONLY overlay for the native install/build stage.
+#
+# NEVER auto-loaded. Compose picks up docker-compose.yml plus
+# docker-compose.override.yml on its own; this file is merged in ONLY when the
+# install engine passes it explicitly:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.build.yml build
+#
+# so a post-install `up` can never trigger a multi-hour rebuild, and the config
+# system's YAML writer (which owns the override file) never touches build
+# config.
+#
+# It is STRICTLY a build overlay — nothing else belongs here. The base file
+# supplies the project identity, the published tags and every runtime key, and
+# because it is always passed first the built stages are tagged with the very
+# tags a later `up` then resolves. That is also the whole of the Route B seam:
+# publish those tags and the build stage is skipped, with nothing else to
+# change.
+#
+# The four targets are the multi-stage Dockerfile's stages in the cloned
+# AzerothCore checkout; the context is the title dir, which IS that checkout.
+services:
+  ac-worldserver:
+    build:
+      context: {{BUILD_CONTEXT}}
+      target: worldserver
+
+  ac-authserver:
+    build:
+      context: {{BUILD_CONTEXT}}
+      target: authserver
+
+  ac-db-import:
+    build:
+      context: {{BUILD_CONTEXT}}
+      target: db-import
+
+  ac-client-data-init:
+    build:
+      context: {{BUILD_CONTEXT}}
+      target: client-data

@@ -116,6 +116,44 @@ Evidence:
 - `C:\Users\perzi\dads-mmo-lab\docs\SHIP-LIST.md:7-9,153-268,324-331`
 - `C:\Users\perzi\dads-mmo-lab\guides\DML-Windows\Install-DML.ps1:685-1101,1990-2010 (steps a native installer replaces/drops)`
 
+## BLOCKERS FOR TASK 3 (the install engine) — read before wiring anything
+
+Tasks 2/4/9 are landed but NOTHING IS WIRED: no CLI subcommand and no Tauri command calls the
+generator, so none of the below can happen today. They MUST be resolved by the task that first
+creates a stack, because that is when they become reachable.
+
+1. **`container_name: ac-*` is engine-GLOBAL.** The identity work made the compose PROJECT, the
+   named volumes and the image refs per-install — but container names are unique per Docker engine,
+   not per project. Consequences: two generated stacks can never be up at once, and every bare-name
+   call in the codebase (`docker exec ac-database mysqldump` in backup.rs, `docker restart -t 300
+   ac-worldserver` in world-restart, the DB reader's hints) acts on WHICHEVER stack currently owns
+   the name. `wow backup restore` is a WRITE, so this is not merely a read hazard.
+   The names cannot simply be made unique: the rest of the code addresses them by name. Options are
+   (a) keep names global and enforce one-stack-at-a-time with the port/identity guard of Task 7,
+   (b) make names per-install AND route every consumer through compose-project resolution (the
+   `compose ps -q <service>` idiom the log-snapshot fix already uses). (b) is the honest end state;
+   (a) is shippable sooner. DECIDE IN TASK 3.
+
+2. **`poc/native-docker/migrate/import-to-desktop.sh` still hardcodes**
+   `COMPOSE_PROJECT_NAME:-dml-wow-native` — the exact project the working migrated server runs. A
+   migration re-run "into a scratch games dir" (Task 13's own wording) would target the live server.
+   Task 10 replaces this script with the Rust import; until then the script must not be used for a
+   second install.
+
+3. **`write_all` rewrites `docker-compose.yml` in whatever dir it is handed**, and the DEFAULT games
+   dir is `%USERPROFILE%\dml-native` — whose `wow-server-playerbots` IS the working migrated
+   server. Task 3 must refuse to generate over a pre-existing non-generated compose file, or the
+   first careless `install-native` re-identifies that server and orphans its volumes and images.
+
+4. **Two test-quality gaps carried over** (mutation-verified by review, not speculative):
+   `base_uses_the_ac_container_names_the_rest_of_the_code_addresses` asserts string literals against
+   the template it just rendered and stays green when `backup.rs`'s `ac-database` is renamed; and
+   preflight's `every_shortfall_finding_carries_its_floor_in_the_copy` still cannot detect a dropped
+   floor. Both read as protection that does not exist.
+
+5. **`check-migrate-scripts.sh` fails on a clean tree** (1 failing check out of 126, varying), so it
+   cannot serve as Task 9's evidence until it is stabilised.
+
 ## Tasks
 
 ### Task 1 — Pin the upstream build contract (design spec + committed SHA pins)
