@@ -3828,8 +3828,26 @@ _installers_supported() {
 }
 
 # One sentence for the text path, kept next to the check it explains.
+#
+# WORDED FOR WHAT IS REACHABLE TODAY, deliberately.
+#
+# A native Route A install engine exists (`dml-wow install-native`), and an
+# earlier version of this message advertised it. That was FALSE for every real
+# user and was caught by three independent reviewers on 2026-07-29: the launcher
+# ships no `dml-wow` binary (`tauri.conf.json`'s bundle.resources carries
+# `cli/dml`, the lua trees and the six installers, and there is no externalBin),
+# and the Library page's Install button is DISABLED on exactly the host that
+# produces this message (`title-install.ts`'s gate returns canInstall:false
+# whenever install_supported is false). So the copy sent people to two dead ends.
+#
+# The native route gets advertised here when it is actually reachable -- i.e.
+# when the launcher wiring lands and the binary ships -- and `title-install.ts`
+# must be updated in the SAME change, because that file holds the sentence a
+# Windows user actually sees. `install-native` itself has NO bash mirror on
+# purpose: this check refuses on Windows by design and the Linux installers
+# remain the WSL route.
 _installers_unsupported_msg() {
-    printf '%s' "installing titles needs the WSL backend: the DML installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host"
+    printf '%s' "these installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host, so installing a title here needs the WSL backend"
 }
 
 # id|display name|installer script|kind(games=installer manages ~/games itself,
@@ -5406,6 +5424,11 @@ case "$cmd" in
         # could never make these Linux scripts runnable here.
         if ! _installers_supported; then
           echo "[dml] ERROR: $(_installers_unsupported_msg)"
+          # ONE instruction, and it is the one that works. An earlier version
+          # branched on the WoW title and pointed at `dml-wow install-native` /
+          # "Library -> Install", neither of which a real user has yet (no
+          # dml-wow in the bundle; the Library button is disabled on this very
+          # host). See _installers_unsupported_msg for the full note.
           echo "[dml] Switch Settings -> Launcher -> Server backend to \"WSL (dml-arch distro)\" and install from there."
           exit 1
         fi
@@ -10394,29 +10417,95 @@ case "$cmd" in
             fi
             # 1. Bring the daemon up. Kernel-TUN via systemd is the reliable
             # path (a real tailscale0 interface); userspace-networking is the
-            # fallback when there is no /dev/net/tun or no systemd. Best-effort
-            # -- `tailscale up` below surfaces the real error if it did not.
-            ts_daemon="unknown"
+            # fallback when there is no /dev/net/tun or no systemd.
+            #
+            # Its failure is CAPTURED, not discarded. The old code was
+            # best-effort with the comment "`tailscale up` below surfaces the
+            # real error if it did not" -- which is false: `up` only ever
+            # reports its own timeout, so a sudo refusal, a missing unit, a
+            # tailscaled that starts and dies, and a healthy-but-slow daemon
+            # all produced the SAME useless message. Found live on a clean VM,
+            # 2026-07-29.
+            ts_daemon="unknown"; ts_daemon_err=""
             if [[ -c /dev/net/tun ]] && systemctl is-system-running >/dev/null 2>&1; then
-              if sudo -n systemctl enable --now tailscaled >/dev/null 2>&1; then ts_daemon="systemd"; fi
+              if ts_daemon_out="$(sudo -n systemctl enable --now tailscaled 2>&1)"; then
+                ts_daemon="systemd"
+              else
+                ts_daemon_err="$(printf '%s' "$ts_daemon_out" | tail -c 300 | tr -d '\r' | tr '\n' ' ')" || ts_daemon_err=""
+              fi
             else
               if sudo -n "$TS_BIN" status >/dev/null 2>&1; then
                 ts_daemon="existing"
               else
                 # Detached so the daemon outlives this CLI invocation.
                 sudo -n bash -c 'nohup tailscaled --tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state >/dev/null 2>&1 &' >/dev/null 2>&1 || true
-                ts_daemon="userspace"
                 sleep 1
+                # Only claim "userspace" once the daemon actually ANSWERS.
+                # Setting it unconditionally (as this did) meant ts_daemon was
+                # never `unknown` on this branch, so the precondition below could
+                # not fire and a userspace tailscaled that failed to start was
+                # still reported as a login timeout -- the very bug the
+                # precondition exists to prevent, surviving on one branch.
+                # Caught by review, 2026-07-29.
+                if sudo -n "$TS_BIN" status >/dev/null 2>&1; then
+                  ts_daemon="userspace"
+                else
+                  ts_daemon_err="tailscaled (userspace mode) did not start or is not answering"
+                fi
               fi
+            fi
+            # The daemon is a HARD prerequisite for a login: if we could not
+            # start it AND it is not answering, say so now with the real cause
+            # instead of spending the whole login timeout to report nothing.
+            if [[ "$ts_daemon" == unknown ]] && ! sudo -n "$TS_BIN" status >/dev/null 2>&1; then
+              if printf '%s' "$ts_daemon_err" | grep -qiE 'password is required|sudo:.*(no tty|askpass)'; then
+                json_err SUDO_REQUIRED "Starting the Tailscale service needs admin rights not available without a password" "Open the DML shell (Tools -> DML shell) and run: sudo systemctl enable --now tailscaled"
+              else
+                json_err TAILSCALE_DAEMON_FAILED "The Tailscale service could not be started" "${ts_daemon_err:-Check it by hand in the DML shell: sudo systemctl status tailscaled}"
+              fi
+              exit 1
             fi
             # 2. Log in. `tailscale up` blocks until authenticated; --timeout
             # bounds the wait so the GUI never hangs. When unauthenticated it
-            # prints the auth URL FIRST (which stays valid after the timeout),
-            # then errors out -- so we grab the URL and return it for the user
-            # to open in any browser. Already-authenticated returns 0 fast.
-            if tsout="$(sudo -n "$TS_BIN" up --timeout="${DML_TS_UP_TIMEOUT:-8s}" 2>&1)"; then :; else :; fi
+            # prints the auth URL (which stays valid after the timeout), then
+            # errors out -- so we grab the URL and return it for the user to
+            # open in any browser. Already-authenticated returns 0 fast.
+            #
+            # The default is 45s, not the 8s it used to be, and that number is
+            # MEASURED, not guessed: on a clean 2-vCPU VM the control plane took
+            # 30 seconds to hand back the auth URL (tailscaled journal,
+            # 2026-07-29 -- RegisterReq at 22:37:52, "AuthURL is ..." at
+            # 22:38:22). At 8s `up` had already given up 22 seconds BEFORE the
+            # URL existed, so the user saw a bare timeout and never got the one
+            # thing that lets them finish the login by hand. The old comment
+            # here claimed the URL is printed FIRST; it is printed when the
+            # control plane answers, which is precisely the problem.
+            ts_up_to="${DML_TS_UP_TIMEOUT:-45s}"
+            # Accept a bare number the way the native surface does. Go's duration
+            # parser rejects "90" with "missing unit", so without this the SAME
+            # env value works on one surface and silently fails on the other --
+            # the seam is documented as shared, so it has to behave the same.
+            [[ "$ts_up_to" =~ ^[0-9]+$ ]] && ts_up_to="${ts_up_to}s"
+            # Outer watchdog, mirroring the native surface's `run_bounded`. The
+            # launcher had one and bash did not, so a `tailscale up` that hung
+            # DESPITE its own --timeout returned on one surface and blocked the
+            # GUI forever on the other (review finding, 2026-07-29). It must
+            # OUTLIVE the inner timeout or our kill lands first and the URL is
+            # never printed -- same invariant as TS_UP_OUTER_SLACK_SECS in Rust.
+            ts_up_outer=60
+            if [[ "$ts_up_to" =~ ^([0-9]+)s$ ]]; then ts_up_outer=$(( ${BASH_REMATCH[1]} + 15 ))
+            elif [[ "$ts_up_to" =~ ^([0-9]+)m$ ]]; then ts_up_outer=$(( ${BASH_REMATCH[1]} * 60 + 15 )); fi
+            if tsout="$(timeout -k 5 "$ts_up_outer" sudo -n "$TS_BIN" up --timeout="$ts_up_to" 2>&1)"; then :; else :; fi
             ts_url="$(printf '%s' "$tsout" | grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9./_-]+' | head -1 || true)"
             [[ -z "$ts_url" ]] && ts_url="$(printf '%s' "$tsout" | grep -oE 'https://[A-Za-z0-9./_-]+' | head -1 || true)"
+            # SECOND chance at the URL: tailscaled keeps the PENDING login URL
+            # in its own state, so when `up` gave up before one was printed the
+            # daemon may hold it by now. That is exactly the case that failed
+            # live, and recovering it costs one bounded read. grep, not jq --
+            # jq is a test-only dependency in this repo, never a runtime one.
+            if [[ -z "$ts_url" ]]; then
+              ts_url="$(sudo -n "$TS_BIN" status --json 2>/dev/null | grep -oE 'https://login\.tailscale\.com/[A-Za-z0-9./_-]+' | head -1 || true)"
+            fi
             ts_ip="$(sudo -n "$TS_BIN" ip -4 2>/dev/null | head -1 || true)"
             [[ "$ts_ip" =~ ^100\. ]] || ts_ip=""
             ts_conn=false
@@ -10442,7 +10531,11 @@ case "$cmd" in
               if printf '%s' "$tsout" | grep -qiE 'password is required|sudo:.*(no tty|askpass)'; then
                 json_err SUDO_REQUIRED "Logging in needs admin rights not available without a password" "Open the DML shell and run: sudo tailscale up"
               else
-                json_err TAILSCALE_UP_FAILED "Could not start Tailscale login" "${tstail:-Is the Tailscale daemon running? Try Install, then Log in again.}"
+                # The daemon is confirmed up by this point (step 1 refuses
+                # otherwise), so "timed out" here means the control plane was
+                # slower than the wait -- name the knob rather than implying
+                # something is broken.
+                json_err TAILSCALE_UP_FAILED "Could not start Tailscale login" "${tstail:-Try Log in again -- the Tailscale control server can take half a minute to answer.} (Waited ${ts_up_to}; raise DML_TS_UP_TIMEOUT to wait longer.)"
               fi
               exit 1
             fi

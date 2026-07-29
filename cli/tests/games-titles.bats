@@ -108,6 +108,33 @@ EOF
   ! echo "$output" | grep -q 'dev-install.ps1'
 }
 
+@test "games install: the refusal never advertises a route the user cannot take" {
+  # A native Route A engine EXISTS, and an earlier version of this refusal
+  # advertised it ("Library -> Install", "dml-wow install-native"). Both were
+  # dead ends for every real user: the launcher bundles no dml-wow binary, and
+  # the Library Install button is disabled on exactly this host. Three
+  # independent reviewers caught it on 2026-07-29.
+  #
+  # So this test pins the HONEST property: the refusal offers only the route
+  # that works. When the launcher wiring lands and the binary ships, this test
+  # flips DELIBERATELY -- and `launcher/src/lib/title-install.ts` must be
+  # updated in the same change, because that file holds the sentence a Windows
+  # user actually sees.
+  #
+  # HOME is pinned into the fixture because `_title_installed` also looks at
+  # `$HOME/<id>`: without this, a developer who happens to have that directory
+  # would get "already installed" and never reach the host check at all.
+  mkdir -p "$FIXTURE/home"
+  run env DML_OSTYPE=msys HOME="$FIXTURE/home" bash "$DML" games install wow-server-playerbots
+  [ "$status" -eq 1 ]
+  ! echo "$output" | grep -q 'install-native'
+  ! echo "$output" | grep -q 'Library ->'
+  # The one thing that does work, and never the step that was already fine.
+  echo "$output" | grep -q 'WSL backend'
+  echo "$output" | grep -q 'Switch Settings'
+  ! echo "$output" | grep -q 'dev-install.ps1'
+}
+
 @test "games install: --json rejected, unknown id rejected, EXISTS when installed" {
   run bash "$DML" games install maplestory-server --json
   [ "$status" -eq 1 ]

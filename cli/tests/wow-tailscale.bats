@@ -89,6 +89,65 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "SUDO_REQUIRED" ]
 }
 
+# --- the 2026-07-29 live failure (found on a clean Windows 11 VM) -----------
+#
+# Reported as: "Could not start Tailscale login — timeout waiting for Tailscale
+# service to enter a Running state". The daemon was healthy the whole time; the
+# tailscaled journal showed RegisterReq at 22:37:52 and "AuthURL is ..." at
+# 22:38:22 -- THIRTY SECONDS -- while `up` waited 8 and then reported a bare
+# timeout, throwing away a login that was succeeding.
+
+@test "tailscale up: the login wait is long enough for a slow control plane" {
+  # The default is the fix. 8s (the old value) could not survive the measured
+  # 30s delay, so this fails if anyone lowers it back under half a minute.
+  export DML_STUB_TS_CONNECTED=1
+  export DML_STUB_TS_IP="100.90.80.70"
+  export DML_STUB_TS_CALL_LOG="$FIXTURE/ts-calls.log"
+  run bash "$DML" wow tailscale up --json
+  [ "$status" -eq 0 ]
+  secs="$(grep -oE 'up --timeout=[0-9]+' "$DML_STUB_TS_CALL_LOG" | head -1 | grep -oE '[0-9]+$')"
+  [ -n "$secs" ]
+  [ "$secs" -ge 30 ]
+}
+
+@test "tailscale up: a URL the daemon holds is recovered when up printed none" {
+  # `up` times out WITHOUT printing a URL (empty DML_STUB_TS_UP_URL), but
+  # tailscaled has since received one. Before the fix this was a dead end: the
+  # user got a timeout and never saw the link that would have let them finish
+  # the login on any device.
+  export DML_STUB_TS_UP_URL=""
+  export DML_STUB_TS_AUTH_URL="https://login.tailscale.com/a/e73516d017e7e"
+  export DML_STUB_TS_STATE="NeedsLogin"
+  run bash "$DML" wow tailscale up --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.connected')" = "false" ]
+  [ "$(echo "$output" | jq -r '.data.auth_url')" = "https://login.tailscale.com/a/e73516d017e7e" ]
+}
+
+@test "tailscale up: a daemon that cannot start names ITS cause, not a login timeout" {
+  # systemctl enable fails AND the daemon does not answer -> the honest error is
+  # the daemon, reported immediately. Before the fix this was swallowed
+  # (best-effort, result discarded) and the user waited out the whole login
+  # timeout to be told only that it had timed out.
+  export DML_STUB_SYSTEMCTL_ENABLE_EXIT=1
+  export DML_STUB_TS_STATUS_EXIT=1
+  # The call log MUST be exported for the "never reached up" assertion below to
+  # mean anything. Unset, it defaulted to /dev/null and `[ ! -s /dev/null ]` was
+  # always TRUE, so that whole property was unprotected -- caught by adversarial
+  # review, 2026-07-29, and exactly the dead-assertion class this repo keeps
+  # relearning.
+  export DML_STUB_TS_CALL_LOG="$FIXTURE/ts-calls-daemonfail.log"
+  run bash "$DML" wow tailscale up --json
+  [ "$status" -eq 1 ]
+  [ "$(echo "$output" | jq -r '.error.code')" = "TAILSCALE_DAEMON_FAILED" ]
+  # The hint must carry systemctl's OWN words -- that is the whole point.
+  echo "$output" | jq -r '.error.hint' | grep -qi 'tailscaled.service not found'
+  # And it must NOT have spent the login timeout first: the log exists (the
+  # precondition's own `status` probe is in it) but no `up` was ever attempted.
+  [ -f "$DML_STUB_TS_CALL_LOG" ]
+  ! grep -q '^up ' "$DML_STUB_TS_CALL_LOG"
+}
+
 @test "tailscale up: passes --timeout and the 3724,8085 firewall ports on connect" {
   export DML_STUB_TS_CONNECTED=1
   export DML_STUB_TS_IP="100.90.80.70"

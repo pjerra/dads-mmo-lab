@@ -4837,6 +4837,14 @@ fn run_bounded(program: &std::ffi::OsStr, args: &[&str], timeout: std::time::Dur
 struct TsStatusFields {
     backend_state: Option<String>,
     ip: Option<String>,
+    /// The PENDING login URL, when tailscaled is holding one (`NeedsLogin`).
+    ///
+    /// This is the field that recovers the failure found live on a clean VM
+    /// (2026-07-29): `tailscale up` can time out BEFORE the control plane
+    /// returns a URL — measured at 30s there — while the daemon goes on to
+    /// receive it and keep it. Reading it back turns a dead-end timeout into a
+    /// clickable link.
+    auth_url: Option<String>,
 }
 
 /// Pure JSON parse: `BackendState` -> backend_state; the first `100.x`
@@ -4859,7 +4867,86 @@ fn parse_tailscale_status_json(raw: &str) -> TsStatusFields {
         .get("TailscaleIPs")
         .and_then(find_ip)
         .or_else(|| v.get("Self").and_then(|s| s.get("TailscaleIPs")).and_then(find_ip));
-    TsStatusFields { backend_state, ip }
+    // Empty string filtered out: tailscaled emits `"AuthURL": ""` once the
+    // login has completed, and an empty URL is not a URL.
+    let auth_url = v
+        .get("AuthURL")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| s.starts_with("http"))
+        .map(str::to_string);
+    TsStatusFields { backend_state, ip, auth_url }
+}
+
+/// Default seconds to let `tailscale up` wait for the login to be answered.
+///
+/// 45, and MEASURED rather than guessed: on a clean 2-vCPU Windows VM the
+/// Tailscale control plane took **30 seconds** to hand back the auth URL
+/// (tailscaled journal, 2026-07-29 — `RegisterReq` at 22:37:52, `AuthURL is …`
+/// at 22:38:22). The previous hardcoded `--timeout=8s` therefore gave up 22
+/// seconds before the URL existed, and the user got a bare "timeout waiting for
+/// Tailscale service to enter a Running state" instead of the link that would
+/// have let them finish the login on any device.
+const TS_UP_TIMEOUT_DEFAULT_SECS: u64 = 45;
+
+/// Extra wall-clock the OUTER process bound gets over the inner `--timeout`.
+/// It must be strictly positive, or our own kill would land first and defeat
+/// tailscale's own (gentler, URL-printing) timeout — which is how the 8s inner
+/// vs 15s outer pair used to behave the moment anyone raised the inner one.
+const TS_UP_OUTER_SLACK_SECS: u64 = 15;
+
+/// Largest login wait an override may ask for. Two reasons, and the first one is
+/// a real bug this exists to prevent: without a ceiling, `DML_TS_UP_TIMEOUT`
+/// could parse to a value near `u64::MAX`, and `secs + TS_UP_OUTER_SLACK_SECS`
+/// would then PANIC in debug or wrap in release — inverting the exact
+/// outer-outlives-inner invariant the slack is there to guarantee (found by an
+/// adversarial review, 2026-07-29). The second reason is plain sense: ten
+/// minutes is already far past the ~30s the control plane actually takes, and a
+/// larger number is a typo, not an intention.
+const TS_UP_TIMEOUT_MAX_SECS: u64 = 600;
+
+/// Parse a Go-style short duration (`45s`, `2m`, or bare seconds) into seconds.
+/// `None` for anything else — the caller then keeps the default rather than
+/// risking an outer bound shorter than the inner one.
+fn parse_short_duration_secs(raw: &str) -> Option<u64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (digits, mult) = match s.strip_suffix('s') {
+        Some(d) => (d, 1),
+        None => match s.strip_suffix('m') {
+            Some(d) => (d, 60),
+            None => (s, 1),
+        },
+    };
+    let n: u64 = digits.trim().parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    n.checked_mul(mult)
+}
+
+/// The `--timeout=` value to hand `tailscale up`, and the outer process bound.
+///
+/// `DML_TS_UP_TIMEOUT` is the override — the SAME seam name and the same 45s
+/// default as the WSL arm (`cli/src/90-main.sh`), so the two surfaces cannot
+/// drift into different behaviour for the same user action.
+fn ts_up_timeout() -> (String, std::time::Duration) {
+    let secs = std::env::var("DML_TS_UP_TIMEOUT")
+        .ok()
+        .as_deref()
+        .and_then(parse_short_duration_secs)
+        // The ceiling is what makes the addition below infallible. Without it an
+        // override near u64::MAX panics in debug and WRAPS in release, leaving
+        // the outer bound below the inner timeout -- inverting the one invariant
+        // this function exists to hold.
+        .filter(|s| *s <= TS_UP_TIMEOUT_MAX_SECS)
+        .unwrap_or(TS_UP_TIMEOUT_DEFAULT_SECS);
+    (
+        format!("--timeout={secs}s"),
+        std::time::Duration::from_secs(secs + TS_UP_OUTER_SLACK_SECS),
+    )
 }
 
 /// Pure: pulls the first-time Tailscale login URL out of `tailscale up`'s
@@ -4959,21 +5046,35 @@ fn tailscale_up_native() -> Result<serde_json::Value, CmdError> {
     let Some(exe) = find_tailscale_exe() else {
         return Err(tailscale_not_installed_err());
     };
-    let (_ok, raw) = run_bounded(exe.as_os_str(), &["up", "--timeout=8s"], std::time::Duration::from_secs(15))
+    let (timeout_flag, outer) = ts_up_timeout();
+    let (_ok, raw) = run_bounded(exe.as_os_str(), &["up", &timeout_flag], outer)
         .unwrap_or_else(|| (false, String::new()));
-    let auth_url = extract_tailscale_auth_url(&raw);
+    // SECOND chance at the URL: `up` may have given up before the control plane
+    // answered, while tailscaled went on to receive the URL and keep it. That is
+    // the live-found failure, and recovering it costs one bounded status read.
+    let auth_url = extract_tailscale_auth_url(&raw).or_else(|| {
+        run_bounded(exe.as_os_str(), &["status", "--json"], std::time::Duration::from_secs(5))
+            .and_then(|(_, out)| parse_tailscale_status_json(&out).auth_url)
+    });
     let ip = run_bounded(exe.as_os_str(), &["ip", "-4"], std::time::Duration::from_secs(5))
         .and_then(|(_, out)| first_tailnet_ip(&out));
     let connected = ip.is_some() && auth_url.is_none();
     if !connected && auth_url.is_none() {
         let tail = tail_str(&raw, 400);
+        // Name the knob rather than implying something is broken: by this point
+        // the usual cause is simply that the control server was slower than the
+        // wait, and the wait is adjustable.
+        let waited = format!(
+            " (Waited {}; raise DML_TS_UP_TIMEOUT to wait longer.)",
+            timeout_flag.trim_start_matches("--timeout=")
+        );
         return Err(CmdError {
             code: "TAILSCALE_UP_FAILED".into(),
             message: "Could not start Tailscale login".into(),
             hint: if tail.is_empty() {
-                "Is Tailscale running? Try Install, then Log in again.".into()
+                format!("Try Log in again -- the Tailscale control server can take half a minute to answer.{waited}")
             } else {
-                tail
+                format!("{tail}{waited}")
             },
         });
     }
@@ -5000,8 +5101,8 @@ fn tailscale_down_native() -> serde_json::Value {
 /// The one `*_blocking` body deliberately LEFT in the launcher by the
 /// cargo-workspace refactor (Task 9), which hoisted every other one into
 /// `dml-wow`. This whole Tailscale cluster is Windows-HOST desktop-app
-/// plumbing — locating and driving the Tailscale app's `tailscale.exe`,
-/// running its MSI installer, parsing `tailscale status --json` — with no
+/// plumbing — locating and driving the Tailscale app's `tailscale.exe` and
+/// parsing `tailscale status --json` — with no
 /// WoW/AzerothCore domain content at all, so `dml-wow` ("the WoW game
 /// library") is the wrong home for it and `dml-core` has no host-networking
 /// module to put it in. No planned `dml-wow-cli` subcommand consumes it
@@ -7052,14 +7153,107 @@ mod tests {
         // Mirrors the brief's `connected = backend_state=="Running" &&
         // ip.is_some()` -- Running with no IP yet (mid-login) must NOT read
         // as connected.
-        let running_no_ip = TsStatusFields { backend_state: Some("Running".into()), ip: None };
+        let running_no_ip = TsStatusFields {
+            backend_state: Some("Running".into()),
+            ip: None,
+            ..TsStatusFields::default()
+        };
         let connected = running_no_ip.backend_state.as_deref() == Some("Running") && running_no_ip.ip.is_some();
         assert!(!connected);
 
-        let running_with_ip =
-            TsStatusFields { backend_state: Some("Running".into()), ip: Some("100.1.2.3".into()) };
+        let running_with_ip = TsStatusFields {
+            backend_state: Some("Running".into()),
+            ip: Some("100.1.2.3".into()),
+            ..TsStatusFields::default()
+        };
         let connected = running_with_ip.backend_state.as_deref() == Some("Running") && running_with_ip.ip.is_some();
         assert!(connected);
+    }
+
+    /// The field that turns the live-found dead end into a clickable link:
+    /// tailscaled holds the pending URL after our `up` has already given up.
+    #[test]
+    fn parses_the_pending_auth_url_out_of_status_json() {
+        let raw = r#"{"BackendState":"NeedsLogin","TailscaleIPs":[],
+                      "AuthURL":"https://login.tailscale.com/a/e73516d017e7e"}"#;
+        let fields = parse_tailscale_status_json(raw);
+        assert_eq!(fields.auth_url.as_deref(), Some("https://login.tailscale.com/a/e73516d017e7e"));
+
+        // Logged in already: tailscaled reports the key as an empty string, and
+        // an empty URL is not a URL. Without this filter `up` would report a
+        // pending login that does not exist.
+        let done = parse_tailscale_status_json(r#"{"BackendState":"Running","AuthURL":""}"#);
+        assert_eq!(done.auth_url, None);
+        // Absent entirely is also None, not a panic.
+        assert_eq!(parse_tailscale_status_json(r#"{"BackendState":"Running"}"#).auth_url, None);
+    }
+
+    /// The 8s -> 45s change is the actual fix for the live failure, so the
+    /// DEFAULT is pinned: a silent revert to a sub-30s wait would reintroduce a
+    /// bug whose whole signature is "the URL arrives after we stopped waiting".
+    #[test]
+    fn the_login_wait_defaults_to_longer_than_the_measured_control_plane_delay() {
+        // 30s was measured on the VM; the default must clear it with margin.
+        assert!(
+            TS_UP_TIMEOUT_DEFAULT_SECS >= 45,
+            "the control plane took 30s live; {TS_UP_TIMEOUT_DEFAULT_SECS}s leaves no margin"
+        );
+        // And our own process bound must not fire before tailscale's own
+        // timeout, or we kill the run before it can print the URL.
+        assert!(TS_UP_OUTER_SLACK_SECS > 0);
+    }
+
+    #[test]
+    fn short_duration_parsing_accepts_the_forms_the_seam_documents() {
+        assert_eq!(parse_short_duration_secs("45s"), Some(45));
+        assert_eq!(parse_short_duration_secs("90"), Some(90));
+        assert_eq!(parse_short_duration_secs("2m"), Some(120));
+        assert_eq!(parse_short_duration_secs(" 30s "), Some(30));
+        // Rejected -> the caller keeps the default. Zero and garbage both mean
+        // "no usable value": honouring 0 would make the outer bound shorter
+        // than the inner timeout, the exact inversion this guards against.
+        assert_eq!(parse_short_duration_secs("0s"), None);
+        assert_eq!(parse_short_duration_secs(""), None);
+        assert_eq!(parse_short_duration_secs("soon"), None);
+        assert_eq!(parse_short_duration_secs("1h"), None);
+        assert_eq!(parse_short_duration_secs("-5s"), None);
+    }
+
+    /// The outer bound must always exceed the inner `--timeout`, for the default
+    /// AND for any accepted override — otherwise our kill lands first and
+    /// tailscale never gets to print the URL it was about to print.
+    /// An override near `u64::MAX` used to PANIC here in debug and wrap in
+    /// release, leaving the outer bound below the inner timeout — inverting the
+    /// exact invariant the slack exists to hold. Found by adversarial review,
+    /// 2026-07-29; the ceiling is what makes the addition infallible.
+    #[test]
+    fn an_absurd_login_wait_override_is_refused_instead_of_overflowing() {
+        // The parser itself must not be the thing that saves us -- it is allowed
+        // to return the huge value; the CEILING is the guard.
+        assert_eq!(parse_short_duration_secs("18446744073709551615"), Some(u64::MAX));
+        assert!(u64::MAX.checked_add(TS_UP_OUTER_SLACK_SECS).is_none(), "the add would overflow");
+        assert!(
+            TS_UP_TIMEOUT_MAX_SECS.checked_add(TS_UP_OUTER_SLACK_SECS).is_some(),
+            "anything at or under the ceiling must be addable without overflow"
+        );
+        // And a value over the ceiling is ignored in favour of the default,
+        // rather than honoured into a GUI that hangs for centuries.
+        assert!(TS_UP_TIMEOUT_MAX_SECS > TS_UP_TIMEOUT_DEFAULT_SECS);
+    }
+
+    #[test]
+    fn the_outer_process_bound_always_outlives_the_inner_timeout() {
+        let (flag, outer) = ts_up_timeout();
+        let inner: u64 = flag
+            .trim_start_matches("--timeout=")
+            .trim_end_matches('s')
+            .parse()
+            .expect("the flag carries a plain seconds value");
+        assert!(
+            outer.as_secs() > inner,
+            "outer {}s must outlive inner {inner}s",
+            outer.as_secs()
+        );
     }
 
     #[test]

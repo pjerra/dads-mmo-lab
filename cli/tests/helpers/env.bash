@@ -556,7 +556,11 @@ case "${1:-}" in
     if [[ "${DML_STUB_TS_CONNECTED:-0}" == 1 ]]; then
       exit 0
     fi
-    printf 'To authenticate, visit:\n\n\t%s\n\n' "${DML_STUB_TS_UP_URL:-https://login.tailscale.com/a/0123456789abcdef}"
+    # `-`, NOT `:-`: an explicitly EMPTY DML_STUB_TS_UP_URL must mean "up printed
+    # no URL at all" (the live case where the control plane had not answered
+    # yet). With `:-` an empty value silently fell back to the default URL, so a
+    # test for the no-URL path proved nothing.
+    printf 'To authenticate, visit:\n\n\t%s\n\n' "${DML_STUB_TS_UP_URL-https://login.tailscale.com/a/0123456789abcdef}"
     exit 1
     ;;
   ip)
@@ -564,8 +568,19 @@ case "${1:-}" in
     exit 0
     ;;
   status)
+    # DML_STUB_TS_STATUS_EXIT models a daemon that is not answering at all --
+    # which is what the `up` arm's daemon precondition checks before it spends
+    # the whole login timeout discovering the same thing.
+    if [[ "${DML_STUB_TS_STATUS_EXIT:-0}" != 0 ]]; then
+      echo "failed to connect to local tailscaled" >&2
+      exit "${DML_STUB_TS_STATUS_EXIT}"
+    fi
     if [[ "${2:-}" == "--json" ]]; then
-      printf '{"BackendState":"%s","Self":{"TailscaleIPs":["%s"]}}\n' "${DML_STUB_TS_STATE:-Running}" "${DML_STUB_TS_IP:-100.64.0.1}"
+      # DML_STUB_TS_AUTH_URL models tailscaled HOLDING a pending login URL --
+      # the state that exists after `tailscale up` has already given up waiting
+      # for it (measured live: the control plane answered 30s in, `up` waited 8).
+      printf '{"BackendState":"%s","AuthURL":"%s","Self":{"TailscaleIPs":["%s"]}}\n' \
+        "${DML_STUB_TS_STATE:-Running}" "${DML_STUB_TS_AUTH_URL:-}" "${DML_STUB_TS_IP:-100.64.0.1}"
       exit 0
     fi
     printf '%s   dml-host   linux   -\n' "${DML_STUB_TS_IP:-100.64.0.1}"
@@ -590,7 +605,14 @@ EOS
   cat > "$STUB_BIN/systemctl" <<'EOS'
 #!/usr/bin/env bash
 # is-system-running -> "running"; enable/anything else -> success.
+# DML_STUB_SYSTEMCTL_ENABLE_EXIT models `enable --now tailscaled` FAILING (no
+# such unit, masked, or the daemon dying on start). The up arm must report that
+# cause rather than swallowing it and blaming a login timeout.
 [[ "${1:-}" == "is-system-running" ]] && { echo running; exit 0; }
+if [[ "${1:-}" == "enable" && "${DML_STUB_SYSTEMCTL_ENABLE_EXIT:-0}" != 0 ]]; then
+  echo "Failed to enable unit: Unit tailscaled.service not found." >&2
+  exit "${DML_STUB_SYSTEMCTL_ENABLE_EXIT}"
+fi
 exit 0
 EOS
   chmod +x "$STUB_BIN/systemctl"

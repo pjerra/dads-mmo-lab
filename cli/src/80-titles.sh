@@ -28,8 +28,26 @@ _installers_supported() {
 }
 
 # One sentence for the text path, kept next to the check it explains.
+#
+# WORDED FOR WHAT IS REACHABLE TODAY, deliberately.
+#
+# A native Route A install engine exists (`dml-wow install-native`), and an
+# earlier version of this message advertised it. That was FALSE for every real
+# user and was caught by three independent reviewers on 2026-07-29: the launcher
+# ships no `dml-wow` binary (`tauri.conf.json`'s bundle.resources carries
+# `cli/dml`, the lua trees and the six installers, and there is no externalBin),
+# and the Library page's Install button is DISABLED on exactly the host that
+# produces this message (`title-install.ts`'s gate returns canInstall:false
+# whenever install_supported is false). So the copy sent people to two dead ends.
+#
+# The native route gets advertised here when it is actually reachable -- i.e.
+# when the launcher wiring lands and the binary ships -- and `title-install.ts`
+# must be updated in the SAME change, because that file holds the sentence a
+# Windows user actually sees. `install-native` itself has NO bash mirror on
+# purpose: this check refuses on Windows by design and the Linux installers
+# remain the WSL route.
 _installers_unsupported_msg() {
-    printf '%s' "installing titles needs the WSL backend: the DML installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host"
+    printf '%s' "these installers are Linux scripts (sudo, pacman/apt, systemd) and cannot run on this host, so installing a title here needs the WSL backend"
 }
 
 # id|display name|installer script|kind(games=installer manages ~/games itself,
