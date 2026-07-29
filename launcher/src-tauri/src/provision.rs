@@ -422,23 +422,16 @@ pub fn verify_failure(after: &BackendStatus) -> Option<(&'static str, String, St
     }
 }
 
-/// One line of a failed spawn's output, for the error message. Prefers stderr,
-/// falls back to stdout, and collapses to a bounded single line — a raw
-/// multi-KB dump in an error sentence helps nobody.
+/// One line of a failed spawn's output, for the error message. The picking and
+/// bounding now live in [`dml_core::setup::first_diagnostic_line`] — the probe
+/// chain needs the identical thing for the could-not-tell screen's `detail`
+/// (SHIP-LIST Phase 4 review, P9), and two copies of "quote one line of what
+/// wsl.exe said" is exactly the drift this codebase keeps paying for. The only
+/// difference kept here is the fallback: an error SENTENCE has to say
+/// something, a diagnostics line may simply be absent.
 fn first_diagnostic_line(stdout: &str, stderr: &str) -> String {
-    let pick = |s: &str| {
-        s.lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .map(|l| {
-                if l.chars().count() > 200 {
-                    format!("{}...", l.chars().take(200).collect::<String>())
-                } else {
-                    l.to_string()
-                }
-            })
-    };
-    pick(stderr).or_else(|| pick(stdout)).unwrap_or_else(|| "no output".to_string())
+    dml_core::setup::first_diagnostic_line(stdout, stderr)
+        .unwrap_or_else(|| "no output".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -457,6 +450,12 @@ fn fail(emit: &impl Fn(Value), code: &str, message: impl Into<String>, hint: &st
 ///
 /// `run` receives `wsl.exe` argv and answers with what happened — the single
 /// injection seam, shared with the probe chain so the tests see BOTH.
+///
+/// The chain's per-probe [`dml_core::setup::ProbeBudget`] is deliberately
+/// IGNORED here: this flow already gives every spawn [`DEFAULT_SETUP_TIMEOUT`]
+/// (120s), which is the cold-start budget anyway, and a user who pressed a
+/// button and is watching a streamed log would rather wait than have their
+/// provisioning killed halfway through.
 pub fn provision_with(
     cfg: &ProvisionCfg,
     resource_dir: Option<&Path>,
@@ -468,7 +467,7 @@ pub fn provision_with(
     // 1. May we run? The same chain `backend_status` reports -- not a second
     //    opinion about the same machine.
     emit(line_event("info", "Checking this PC..."));
-    let before = probe_with(&cfg.distro, &cfg.user, &mut run);
+    let before = probe_with(&cfg.distro, &cfg.user, |a, _budget| run(a));
     if let Some((code, message, hint)) = refusal(&before) {
         fail(&emit, code, message, &hint);
         return;
@@ -573,7 +572,7 @@ pub fn provision_with(
     // 5. Verify -- same chain again, so "installed" means the same thing the
     //    first-run screen will independently see.
     emit(line_event("info", "Checking the installed CLI..."));
-    let after = probe_with(&cfg.distro, &cfg.user, &mut run);
+    let after = probe_with(&cfg.distro, &cfg.user, |a, _budget| run(a));
     if let Some((code, message, hint)) = verify_failure(&after) {
         fail(&emit, code, message, &hint);
         return;
@@ -1242,6 +1241,7 @@ mod tests {
         BackendStatus {
             state,
             blocked_at: Some(SetupStep::Distro),
+            detail: None,
             distro: DISTRO.to_string(),
             expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
             probes: dml_core::setup::Probes::unprobed(),

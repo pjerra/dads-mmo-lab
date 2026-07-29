@@ -25,6 +25,15 @@
 //!     structure under the target. That is what `cli/lua/party` and
 //!     `cli/lua/gm` use, so new bridge scripts are picked up automatically
 //!     without the two sets ever mixing.
+//! THE CATCH, and why `build.rs` has a `WATCH_DIRS` list: the walk happens
+//! only when the build script RUNS, and `tauri_build::build()` asks cargo to
+//! watch each file it walked, never the directory. A script that does not exist
+//! yet is on no such list, so adding one used to leave cargo thinking the build
+//! script was fresh — build.rs never re-ran and the new file never shipped.
+//! `build.rs` names the two directories on their own `rerun-if-changed` lines
+//! (cargo rescans a directory), and
+//! `the_build_script_makes_cargo_watch_every_directory_resource` below fails if
+//! a directory-form resource is ever added here without being added there.
 //! The six installers are listed one by one rather than globbed: `guides/`
 //! also holds `install-wow-wotlk-fedora.sh`, `-ubuntu.sh` and the unbound
 //! addon script, none of which the title registry can run. Enumerating them
@@ -341,6 +350,151 @@ mod tests {
             !cli.windows(2).any(|w| w == b"\r\n"),
             "bundled cli/dml has CRLF line endings; bash in the distro will reject it"
         );
+    }
+
+    /// Compare paths the way both platforms write them: the build script's
+    /// directives come back with the platform separator (`..\..\cli\lua\gm` on
+    /// Windows), the manifest is written with forward slashes.
+    fn norm(p: &str) -> String {
+        p.replace('\\', "/").trim_end_matches('/').to_string()
+    }
+
+    /// Every `cargo:rerun-if-changed=` path the build script really printed on
+    /// the build that produced THIS test binary. `OUT_DIR` is
+    /// `target/<profile>/build/<pkg>-<hash>/out`, and cargo captures the build
+    /// script's stdout as `output` next to it — so this reads the actual
+    /// directives cargo was given, not a re-implementation of them.
+    fn build_script_rerun_paths() -> Vec<String> {
+        let out_dir = Path::new(env!("OUT_DIR"));
+        let output = out_dir.parent().expect("OUT_DIR has a parent").join("output");
+        let text = std::fs::read_to_string(&output)
+            .unwrap_or_else(|e| panic!("cannot read the build script output at {}: {e}", output.display()));
+        let paths: Vec<String> = text
+            .lines()
+            .filter_map(|l| {
+                l.strip_prefix("cargo:rerun-if-changed=")
+                    .or_else(|| l.strip_prefix("cargo::rerun-if-changed="))
+            })
+            .map(norm)
+            .collect();
+        // Non-vacuity: an empty or unparsed file would satisfy every "must
+        // contain" loop below by never running it.
+        assert!(
+            !paths.is_empty(),
+            "no rerun-if-changed directives parsed out of {}",
+            output.display()
+        );
+        paths
+    }
+
+    #[test]
+    fn the_build_script_makes_cargo_watch_every_directory_resource() {
+        // The bug this pins (verified against the real `output` file before the
+        // fix): `tauri_build::build()` prints `cargo:rerun-if-changed` for each
+        // resource it WALKED — `..\..\cli\lua\party\dml_login.lua` and friends —
+        // and never for the directory, because tauri-utils' resource iterator
+        // skips directories. A bridge script that does not exist yet is on no
+        // such list, so adding one leaves cargo believing the build script is
+        // fresh: build.rs does not re-run, `target/<profile>/cli/lua/party`
+        // keeps the old set, and `provision::plan` — which enumerates the
+        // scripts from disk at runtime precisely so new ones need no code
+        // change — provisions the stale set with no error anywhere.
+        //
+        // Cargo DOES rescan a directory named on a rerun-if-changed line, so
+        // the directories themselves must be on it.
+        let watched = build_script_rerun_paths();
+
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let res = conf["bundle"]["resources"].as_object().expect("bundle.resources map");
+        // A source tauri walks (rather than copying as one file) is exactly one
+        // that `is_dir()` — the same test tauri-utils applies.
+        let dirs: Vec<String> =
+            res.keys().filter(|src| manifest.join(src).is_dir()).map(|s| norm(s)).collect();
+        assert!(
+            dirs.len() >= 2,
+            "expected the two bridge-script directories among the resource sources: {dirs:?}"
+        );
+
+        for d in dirs {
+            assert!(
+                watched.iter().any(|w| *w == d),
+                "the build script never told cargo to watch the directory {d}, so a NEW file in it \
+                 will not trigger a rebuild and will not be bundled. Watched: {watched:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bundled_resource_dirs_match_the_repo() {
+        // P14's OTHER half, and the reason build.rs's rerun-if-changed lines are
+        // not the whole fix. Cargo re-running the build script is not the same
+        // as the copy being right: `tauri_build::build()` only ever COPIES, so a
+        // bridge script deleted from `cli/lua/party` stays behind in
+        // `target/<profile>/cli/lua/party` forever. `provision::plan` enumerates
+        // that directory at RUNTIME (precisely so a NEW script needs no code
+        // change), which means a dev build would keep installing a script that
+        // no longer exists in the repo, with no error anywhere.
+        //
+        // Both directions are asserted: an extra file is the deletion half, a
+        // missing one is the addition half failing on the REAL build output
+        // rather than only in the directives build.rs printed.
+        let exe = std::env::current_exe().expect("test exe path");
+        let target_dir = exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("target/<profile>/deps/<exe> has two parents");
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let res = conf["bundle"]["resources"].as_object().expect("bundle.resources map");
+
+        let names = |dir: &Path| -> std::collections::BTreeSet<String> {
+            std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+                .filter_map(Result::ok)
+                .filter(|e| e.path().is_file())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        for (src, dest) in res {
+            let src_dir = manifest.join(src);
+            if !src_dir.is_dir() {
+                continue; // single-file resources are not walked
+            }
+            let dest_dir = target_dir.join(dest.as_str().expect("every target is a string"));
+            assert!(
+                dest_dir.is_dir(),
+                "the build did not lay {src} down at {}",
+                dest_dir.display()
+            );
+            let want = names(&src_dir);
+            let got = names(&dest_dir);
+            let stale: Vec<&String> = got.difference(&want).collect();
+            assert!(
+                stale.is_empty(),
+                "{} holds {stale:?}, which {src} no longer contains: tauri-build copies resources \
+                 and never prunes them, and provision::plan enumerates that directory at runtime, \
+                 so a dev build would install a script deleted from the repo. Remedy: delete {} \
+                 (or run `cargo clean -p launcher`).",
+                dest_dir.display(),
+                target_dir.join("cli").display()
+            );
+            let absent: Vec<&String> = want.difference(&got).collect();
+            assert!(
+                absent.is_empty(),
+                "{} is missing {absent:?} from {src}: the build script did not re-run for a NEW \
+                 file, which is the bug build.rs's rerun-if-changed lines exist to prevent.",
+                dest_dir.display()
+            );
+            checked += 1;
+        }
+        // Non-vacuity: a manifest whose directory resources stopped being
+        // directories would skip every assertion above.
+        assert!(checked >= 2, "expected the two bridge-script directories, checked {checked}");
     }
 
     #[test]

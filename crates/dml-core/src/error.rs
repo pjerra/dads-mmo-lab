@@ -34,9 +34,29 @@ impl From<RunnerError> for CmdError {
                 message: raw,
                 // Both backends, same reason the Spawn arm covers both: this
                 // mapping has no runner context, and a native-mode user has no
-                // distro and no "Set up backend" button to press.
+                // distro and no setup button to press.
+                //
+                // BOTH labels, because both states land here and this mapping
+                // cannot tell them apart: an outdated CLI answers in plain text
+                // and an absent one answers with nothing that parses. The
+                // start screen reads "Update backend" for the first (the common
+                // one -- Install-DML.ps1 still bootstraps v2.6.0) and "Set up
+                // backend" for the second, so naming only one of them sent most
+                // readers looking for a button that is not on their screen.
+                //
+                // The test that reads both labels out of `first-run.ts` and
+                // fails if this copy stops matching them lives in the LAUNCHER
+                // crate (`the_cli_bad_output_hint_names_the_buttons_first_run_actually_renders`
+                // in launcher/src-tauri/src/lib.rs). It cannot live here: this
+                // crate is the game-agnostic bottom layer and must not know the
+                // launcher's source tree exists -- an `include_str!` reaching up
+                // into launcher/src would red `cargo test -p dml-core` (ubuntu
+                // CI included) the day a SvelteKit file is renamed. The launcher
+                // crate depends on this one and already reads both sides
+                // (`provision.rs` does the same with `api.ts`), so that is where
+                // the coupling is real.
                 hint: format!(
-                    "The DML backend answered with something this launcher does not understand - usually an older CLI than the v{} it speaks. Default mode: press \"Set up backend\" on the launcher's start screen to install the copy that shipped with it. Native mode (DML_BACKEND=native): point DML_SCRIPT at a matching cli/dml.",
+                    "The DML backend answered with something this launcher does not understand - usually an older CLI than the v{} it speaks. Default mode: press \"Update backend\" on the launcher's start screen (the same button reads \"Set up backend\" when there is no backend in there at all) to install the copy that shipped with it. Native mode (DML_BACKEND=native): point DML_SCRIPT at a matching cli/dml.",
                     crate::setup::EXPECTED_CLI_VERSION
                 ),
             },
@@ -80,12 +100,16 @@ mod tests {
             "the hint still tells the user to run a script from a repo: {}",
             err.hint
         );
-        assert!(
-            err.hint.contains("Set up backend"),
-            "the hint must name the in-app setup button (first-run.ts's label): {}",
-            err.hint
-        );
     }
+
+    // The hint has to name the button that is actually on the user's screen,
+    // and `first-run.ts` has TWO setup buttons whose labels differ by state
+    // ("Update backend" for `cli_outdated`, "Set up backend" for `no_cli`).
+    // BOTH of those machines produce `CLI_BAD_OUTPUT`, so the copy names both.
+    // That coupling is pinned by a test that reads the labels out of
+    // `first-run.ts` itself -- in the LAUNCHER crate, which legitimately spans
+    // both sides. See the comment on the `BadOutput` arm above for why it is
+    // not here.
 
     /// The version in the copy must come from the contract constant, not a
     /// literal: `EXPECTED_CLI_VERSION` is what the probe chain and the setup

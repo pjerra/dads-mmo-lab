@@ -67,6 +67,12 @@ export interface PayloadStatus {
 export interface BackendStatusReport {
   state: SetupState;
   blocked_at: SetupStep | null;
+  /**
+   * What the probe that went dark actually SAID — one bounded line of
+   * wsl.exe's (or the distro's) own output, UTF-16-decoded on the Rust side.
+   * Set only alongside `blocked_at`; null whenever there was nothing to quote.
+   */
+  detail: string | null;
   distro: string;
   expected_cli_version: string;
   probes: BackendProbes;
@@ -102,7 +108,7 @@ export type FirstRunAction =
 export interface FirstRunState {
   kind: FirstRunKind;
   title: string;
-  /** One sentence. */
+  /** The whole explanation: one sentence, or two when a state has two remedies. */
   body: string;
   action: FirstRunAction;
   /** Small diagnostics line under the button. Empty when there is nothing useful to add. */
@@ -113,8 +119,67 @@ export interface FirstRunState {
  * Where the elevated substrate installer lives. Same URL Help.svelte's
  * Community card opens -- never invent a second one, and never invent a
  * deep link to a file that may be renamed.
+ *
+ * SCOPE: this is the UPSTREAM project. It carries `guides/DML-Windows/
+ * Install-DML.ps1`, which is why `no_wsl`/`no_distro` link to it. It does NOT
+ * carry this launcher and publishes no release of it, so it must never be
+ * offered as a place to download the app itself.
  */
 export const PROJECT_URL = "https://github.com/DadsMmoLab/dads-mmo-lab";
+
+/**
+ * The diagnostics line, made readable by a human.
+ *
+ * The chain quotes the FIRST line the probe printed, verbatim — which is right
+ * for `wsl.exe`, whose complaints are sentences, and wrong for the two probes
+ * that run `dml ... --json` inside the distro: their first line is our own
+ * envelope, so a titles-step (or an unparseable cli-step) shrug rendered
+ * `{"ok":false,"error":{"code":...}}` at 12px as the user's one clue.
+ *
+ * The envelope's `message` IS the human sentence, so this pulls it out rather
+ * than inventing anything. Nothing is lost: `report.detail` still carries the
+ * raw text for a bug report, this only changes what the card shows.
+ *
+ * Anything that does not look like JSON (every `wsl.exe` message) is returned
+ * untouched — including the truncated tail the Rust side appends at 200 chars,
+ * which is why the fields are also matched textually when `JSON.parse` fails.
+ */
+export function humanDetail(raw: string): string {
+  const t = raw.trim();
+  if (!t.startsWith("{")) return raw;
+
+  let message: string | undefined;
+  let code: string | undefined;
+  try {
+    const obj = JSON.parse(t) as Record<string, unknown>;
+    const err = (obj.error ?? obj) as Record<string, unknown>;
+    if (typeof err?.message === "string") message = err.message;
+    if (typeof err?.code === "string") code = err.code;
+  } catch {
+    // A bounded quote is very often CUT OFF mid-object (the Rust side stops at
+    // 200 chars and appends an ellipsis), which is exactly the case that most
+    // needs rescuing from a raw blob -- and the case where the string we want
+    // has no closing quote left, hence the second, open-ended pattern.
+    const unescape = (s: string) =>
+      s.replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    const grab = (key: string): string | undefined => {
+      const body = `"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`;
+      const closed = new RegExp(`${body}"`).exec(t);
+      if (closed) return unescape(closed[1]);
+      const open = new RegExp(`${body}$`).exec(t);
+      return open ? unescape(open[1]) : undefined;
+    };
+    message = grab("message");
+    code = grab("code");
+  }
+
+  message = message?.trim();
+  code = code?.trim();
+  if (message) return code ? `${message} (${code})` : message;
+  if (code) return `The DML backend reported ${code}.`;
+  // JSON we cannot read anything out of. Still not a blob on the card.
+  return "The DML backend answered with something the launcher couldn't read.";
+}
 
 /** The screen for every could-not-tell, whatever produced it. */
 function couldNotTell(step: SetupStep | null, distro: string | null, detail: string): FirstRunState {
@@ -134,7 +199,7 @@ function couldNotTell(step: SetupStep | null, distro: string | null, detail: str
     title: "Couldn't check this PC's setup",
     body,
     action: { kind: "retry", label: "Check again" },
-    detail,
+    detail: humanDetail(detail),
   };
 }
 
@@ -162,8 +227,23 @@ function setupScreen(r: BackendStatusReport): FirstRunState {
     return {
       kind: "payload-missing",
       title: "This copy of the launcher didn't bring its setup files",
-      body: `The DML backend isn't in ${r.distro} yet and the launcher can't put it there, because the files it ships for that job aren't in this copy — reinstalling from a complete release is the way back.`,
-      action: { kind: "link", label: "Get a complete release ↗", url: PROJECT_URL },
+      // NOT a link to PROJECT_URL. That repository carries Install-DML.ps1 but
+      // no launcher and no release of it, so "get a complete release" sent the
+      // one user who cannot fix themselves to a page where the thing they were
+      // told to download does not exist.
+      //
+      // TWO CAUSES, TWO REMEDIES — and the copy has to carry both, because the
+      // one remedy it used to name does not fix the commoner cause. If the exe
+      // was dragged out of its install folder, reinstalling repairs the
+      // ORIGINAL directory and the copy in front of the user stays exactly as
+      // broken: Check again then fails forever with no hint that WHICH exe they
+      // launched is the problem. So the moved case is named first (the fix is
+      // free and instant), the quarantine case second. Both are repaired IN
+      // PLACE, which is why the button re-checks rather than navigating away,
+      // and `detail` names the directory we looked in — the thread to pull when
+      // neither sentence describes you.
+      body: `The DML backend isn't in ${r.distro} yet and the launcher can't put it there, because the files it ships for that job aren't in this copy. If you moved or copied the launcher out of the folder it was installed into, start it from that folder instead — otherwise running the launcher's installer again puts the files back, and if your antivirus quarantined them you'll need to allow them first.`,
+      action: { kind: "retry", label: "Check again" },
       detail: `Missing: ${r.payload.missing.join(", ")}${where}`,
     };
   }
@@ -224,7 +304,9 @@ export function firstRunState(o: {
       return null;
 
     case "unknown":
-      return couldNotTell(r.blocked_at, r.distro, o.error ?? "");
+      // The machine's OWN words first: `error` describes our IPC, `detail`
+      // describes their PC, and this is the one screen with no repair on it.
+      return couldNotTell(r.blocked_at, r.distro, r.detail ?? o.error ?? "");
 
     case "no_wsl":
       return {
@@ -257,6 +339,55 @@ export function firstRunState(o: {
         detail: "",
       };
   }
+}
+
+/** How the one button renders right now. */
+export interface FirstRunButton {
+  label: string;
+  disabled: boolean;
+}
+
+/**
+ * The button's live state, given what is currently running.
+ *
+ * WHY THIS IS NOT JUST `action.label`. The retry arm is the one that hurts: the
+ * probe chain's cold-start budget is 120 s, so on a wedged distro "Check again"
+ * used to sit there enabled and unchanged for two minutes while `probeBackend`
+ * silently dropped every re-click on its re-entry guard. A user reasonably
+ * concludes the button is broken — on the ONE screen that has no other repair
+ * on it. Both slow arms therefore say so and refuse the second press:
+ * `setup` while `backend_setup` streams, `retry` while a probe is in flight.
+ *
+ * Lives here rather than in FirstRun.svelte for the same reason the copy does:
+ * this is a decision, and decisions in this module are vitest-pinned instead of
+ * click-tested.
+ */
+export function firstRunButton(
+  action: FirstRunAction,
+  o: { setupRunning: boolean; rechecking: boolean; setupLocked: boolean },
+): FirstRunButton {
+  if (action.kind === "setup") {
+    return {
+      // A setup run always ends in a re-probe (FirstRun.svelte's runSetup), and
+      // that probe outlives the run: `running` is already false while the
+      // launcher is still finding out whether the install took. Saying nothing
+      // for those seconds left the ONE button on the screen enabled and reading
+      // "Set up backend", which invites a second full install on top of the
+      // answer being fetched.
+      label: o.setupRunning ? "Setting up…" : o.rechecking ? "Checking…" : action.label,
+      disabled: o.setupRunning || o.rechecking || o.setupLocked,
+    };
+  }
+  if (action.kind === "retry") {
+    return {
+      label: o.rechecking ? "Checking…" : action.label,
+      // The mirror image of the same rule: neither slow job may leave the
+      // other's button pressable.
+      disabled: o.rechecking || o.setupRunning,
+    };
+  }
+  // nav / link: instant, and neither of them is what the running job is about.
+  return { label: action.label, disabled: o.setupRunning };
 }
 
 /**

@@ -1488,6 +1488,47 @@ pub fn backend_status_report(
     }
 }
 
+/// The probe environment [`backend_status`] hands the chain. Split out of the
+/// command body so the wall-clock budgets are pinned by a test — a
+/// `#[tauri::command]` needs an `AppHandle` and cannot be called from one.
+///
+/// The budgets themselves are `dml_core::setup`'s defaults; what splitting this
+/// out lets a test assert is that `backend_status` does not quietly narrow
+/// them. It is the call that gates Home on every app start, so the cold-boot
+/// budget is load-bearing here specifically (SHIP-LIST Phase 4 review,
+/// P4/P8/P12).
+pub fn backend_probe_env() -> dml_core::setup::SetupProbeEnv {
+    dml_core::setup::SetupProbeEnv::new(dml_core::runner::DISTRO, dml_core::runner::USER)
+}
+
+/// Everything [`backend_status`] does, with the one thing a test cannot have —
+/// the actual `wsl.exe` spawn — injected. `spawn` is handed the program, the
+/// argv and the budget ALREADY RESOLVED to a wall clock.
+///
+/// THIS IS THE SEAM, AND IT IS DELIBERATELY BELOW THE BUDGET. A test that only
+/// asserts on what [`backend_probe_env`] returns pins a helper, not a call
+/// site: narrowing the env between building it and handing it to the chain
+/// leaves such a test green (verified — `env.cold_timeout =
+/// Duration::from_secs(20)` here, the exact regression, went undetected). What
+/// the chain is given can only be observed where the budget is spent, so the
+/// injection point is the spawn and the thing under test is the path Home
+/// takes on every app start.
+pub fn backend_status_with(
+    resource_dir: Option<&std::path::Path>,
+    native: bool,
+    mut spawn: impl FnMut(
+        &std::ffi::OsStr,
+        &[&str],
+        std::time::Duration,
+    ) -> dml_core::setup::ProbeOutcome,
+) -> BackendStatusReport {
+    let env = backend_probe_env();
+    let backend = dml_core::setup::probe_with(&env.distro, &env.user, |args, budget| {
+        spawn(&env.wsl_program, args, env.budget(budget))
+    });
+    backend_status_report(backend, crate::payload::resolve_opt(resource_dir), native)
+}
+
 /// Probe this machine and report the FIRST thing standing between the user and
 /// a running server: no WSL → no `dml-arch` distro → no `dml` CLI in it (or an
 /// outdated one) → no titles installed.
@@ -1496,8 +1537,10 @@ pub fn backend_status_report(
 /// command (4.2) consume THIS — one chain, one answer, so the two can never
 /// disagree about what state the machine is in.
 ///
-/// Bounded end to end: each spawn is capped at
-/// [`dml_core::setup::DEFAULT_PROBE_TIMEOUT`] and the chain short-circuits at
+/// Bounded end to end, with TWO budgets (see [`backend_probe_env`]): the
+/// host-side calls are capped at [`dml_core::setup::DEFAULT_PROBE_TIMEOUT`] and
+/// the one call that may cold-start the WSL2 VM at
+/// [`dml_core::setup::DEFAULT_COLD_START_TIMEOUT`]. The chain short-circuits at
 /// the first missing link, so a machine with no WSL answers immediately and a
 /// wedged `wsl.exe` costs one timeout, not four. Runs on the blocking pool —
 /// it shells subprocesses and must never sit on the IPC thread.
@@ -1513,15 +1556,7 @@ async fn backend_status(app: tauri::AppHandle) -> Result<BackendStatusReport, Cm
     let resource_dir = app.path().resource_dir().ok();
     let native = is_native_backend();
     tauri::async_runtime::spawn_blocking(move || {
-        let env = dml_core::setup::SetupProbeEnv::new(
-            dml_core::runner::DISTRO,
-            dml_core::runner::USER,
-        );
-        backend_status_report(
-            dml_core::setup::probe(&env),
-            crate::payload::resolve_opt(resource_dir.as_deref()),
-            native,
-        )
+        backend_status_with(resource_dir.as_deref(), native, dml_core::setup::spawn_probe)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })
@@ -6547,7 +6582,95 @@ mod tests {
             cli: dml_core::setup::Tri::Yes,
             cli_version: Some(dml_core::setup::EXPECTED_CLI_VERSION.to_string()),
             titles: Some(2),
+            detail: None,
         }
+    }
+
+    #[test]
+    fn backend_status_report_carries_the_probe_message_through_the_flatten() {
+        // SHIP-LIST Phase 4 review, P9. The chain now quotes what wsl.exe
+        // actually said on a could-not-tell, but the screen reads it through
+        // `#[serde(flatten)]` -- so a key that exists in `BackendStatus` and is
+        // swallowed here helps nobody. `detail` must be a sibling of `state`.
+        let mut probes = probes_ready();
+        probes.wsl = dml_core::setup::Tri::Unknown;
+        probes.detail = Some("Wsl/Service/CreateInstance/0x80370102".to_string());
+        let report = backend_status_report(
+            dml_core::setup::derive("dml-arch", probes),
+            crate::payload::resolve_opt(None),
+            false,
+        );
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["state"], "unknown");
+        assert_eq!(v["blocked_at"], "wsl");
+        assert_eq!(
+            v["detail"], "Wsl/Service/CreateInstance/0x80370102",
+            "the retry card has nothing to show: {v}"
+        );
+    }
+
+    #[test]
+    fn backend_status_probes_with_a_budget_that_survives_a_cold_wsl2_boot() {
+        // SHIP-LIST Phase 4 review, P4/P8/P12. `backend_status` runs from
+        // +page.svelte's onMount, so its FIRST call into the distro is the one
+        // that boots the WSL2 VM after a Windows reboot. On a 20s budget that
+        // overruns, and an established user's working Home is replaced by
+        // "Couldn't check this PC's setup".
+        //
+        // THIS ASSERTS ON THE CALL SITE, NOT ON A HELPER. The first version
+        // read `backend_probe_env()` and checked its budgets -- which proves
+        // only that the helper builds the right numbers, never that the
+        // command hands them over intact. A verifier set
+        // `env.cold_timeout = Duration::from_secs(20)` at the real call site,
+        // the precise regression named above, and the test stayed GREEN. So
+        // the budget is now observed where it is SPENT: at the spawn, through
+        // the same seam `probe_with` gives the chain.
+        use dml_core::setup::ProbeOutcome;
+        let seen: std::cell::RefCell<Vec<(Vec<String>, std::time::Duration)>> =
+            std::cell::RefCell::new(Vec::new());
+        let report = backend_status_with(None, false, |program, args, budget| {
+            assert_eq!(program, std::ffi::OsStr::new("wsl.exe"), "probes must spawn wsl.exe");
+            seen.borrow_mut().push((args.iter().map(|s| s.to_string()).collect(), budget));
+            let stdout = if args.first().copied() == Some("--list") {
+                format!("{}\r\n", dml_core::runner::DISTRO)
+            } else if args.contains(&"version") {
+                r#"{"ok":true,"data":{"version":"3.0.0"}}"#.to_string()
+            } else {
+                r#"{"ok":true,"data":{"games":[]}}"#.to_string()
+            };
+            ProbeOutcome::Ran { code: Some(0), stdout, stderr: String::new() }
+        });
+        let seen = seen.into_inner();
+
+        // The chain walked to the end, so the cold call below really is the
+        // one the chain made -- not a short-circuit that never reached it.
+        assert_eq!(serde_json::to_value(&report).unwrap()["state"], "no_titles");
+        assert_eq!(seen.len(), 3, "the whole chain must have run: {seen:?}");
+
+        // ...against this launcher's own distro and user.
+        let cold = seen
+            .iter()
+            .find(|(args, _)| args.contains(&"version".to_string()))
+            .expect("the CLI probe never ran");
+        assert_eq!(
+            cold.0,
+            vec!["-d", dml_core::runner::DISTRO, "-u", dml_core::runner::USER, "--", "dml", "version", "--json"]
+        );
+        // THE ASSERTION: the wall clock the VM-booting call is actually given.
+        assert!(
+            cold.1 >= std::time::Duration::from_secs(90),
+            "the cold call gets {:?}, which a cold WSL2 + systemd boot outruns",
+            cold.1
+        );
+        // And the other half: a host-side call must NOT inherit that budget,
+        // or a broken machine takes minutes to say so.
+        let warm = seen.first().expect("nothing was probed");
+        assert_eq!(warm.0, vec!["--list", "--quiet"]);
+        assert!(
+            warm.1 <= std::time::Duration::from_secs(30),
+            "a wedged host-side wsl.exe must still be reported fast, got {:?}",
+            warm.1
+        );
     }
 
     #[test]
@@ -6624,6 +6747,181 @@ mod tests {
         let v = serde_json::to_value(&report).unwrap();
         assert_eq!(v["payload"]["present"], "no");
         assert_eq!(v["payload"]["missing"][0], crate::payload::CLI_SCRIPT);
+    }
+
+    // -- the CLI_BAD_OUTPUT hint names the button on the user's screen -------
+    // This test lives HERE, not in `dml-core`, on purpose. The hint is built in
+    // `dml_core::error` (the game-agnostic bottom layer, which must never know
+    // that a SvelteKit tree exists) but the labels it quotes are rendered by
+    // `launcher/src/lib/first-run.ts`. This crate is the one that legitimately
+    // spans both sides -- it depends on dml-core and it already reads the
+    // frontend's source (`provision.rs` does the same with `api.ts`), so an
+    // `include_str!` of a frontend file cannot red `cargo test -p dml-core`
+    // (ubuntu CI included) the day that file is renamed.
+
+    /// Every label `first-run.ts` puts on a `kind: "setup"` button, read out of
+    /// the file that renders it.
+    ///
+    /// Parsed rather than duplicated: a copy of the literals here could neither
+    /// notice a rename there nor notice that it was quoting the wrong one of the
+    /// two. Tolerant of both quote styles and of property order, so a prettier
+    /// config change is a formatting change and not a red test.
+    fn first_run_setup_button_labels() -> Vec<String> {
+        const TS: &str = include_str!("../../src/lib/first-run.ts");
+
+        /// The `{ ... }` object literal that encloses byte `at`.
+        fn enclosing_object(src: &str, at: usize) -> Option<(usize, usize)> {
+            let b = src.as_bytes();
+            let mut depth = 0i32;
+            let mut start = None;
+            for i in (0..at).rev() {
+                match b[i] {
+                    b'}' => depth += 1,
+                    b'{' => {
+                        if depth == 0 {
+                            start = Some(i);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            let start = start?;
+            depth = 0;
+            for i in at..b.len() {
+                match b[i] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        if depth == 0 {
+                            return Some((start, i + 1));
+                        }
+                        depth -= 1;
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        /// `name: "value"` / `name: 'value'` inside one object literal. A
+        /// non-literal value (the `label: string` of the type declaration)
+        /// yields None, which is what keeps the type out of the results.
+        fn string_prop(seg: &str, name: &str) -> Option<String> {
+            let key = format!("{name}:");
+            let mut from = 0usize;
+            while let Some(rel) = seg[from..].find(&key) {
+                let after = &seg[from + rel + key.len()..];
+                let v = after.trim_start();
+                let quote = v.chars().next()?;
+                if quote == '"' || quote == '\'' {
+                    let body = &v[quote.len_utf8()..];
+                    if let Some(end) = body.find(quote) {
+                        return Some(body[..end].to_string());
+                    }
+                }
+                from += rel + key.len();
+            }
+            None
+        }
+
+        let mut out: Vec<String> = Vec::new();
+        for (i, _) in TS.match_indices("kind:") {
+            let v = TS[i + "kind:".len()..].trim_start();
+            if !(v.starts_with("\"setup\"") || v.starts_with("'setup'")) {
+                continue;
+            }
+            let Some((s, e)) = enclosing_object(TS, i) else { continue };
+            let Some(label) = string_prop(&TS[s..e], "label") else { continue };
+            if !label.is_empty() && !out.contains(&label) {
+                out.push(label);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_cli_bad_output_hint_names_the_buttons_first_run_actually_renders() {
+        // `first-run.ts` has TWO setup buttons and their labels differ by state:
+        // `cli_outdated` renders "Update backend", `no_cli` renders "Set up
+        // backend". BOTH of those machines produce `CLI_BAD_OUTPUT` -- an old
+        // CLI answers in plain text, an absent one answers with nothing that
+        // parses -- and that mapping has no way to tell which, so the copy has
+        // to name both. It used to name only "Set up backend", the label the
+        // RARER of the two sees.
+        let labels = first_run_setup_button_labels();
+        // Non-vacuity: a parse that found nothing would satisfy the loop below
+        // without reading a single label.
+        assert!(
+            labels.len() >= 2,
+            "expected first-run.ts's setup-button labels, parsed: {labels:?}"
+        );
+        let err = dml_core::error::CmdError::from(dml_core::runner::RunnerError::BadOutput {
+            raw: "dml v2.6.0".into(),
+        });
+        assert_eq!(err.code, "CLI_BAD_OUTPUT");
+        for label in &labels {
+            assert!(
+                err.hint.contains(label.as_str()),
+                "a user in one of the states that produce CLI_BAD_OUTPUT sees a button \
+                 labelled {label:?}, and the hint never names it: {}",
+                err.hint
+            );
+        }
+    }
+
+    // -- the doc comments on the probe seam ----------------------------------
+
+    /// The `///` block immediately above `anchor`, attributes skipped.
+    fn doc_block_before(src: &str, anchor: &str) -> String {
+        let at = src.find(anchor).unwrap_or_else(|| panic!("anchor not found: {anchor}"));
+        let mut lines: Vec<&str> = Vec::new();
+        for line in src[..at].lines().rev() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("///") {
+                lines.push(rest.trim());
+            } else if t.starts_with("#[") || t.is_empty() {
+                // An attribute (`#[tauri::command]`) still belongs to the item,
+                // but a blank line ends the block.
+                if t.is_empty() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        lines.reverse();
+        lines.join(" ")
+    }
+
+    #[test]
+    fn each_probe_seam_item_carries_its_own_doc() {
+        // Phase 4 review N2. `backend_probe_env` was inserted BETWEEN
+        // `backend_status`'s doc block and `backend_status` itself, which moved
+        // the whole command doc onto the helper: the helper claimed to "probe
+        // this machine", to run "on the blocking pool" and to "NEVER fail" --
+        // none of which is true of a function that builds a `SetupProbeEnv` --
+        // and the command that DOES make those promises was left undocumented.
+        const SRC: &str = include_str!("lib.rs");
+        let helper = doc_block_before(SRC, "pub fn backend_probe_env()");
+        let command = doc_block_before(SRC, "async fn backend_status(app: tauri::AppHandle)");
+
+        assert!(
+            command.contains("NEVER fails"),
+            "the never-fails contract must be documented on the command that implements it: {command:?}"
+        );
+        assert!(
+            command.contains("Probe this machine"),
+            "backend_status has no doc of its own: {command:?}"
+        );
+        assert!(
+            !helper.contains("NEVER fails") && !helper.contains("Probe this machine"),
+            "backend_probe_env is carrying the command's doc: {helper:?}"
+        );
+        assert!(
+            helper.contains("probe environment"),
+            "backend_probe_env needs a doc of its own: {helper:?}"
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
   // and performs the action.
   import { openUrl } from "@tauri-apps/plugin-opener";
   import type { PageId } from "$lib/nav";
-  import type { FirstRunKind, FirstRunState } from "$lib/first-run";
+  import { firstRunButton, type FirstRunKind, type FirstRunState } from "$lib/first-run";
   import { backendSetup } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -25,11 +25,25 @@
     state: fr,
     onnav,
     onrecheck,
+    rechecking,
   }: {
     state: FirstRunState;
     onnav: (p: PageId) => void;
     /** Re-run the backend probe -- the screen's whole job is to stop being true. */
     onrecheck: () => void;
+    /**
+     * Whether a probe is in flight RIGHT NOW. Owned by the shell, which owns the
+     * probe: the retry can cost the full cold-start budget, and a button that
+     * neither disables nor changes text for that long -- while the shell's
+     * re-entry guard drops every re-click -- reads as broken.
+     *
+     * REQUIRED ON PURPOSE, no default. A default of `false` makes an unwired
+     * screen look exactly like an idle one, so deleting `rechecking={probing}`
+     * from the shell would silently reinstate that button with every test still
+     * green. Without one, the omission is a svelte-check error -- and
+     * first-run-pairing.test.ts pins the attribute itself.
+     */
+    rechecking: boolean;
   } = $props();
 
   // Exhaustive by type: adding a FirstRunKind without a glyph is a
@@ -54,6 +68,11 @@
   // mutating control so the registry stays the single switch.
   const setupLocked = $derived(featureLocked("backend-setup"));
   const busy = $derived(backendSetupRun.running);
+  // Label + disabled together, decided in first-run.ts so both slow arms
+  // (setup streaming, probe in flight) are vitest-pinned rather than clicked.
+  const btn = $derived(
+    firstRunButton(fr.action, { setupRunning: busy, rechecking, setupLocked }),
+  );
 
   async function runSetup() {
     if (backendSetupRun.running) return;
@@ -79,6 +98,14 @@
       backendSetupRun.running = false;
       // Always re-probe, including after a failed run: the screen must reflect
       // what the machine looks like NOW, not what it looked like on mount.
+      //
+      // Clearing `running` first is safe but not sufficient. Safe: onrecheck()
+      // raises the shell's `probing` synchronously (probeBackend sets it before
+      // its first await), so both writes land in one batch and no frame renders
+      // between them. Not sufficient: the probe then OUTLIVES this block by up
+      // to the cold-start budget, and the button is rendered from `rechecking`
+      // for all of it -- which is why firstRunButton's setup arm has to honour
+      // that flag, not just `running`.
       onrecheck();
     }
   }
@@ -113,10 +140,10 @@
     <button
       class="primary"
       onclick={act}
-      disabled={busy || (fr.action.kind === "setup" && setupLocked)}
+      disabled={btn.disabled}
       title={fr.action.kind === "setup" && setupLocked ? LOCKED_HINT : undefined}
     >
-      {busy && fr.action.kind === "setup" ? "Setting up…" : fr.action.label}
+      {btn.label}
     </button>
     {#if fr.detail}
       <p class="detail">{fr.detail}</p>

@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   firstRunState,
   firstRunNeedsProbe,
+  firstRunButton,
+  humanDetail,
   PROJECT_URL,
   type BackendStatusReport,
   type FirstRunState,
@@ -22,6 +24,7 @@ function report(o: Partial<BackendStatusReport> = {}): BackendStatusReport {
   return {
     state: "ready",
     blocked_at: null,
+    detail: null,
     distro: "dml-arch",
     expected_cli_version: "3.0.0",
     probes: { wsl: "yes", distro: "yes", cli: "yes", cli_version: "3.0.0", titles: 2 },
@@ -159,6 +162,71 @@ describe("firstRunState — state 2: distro but no CLI (the launcher CAN fix thi
     expect(s.detail).toContain("cli/dml");
   });
 
+  it("does not send the payload-missing user to a repo that has no launcher in it", () => {
+    // PROJECT_URL is the UPSTREAM project. It carries Install-DML.ps1 -- which
+    // is why the no-wsl/no-distro arms link to it -- but it contains no
+    // launcher/ and publishes no release of this app, so "Get a complete
+    // release" pointed the one user who cannot fix themselves at a page where
+    // the thing they were told to download does not exist.
+    const s = shown({
+      report: report({
+        state: "no_cli",
+        payload: { present: "no", dir: "C:\\app", missing: ["cli/dml"] },
+      }),
+      everReady: false,
+    });
+    expect(s.kind).toBe("payload-missing");
+    expect(s.action.kind).not.toBe("link");
+    expect(JSON.stringify(s)).not.toContain(PROJECT_URL);
+    // And it must not promise a download that does not exist yet either.
+    expect(`${s.title} ${s.body} ${s.action.label}`).not.toMatch(/\brelease\b/i);
+  });
+
+  it("tells the payload-missing user something they can actually do, and lets them re-check", () => {
+    // The remedy has to be performable with what they have in front of them:
+    // the installer they already ran, plus the antivirus that is the usual
+    // reason a shipped file is not on disk. Re-checking is the button, because
+    // the screen's whole job is to stop being true once the files are back.
+    const s = shown({
+      report: report({
+        state: "cli_outdated",
+        payload: { present: "no", dir: "C:\\app", missing: ["cli/lua/gm"] },
+      }),
+      everReady: false,
+    });
+    expect(s.kind).toBe("payload-missing");
+    expect(s.action.kind).toBe("retry");
+    expect(s.body).toMatch(/installer|reinstall/i);
+    expect(s.body).toMatch(/antivirus|security software/i);
+    // The diagnostics still name what is gone and where we looked -- that is
+    // what makes "allow it in your antivirus" actionable.
+    expect(s.detail).toContain("cli/lua/gm");
+    expect(s.detail).toContain("C:\\app");
+  });
+
+  it("names a remedy for BOTH of the causes it claims, not just the quarantine one", () => {
+    // The copy names two causes -- a copy moved out of its install folder, and
+    // an antivirus that ate the payload -- but offered ONE remedy, and
+    // "run the installer again" does not fix the moved copy: reinstalling
+    // repairs the ORIGINAL install directory while the exe the user is looking
+    // at stays exactly as broken, so Check again fails forever with no hint
+    // that WHICH exe they launched is the problem.
+    const s = shown({
+      report: report({
+        state: "no_cli",
+        payload: { present: "no", dir: "C:\\Users\\me\\Desktop", missing: ["cli/dml"] },
+      }),
+      everReady: false,
+    });
+    expect(s.kind).toBe("payload-missing");
+    // The moved-copy case, and what to do about it.
+    expect(s.body).toMatch(/moved|copied/i);
+    expect(s.body).toMatch(/folder it was installed into|install folder/i);
+    // ...without losing the reinstall/antivirus remedy for the other cause.
+    expect(s.body).toMatch(/installer|reinstall/i);
+    expect(s.body).toMatch(/antivirus|security software/i);
+  });
+
   it("says it could not FIND its setup files rather than accusing them of being incomplete", () => {
     // payload present=unknown means the resource dir would not resolve. That
     // is a could-not-tell, not a missing payload.
@@ -254,6 +322,175 @@ describe("firstRunState — could not tell", () => {
 
   it("keeps a working Home over a failed probe call once the machine was seen ready", () => {
     expect(firstRunState({ report: null, error: "channel closed", everReady: true })).toBeNull();
+  });
+
+  it("shows what wsl.exe actually said, so a dead end is at least reportable", () => {
+    // SHIP-LIST Phase 4 review, P9. This is the ONE screen with no repair on
+    // it: a non-English Windows, or any wording Microsoft changes, lands here
+    // and the Check-again button will never succeed. Without the message
+    // neither the user nor a bug report has a single word to go on. The chain
+    // now carries it (crates/dml-core/src/setup.rs), and this is the end of
+    // that wire.
+    const s = shown({
+      report: report({
+        state: "unknown",
+        blocked_at: "cli",
+        detail: "The distribution failed to start: Wsl/Service/0x8007019e",
+      }),
+      everReady: false,
+    });
+    expect(s.detail).toContain("Wsl/Service/0x8007019e");
+  });
+
+  it("prefers the probe's own words over the IPC error when both exist", () => {
+    // `error` is set when the invoke itself failed; `detail` is what the
+    // machine said. When a report DID land, the machine's words are the
+    // specific ones -- "channel closed" describes our plumbing, not their PC.
+    const s = shown({
+      report: report({ state: "unknown", blocked_at: "wsl", detail: "0x80370102" }),
+      error: "some transport hiccup",
+      everReady: false,
+    });
+    expect(s.detail).toBe("0x80370102");
+  });
+
+  it("falls all the way down the diagnostics ladder: probe words, then IPC error, then nothing", () => {
+    // Replaces a test that asserted only the LAST rung (detail null, no error
+    // -> ""). That assertion is satisfied by every candidate fallback chain,
+    // including the two wrong ones below, so it read as coverage of the
+    // `r.detail ?? o.error ?? ""` fix while pinning none of it:
+    //   * `o.error ?? ""`  (drops the probe's words)  -- old test passed;
+    //   * `r.detail ?? ""` (drops the IPC error)      -- the WHOLE old file passed.
+    // All three rungs together are what discriminate, so all three are here.
+    const at = (detail: string | null, error: string | null) =>
+      shown({
+        report: report({ state: "unknown", blocked_at: "wsl", detail }),
+        error,
+        everReady: false,
+      }).detail;
+
+    // Rung 1: the machine's own words win. They describe the user's PC;
+    // "channel closed" describes our plumbing.
+    expect(at("0x80370102", "channel closed")).toBe("0x80370102");
+    expect(at("0x80370102", null)).toBe("0x80370102");
+    // Rung 2: nothing to quote, but the invoke itself failed -- reachable,
+    // because a failed re-probe leaves the PREVIOUS report standing next to the
+    // new error. That error is then the only fact this run produced, so the one
+    // screen with no repair on it must not throw it away.
+    expect(at(null, "channel closed")).toBe("channel closed");
+    // Rung 3: neither. A missing wsl.exe says nothing, and inventing a sentence
+    // for it would be the same guessing the tri-state rule exists to prevent.
+    expect(at(null, null)).toBe("");
+  });
+
+  it("does not put a raw JSON envelope on the card as the user's diagnostic", () => {
+    // The titles step runs `dml games list --json` INSIDE the distro, so when
+    // it fails the first line the chain quotes is our own envelope. Verbatim is
+    // right for wsl.exe (its complaints are sentences) and wrong here: a user
+    // hitting a titles-step shrug was shown `{"ok":false,"error":{...}}` at
+    // 12px as the one clue on the ONE screen with no repair on it.
+    const s = shown({
+      report: report({
+        state: "unknown",
+        blocked_at: "titles",
+        detail:
+          '{"ok":false,"error":{"code":"DOCKER_DOWN","message":"Docker is not running","hint":"Start Docker Desktop"}}',
+      }),
+      everReady: false,
+    });
+    expect(s.detail).toContain("Docker is not running");
+    expect(s.detail).not.toContain('{"ok"');
+    expect(s.detail).not.toContain('"code"');
+  });
+});
+
+describe("humanDetail", () => {
+  it("leaves what wsl.exe said exactly as it said it", () => {
+    // Every message from the host-side probes is a sentence already, and this
+    // is the evidence a bug report is built on.
+    expect(humanDetail("Wsl/Service/CreateInstance/0x80370102")).toBe(
+      "Wsl/Service/CreateInstance/0x80370102",
+    );
+    expect(humanDetail("Das Windows-Subsystem für Linux wurde nicht installiert.")).toBe(
+      "Das Windows-Subsystem für Linux wurde nicht installiert.",
+    );
+    expect(humanDetail("")).toBe("");
+  });
+
+  it("reads the sentence out of an error envelope, with the code alongside it", () => {
+    expect(
+      humanDetail('{"ok":false,"error":{"code":"NOT_FOUND","message":"No such game: wow"}}'),
+    ).toBe("No such game: wow (NOT_FOUND)");
+  });
+
+  it("still finds the message when the quote was cut off at the 200-char bound", () => {
+    // `first_diagnostic_line` truncates, so the commonest JSON detail is not
+    // valid JSON at all -- which is exactly when a blob is least readable.
+    const cut =
+      '{"ok":false,"error":{"code":"CLI_BAD_OUTPUT","message":"The backend answered with something this launcher does not underst...';
+    const got = humanDetail(cut);
+    expect(got).toContain("The backend answered with something");
+    expect(got).not.toContain('{"ok"');
+  });
+
+  it("says something readable even for JSON with nothing quotable in it", () => {
+    const got = humanDetail('{"ok":false,"data":{}}');
+    expect(got).not.toContain("{");
+    expect(got.length).toBeGreaterThan(0);
+  });
+});
+
+describe("firstRunButton", () => {
+  const retry = { kind: "retry", label: "Check again" } as const;
+  const setup = { kind: "setup", label: "Set up backend" } as const;
+  const idle = { setupRunning: false, rechecking: false, setupLocked: false };
+
+  it("refuses the second press while a probe is in flight, and says it is working", () => {
+    // The screen this protects is the could-not-tell one, whose retry can now
+    // cost the full 120 s cold-start budget. Left enabled and unchanged, the
+    // user re-clicks, +page.svelte's re-entry guard silently drops each press,
+    // and the button reads as broken.
+    const b = firstRunButton(retry, { ...idle, rechecking: true });
+    expect(b.disabled).toBe(true);
+    expect(b.label).not.toBe("Check again");
+    expect(b.label).toMatch(/check|work/i);
+  });
+
+  it("leaves the retry pressable when nothing is running", () => {
+    const b = firstRunButton(retry, idle);
+    expect(b).toEqual({ label: "Check again", disabled: false });
+  });
+
+  it("still shows the setup button's own busy state", () => {
+    const b = firstRunButton(setup, { ...idle, setupRunning: true });
+    expect(b).toEqual({ label: "Setting up…", disabled: true });
+  });
+
+  it("refuses the setup button underneath the re-probe its own run ends in", () => {
+    // The reciprocal of the rule above, and the one that was missing. runSetup
+    // clears backendSetupRun.running and then re-probes, so for the WHOLE
+    // verification probe -- up to the 140 s cold budget -- the state is
+    // setupRunning:false, rechecking:true. The setup arm ignored `rechecking`,
+    // so it sat there enabled and labelled "Set up backend" while the launcher
+    // was still working out whether the setup had taken. A second press there
+    // re-runs the entire backend install on top of the answer being fetched.
+    const b = firstRunButton(setup, { ...idle, rechecking: true });
+    expect(b.disabled).toBe(true);
+    expect(b.label).not.toBe("Set up backend");
+    expect(b.label).toMatch(/check|work/i);
+  });
+
+  it("disables the setup button when the feature registry locks it", () => {
+    const b = firstRunButton(setup, { ...idle, setupLocked: true });
+    expect(b).toEqual({ label: "Set up backend", disabled: true });
+  });
+
+  it("does not lock a locked feature onto the buttons that are not it", () => {
+    // Only `setup` presses backend_setup; a locked registry entry must not
+    // disable "Open Library" or the installer link.
+    const nav = { kind: "nav", label: "Open Library", page: "library" } as const;
+    expect(firstRunButton(nav, { ...idle, setupLocked: true }).disabled).toBe(false);
+    expect(firstRunButton(nav, { ...idle, rechecking: true }).disabled).toBe(false);
   });
 });
 

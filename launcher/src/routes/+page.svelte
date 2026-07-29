@@ -74,8 +74,12 @@
   // is done with it. Without it a single timed-out probe would evict an
   // established user's working Home and replace it with "couldn't check".
   let backendEverReady = $state(false);
-  // Plain (non-reactive) re-entry guard -- nothing renders it.
-  let probing = false;
+  // Re-entry guard AND the first-run screen's busy state: the retry button is
+  // rendered off this, so it must be reactive. Dropping a re-click silently
+  // (which is what the guard does) is only acceptable while the button visibly
+  // says it is already working -- on a wedged distro the probe can run for the
+  // full 120 s cold-start budget.
+  let probing = $state(false);
 
   async function probeBackend() {
     if (probing) return;
@@ -293,7 +297,12 @@
     <!-- Nothing to run yet: Home's status card would describe a server that
          does not exist. Replaces the Home CONTENT only -- the sidebar stays
          live, so Settings (backend switch) and Help remain reachable. -->
-    <FirstRun state={firstRun} onnav={(p) => go(p)} onrecheck={() => void probeBackend()} />
+    <FirstRun
+      state={firstRun}
+      onnav={(p) => go(p)}
+      onrecheck={() => void probeBackend()}
+      rechecking={probing}
+    />
   {:else}
     {#if page === "home"}<Home onnav={(p) => go(p)} />{/if}
     {#if page === "library"}<Library />{/if}

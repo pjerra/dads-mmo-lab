@@ -202,6 +202,29 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       wait a new user ever sits through -- the moment they most need to trust
       what they are reading.
 
+- [ ] **4.0d — Known, recorded, NOT fixed (Phase 4 review residue, 2026-07-29).**
+      Found by verification, judged not worth another corrective wave at 03:00
+      after three waves on the same code. None blocks a release; all are real.
+      - `classify_wsl_list`: exit 0 + empty stdout + ANY stderr byte is a shrug,
+        where the same input with a silent stderr settles as NoDistro. A routine
+        wsl.exe proxy advisory therefore costs a user the "no distro" screen.
+      - A probe TIMEOUT (`CouldNotTell`) carries no detail text, so the one
+        screen with no repair on it shows a blank diagnostics line — and the new
+        120s cold budget makes timeouts the likeliest could-not-tell.
+      - The CLI_BAD_OUTPUT hint's "names a real button" assertion moved from
+        dml-core to the launcher crate, which the Linux CI job does not build.
+        The pin is now Windows-only.
+      - `the_bundled_resource_dirs_match_the_repo` asserts on the state of
+        `target/<profile>/` rather than on code; its stale-file half reds on a
+        condition build.rs deliberately declines to fix, so it can fail for a
+        developer who did nothing wrong.
+      - Three frontend copy tests match prose with regexes. They are
+        change-detectors: ordinary rewording reds them.
+      - Three `classify_wsl_list` tests pass verbatim against the PRE-Phase-4
+        classifier. They are happy-path guard rails, not evidence for the
+        change, and two read as if they pin the reordering. Worth relabelling
+        so nobody mistakes them for coverage.
+
 - [ ] **4.5 — Decide what v0.1.0 covers.** Cheapest honest beta: **WSL mode
       works end to end; native mode is the faster path for people who already
       have a server.** That ships in days. Native title install then becomes

@@ -25,12 +25,19 @@
 //! [`BackendStatus::blocked_at`] naming the step that went dark — never in a
 //! "no" state that has an action attached to it.
 //!
-//! BOUNDEDNESS. Every spawn goes through [`dml_core::proc::run_bounded_outcome`]
-//! (see [`SetupProbeEnv::timeout`]): a missing wsl.exe returns instantly, a
-//! hung one is killed and reaped at the deadline. The chain also
-//! short-circuits — probes 3 and 4 are never spawned when the distro is
-//! absent, because a question about the inside of a distro that does not
-//! exist has no honest answer.
+//! BOUNDEDNESS, AND WHY IT IS TWO NUMBERS. Every spawn goes through
+//! [`dml_core::proc::run_bounded_outcome`]: a missing wsl.exe returns
+//! instantly, a hung one is killed and reaped at the deadline. But the probes
+//! do not cost the same. The host-side distro list boots nothing and gets
+//! [`DEFAULT_PROBE_TIMEOUT`]; the first call INTO the distro boots the WSL2 VM
+//! and gets [`DEFAULT_COLD_START_TIMEOUT`] (see [`ProbeBudget`]). Spending the
+//! short budget on the cold call is how a perfectly good machine gets reported
+//! as broken; spending the long one on every call is how a broken machine
+//! takes six minutes to say so.
+//!
+//! The chain also short-circuits — probes 3 and 4 are never spawned when the
+//! distro is absent, because a question about the inside of a distro that does
+//! not exist has no honest answer.
 
 use std::ffi::OsString;
 use std::time::Duration;
@@ -49,8 +56,51 @@ use crate::proc::{run_bounded_outcome, windows_no_window, BoundedOutcome};
 /// [`SetupState::CliOutdated`] case, and it is the common one.
 pub const EXPECTED_CLI_VERSION: &str = "3.0.0";
 
-/// Default wall-clock bound for one probe spawn.
+/// Default wall-clock bound for a probe spawn that boots NOTHING —
+/// `wsl --list --quiet` is a host-side registry read, and `dml games list`
+/// only runs after the distro has already answered once. If either of those
+/// takes 20 seconds, something really is wrong.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Default wall-clock bound for the ONE spawn that may pay for a cold start.
+///
+/// THE PROBES ARE NOT ALL EQUAL. `wsl -d dml-arch -u dml -- dml version --json`
+/// is the first call that enters the distro, so it is the call that boots the
+/// WSL2 utility VM — and `Install-DML.ps1` writes `/etc/wsl.conf` with
+/// `[boot] systemd=true`, so that boot includes bringing systemd (and dockerd)
+/// up inside it. After a Windows reboot that routinely runs past 20 seconds.
+///
+/// The number is not a guess, it is this project's own measured budget for the
+/// identical spawn: `provision.rs`'s `DEFAULT_SETUP_TIMEOUT` is 120s ("the
+/// FIRST `wsl.exe` call on a cold machine boots the WSL2 VM, which can take
+/// the better part of a minute") and `Install-DML.ps1` allows systemd a
+/// further `timeout 60` to reach running/degraded. A probe that GATES Home
+/// cannot be stingier than the command it gates: the cost of overrunning is
+/// not a slow screen, it is an established user's working Home being replaced
+/// by "Couldn't check this PC's setup", with a Check again button that costs
+/// another full budget each press.
+///
+/// This is deliberately NOT applied to every spawn. A genuinely absent
+/// `wsl.exe` still answers instantly — that is a `NotFound` spawn error, not a
+/// timeout, so no budget is spent at all — and a wedged host-side `wsl.exe`
+/// still fails at [`DEFAULT_PROBE_TIMEOUT`] rather than making a broken
+/// machine wait six minutes to be told so.
+pub const DEFAULT_COLD_START_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Which budget a given probe spawn is entitled to.
+///
+/// The chain hands one of these to its runner per call, so "how long may this
+/// wait" is a property of WHICH QUESTION is being asked, not of the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbeBudget {
+    /// This spawn may have to cold-start the WSL2 VM (and systemd inside the
+    /// distro). Exactly one probe in the chain is in this position: the first
+    /// one that runs a command INSIDE the distro.
+    ColdStart,
+    /// Everything else — the host-side distro list, and any call made after
+    /// the distro has already answered. A slow answer here is a real fault.
+    Warm,
+}
 
 /// A probe's answer. `Unknown` is NOT a synonym for `No` — see the module doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -111,12 +161,26 @@ pub struct Probes {
     pub cli_version: Option<String>,
     /// Installed title count, or `None` for could-not-tell / not probed.
     pub titles: Option<usize>,
+    /// Verbatim words of the probe that went dark, if any — the CARRIER only.
+    /// Deliberately not on the wire: [`derive`] copies it to
+    /// [`BackendStatus::detail`], which is the one the screen reads. Two
+    /// copies of the same string in one payload is how a UI ends up reading
+    /// the wrong one.
+    #[serde(skip)]
+    pub detail: Option<String>,
 }
 
 impl Probes {
     /// All-unknown: nothing has been asked yet.
     pub fn unprobed() -> Self {
-        Probes { wsl: Tri::Unknown, distro: Tri::Unknown, cli: Tri::Unknown, cli_version: None, titles: None }
+        Probes {
+            wsl: Tri::Unknown,
+            distro: Tri::Unknown,
+            cli: Tri::Unknown,
+            cli_version: None,
+            titles: None,
+            detail: None,
+        }
     }
 }
 
@@ -127,6 +191,16 @@ pub struct BackendStatus {
     pub state: SetupState,
     /// Set only when `state` is [`SetupState::Unknown`].
     pub blocked_at: Option<SetupStep>,
+    /// What the probe that went dark actually SAID, verbatim and bounded to one
+    /// line. Set only alongside `blocked_at`, for the same reason: a settled
+    /// state already has a written sentence, and a raw `wsl.exe` line under it
+    /// would only make a working screen look broken.
+    ///
+    /// This exists because a could-not-tell is the ONE screen with no repair on
+    /// it. Without the message, a non-English Windows — or any wording
+    /// Microsoft changes next month — becomes a permanent "Check again" loop
+    /// with nothing for the user OR a bug report to go on.
+    pub detail: Option<String>,
     /// The distro the chain asked about, so messages can name it.
     pub distro: String,
     pub expected_cli_version: String,
@@ -157,6 +231,11 @@ impl ProbeOutcome {
                 ProbeOutcome::ProgramMissing
             }
             BoundedOutcome::SpawnFailed(_) | BoundedOutcome::TimedOut => ProbeOutcome::CouldNotTell,
+            // DECODED HERE, ONCE. wsl.exe's own messages are UTF-16LE on
+            // Windows; `decode_wsl_output` sniffs that and is lossy on both
+            // paths, so a half-read pipe or a stray byte can never panic a
+            // diagnostic. Everything downstream — matching, and the `detail`
+            // the screen shows — therefore works on real text.
             BoundedOutcome::Ran(out) => ProbeOutcome::Ran {
                 code: out.status.code(),
                 stdout: decode_wsl_output(&out.stdout),
@@ -164,13 +243,43 @@ impl ProbeOutcome {
             },
         }
     }
+
+    /// This outcome's own words, for the could-not-tell screen. `None` when
+    /// there is nothing to quote: a program that is not installed said nothing,
+    /// and neither did one that was killed at its deadline. Inventing a
+    /// sentence for those would be the same guessing this module refuses to do
+    /// everywhere else.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            ProbeOutcome::ProgramMissing | ProbeOutcome::CouldNotTell => None,
+            ProbeOutcome::Ran { stdout, stderr, .. } => first_diagnostic_line(stdout, stderr),
+        }
+    }
+}
+
+/// One line of a probe's output for the screen: prefers stderr (where wsl.exe
+/// and the shell put their complaints), falls back to stdout, and bounds it —
+/// a multi-KB dump under a button helps nobody, and the screen has one line.
+pub fn first_diagnostic_line(stdout: &str, stderr: &str) -> Option<String> {
+    let pick = |s: &str| {
+        s.lines().map(str::trim).find(|l| !l.is_empty()).map(|l| {
+            if l.chars().count() > 200 {
+                format!("{}...", l.chars().take(200).collect::<String>())
+            } else {
+                l.to_string()
+            }
+        })
+    };
+    pick(stderr).or_else(|| pick(stdout))
 }
 
 /// Probe 1+2's answer: one `wsl --list --quiet` call settles both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslProbe {
     pub wsl: Tri,
     pub distro: Tri,
+    /// Set only alongside a `Tri::Unknown`: what wsl.exe actually said.
+    pub detail: Option<String>,
 }
 
 /// Probe 3's answer.
@@ -178,6 +287,8 @@ pub struct WslProbe {
 pub struct CliProbe {
     pub cli: Tri,
     pub version: Option<String>,
+    /// Set only alongside `Tri::Unknown`: what the distro actually said.
+    pub detail: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -191,48 +302,189 @@ fn clean_line(line: &str) -> &str {
     line.trim().trim_start_matches('\u{feff}').trim()
 }
 
+/// What a `wsl.exe` message we RECOGNISE means, as `(wsl, distro)`. `None` is
+/// "nothing here we can honestly claim to understand".
+///
+/// Deliberately few, and every one of them a sentence Microsoft actually
+/// prints. A phrase we cannot cite is a guess, and a guess here puts a repair
+/// button in front of a machine that is merely unhappy.
+fn recognised_message(text: &str) -> Option<(Tri, Tri)> {
+    let text = text.to_lowercase();
+    if text.contains("is not installed")
+        || text.contains("optional component is not enabled")
+        || text.contains("has not been enabled")
+        || text.contains("0x8007019e")
+    {
+        // No WSL — so no distro either.
+        return Some((Tri::No, Tri::No));
+    }
+    if text.contains("no installed distributions") {
+        // WSL itself works; the machine simply has nothing registered.
+        return Some((Tri::Yes, Tri::No));
+    }
+    None
+}
+
+/// Punctuation a registered distro name legitimately carries
+/// (`Ubuntu-22.04`, `openSUSE-Leap-15.5`, `SUSE_Linux(preview)`). Everything
+/// outside this set, **in any script**, is a sentence's furniture: `。`, `、`,
+/// `！`, `«`, `"`, `,`, `;`.
+const NAME_PUNCT: &[char] = &['-', '_', '.', '+', '(', ')'];
+
+/// Does this cleaned stdout line look like a registered distro NAME, as
+/// opposed to a sentence `wsl.exe` printed at us?
+///
+/// WHITESPACE CANNOT BE THE TEST. `wsl --import "Ubuntu 22.04" ...` is legal,
+/// the Store registers "Ubuntu 20.04"/"Ubuntu 22.04" verbatim, and "Arch
+/// Linux" is an ordinary name in this project's own audience — so "every line
+/// is a single token" declares a perfectly readable list unreadable, which is
+/// one of the two regressions this function has already had.
+///
+/// AND ASCII SHAPE CANNOT BE THE TEST EITHER — the other one. "short, few
+/// SPACE-separated words, does not end in `.` or `:`" describes an English
+/// label, and a Japanese or Chinese wsl.exe satisfies all three by accident:
+/// its full stop is `。`, and it spends no spaces at all, so a whole sentence
+/// counts as ONE word. That read a localized "WSL is not installed" as a
+/// one-entry distro list and answered `wsl=Yes, distro=No` — a confident
+/// "just create the distro" to a machine with no WSL on it.
+///
+/// So the shape test is asked in a script-agnostic way:
+///
+/// * **No punctuation a label would not carry** (see [`NAME_PUNCT`]). This is
+///   what catches `。`/`！`/`、` without keeping a list of the world's full
+///   stops, and it keeps the ASCII terminator rule as the special case it
+///   always was (`.` is legal *inside* `Ubuntu 22.04`, never at the end).
+/// * **No caseless letters.** The word budget below counts spaces, and only
+///   scripts that spend spaces on word boundaries can be counted that way.
+///   "Has this letter no upper- and no lower-case form" is std's cheapest
+///   proxy for "a script we cannot count words in": it catches CJK, kana,
+///   Hangul and Thai, and over-catches Arabic/Hebrew/Devanagari, which do use
+///   spaces. That over-catch costs a name in one of those scripts a
+///   [`Tri::Unknown`] instead of a `NoDistro` — the tri-state's safe side, and
+///   the honest answer for a line whose word count we are guessing at. Cased
+///   scripts — Latin, Greek, Cyrillic — are untouched, so "Min Grønne Distro"
+///   is still read as the name it is.
+///
+/// This is a heuristic and it is only ever allowed to decide between "the
+/// distro is absent" and "we could not tell" — never to contradict the name
+/// being listed (checked first, below). Every `false` it returns lands on
+/// [`SetupState::Unknown`], which is why it may be strict and may not be
+/// generous.
+fn looks_like_a_distro_name(name: &str) -> bool {
+    if name.is_empty() || name.chars().count() > 64 {
+        return false;
+    }
+    if name.ends_with('.') || name.ends_with(':') {
+        return false;
+    }
+    for c in name.chars() {
+        if c.is_whitespace() || c.is_numeric() {
+            continue;
+        }
+        if c.is_alphabetic() {
+            if !c.is_lowercase() && !c.is_uppercase() {
+                return false; // caseless script: no word boundaries to count
+            }
+            continue;
+        }
+        if !NAME_PUNCT.contains(&c) {
+            return false;
+        }
+    }
+    name.split_whitespace().count() <= 5
+}
+
 /// Classify `wsl.exe --list --quiet`, which settles probes 1 and 2 at once.
 ///
-/// The non-zero-exit arm is where the tri-state discipline lives: WSL has two
-/// well-known failure messages that mean genuinely different things, and
-/// ANYTHING ELSE is a shrug. Guessing here would put a repair button in front
-/// of a user whose machine is merely unhappy.
+/// READ WHAT IT SAID, NOT WHAT IT RETURNED. Windows ships an inbox `wsl.exe`
+/// stub on every machine; with WSL not installed it prints "The Windows
+/// Subsystem for Linux is not installed" and STILL EXITS 0. That is the exact
+/// lie that broke `Install-DML.ps1` on a clean Windows 11 VM (f304629), and it
+/// generalises: the exit code is not evidence for ANY of these messages, so
+/// every message we claim to recognise is matched BEFORE the exit code is
+/// consulted at all. The exit code's only remaining job is to corroborate
+/// "and this stdout is a distro list".
+///
+/// WHY THE STREAMS ARE READ SEPARATELY, AND IN THIS ORDER. Merging them into
+/// one blob throws away the only structure this output has:
+///
+///   * **stdout is the ANSWER SLOT.** `--list --quiet` writes the registered
+///     names there — and the inbox stub writes its "not installed" banner
+///     there too. So whatever occupies stdout is wsl.exe's answer to the
+///     question we asked, and it is read first.
+///   * **stderr is COMMENTARY.** A healthy WSL emits advisory lines there
+///     routinely (localhost-proxy notices, console warnings), and "is not
+///     installed" is a fragment about *something* — not always about WSL
+///     ("wsl: Docker Desktop is not installed."). Commentary may settle the
+///     question only when the answer slot did not.
+///
+/// Hence: (1) the name we asked about, literally listed, beats everything —
+/// no sentence on either stream can make a distro that wsl.exe just enumerated
+/// stop existing, and no exit code can either; (2) a recognised message *in
+/// the answer slot* beats reading that slot as a list, because a message is
+/// not a list and splitting an unrecognised complaint into lines is how a
+/// machine with no WSL at all got told to go create a distro; (3) a readable
+/// list beats a recognised message on stderr, because the list is proof and
+/// the commentary is about something else; (4) only then does stderr get to
+/// settle it.
+///
+/// The fall-through is where the tri-state discipline lives: ANYTHING ELSE is
+/// a shrug that carries its own text out (`detail`) so the screen has
+/// something to show. Guessing here would put a repair button in front of a
+/// user whose machine is merely unhappy — or, worse, offer to create a distro
+/// on a machine that cannot host one.
 pub fn classify_wsl_list(outcome: &ProbeOutcome, distro: &str) -> WslProbe {
+    let settled = |wsl, d| WslProbe { wsl, distro: d, detail: None };
+    let shrug =
+        || WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown, detail: outcome.detail() };
     match outcome {
         // No wsl.exe on the machine at all: WSL is not installed, and there
         // is therefore no distro either.
-        ProbeOutcome::ProgramMissing => WslProbe { wsl: Tri::No, distro: Tri::No },
-        ProbeOutcome::CouldNotTell => WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown },
+        ProbeOutcome::ProgramMissing => settled(Tri::No, Tri::No),
+        ProbeOutcome::CouldNotTell => shrug(),
         ProbeOutcome::Ran { code, stdout, stderr } => {
-            let text = format!("{stdout}\n{stderr}").to_lowercase();
-            // Checked BEFORE the exit code, because the exit code lies here.
-            // Windows ships an inbox wsl.exe stub on every machine; with WSL
-            // not installed it prints this and STILL EXITS 0. Trusting exit 0
-            // first is the exact bug that shipped in Install-DML.ps1 and cost
-            // a clean-VM install run tonight (f304629) -- the same mistake had
-            // been made independently here.
-            if text.contains("is not installed") {
-                return WslProbe { wsl: Tri::No, distro: Tri::No };
+            let lines: Vec<&str> =
+                stdout.lines().map(clean_line).filter(|l| !l.is_empty()).collect();
+
+            // 1. POSITIVE EVIDENCE, and it outranks everything — including the
+            //    exit code, which is not evidence, and including any message
+            //    on either stream. The name we asked about is on a line of its
+            //    own in the answer slot; nothing wsl.exe prints does that by
+            //    accident. Compared against EVERY line (not just the
+            //    name-shaped ones) so that a multi-word distro we were asked
+            //    about is matched rather than filtered away.
+            if lines.contains(&distro) {
+                return settled(Tri::Yes, Tri::Yes);
             }
-            if *code == Some(0) {
-                let present = stdout.lines().any(|l| clean_line(l) == distro);
-                return WslProbe {
-                    wsl: Tri::Yes,
-                    distro: if present { Tri::Yes } else { Tri::No },
-                };
+            // 2. A message we recognise, IN THE ANSWER SLOT. This is the inbox
+            //    stub (exit 0 + "is not installed" on stdout) and it must beat
+            //    step 3: a message is not a list.
+            if let Some((wsl, d)) = recognised_message(stdout) {
+                return settled(wsl, d);
             }
-            if text.contains("no installed distributions") {
-                // WSL itself works; the machine simply has nothing installed.
-                WslProbe { wsl: Tri::Yes, distro: Tri::No }
-            } else if text.contains("optional component is not enabled")
-                || text.contains("has not been enabled")
-                || text.contains("0x8007019e")
+            // 3. stdout really is a list of names. Beats step 4 because the
+            //    list is proof that WSL works, while stderr is commentary that
+            //    may well be about something else entirely. Every non-empty
+            //    line must be name-shaped: a stdout that mixes names with
+            //    prose is one we cannot safely split, so it is a shrug.
+            if *code == Some(0)
+                && !lines.is_empty()
+                && lines.iter().all(|l| looks_like_a_distro_name(l))
             {
-                WslProbe { wsl: Tri::No, distro: Tri::No }
-            } else {
-                // Unrecognised failure. Evidence of NOTHING.
-                WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown }
+                return settled(Tri::Yes, Tri::No);
             }
+            // 4. Nothing in the answer slot settled it — now stderr may.
+            if let Some((wsl, d)) = recognised_message(stderr) {
+                return settled(wsl, d);
+            }
+            // 5. Silent success: a working wsl.exe with nothing registered.
+            //    Requires real silence on BOTH streams; unexplained stderr
+            //    next to an empty answer is not an empty list.
+            if *code == Some(0) && lines.is_empty() && stderr.trim().is_empty() {
+                return settled(Tri::Yes, Tri::No);
+            }
+            // 6. Unrecognised. Evidence of NOTHING — but say what it said.
+            shrug()
         }
     }
 }
@@ -246,7 +498,7 @@ pub fn classify_cli_version(outcome: &ProbeOutcome) -> CliProbe {
     let (code, stdout, stderr) = match outcome {
         // wsl.exe vanished between probes. Says nothing about `dml`.
         ProbeOutcome::ProgramMissing | ProbeOutcome::CouldNotTell => {
-            return CliProbe { cli: Tri::Unknown, version: None }
+            return CliProbe { cli: Tri::Unknown, version: None, detail: outcome.detail() }
         }
         ProbeOutcome::Ran { code, stdout, stderr } => (code, stdout, stderr),
     };
@@ -255,7 +507,7 @@ pub fn classify_cli_version(outcome: &ProbeOutcome) -> CliProbe {
             if let Some(v) = env.data.get("version").and_then(|v| v.as_str()) {
                 let v = v.trim();
                 if !v.is_empty() {
-                    return CliProbe { cli: Tri::Yes, version: Some(v.to_string()) };
+                    return CliProbe { cli: Tri::Yes, version: Some(v.to_string()), detail: None };
                 }
             }
         }
@@ -268,7 +520,7 @@ pub fn classify_cli_version(outcome: &ProbeOutcome) -> CliProbe {
         || text.contains("dml: not found")
         || text.contains("no such file or directory")
     {
-        return CliProbe { cli: Tri::No, version: None };
+        return CliProbe { cli: Tri::No, version: None, detail: None };
     }
     // A `dml` that answers in PLAIN TEXT is an OLD one, not an unknown one.
     //
@@ -282,9 +534,13 @@ pub fn classify_cli_version(outcome: &ProbeOutcome) -> CliProbe {
     // run. The upgrade path was invisible on exactly the machine that needed
     // it. Found by review before it ever reached a user, 2026-07-28.
     if let Some(v) = parse_plain_text_version(stdout) {
-        return CliProbe { cli: Tri::Yes, version: Some(v) };
+        return CliProbe { cli: Tri::Yes, version: Some(v), detail: None };
     }
-    CliProbe { cli: Tri::Unknown, version: None }
+    // Unrecognised. A corrupt distro ("The distribution failed to start"), a
+    // localized wsl.exe error, a `dml` that crashed — none of them are proof
+    // of absence, and all of them are things the user can only act on if they
+    // can SEE them.
+    CliProbe { cli: Tri::Unknown, version: None, detail: outcome.detail() }
 }
 
 /// Pull a version out of a pre-JSON `dml version` line, e.g. `dml v2.6.0`.
@@ -347,6 +603,9 @@ pub fn derive(distro: &str, probes: Probes) -> BackendStatus {
     let unknown_at = |step: SetupStep, probes: Probes| BackendStatus {
         state: SetupState::Unknown,
         blocked_at: Some(step),
+        // The could-not-tell screen is the one with no repair on it, so this
+        // is the only place the raw text earns its space.
+        detail: probes.detail.clone(),
         distro: distro.to_string(),
         expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
         probes,
@@ -354,6 +613,7 @@ pub fn derive(distro: &str, probes: Probes) -> BackendStatus {
     let settled = |state: SetupState, probes: Probes| BackendStatus {
         state,
         blocked_at: None,
+        detail: None,
         distro: distro.to_string(),
         expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
         probes,
@@ -403,23 +663,33 @@ pub fn derive(distro: &str, probes: Probes) -> BackendStatus {
 pub fn probe_with(
     distro: &str,
     user: &str,
-    mut run: impl FnMut(&[&str]) -> ProbeOutcome,
+    mut run: impl FnMut(&[&str], ProbeBudget) -> ProbeOutcome,
 ) -> BackendStatus {
-    let wsl = classify_wsl_list(&run(&["--list", "--quiet"]), distro);
+    // Host-side registry read: it does not start the VM, so it gets the short
+    // budget and a dead WSL is reported fast.
+    let wsl = classify_wsl_list(&run(&["--list", "--quiet"], ProbeBudget::Warm), distro);
     let mut probes = Probes {
         wsl: wsl.wsl,
         distro: wsl.distro,
         cli: Tri::Unknown,
         cli_version: None,
         titles: None,
+        // The diagnostic always belongs to the link that went dark, and the
+        // chain stops at the first one — so each step that runs OVERWRITES it,
+        // and by construction only a step whose predecessor said `Yes` can.
+        detail: wsl.detail,
     };
 
     if probes.distro == Tri::Yes {
-        let cli = classify_cli_version(&run(&[
-            "-d", distro, "-u", user, "--", "dml", "version", "--json",
-        ]));
+        // THE cold-start call: the first thing that runs inside the distro, so
+        // it is the one that pays for booting the WSL2 VM + systemd.
+        let cli = classify_cli_version(&run(
+            &["-d", distro, "-u", user, "--", "dml", "version", "--json"],
+            ProbeBudget::ColdStart,
+        ));
         probes.cli = cli.cli;
         probes.cli_version = cli.version;
+        probes.detail = cli.detail;
 
         // Only ask a CLI we can actually speak to. An outdated `dml` is
         // already a settled state, and its `games list` shape is not
@@ -427,9 +697,15 @@ pub fn probe_with(
         let usable = probes.cli == Tri::Yes
             && probes.cli_version.as_deref().is_some_and(cli_version_matches);
         if usable {
-            probes.titles = classify_titles(&run(&[
-                "-d", distro, "-u", user, "--", "dml", "games", "list", "--json",
-            ]));
+            // The distro just answered, so it is warm by construction.
+            let out = run(
+                &["-d", distro, "-u", user, "--", "dml", "games", "list", "--json"],
+                ProbeBudget::Warm,
+            );
+            probes.titles = classify_titles(&out);
+            if probes.titles.is_none() {
+                probes.detail = out.detail();
+            }
         }
     }
 
@@ -442,8 +718,10 @@ pub struct SetupProbeEnv {
     pub wsl_program: OsString,
     pub distro: String,
     pub user: String,
-    /// Wall-clock bound per spawn.
+    /// Wall-clock bound for a spawn that boots nothing.
     pub timeout: Duration,
+    /// Wall-clock bound for the one spawn that may cold-start the WSL2 VM.
+    pub cold_timeout: Duration,
 }
 
 impl SetupProbeEnv {
@@ -453,17 +731,36 @@ impl SetupProbeEnv {
             distro: distro.to_string(),
             user: user.to_string(),
             timeout: DEFAULT_PROBE_TIMEOUT,
+            cold_timeout: DEFAULT_COLD_START_TIMEOUT,
+        }
+    }
+
+    /// The wall clock a given probe is entitled to.
+    pub fn budget(&self, budget: ProbeBudget) -> Duration {
+        match budget {
+            ProbeBudget::ColdStart => self.cold_timeout,
+            ProbeBudget::Warm => self.timeout,
         }
     }
 }
 
+/// ONE bounded probe spawn, with the budget already resolved to a wall clock.
+///
+/// The only place in the chain that touches the OS, so it is also the seam a
+/// caller substitutes to test its own wiring — see the launcher's
+/// `backend_status_with`, which needs to prove that the budget it hands this
+/// function is the cold-start one.
+pub fn spawn_probe(program: &std::ffi::OsStr, args: &[&str], budget: Duration) -> ProbeOutcome {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    windows_no_window(&mut cmd);
+    ProbeOutcome::from_bounded(run_bounded_outcome(cmd, budget))
+}
+
 /// Run the chain for real.
 pub fn probe(env: &SetupProbeEnv) -> BackendStatus {
-    probe_with(&env.distro, &env.user, |args| {
-        let mut cmd = std::process::Command::new(&env.wsl_program);
-        cmd.args(args);
-        windows_no_window(&mut cmd);
-        ProbeOutcome::from_bounded(run_bounded_outcome(cmd, env.timeout))
+    probe_with(&env.distro, &env.user, |args, budget| {
+        spawn_probe(&env.wsl_program, args, env.budget(budget))
     })
 }
 
@@ -488,20 +785,20 @@ mod tests {
     fn wsl_list_missing_program_means_no_wsl_and_no_distro() {
         // wsl.exe genuinely absent is the ONE definitive negative.
         let got = classify_wsl_list(&ProbeOutcome::ProgramMissing, DISTRO);
-        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No });
+        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No, detail: None });
     }
 
     #[test]
     fn wsl_list_could_not_tell_is_unknown_on_both_never_no() {
         // The tri-state rule: a hung/blocked wsl.exe proves nothing.
         let got = classify_wsl_list(&ProbeOutcome::CouldNotTell, DISTRO);
-        assert_eq!(got, WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown });
+        assert_eq!(got, WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown, detail: None });
     }
 
     #[test]
     fn wsl_list_finds_the_distro_among_others() {
         let got = classify_wsl_list(&ran(0, "Ubuntu\r\ndml-arch\r\ndocker-desktop\r\n"), DISTRO);
-        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::Yes });
+        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::Yes, detail: None });
     }
 
     #[test]
@@ -515,7 +812,7 @@ mod tests {
     #[test]
     fn wsl_list_present_but_distro_absent() {
         let got = classify_wsl_list(&ran(0, "Ubuntu\r\ndocker-desktop\r\n"), DISTRO);
-        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::No });
+        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::No, detail: None });
     }
 
     #[test]
@@ -532,7 +829,7 @@ mod tests {
             &ran_err(1, "Windows Subsystem for Linux has no installed distributions."),
             DISTRO,
         );
-        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::No });
+        assert_eq!(got, WslProbe { wsl: Tri::Yes, distro: Tri::No, detail: None });
     }
 
     #[test]
@@ -541,14 +838,23 @@ mod tests {
             &ran_err(1, "The Windows Subsystem for Linux optional component is not enabled."),
             DISTRO,
         );
-        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No });
+        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No, detail: None });
     }
 
     #[test]
     fn wsl_list_unrecognized_failure_is_unknown_not_no() {
         // The default must be a shrug. Anything else invents a diagnosis.
         let got = classify_wsl_list(&ran_err(1, "Error code: Wsl/Service/0x8007273f"), DISTRO);
-        assert_eq!(got, WslProbe { wsl: Tri::Unknown, distro: Tri::Unknown });
+        assert_eq!(
+            got,
+            WslProbe {
+                wsl: Tri::Unknown,
+                distro: Tri::Unknown,
+                // ...and the shrug carries wsl.exe's own words out with it,
+                // because this screen has no repair on it (P9).
+                detail: Some("Error code: Wsl/Service/0x8007273f".to_string()),
+            }
+        );
     }
 
     // -- classify_cli_version ------------------------------------------------
@@ -556,26 +862,26 @@ mod tests {
     #[test]
     fn cli_version_read_from_the_ok_envelope() {
         let got = classify_cli_version(&ran(0, r#"{"ok":true,"data":{"version":"3.0.0"}}"#));
-        assert_eq!(got, CliProbe { cli: Tri::Yes, version: Some("3.0.0".into()) });
+        assert_eq!(got, CliProbe { cli: Tri::Yes, version: Some("3.0.0".into()), detail: None });
     }
 
     #[test]
     fn cli_version_reports_an_old_cli_verbatim() {
         // The bootstrap CLI the elevated installer still embeds.
         let got = classify_cli_version(&ran(0, r#"{"ok":true,"data":{"version":"2.6.0"}}"#));
-        assert_eq!(got, CliProbe { cli: Tri::Yes, version: Some("2.6.0".into()) });
+        assert_eq!(got, CliProbe { cli: Tri::Yes, version: Some("2.6.0".into()), detail: None });
     }
 
     #[test]
     fn cli_missing_inside_the_distro_is_a_definitive_no() {
         let got = classify_cli_version(&ran_err(127, "bash: dml: command not found"));
-        assert_eq!(got, CliProbe { cli: Tri::No, version: None });
+        assert_eq!(got, CliProbe { cli: Tri::No, version: None, detail: None });
     }
 
     #[test]
     fn cli_could_not_tell_is_unknown() {
         let got = classify_cli_version(&ProbeOutcome::CouldNotTell);
-        assert_eq!(got, CliProbe { cli: Tri::Unknown, version: None });
+        assert_eq!(got, CliProbe { cli: Tri::Unknown, version: None, detail: None });
     }
 
     #[test]
@@ -589,7 +895,15 @@ mod tests {
         // the first-run screen. The Unknown contract still holds for output
         // that is genuinely not a dml banner, which is what it now uses.
         let got = classify_cli_version(&ran(0, "some other program v3.0.0"));
-        assert_eq!(got, CliProbe { cli: Tri::Unknown, version: None });
+        assert_eq!(
+            got,
+            CliProbe {
+                cli: Tri::Unknown,
+                version: None,
+                // The unreadable answer is quoted back, not swallowed (P9).
+                detail: Some("some other program v3.0.0".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -603,7 +917,312 @@ mod tests {
             &ran(0, "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'."),
             "dml-arch",
         );
-        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No });
+        assert_eq!(got, WslProbe { wsl: Tri::No, distro: Tri::No, detail: None });
+    }
+
+    #[test]
+    fn every_known_wsl_message_beats_the_exit_code_it_arrives_with() {
+        // P3. The lesson of f304629 is not "add one more string": it is that
+        // wsl.exe's EXIT CODE is not evidence. The inbox stub exits 0 while
+        // saying WSL is missing -- and there is nothing special about that one
+        // sentence, so EVERY message we claim to recognise has to be read
+        // before the exit code, not only on the non-zero branch.
+        //
+        // Each row is (message, expected) and is asserted at BOTH exit 0 and
+        // exit 1, because either is possible and neither is the evidence.
+        let cases: &[(&str, Tri, Tri)] = &[
+            (
+                "The Windows Subsystem for Linux is not installed. You can install by running 'wsl.exe --install'.",
+                Tri::No,
+                Tri::No,
+            ),
+            (
+                "The Windows Subsystem for Linux optional component is not enabled. Please enable it and try again.",
+                Tri::No,
+                Tri::No,
+            ),
+            (
+                "WslRegisterDistribution failed: the optional component has not been enabled.",
+                Tri::No,
+                Tri::No,
+            ),
+            (
+                "Error: 0x8007019e The Windows Subsystem for Linux has not been enabled.",
+                Tri::No,
+                Tri::No,
+            ),
+            ("Windows Subsystem for Linux has no installed distributions.", Tri::Yes, Tri::No),
+        ];
+        for (message, wsl, distro) in cases {
+            for code in [0, 1] {
+                let on_stdout = classify_wsl_list(&ran(code, message), DISTRO);
+                assert_eq!(
+                    (on_stdout.wsl, on_stdout.distro),
+                    (*wsl, *distro),
+                    "exit {code} must not change the reading of {message:?}"
+                );
+                let on_stderr = classify_wsl_list(&ran_err(code, message), DISTRO);
+                assert_eq!(
+                    (on_stderr.wsl, on_stderr.distro),
+                    (*wsl, *distro),
+                    "exit {code} on stderr must not change the reading of {message:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_message_at_exit_zero_is_not_an_empty_distro_list() {
+        // P3 + P9, the compounding pair. A non-English Windows with WSL absent
+        // prints a message we do not recognise and (inbox stub) exits 0. The
+        // old code read "exit 0" as "wsl works" and the ABSENCE of a dml-arch
+        // line as "the distro is missing", producing NoDistro: a user with no
+        // WSL at all told to go create a distro. A message is not a list.
+        let got = classify_wsl_list(
+            &ProbeOutcome::Ran {
+                code: Some(0),
+                stdout: String::new(),
+                stderr: "Das Windows-Subsystem für Linux wurde nicht installiert.".to_string(),
+            },
+            DISTRO,
+        );
+        assert_eq!(got.wsl, Tri::Unknown, "an unreadable answer is evidence of nothing");
+        assert_eq!(got.distro, Tri::Unknown);
+    }
+
+    #[test]
+    fn a_message_on_stdout_at_exit_zero_is_not_a_one_entry_distro_list() {
+        // The other half of the same hole. wsl.exe writes its own complaints to
+        // stdout as readily as to stderr -- the inbox stub's "is not installed"
+        // banner arrives there, which is why the regression test above models
+        // it that way. So a sentence we do NOT recognise arrives there too, and
+        // splitting it into lines produced a "distro list" of one entry that
+        // simply was not `dml-arch`: a machine with no WSL, told to go create a
+        // distro. A distro name is one token; a sentence is not.
+        let got = classify_wsl_list(
+            &ran(0, "Das Windows-Subsystem für Linux wurde nicht installiert.\r\n"),
+            DISTRO,
+        );
+        assert_eq!(got.wsl, Tri::Unknown, "prose is not a distro list");
+        assert_eq!(got.distro, Tri::Unknown);
+        assert!(
+            got.detail.as_deref().unwrap_or("").contains("nicht installiert"),
+            "and the shrug must quote it: {:?}",
+            got.detail
+        );
+    }
+
+    #[test]
+    fn a_listed_distro_is_believed_even_next_to_output_we_cannot_parse() {
+        // The guard above must never cost a machine that is demonstrably fine:
+        // the name we asked about being present is positive evidence, and it
+        // outranks anything else on the stream.
+        let got = classify_wsl_list(&ran(0, "Some chatty banner line\r\ndml-arch\r\n"), DISTRO);
+        assert_eq!((got.wsl, got.distro), (Tri::Yes, Tri::Yes));
+        // ...and ordinary stderr chatter (WSL emits proxy/localhost warnings
+        // routinely) must not turn a real list into a shrug either.
+        let noisy = ProbeOutcome::Ran {
+            code: Some(0),
+            stdout: "Ubuntu\r\ndocker-desktop\r\n".to_string(),
+            stderr: "wsl: A localhost proxy configuration was detected...".to_string(),
+        };
+        assert_eq!(
+            (classify_wsl_list(&noisy, DISTRO).wsl, classify_wsl_list(&noisy, DISTRO).distro),
+            (Tri::Yes, Tri::No)
+        );
+    }
+
+    #[test]
+    fn a_real_distro_list_at_exit_zero_is_still_read_as_a_list() {
+        // The guard above must not cost the happy path: a list is a list.
+        assert_eq!(
+            classify_wsl_list(&ran(0, "Ubuntu\r\ndml-arch\r\n"), DISTRO).distro,
+            Tri::Yes
+        );
+        // A silent exit 0 (no stdout, no stderr) is a working wsl.exe with
+        // nothing registered -- a real answer, and the one NoDistro exists for.
+        let silent = classify_wsl_list(&ran(0, ""), DISTRO);
+        assert_eq!((silent.wsl, silent.distro), (Tri::Yes, Tri::No));
+    }
+
+    /// Build a `Ran` with BOTH streams populated -- the shape the two
+    /// regressions below live in, and one `ran`/`ran_err` cannot express.
+    fn ran_both(code: i32, stdout: &str, stderr: &str) -> ProbeOutcome {
+        ProbeOutcome::Ran {
+            code: Some(code),
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_legal_distro_name_with_a_space_does_not_poison_the_whole_list() {
+        // REGRESSION. The "is this really a list of names" guard was written
+        // as "EVERY line is a single token", which is not true of distro
+        // names: `wsl --import "Ubuntu 22.04" ...` is legal, the Store's own
+        // packages register as "Ubuntu 20.04"/"Ubuntu 22.04", and "Arch Linux"
+        // is ordinary in exactly this project's audience. One such neighbour
+        // downgraded a perfectly readable list to a shrug -- i.e. a machine
+        // whose honest answer is "dml-arch isn't installed yet, here is the
+        // installer" got the one screen with no repair on it instead, with a
+        // diagnostics line quoting a DIFFERENT distro's name at them.
+        let got = classify_wsl_list(&ran(0, "Ubuntu 22.04\r\ndocker-desktop\r\n"), DISTRO);
+        assert_eq!(
+            (got.wsl, got.distro),
+            (Tri::Yes, Tri::No),
+            "a multi-word neighbour must not make a readable list unreadable"
+        );
+        assert_eq!(got.detail, None, "a settled answer carries no diagnostic");
+
+        // The same list WITH dml-arch in it is still positive evidence...
+        let got = classify_wsl_list(&ran(0, "Ubuntu 22.04\r\ndml-arch\r\n"), DISTRO);
+        assert_eq!((got.wsl, got.distro), (Tri::Yes, Tri::Yes));
+
+        // ...and a multi-word name we were ASKED about is matched, not
+        // filtered away as unparseable.
+        let got = classify_wsl_list(&ran(0, "Ubuntu\r\nMy Distro\r\n"), "My Distro");
+        assert_eq!((got.wsl, got.distro), (Tri::Yes, Tri::Yes));
+    }
+
+    #[test]
+    fn a_localized_message_is_not_a_distro_list_in_any_script() {
+        // REGRESSION, and the other half of the trade the test above made. The
+        // "is this a list of names" guard was rewritten around ASCII shape: an
+        // ASCII '.'/':' terminator plus a count of SPACE-separated words. A
+        // Japanese or Chinese wsl.exe has neither -- its full stop is U+3002
+        // and it spends no spaces at all, so a whole sentence counts as ONE
+        // word and reads as a one-entry distro list. The verdict on a machine
+        // with no WSL was then a confident wsl=Yes / distro=No: "WSL works,
+        // dml-arch just isn't registered", with a Create-the-distro path in
+        // front of someone who cannot host one.
+        //
+        // Real localized shapes -- Japanese and Chinese, each both with the
+        // Latin product names Windows keeps inline and without them, and one
+        // with NO terminator at all so the fix cannot be "learn one more
+        // full stop character".
+        for stdout in [
+            "Linux 用 Windows サブシステムがインストールされていません。\r\n",
+            "指定された名前のディストリビューションが見つかりませんでした。\r\n",
+            "ディストリビューションが見つかりません\r\n",
+            "适用于 Linux 的 Windows 子系统未安装。\r\n",
+            "系统找不到指定的文件。\r\n",
+            // ...and a CASED script, which the caseless-letter half of the rule
+            // cannot see: Russian is spaced and counts as 4 words, so only the
+            // punctuation half rejects it. `wsl: ` is wsl.exe's own prefix (see
+            // the "wsl: Docker Desktop is not installed." samples below), and a
+            // short localized complaint under it clears a 5-word budget easily.
+            "wsl: Не удалось запустить\r\n",
+        ] {
+            let got = classify_wsl_list(&ran(0, stdout), DISTRO);
+            assert_eq!(
+                (got.wsl, got.distro),
+                (Tri::Unknown, Tri::Unknown),
+                "prose is not a distro list, whatever script it is in: {stdout:?}"
+            );
+            assert!(
+                !got.detail.as_deref().unwrap_or("").is_empty(),
+                "and the shrug must quote it: {:?}",
+                got.detail
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_ascii_multi_word_name_is_still_a_list() {
+        // The counterweight, so the guard above cannot be paid for by
+        // declaring every non-ASCII line unreadable: `wsl --import` takes the
+        // name it is given, and a Danish user's "Min Grønne Distro" next to a
+        // Store "Ubuntu 22.04" is an ordinary, readable list. NoDistro has a
+        // real sentence and a route to Install-DML.ps1 on it; Unknown has a
+        // Check-again button that can never succeed on this machine.
+        let got = classify_wsl_list(
+            &ran(0, "Ubuntu 22.04\r\nMin Grønne Distro\r\nArch Linux\r\n"),
+            DISTRO,
+        );
+        assert_eq!(
+            (got.wsl, got.distro),
+            (Tri::Yes, Tri::No),
+            "a legal multi-word name in a Latin script is still a list"
+        );
+        assert_eq!(got.detail, None, "a settled answer carries no diagnostic");
+    }
+
+    #[test]
+    fn a_space_in_a_neighbours_name_still_reaches_the_installer_screen() {
+        // The same regression stated as the user-visible consequence, because
+        // that is what the finding is about: NoDistro has a real sentence and
+        // a way to reach Install-DML.ps1; Unknown has a Check-again button
+        // that can never succeed on this machine.
+        let st = probe_with(DISTRO, USER, |_, _| ran(0, "Ubuntu 22.04\r\n"));
+        assert_eq!(st.state, SetupState::NoDistro);
+        assert_eq!(st.blocked_at, None);
+    }
+
+    #[test]
+    fn a_listed_distro_outranks_a_recognised_message_on_the_other_stream() {
+        // REGRESSION. The message scan ran over `stdout + stderr` MERGED and
+        // ahead of the positive evidence, so any recognised phrase anywhere on
+        // either stream unregistered a distro that wsl.exe had just listed by
+        // name. "wsl: Docker Desktop is not installed." is not hypothetical --
+        // "is not installed" is a sentence fragment about SOMETHING, and the
+        // subject is not always WSL.
+        for message in [
+            "wsl: Docker Desktop is not installed.",
+            "The Windows Subsystem for Linux optional component is not enabled.",
+            "WslRegisterDistribution failed: the optional component has not been enabled.",
+            "Error: 0x8007019e",
+            "Windows Subsystem for Linux has no installed distributions.",
+        ] {
+            let got = classify_wsl_list(&ran_both(0, "Ubuntu\r\ndml-arch\r\n", message), DISTRO);
+            assert_eq!(
+                (got.wsl, got.distro),
+                (Tri::Yes, Tri::Yes),
+                "stderr {message:?} must not unregister a distro that is literally listed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_readable_list_on_stdout_outranks_a_recognised_message_on_stderr() {
+        // The same ordering bug one step down the chain: dml-arch is absent,
+        // but the list PROVES WSL works, and stderr is where wsl.exe puts
+        // commentary. Answering "WSL is not installed" to a machine that just
+        // enumerated its distros is a confident No with a repair button on it.
+        let got = classify_wsl_list(
+            &ran_both(0, "Ubuntu\r\ndocker-desktop\r\n", "wsl: Docker Desktop is not installed."),
+            DISTRO,
+        );
+        assert_eq!((got.wsl, got.distro), (Tri::Yes, Tri::No));
+        assert_eq!(got.detail, None);
+    }
+
+    #[test]
+    fn a_message_in_the_answer_slot_still_beats_a_list_shaped_reading() {
+        // The gain the previous wave made, pinned so this reordering cannot
+        // give it back: stdout is where the ANSWER goes, so a message we
+        // recognise ARRIVING THERE is the answer -- ahead of any attempt to
+        // read stdout as a list, and regardless of the exit code (the inbox
+        // stub prints exactly this and exits 0).
+        //
+        // The second sample is the sharp one, and the reason this test is not
+        // redundant with the inbox-stub test above: every line of it IS
+        // name-shaped, so dropping the answer-slot message check would let the
+        // list reader answer "WSL works, dml-arch just isn't registered" to a
+        // machine that has no WSL at all. (Mutation-checked: deleting that
+        // check reds exactly this assertion.)
+        for stdout in [
+            "The Windows Subsystem for Linux is not installed.\r\nrun wsl --install\r\n",
+            "WSL is not installed\r\n",
+        ] {
+            for code in [0, 1] {
+                let got = classify_wsl_list(&ran_both(code, stdout, ""), DISTRO);
+                assert_eq!(
+                    (got.wsl, got.distro),
+                    (Tri::No, Tri::No),
+                    "exit {code}, stdout {stdout:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -612,7 +1231,7 @@ mod tests {
         // cannot drift back together.
         assert_eq!(
             classify_cli_version(&ran(0, "dml v3.0.0")),
-            CliProbe { cli: Tri::Yes, version: Some("3.0.0".to_string()) }
+            CliProbe { cli: Tri::Yes, version: Some("3.0.0".to_string()), detail: None }
         );
     }
 
@@ -664,7 +1283,7 @@ mod tests {
     // -- derive: every combination, in chain order ---------------------------
 
     fn p(wsl: Tri, distro: Tri, cli: Tri, version: Option<&str>, titles: Option<usize>) -> Probes {
-        Probes { wsl, distro, cli, cli_version: version.map(str::to_string), titles }
+        Probes { wsl, distro, cli, cli_version: version.map(str::to_string), titles, detail: None }
     }
 
     #[test]
@@ -797,7 +1416,7 @@ mod tests {
     #[test]
     fn chain_asks_wsl_list_first() {
         let fake = Fake::new(vec![ProbeOutcome::ProgramMissing]);
-        let _ = probe_with(DISTRO, USER, |a| fake.run(a));
+        let _ = probe_with(DISTRO, USER, |a, _| fake.run(a));
         let calls = fake.calls();
         assert_eq!(calls.first().map(Vec::as_slice), Some(&["--list".to_string(), "--quiet".to_string()][..]));
     }
@@ -807,7 +1426,7 @@ mod tests {
         // Asking what is inside a distro that does not exist has no honest
         // answer, and each extra spawn is another `timeout` the user waits.
         let fake = Fake::new(vec![ProbeOutcome::ProgramMissing]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::NoWsl);
         assert_eq!(fake.calls().len(), 1, "no probe may run past a missing link");
     }
@@ -815,7 +1434,7 @@ mod tests {
     #[test]
     fn chain_does_not_probe_the_cli_when_the_distro_is_absent() {
         let fake = Fake::new(vec![ran(0, "Ubuntu\r\n")]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::NoDistro);
         assert_eq!(fake.calls().len(), 1);
     }
@@ -826,7 +1445,7 @@ mod tests {
             ran(0, "dml-arch\r\n"),
             ran_err(127, "bash: dml: command not found"),
         ]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::NoCli);
         let calls = fake.calls();
         assert_eq!(calls.len(), 2, "the titles probe must not run without a CLI");
@@ -842,7 +1461,7 @@ mod tests {
             ran(0, "dml-arch\r\n"),
             ran(0, r#"{"ok":true,"data":{"version":"2.6.0"}}"#),
         ]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::CliOutdated);
         assert_eq!(fake.calls().len(), 2);
     }
@@ -854,7 +1473,7 @@ mod tests {
             ran(0, r#"{"ok":true,"data":{"version":"3.0.0"}}"#),
             ran(0, r#"{"ok":true,"data":{"games":[{"id":"wow-server-playerbots"}]}}"#),
         ]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::Ready);
         let calls = fake.calls();
         assert_eq!(calls.len(), 3);
@@ -871,8 +1490,135 @@ mod tests {
             ran(0, r#"{"ok":true,"data":{"version":"3.0.0"}}"#),
             ran(0, r#"{"ok":true,"data":{"games":[]}}"#),
         ]);
-        let got = probe_with(DISTRO, USER, |a| fake.run(a));
+        let got = probe_with(DISTRO, USER, |a, _| fake.run(a));
         assert_eq!(got.state, SetupState::NoTitles);
+    }
+
+    // -- P9: the unrecognised path must carry wsl.exe's own words -------------
+    // These assert on the SERIALIZED report, not on an internal field: the
+    // finding is that the message never reaches the screen, and the screen
+    // reads this JSON. A field that exists but is not serialized would fix
+    // nothing.
+
+    fn detail_of(st: &BackendStatus) -> String {
+        serde_json::to_value(st).unwrap()["detail"].as_str().unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn an_unrecognised_wsl_failure_reaches_the_screen_with_its_own_message() {
+        // Without this the user gets "Couldn't check this PC's setup" and a
+        // Check-again button that will never succeed, and neither they nor a
+        // bug report has one word to go on.
+        let st = probe_with(DISTRO, USER, |_, _| {
+            ran_err(1, "Wsl/Service/CreateInstance/CreateVm/HCS/0x80370102")
+        });
+        assert_eq!(st.state, SetupState::Unknown);
+        assert_eq!(st.blocked_at, Some(SetupStep::Wsl));
+        assert!(
+            detail_of(&st).contains("0x80370102"),
+            "the screen has nothing to show: {:?}",
+            serde_json::to_value(&st).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_corrupt_distro_names_itself_instead_of_looping_the_user_forever() {
+        // Concrete case 2 from the finding: the distro IS registered, but
+        // starting it fails. That is neither exit 127 nor any matched string,
+        // so it is a could-not-tell at the CLI step -- the one screen with no
+        // repair on it. It must at least say why.
+        let st = probe_with(DISTRO, USER, |args, _| {
+            if args.first().copied() == Some("--list") {
+                ran(0, "dml-arch\r\n")
+            } else {
+                ran_err(1, "The distribution failed to start: Wsl/Service/0x8007019e_NOPE")
+            }
+        });
+        assert_eq!(st.state, SetupState::Unknown);
+        assert_eq!(st.blocked_at, Some(SetupStep::Cli));
+        assert!(
+            detail_of(&st).contains("The distribution failed to start"),
+            "got {:?}",
+            detail_of(&st)
+        );
+    }
+
+    /// `wsl.exe`'s OWN messages are UTF-16LE (see `envelope::decode_wsl_output`).
+    fn utf16le(s: &str) -> Vec<u8> {
+        s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn a_localized_utf16_message_arrives_readable_and_a_truncated_one_cannot_panic() {
+        // The population this finding is written for: a non-English Windows
+        // whose message matches none of our substrings. It must survive the
+        // decode intact, and a HALF-decoded buffer (odd length, a truncated
+        // pipe read) must degrade to mojibake -- never to a panic, which in a
+        // diagnostic path would take the whole first-run screen down.
+        let german = "Das Windows-Subsystem für Linux wurde nicht installiert.";
+        let bytes = utf16le(german);
+        let decoded = decode_wsl_output(&bytes);
+        assert!(decoded.contains("nicht installiert"), "decode lost the message: {decoded:?}");
+
+        let st = probe_with(DISTRO, USER, |_, _| ProbeOutcome::Ran {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: decoded.clone(),
+        });
+        assert_eq!(st.state, SetupState::Unknown, "an unreadable answer is not a missing distro");
+        assert!(detail_of(&st).contains("nicht installiert"), "got {:?}", detail_of(&st));
+
+        // Truncated mid-code-unit: lossy, not fatal.
+        let truncated = decode_wsl_output(&bytes[..bytes.len() - 1]);
+        let st2 = probe_with(DISTRO, USER, |_, _| ProbeOutcome::Ran {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: truncated.clone(),
+        });
+        assert_eq!(st2.state, SetupState::Unknown);
+        assert!(!detail_of(&st2).is_empty(), "even garbled bytes are better than silence");
+    }
+
+    #[test]
+    fn a_recognised_answer_carries_no_detail_at_all() {
+        // `detail` is the could-not-tell's evidence, not a debug dump: every
+        // settled state already has a real sentence written for it, and a raw
+        // wsl.exe line under it would only make that screen look broken.
+        //
+        // The probes here deliberately arrive CARRYING a diagnostic. Feeding
+        // in `detail: None` would let `settled` copy the carrier through and
+        // this test would still pass -- that mutant survived the first draft.
+        let carried = "Wsl/Service/0x8007273f (left over from an earlier link)";
+        for probes in [
+            p(Tri::No, Tri::No, Tri::Unknown, None, None),
+            p(Tri::Yes, Tri::No, Tri::Unknown, None, None),
+            p(Tri::Yes, Tri::Yes, Tri::No, None, None),
+            p(Tri::Yes, Tri::Yes, Tri::Yes, Some("2.6.0"), Some(1)),
+            p(Tri::Yes, Tri::Yes, Tri::Yes, Some("3.0.0"), Some(0)),
+            p(Tri::Yes, Tri::Yes, Tri::Yes, Some("3.0.0"), Some(3)),
+        ] {
+            let st = derive(DISTRO, Probes { detail: Some(carried.to_string()), ..probes });
+            assert_ne!(st.state, SetupState::Unknown, "{st:?}");
+            assert_eq!(detail_of(&st), "", "settled state leaked a diagnostic: {st:?}");
+        }
+
+        // And the chain's own settled answers really do arrive detail-free.
+        for st in [
+            probe_with(DISTRO, USER, |_, _| ProbeOutcome::ProgramMissing),
+            probe_with(DISTRO, USER, |_, _| {
+                ran_err(1, "Windows Subsystem for Linux has no installed distributions.")
+            }),
+            probe_with(DISTRO, USER, |args, _| {
+                if args.first().copied() == Some("--list") {
+                    ran(0, "dml-arch\r\n")
+                } else {
+                    ran_err(127, "bash: dml: command not found")
+                }
+            }),
+        ] {
+            assert_ne!(st.state, SetupState::Unknown, "{st:?}");
+            assert_eq!(detail_of(&st), "", "settled state leaked a diagnostic: {st:?}");
+        }
     }
 
     // -- probe: the real spawn, bounded --------------------------------------
@@ -891,6 +1637,107 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "a missing program must fail fast, took {elapsed:?}"
+        );
+    }
+
+    // -- P4/P8/P12: the cold-boot budget --------------------------------------
+    // These assert ELAPSED WALL CLOCK, not "an error came back": an
+    // implementation that hands every spawn the same short budget produces the
+    // identical `Unknown` verdict, so only the clock can tell the two apart.
+
+    /// A child that outlives any budget these tests set, spawned DIRECTLY (one
+    /// process, so the kill closes the pipes the draining threads read — the
+    /// grandchild trap `proc.rs` and `dml_wow::backup` both document).
+    #[cfg(windows)]
+    fn hang_command() -> std::process::Command {
+        let mut cmd = std::process::Command::new("ping");
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        cmd
+    }
+    #[cfg(not(windows))]
+    fn hang_command() -> std::process::Command {
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        cmd
+    }
+
+    /// Scaled-down stand-ins for the two real budgets, so the suite stays fast
+    /// while the RATIO under test (cold >> poll) is the real one.
+    const TEST_POLL: Duration = Duration::from_millis(300);
+    const TEST_COLD: Duration = Duration::from_millis(2000);
+
+    #[test]
+    fn the_first_call_into_the_distro_may_outlast_the_status_poll_budget() {
+        // THE REGRESSION: `wsl -d dml-arch -u dml -- dml version --json` is the
+        // call that boots the WSL2 utility VM (plus systemd inside it). After a
+        // Windows reboot that routinely runs past a status-poll budget, and the
+        // consequence is not a slow Home — it is an established user's WORKING
+        // Home being replaced by "Couldn't check this PC's setup".
+        let mut env = SetupProbeEnv::new(DISTRO, USER);
+        env.timeout = TEST_POLL;
+        env.cold_timeout = TEST_COLD;
+        let start = std::time::Instant::now();
+        let got = probe_with(DISTRO, USER, |args, budget| {
+            if args.first().copied() == Some("--list") {
+                return ran(0, "dml-arch\r\n");
+            }
+            let mut cmd = hang_command();
+            windows_no_window(&mut cmd);
+            ProbeOutcome::from_bounded(run_bounded_outcome(cmd, env.budget(budget)))
+        });
+        let elapsed = start.elapsed();
+        assert_eq!(got.state, SetupState::Unknown, "the hung probe must still be a shrug");
+        assert_eq!(got.blocked_at, Some(SetupStep::Cli));
+        assert!(
+            elapsed >= TEST_COLD,
+            "the cold call was cut off at the poll budget after only {elapsed:?} - \
+             a slow-but-fine machine gets reported as broken"
+        );
+        assert!(elapsed < TEST_COLD * 4, "must still return promptly after it, took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_host_side_wsl_call_does_not_inherit_the_cold_budget() {
+        // The other half, and the reason this is two budgets rather than one
+        // bigger number: `wsl --list --quiet` is a registry read that never
+        // starts a VM, so a wedged or absent WSL must still answer fast. Make
+        // every probe wait two minutes and a broken machine takes six.
+        let mut env = SetupProbeEnv::new(DISTRO, USER);
+        env.timeout = TEST_POLL;
+        env.cold_timeout = TEST_COLD;
+        let start = std::time::Instant::now();
+        let got = probe_with(DISTRO, USER, |_args, budget| {
+            let mut cmd = hang_command();
+            windows_no_window(&mut cmd);
+            ProbeOutcome::from_bounded(run_bounded_outcome(cmd, env.budget(budget)))
+        });
+        let elapsed = start.elapsed();
+        assert_eq!(got.state, SetupState::Unknown);
+        assert_eq!(got.blocked_at, Some(SetupStep::Wsl));
+        assert!(elapsed >= TEST_POLL, "must have actually waited, {elapsed:?}");
+        assert!(
+            elapsed < TEST_COLD,
+            "probe 1 boots nothing and must not be given the cold budget, waited {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_budgets_cover_a_real_cold_wsl2_boot() {
+        // The numbers themselves, pinned. `provision.rs` already budgets 120s
+        // for the identical first spawn ("the FIRST wsl.exe call on a cold
+        // machine boots the WSL2 VM, which can take the better part of a
+        // minute") and Install-DML.ps1 allows systemd 60s on top; a probe that
+        // gates Home cannot be stingier than the command it gates.
+        let env = SetupProbeEnv::new(DISTRO, USER);
+        assert_eq!(env.budget(ProbeBudget::ColdStart), DEFAULT_COLD_START_TIMEOUT);
+        assert_eq!(env.budget(ProbeBudget::Warm), DEFAULT_PROBE_TIMEOUT);
+        assert!(
+            DEFAULT_COLD_START_TIMEOUT >= Duration::from_secs(90),
+            "a cold WSL2 + systemd boot routinely passes a minute"
+        );
+        assert!(
+            DEFAULT_PROBE_TIMEOUT <= Duration::from_secs(30),
+            "the host-side call must still fail fast"
         );
     }
 
@@ -981,6 +1828,7 @@ dml v2.6.0
                 cli: Tri::Yes,
                 cli_version: Some("2.6.0".to_string()),
                 titles: Some(1),
+                detail: None,
             },
         );
         assert_eq!(st.state, SetupState::CliOutdated, "an old CLI must offer the upgrade, not a shrug");
