@@ -187,6 +187,57 @@ sticky `TerminalSeen` exit-code tracker, plus `run.rs`'s `stream_dispatch`) live
 `dml-wow-cli`, not `dml-core`. A second game CLI today would copy that pattern (~small); hoisting it into
 `dml-core` is an obvious follow-up if a second crate materializes.
 
+## Measured: Rust vs the bash CLI
+
+Measured 2026-07-29 on the development box (Windows 11, 32 logical cores; WSL2
+`dml-arch` capped at 5 GB / 2 cores). Three runs each, **median** reported.
+
+- Rust: `target\release\dml-wow.exe <cmd>`
+- bash: `wsl.exe -d dml-arch -u dml -- dml <cmd> --json`
+- Timed with PowerShell `Measure-Command`.
+
+| Command | Rust | bash (via WSL) | Rust is |
+|---|---:|---:|---:|
+| `version` | 30 ms | 174 ms | **5.7× faster** |
+| `games list` | 31 ms | 314 ms | **10.2× faster** |
+| `status` | 1 399 ms | 401 ms | *not comparable — see below* |
+
+### What the wins actually are
+
+`version` and `games list` are the honest measurements, and neither is doing
+real work: they are dominated by **getting to the code at all**. The bash path
+pays for a `wsl.exe` hop into a distro plus bash startup and a ~10,000-line
+script being parsed; the Rust path is one already-resident binary starting.
+That is exactly why the gap is largest on the cheapest command — it is
+overhead, not throughput, and it applies once per invocation.
+
+The practical consequence is not "the server runs faster". It is that a GUI
+polling status every 7 seconds, and pages that fire several reads when they
+open, stop paying a fifth of a second per call for the privilege of asking.
+
+### Why `status` is not in the win column
+
+**It is measuring docker, not the CLI.** Both runs were taken with the stack
+STOPPED, and on this machine `docker info` alone takes **1 017 ms** when Docker
+Desktop is not running — the native path waits on a named pipe that is not
+there. The bash path asks a `dockerd` inside the distro, which refuses faster.
+So that row compares two failure timeouts, not two implementations, and
+publishing it either way round would be dishonest.
+
+A finding worth keeping, though: with the engine down, ~1 s of every native
+`status` is a dead `docker info`, and Home polls status on a 7 s timer. Bounded
+and not fatal — the call is time-limited and the UI stays responsive — but it
+is real latency on a machine whose Docker is simply off.
+
+### Not measured, deliberately
+
+`games start`, `games restart` and a config write are missing from this table.
+The first two are dominated by Docker pulling and starting containers, so the
+CLI is a rounding error in them — measuring them would flatter neither side
+honestly. The config write was skipped because it mutates a live server's
+configuration and this table was produced unattended; it belongs in the same
+pass as the live smoke tests, with a human watching.
+
 ## Honest status
 
 **Windows** is the exercised platform: the workspace was built and tested there throughout, the

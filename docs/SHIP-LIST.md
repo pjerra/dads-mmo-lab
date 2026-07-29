@@ -82,7 +82,17 @@ is exactly how this project got to 613 unreleased commits.
 Right now the case for Rust is "it feels faster". That loses an argument. A
 measurement wins one.
 
-- [ ] **2.1 — Time bash vs Rust on the same box, same operations.** At minimum:
+- [x] **2.1 — DONE 2026-07-29** (median of 3, table in docs/rust-cli-pitch.md):
+      `version` 30ms vs 174ms (5.7x), `games list` 31ms vs 314ms (10.2x).
+      `status` was measured and DELIBERATELY NOT claimed: with the stack down it
+      compares two docker failure-timeouts, not two implementations -- `docker
+      info` alone costs 1017ms on this box when Docker Desktop is off. Left in
+      the table as a non-result with the reason. `start`/`restart` and the
+      config write are unmeasured: the first two are dominated by Docker, and
+      the write mutates a live server so it belongs with the supervised smokes.
+      SIDE FINDING worth its own line: ~1s of every native `status` is a dead
+      `docker info` when the engine is down, and Home polls status every 7s.
+- [ ] ~~**2.1 — Time bash vs Rust on the same box, same operations.**~~ At minimum:
       `status`, `games list`, `games start`, `games restart`, one config write.
       Three runs each, take the median, record milliseconds.
       - bash: `wsl.exe -d dml-arch -u dml -- dml <cmd> --json`
