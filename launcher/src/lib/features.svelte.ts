@@ -17,7 +17,12 @@ export const FEATURES: Record<string, FeatureStatus> = {
   restart: "tested",
   "console-send": "tested",
   "title-install": "untested",
-  "title-remove": "untested",
+  // UNLOCKED for v0.1.0 alongside title-install: a beta where installing a
+  // title is a ONE-WAY door is worse than the risk of the removal itself,
+  // and testers will install the wrong thing. It is genuinely destructive
+  // (server dir + containers), so it keeps its typed-id confirmation --
+  // that gate stays regardless of this flag.
+  "title-remove": "tested",
   "teleport-named": "tested",
   "teleport-coords": "tested",
   "gm-actions": "tested",
