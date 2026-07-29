@@ -289,6 +289,31 @@ Evidence:
 - Test-suite concurrency gotcha applies to all new suites: never run bats and cargo parity/engine tests simultaneously (bats setup() rewrites cli/dml in place).
 - Route B seam erosion: Route B stays a compose-variable swap ONLY while (a) image tags stay ${IMAGE_TAG:-master}, (b) build: lives solely in docker-compose.build.yml, (c) the engine's build stage is skippable when images already exist. A later 'simplification' merging the build file into the override would silently design Route B out — Task 2's file-separation test is the tripwire.
 
+## DECISIONS TAKEN (user ratified 2026-07-29, "do your recommendations and go")
+
+1. **Orchestration lives in Rust.** The install engine is a `dml-wow` surface
+   (`install-native`, NDJSON streamed, resumable); `Install-DML-Native.ps1` is a
+   THIN machine-preparer only (Docker Desktop, Git for Windows, the launcher).
+   One implementation, two entry points — and nothing new to delete when Phase 6
+   removes the bash CLI.
+2. **The checkout lives on the Windows filesystem.** Not negotiable in fact: the
+   existing native config code REQUIRES `env/dist/etc` bind-mounted back out, so
+   part of the tree must be Windows-side regardless. Clone with
+   `core.autocrlf=input` (LF preserved for a Linux build), and reuse the
+   Defender build-tool exclusion already shipped to keep the scan cost off it.
+3. **Preflight REFUSES a doomed build.** Below ~6 GB Docker VM RAM or ~40 GB free
+   on the Docker data-root drive it refuses; between there and 8 GB / 60 GB it
+   warns. Always overridable with an explicit flag. Rationale is the project's
+   own evidence (~2 GB per compiler job; a SIGKILL "dies at the same % every
+   retry") plus a real cancelled build on 2026-07-29 — an unguarded build on a
+   small machine costs hours and then fails.
+4. **v0.1.0 still ships as scoped in SHIP-LIST 4.5.** Route A lands behind the
+   existing "Enable untested features" toggle until its live gates pass, so the
+   beta is not held hostage to a multi-hour build path. Feature key
+   `native-install`, registered untested.
+
+The remaining questions below stay open; none blocks Tasks 2, 4 or 9.
+
 ## Open questions — THE USER MUST ANSWER THESE
 
 1. Where should the Route A install orchestration live: a new PowerShell installer 'as the original' (Install-DML-Native.ps1), a new Rust surface (dml-wow-cli + launcher command), or a relaxed bash `dml games install` arm? The user's words suggest a PS1, but the launcher needs a programmatic path too, and the choice collides with the bash-Rust mirror policy and Phase 6's plan to delete the bash CLI — only the user can rank those.

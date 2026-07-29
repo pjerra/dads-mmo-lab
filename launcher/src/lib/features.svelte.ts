@@ -90,6 +90,10 @@ export const FEATURES: Record<string, FeatureStatus> = {
   // Writes a name file into the server's own directory. Benign and reversible,
   // but it is still a write to a title dir, so it follows the same rule.
   "server-rename": "untested",
+  // Route A native install: clones AzerothCore + mod-playerbots and builds the
+  // worldserver in Docker. Hours long and writes a whole server directory, so
+  // it stays locked until its live gates pass (plan 2026-07-29, decision 4).
+  "native-install": "untested",
   "backend-setup": "untested",
 };
 
