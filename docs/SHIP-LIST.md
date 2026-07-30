@@ -10,6 +10,18 @@ No new spec, no new "round", no new page. If an idea arrives, it goes in
 
 ---
 
+## Known flake (found 2026-07-30, NOT investigated)
+
+`cli/tests/soap.bats` test 6, "wow soap-exec returns result envelope on success",
+failed once in a full-suite run and passed on the next full run and in isolation
+(10/10). Nothing in that code path was touched that day. Likely cross-test
+contamination of `~/.dml/soap.env`, which tests 2 and 3 of that same file write.
+
+Worth fixing before the beta, for one reason: an intermittently red suite is
+indistinguishable from a real regression, and this repo has already lost time to
+exactly that (a build race between bats and the cargo parity suites produced ~450
+fake failures). A gate you have to re-run to believe is not a gate.
+
 ## Decisions taken (user, 2026-07-30)
 
 Recorded here because a decision that lives only in a conversation is a decision
@@ -377,7 +389,7 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       The new native compose generator already prevents this class by shipping
       SOAP enabled and bound to 0.0.0.0 by default.
 
-- [ ] **4.0f — `AC_*` env vars SILENTLY DISCARD the launcher's own config saves.**
+- [x] **4.0f — `AC_*` env vars SILENTLY DISCARD the launcher's own config saves.**
       Found live on the VM, 2026-07-29, and it is a release-grade honesty bug: the
       user changed the world bot population in Bot World, saved, restarted — and
       the old value came back, five times. Cause: the title installer's
@@ -445,17 +457,26 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       An absent `apply_needed` resolves to `recreate`, the STRONGER apply -- an
       older `dml` in the distro then does one needless slow restart instead of
       silently failing to apply. Guessing the weaker answer is the bug itself.
-      (c) OPEN, and it is a PRODUCT decision, not a code one: removing
-      `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS` from
-      `guides/wow-wotlk/install-wow-wotlk.sh` would drop a fresh install to the
-      module's own `.dist` default of **500/500** (measured), not to 1600/2000.
-      So it is a silent change to how populated a new server feels out of the
-      box. Writing the conf instead is possible -- the cloned module carries
-      `modules/mod-playerbots/conf/playerbots.conf.dist` at install time -- but
-      that edits the install path, which cannot be verified here without a 2-4
-      hour source build. Left for the user; (a)+(b) make the current behaviour
-      correct and honest in the meantime, at the cost of one recreate on the
-      first population save of a fresh WSL install.
+      (c) DONE -- user decision the same day, taken with the measured
+      consequence in front of them: `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS` are gone
+      from ALL FOUR installers (Arch, Ubuntu, Fedora at 1600/2000, and
+      `Install-WoW-WotLK.ps1` which set 200/250 in TWO places -- the installers had
+      already drifted from each other). A fresh install now takes the module's own
+      `.dist` default of **500/500** (measured, not assumed): so the Linux routes
+      drop from 2000 to 500 and the PS1 route RISES from 250 to 500. Existing
+      installs are untouched and keep their env keys until a save migrates them.
+      This was not a new policy -- `composegen.rs`'s "the shadowing rule" already
+      said a generated override must not carry env keys that shadow curated rows,
+      with a tripwire enforcing it on the native side. The installers were simply
+      out of step.
+      Tripwire: `installers_carry_no_bot_count_env_keys`. Its first version was
+      itself broken and adversarial review caught it -- the forbidden set came only
+      from registry rows, and `AiPlayerbot.MinRandomBots` is NOT a registry row (it
+      is a hard-coded companion write), so a test named "no bot count env keys"
+      would have passed while an installer re-pinned the bot FLOOR at 1600. It now
+      unions in the companion keys, DISCOVERS the installer files instead of
+      hard-coding them, and accepts `KEY=value` as well as `KEY: value`. All three
+      gaps are mutation-proven.
       NB this also explains why the workaround that DID work was `docker compose
       up -d` rather than a restart — that was the right instruction for the wrong
       stated reason.

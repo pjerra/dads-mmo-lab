@@ -879,7 +879,15 @@ export async function wowConfigRead(): Promise<ConfigSetting[]> {
 export async function wowConfigSet(
   key: string,
   value: string,
-): Promise<{ changed: boolean; restart_required: boolean; applied?: "live" | "restart" | "none" }> {
+): Promise<{
+  changed: boolean;
+  restart_required: boolean;
+  applied?: "live" | "restart" | "none";
+  /** WHICH restart applies this save. Optional because an older `dml` in the
+   *  distro does not emit it -- normalizeApplyNeeded() then assumes the STRONGER
+   *  apply rather than guessing the weaker one. See lib/apply-needed.ts. */
+  apply_needed?: "none" | "world-restart" | "recreate";
+}> {
   const mode = await resolveBackendMode();
   return mode === "native"
     ? await invoke("wow_config_set_native", { key, value })
@@ -967,6 +975,8 @@ export async function wowConfigTuningSet(
   changed: boolean;
   restart_required: boolean;
   applied: "restart" | "reload-ale" | "none";
+  /** See wowConfigSet: optional for the same older-CLI reason. */
+  apply_needed?: "none" | "world-restart" | "recreate";
   reload?: string;
 }> {
   const mode = await resolveBackendMode();

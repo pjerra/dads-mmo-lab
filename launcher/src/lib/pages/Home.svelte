@@ -158,24 +158,34 @@
     // covers the Home buttons (a start after a stop reads as "starting" via
     // the polled verdict, so only restart needs the explicit flag).
     if (action === "restart") restartState.restarting = true;
-    // Only a run that reached the end without throwing may clear the banner.
+    // Only a run that actually SUCCEEDED may clear the pending-apply banner.
+    //
+    // "await returned" is not success: a streaming command resolves Ok even when
+    // the CLI exits non-zero (run_stream returns Ok(code) for any code, and
+    // stream_args maps it to Ok(())) -- the failure travels as an `error` event
+    // instead. Deriving this from the promise cleared the banner for a restart
+    // that never happened, which is the mirror image of the bug the banner
+    // exists to prevent: a DB that never became healthy means `dml-start.sh`
+    // exits before `compose up -d`, so the env removal is not applied, and the
+    // user would be left with no signal at all. Same rule as the bot-flush
+    // stream below.
     let applied = false;
     try {
       if (action === "restart") {
         await gamesRestart(WOW_ID, skipSaveall, (e) => {
           buf.term = applyEvent(buf.term, e);
+          // A full restart is a compose down->up: the containers are RECREATED,
+          // so every pending save is applied -- including the ones the fast
+          // world-only restart could not touch.
+          if (e.event === "done") applied = true;
         });
-        // A full restart is a compose down->up: the containers are RECREATED, so
-        // every pending save is applied -- including the ones the fast world-only
-        // restart could not touch. Nothing is left pending.
-        applied = true;
       } else if (action === "start") {
         await gamesStart(WOW_ID, (e) => {
           buf.term = applyEvent(buf.term, e);
+          // A cold start creates the containers from the current compose +
+          // confs, so it applies pending saves for the same reason.
+          if (e.event === "done") applied = true;
         });
-        // A cold start creates the containers from the current compose + confs,
-        // so it applies pending saves for the same reason.
-        applied = true;
       } else {
         // manageDocker (native mode only, review finding #6): the persisted
         // Tools-page preference for whether stopping the server also stops
@@ -220,6 +230,13 @@
     try {
       await wowWorldRestart(skipSaveall, (e) => {
         buf.term = applyEvent(buf.term, e);
+        // This restarts the world PROCESS, so it satisfies a pending
+        // `world-restart` and nothing stronger. It is disabled while a
+        // `recreate` is pending, so reaching here with one is not expected --
+        // the explicit check keeps that true if the gate ever changes.
+        if (e.event === "done" && restartState.apply === "world-restart") {
+          clearApplyNeeded();
+        }
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };

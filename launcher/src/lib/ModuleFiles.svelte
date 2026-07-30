@@ -107,9 +107,12 @@
     try {
       const target = file;
       const r = await wowConfigRawReset(target);
-      // A raw rewrite of a bind-mounted conf: the world re-reads it at process
-      // start, and this route never touches override.yml, so no recreate.
-      noteApplyNeeded("world-restart");
+      // `recreate`, not `world-restart`. A raw rewrite is a bind-mounted conf
+      // that the world re-reads at process start -- but unlike `config set`, this
+      // route removes NO shadowing AC_* env key, and its allowlist includes
+      // playerbots.conf, which is exactly where those keys live. Promising "the
+      // fast world-only restart is enough" would be a promise we cannot keep.
+      noteApplyNeeded("recreate");
       if (file === target) await loadFile();
       lastBackup = r.backup;
     } catch (e) {
@@ -152,7 +155,9 @@
       const content = fileContent;
       const r = await wowConfigRawWrite(targetFile, content);
       lastBackup = r.backup;
-      noteApplyNeeded("world-restart");
+      // See the raw-reset comment above: this route never un-shadows an AC_* env
+      // key, so the weaker apply must not be advertised.
+      noteApplyNeeded("recreate");
       return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
@@ -214,10 +219,14 @@
       // Applying settings is a deliberate, infrequent restart -- always save
       // characters first (false = don't skip). The "faster restart" option
       // lives on Home for the routine restart button.
+      // Derived from the terminal `done` event, never from the promise: a
+      // streaming command resolves Ok even when the CLI exits non-zero (the
+      // failure arrives as an `error` event), so clearing the banner here would
+      // announce a restart that did not happen.
       await gamesRestart(WOW_ID, false, (e) => {
         buf.term = applyEvent(buf.term, e);
+        if (e.event === "done") clearApplyNeeded();
       });
-      clearApplyNeeded();
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {

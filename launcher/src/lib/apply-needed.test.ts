@@ -70,7 +70,11 @@ describe("user-facing copy", () => {
   it("names which button applies a recreate, and says the fast one will not", () => {
     const t = bannerText("recreate");
     expect(t).toMatch(/Restart on the Home page/);
+    // Not merely the word "cannot" somewhere: the sentence must name the fast
+    // restart as the thing that cannot do it, and say why (same container).
+    expect(t).toMatch(/fast world-only restart/);
     expect(t).toMatch(/cannot/);
+    expect(t).toMatch(/same container/);
   });
 
   it("tells the user the fast restart suffices when it does", () => {
@@ -82,7 +86,12 @@ describe("user-facing copy", () => {
   });
 
   it("blocks the fast restart only for a pending recreate", () => {
-    expect(fastRestartBlockedReason("recreate")).not.toBe("");
+    // This reason IS the user's only explanation for a disabled button, so it
+    // must explain itself -- "x" is non-empty and useless.
+    const why = fastRestartBlockedReason("recreate");
+    expect(why).toMatch(/full Restart/);
+    expect(why).toMatch(/running container/);
+    expect(why.length).toBeGreaterThan(40);
     expect(fastRestartBlockedReason("world-restart")).toBe("");
     expect(fastRestartBlockedReason("none")).toBe("");
   });

@@ -102,6 +102,12 @@ EOF
   # the frozen env is still inside the RUNNING container -> restart, not live
   [ "$(echo "$output" | jq -r '.data.applied')" = "restart" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
+  # ...and specifically a RECREATE: this save REMOVED a shadowing AC_* env key,
+  # and a container's environment is fixed when it is created, so restarting the
+  # same container cannot apply it. Reporting "world-restart" here is what made
+  # the user's setting silently revert (SHIP-LIST 4.0f). NB asserted BEFORE the
+  # `run yq` calls below -- `run` replaces $output.
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "recreate" ]
   grep -q '^Rate.XP.Kill = 4$' "$ETC/worldserver.conf"
   run yq -e '.services.ac-worldserver.environment | has("AC_RATE_XP_KILL")' "$OVR"
   [ "$status" -ne 0 ]
@@ -133,6 +139,10 @@ AC_RATE_XP_KILL=3'
   [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "restart" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "true" ]
+  # The override file is already clean, but the RUNNING container still carries
+  # the key -- so a recreate is the only thing that applies this, and the frozen
+  # probe is what distinguishes it from a plain world-restart.
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "recreate" ]
   grep -q '^Rate.XP.Kill = 5$' "$ETC/worldserver.conf"
 }
 
@@ -146,6 +156,8 @@ AC_RATE_XP_KILL=3'
   run bash "$DML" wow config set --key rates.xp_kill --value 6 --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "live" ]
+  # Applied live -> no restart of any kind is pending.
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "none" ]
   [ "$(echo "$output" | jq -r '.data.restart_required')" = "false" ]
 }
 

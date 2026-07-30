@@ -1008,3 +1008,71 @@ mod tests {
         assert_eq!(validate_tuning_value("list", "", "Allowed classes", 0, 0), Err(want3));
     }
 }
+
+#[cfg(test)]
+mod apply_needed_tests {
+    use super::*;
+
+    /// `tuning_set`'s conf backend had NO test on either the unit or the parity
+    /// side: `tuning_write_parity.rs` covers only the lua backend. So changing
+    /// this envelope's `apply_needed` — or deleting it — was invisible to cargo,
+    /// and invisible to bats too, because bats exercises the bash twin.
+    ///
+    /// The value matters: `world-restart`, not `recreate`. This route writes a
+    /// bind-mounted conf and never touches `docker-compose.override.yml`, so no
+    /// container env changes. An ABSENT field makes the launcher assume the
+    /// stronger apply, which would charge every module save a needless full
+    /// recreate — the harm the bash twin's comment claims to prevent.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dml-tuning-an-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("env").join("dist").join("etc").join("modules")).unwrap();
+        // `tuning_set` refuses before doing anything unless the title looks
+        // installed, and "installed" means a compose file is present.
+        std::fs::write(d.join("docker-compose.yml"), "services: {}
+").unwrap();
+        d
+    }
+
+    fn write_module_conf(dir: &std::path::Path, file: &str, body: &str) {
+        std::fs::write(dir.join("env").join("dist").join("etc").join("modules").join(file), body)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_conf_backed_tuning_save_asks_for_a_world_restart_not_a_recreate() {
+        let dir = scratch("changed");
+        write_module_conf(&dir, "mod_learnspells.conf", "LearnSpells.MaxLevel = 60\n");
+        let out = tuning_set(
+            "learnspells.max_level".into(),
+            "70".into(),
+            std::sync::Arc::new(std::sync::Mutex::new(())),
+            dir.clone(),
+        )
+        .unwrap();
+        assert_eq!(out["backend"], "conf");
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        assert_eq!(out["applied"], "restart");
+        assert_eq!(out["apply_needed"], "world-restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unchanged_conf_backed_tuning_save_leaves_nothing_pending() {
+        let dir = scratch("unchanged");
+        write_module_conf(&dir, "mod_learnspells.conf", "LearnSpells.MaxLevel = 70\n");
+        let out = tuning_set(
+            "learnspells.max_level".into(),
+            "70".into(),
+            std::sync::Arc::new(std::sync::Mutex::new(())),
+            dir.clone(),
+        )
+        .unwrap();
+        assert_eq!(out["changed"], false);
+        assert_eq!(out["restart_required"], false);
+        assert_eq!(out["applied"], "none");
+        assert_eq!(out["apply_needed"], "none");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

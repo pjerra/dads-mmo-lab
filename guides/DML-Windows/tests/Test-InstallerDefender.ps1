@@ -567,16 +567,57 @@ Say 'Legacy tray retirement' 'Cyan'
 $installText = Get-Content -Raw $installer
 Assert-True ($installText -match [regex]::Escape('[switch]$LegacyTray')) `
     "the installer exposes -LegacyTray as the opt-in"
-Assert-True ($installText -match [regex]::Escape('if (-not $LegacyTray) {')) `
-    "the tray compile is gated OFF unless -LegacyTray is passed"
 
-# The shortcut creation must be unreachable by default. Both lines still exist in
-# the file (inside the opt-in branch), so presence proves nothing -- what matters
-# is that they sit AFTER the gate, i.e. inside it.
-$gateAt = $installText.IndexOf('if (-not $LegacyTray) {')
-$deskAt = $installText.IndexOf('Desktop\DML Launcher.lnk")')
-Assert-True ($gateAt -gt 0 -and $deskAt -gt $gateAt) `
-    "the Desktop shortcut is created only inside the opt-in branch"
+# WHICH BRANCH the shortcut creation lives in is the whole point, so this walks
+# the AST instead of comparing string offsets. An earlier version of this check
+# asserted only that "Desktop\DML Launcher.lnk" appears LATER IN THE FILE than
+# the gate -- which is satisfied by swapping the two branch bodies (making the
+# DEFAULT path build the tray and create both shortcuts), and by dedenting the
+# shortcut block out of the branch entirely. Adversarial review, 2026-07-30.
+$gateIf = $installAst.FindAll({
+    param($node)
+    $node -is [System.Management.Automation.Language.IfStatementAst] -and
+    $node.Clauses.Count -ge 1 -and
+    $node.Clauses[0].Item1.Extent.Text -match [regex]::Escape('-not $LegacyTray')
+}, $true)
+Assert-Eq 1 @($gateIf).Count 'exactly one -not $LegacyTray gate exists'
+
+if (@($gateIf).Count -eq 1) {
+    $gate = @($gateIf)[0]
+    $defaultBody = $gate.Clauses[0].Item2.Extent.Text
+    $optInBody = if ($gate.ElseClause) { $gate.ElseClause.Extent.Text } else { '' }
+
+    # The DEFAULT path (no -LegacyTray) must clean up and do nothing else.
+    Assert-True ($defaultBody -match 'Remove-LegacyTrayShortcuts') `
+        "the default path calls the shortcut cleanup"
+    Assert-True ($defaultBody -notmatch 'CreateShortcut') `
+        "the default path creates no shortcuts"
+    Assert-True ($defaultBody -notmatch 'csc\.exe|CscPath') `
+        "the default path does not compile the tray"
+
+    # BOTH shortcuts must be confined to the opt-in branch. The startup entry
+    # was half of the reported confusion and had no positional check at all.
+    Assert-True ($optInBody -match [regex]::Escape('Desktop\DML Launcher.lnk')) `
+        "the Desktop shortcut is created only inside the opt-in branch"
+    Assert-True ($optInBody -match 'Startup') `
+        "the Windows-startup shortcut is created only inside the opt-in branch"
+
+    # ...and nowhere else. Catches a dedent out of the branch, and a second copy
+    # elsewhere in the file -- this installer genuinely had duplicated blocks
+    # before, so duplication here is a real failure mode, not a hypothetical.
+    $allShortcutHits = ([regex]::Matches($installText, [regex]::Escape('CreateShortcut('))).Count
+    $inBranchHits = ([regex]::Matches($optInBody, [regex]::Escape('CreateShortcut('))).Count
+    # The cleanup helper legitimately calls CreateShortcut to READ a target.
+    $helperHits = ([regex]::Matches($installAsts['Remove-LegacyTrayShortcuts'].Extent.Text, [regex]::Escape('CreateShortcut('))).Count
+    Assert-Eq $allShortcutHits ($inBranchHits + $helperHits) `
+        "no shortcut is created outside the opt-in branch"
+}
+
+# The cleanup must actually be CALLED, or it is dead code and every
+# already-installed box keeps both shortcuts pointing at the retired exe --
+# which is the entire reason the cleanup exists.
+Assert-True ($installText -match 'Remove-LegacyTrayShortcuts\s+-LegacyExe') `
+    "Phase 2 calls Remove-LegacyTrayShortcuts (or it is dead code)"
 
 # Behaviour: the cleanup must remove the retired shortcuts and NOTHING else.
 # A user who hit this confusion may well have repointed "DML Launcher.lnk" at the

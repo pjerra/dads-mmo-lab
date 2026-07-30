@@ -224,15 +224,17 @@
       let anyRestart = false;
       for (const key of curated) {
         const r = await wowConfigTuningSet(key, mtEdits[key]);
-        if (r.changed && r.restart_required) {
-          noteApplyNeeded(normalizeApplyNeeded(r));
+        const need = normalizeApplyNeeded(r);
+        if (r.changed && need !== "none") {
+          noteApplyNeeded(need);
           anyRestart = true;
         }
       }
       for (const c of cardStaged(conf)) {
         const r = await wowConfigSet(`conf:${conf}:${c.key}`, c.value);
-        if (r.restart_required) {
-          noteApplyNeeded(normalizeApplyNeeded(r));
+        const need = normalizeApplyNeeded(r);
+        if (need !== "none") {
+          noteApplyNeeded(need);
           anyRestart = true;
         } else if (r.applied === "live") {
           anyLive = true;
@@ -258,7 +260,7 @@
         const r = await wowConfigTuningSet(key, mtEdits[key]);
         if (r.changed) {
           if (r.backend === "lua") mtReloadPending = true;
-          if (r.restart_required) noteApplyNeeded(normalizeApplyNeeded(r));
+          noteApplyNeeded(normalizeApplyNeeded(r));
         }
       }
       await loadModuleTuning(dirty);

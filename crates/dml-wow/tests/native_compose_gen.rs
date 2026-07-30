@@ -1309,7 +1309,7 @@ fn a_build_can_never_clobber_the_image_refs_another_stack_already_runs() {
 ///
 /// `default_override_shadows_exactly_one_documented_registry_row` (above) proves
 /// the NATIVE generator never emits an env key that shadows a curated setting.
-/// The four WSL/Windows title installers write their own
+/// The WSL/Windows title installers write their own
 /// `docker-compose.override.yml` from a heredoc/here-string, and for a long time
 /// they DID emit bot counts: `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS`. That cost a
 /// real bug — the user changed the world bot population, saved, restarted, and
@@ -1320,45 +1320,116 @@ fn a_build_can_never_clobber_the_image_refs_another_stack_already_runs() {
 /// Reading the shipped installer text is the only way to pin this: the installers
 /// are bash and PowerShell, so no amount of Rust unit testing reaches them. Same
 /// mechanism `provision.rs` uses to detect drift against `cli/dev-install.ps1`.
-/// A missing file FAILS rather than skipping — a tripwire that silently finds
-/// nothing to check is not a tripwire.
+///
+/// Three things here are deliberate, and the first two are corrections of a
+/// version of this test that LOOKED right and was not (adversarial review,
+/// 2026-07-30):
+///
+/// 1. The forbidden set is the registry rows UNION the companion keys that
+///    `config_set_curated` writes and un-shadows by hard-coded special case.
+///    `AiPlayerbot.MinRandomBots` is NOT a registry row — it rides along with
+///    `bots.population` (`config.rs`) — so a registry-only oracle silently
+///    ignored `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS`, the exact key that pins the bot
+///    FLOOR. A test named "no bot count env keys" would have passed while an
+///    installer re-set the floor to 1600 and the ceiling moved to 800.
+/// 2. The installer list is DISCOVERED, not hard-coded, so a new title installer
+///    is covered the day it lands rather than when someone remembers this test.
+/// 3. Both `KEY: value` (YAML map) and `KEY=value` (compose list / `.env`) count
+///    as an assignment. Only the map form was checked before, and only the map
+///    form is understood by `_cfg_env_read`/`parse_override_env` — so a list-form
+///    key would have slipped the tripwire AND made `config set` report
+///    `world-restart` while the env still shadowed.
+///
+/// A missing or unreadable file FAILS rather than skipping — a tripwire that
+/// silently finds nothing to check is not a tripwire.
 #[test]
 fn installers_carry_no_bot_count_env_keys() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let installers = [
-        "guides/wow-wotlk/install-wow-wotlk.sh",
-        "guides/wow-wotlk/install-wow-wotlk-ubuntu.sh",
-        "guides/wow-wotlk/install-wow-wotlk-fedora.sh",
-        "guides/wow-wotlk/Install-WoW-WotLK.ps1",
-    ];
-    // Every env name that shadows a curated registry row, derived from the same
-    // oracle the native tripwire uses -- so a NEW curated row is covered here the
-    // day it is added, without anyone remembering to update this list.
-    let owned: std::collections::BTreeSet<String> = dml_wow::registry::config_registry_rows()
+
+    // (2) Discover every shipped title installer under guides/.
+    let mut installers: Vec<std::path::PathBuf> = Vec::new();
+    let guides = root.join("guides");
+    let mut stack = vec![guides.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+            let is_script = name.ends_with(".sh") || name.ends_with(".ps1");
+            if is_script && name.contains("install") {
+                installers.push(path);
+            }
+        }
+    }
+    installers.sort();
+    // The discovery itself must be real: an empty or tiny sweep would make every
+    // assertion below vacuous.
+    assert!(
+        installers.len() >= 6,
+        "expected to discover the shipped title installers under guides/, found {}: {installers:?}",
+        installers.len()
+    );
+    for known in [
+        "install-wow-wotlk.sh",
+        "install-wow-wotlk-ubuntu.sh",
+        "install-wow-wotlk-fedora.sh",
+        "Install-WoW-WotLK.ps1",
+    ] {
+        assert!(
+            installers.iter().any(|p| p.file_name().and_then(|n| n.to_str()) == Some(known)),
+            "{known} was not discovered -- has it moved? this tripwire must not silently pass"
+        );
+    }
+
+    // (1) Every env name that shadows a setting the config editor owns: the
+    // curated registry rows, plus the hard-coded companion writes.
+    let mut owned: std::collections::BTreeSet<String> = dml_wow::registry::config_registry_rows()
         .iter()
         .filter_map(|r| r.get("env").and_then(|e| e.as_str()))
         .filter(|e| e.starts_with("conf:"))
         .map(|e| dml_wow::config::env_name_for(e.rsplit(':').next().unwrap()))
         .collect();
-    assert!(owned.contains("AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"), "oracle looks wrong: {owned:?}");
+    for companion in ["AiPlayerbot.MinRandomBots", "AuctionHouseBot.Account"] {
+        owned.insert(dml_wow::config::env_name_for(companion));
+    }
+    // Sanity: name BOTH population keys explicitly. The missing floor key is the
+    // blind spot this test already had once; an assert that only pins the ceiling
+    // is what let it through.
+    for must in ["AC_AI_PLAYERBOT_MAX_RANDOM_BOTS", "AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"] {
+        assert!(owned.contains(must), "oracle lost {must}: {owned:?}");
+    }
 
-    for rel in installers {
-        let path = root.join(rel);
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {rel} ({e}) -- has it moved? this tripwire must not silently pass"));
+    for path in &installers {
+        let rel = path.strip_prefix(&root).unwrap_or(path).display().to_string();
+        let text = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {rel} ({e}) -- this tripwire must not silently pass"));
         for name in &owned {
             // The autologin exception is documented and shared with the native
-            // generator; every other shadowing key is a regression.
+            // generator (see composegen.rs, "the shadowing rule").
             if name == "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN" {
                 continue;
             }
             // Only an ASSIGNMENT counts. The explanatory comment in each
-            // installer names these keys on purpose, and must stay legal.
-            let assigned = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.starts_with('#'))
-                .any(|l| l.starts_with(name.as_str()) && l[name.len()..].trim_start().starts_with(':'));
+            // installer names these keys on purpose and must stay legal.
+            let assigned = text.lines().map(str::trim).any(|l| {
+                if l.starts_with('#') {
+                    return false;
+                }
+                // Tolerate the compose list form's leading "- ".
+                let l = l.strip_prefix("- ").map(str::trim_start).unwrap_or(l);
+                match l.strip_prefix(name.as_str()) {
+                    // (3) `KEY: value` or `KEY=value`.
+                    Some(rest) => {
+                        let r = rest.trim_start();
+                        r.starts_with(':') || r.starts_with('=')
+                    }
+                    None => false,
+                }
+            });
             assert!(
                 !assigned,
                 "{rel} sets {name}, which OVERRIDES the matching conf key and makes \

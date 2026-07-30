@@ -382,7 +382,7 @@
     try {
       for (const c of pbStaged) {
         const r = await wowConfigSet(`conf:playerbots.conf:${c.key}`, c.value);
-        if (r.restart_required) noteApplyNeeded(normalizeApplyNeeded(r));
+        noteApplyNeeded(normalizeApplyNeeded(r));
       }
       await loadPbKeys();
     } catch (e) {
@@ -461,8 +461,12 @@
       let anyRestart = false;
       for (const key of toSave) {
         const r = await wowConfigSet(key, edits[key]);
-        if (r.restart_required) {
-          noteApplyNeeded(normalizeApplyNeeded(r));
+        // apply_needed is the single source of truth: gating on restart_required
+        // first would discard an envelope that says WHICH apply is needed without
+        // repeating THAT one is.
+        const need = normalizeApplyNeeded(r);
+        if (need !== "none") {
+          noteApplyNeeded(need);
           anyRestart = true;
         } else if (r.applied === "live") {
           anyLive = true;
@@ -528,10 +532,14 @@
       // Applying settings is a deliberate, infrequent restart -- always save
       // characters first (false = don't skip). The "faster restart" option
       // lives on Home for the routine restart button.
+      // Derived from the terminal `done` event, never from the promise: a
+      // streaming command resolves Ok even when the CLI exits non-zero (the
+      // failure arrives as an `error` event), so clearing the banner here would
+      // announce a restart that did not happen.
       await gamesRestart(WOW_ID, false, (e) => {
         buf.term = applyEvent(buf.term, e);
+        if (e.event === "done") clearApplyNeeded();
       });
-      clearApplyNeeded();
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {
