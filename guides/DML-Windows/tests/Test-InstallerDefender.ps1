@@ -87,7 +87,7 @@ function Test-InsideHereString($fn) {
     return $false
 }
 
-$installFns = @('Get-SourceCheckoutRoot', 'Test-ExclusionRecorded', 'Get-BuildToolExclusionPaths', 'Add-BuildToolDefenderExclusions')
+$installFns = @('Get-SourceCheckoutRoot', 'Test-ExclusionRecorded', 'Get-BuildToolExclusionPaths', 'Add-BuildToolDefenderExclusions', 'Remove-LegacyTrayShortcuts')
 $installAsts = @{}
 foreach ($name in $installFns) {
     $fn = Get-FunctionAst $installAst $name
@@ -552,6 +552,78 @@ try {
     Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# -----------------------------------------------------------------------------
+# The retired C# tray (SHIP-LIST 4.0b)
+#
+# Two apps both called "DML Launcher", differing only by a hyphen in their exe
+# names. On the test VM the Desktop icon AND the Windows-startup entry both
+# pointed at the OLD C# tray while the new Tauri app was reachable only from the
+# Start-menu list, and the person who BUILT it could not find what they had just
+# installed. The installer no longer builds or shortcuts the old tray by default.
+# -----------------------------------------------------------------------------
+Say ""
+Say 'Legacy tray retirement' 'Cyan'
+
+$installText = Get-Content -Raw $installer
+Assert-True ($installText -match [regex]::Escape('[switch]$LegacyTray')) `
+    "the installer exposes -LegacyTray as the opt-in"
+Assert-True ($installText -match [regex]::Escape('if (-not $LegacyTray) {')) `
+    "the tray compile is gated OFF unless -LegacyTray is passed"
+
+# The shortcut creation must be unreachable by default. Both lines still exist in
+# the file (inside the opt-in branch), so presence proves nothing -- what matters
+# is that they sit AFTER the gate, i.e. inside it.
+$gateAt = $installText.IndexOf('if (-not $LegacyTray) {')
+$deskAt = $installText.IndexOf('Desktop\DML Launcher.lnk")')
+Assert-True ($gateAt -gt 0 -and $deskAt -gt $gateAt) `
+    "the Desktop shortcut is created only inside the opt-in branch"
+
+# Behaviour: the cleanup must remove the retired shortcuts and NOTHING else.
+# A user who hit this confusion may well have repointed "DML Launcher.lnk" at the
+# new app themselves; deleting that would undo their own fix.
+Invoke-Expression $installAsts['Remove-LegacyTrayShortcuts'].Extent.Text
+
+$trayBox = Join-Path ([System.IO.Path]::GetTempPath()) ("dml-tray-" + [guid]::NewGuid().ToString('N'))
+$savedProfile = $env:USERPROFILE
+$savedAppData = $env:APPDATA
+try {
+    $desk = Join-Path $trayBox 'Desktop'
+    $startup = Join-Path $trayBox 'Roaming\Microsoft\Windows\Start Menu\Programs\Startup'
+    New-Item -ItemType Directory -Force -Path $desk, $startup | Out-Null
+    $env:USERPROFILE = $trayBox
+    $env:APPDATA = (Join-Path $trayBox 'Roaming')
+
+    $legacyExe = Join-Path $trayBox 'DML-Launcher.exe'
+    $newExe = Join-Path $trayBox 'launcher.exe'
+    Set-Content -Path $legacyExe -Value 'x' -Encoding utf8
+    Set-Content -Path $newExe -Value 'x' -Encoding utf8
+
+    $wsh = New-Object -ComObject WScript.Shell
+    $deskLnk = Join-Path $desk 'DML Launcher.lnk'
+    $startLnk = Join-Path $startup 'DML Launcher.lnk'
+    $l = $wsh.CreateShortcut($deskLnk);  $l.TargetPath = $legacyExe; $l.Save()
+    $l = $wsh.CreateShortcut($startLnk); $l.TargetPath = $legacyExe; $l.Save()
+
+    Remove-LegacyTrayShortcuts -LegacyExe $legacyExe
+    Assert-True (-not (Test-Path $deskLnk))  "the retired Desktop shortcut is removed"
+    Assert-True (-not (Test-Path $startLnk)) "the retired Windows-startup shortcut is removed"
+
+    # Same name, different target: the user repointed it at the new app.
+    $l = $wsh.CreateShortcut($deskLnk); $l.TargetPath = $newExe; $l.Save()
+    Remove-LegacyTrayShortcuts -LegacyExe $legacyExe
+    Assert-True (Test-Path $deskLnk) `
+        "a shortcut repointed at the NEW launcher is left alone"
+
+    # Nothing to do must be silent and safe, not an error.
+    Remove-Item $deskLnk -Force
+    $threw = $false
+    try { Remove-LegacyTrayShortcuts -LegacyExe $legacyExe } catch { $threw = $true }
+    Assert-True (-not $threw) "cleanup with no shortcuts present is a no-op"
+} finally {
+    $env:USERPROFILE = $savedProfile
+    $env:APPDATA = $savedAppData
+    Remove-Item $trayBox -Recurse -Force -ErrorAction SilentlyContinue
+}
 Say ""
 if ($script:Failures -eq 0) {
     Say "$script:Checks checks passed" 'Green'

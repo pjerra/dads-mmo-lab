@@ -18,7 +18,15 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$ResumePhase2
+    [switch]$ResumePhase2,
+    # The OLD C# system-tray app is RETIRED (SHIP-LIST 4.0b). It is no longer
+    # built or shortcut by default: it and the new Tauri launcher were both
+    # called "DML Launcher", differing only by a hyphen in their exe names,
+    # and on the test VM the desktop icon AND the Windows-startup entry both
+    # pointed at the OLD one while the new app was reachable only from the
+    # Start-menu list. The tester -- who built the thing -- could not find the
+    # app they had just installed. Pass -LegacyTray to build it anyway.
+    [switch]$LegacyTray
 )
 
 Set-StrictMode -Version Latest
@@ -104,6 +112,42 @@ function Test-StepDone([string]$step) {
 function Mark-StepDone([string]$step) {
     New-Item -ItemType File -Force -Path "$StateDir\done-$step" | Out-Null
     Write-Diag "Step '$step' marked complete"
+}
+# =============================================================================
+# Legacy tray retirement (SHIP-LIST 4.0b)
+# =============================================================================
+function Remove-LegacyTrayShortcuts {
+    # Delete the Desktop and Windows-startup shortcuts that older runs of this
+    # installer created for the retired C# tray.
+    #
+    # ONLY when the shortcut actually resolves to that exe. A user may have
+    # repointed "DML Launcher.lnk" at the new Tauri app -- which is exactly what
+    # someone hitting this confusion would do -- and deleting THAT would take
+    # away the fix they applied themselves. Comparing the resolved TargetPath is
+    # what makes this safe to run on every upgrade.
+    param([Parameter(Mandatory)][string]$LegacyExe)
+
+    $targets = @(
+        (Join-Path $env:USERPROFILE 'Desktop\DML Launcher.lnk'),
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\DML Launcher.lnk')
+    )
+    $wsh = $null
+    foreach ($lnk in $targets) {
+        if (-not (Test-Path $lnk)) { continue }
+        try {
+            if (-not $wsh) { $wsh = New-Object -ComObject WScript.Shell }
+            $target = $wsh.CreateShortcut($lnk).TargetPath
+            if ($target -and ($target -ieq $LegacyExe)) {
+                Remove-Item $lnk -Force -ErrorAction Stop
+                Write-Ok "Removed the retired tray shortcut: $lnk"
+            } else {
+                Write-Diag "Left $lnk alone -- it points at $target, not the retired tray."
+            }
+        } catch {
+            # Never fail an install over a shortcut.
+            Write-Diag "Could not inspect $lnk ($($_.Exception.Message)) -- left alone."
+        }
+    }
 }
 function Clear-DistroStepMarkers {
     # Called when we do a fresh distro import so stale inside-distro markers
@@ -2005,12 +2049,20 @@ exit 0
             [System.IO.File]::WriteAllBytes($IcoPath, [System.Convert]::FromBase64String($IcoB64))
             Write-Diag "Icon written: $IcoPath"
 
-    Write-Step "Compiling DML Launcher (system tray app)..."
-
     $CscPath = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    if (-not (Test-Path $CscPath)) {
+    if (-not $LegacyTray) {
+        # Retired by default. Removing the CREATION of the two shortcuts is not
+        # enough on its own: every box that already ran an older installer still
+        # has them, still pointing at the old exe, so the confusion survives the
+        # upgrade. Clean them up -- but only when they really do point at the
+        # retired exe, never a shortcut the user made or repointed themselves.
+        Write-Diag "Legacy C# tray not requested -- skipping it (pass -LegacyTray to build it)."
+        Remove-LegacyTrayShortcuts -LegacyExe (Join-Path $LauncherDir 'DML-Launcher.exe')
+    } elseif (-not (Test-Path $CscPath)) {
+        Write-Step "Compiling DML Launcher (legacy system tray app)..."
         Write-Warn "csc.exe not found at $CscPath -- skipping launcher (DML environment still fully works)."
     } else {
+        Write-Step "Compiling DML Launcher (legacy system tray app)..."
             $LauncherCs  = "$LauncherDir\DML-Launcher.cs"
             $LauncherExe = "$LauncherDir\DML-Launcher.exe"
 
@@ -3114,9 +3166,12 @@ class TrayApp : ApplicationContext
     Write-Host "    Arch Linux  +  systemd  +  Docker Engine  +  dml CLI v2.1" -ForegroundColor Green
     Write-Host "  Install location: $InstallRoot" -ForegroundColor DarkGray
     Write-Host ""
-    if (Test-Path "$env:USERPROFILE\Desktop\DML Launcher.lnk") {
-        Write-Host "  DML Launcher is on your Desktop and starts with Windows." -ForegroundColor White
+    if ($LegacyTray -and (Test-Path "$env:USERPROFILE\Desktop\DML Launcher.lnk")) {
+        Write-Host "  The legacy DML Launcher tray is on your Desktop and starts with Windows." -ForegroundColor White
         Write-Host "  Right-click the tray icon to start/stop titles and install new ones." -ForegroundColor White
+    } else {
+        Write-Host "  Next: install DML Launcher (the app you actually use day to day)." -ForegroundColor White
+        Write-Host "  This script only prepares the environment underneath it." -ForegroundColor DarkGray
     }
     Write-Host ""
     Write-Host "  To run a DML title from the command line:" -ForegroundColor White

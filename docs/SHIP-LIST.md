@@ -250,7 +250,7 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       the app and needs no system-wide install at all (~180MB). Decide which
       once we know whether the failure was at install time or at launch.
 
-- [ ] **4.0b — Two launchers, and a stranger cannot tell them apart.** FOUND ON
+- [x] **4.0b — Two launchers, and a stranger cannot tell them apart.** FOUND ON
       THE VM, 2026-07-28: after `Install-DML.ps1` + the new installer, the
       tester could not find the app they had just installed -- the Start menu
       offers the OLD C# tray (`C:\DML\DML-Launcher.exe`, installed by
@@ -272,6 +272,42 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       A stranger has no chance, and any old-tray bug gets reported against the
       new app. Fix before any release: stop Install-DML.ps1 creating those two
       shortcuts (and installing the C# tray at all).
+
+      **FIXED 2026-07-30.** The C# tray is retired: `Install-DML.ps1` no longer
+      builds it or creates its two shortcuts. It is gated behind an opt-in
+      `-LegacyTray` switch rather than deleted, because the embedded C# is ~900
+      lines inside a file that also carries the bootstrap CLI here-string, and a
+      reversible gate is the smaller, safer diff.
+
+      Removing the CREATION was NOT enough on its own, and that is the part worth
+      remembering: every box that already ran an older installer still had both
+      shortcuts, still pointing at the old exe, so the confusion would have
+      survived the upgrade untouched. `Remove-LegacyTrayShortcuts` now cleans them
+      up on every run — but ONLY when the shortcut's resolved `TargetPath` really
+      is the retired exe. Anyone who hit this confusion may well have repointed
+      "DML Launcher.lnk" at the new app themselves, and deleting that would undo
+      their own fix. That safety property is the one the mutation test proves:
+      making the cleanup unconditional turns "a shortcut repointed at the NEW
+      launcher is left alone" red.
+      The installer's closing summary also claimed "DML Launcher is on your
+      Desktop and starts with Windows" — true only of the retired app — and now
+      points at the real next step instead.
+      Harness: `guides/DML-Windows/tests/Test-InstallerDefender.ps1`, 128 -> 138
+      checks. The three static checks assert ordering, not mere presence: both
+      shortcut lines still exist in the file (inside the opt-in branch), so
+      grepping for them would prove nothing.
+
+      ONE OBSERVABLE CHECK LEFT FOR THE USER, 10 seconds during the next
+      installer run: after installing the launcher, **is there a Desktop icon for
+      DML Launcher, and does the Start-menu entry open the new app?**
+      `tauri.conf.json` has `nsis: {}` — no explicit shortcut configuration — and
+      whether Tauri's NSIS template creates a Desktop shortcut by default could
+      not be settled here: the bundler template is not in the cargo registry (it
+      ships prebuilt inside the npm CLI) and the built installer's script data is
+      LZMA-compressed, so grepping the exe is inconclusive. Guessing at an `nsis`
+      config key could break the installer build, which is worse than the current
+      state. If the answer is "no Desktop icon", that is a one-line config fix —
+      but it must be made against an observation, not an assumption.
 
 - [ ] **4.0c — The title installer talks to Steam Deck owners.** Seen on the VM
       run, 2026-07-28: the WoW installer says "This will take 2-4 hours on your
