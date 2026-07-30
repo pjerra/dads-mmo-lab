@@ -53,10 +53,28 @@ were taken as recommended.
       That keeps `git pull upstream main` clean forever, and it means "what is
       the current work" has a one-word answer for anyone who clones the repo.
       Releases get tagged on `rust-main`. There is no merge ceremony to perform.
-- [ ] **0.3 — Delete the dead branches** or mark them historical in the README:
-      `spike/docker-desktop-native` and `feat/round2-launcher-batch` are fully
-      contained in `rust-main`. `feat/backup-names-autobackup` and
-      `feat/dml-launcher-windows` need a decision: merged, or gone.
+- [x] **0.3 — Delete the dead branches.** DONE 2026-07-30 (user decision).
+      Measured first: SIX of the seven branches had **zero** commits not already
+      in `rust-main`, so nothing needed merging and nothing was lost. `main` is
+      byte-identical to `upstream/main` (0 commits each way) — exactly the
+      untouched pull-mirror 0.2 wants, so it STAYS and is never merged into.
+      `feat/multi-server-tray` STAYS: it has one unmerged commit, and it is
+      blocked on per-install container names anyway (`ac-*` `container_name`s are
+      global to the docker ENGINE, so one stack per PC until that lands).
+
+      Deleted, local and on origin where they existed. Tip SHAs recorded so
+      "deleted" never means "unrecoverable" — `git branch <name> <sha>` restores
+      any of them, and every one of these commits is already an ancestor of
+      `rust-main`:
+
+      | branch | tip | last commit |
+      |---|---|---|
+      | `feat/backup-names-autobackup` | `ef035f0` | 2026-07-26 |
+      | `feat/dml-launcher-windows` (+origin) | `a589cd5` | 2026-07-23 |
+      | `feat/round2-launcher-batch` | `268b771` | 2026-07-28 |
+      | `fix/games-folder-mnt-hints-updater` (+origin) | `38b3a9c` | 2026-07-14 |
+      | `spike/docker-desktop-native` (+origin) | `568ea4c` | 2026-07-26 |
+      | `origin/feat/rust-cli-workspace` (old name of `rust-main`) | `1c503d4` | — |
 
 ---
 
