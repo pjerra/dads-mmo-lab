@@ -23,6 +23,10 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   d="$(_done_data "$output")"
   [ "$(echo "$d" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$d" | jq -r '.data.restart_required')" = "true" ]
+  # Eluna loads the deployed lua when the WORLD process starts -- a world-only
+  # restart is enough, and saying so keeps the launcher from demanding a full
+  # recreate for a script deploy.
+  [ "$(echo "$d" | jq -r '.data.apply_needed')" = "world-restart" ]
   for f in dml_addclass.lua dml_uninvite.lua dml_login.lua dml_gm.lua; do
     [ -f "$GDIR/env/dist/etc/modules/lua_scripts/$f" ]
   done
@@ -47,6 +51,7 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   d="$(_done_data "$output")"
   [ "$(echo "$d" | jq -r '.data.changed')" = "false" ]
   [ "$(echo "$d" | jq -r '.data.restart_required')" = "false" ]
+  [ "$(echo "$d" | jq -r '.data.apply_needed')" = "none" ]
 }
 
 @test "bridge-setup errors NOT_FOUND when the wow server is absent" {

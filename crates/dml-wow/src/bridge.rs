@@ -120,7 +120,15 @@ fn bs_event_section_end(status: &str) -> serde_json::Value {
 }
 
 fn bs_event_done(changed: bool) -> serde_json::Value {
-    serde_json::json!({"event": "done", "data": {"changed": changed, "restart_required": changed}})
+    // `world-restart`: the deploy writes lua scripts into the bind-mounted title
+    // dir, which Eluna loads when the WORLD process starts -- no container env
+    // changes, so no recreate. Emitted so the launcher does not have to fall back
+    // to assuming the stronger apply (see launcher/src/lib/apply-needed.ts).
+    serde_json::json!({"event": "done", "data": {
+        "changed": changed,
+        "restart_required": changed,
+        "apply_needed": if changed { "world-restart" } else { "none" },
+    }})
 }
 
 fn bs_event_error(code: &str, message: impl Into<String>, hint: &str) -> serde_json::Value {
@@ -359,8 +367,8 @@ mod tests {
 
     #[test]
     fn bs_event_done_shape() {
-        assert_eq!(bs_event_done(true), serde_json::json!({"event":"done","data":{"changed":true,"restart_required":true}}));
-        assert_eq!(bs_event_done(false), serde_json::json!({"event":"done","data":{"changed":false,"restart_required":false}}));
+        assert_eq!(bs_event_done(true), serde_json::json!({"event":"done","data":{"changed":true,"restart_required":true,"apply_needed":"world-restart"}}));
+        assert_eq!(bs_event_done(false), serde_json::json!({"event":"done","data":{"changed":false,"restart_required":false,"apply_needed":"none"}}));
     }
 
     #[test]

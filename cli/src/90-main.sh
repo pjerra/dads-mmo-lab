@@ -3472,6 +3472,15 @@ case "$cmd" in
               # .dist on first touch, comment-preserving in-place write. These
               # module confs are read at server startup, so a change always
               # needs a restart (no live reload attempted).
+              #
+              # `apply_needed` is "world-restart", NOT "recreate": this route
+              # writes a bind-mounted conf and never touches
+              # docker-compose.override.yml, so no creation-time container env
+              # changes and restarting the world process is enough. (Contrast
+              # `config set`, which migrates legacy AC_* env keys and therefore
+              # sometimes needs a fresh container.) Emitted so the launcher
+              # never has to guess -- an absent apply_needed makes it assume the
+              # stronger apply.
               CFG_CHANGED=false
               cpath="$(_cfg_conf_path "$file")"
               _cfg_conf_ensure "$cpath" \
@@ -3479,9 +3488,9 @@ case "$cmd" in
               _cfg_conf_write "$cpath" "$confkey" "$value" \
                 || { json_err WRITE_FAILED "Could not write $file" ""; exit 1; }
               if [[ "$CFG_CHANGED" == true ]]; then
-                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":true,\"restart_required\":true,\"applied\":\"restart\"}"
+                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":true,\"restart_required\":true,\"applied\":\"restart\",\"apply_needed\":\"world-restart\"}"
               else
-                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\"}"
+                json_ok "{\"key\":\"$key\",\"backend\":\"conf\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\",\"apply_needed\":\"none\"}"
               fi
             else
               # Lua backend: line-replace the DEPLOYED script. Applies live via
@@ -3495,9 +3504,9 @@ case "$cmd" in
               mtreload=".reload ale (Console page) or restart the server to apply"
               if _lua_cfg_write "$lpath" "$confkey" "$fileval"; then
                 if [[ "$MTUNE_CHANGED" == true ]]; then
-                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":true,\"restart_required\":false,\"applied\":\"reload-ale\",\"reload\":\"$(json_escape "$mtreload")\"}"
+                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":true,\"restart_required\":false,\"applied\":\"reload-ale\",\"apply_needed\":\"none\",\"reload\":\"$(json_escape "$mtreload")\"}"
                 else
-                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\"}"
+                  json_ok "{\"key\":\"$key\",\"backend\":\"lua\",\"changed\":false,\"restart_required\":false,\"applied\":\"none\",\"apply_needed\":\"none\"}"
                 fi
               else
                 if [[ -z "$(_lua_cfg_read "$lpath" "$confkey")" ]]; then
@@ -3549,7 +3558,11 @@ case "$cmd" in
         if [[ "$DML_JSON" == 1 ]]; then
           ndjson_line info "scripts deployed (changed=$ch)"
           ndjson_section_end bridge-setup ok
-          ndjson_done "{\"changed\":$ch,\"restart_required\":$ch}"
+          # apply_needed=world-restart: the deploy writes lua scripts into the
+          # bind-mounted title dir, which Eluna loads when the WORLD process
+          # starts -- no container env changes, so no recreate needed.
+          if [[ "$ch" == true ]]; then bs_apply="world-restart"; else bs_apply="none"; fi
+          ndjson_done "{\"changed\":$ch,\"restart_required\":$ch,\"apply_needed\":\"$bs_apply\"}"
         else
           echo "[dml] bridge-setup done (changed=$ch, restart_required=$ch)"
         fi

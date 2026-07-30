@@ -19,7 +19,8 @@
   } from "$lib/api";
   import { lintConfContent } from "$lib/conf-lint";
   import { applyEvent } from "$lib/terminal-state";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, noteApplyNeeded, clearApplyNeeded } from "$lib/restart-state.svelte";
+  import { bannerText } from "$lib/apply-needed";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -106,7 +107,9 @@
     try {
       const target = file;
       const r = await wowConfigRawReset(target);
-      restartState.needed = true;
+      // A raw rewrite of a bind-mounted conf: the world re-reads it at process
+      // start, and this route never touches override.yml, so no recreate.
+      noteApplyNeeded("world-restart");
       if (file === target) await loadFile();
       lastBackup = r.backup;
     } catch (e) {
@@ -149,7 +152,7 @@
       const content = fileContent;
       const r = await wowConfigRawWrite(targetFile, content);
       lastBackup = r.backup;
-      restartState.needed = true;
+      noteApplyNeeded("world-restart");
       return true;
     } catch (e) {
       const err = e as { message?: string; hint?: string };
@@ -214,7 +217,7 @@
       await gamesRestart(WOW_ID, false, (e) => {
         buf.term = applyEvent(buf.term, e);
       });
-      restartState.needed = false;
+      clearApplyNeeded();
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {
@@ -249,7 +252,7 @@
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if restartState.needed}
-    <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
+    <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {/if}
 
   <div class="row">

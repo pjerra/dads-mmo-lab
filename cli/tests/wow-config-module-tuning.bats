@@ -128,6 +128,11 @@ EOF
   [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.backend')" = "conf" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "restart" ]
+  # world-restart, NOT recreate: this route writes a bind-mounted conf and never
+  # touches docker-compose.override.yml, so no container env changes. The
+  # launcher assumes the STRONGER apply when the field is absent, so dropping it
+  # here would silently cost every module save a full recreate.
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "world-restart" ]
   grep -q '^BeastMaster.MinLevel = 25$' "$MOD/mod_npc_beastmaster.conf"
   grep -q '^# Beastmaster config -- comment must survive edits$' "$MOD/mod_npc_beastmaster.conf"
   run bash "$DML" wow config tuning-list --json
@@ -166,6 +171,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.changed')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "none" ]
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "none" ]
 }
 
 @test "tuning-set (conf): module not installed (no conf, no dist) -> NOT_INSTALLED" {
@@ -183,6 +189,8 @@ EOF
   [ "$(echo "$output" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$output" | jq -r '.data.backend')" = "lua" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "reload-ale" ]
+  # Applied by reloading ALE, so no restart is pending at all.
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "none" ]
   grep -q '^UnlimitedAmmoNamespace.ENABLED = true -- Set this to false to disable the script$' "$LUA/UnlimitedAmmo.lua"
 }
 
@@ -220,6 +228,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.changed')" = "false" ]
   [ "$(echo "$output" | jq -r '.data.applied')" = "none" ]
+  [ "$(echo "$output" | jq -r '.data.apply_needed')" = "none" ]
 }
 
 @test "tuning-set (lua): a key that appears twice edits the LAST occurrence (matches read/Lua last-wins)" {

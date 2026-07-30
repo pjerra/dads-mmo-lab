@@ -24,7 +24,8 @@
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, noteApplyNeeded, clearApplyNeeded } from "$lib/restart-state.svelte";
+  import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import CharPicker from "$lib/CharPicker.svelte";
@@ -198,7 +199,7 @@
         // restarts. Clear it on the successful terminal event (a failure
         // arrives as an "error" event instead, which leaves the banner).
         const ev = e as { event?: string };
-        if (ev.event === "done") restartState.needed = false;
+        if (ev.event === "done") clearApplyNeeded();
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
@@ -261,8 +262,13 @@
     try {
       await wowAhbotRepair(ahRepairChar, (e) => {
         buf.term = applyEvent(buf.term, e);
-        const ev = e as { event?: string; data?: { restart_required?: boolean } };
-        if (ev.event === "done" && ev.data?.restart_required) restartState.needed = true;
+        const ev = e as {
+          event?: string;
+          data?: { restart_required?: boolean; apply_needed?: string };
+        };
+        if (ev.event === "done" && ev.data?.restart_required) {
+          noteApplyNeeded(normalizeApplyNeeded(ev.data));
+        }
       });
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
@@ -376,7 +382,7 @@
     try {
       for (const c of pbStaged) {
         const r = await wowConfigSet(`conf:playerbots.conf:${c.key}`, c.value);
-        if (r.restart_required) restartState.needed = true;
+        if (r.restart_required) noteApplyNeeded(normalizeApplyNeeded(r));
       }
       await loadPbKeys();
     } catch (e) {
@@ -456,7 +462,7 @@
       for (const key of toSave) {
         const r = await wowConfigSet(key, edits[key]);
         if (r.restart_required) {
-          restartState.needed = true;
+          noteApplyNeeded(normalizeApplyNeeded(r));
           anyRestart = true;
         } else if (r.applied === "live") {
           anyLive = true;
@@ -525,7 +531,7 @@
       await gamesRestart(WOW_ID, false, (e) => {
         buf.term = applyEvent(buf.term, e);
       });
-      restartState.needed = false;
+      clearApplyNeeded();
     } catch (e) {
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {
@@ -547,7 +553,7 @@
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if restartState.needed}
-    <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
+    <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {:else if liveNote}
     <div class="live-card"><p>Applied live ✓ — the running server picked the change up, no restart needed.</p></div>
   {/if}

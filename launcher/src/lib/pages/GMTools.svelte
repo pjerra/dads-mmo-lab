@@ -7,7 +7,8 @@
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, noteApplyNeeded } from "$lib/restart-state.svelte";
+  import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
   import CharPicker from "$lib/CharPicker.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { summonModuleHint } from "$lib/gm-summon";
@@ -117,8 +118,8 @@
       await wowBridgeSetup((e) => {
         buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
-          const d = e.data as { restart_required?: boolean } | undefined;
-          if (d?.restart_required) restartState.needed = true;
+          const d = e.data as { restart_required?: boolean; apply_needed?: string } | undefined;
+          if (d?.restart_required) noteApplyNeeded(normalizeApplyNeeded(d));
         }
       });
     } catch (e) {
@@ -136,7 +137,7 @@
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if restartState.needed}
-    <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
+    <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {/if}
 
   <div class="card row">

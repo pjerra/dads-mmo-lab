@@ -681,6 +681,42 @@ pub fn env_frozen_with(
 // whether a legacy AC_* env still beats the conf in the RUNNING container.
 // ---------------------------------------------------------------------------
 
+/// The four fields every `config set` WRITE route answers with, built in ONE
+/// place so the two routes cannot drift -- port of the twin bash blocks
+/// (`90-main.sh:2962-3003` direct, `3115-3131` curated).
+///
+/// `apply_needed` exists because a bare `restart_required:true` was not enough
+/// information, and the gap cost a real bug: the launcher's restart button calls
+/// world-restart, i.e. `docker restart -t 300 ac-worldserver`, which restarts
+/// the SAME container -- and a container's environment is fixed when it is
+/// CREATED. So when a save REMOVES a legacy AC_* env key that was shadowing
+/// this conf row, the file ends up correct, the container keeps the old value
+/// anyway, and the user watches the change revert (found live on the Bot World
+/// page, five times, 2026-07-29). `env_was` already records that an env key was
+/// present (in the override, or still frozen into the running container), so
+/// this needs no docker call of its own.
+///
+/// NB do NOT "fix" this by adding `compose up -d` to world-restart: recreation
+/// stops the container on compose's short default timeout, and `-t 300` exists
+/// precisely so the world can save every character first.
+fn cfgset_outcome(changed: bool, applied: &str, env_was: bool) -> serde_json::Value {
+    // `applied == "live"` means the running world has already re-read the conf,
+    // so nothing further is needed.
+    let (restart_required, apply_needed) = if !changed || applied == "live" {
+        (false, "none")
+    } else if env_was {
+        (true, "recreate")
+    } else {
+        (true, "world-restart")
+    };
+    serde_json::json!({
+        "changed": changed,
+        "restart_required": restart_required,
+        "applied": applied,
+        "apply_needed": apply_needed,
+    })
+}
+
 pub fn cfg_installed_err() -> CmdError {
     CmdError {
         code: "NOT_FOUND".into(),
@@ -784,10 +820,8 @@ pub fn config_set_direct(
     }
 
     let mut applied = "none".to_string();
-    let mut restart_required = false;
     if changed {
         applied = "restart".to_string();
-        restart_required = true;
         if let Some(reload_cmd) = crate::config::conf_reload_cmd(&conf_file) {
             if !env_was && env_frozen(&ename) {
                 env_was = true;
@@ -798,16 +832,11 @@ pub fn config_set_direct(
                 let outcome = crate::soap::exec(&soap_cfg, reload_cmd);
                 if matches!(outcome, crate::soap::SoapOutcome::Ok(_)) {
                     applied = "live".to_string();
-                    restart_required = false;
                 }
             }
         }
     }
-    Ok(serde_json::json!({
-        "changed": changed,
-        "restart_required": restart_required,
-        "applied": applied,
-    }))
+    Ok(cfgset_outcome(changed, &applied, env_was))
 }
 
 /// Route B — the curated registry-row route (`90-main.sh:2440-2560`).
@@ -981,25 +1010,18 @@ pub fn config_set_curated(
         }
 
         let mut applied = "none".to_string();
-        let mut restart_required = false;
         if changed {
             applied = "restart".to_string();
-            restart_required = true;
             if (conf_file == "worldserver.conf" || conf_file == "mod_ahbot.conf") && !env_was {
                 let _guard = soap_lock.lock().unwrap_or_else(|e| e.into_inner());
                 let soap_cfg = crate::soap::SoapConfig::load();
                 let outcome = crate::soap::exec(&soap_cfg, "reload config");
                 if matches!(outcome, crate::soap::SoapOutcome::Ok(_)) {
                     applied = "live".to_string();
-                    restart_required = false;
                 }
             }
         }
-        return Ok(serde_json::json!({
-            "changed": changed,
-            "restart_required": restart_required,
-            "applied": applied,
-        }));
+        return Ok(cfgset_outcome(changed, &applied, env_was));
     }
 
     // Non-conf env column (currently unreachable — every real registry row is
@@ -1791,6 +1813,8 @@ services:
         assert_eq!(out["changed"], true);
         assert_eq!(out["restart_required"], true);
         assert_eq!(out["applied"], "restart");
+        // Nothing shadowed this row, so restarting the world process is enough.
+        assert_eq!(out["apply_needed"], "world-restart");
         assert_eq!(t.read_module_conf("playerbots.conf"), "AiPlayerbot.Foo = 42\n");
     }
 
@@ -1807,6 +1831,11 @@ services:
         assert_eq!(out["changed"], true);
         assert_eq!(out["restart_required"], true);
         assert_eq!(out["applied"], "restart");
+        // THE REGRESSION: removing a shadowing AC_* env key cannot be applied by
+        // restarting the same container, because its environment was fixed at
+        // create time. Only a recreate (down->up) lands this save -- reporting
+        // "world-restart" here is what made the user's change silently revert.
+        assert_eq!(out["apply_needed"], "recreate");
         let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
         assert!(!crate::config::parse_override_env(&text).contains_key("AC_AI_PLAYERBOT_FOO"));
     }
@@ -2020,6 +2049,46 @@ services:
         let text = t.read_module_conf("playerbots.conf");
         assert!(text.contains("AiPlayerbot.MaxRandomBots = 800"));
         assert!(text.contains("AiPlayerbot.MinRandomBots = 800"));
+        assert_eq!(out["apply_needed"], "world-restart");
+    }
+
+    /// The user-facing bug, in its original shape: the WSL installer writes BOTH
+    /// population bounds as AC_* env keys into the compose override, so the very
+    /// first Bot World save has to migrate them -- and a save that removes an env
+    /// key needs the container RECREATED, which the launcher's restart button
+    /// cannot do. Reported as "world-restart", the change appeared to revert.
+    #[test]
+    fn a_population_save_that_migrates_the_installers_env_keys_demands_a_recreate() {
+        let t = TmpTitleDir::new("curated-botspop-shadowed");
+        t.write_module_conf(
+            "playerbots.conf",
+            "AiPlayerbot.MaxRandomBots = 500\nAiPlayerbot.MinRandomBots = 500\n",
+        );
+        // Verbatim the two names `guides/wow-wotlk/install-wow-wotlk.sh` writes.
+        t.write_override(concat!(
+            "services:\n  ac-worldserver:\n    environment:\n",
+            "      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: \"500\"\n",
+            "      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: \"500\"\n",
+        ));
+        let rows = vec![curated_row(
+            "bots.population",
+            "int",
+            0.into(),
+            3000.into(),
+            "conf:playerbots.conf:AiPlayerbot.MaxRandomBots",
+            "World bot population",
+        )];
+        let out =
+            config_set_curated(&t.0, "bots.population", "800", &rows, &no_soap_lock()).unwrap();
+        assert_eq!(out["changed"], true);
+        assert_eq!(out["restart_required"], true);
+        assert_eq!(out["apply_needed"], "recreate");
+        // Both shadowing keys are gone -- Min is the companion write, and leaving
+        // it would keep the floor at 500 while the ceiling moved to 800.
+        let text = std::fs::read_to_string(t.0.join("docker-compose.override.yml")).unwrap();
+        let env = crate::config::parse_override_env(&text);
+        assert!(!env.contains_key("AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"));
+        assert!(!env.contains_key("AC_AI_PLAYERBOT_MIN_RANDOM_BOTS"));
     }
 
     #[test]

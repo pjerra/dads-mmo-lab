@@ -8,7 +8,8 @@
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, clearApplyNeeded } from "$lib/restart-state.svelte";
+  import { bannerText, fastRestartBlockedReason } from "$lib/apply-needed";
   import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { toolPrefs } from "$lib/tool-prefs.svelte";
@@ -143,6 +144,10 @@
     if (!busy) act(action);
   });
 
+  const fastRestartBlocked = $derived(
+    restartState.needed ? fastRestartBlockedReason(restartState.apply) : "",
+  );
+
   async function act(action: "start" | "stop" | "restart") {
     busy = true;
     beginRun("home");
@@ -153,15 +158,24 @@
     // covers the Home buttons (a start after a stop reads as "starting" via
     // the polled verdict, so only restart needs the explicit flag).
     if (action === "restart") restartState.restarting = true;
+    // Only a run that reached the end without throwing may clear the banner.
+    let applied = false;
     try {
       if (action === "restart") {
         await gamesRestart(WOW_ID, skipSaveall, (e) => {
           buf.term = applyEvent(buf.term, e);
         });
+        // A full restart is a compose down->up: the containers are RECREATED, so
+        // every pending save is applied -- including the ones the fast world-only
+        // restart could not touch. Nothing is left pending.
+        applied = true;
       } else if (action === "start") {
         await gamesStart(WOW_ID, (e) => {
           buf.term = applyEvent(buf.term, e);
         });
+        // A cold start creates the containers from the current compose + confs,
+        // so it applies pending saves for the same reason.
+        applied = true;
       } else {
         // manageDocker (native mode only, review finding #6): the persisted
         // Tools-page preference for whether stopping the server also stops
@@ -188,6 +202,7 @@
     } finally {
       taskbarIdle();
       if (action === "restart") restartState.restarting = false;
+      if (applied) clearApplyNeeded();
       busy = false;
       await refresh();
     }
@@ -324,6 +339,13 @@
   {/if}
 
   <header class="bar"><h2>WoW server</h2></header>
+  <!-- The pending-apply banner belongs HERE, not only on the pages that save:
+       the restart buttons live in this section, so before this the user had to
+       navigate away from the advice to reach the button -- and the advice never
+       said WHICH button. See lib/apply-needed.ts. -->
+  {#if restartState.needed}
+    <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
+  {/if}
   {#if statusError}
     <div class="error-card"><strong>Couldn't reach the DML backend.</strong><p>{statusError}</p></div>
   {:else if containerState}
@@ -345,10 +367,12 @@
               Restart
             </button>
             <button
-              disabled={busy || featureLocked("world-restart")}
+              disabled={busy || featureLocked("world-restart") || fastRestartBlocked !== ""}
               title={featureLocked("world-restart")
                 ? LOCKED_HINT
-                : "Faster: restarts only the world server. Does NOT apply settings changes — use Restart for that."}
+                : fastRestartBlocked !== ""
+                  ? fastRestartBlocked
+                  : "Faster: restarts only the world server. Does NOT apply settings changes — use Restart for that."}
               onclick={worldRestart}
             >
               Restart world only
@@ -478,4 +502,5 @@
   .muted { color: #8b949e; margin: 0; }
   .refresh-warn { font-size: 12.5px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+  .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
 </style>

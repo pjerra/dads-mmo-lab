@@ -38,7 +38,8 @@
   } from "$lib/conf-keys";
   import { clearSavedEdits } from "$lib/config-diff";
   import { applyEvent } from "$lib/terminal-state";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, noteApplyNeeded } from "$lib/restart-state.svelte";
+  import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -224,14 +225,14 @@
       for (const key of curated) {
         const r = await wowConfigTuningSet(key, mtEdits[key]);
         if (r.changed && r.restart_required) {
-          restartState.needed = true;
+          noteApplyNeeded(normalizeApplyNeeded(r));
           anyRestart = true;
         }
       }
       for (const c of cardStaged(conf)) {
         const r = await wowConfigSet(`conf:${conf}:${c.key}`, c.value);
         if (r.restart_required) {
-          restartState.needed = true;
+          noteApplyNeeded(normalizeApplyNeeded(r));
           anyRestart = true;
         } else if (r.applied === "live") {
           anyLive = true;
@@ -257,7 +258,7 @@
         const r = await wowConfigTuningSet(key, mtEdits[key]);
         if (r.changed) {
           if (r.backend === "lua") mtReloadPending = true;
-          if (r.restart_required) restartState.needed = true;
+          if (r.restart_required) noteApplyNeeded(normalizeApplyNeeded(r));
         }
       }
       await loadModuleTuning(dirty);
@@ -353,7 +354,7 @@
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
   {#if note}<p class="muted">{note}</p>{/if}
   {#if restartState.needed}
-    <div class="warn-card"><p>Saved — restart the server to apply the changes.</p></div>
+    <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {:else if liveNote}
     <div class="live-card"><p>Applied live ✓ — the running server picked the change up, no restart needed.</p></div>
   {/if}

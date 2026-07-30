@@ -585,11 +585,14 @@ pub fn tuning_set(
             LuaWrite::Changed => Ok(serde_json::json!({
                 "key": key, "backend": "lua", "changed": true,
                 "restart_required": false, "applied": "reload-ale",
+                // Applied by reloading ALE, not by any restart.
+                "apply_needed": "none",
                 "reload": LUA_RELOAD_HINT,
             })),
             LuaWrite::Unchanged => Ok(serde_json::json!({
                 "key": key, "backend": "lua", "changed": false,
                 "restart_required": false, "applied": "none",
+                "apply_needed": "none",
             })),
             // The oracle discriminates its single `return 1` by RE-READING
             // the (untouched) file: still no value for this key -> the key
@@ -634,11 +637,21 @@ pub fn tuning_set(
         serde_json::json!({
             "key": key, "backend": "conf", "changed": true,
             "restart_required": true, "applied": "restart",
+            // `world-restart`, not `recreate`: this route writes a bind-mounted
+            // conf and NEVER touches docker-compose.override.yml, so no
+            // creation-time container env changes and restarting the world
+            // process is enough. (Contrast `config set`, which migrates legacy
+            // AC_* env keys and therefore sometimes needs a fresh container --
+            // see config::cfgset_outcome.) The field is emitted so the launcher
+            // never has to guess: an absent apply_needed makes it assume the
+            // stronger apply.
+            "apply_needed": "world-restart",
         })
     } else {
         serde_json::json!({
             "key": key, "backend": "conf", "changed": false,
             "restart_required": false, "applied": "none",
+            "apply_needed": "none",
         })
     })
 }

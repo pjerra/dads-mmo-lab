@@ -10,6 +10,36 @@ No new spec, no new "round", no new page. If an idea arrives, it goes in
 
 ---
 
+## Decisions taken (user, 2026-07-30)
+
+Recorded here because a decision that lives only in a conversation is a decision
+that gets lost. All four were put to the user with recommendations and all four
+were taken as recommended.
+
+1. **v0.1.0 beta scope: WSL-only.** The native-Docker install engine
+   (`install_native.rs`) stays in the repo and reachable by running the binary,
+   but nothing in the launcher points at it for v0.1.0. Reasons: the launcher is
+   not wired to it, native mode CANNOT install a title at all (all six installers
+   are Linux scripts and `_installers_supported` refuses on a Windows host), and
+   native has no readiness wait, which makes its boot-loop diagnosis thin.
+2. **Pin AzerothCore + mod-playerbots to known-good SHAs.** A stranger's install
+   must be reproducible; today a bad upstream commit breaks installs for reasons
+   we cannot reproduce locally, and each failure costs that user a full source
+   build. We own the bumps. (Implementation is Phase 1 Task 1 — still to do.)
+3. **WebView2: the prerequisites script handles it.** That script already has to
+   enable WSL2 and install Docker Desktop, both of which need admin and a reboot,
+   so the check costs nothing extra there and keeps the download small. Stated
+   honestly, "download one file, double-click, play" is really "run one script
+   once, then double-click forever" — see 4.0h.
+4. **`docs/superpowers/plans/2026-07-25-common-writes-to-rust.md`: committed, and
+   deferred to post-beta.** Tracked so it stops being invisible to git, the
+   roadmap and any audit — the exact failure mode that already lost a
+   user-approved perf-advisor spec and a 13-item feature batch — but explicitly
+   NOT before the beta, because it competes with the five live gates that
+   actually block the release.
+
+---
+
 ## Phase 0 — stop the bleeding (30 minutes)
 
 - [ ] **0.1 — Clean the worktree.** 9 modified files + 3 untracked are sitting
@@ -332,15 +362,46 @@ C:\Users\perzi.* Everything else on this list is downstream of fixing that.
       `config set bots.population` does BOTH kinds at once, so it needs a
       recreate, and the UI offers the one action that cannot deliver it.
 
-      STILL TO DO: (a) have `config set`/the conf-row route report WHICH apply is
-      needed (e.g. `apply: recreate | world-restart | live`) instead of a bare
-      `restart_required: true`; (b) make the pending-restart banner choose the
-      action that can actually apply the change it just made — a recreate when an
-      env key was touched; (c) stop the installer writing env keys that shadow
-      curated conf rows in the first place
-      (`guides/wow-wotlk/install-wow-wotlk.sh`'s override sets
-      `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS`), so the migration is not needed on
-      fresh installs at all.
+      **CONFIRMED AGAINST THE REAL BOX, 2026-07-30.** There are TWO servers on
+      this machine and they differ exactly where it matters. The WSL install
+      (`~/games/wow-server-playerbots`) has `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS:
+      1600/2000` in its override AND a `playerbots.conf` that does not set those
+      keys at all -- so the running bot count comes ENTIRELY from env, and the
+      first population save both writes the conf and removes the env, which only
+      a recreate can apply. The native install (`C:\Users\perzi\dml-native`) has
+      no env shadow and a plain 500/500 conf. With no `~/.dml/launcher.json` the
+      backend auto-detects, which on this box resolves to the WSL one -- the
+      shadowed one. The reproduction is on disk, not inferred.
+
+      (a) DONE -- `apply_needed: recreate | world-restart | none` now rides along
+      with `restart_required` on BOTH surfaces (bash `cli/src/90-main.sh` and
+      native `crates/dml-wow`), for `config set` (both routes, built in one place
+      by `config::cfgset_outcome` so they cannot drift), `config tuning-set`, and
+      `bridge-setup`. Mutation-verified on both surfaces.
+      (b) DONE -- `launcher/src/lib/apply-needed.ts` (pure, 15 vitest cases) owns
+      the ranking, the escalation (a multi-row save keeps the STRONGEST answer,
+      never the last one) and the copy. Three things changed in the UI: the
+      banner now NAMES the button instead of saying "restart the server"; the
+      banner is shown on **Home**, where the restart buttons actually are (before
+      this the user had to navigate away from the advice to reach the button);
+      and "Restart world only" is DISABLED while a recreate is pending, with the
+      reason in its tooltip -- a tooltip alone was already there and was not
+      enough. A full Restart or a cold Start clears the pending state, and only
+      on success.
+      An absent `apply_needed` resolves to `recreate`, the STRONGER apply -- an
+      older `dml` in the distro then does one needless slow restart instead of
+      silently failing to apply. Guessing the weaker answer is the bug itself.
+      (c) OPEN, and it is a PRODUCT decision, not a code one: removing
+      `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS` from
+      `guides/wow-wotlk/install-wow-wotlk.sh` would drop a fresh install to the
+      module's own `.dist` default of **500/500** (measured), not to 1600/2000.
+      So it is a silent change to how populated a new server feels out of the
+      box. Writing the conf instead is possible -- the cloned module carries
+      `modules/mod-playerbots/conf/playerbots.conf.dist` at install time -- but
+      that edits the install path, which cannot be verified here without a 2-4
+      hour source build. Left for the user; (a)+(b) make the current behaviour
+      correct and honest in the meantime, at the cost of one recreate on the
+      first population save of a fresh WSL install.
       NB this also explains why the workaround that DID work was `docker compose
       up -d` rather than a restart — that was the right instruction for the wrong
       stated reason.

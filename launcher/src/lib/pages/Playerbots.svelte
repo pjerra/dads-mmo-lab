@@ -11,7 +11,8 @@
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
-  import { restartState } from "$lib/restart-state.svelte";
+  import { restartState, noteApplyNeeded } from "$lib/restart-state.svelte";
+  import { normalizeApplyNeeded } from "$lib/apply-needed";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import {
@@ -358,8 +359,8 @@
       await wowPartySetup((e) => {
         buf.term = applyEvent(buf.term, e);
         if (e.event === "done") {
-          const d = e.data as { restart_required?: boolean } | undefined;
-          if (d?.restart_required) restartState.needed = true;
+          const d = e.data as { restart_required?: boolean; apply_needed?: string } | undefined;
+          if (d?.restart_required) noteApplyNeeded(normalizeApplyNeeded(d));
         }
       });
     } catch (e) {
