@@ -1304,3 +1304,67 @@ fn a_build_can_never_clobber_the_image_refs_another_stack_already_runs() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The installer half of "the shadowing rule".
+///
+/// `default_override_shadows_exactly_one_documented_registry_row` (above) proves
+/// the NATIVE generator never emits an env key that shadows a curated setting.
+/// The four WSL/Windows title installers write their own
+/// `docker-compose.override.yml` from a heredoc/here-string, and for a long time
+/// they DID emit bot counts: `AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS`. That cost a
+/// real bug — the user changed the world bot population, saved, restarted, and
+/// watched the old value come back five times, because the env beat the conf and
+/// removing an env key needs the container RECREATED, which the restart button
+/// could not do (SHIP-LIST 4.0f).
+///
+/// Reading the shipped installer text is the only way to pin this: the installers
+/// are bash and PowerShell, so no amount of Rust unit testing reaches them. Same
+/// mechanism `provision.rs` uses to detect drift against `cli/dev-install.ps1`.
+/// A missing file FAILS rather than skipping — a tripwire that silently finds
+/// nothing to check is not a tripwire.
+#[test]
+fn installers_carry_no_bot_count_env_keys() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let installers = [
+        "guides/wow-wotlk/install-wow-wotlk.sh",
+        "guides/wow-wotlk/install-wow-wotlk-ubuntu.sh",
+        "guides/wow-wotlk/install-wow-wotlk-fedora.sh",
+        "guides/wow-wotlk/Install-WoW-WotLK.ps1",
+    ];
+    // Every env name that shadows a curated registry row, derived from the same
+    // oracle the native tripwire uses -- so a NEW curated row is covered here the
+    // day it is added, without anyone remembering to update this list.
+    let owned: std::collections::BTreeSet<String> = dml_wow::registry::config_registry_rows()
+        .iter()
+        .filter_map(|r| r.get("env").and_then(|e| e.as_str()))
+        .filter(|e| e.starts_with("conf:"))
+        .map(|e| dml_wow::config::env_name_for(e.rsplit(':').next().unwrap()))
+        .collect();
+    assert!(owned.contains("AC_AI_PLAYERBOT_MAX_RANDOM_BOTS"), "oracle looks wrong: {owned:?}");
+
+    for rel in installers {
+        let path = root.join(rel);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {rel} ({e}) -- has it moved? this tripwire must not silently pass"));
+        for name in &owned {
+            // The autologin exception is documented and shared with the native
+            // generator; every other shadowing key is a regression.
+            if name == "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN" {
+                continue;
+            }
+            // Only an ASSIGNMENT counts. The explanatory comment in each
+            // installer names these keys on purpose, and must stay legal.
+            let assigned = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .any(|l| l.starts_with(name.as_str()) && l[name.len()..].trim_start().starts_with(':'));
+            assert!(
+                !assigned,
+                "{rel} sets {name}, which OVERRIDES the matching conf key and makes \
+                 the launcher's save of that setting silently revert. Configure it \
+                 in the conf file instead (see composegen.rs, 'the shadowing rule')."
+            );
+        }
+    }
+}

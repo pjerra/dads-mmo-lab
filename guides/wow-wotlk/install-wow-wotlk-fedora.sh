@@ -683,8 +683,15 @@ services:
     environment:
       AC_PLAYERBOTS_UPDATES_ENABLE_DATABASES: "1"
       AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "1"
-      AC_AI_PLAYERBOT_MIN_RANDOM_BOTS: "1600"
-      AC_AI_PLAYERBOT_MAX_RANDOM_BOTS: "2000"
+      # Bot counts (AC_AI_PLAYERBOT_MIN/MAX_RANDOM_BOTS) deliberately do NOT
+      # belong here. An AC_* env var OVERRIDES the matching playerbots.conf key,
+      # so setting one here makes the launcher's Bot World page look broken: the
+      # save lands in the conf, the env silently wins, and the old value comes
+      # back on the next start. Bot counts are configured in playerbots.conf via
+      # the launcher (the module's own default is 500/500). This is the same rule
+      # the native compose generator already enforces -- see "the shadowing
+      # rule" in crates/dml-wow/src/composegen.rs -- and both are tripwire-tested
+      # by installers_carry_no_bot_count_env_keys in native_compose_gen.rs.
   ac-authserver:
     build:
       context: .

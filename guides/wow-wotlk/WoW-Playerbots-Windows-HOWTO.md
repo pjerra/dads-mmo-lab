@@ -300,30 +300,37 @@ docker attach $(docker ps --format '{{.Names}}' | grep worldserver | head -1)
 
 ## Bot Settings
 
-Bots are tuned for a solo player. Settings in `docker-compose.override.yml`:
+Bots are tuned for a solo player. The two knobs that matter:
 
-| Setting | Value |
-|---|---|
-| `AC_AI_PLAYERBOT_MIN_RANDOM_BOTS` | 200 |
-| `AC_AI_PLAYERBOT_MAX_RANDOM_BOTS` | 250 |
-| `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` | 1 (enabled) |
+| Setting | Where it lives | Default |
+|---|---|---|
+| World bot population | `playerbots.conf` (`AiPlayerbot.MinRandomBots` / `MaxRandomBots`) | 500 |
+| Bots log themselves in | `docker-compose.override.yml` (`AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN`) | 1 (enabled) |
 
-To change these, open the dml-arch shell and edit the file:
+**Change the population from the launcher** — Config → Bot World → World bot
+population → Save. That is the supported route and it tells you which restart
+applies the change.
+
+The population is deliberately NOT an `AC_*` environment variable. An `AC_*` var
+OVERRIDES the matching key in `playerbots.conf`, so if one is set, saving the
+setting in the launcher looks like it worked and then the old value comes back on
+the next start. (That was a real bug — see SHIP-LIST 4.0f.) Autologin is the one
+documented exception, because without it bots never log in at all.
+
+> **Tip — turn bots off temporarily** (e.g. while testing LAN play, for much
+> faster server starts): set `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "0"` in
+> `docker-compose.override.yml` and restart. Set it back to `"1"` to bring them
+> back — nothing is lost. NB this one needs a full `docker compose down && up`,
+> not a plain restart: a container's environment is fixed when it is created.
+
+If you must edit the files by hand, open the dml-arch shell:
 
 ```bash
 wsl -d dml-arch -u dml
-nano ~/games/wow-server-playerbots/docker-compose.override.yml
-```
-
-Then restart the server from the tray or:
-
-```bash
+nano ~/games/wow-server-playerbots/env/dist/etc/modules/playerbots.conf   # population
+nano ~/games/wow-server-playerbots/docker-compose.override.yml            # autologin
 cd ~/games/wow-server-playerbots && docker compose down && docker compose up -d
 ```
-
-> **Tip — turn bots off temporarily** (e.g. while testing LAN play, for much faster server starts): set `AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN: "0"` in the same file and restart. Set it back to `"1"` to bring them back — nothing is lost.
->
-> These environment variables win over the module's own config file, so this file is the only place you need to edit.
 
 ---
 
