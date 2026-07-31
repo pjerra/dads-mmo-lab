@@ -1305,6 +1305,30 @@ fn a_build_can_never_clobber_the_image_refs_another_stack_already_runs() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Does this line ASSIGN `name`, anywhere on it?
+///
+/// True for `KEY: v` (YAML map), `KEY=v` (compose list / .env / shell),
+/// `export KEY=v`, `ENV KEY=v`, `-e KEY=v`. False for a mere mention, and false
+/// for a longer identifier that merely ENDS with the key (`MY_AC_RATE_XP_KILL`),
+/// which is why the preceding character is checked.
+fn assigns_env_key(line: &str, name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut from = 0usize;
+    while let Some(rel) = line[from..].find(name) {
+        let at = from + rel;
+        let prev_ok = at == 0 || {
+            let p = bytes[at - 1];
+            !(p.is_ascii_alphanumeric() || p == b'_')
+        };
+        let rest = line[at + name.len()..].trim_start();
+        if prev_ok && (rest.starts_with(':') || rest.starts_with('=')) {
+            return true;
+        }
+        from = at + name.len();
+    }
+    false
+}
+
 /// The installer half of "the shadowing rule".
 ///
 /// `default_override_shadows_exactly_one_documented_registry_row` (above) proves
@@ -1413,22 +1437,21 @@ fn installers_carry_no_bot_count_env_keys() {
             if name == "AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN" {
                 continue;
             }
-            // Only an ASSIGNMENT counts. The explanatory comment in each
-            // installer names these keys on purpose and must stay legal.
+            // Only an ASSIGNMENT counts, ANYWHERE on a non-comment line. The
+            // explanatory comment in each installer names these keys on purpose
+            // and must stay legal, which is what the `#` filter buys.
+            //
+            // Position-independent deliberately: an earlier version only matched
+            // when the TRIMMED line STARTED with the key, which a third reviewer
+            // showed is evaded by `export AC_AI_PLAYERBOT_MAX_RANDOM_BOTS=800` --
+            // an ordinary shell assignment in a .sh installer, and exactly the
+            // bug this tripwire exists to prevent. It also misses `ENV KEY=v` and
+            // `-e KEY=v`. Matching anywhere costs nothing and closes the family.
             let assigned = text.lines().map(str::trim).any(|l| {
                 if l.starts_with('#') {
                     return false;
                 }
-                // Tolerate the compose list form's leading "- ".
-                let l = l.strip_prefix("- ").map(str::trim_start).unwrap_or(l);
-                match l.strip_prefix(name.as_str()) {
-                    // (3) `KEY: value` or `KEY=value`.
-                    Some(rest) => {
-                        let r = rest.trim_start();
-                        r.starts_with(':') || r.starts_with('=')
-                    }
-                    None => false,
-                }
+                assigns_env_key(l, name)
             });
             assert!(
                 !assigned,

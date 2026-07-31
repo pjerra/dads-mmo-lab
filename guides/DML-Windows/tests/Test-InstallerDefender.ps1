@@ -605,12 +605,44 @@ if (@($gateIf).Count -eq 1) {
     # ...and nowhere else. Catches a dedent out of the branch, and a second copy
     # elsewhere in the file -- this installer genuinely had duplicated blocks
     # before, so duplication here is a real failure mode, not a hypothetical.
-    $allShortcutHits = ([regex]::Matches($installText, [regex]::Escape('CreateShortcut('))).Count
-    $inBranchHits = ([regex]::Matches($optInBody, [regex]::Escape('CreateShortcut('))).Count
+    #
+    # CONTAINMENT BY SOURCE OFFSET, not by counting a literal string.
+    #
+    # A third reviewer proposed that the old count of 'CreateShortcut(' was evaded
+    # by `$wsh.CreateShortcut ("...")` -- a space before the paren. That example is
+    # WRONG: PowerShell rejects it outright ("Unexpected token '('"), so it could
+    # never ship. Verified against the 5.1 parser rather than taken on trust.
+    #
+    # The AST is still the right tool, for reasons that do hold: it cannot be
+    # inflated by the string appearing in a comment or a here-string (which would
+    # have made the old totals disagree and failed for a fake reason), it survives
+    # any legal reformatting, and it reports the offending LINE instead of a bare
+    # count mismatch. Mutation-proven with a stray that actually parses.
+    $shortcutCalls = $installAst.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+        $node.Member.Value -eq 'CreateShortcut'
+    }, $true)
     # The cleanup helper legitimately calls CreateShortcut to READ a target.
-    $helperHits = ([regex]::Matches($installAsts['Remove-LegacyTrayShortcuts'].Extent.Text, [regex]::Escape('CreateShortcut('))).Count
-    Assert-Eq $allShortcutHits ($inBranchHits + $helperHits) `
-        "no shortcut is created outside the opt-in branch"
+    $helperExtent = $installAsts['Remove-LegacyTrayShortcuts'].Extent
+    $optInExtent = $gate.ElseClause.Extent
+    $strays = @()
+    foreach ($call in $shortcutCalls) {
+        $off = $call.Extent.StartOffset
+        $inOptIn = ($off -ge $optInExtent.StartOffset -and $off -lt $optInExtent.EndOffset)
+        $inHelper = ($off -ge $helperExtent.StartOffset -and $off -lt $helperExtent.EndOffset)
+        if (-not ($inOptIn -or $inHelper)) {
+            $strays += "line $($call.Extent.StartLineNumber)"
+        }
+    }
+    Assert-Eq '' ($strays -join ', ') `
+        "no CreateShortcut call sits outside the opt-in branch or the cleanup helper"
+    # And the branch really does still create both -- otherwise 'no strays' is
+    # satisfied by there being no shortcut code left at all.
+    $inOptInCount = @($shortcutCalls | Where-Object {
+        $_.Extent.StartOffset -ge $optInExtent.StartOffset -and $_.Extent.StartOffset -lt $optInExtent.EndOffset
+    }).Count
+    Assert-Eq 2 $inOptInCount "the opt-in branch creates exactly the Desktop and Startup shortcuts"
 }
 
 # The cleanup must actually be CALLED, or it is dead code and every
