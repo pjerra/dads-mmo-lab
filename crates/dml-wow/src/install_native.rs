@@ -1259,7 +1259,22 @@ impl<'a> Engine<'a> {
     }
 
     fn do_generate(&mut self) -> Result<(), Fail> {
-        let gen = composegen::write_all(&self.title_dir, &self.opts.compose).map_err(|e| Fail {
+        // May we regenerate an override that is already there?
+        //
+        // Only while this install has never started its containers. `up` is the
+        // moment the override becomes live configuration: from then on
+        // `crate::config` writes the user's bot counts, rates and SOAP settings
+        // into it and a regeneration would eat them. Before it, the file is
+        // purely our own output and a stale copy is a liability — the bug that
+        // broke the first live install was a missing key in a TEMPLATE, and a
+        // fix that cannot reach an existing directory is not a fix.
+        //
+        // Deliberately NOT `ready`: an install that reached `up` and then timed
+        // out waiting for the world server has a RUNNING stack the Settings page
+        // can already write to, so resuming it must not discard those edits.
+        let replace_override = !self.state.is_done(Stage::Up);
+        let gen = composegen::write_all_with(&self.title_dir, &self.opts.compose, replace_override)
+            .map_err(|e| Fail {
             // composegen already speaks this envelope's codes (BAD_ARG /
             // WRITE_FAILED / COMPOSE_TEMPLATE); re-coding them here would hide
             // which of them actually happened.
@@ -1269,7 +1284,17 @@ impl<'a> Engine<'a> {
         })?;
         self.line("info", format!("wrote {}", gen.base.display()));
         self.line("info", format!("wrote {}", gen.build.display()));
-        if gen.override_written {
+        if gen.override_replaced {
+            // Say it plainly. A resume that quietly rewrites a settings file is
+            // the kind of thing a user should be able to read back afterwards.
+            self.line(
+                "info",
+                format!(
+                    "refreshed {} from the current templates (this install has not started yet, so it held no settings of yours)",
+                    gen.overrides.display()
+                ),
+            );
+        } else if gen.override_written {
             self.line("info", format!("wrote {}", gen.overrides.display()));
         } else {
             self.line(
@@ -1785,6 +1810,99 @@ mod tests {
         let (rc, events) = run_install(&io, &fast_opts(&games));
         assert_eq!(rc, 0, "{events:#?}");
         assert!(io.has("fetch --depth"), "a missing commit must be fetched");
+    }
+
+    /// Build a title dir that looks like a real interrupted install: our
+    /// checkout (both `.git` dirs, so the foreign-compose guard accepts it) plus
+    /// generated files already on disk and the stages recorded.
+    fn resumable_title(games: &Path, through: &[Stage]) -> PathBuf {
+        let title = games.join("wow-server-playerbots");
+        std::fs::create_dir_all(title.join(".git")).unwrap();
+        std::fs::create_dir_all(title.join("modules/mod-playerbots/.git")).unwrap();
+        for f in [composegen::BASE_FILE, composegen::BUILD_FILE, composegen::OVERRIDE_FILE] {
+            std::fs::write(title.join(f), "STALE-GENERATED-OUTPUT
+").unwrap();
+        }
+        let mut st = InstallState::new("wow-server-playerbots", &composegen::install_id(&title));
+        for s in through {
+            st.mark(*s);
+        }
+        save_state(&title, &st).unwrap();
+        title
+    }
+
+    /// THE RESUME GAP. A fix to a TEMPLATE has to be able to reach a directory
+    /// that already has generated files, or "resume" quietly serves the broken
+    /// output the fix was written to replace.
+    ///
+    /// This is not hypothetical: the first live native install died after five
+    /// green stages and 600+ MB of clone because the build overlay named no
+    /// `dockerfile:`, and the whole class is invisible to a test that drives a
+    /// fake docker which never opens the file.
+    ///
+    /// Before `up`, every generated file — the override included — is ours.
+    #[test]
+    fn a_resume_before_up_refreshes_every_generated_file() {
+        let games = fixture("regen-before-up");
+        let title = resumable_title(
+            &games,
+            &[Stage::CloneCore, Stage::CloneModule, Stage::GenerateCompose],
+        );
+        let io = happy_io();
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+        for f in [composegen::BASE_FILE, composegen::BUILD_FILE, composegen::OVERRIDE_FILE] {
+            let body = std::fs::read_to_string(title.join(f)).unwrap();
+            assert!(
+                !body.contains("STALE-GENERATED-OUTPUT"),
+                "{f} was not regenerated on resume -- a template fix cannot reach this install"
+            );
+        }
+    }
+
+    /// The other half, and the reason the switch is not simply "always
+    /// regenerate": once the containers have started, the override is where
+    /// `crate::config` keeps the user's bot counts, rates and SOAP settings.
+    /// Note the boundary is `up`, NOT `ready` — a stack that came up and then
+    /// timed out waiting for the world server is RUNNING and reachable from the
+    /// Settings page, so its override is already live configuration.
+    #[test]
+    fn a_resume_after_up_never_touches_the_users_settings() {
+        let games = fixture("regen-after-up");
+        let title = resumable_title(
+            &games,
+            &[
+                Stage::CloneCore,
+                Stage::CloneModule,
+                Stage::GenerateCompose,
+                Stage::Build,
+                Stage::Up,
+            ],
+        );
+        // What a user's saved settings look like to this code: content we did
+        // not write, in the file the config system owns.
+        std::fs::write(
+            title.join(composegen::OVERRIDE_FILE),
+            "services:
+  ac-worldserver:
+    environment:
+      AC_PLAYERBOTS_MAXRANDOMBOTS: \"40\"
+",
+        )
+        .unwrap();
+
+        let io = happy_io();
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+        let body = std::fs::read_to_string(title.join(composegen::OVERRIDE_FILE)).unwrap();
+        assert!(
+            body.contains("AC_PLAYERBOTS_MAXRANDOMBOTS: \"40\""),
+            "a resume ate the user's settings: {body}"
+        );
+        // ...and the machine-owned files were still refreshed, so this is not
+        // passing because the whole stage was skipped.
+        let base = std::fs::read_to_string(title.join(composegen::BASE_FILE)).unwrap();
+        assert!(!base.contains("STALE-GENERATED-OUTPUT"), "the base file must still be regenerated");
     }
 
     fn happy_io() -> FakeIo {

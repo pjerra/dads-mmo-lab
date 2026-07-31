@@ -320,6 +320,12 @@ pub struct Generated {
     pub overrides: PathBuf,
     pub build: PathBuf,
     pub override_written: bool,
+    /// The override existed and was REPLACED — only reachable through
+    /// [`write_all_with`]`(.., true)`, i.e. an install that has not started its
+    /// containers yet. Distinguished from `override_written` so the caller can
+    /// say "refreshed" rather than "wrote", which are different events to a
+    /// user watching a resume.
+    pub override_replaced: bool,
     /// `<title_dir>/.env`, present iff this call wrote settings into it.
     /// `None` means the options needed no `.env` — never "the settings were
     /// applied somewhere else".
@@ -752,8 +758,9 @@ fn write_file(path: &Path, text: &str) -> Result<(), CmdError> {
 /// artifacts and are always rewritten (so a resumed install repairs them).
 /// `docker-compose.override.yml` is only written when ABSENT: it belongs to
 /// the config system and carries the user's settings, so regenerating it on a
-/// resume would silently discard them. Use [`write_override_force`] when you
-/// really mean to replace it.
+/// resume would silently discard them. Use [`write_all_with`] when the caller
+/// can prove the override is not yet in service (the install engine can, before
+/// its `up` stage), or [`write_override_force`] to replace it outright.
 ///
 /// `.env` is written (merged) whenever the options need one. It is not
 /// optional bookkeeping: Compose interpolates the base file's
@@ -764,6 +771,38 @@ fn write_file(path: &Path, text: &str) -> Result<(), CmdError> {
 /// and every `mysqldump` in [`crate::backup`]/[`crate::restore`]/
 /// [`crate::lifecycle`] failing auth.
 pub fn write_all(title_dir: &Path, opts: &ComposeOpts) -> Result<Generated, CmdError> {
+    write_all_with(title_dir, opts, false)
+}
+
+/// [`write_all`], with the one decision it cannot make for itself: may an
+/// EXISTING `docker-compose.override.yml` be regenerated?
+///
+/// ## Why this switch exists
+///
+/// Every other generated file is rewritten on every call, so a fixed template
+/// reaches an in-progress install on the next run. The override was the
+/// exception, and that exception was a silent hole: a template fix could never
+/// reach any directory that already had one — not on a resume, not after a DML
+/// update. The bug that broke the first live install was exactly a template
+/// omission, so "our generator was wrong and the fix cannot reach you" is a real
+/// failure mode, not a hypothetical one.
+///
+/// The exception was not arbitrary, though, and must not simply be deleted. The
+/// override is where [`crate::config`] writes the user's settings — bot counts,
+/// rates, SOAP — so rewriting one that is in service destroys them.
+///
+/// Both facts hold, so the caller has to say which situation it is in. The
+/// engine's rule is `up`: the override first takes effect when the containers
+/// start, so before that stage is recorded no setting can have been applied
+/// through it and regenerating is provably lossless. Afterwards the file is live
+/// configuration and is left alone. Not "before ready" — a stack that reached
+/// `up` and then timed out waiting for the world server is running, reachable
+/// from Settings, and a resume must not eat what the user changed.
+pub fn write_all_with(
+    title_dir: &Path,
+    opts: &ComposeOpts,
+    replace_override: bool,
+) -> Result<Generated, CmdError> {
     // Before the filesystem is touched at all: a refused option must not even
     // leave a title dir behind.
     validate(opts)?;
@@ -778,7 +817,9 @@ pub fn write_all(title_dir: &Path, opts: &ComposeOpts) -> Result<Generated, CmdE
     write_file(&base, &render_base(title_dir, opts)?)?;
     write_file(&build, &render_build(opts)?)?;
 
-    let override_written = !overrides.exists();
+    let existed = overrides.exists();
+    let override_replaced = existed && replace_override;
+    let override_written = !existed || override_replaced;
     if override_written {
         write_file(&overrides, &render_override(opts)?)?;
     }
@@ -796,7 +837,7 @@ pub fn write_all(title_dir: &Path, opts: &ComposeOpts) -> Result<Generated, CmdE
         Some(path)
     };
 
-    Ok(Generated { base, overrides, build, override_written, dotenv })
+    Ok(Generated { base, overrides, build, override_written, override_replaced, dotenv })
 }
 
 /// Replace `docker-compose.override.yml` from `opts`, discarding whatever was
