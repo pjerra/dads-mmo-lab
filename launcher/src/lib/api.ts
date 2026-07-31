@@ -1488,6 +1488,28 @@ export const urlInstall = (url: string, onEvent: (e: InstallEvent) => void): Pro
   ch.onmessage = onEvent;
   return invoke("url_install", { url, onEvent: ch });
 };
+// NATIVE-mode title install. Deliberately NOT an `InstallEvent` stream like
+// gamesInstall above: that one is a raw pty and emits chunk/exit, while the
+// native engine speaks the project's ordinary NDJSON vocabulary, so this is a
+// plain TermEvent stream the existing terminal reducer already understands.
+//
+// There is no `resume` flag: re-calling this with the same id IS the resume.
+// The engine reads `.dml-install.json` from the title dir and continues at the
+// first unfinished stage, so the UI never has to track where a run got to.
+//
+// Per the standing contract, the promise RESOLVES even when the install fails --
+// failure arrives as an `error` event. Callers must derive success from the
+// terminal `done` event, never from the promise settling. That exact mistake
+// shipped once already, in Home's restart flow.
+export const gamesInstallNative = (
+  id: string,
+  onEvent: (e: TermEvent) => void,
+  allowUnderspec?: boolean,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("games_install_native", { id, allowUnderspec, onEvent: ch });
+};
 export async function gamesInstallInput(text: string): Promise<void> {
   return await invoke("games_install_input", { text });
 }
