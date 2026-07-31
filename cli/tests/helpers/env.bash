@@ -3,6 +3,26 @@ make_fixture() {
   FIXTURE="$(mktemp -d)"
   export DML_GAMES_DIR="$FIXTURE/games"
   mkdir -p "$DML_GAMES_DIR"
+  # Where the sequencing stubs keep their "which reply is next" counters.
+  #
+  # This is EXPORTED because the stubs are separate processes that cannot see
+  # $FIXTURE, and it exists because the previous default was
+  # `/tmp/dml_<kind>_seq.$$` -- shared /tmp, keyed by the STUB's own pid. Two
+  # ways that bites, both producing the intermittent-and-unreproducible failure
+  # that is the worst kind to own:
+  #
+  #   * $$ is a NEW pid on every stub invocation, so a counter keyed by it never
+  #     advances -- the sequence silently replays its first entry forever, and
+  #     the test proves nothing while passing.
+  #   * pids are RECYCLED. A leftover /tmp/dml_curl_seq.4242 from any earlier run
+  #     is read as this run's progress the moment a stub happens to be pid 4242.
+  #
+  # Every test today sets its own *_SEQ_STATE into the fixture, so the trap is
+  # currently unreached -- which is exactly why it needed closing now rather
+  # than after someone forgot. Correctness should not depend on each test author
+  # remembering an opt-in.
+  export DML_STUB_STATE_DIR="$FIXTURE/stub-state"
+  mkdir -p "$DML_STUB_STATE_DIR"
 }
 
 add_game() {  # add_game <id> compose|install|empty|nested
@@ -110,7 +130,7 @@ if [[ "${1:-}" == "inspect" ]]; then
   # read as evidence of anything.
   if [[ "$*" == *RestartCount* ]]; then
     if [[ -n "${DML_STUB_RESTART_COUNT_SEQ:-}" ]]; then
-      st="${DML_STUB_RESTART_COUNT_SEQ_STATE:-/tmp/dml_rc_seq.$$}"
+      st="${DML_STUB_RESTART_COUNT_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/rc_seq}"
       i=0; [[ -f "$st" ]] && i="$(cat "$st")"
       vals=($DML_STUB_RESTART_COUNT_SEQ)
       idx=$i; (( idx >= ${#vals[@]} )) && idx=$(( ${#vals[@]} - 1 ))
@@ -196,7 +216,7 @@ if [[ "${1:-}" == "exec" ]]; then
   [[ "${DML_STUB_DOCKER_DOWN:-0}" == 1 ]] && exit 1
   [[ -n "${DML_STUB_DB_QUERY_LOG:-}" ]] && printf '%s\n' "$*" >> "$DML_STUB_DB_QUERY_LOG"
   if [[ -n "${DML_STUB_DB_ROWS_SEQ:-}" ]]; then
-    st="${DML_STUB_DB_SEQ_STATE:-/tmp/dml_seq_state.$$}"
+    st="${DML_STUB_DB_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/db_seq}"
     i=0; [[ -f "$st" ]] && i="$(cat "$st")"
     files=($DML_STUB_DB_ROWS_SEQ)
     idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
@@ -255,7 +275,7 @@ done
 resp="${DML_STUB_SOAP_RESPONSE:-}"
 code="${DML_STUB_HTTP:-200}"
 if [[ -n "${DML_STUB_CURL_SEQ:-}" ]]; then
-  st="${DML_STUB_CURL_SEQ_STATE:-/tmp/dml_curl_seq.$$}"
+  st="${DML_STUB_CURL_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/curl_seq}"
   i=0; [[ -f "$st" ]] && i="$(cat "$st")"
   files=($DML_STUB_CURL_SEQ)
   idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
@@ -299,7 +319,7 @@ if [[ "${1:-}" == "exec" ]]; then
   if [[ -n "${DML_STUB_DB_ROWS_SEQ:-}" ]]; then
     # DML_STUB_DB_ROWS_SEQ = space-separated list of row-files; return the
     # next one per call, then stick on the last. State in $DML_STUB_DB_SEQ_STATE.
-    st="${DML_STUB_DB_SEQ_STATE:-/tmp/dml_seq_state.$$}"
+    st="${DML_STUB_DB_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/db_seq}"
     i=0; [[ -f "$st" ]] && i="$(cat "$st")"
     files=($DML_STUB_DB_ROWS_SEQ)
     idx=$i; (( idx >= ${#files[@]} )) && idx=$(( ${#files[@]} - 1 ))
@@ -470,7 +490,7 @@ if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--abbrev-ref" ]]; then
 fi
 if [[ "${1:-}" == "rev-parse" && "${2:-}" == "--short" ]]; then
   if [[ -n "${DML_STUB_GIT_HEAD_SEQ:-}" ]]; then
-    st="${DML_STUB_GIT_HEAD_SEQ_STATE:-/tmp/dml_git_head_seq.$$}"
+    st="${DML_STUB_GIT_HEAD_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/git_head_seq}"
     i=0; [[ -f "$st" ]] && i="$(cat "$st")"
     shas=($DML_STUB_GIT_HEAD_SEQ)
     idx=$i; (( idx >= ${#shas[@]} )) && idx=$(( ${#shas[@]} - 1 ))
@@ -714,7 +734,7 @@ if [[ "${1:-}" == "info" ]]; then
   # that refuses. `exec` for the same reason as the systemctl arm above.
   [[ -n "${DML_STUB_DOCKER_INFO_HANG:-}" ]] && exec sleep "${DML_STUB_DOCKER_INFO_HANG}"
   if [[ -n "${DML_STUB_DOCKER_INFO_SEQ:-}" ]]; then
-    st="${DML_STUB_DOCKER_INFO_SEQ_STATE:-/tmp/dml_docker_info_seq.$$}"
+    st="${DML_STUB_DOCKER_INFO_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/docker_info_seq}"
     i=0; [[ -f "$st" ]] && i="$(cat "$st")"
     codes=($DML_STUB_DOCKER_INFO_SEQ)
     idx=$i; (( idx >= ${#codes[@]} )) && idx=$(( ${#codes[@]} - 1 ))

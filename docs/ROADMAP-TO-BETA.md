@@ -120,7 +120,7 @@ Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native
 | **6** | **Launcher wiring** | ❌ **THE ONE THAT MATTERS** |
 | **8** | **`Install-DML-Native.ps1`** | ❌ not started |
 | **11** | **Account + SOAP bootstrap** | ❌ not started |
-| 7 | Port guard armed on native start | ⚠️ machinery exists in `lifecycle.rs`, arming unverified |
+| 7 | Port guard armed on native start | ⚠️ **armed, but as a WARNING where the plan specified a REFUSAL** — see below |
 | 10 | `migrate-import` | ❌ not started |
 | 12, 13 | LIVE gates — real build, kill-mid-build resume, first login | 🙋 user |
 | 14 | Docs + doctrine reconciliation | partial |
@@ -162,10 +162,35 @@ shown, so "done" must be earned. Deliberately not automated — that would need 
 SRP6 `INSERT` into `acore_auth`, a new sanctioned-write class only the user can
 approve.
 
-### B4 — Task 7 verification, then Task 10 (`migrate-import`)
+### B4 — Task 7: the guard exists, but not as specified — DECIDE
 
-Task 10 is the "bring your existing server across" path. Genuinely valuable and
-genuinely optional for a beta — a new user installs fresh.
+**Verified by reading, 2026-08-01.** `check_port_conflicts` IS armed on native
+start ([`lifecycle.rs`](../crates/dml-wow/src/lifecycle.rs) in
+`games_lifecycle_stream_with`), with the real `port_listening` prober, and
+deliberately on cold starts only — on a restart the ports are held by this
+server's own containers, so checking would cry wolf. That part is right.
+
+**But it WARNS. The plan specified a REFUSAL**, and explicitly considered and
+rejected the advisory-only variant: *"a start that will lose the port race and
+crash-loop is exactly what the boot-loop watch would then diagnose — refusing
+earlier is the honest surface."*
+
+This is a genuine plan-vs-implementation divergence and it is a user-visible
+behaviour change either way, so it is a decision rather than a bug to quietly
+fix. The case for keeping the warning: 3306 already has an automatic remedy (the
+`.env` `DOCKER_DB_EXTERNAL_PORT` write), and a refusal that fires on a prober
+that merely failed to answer would block a start for no reason — the tri-state
+rule the plan itself insists on. The case for the refusal: with `ac-*` container
+names global to the docker engine, a second stack cannot work, and letting it
+crash-loop spends the user's time to reach the same conclusion.
+
+Leaning: **refuse for the three game ports, keep 3306 advisory** (it is the one
+with a real remedy), and never refuse on an unanswerable probe.
+
+### B5 — Task 10 (`migrate-import`)
+
+The "bring your existing server across" path. Genuinely valuable and genuinely
+optional for a beta — a new user installs fresh.
 
 ---
 
