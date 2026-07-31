@@ -91,16 +91,39 @@ the rest — and that file is explicitly flagged as dangerous to edit casually
 (it embeds an old CLI as a here-string; installer↔CLI sync is its own planned
 job). Fix it there, with its 128-check harness, not in passing.
 
-### A3 — `cli/tests/soap.bats` test 6 flakes
+### A3 — `cli/tests/soap.bats` test 6 flakes — ⚠️ NOT REPRODUCED, hazards closed
 
-Failed once in a full-suite run on 2026-07-30, passed on the next full run and
-10/10 in isolation. Nothing in that path had been touched. Likely cross-test
-contamination of `~/.dml/soap.env`, which tests 2 and 3 of the same file write.
+**The flake did not reproduce**: 15 isolated runs and 3 full-suite runs, all
+clean. It stays open, and nothing may be claimed as its fix.
 
-Worth fixing for exactly one reason: **an intermittently red suite is
-indistinguishable from a real regression**, and this repo has already lost days
-to that (a build race between bats and the cargo parity suites produced ~450 fake
-failures). A gate you have to re-run to believe is not a gate.
+**The recorded hypothesis is disproved, which is worth more than a guess.** It
+read "likely cross-test contamination of `~/.dml/soap.env`". It cannot be:
+`setup()` exports `HOME="$FIXTURE"`, a fresh `mktemp -d` per **test**, so the
+directories tests 2 and 3 write into no longer exist when test 6 runs. Left
+standing, that note would have sent the next investigation somewhere there is
+nothing to find.
+
+Two REAL hazards of the same class were found and closed:
+
+* **`build.sh` published a torn file.** `cat src/*.sh > dml` truncates instantly
+  and fills over milliseconds, so a concurrent reader sees a half-file — the
+  documented cause of ~450 fake failures when bats overlapped the cargo parity
+  suites. Now temp-file + atomic `mv`. Same change fixed a second bug in the same
+  four lines: the parse check ran *after* the redirect, so a syntax error in
+  `src/` was **published first and reported second**.
+* **Stub counters defaulted to `/tmp/dml_<kind>_seq.$$`** — shared `/tmp`, keyed
+  by the stub's own pid. `$$` is a new pid per invocation (counter never
+  advances → sequence silently replays entry one → a test that proves nothing
+  while passing), and pids are recycled (a leftover file from any earlier run is
+  read as this run's progress). Unreached today because every test sets its own
+  state path — which is exactly why it was worth closing before someone forgot.
+
+New `cli/tests/build-script.bats` (5 tests) pins the build script. Mutation-proven:
+restoring the old `build.sh` reddens 3 of 5.
+
+**Still true and still the reason this mattered:** an intermittently red suite is
+indistinguishable from a real regression. If test 6 flakes again, capture the
+full output — the harness can no longer be the cause of the two mechanisms above.
 
 ---
 
