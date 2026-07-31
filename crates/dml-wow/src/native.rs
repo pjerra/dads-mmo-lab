@@ -32,10 +32,10 @@ use dml_core::error::CmdError;
 /// two). Re-exported here so every existing `native::X` call site in
 /// `lib.rs`/`maint.rs` keeps compiling unchanged.
 pub use dml_core::engine::{
-    docker_desktop_program, docker_desktop_stop_args, docker_info_args, docker_program,
-    engine_running, ensure_decision, game_state, launch_detached, parse_ps_json, poll_until_ready,
-    stop_engine, stop_engine_enabled, EnsureDecision, PollOutcome, PsRow, ENGINE_POLL_INTERVAL_MS,
-    ENGINE_POLL_TIMEOUT_MS,
+    docker_desktop_program, docker_desktop_start_args, docker_desktop_stop_args, docker_info_args,
+    docker_program, engine_running, ensure_decision, game_state, launch_detached, parse_ps_json,
+    poll_until_ready, start_engine, start_engine_succeeded, stop_engine, stop_engine_enabled,
+    EnsureDecision, PollOutcome, PsRow, ENGINE_POLL_INTERVAL_MS, ENGINE_POLL_TIMEOUT_MS,
 };
 
 /// PATH for the docker child: the docker executable's own directory (which
@@ -220,12 +220,22 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
             // desktop is Some here (decision returned Launch).
             let exe = desktop.expect("Launch decision implies a resolved desktop exe");
             engine_line(&emit, "info", "Docker engine is down. Starting Docker Desktop...");
-            if let Err(e) = native::launch_detached(&exe) {
-                let msg = format!("Failed to launch Docker Desktop: {e}");
-                emit(serde_json::json!({"event": "error", "error": {
-                    "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
-                }}));
-                return Err(CmdError { code: "DOCKER_DESKTOP_LAUNCH".into(), message: msg, hint: String::new() });
+            // Ask the CLI for the ENGINE first: launching the GUI exe pops the
+            // Docker dashboard window over whatever the user was doing, every
+            // time the server starts with the engine down, and we never wanted
+            // the dashboard. `docker desktop start -d` starts the engine with no
+            // window. The `docker desktop` plugin only exists from Docker
+            // Desktop 4.37, so a failure is NOT an error -- it falls back to the
+            // exe, which is exactly the behaviour that shipped before this.
+            let cli = native::start_engine(&program);
+            if !native::start_engine_succeeded(&cli) {
+                if let Err(e) = native::launch_detached(&exe) {
+                    let msg = format!("Failed to launch Docker Desktop: {e}");
+                    emit(serde_json::json!({"event": "error", "error": {
+                        "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
+                    }}));
+                    return Err(CmdError { code: "DOCKER_DESKTOP_LAUNCH".into(), message: msg, hint: String::new() });
+                }
             }
             let outcome = native::poll_until_ready(
                 native::ENGINE_POLL_INTERVAL_MS,

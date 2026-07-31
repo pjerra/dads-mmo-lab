@@ -225,6 +225,48 @@ pub fn stop_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
     cmd.output()
 }
 
+/// The `docker desktop start` argv — the SYMMETRIC sibling of
+/// [`docker_desktop_stop_args`]. `-d` returns as soon as the request is
+/// accepted; readiness is still waited for by [`poll_until_ready`], exactly as
+/// with the exe route, so the two paths differ only in how the engine is asked
+/// to come up. Pure, for tests.
+pub fn docker_desktop_start_args() -> [&'static str; 3] {
+    ["desktop", "start", "-d"]
+}
+
+/// Run `docker desktop start -d` against `program`.
+///
+/// WHY THIS EXISTS: launching `Docker Desktop.exe` starts the GUI, and the
+/// dashboard WINDOW pops up over whatever the user was doing every time the
+/// server starts with the engine down. We only ever wanted the engine. This
+/// asks for the engine and nothing else.
+///
+/// It is not universally available — the `docker desktop` CLI plugin arrived in
+/// Docker Desktop 4.37 — so the caller treats failure as "fall back to the exe",
+/// never as a hard error. (Impure.)
+pub fn start_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
+    let mut cmd = Command::new(program);
+    cmd.args(docker_desktop_start_args());
+    cmd.stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    cmd.output()
+}
+
+/// Did `docker desktop start` actually take responsibility for the engine?
+///
+/// Pure so the fallback rule is unit-tested without spawning anything. Only a
+/// clean exit counts: an older Docker Desktop answers an unknown `desktop`
+/// subcommand with a non-zero exit, and a spawn error means no docker CLI at
+/// all. Both mean "fall back to launching the exe", which is the behaviour that
+/// shipped before this and still works everywhere.
+pub fn start_engine_succeeded(result: &std::io::Result<std::process::Output>) -> bool {
+    matches!(result, Ok(out) if out.status.success())
+}
+
 /// Launch `program` (the Docker Desktop GUI exe) detached, without a console
 /// window. Returns as soon as the process is spawned — the engine comes up
 /// asynchronously and is waited for separately via [`poll_until_ready`].
@@ -544,5 +586,60 @@ mod tests {
         let out = poll_until_ready(3_000, 0, || false, |_| sleeps += 1);
         assert_eq!(out, PollOutcome::Timeout { waited_ms: 0 });
         assert_eq!(sleeps, 0);
+    }
+}
+
+#[cfg(test)]
+mod start_engine_tests {
+    use super::*;
+
+    /// Symmetric with the stop argv, and `-d` is load-bearing: without it the
+    /// call blocks until Docker Desktop reports ready, which would duplicate
+    /// (and fight with) `poll_until_ready`'s own bounded wait.
+    #[test]
+    fn the_start_argv_asks_for_the_engine_and_returns_immediately() {
+        assert_eq!(docker_desktop_start_args(), ["desktop", "start", "-d"]);
+        // The pair must stay symmetric -- a reader should be able to see that
+        // one command starts what the other stops.
+        assert_eq!(docker_desktop_stop_args()[0], docker_desktop_start_args()[0]);
+    }
+
+    fn fake_output(code: i32) -> std::io::Result<std::process::Output> {
+        // Build a real Output with a chosen status by running a trivial command
+        // that is guaranteed present on this platform.
+        #[cfg(windows)]
+        let out = Command::new("cmd").args(["/C", &format!("exit {code}")]).output();
+        #[cfg(not(windows))]
+        let out = Command::new("sh").args(["-c", &format!("exit {code}")]).output();
+        out
+    }
+
+    /// The fallback rule, which is the whole safety story: ONLY a clean exit
+    /// means the CLI took responsibility for the engine. An older Docker Desktop
+    /// (pre-4.37) rejects the unknown `desktop` subcommand with a non-zero exit,
+    /// and a missing docker CLI fails to spawn at all -- both must fall back to
+    /// launching the exe, which is what shipped before and works everywhere.
+    #[test]
+    fn only_a_clean_exit_counts_as_the_cli_having_started_the_engine() {
+        assert!(start_engine_succeeded(&fake_output(0)));
+        assert!(!start_engine_succeeded(&fake_output(1)), "an old Desktop rejects the subcommand");
+        assert!(
+            !start_engine_succeeded(&Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no docker",
+            ))),
+            "a missing docker CLI must fall back, not abort"
+        );
+    }
+
+    /// Guards the one way this could take down a working setup: if a spawn
+    /// failure were ever read as success, the exe fallback would be skipped and
+    /// the engine would never start at all.
+    #[test]
+    fn a_spawn_failure_is_never_mistaken_for_a_started_engine() {
+        let missing = std::ffi::OsString::from("dml-no-such-docker-binary-ever.exe");
+        let result = start_engine(&missing);
+        assert!(result.is_err(), "the fake binary must not exist: {result:?}");
+        assert!(!start_engine_succeeded(&result));
     }
 }
