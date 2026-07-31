@@ -47,6 +47,18 @@ pub struct InstallSession {
 pub enum InstallSlot {
     Starting,
     Running(InstallSession),
+    /// A NATIVE install running inside this process (`games_install_native`).
+    ///
+    /// It shares the slot with the WSL passthrough so the two can never run at
+    /// once — they would fight over the same title directory — but it carries
+    /// neither a `stdin` nor a killable pid, and that is not an oversight:
+    /// * the engine asks no questions, so there is nothing to type at;
+    /// * its children are `git`/`docker` spawned by US, so `taskkill /T` on our
+    ///   own pid would take the launcher down with them.
+    /// The two session commands therefore refuse for this variant rather than
+    /// pretending, which is why this is a distinct variant and not a
+    /// `Running` with dummy fields.
+    Native,
 }
 
 /// Auto-shutdown watcher control block (Batch 2 F5). `generation` is bumped
@@ -6056,6 +6068,74 @@ async fn games_install(
     Ok(())
 }
 
+/// NATIVE-MODE title install: [`dml_wow::install_native`]'s staged, resumable
+/// engine, streamed over the same `Channel` the rest of the terminal uses.
+///
+/// This is the command that makes the native install REACHABLE. The engine has
+/// been proven end-to-end on real hardware (2026-07-31, 8/8 stages, 21m18s) but
+/// until now only by running the binary from a terminal, which is not a product.
+///
+/// Three things it deliberately does NOT do:
+///
+/// * **No bash mirror, and no fallback to one.** The six title installers are
+///   Linux scripts (`sudo -v`, pacman/apt, `systemctl`), so bash's own
+///   `_installers_supported` refuses on Windows. Native install is native-only
+///   BY DESIGN — see `docs/cli-contract.md`.
+/// * **No separate process.** The engine runs in `spawn_blocking` and spawns
+///   `git`/`docker` itself, which is why the busy slot is
+///   [`InstallSlot::Native`] rather than a `Running` with a pid.
+/// * **No exit event.** The WSL passthrough is a raw pty and emits
+///   `chunk`/`exit`; this engine speaks the project's NDJSON vocabulary, so the
+///   terminal's existing `done`/`error` handling ends the run. Mixing the two
+///   would give the frontend two ways to learn the same thing.
+///
+/// Resume is not a parameter: rerunning the same id IS the resume, because the
+/// engine reads `.dml-install.json` from the title dir and continues at the
+/// first unfinished stage.
+#[tauri::command]
+async fn games_install_native(
+    id: String,
+    allow_underspec: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Native);
+    }
+    let slot = state.install.clone();
+    let ch = on_event.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut opts = dml_wow::install_native::InstallOpts::new(
+            id,
+            dml_core::compose::games_dir_from_env(),
+        );
+        opts.allow_underspec = allow_underspec.unwrap_or(false);
+        dml_wow::install_native::install_native_stream(&opts, |v| {
+            let _ = ch.send(v);
+        })
+    })
+    .await;
+    // Release the slot whatever happened, INCLUDING a panic inside the engine.
+    // A slot left held would make every later install fail with BUSY and no
+    // running install to cancel — recoverable only by restarting the launcher.
+    *slot.lock().unwrap() = None;
+    result.map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn games_install_input(text: String, state: State<'_, AppState>) -> Result<(), CmdError> {
     use std::io::Write;
@@ -6065,6 +6145,13 @@ async fn games_install_input(text: String, state: State<'_, AppState>) -> Result
             .stdin
             .write_all(format!("{text}\n").as_bytes())
             .map_err(|e| CmdError { code: "STDIN".into(), message: e.to_string(), hint: String::new() }),
+        // A native install answers no questions, so there is no stdin to write
+        // to. Saying so beats a silent success the caller would read as "sent".
+        Some(InstallSlot::Native) => Err(CmdError {
+            code: "NOT_INTERACTIVE".into(),
+            message: "This install does not ask questions, so there is nothing to answer.".into(),
+            hint: String::new(),
+        }),
         Some(InstallSlot::Starting) | None => Err(CmdError {
             code: "NO_SESSION".into(),
             message: "No install is running".into(),
@@ -6079,6 +6166,18 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
         let guard = state.install.lock().unwrap();
         match guard.as_ref() {
             Some(InstallSlot::Running(s)) => s.pid,
+            // The native engine's children are OUR children: `taskkill /F /T`
+            // on this pid would kill the launcher. Refusing honestly is better
+            // than a cancel that closes the app, and the work is resumable —
+            // which is the part worth telling the user.
+            Some(InstallSlot::Native) => {
+                return Err(CmdError {
+                    code: "NOT_CANCELLABLE".into(),
+                    message: "A native install cannot be cancelled from here yet.".into(),
+                    hint: "Closing the launcher stops it. Nothing is lost: running the install again continues from the last finished step, reusing Docker's build cache."
+                        .into(),
+                })
+            }
             Some(InstallSlot::Starting) | None => {
                 return Err(CmdError {
                     code: "NO_SESSION".into(),
@@ -6441,6 +6540,7 @@ pub fn run() {
             games_status,
             games_catalog,
             games_install,
+            games_install_native,
             url_install,
             games_install_input,
             games_install_cancel,

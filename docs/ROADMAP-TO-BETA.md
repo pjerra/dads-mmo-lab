@@ -210,6 +210,63 @@ crash-loop spends the user's time to reach the same conclusion.
 Leaning: **refuse for the three game ports, keep 3306 advisory** (it is the one
 with a real remedy), and never refuse on an unanswerable probe.
 
+### B4b — Install the OTHER WoW titles by running their `.sh` in a WSL distro (user decision, 2026-08-01)
+
+**Scope narrowed by the user: the launcher installs WoW servers only.** MapleStory,
+RuneScape and Mu Online are dropped from the install surface.
+
+**Question asked: can Docker Desktop's own WSL distro run the installers?**
+**Answer, probed live rather than recalled: no — and the alternative is better.**
+
+| distro | bash | sudo | systemd | docker | verdict |
+|---|---|---|---|---|---|
+| `docker-desktop` | ❌ absent | ❌ | ❌ | — | cannot run a bash script at all |
+| `Ubuntu` 26.04 | ✅ | ✅ | ✅ pid 1 | ✅ **`docker ps` works** | can run them |
+
+Three verified facts make this work, and each one was checked, not assumed:
+
+1. **Docker Desktop's WSL integration means a script in Ubuntu drives the REAL
+   engine.** `docker ps` succeeds and `docker compose version` reports v5.3.1
+   there, so containers an installer creates are the same ones native mode
+   manages afterwards. That is the whole trick — no docker-in-docker, no socket
+   forwarding.
+2. **No sudo is needed.** `install_docker()` in
+   `guides/wow-wotlk/install-wow-wotlk-ubuntu.sh` returns 0 immediately when
+   docker and the compose plugin are both present, and EVERY `sudo` in that
+   script sits inside the path that check skips. The sudo-password problem that
+   would otherwise sink this simply does not arise.
+3. **Vanilla and TBC are CMaNGOS, not AzerothCore** (`cmangos/mangos-classic`,
+   `cmangos/mangos-tbc`, `cmangos/playerbots`). Different build, different DB,
+   different containers — so `install_native.rs`, which is AzerothCore-shaped
+   throughout, does NOT generalise to them. Running their scripts is days;
+   re-deriving CMaNGOS knowledge in Rust is weeks. **Running the scripts is the
+   correct answer here, not the lazy one.**
+
+The resulting shape is a hybrid, and it is the honest one:
+
+| title | how |
+|---|---|
+| WotLK Playerbots | native Rust engine — already proven |
+| Wrath Unbound | `.sh` in a distro (uses NO package manager at all — cleanest case) |
+| Vanilla (CMaNGOS) | `.sh` in a distro — needs an apt path, currently pacman-first |
+| TBC (CMaNGOS) | `.sh` in a distro — same |
+
+**THIS RETIRES `dml-arch`**, which was the point: nothing would run inside it.
+
+**Distro choice (user decision): DETECT.** Probe every installed distro for
+bash + a reachable docker, use the first that passes, and import a DML-owned
+Ubuntu only when none does. Rejected alternatives and why: writing into the
+user's personal Ubuntu is not reproducible for a stranger and is rude to their
+machine; always creating a DML distro pays a first-run cost even when a perfectly
+good one exists, and Docker Desktop's WSL integration is OFF by default for a new
+distro, so that path also needs a detect-and-instruct step for the toggle.
+Detection subsumes both. Roughly one extra day over the simplest option.
+
+Two things this must not repeat from the WSL era: the probe is TRI-STATE (a
+distro that fails to answer is evidence of nothing, not evidence of absence), and
+anything passing a host path through `wsl.exe` uses `--exec` with real argv, per
+the recorded metacharacter bug.
+
 ### B5 — Task 10 (`migrate-import`)
 
 The "bring your existing server across" path. Genuinely valuable and genuinely
