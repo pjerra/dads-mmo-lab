@@ -40,6 +40,45 @@ describe("terminal state reducer", () => {
     expect(s.finished).toEqual({ kind: "done", data: { id: "wow", state: "running" } });
   });
 
+  it("done closes every still-running section, including the implicit output one", () => {
+    // The REAL event sequence of a native `games start` with Docker Desktop
+    // down, transcribed from native.rs + lifecycle.rs. The engine-progress lines
+    // arrive OUTSIDE any section, so the `line` arm fabricates one named
+    // "output" -- and nothing in this repo ever emits section_end{name:"output"},
+    // so only the terminal event can close it. Before this, the user watched
+    // that spinner turn forever next to a server that had already started.
+    let s = applyEvent(initialTermState(), {
+      event: "line",
+      level: "info",
+      text: "Docker engine is down. Starting Docker Desktop...",
+    });
+    s = applyEvent(s, {
+      event: "line",
+      level: "info",
+      text: "Waiting for Docker Desktop to be ready...",
+    });
+    s = applyEvent(s, { event: "line", level: "info", text: "Docker Desktop engine is ready." });
+    s = applyEvent(s, { event: "section_start", name: "start" });
+    s = applyEvent(s, { event: "line", level: "info", text: "starting containers..." });
+    s = applyEvent(s, { event: "section_end", name: "start", status: "ok" });
+    s = applyEvent(s, { event: "done", data: { id: "wow", state: "running" } });
+
+    expect(s.sections.map((x) => x.name)).toEqual(["output", "start"]);
+    expect(s.sections.every((x) => x.status !== "running")).toBe(true);
+    // The engine lines stay READABLE -- closing the section must not hide the
+    // three lines the user was watching.
+    expect(s.sections[0]).toMatchObject({ status: "ok", collapsed: false });
+    expect(s.sections[0].lines).toHaveLength(3);
+  });
+
+  it("done does not overwrite a section that already failed", () => {
+    // Closing running sections must not launder a section_end error into "ok".
+    let s = applyEvent(initialTermState(), { event: "section_start", name: "start" });
+    s = applyEvent(s, { event: "section_end", name: "start", status: "error" });
+    s = applyEvent(s, { event: "done", data: {} });
+    expect(s.sections[0].status).toBe("error");
+  });
+
   it("error finishes the run and fails running sections", () => {
     let s = applyEvent(initialTermState(), { event: "section_start", name: "start" });
     const err = { code: "START_FAILED", message: "boom", hint: "" };

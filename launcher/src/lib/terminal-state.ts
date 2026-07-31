@@ -59,6 +59,25 @@ export function applyEvent(s: TermState, e: TermEvent, now: number = Date.now())
 
     case "done":
       st.finished = { kind: "done", data: (e as { data: unknown }).data };
+      // A terminal event ENDS the stream, so a section still marked "running"
+      // can never be closed by a later section_end -- close it here. The `error`
+      // arm below has always done this; `done` not doing it was an asymmetry
+      // that left a spinner turning forever after a SUCCESSFUL run.
+      //
+      // It bites the implicit "output" section the `line` arm fabricates above
+      // for lines emitted outside any section -- and nothing in this repo ever
+      // emits `section_end{name:"output"}`, so that section is structurally
+      // unclosable. Native `games start` emits its Docker-engine progress lines
+      // that way, so EVERY native start left a spinner running next to
+      // "output" while the head correctly showed the run complete. Reported
+      // live, 2026-07-31: Docker was down, so the engine phase lasted minutes
+      // and the user sat watching a spinner for a server that had started.
+      //
+      // Deliberately not collapsed: those lines stay visible, and the each-key
+      // (name + status) stays unique, so no duplicate-key error.
+      st.sections = st.sections.map((sec) =>
+        sec.status === "running" ? { ...sec, status: "ok" } : sec,
+      );
       break;
 
     case "error": {

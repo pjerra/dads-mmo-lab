@@ -1327,10 +1327,20 @@ fn a_failing_stop_ends_at_its_terminal_event_so_a_truncating_consumer_cannot_see
         "engine-stop lines must come BEFORE the terminal event, not after it: {events:?}"
     );
     assert!(
-        events[engine_idx + 1..events.len() - 1]
+        events[engine_idx + 1..events.len() - 1].iter().all(|e| {
+            e["event"] == "line"
+                || (e["event"] == "section_end" && e["name"] == "docker-engine")
+        }),
+        "only engine `line` events and the engine section's own close may sit between          the section end and the terminal event: {events:?}"
+    );
+    // The invariant the assertion above is really protecting, stated directly:
+    // a truncating consumer must not be able to read a terminal event that says
+    // success. Exactly one terminal event, and it is the last line.
+    assert!(
+        events[..events.len() - 1]
             .iter()
-            .all(|e| e["event"] == "line"),
-        "nothing but engine `line` events may sit between the section end and the terminal event: {events:?}"
+            .all(|e| e["event"] != "done" && e["event"] != "error"),
+        "a terminal event must appear exactly ONCE, at the very end: {events:?}"
     );
 }
 

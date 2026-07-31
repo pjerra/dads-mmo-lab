@@ -184,6 +184,11 @@ impl NativeDocker {
 
 /// Emit engine-lifecycle progress as an envelope `line` event onto the same
 /// stream the games output uses, so the UI terminal shows it inline.
+/// Section name for the Docker-engine phase of a native stop. Any name works
+/// EXCEPT "output", which is the one the UI reducer fabricates for section-less
+/// lines and which nothing is allowed to close by name.
+const ENGINE_SECTION: &str = "docker-engine";
+
 fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<String>) {
     emit(serde_json::json!({"event": "line", "level": level, "text": text.into()}));
 }
@@ -256,10 +261,27 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
 /// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
 /// never fails the server-stop. Blocking — run under `spawn_blocking`.
 pub fn stop_engine_stream(emit: impl Fn(serde_json::Value)) {
+    stop_engine_stream_with(&crate::native::docker_program(), emit)
+}
+
+/// The injectable half, so a test can exercise the event shape WITHOUT stopping
+/// the developer's real Docker Desktop. The first version of the test below did
+/// exactly that -- it called the real thing, took the engine down mid-session
+/// and destroyed the running containers (2026-07-31). A unit test must not be
+/// able to do that, and "just don't run it" is not a safeguard.
+pub fn stop_engine_stream_with(program: &std::ffi::OsStr, emit: impl Fn(serde_json::Value)) {
     use crate::native;
-    let program = native::docker_program();
+    // A REAL section, not bare lines. These lines are emitted AFTER the stop
+    // lifecycle's terminal `done` event, and the UI reducer fabricates an
+    // implicit "output" section for any line arriving outside one -- a section
+    // nothing can ever close, because no emitter in this repo sends
+    // `section_end{name:"output"}`. On the start path the terminal event closes
+    // it (see terminal-state.ts's `done` arm); here the terminal event has
+    // ALREADY passed, so the reducer cannot help and the spinner would turn
+    // forever after a successful stop. Closing our own section is the fix.
+    emit(serde_json::json!({"event": "section_start", "name": ENGINE_SECTION}));
     engine_line(&emit, "info", "Stopping Docker Desktop...");
-    match native::stop_engine(&program) {
+    match native::stop_engine(program) {
         Ok(out) if out.status.success() => {
             engine_line(&emit, "info", "Docker Desktop stopped.");
         }
@@ -279,6 +301,9 @@ pub fn stop_engine_stream(emit: impl Fn(serde_json::Value)) {
             engine_line(&emit, "warn", format!("Could not stop Docker Desktop: {e}"));
         }
     }
+    // Always "ok": stopping the engine is best-effort by contract and never
+    // fails the server-stop, so a warn line inside is not a failed section.
+    emit(serde_json::json!({"event": "section_end", "name": ENGINE_SECTION, "status": "ok"}));
 }
 
 #[cfg(test)]
@@ -337,5 +362,54 @@ mod tests {
         // A bare `docker` (no directory) means PATH already resolves it and its
         // sibling helpers — don't rewrite PATH.
         assert!(augmented_path(OsStr::new("docker"), Some(OsString::from(r"C:\Windows"))).is_none());
+    }
+}
+
+#[cfg(test)]
+mod engine_section_tests {
+    use std::sync::{Arc, Mutex};
+
+    /// The stop path emits its engine lines AFTER the lifecycle's terminal
+    /// `done`, so the UI reducer cannot close them -- see the comment on
+    /// `stop_engine_stream`. They must therefore arrive inside a section this
+    /// function closes itself, and that section must NOT be called "output"
+    /// (the reducer fabricates that name for section-less lines and nothing may
+    /// close it by name).
+    ///
+    /// Driven through `stop_engine_stream_with` against a binary that does not
+    /// exist, so it takes the Err arm and emits the warn line. The FIRST version
+    /// of this test called `stop_engine_stream` directly and stopped the real
+    /// Docker Desktop mid-session, destroying the running containers. The seam
+    /// is not a nicety.
+    #[test]
+    fn the_engine_stop_wraps_its_lines_in_a_section_it_closes_itself() {
+        let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let fake = std::ffi::OsString::from("dml-no-such-docker-binary-ever.exe");
+        super::stop_engine_stream_with(&fake, move |v| sink.lock().unwrap().push(v));
+
+        let events = seen.lock().unwrap().clone();
+        let first = events.first().expect("at least one event");
+        assert_eq!(first["event"], "section_start");
+        assert_eq!(first["name"], super::ENGINE_SECTION);
+
+        let last = events.last().expect("at least one event");
+        assert_eq!(last["event"], "section_end");
+        assert_eq!(last["name"], super::ENGINE_SECTION);
+        assert_eq!(last["status"], "ok", "best-effort by contract, so never a failed section");
+
+        assert_ne!(super::ENGINE_SECTION, "output", "that name is unclosable by contract");
+        // Every line sits between the two markers, so none can leak into the
+        // reducer's implicit section...
+        assert!(
+            events[1..events.len() - 1].iter().all(|e| e["event"] == "line"),
+            "unexpected event between the section markers: {events:?}"
+        );
+        // ...and the run really reached the failure arm, so this is not passing
+        // because nothing happened.
+        assert!(
+            events.iter().any(|e| e["level"] == "warn"),
+            "expected the missing-binary warn line: {events:?}"
+        );
     }
 }
