@@ -481,6 +481,47 @@ pub fn mem_bound_jobs(mem_bytes: u64) -> u32 {
     ((mem_bytes / MEM_PER_COMPILER_JOB_BYTES) as u32).max(1)
 }
 
+/// How many compiler jobs upstream's build ACTUALLY starts on a VM with `ncpu`
+/// CPUs — which is `ncpu + 1`, not `ncpu`.
+///
+/// EVIDENCE, read from the pinned checkout ([`crate::install_native::CORE_PINNED_COMMIT`])
+/// at `apps/docker/Dockerfile`:
+///
+/// ```text
+/// && cmake --build . --config "$CTYPE" -j $(($(nproc) + 1)) \
+/// ```
+///
+/// Two things follow, and both matter more than they look:
+///
+/// 1. **The `+ 1` is real.** Sizing advice computed against `ncpu` understates
+///    the peak by one whole compiler — about [`MEM_PER_COMPILER_JOB_BYTES`] —
+///    and understates it precisely on the machines that are already tight.
+/// 2. **There is no knob.** The job count is hardcoded inside the `RUN`, not an
+///    `ARG`, so no `--build-arg` can change it. (`ARG CMAKE_EXTRA_OPTIONS` is
+///    declared at line 54 and then never referenced in the `cmake` invocation —
+///    a dead option, so not an injection point either.) `cmake --build` would
+///    honour `CMAKE_BUILD_PARALLEL_LEVEL`, but only when `-j` is absent, and
+///    here it never is.
+///
+/// This settles the native plan's Task 1 research question — "does the build
+/// honor any parallelism arg/env, which decides whether preflight can cap jobs
+/// or only instruct Docker Desktop resource limits". The answer is the second
+/// one: **the Docker VM's CPU count is the only lever there is.** That is
+/// exactly why the CPU finding must get its arithmetic right — telling the user
+/// the correct number to set is the entire mitigation available.
+///
+/// Bumping the pinned SHA means re-reading that line.
+pub fn upstream_build_jobs(ncpu: u32) -> u32 {
+    ncpu.saturating_add(1)
+}
+
+/// The CPU count to set in Docker Desktop so upstream's `nproc + 1` lands at or
+/// under what memory can feed. Floored at 1: advising "set CPUs to 0" is not
+/// advice, and Docker Desktop will not accept it either.
+pub fn advised_cpu_setting(mem_bytes: u64) -> u32 {
+    mem_bound_jobs(mem_bytes).saturating_sub(1).max(1)
+}
+
 // ---------------------------------------------------------------------------
 // Pure: which drive holds Docker's data
 // ---------------------------------------------------------------------------
@@ -995,27 +1036,37 @@ fn hub_finding(hub: Tri, detail: Option<&str>) -> Finding {
     }
 }
 
-/// Advisory only: more CPUs than the VM's RAM can feed at ~2 GB per compiler
-/// job. Never a refusal — the build still completes, it just needs the CPU cap
-/// that `Install-DML.ps1` applies on the WSL side and that nothing applies here.
+/// Advisory only: the build starts more compiler jobs than the VM's RAM can
+/// feed at ~2 GB each. Never a refusal — the build still completes, it just
+/// needs the CPU cap that `Install-DML.ps1` applies on the WSL side and that
+/// nothing can apply here (see [`upstream_build_jobs`]: the job count is
+/// hardcoded upstream, so naming the right number IS the mitigation).
 /// Emitted only when BOTH numbers are real; guessing one would produce advice
 /// about a machine we did not measure.
 fn cpu_finding(ncpu: Option<u32>, mem_bytes: Option<u64>) -> Option<Finding> {
     let (ncpu, mem) = (ncpu?, mem_bytes?);
     let jobs = mem_bound_jobs(mem);
-    if ncpu <= jobs {
+    // Compare against what upstream REALLY starts — `nproc + 1`. Comparing
+    // against `ncpu` left the worst case silent: a VM with exactly as many CPUs
+    // as memory can feed (4 CPUs / 8 GB) got no warning at all, while the build
+    // ran 5 concurrent compilers against room for 4.
+    let started = upstream_build_jobs(ncpu);
+    if started <= jobs {
         return None;
     }
+    let advised = advised_cpu_setting(mem);
     Some(Finding {
         check: Check::Cpu,
         severity: Severity::Warn,
         message: format!(
-            "Docker's Linux VM has {ncpu} CPUs but only {} of memory — at roughly {} per compiler job that is room for {jobs} jobs, not {ncpu}. Nothing caps build parallelism for you here, so the build can out-run its own memory.",
+            "Docker's Linux VM has {ncpu} CPUs and {} of memory, and this build starts one compiler per CPU plus one — {started} at once. At roughly {} each that needs {}, so it can out-run its own memory. Nothing caps build parallelism for you here: the job count is fixed inside the upstream build, so the CPU setting is the only lever.",
             format_gb(mem),
-            format_gb(MEM_PER_COMPILER_JOB_BYTES)
+            format_gb(MEM_PER_COMPILER_JOB_BYTES),
+            format_gb(started as u64 * MEM_PER_COMPILER_JOB_BYTES),
         ),
         hint: format!(
-            "Set Docker Desktop > Settings > Resources > CPUs to {jobs} (or raise the memory limit) before starting the build."
+            "Set Docker Desktop > Settings > Resources > CPUs to {advised} (that yields {jobs} compilers, which {} can feed), or raise the memory limit, before starting the build.",
+            format_gb(mem)
         ),
     })
 }
@@ -1691,11 +1742,66 @@ mod tests {
 
     #[test]
     fn cpus_the_ram_can_feed_produce_no_advisory() {
+        // 16 GB feeds 8 jobs, and 7 CPUs start 7 + 1 = 8. Exactly fed, so quiet.
+        // NB 8 CPUs here would NOT be quiet — see the off-by-one test below.
         let mut facts = healthy();
-        facts.docker.mem_bytes = Some(16 * GB); // 8 jobs
-        facts.docker.ncpu = Some(8);
+        facts.docker.mem_bytes = Some(16 * GB);
+        facts.docker.ncpu = Some(7);
         let rep = decide(&facts, false);
         assert!(rep.finding(Check::Cpu).is_none(), "{:#?}", rep.findings);
+    }
+
+    /// THE CASE THAT USED TO BE SILENT. The advisory compared `ncpu` against the
+    /// memory-bound job count, but upstream's Dockerfile builds with
+    /// `-j $(($(nproc) + 1))` — so a VM with exactly as many CPUs as its RAM can
+    /// feed started ONE MORE compiler than there was memory for, and said
+    /// nothing at all.
+    ///
+    /// That is the worst place to be silent. An OOM kill arrives as a bare
+    /// `Killed` hours into a build log with no cause attached, which is the
+    /// documented reason the memory floor is a refusal rather than a warning.
+    #[test]
+    fn the_extra_job_upstream_starts_is_counted() {
+        let mut facts = healthy();
+        facts.docker.mem_bytes = Some(8 * GB); // feeds 4 jobs
+        facts.docker.ncpu = Some(4); // ...but starts 5
+        let rep = decide(&facts, false);
+        assert_eq!(
+            sev(&rep, Check::Cpu),
+            Severity::Warn,
+            "4 CPUs on 8 GB starts 5 compilers against room for 4: {:#?}",
+            rep.findings
+        );
+        let m = msg(&rep, Check::Cpu);
+        assert!(m.contains('5'), "the real job count is missing: {m}");
+        assert!(m.contains("10.0 GB"), "what those jobs actually need is missing: {m}");
+    }
+
+    /// The advice has to be arithmetic the user can act on: setting CPUs to N
+    /// yields N+1 compilers, so the advised number is one BELOW the job count.
+    /// Advising the job count itself re-creates the same overcommit the warning
+    /// exists to prevent.
+    #[test]
+    fn the_advised_cpu_setting_accounts_for_the_extra_job() {
+        assert_eq!(advised_cpu_setting(8 * GB), 3, "8 GB feeds 4 jobs, so 3 CPUs -> 4 compilers");
+        assert_eq!(advised_cpu_setting(16 * GB), 7);
+        // Never zero: Docker Desktop will not accept it and it is not advice.
+        assert_eq!(advised_cpu_setting(2 * GB), 1);
+        assert_eq!(advised_cpu_setting(0), 1);
+
+        let mut facts = healthy();
+        facts.docker.mem_bytes = Some(8 * GB);
+        facts.docker.ncpu = Some(16);
+        let rep = decide(&facts, false);
+        let h = rep.finding(Check::Cpu).unwrap().hint.clone();
+        assert!(h.contains("CPUs to 3"), "the hint must advise 3, not 4: {h}");
+    }
+
+    #[test]
+    fn upstream_build_jobs_is_one_more_than_the_cpu_count() {
+        assert_eq!(upstream_build_jobs(8), 9);
+        assert_eq!(upstream_build_jobs(1), 2);
+        assert_eq!(upstream_build_jobs(u32::MAX), u32::MAX, "must not wrap");
     }
 
     #[test]

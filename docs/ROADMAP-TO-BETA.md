@@ -50,17 +50,46 @@ with no way to know that. Resume is a headline feature of the install engine;
 resume that silently serves stale generated output is worse than no resume,
 because it lies about what it did.
 
-### A2 — Nothing caps build parallelism
+### A2 — Nothing caps build parallelism — ✅ DONE 2026-08-01
 
-Preflight warns *"8 CPUs but only 15.6 GB — room for 7 jobs, not 8. Nothing caps
-build parallelism for you here."* That sentence is honest and completely inert:
-the compose templates pass no `-j`, so the warning names a risk the product
-declines to manage.
+Preflight warned *"8 CPUs but only 15.6 GB — room for 7 jobs, not 8. Nothing caps
+build parallelism for you here."* Honest, and inert.
 
-The project already paid for this lesson once — `Install-DML.ps1` records ~2 GB
-per compiler job and that a SIGKILL "presents as dying at the same % every
-retry". The 2026-07-31 worldserver link survived, but it got lucky rather than
-proven.
+**The investigation changed the answer.** Reading the PINNED upstream Dockerfile
+(`apps/docker/Dockerfile`, the whole point of pinning) settled the native plan's
+open Task 1 research question:
+
+```
+&& cmake --build . --config "$CTYPE" -j $(($(nproc) + 1))
+```
+
+* The job count is **hardcoded inside the `RUN`**, not an `ARG`, so no
+  `--build-arg` can change it. `ARG CMAKE_EXTRA_OPTIONS` is declared and then
+  never referenced — a dead option, so not an injection point either.
+  `cmake --build` honours `CMAKE_BUILD_PARALLEL_LEVEL` only when `-j` is absent,
+  and here it never is. **There is no knob. The Docker VM's CPU count is the
+  only lever that exists.**
+* It is `nproc` **+ 1**. Every piece of sizing advice in this project was
+  computed against `nproc`, understating the peak by one whole compiler
+  (~2 GB) — and understating it exactly on the machines already tight enough to
+  care.
+
+So the deliverable was not a cap (impossible) but **arithmetic the user can act
+on**, which is the entire mitigation available. The off-by-one had left the worst
+case silent: a VM with exactly as many CPUs as its RAM can feed (4 CPUs / 8 GB)
+got **no warning at all** while the build ran 5 concurrent compilers against room
+for 4. Preflight now counts what upstream really starts, names what those jobs
+need, and advises a CPU number that is one *below* the job count — advising the
+job count itself re-created the very overcommit the warning exists to prevent.
+Both halves mutation-proven.
+
+**Known, recorded, NOT fixed:** `Install-DML.ps1`'s WSL sizing carries the same
+wrong assumption in its comment ("one C++ compiler per core") and its
+`memBoundCores` formula. Its impact is heavily buffered — `min(4, hostCores,
+memBoundCores)` dominates on any normal machine and the 8 GB swap floor catches
+the rest — and that file is explicitly flagged as dangerous to edit casually
+(it embeds an old CLI as a here-string; installer↔CLI sync is its own planned
+job). Fix it there, with its 128-check harness, not in passing.
 
 ### A3 — `cli/tests/soap.bats` test 6 flakes
 
