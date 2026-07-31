@@ -267,6 +267,37 @@ distro that fails to answer is evidence of nothing, not evidence of absence), an
 anything passing a host path through `wsl.exe` uses `--exec` with real argv, per
 the recorded metacharacter bug.
 
+#### REJECTED: run the installers in a Docker container instead of a distro
+
+Asked 2026-08-01 ("can we make Docker Desktop run a Linux container to install
+the games?") and settled by experiment, not argument. Recorded here as a NEGATIVE
+RESULT so nobody spends the afternoon again — it is an attractive idea and the
+first two tests encourage it.
+
+| test | result |
+|---|---|
+| container with `/var/run/docker.sock` mounted drives the HOST daemon | ✅ works (`docker ps` returned real containers) |
+| nested `docker run -v /work:/x` where `/work` is the outer container's mount | ❌ **silently empty** |
+| nested run given the WINDOWS host path (`C:/Users/...`) | ✅ works |
+| mounting at the daemon's own host-mount path (`/run/desktop/mnt/host/c/...`) | ❌ empty |
+
+**Why the third row does not save it.** `docker compose` computes absolute paths
+from ITS OWN cwd before handing them to the daemon. Run inside a container, that
+cwd is a Linux path, so `./modules:/azerothcore/modules` arrives at the host
+daemon as a path that does not exist there — and a bind mount to a missing path
+is not an error, it is an EMPTY DIRECTORY. The server then boots without its
+modules and looks fine to every check we have. That is precisely the
+"boots a silently wrong server" class the migration already hit once, which is
+why an approach that merely *can* be made correct is not good enough here.
+
+Making it work would mean patching every installer to emit Windows host paths —
+i.e. modifying the scripts, when using the scripts unmodified was the entire
+appeal. And a container that only clones and generates, leaving `compose up` to
+the host, is just `install_native.rs` with extra steps.
+
+**WSL has none of this.** Docker Desktop's WSL integration translates paths
+natively, which is why the existing `dml-arch` server works today.
+
 ### B5 — Task 10 (`migrate-import`)
 
 The "bring your existing server across" path. Genuinely valuable and genuinely
