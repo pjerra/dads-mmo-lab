@@ -814,6 +814,41 @@ needs a real mechanism chosen before it is built.
 3. Home is hardcoded to `wow-server-playerbots`. Does it follow the active
    server, or stay WoW-only for now?
 
+## Round 5.5 — Keira3 integration (user request, 2026-07-31)
+
+**Integrate https://github.com/azerothcore/Keira3 into the launcher.** Filed the
+day it was asked for, because a request that lives only in a chat is a request
+that gets lost — this repo has already lost a perf-advisor spec and a 13-item
+feature batch that way.
+
+Keira3 is AzerothCore's own database editor (Angular + Electron, AGPL-3.0 — the
+same licence as this repo, so bundling is licence-compatible). It edits
+`creature_template`, `quest_template`, loot, gossip, SmartAI and so on directly
+over MySQL.
+
+NOT SCOPED YET. The open questions, all of which change the size of the job:
+
+1. **Embed or launch?** Three candidate shapes: (a) ship Keira3's web build
+   inside a Tauri window and point it at the world DB; (b) detect/launch the
+   user's installed Keira3 desktop app and hand it connection details;
+   (c) link out and document it. (a) is the real product answer and the most
+   work; (c) is a day.
+2. **It needs a WRITE path to MySQL, which this project deliberately does not
+   have.** The standing security posture is: MySQL access is strictly READ-ONLY,
+   mutations go over SOAP GM commands, and `wow backup restore` is the ONE
+   sanctioned write into character data (the LAN toggle's realmlist UPDATE being
+   the only other write). Keira3 is a bulk world-DB editor — it exists to write.
+   Deciding how that squares with the posture is the FIRST task, not an
+   implementation detail. World DB is not character data, which is probably the
+   line to draw, but it must be drawn explicitly and written down.
+3. **Credentials.** Keira3 needs real MySQL credentials; today they are resolved
+   per-call and never handed to a GUI.
+4. **Backups.** A world-DB editor makes a "take a backup first" prompt close to
+   mandatory. `wow backup create` already exists and should gate the first open.
+
+Blocked on nothing technically, but it is a FEATURE, and SHIP-LIST's one rule is
+no new features until Phase 4 is done. Post-beta.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
