@@ -122,6 +122,9 @@ pub const CODE_CLONE_FAILED: &str = "INSTALL_CLONE_FAILED";
 pub const CODE_BUILD_FAILED: &str = "INSTALL_BUILD_FAILED";
 pub const CODE_UP_FAILED: &str = "INSTALL_UP_FAILED";
 pub const CODE_READY_TIMEOUT: &str = "INSTALL_READY_TIMEOUT";
+/// The pinned commit could not be fetched, checked out, or -- the case that
+/// matters -- did not read back from HEAD afterwards.
+pub const CODE_PIN_FAILED: &str = "INSTALL_PIN_FAILED";
 
 /// The container names the generated stack claims. GLOBAL to the docker engine
 /// (see the module docs), which is exactly why [`conflicting_owner`] exists.
@@ -193,6 +196,73 @@ pub struct RepoRef {
     /// `Some(n)` adds `--depth n`. See [`default_core_repo`] for why the core
     /// checkout deliberately has none.
     pub depth: Option<u32>,
+    /// The exact commit to build. `None` tracks the branch tip.
+    ///
+    /// A pin is only worth having if it is VERIFIED: after checkout the engine
+    /// re-reads `HEAD` and refuses when it does not match, because a pin that
+    /// silently fails to apply is worse than no pin -- it claims a
+    /// reproducibility this build does not have.
+    pub commit: Option<String>,
+}
+
+/// The commits the first successful native install actually built, captured from
+/// that checkout (2026-07-31). Not chosen, not latest -- observed.
+pub const CORE_PINNED_COMMIT: &str = "190184a04539937a617bf033e39378196c0c63f5";
+pub const MODULE_PINNED_COMMIT: &str = "ba46fcdecde3d0c6c2f244fcb3ea862430b6ae5b";
+
+/// `git rev-parse --verify <sha>^{commit}` -- is the pinned commit ALREADY in
+/// this checkout?
+///
+/// Asked before any fetch, and that ordering is load-bearing. The core is
+/// deliberately cloned WITHOUT `--depth` because AzerothCore's `genrev.cmake`
+/// reads the repository's history to stamp a build revision, and
+/// `git fetch --depth 1` against a complete repository would make it SHALLOW --
+/// quietly breaking the very thing the full clone exists for.
+pub fn have_commit_argv(dir: &Path, sha: &str) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        dir.to_string_lossy().into_owned(),
+        "rev-parse".to_string(),
+        "--verify".to_string(),
+        "--quiet".to_string(),
+        format!("{sha}^{{commit}}"),
+    ]
+}
+
+/// `git fetch --depth 1 origin <sha>` -- only reached when the commit is NOT
+/// already present, i.e. a shallow checkout whose tip has moved past the pin.
+pub fn fetch_commit_argv(dir: &Path, sha: &str) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        dir.to_string_lossy().into_owned(),
+        "fetch".to_string(),
+        "--depth".to_string(),
+        "1".to_string(),
+        "origin".to_string(),
+        sha.to_string(),
+    ]
+}
+
+/// `git checkout --detach <sha>`. Detached on purpose: the branch name is how
+/// the clone got here, but the COMMIT is what gets built.
+pub fn checkout_commit_argv(dir: &Path, sha: &str) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        dir.to_string_lossy().into_owned(),
+        "checkout".to_string(),
+        "--detach".to_string(),
+        sha.to_string(),
+    ]
+}
+
+/// `git rev-parse HEAD` -- the verification read.
+pub fn head_sha_argv(dir: &Path) -> Vec<String> {
+    vec![
+        "-C".to_string(),
+        dir.to_string_lossy().into_owned(),
+        "rev-parse".to_string(),
+        "HEAD".to_string(),
+    ]
 }
 
 /// The AzerothCore fork the playerbots build needs, exactly as
@@ -206,16 +276,19 @@ pub struct RepoRef {
 ///   revision into the build. A shallow clone would save ~1.3 GB (measured on
 ///   this box) at the cost of a build-time behaviour nobody in this repo has
 ///   tested. Space is what the preflight's games-dir floor is for.
-/// * A SHA pin is plan Task 1's deliverable — it needs the upstream tree
-///   actually fetched and its compose/Dockerfile recorded first. Until then a
-///   pin would be a number invented here, which is worse than tracking the
-///   branch the installer already tracks. [`RepoRef`] carries no `commit` field
-///   for the same reason: an unused pin is a promise the engine does not keep.
+/// * PINNED as of 2026-08-01, and the precondition this comment used to state
+///   is now met. It said a pin "needs the upstream tree actually fetched" and
+///   that otherwise it "would be a number invented here". The first end-to-end
+///   native install ran on 2026-07-31 -- 8/8 stages, 21m18s, a healthy
+///   worldserver -- so this SHA is not invented: it is the tree that produced a
+///   working server on real hardware. Bumping it means running that build again,
+///   which is the point.
 pub fn default_core_repo() -> RepoRef {
     RepoRef {
         url: "https://github.com/mod-playerbots/azerothcore-wotlk.git".to_string(),
         branch: "Playerbot".to_string(),
         depth: None,
+        commit: Some(CORE_PINNED_COMMIT.to_string()),
     }
 }
 
@@ -227,6 +300,7 @@ pub fn default_module_repo() -> RepoRef {
         url: "https://github.com/mod-playerbots/mod-playerbots.git".to_string(),
         branch: "master".to_string(),
         depth: Some(1),
+        commit: Some(MODULE_PINNED_COMMIT.to_string()),
     }
 }
 
@@ -1061,6 +1135,24 @@ impl<'a> Engine<'a> {
                 let url = out.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
                 if same_repo(&url, &repo.url) {
                     self.line("info", format!("found an existing checkout of {what} -- keeping it."));
+                    // Deliberately NOT re-pinned. We just promised to keep it,
+                    // and moving someone's HEAD can discard local work. Report
+                    // the mismatch instead: honest, and the user can act on it.
+                    if let Some(want) = repo.commit.clone() {
+                        let (o, head) = self.run_collect(&self.git(head_sha_argv(&dest)));
+                        let head = head.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+                        if o.is_ok() && !head.is_empty() && head != want {
+                            self.line(
+                                "warn",
+                                format!(
+                                    "that checkout is at {} but this DML build is pinned to {} -- it was NOT moved. \
+                                     Delete the folder and re-run to build the pinned tree.",
+                                    &head[..head.len().min(12)],
+                                    &want[..want.len().min(12)]
+                                ),
+                            );
+                        }
+                    }
                     return Ok(());
                 }
                 return Err(Fail::new(
@@ -1102,6 +1194,9 @@ impl<'a> Engine<'a> {
         let argv = clone_argv(repo, &dest);
         let outcome = self.run_echo(&self.git_clone(argv), None);
         if outcome.is_ok() {
+            if let Some(sha) = repo.commit.clone() {
+                self.apply_pin(&dest, &sha, what)?;
+            }
             return Ok(());
         }
         Err(Fail::new(
@@ -1109,6 +1204,58 @@ impl<'a> Engine<'a> {
             format!("Could not clone {what} from {} ({}).", repo.url, outcome.detail()),
             "Check your internet connection and that GitHub is reachable, then run the install again -- it continues where it stopped.",
         ))
+    }
+
+    /// Check the pinned commit out, then PROVE it took.
+    ///
+    /// The verification is the whole point. A pin that silently fails to apply
+    /// claims a reproducibility the build does not have, which is worse than
+    /// tracking the branch openly -- and this repo has been bitten repeatedly by
+    /// exactly that shape (an override that was never read, a stub whose default
+    /// was substituted for an empty value).
+    fn apply_pin(&mut self, dest: &std::path::Path, sha: &str, what: &str) -> Result<(), Fail> {
+        let short = &sha[..sha.len().min(12)];
+        // Fetch ONLY when the commit is missing. `git fetch --depth 1` against a
+        // complete repository makes it shallow, and the core is deliberately a
+        // full clone because genrev.cmake reads its history.
+        let (have, _) = self.run_collect(&self.git(have_commit_argv(dest, sha)));
+        if !have.is_ok() {
+            self.line("info", format!("fetching pinned commit {short} for {what}..."));
+            let outcome = self.run_echo(&self.git_clone(fetch_commit_argv(dest, sha)), None);
+            if !outcome.is_ok() {
+                return Err(Fail::new(
+                    CODE_PIN_FAILED,
+                    format!("Could not fetch the pinned commit {short} for {what} ({}).", outcome.detail()),
+                    "Check your connection. If the pin has been removed upstream, this DML build cannot reproduce its server.",
+                ));
+            }
+        }
+
+        let outcome = self.run_echo(&self.git_clone(checkout_commit_argv(dest, sha)), None);
+        if !outcome.is_ok() {
+            return Err(Fail::new(
+                CODE_PIN_FAILED,
+                format!("Could not check out the pinned commit {short} for {what} ({}).", outcome.detail()),
+                "Delete the folder and run the install again.",
+            ));
+        }
+
+        // Read it back. Trusting the checkout's exit code would be trusting the
+        // thing under test.
+        let (o, head) = self.run_collect(&self.git(head_sha_argv(dest)));
+        let head = head.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("").to_string();
+        if !o.is_ok() || head != sha {
+            return Err(Fail::new(
+                CODE_PIN_FAILED,
+                format!(
+                    "{what} was pinned to {short} but HEAD reads {}.",
+                    if head.is_empty() { "nothing".to_string() } else { head[..head.len().min(12)].to_string() }
+                ),
+                "This build cannot be reproduced. Delete the folder and run the install again.",
+            ));
+        }
+        self.line("info", format!("{what} pinned at {short}."));
+        Ok(())
     }
 
     fn do_generate(&mut self) -> Result<(), Fail> {
@@ -1593,6 +1740,53 @@ mod tests {
     /// A fake wired for a complete, successful install. The two `remote get-url`
     /// answers are keyed on the DIRECTORY the probe names, which is how one fake
     /// can answer for both checkouts.
+    /// A pin is only worth having if it is VERIFIED. If HEAD reads back as
+    /// something other than the pin, the build is NOT reproducible, and saying
+    /// so is the whole feature -- this repo has been bitten repeatedly by
+    /// overrides that were silently never applied.
+    #[test]
+    fn a_pin_that_does_not_take_is_a_refusal_not_a_shrug() {
+        let games = fixture("pin-mismatch");
+        let io = happy_io().reply(
+            "wow-server-playerbots rev-parse HEAD",
+            0,
+            &["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"],
+        );
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 1, "{events:#?}");
+        assert_eq!(error_code(&events), CODE_PIN_FAILED, "{events:#?}");
+    }
+
+    /// The core is cloned WITHOUT `--depth` because AzerothCore's genrev.cmake
+    /// reads the repository's history. `git fetch --depth 1` against a complete
+    /// repository makes it SHALLOW, so the fetch must be reached ONLY when the
+    /// commit is genuinely absent.
+    #[test]
+    fn a_commit_already_present_is_never_fetched() {
+        let games = fixture("pin-nofetch");
+        // happy_io answers `rev-parse --verify` with 0 == the commit is here.
+        let io = happy_io();
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+        assert!(
+            !io.has("fetch --depth"),
+            "a commit already present must not trigger a shallowing fetch"
+        );
+        // ...and the pin was still applied, so this is not passing because
+        // nothing happened.
+        assert!(io.has("checkout --detach"), "the pin must still be checked out");
+    }
+
+    #[test]
+    fn a_missing_commit_is_fetched_before_it_is_checked_out() {
+        let games = fixture("pin-fetch");
+        // 1 == `rev-parse --verify --quiet` found nothing.
+        let io = happy_io().reply("rev-parse --verify", 1, &[]);
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+        assert!(io.has("fetch --depth"), "a missing commit must be fetched");
+    }
+
     fn happy_io() -> FakeIo {
         FakeIo::healthy()
             .reply(
@@ -1605,6 +1799,14 @@ mod tests {
                 0,
                 &["https://github.com/mod-playerbots/azerothcore-wotlk.git"],
             )
+            // The pin calls. Order matters and mirrors the get-url pair above:
+            // the module's dest path CONTAINS the core's, so the narrower
+            // "mod-playerbots ..." key must be registered first (find() takes
+            // the first match).
+            .reply("rev-parse --verify", 0, &[])
+            .reply("checkout --detach", 0, &[])
+            .reply("mod-playerbots rev-parse HEAD", 0, &[MODULE_PINNED_COMMIT])
+            .reply("wow-server-playerbots rev-parse HEAD", 0, &[CORE_PINNED_COMMIT])
             .reply("ps -a --format", 0, &[])
             .reply("compose images", 0, &[])
             .reply(
