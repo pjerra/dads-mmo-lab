@@ -1,11 +1,32 @@
 # Common Writes → Rust Implementation Plan
 
-> **STATUS (user decision, 2026-07-30): TRACKED BUT DEFERRED — do NOT start this
-> before the v0.1.0 beta ships.** It is committed so it stops being invisible to
-> git, to the roadmap and to any audit of outstanding work (the failure mode that
-> already lost a user-approved perf-advisor spec and a 13-item feature batch), not
-> because it is next. It competes directly with the five live gates that actually
-> block the release. See `docs/SHIP-LIST.md` → "Decisions taken".
+> **STATUS (corrected 2026-08-01): SUBSYSTEMS A AND B ARE BUILT, TESTED AND
+> PUSHED — this plan is ~90% DONE, not deferred.**
+>
+> The header this replaces said "TRACKED BUT DEFERRED — do NOT start this before
+> the v0.1.0 beta ships", written 2026-07-30. It was wrong, and wrong in a way
+> worth recording: the work had already shipped on **2026-07-25**, five days
+> BEFORE that header was written. The plan file was rescued out of untracked
+> limbo and committed (in `b1fc258`) to stop it being invisible to git — the
+> right instinct — but nobody checked whether it had already been executed, so a
+> finished subsystem was filed as outstanding. That is the recorded
+> `.superpowers/`-invisibility failure in a new flavour: not lost work, but
+> **already-done work re-entered as a blocker**. Before deferring a recovered
+> plan, check `git log` for its own commits.
+>
+> Shipped 2026-07-25 (verified by commit): **A** — SOAP client + command layer
+> (`81582b6`), 13 native SOAP write commands (`f77fa28`), return-home +
+> `db::execute` (`6dcc933`), routing + parity (`cde4e4a`, `c8e085f`).
+> **B** — config-write core (`042eb7a`), `wow_config_set_native` (`f531d00`),
+> `wow_config_tuning_set_native` (`aa80bf0`), parity + Save routing (`dbccdb8`,
+> `b0b5589`). Native Tailscale (`e63c4e2`, `c6e9c3b`) landed the same night.
+>
+> WHAT ACTUALLY REMAINS is one item out of the three "Adjacent fixes" below:
+> **Console always-on (background stream)**. The other two are done — native
+> Tailscale shipped as above, and the docker-stop UX hang was fixed by
+> `stop_engine_stream_with` (which emits "Stopping Docker Desktop..." before the
+> slow call) plus the 2026-08-01 reducer fix that closes a running section on the
+> terminal `done` event. Tick them off rather than rebuilding them.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -118,8 +139,8 @@ SOAP is plain TCP reachable in both modes, so the Rust client COULD serve WSL to
 ## Adjacent fixes (fold in or do as small side-tasks — NOT blockers)
 
 - [ ] **Console always-on (background stream):** replace the tab-open-only poller with a shared store fed by a background `docker logs --follow ac-worldserver` (Rust streaming task → an event/store), so the Console tab is instant + live regardless of which page is open. Bounded buffer (last N lines). Native + WSL (the follow command differs by backend).
-- [ ] **Native Tailscale:** the current feature is distro-shaped (`sudo -n pacman/systemctl/tailscaled/iptables`) and errors on Windows (`sudo.exe` rejects `-n`). Native path: detect the Windows Tailscale app, `tailscale.exe up` (browser login, no sudo), status via `tailscale.exe status`. STOPGAP: gate the whole Tailscale card out of native mode (show "use the Windows Tailscale app" note) so it stops throwing the confusing error until the native path lands.
-- [ ] **Docker-stop UX hang (from commit 0f53fef):** when native `games_stop` stops Docker Desktop, the UI just spins the loading wheel with no feedback and (apparently) never completes. `docker desktop stop` can take 20-60s to bring the engine + WSL VM down, and nothing is streamed meanwhile. Fix the streaming in `lib.rs::games_stop` (native branch): emit **"Stopping Docker Desktop…"** BEFORE the (slow) stop call, run `docker desktop stop` with a bounded timeout (~90s) + optionally poll `docker info` until the engine is actually down, then emit **"Docker Desktop stopped."** and a terminal `done` event so the spinner resolves. On timeout/failure emit a clear warning + `done` (best-effort — the server stop already succeeded). Verify the front-end Home Stop flow actually consumes the terminal event and clears its busy state.
+- [x] **Native Tailscale:** DONE 2026-07-25 (`e63c4e2`, bounded in `c6e9c3b`). the current feature is distro-shaped (`sudo -n pacman/systemctl/tailscaled/iptables`) and errors on Windows (`sudo.exe` rejects `-n`). Native path: detect the Windows Tailscale app, `tailscale.exe up` (browser login, no sudo), status via `tailscale.exe status`. STOPGAP: gate the whole Tailscale card out of native mode (show "use the Windows Tailscale app" note) so it stops throwing the confusing error until the native path lands.
+- [x] **Docker-stop UX hang (from commit 0f53fef):** DONE — `stop_engine_stream_with` emits the notice before the slow call; the terminal-`done` reducer fix (2026-08-01) clears the spinner. when native `games_stop` stops Docker Desktop, the UI just spins the loading wheel with no feedback and (apparently) never completes. `docker desktop stop` can take 20-60s to bring the engine + WSL VM down, and nothing is streamed meanwhile. Fix the streaming in `lib.rs::games_stop` (native branch): emit **"Stopping Docker Desktop…"** BEFORE the (slow) stop call, run `docker desktop stop` with a bounded timeout (~90s) + optionally poll `docker info` until the engine is actually down, then emit **"Docker Desktop stopped."** and a terminal `done` event so the spinner resolves. On timeout/failure emit a clear warning + `done` (best-effort — the server stop already succeeded). Verify the front-end Home Stop flow actually consumes the terminal event and clears its busy state.
 
 ---
 
