@@ -10,6 +10,45 @@ No new spec, no new "round", no new page. If an idea arrives, it goes in
 
 ---
 
+## The native install is PROVEN (2026-07-31)
+
+First end-to-end native install on real hardware: 8/8 stages, exit 0, **21m18s**.
+
+It found one bug no unit test could have. The build overlay named no
+`dockerfile:`, and AzerothCore keeps its Dockerfile at `apps/docker/Dockerfile`,
+so Compose looked for `<checkout>/Dockerfile` and died after 600+ MB of clone and
+five green stages. Every test in this repo drives a FAKE docker that never opens
+the file, so the well-formed YAML and correct stage names sailed through. Fixed,
+with a regression test that reads the rendered overlay.
+
+Compose-project isolation held in reality, not only in a unit test:
+`dml-native-test-0205b295_db-data` sits beside the untouched
+`dml-wow-native_db-data`.
+
+The tree that produced a working server -- what the SHA pin should record:
+
+| repo | SHA |
+|---|---|
+| core (`mod-playerbots/azerothcore-wotlk`, branch `Playerbot`) | `190184a04539937a617bf033e39378196c0c63f5` |
+| module (`mod-playerbots`) | `ba46fcdecde3d0c6c2f244fcb3ea862430b6ae5b` |
+
+**The `native-test` title dir is KEPT ON PURPOSE** -- stopped, not deleted. It is
+the only proven native install, and the launcher-wiring work needs one to wire
+against; rebuilding costs 21+ minutes. Delete it once that wiring is done.
+
+THREE THINGS THIS RUN DID NOT PROVE, so none of them may be assumed:
+
+1. **A COLD build.** The AzerothCore core compiled at 4.7 objects/sec off a warm
+   layer/ccache from the existing server on this machine; only playerbots' AI
+   compiled cold, at 1.2/sec. A stranger with no cache still pays the full hours.
+2. **RESUME AFTER A GENERATOR FIX.** `generate-compose` was recorded done, so a
+   plain re-run reuses the OLD generated file and silently skips the fix. The
+   state file had to be deleted by hand. Real design gap.
+3. **THE MEMORY HEADROOM.** Preflight warned: "8 CPUs but only 15.6 GB -- room
+   for 7 jobs, not 8. Nothing caps build parallelism for you here." The
+   worldserver link survived, but got lucky rather than proven; the compose
+   templates still pass no `-j` limit.
+
 ## Known flake (found 2026-07-30, NOT investigated)
 
 `cli/tests/soap.bats` test 6, "wow soap-exec returns result envelope on success",
@@ -28,12 +67,22 @@ Recorded here because a decision that lives only in a conversation is a decision
 that gets lost. All four were put to the user with recommendations and all four
 were taken as recommended.
 
-1. **v0.1.0 beta scope: WSL-only.** The native-Docker install engine
-   (`install_native.rs`) stays in the repo and reachable by running the binary,
-   but nothing in the launcher points at it for v0.1.0. Reasons: the launcher is
-   not wired to it, native mode CANNOT install a title at all (all six installers
-   are Linux scripts and `_installers_supported` refuses on a Windows host), and
-   native has no readiness wait, which makes its boot-loop diagnosis thin.
+1. ~~**v0.1.0 beta scope: WSL-only.**~~ **REVERSED by the user, 2026-08-01:
+   THE BETA WAITS FOR NATIVE.** The original reasoning was that native could not
+   install a title and had no readiness wait. Both premises are now false:
+   * `install-native` ran END TO END on real hardware for the first time on
+     2026-07-31 -- 8/8 stages, exit 0, 21m18s, with `ac-worldserver` and
+     `ac-database` up and healthy. It is not a paper path.
+   * The "no readiness wait" claim was only ever true of `games start`;
+     `install_native.rs` has a real `Stage::Ready` (1800s timeout, 10s poll,
+     project-scoped log matching, boot-loop watch armed).
+   What remains is INTEGRATION, not architecture: the launcher is still not
+   wired to the engine, backend auto-detect can never select native on a fresh
+   machine (it requires a server dir that only the install creates), and native
+   first-run is suppressed. Roughly 6-8 focused days.
+   The user also wants `dml-arch` RETIRED. Docker Desktop's own distro cannot
+   host the installers (Alpine, no sudo, no systemd, rebuilt on upgrade), so
+   native IS the retirement path.
 2. **Pin AzerothCore + mod-playerbots to known-good SHAs.** A stranger's install
    must be reproducible; today a bad upstream commit breaks installs for reasons
    we cannot reproduce locally, and each failure costs that user a full source
