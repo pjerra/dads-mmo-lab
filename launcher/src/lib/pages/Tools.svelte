@@ -35,7 +35,10 @@
     type PortCheck,
     type CacheEntry,
     type NativeSetupStatus,
-  } from "$lib/api";
+  dockerDashboardGet,
+  dockerDashboardSet,
+  type DockerDashboardSetting,
+} from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
   import {
     DOCKER_RESTART_CONFIRM,
@@ -85,6 +88,40 @@
   let nsNote: string | null = $state(null);
   let defenderScriptPath: string | null = $state(null);
 
+  // Docker Desktop's dashboard-on-startup setting. Held as Docker's OWN state,
+  // re-read after every write, so the checkbox cannot drift from the file.
+  let dashboard = $state<DockerDashboardSetting | null>(null);
+  let dashboardBusy = $state(false);
+  let dashboardError = $state<string | null>(null);
+
+  async function loadDashboardPref() {
+    try {
+      dashboard = await dockerDashboardGet();
+      dashboardError = null;
+    } catch (e) {
+      // Never fail the whole Tools page over an optional convenience toggle.
+      const err = e as { message?: string };
+      dashboardError = err.message ?? String(e);
+      dashboard = null;
+    }
+  }
+
+  async function setDashboardPref(disabled: boolean) {
+    dashboardBusy = true;
+    dashboardError = null;
+    try {
+      dashboard = await dockerDashboardSet(disabled);
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      dashboardError = `${err.message ?? String(e)}${err.hint ? ` \u2014 ${err.hint}` : ""}`;
+      // Re-read so the checkbox shows what Docker's file actually says, not
+      // what the user just tried to set.
+      await loadDashboardPref();
+    } finally {
+      dashboardBusy = false;
+    }
+  }
+
   async function loadNativeStatus() {
     nsBusy = true;
     nsError = null;
@@ -99,6 +136,7 @@
 
   onMount(() => {
     void loadNativeStatus().catch(() => {});
+    void loadDashboardPref().catch(() => {});
   });
 
   async function startDocker() {
@@ -961,6 +999,25 @@
           Frees the docker-desktop WSL VM's RAM after Home's Stop button. Turn this off if you
           run other Docker containers you want to keep alive between server sessions.
         </p>
+
+        {#if dashboard?.supported}
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={dashboard.disabled}
+              disabled={dashboardBusy}
+              onchange={(e) => setDashboardPref(e.currentTarget.checked)}
+            />
+            Don't open the Docker dashboard when the engine starts
+          </label>
+          <p class="muted">
+            Starting the server with Docker stopped pops Docker's own window open. This is
+            Docker Desktop's setting, not ours &mdash; it affects every container you run, and it
+            applies from the next time Docker Desktop starts.
+            {#if dashboard.path}<br /><span class="dim">{dashboard.path}</span>{/if}
+          </p>
+        {/if}
+        {#if dashboardError}<p class="notice">{dashboardError}</p>{/if}
       </div>
 
       <div class="row">

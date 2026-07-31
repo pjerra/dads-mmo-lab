@@ -5666,6 +5666,37 @@ fn native_setup_status() -> Result<serde_json::Value, CmdError> {
 }
 
 /// Launch the Docker Desktop app (the fix for a down engine). Just starts the
+/// Read Docker Desktop's "open the dashboard on startup" setting.
+///
+/// Reports Docker's OWN state rather than a DML preference mirroring it: this
+/// key belongs to Docker Desktop and the user may change it there, so caching
+/// our own copy would let the toggle lie. See `dml_core::dashboard`.
+#[tauri::command]
+fn docker_dashboard_get() -> Result<serde_json::Value, CmdError> {
+    let st = dml_core::dashboard::get().map_err(|e| CmdError {
+        code: "DOCKER_SETTINGS".into(),
+        message: e,
+        hint: "Open Docker Desktop > Settings > General and set it there instead.".into(),
+    })?;
+    serde_json::to_value(st).map_err(|e| CmdError {
+        code: "DOCKER_SETTINGS".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })
+}
+
+/// Write that setting. Preserves every other key and writes atomically — this
+/// is the user's Docker config, shared by every container they run, not ours.
+#[tauri::command]
+fn docker_dashboard_set(disabled: bool) -> Result<serde_json::Value, CmdError> {
+    dml_core::dashboard::set(disabled).map_err(|e| CmdError {
+        code: "DOCKER_SETTINGS".into(),
+        message: e,
+        hint: "Open Docker Desktop > Settings > General and set it there instead.".into(),
+    })?;
+    docker_dashboard_get()
+}
+
 /// GUI exe — no elevation, no engine wait; the card tells the user to re-check
 /// once the engine settles. Errors when Docker Desktop isn't installed.
 #[tauri::command]
@@ -6614,6 +6645,8 @@ pub fn run() {
             defender_hint,
             native_setup_status,
             start_docker_desktop,
+            docker_dashboard_get,
+            docker_dashboard_set,
             wow_docker_restart,
             native_yq_install,
             native_soap_copy,

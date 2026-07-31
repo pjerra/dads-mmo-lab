@@ -876,6 +876,27 @@ export async function wowConfigRead(): Promise<ConfigSetting[]> {
 // Task B3: native mode routes to the SOAP/file-backed `_native` sibling
 // (Task B2a); WSL mode keeps shelling `dml` byte-identically. Same pattern
 // as the A3 write routing.
+/** Docker Desktop's own "open the dashboard on startup" setting.
+ *
+ *  Read straight from Docker's settings file rather than mirrored as a DML
+ *  preference: the key belongs to Docker Desktop and the user can change it
+ *  there, so a cached copy would let our toggle lie. `supported:false` means no
+ *  settings file exists (Docker Desktop never started, or not Windows) and the
+ *  UI hides the control instead of offering one that cannot work. */
+export type DockerDashboardSetting = {
+  supported: boolean;
+  disabled: boolean;
+  path: string | null;
+};
+
+export async function dockerDashboardGet(): Promise<DockerDashboardSetting> {
+  return await invoke("docker_dashboard_get");
+}
+
+export async function dockerDashboardSet(disabled: boolean): Promise<DockerDashboardSetting> {
+  return await invoke("docker_dashboard_set", { disabled });
+}
+
 export async function wowConfigSet(
   key: string,
   value: string,
