@@ -1462,3 +1462,41 @@ fn installers_carry_no_bot_count_env_keys() {
         }
     }
 }
+
+/// The bug the first REAL native build died on, 2026-07-31.
+///
+/// The build overlay declared `context:` and `target:` but no `dockerfile:`, so
+/// Compose looked for `<checkout>/Dockerfile` — and AzerothCore keeps its
+/// Dockerfile at `apps/docker/Dockerfile`. The build failed with "failed to read
+/// dockerfile: open Dockerfile: no such file or directory" after cloning 600+ MB
+/// and passing five green stages.
+///
+/// Nothing caught it because every test in this repo drives a FAKE docker that
+/// never opens the file: the generated YAML was well-formed, the stage names
+/// were right, and the fake happily reported success. That is the shape of this
+/// whole class — a generator can only be proven against the thing it generates
+/// FOR, and the cheap half of that is asserting the paths it names.
+#[test]
+fn the_build_overlay_names_the_dockerfile_azerothcore_actually_ships() {
+    let dir = scratch("build-dockerfile");
+    composegen::write_all(&dir, &ComposeOpts::default()).unwrap();
+    let text = std::fs::read_to_string(dir.join(composegen::BUILD_FILE)).unwrap();
+    let doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text).unwrap();
+    let services = doc["services"].as_mapping().expect("services mapping");
+
+    assert!(!services.is_empty(), "no services rendered — the assertions below would be vacuous");
+    for (name, svc) in services {
+        let name = name.as_str().unwrap_or("<non-string>");
+        let build = &svc["build"];
+        assert!(!build.is_null(), "{name} has no build section");
+        let dockerfile = build["dockerfile"].as_str().unwrap_or_else(|| {
+            panic!("{name} declares no `dockerfile:` — Compose would look for <context>/Dockerfile, which AzerothCore does not have")
+        });
+        assert_eq!(
+            dockerfile, "apps/docker/Dockerfile",
+            "{name} points at a Dockerfile path AzerothCore does not ship"
+        );
+        // A target without a Dockerfile is the same failure one step later.
+        assert!(build["target"].as_str().is_some(), "{name} declares no build target");
+    }
+}

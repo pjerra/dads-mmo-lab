@@ -19,23 +19,35 @@
 #
 # The four targets are the multi-stage Dockerfile's stages in the cloned
 # AzerothCore checkout; the context is the title dir, which IS that checkout.
+#
+# `dockerfile:` is NOT optional here. AzerothCore keeps its Dockerfile at
+# apps/docker/Dockerfile, not at the repo root, so omitting this makes Compose
+# look for <checkout>/Dockerfile and fail with "failed to read dockerfile: open
+# Dockerfile: no such file or directory" -- which is exactly how the first real
+# native build died (2026-07-31), after cloning 600+ MB and five green stages.
+# Every unit test in this repo used a FAKE docker that never opened the file,
+# so nothing caught it until a real build ran.
 services:
   ac-worldserver:
     build:
       context: {{BUILD_CONTEXT}}
+      dockerfile: apps/docker/Dockerfile
       target: worldserver
 
   ac-authserver:
     build:
       context: {{BUILD_CONTEXT}}
+      dockerfile: apps/docker/Dockerfile
       target: authserver
 
   ac-db-import:
     build:
       context: {{BUILD_CONTEXT}}
+      dockerfile: apps/docker/Dockerfile
       target: db-import
 
   ac-client-data-init:
     build:
       context: {{BUILD_CONTEXT}}
+      dockerfile: apps/docker/Dockerfile
       target: client-data
