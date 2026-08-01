@@ -87,12 +87,31 @@ pub fn resolve_and_export() {
     // `docker_desktop_program` has NO bare-name fallback, so `Some` means a
     // real Docker Desktop executable was found on disk.
     let docker_present = dml_core::engine::docker_desktop_program().is_some();
+    // "Could the WSL backend work at all here?" Without this, detection could
+    // never select Native on a fresh machine: its other signal is "a native
+    // server directory exists", which only becomes true AFTER a native install
+    // — and installing requires being in native mode already.
+    //
+    // Only asked when it can change the answer. When Docker is absent the
+    // result is Wsl regardless, and when a native server dir is already there
+    // the result is Native regardless; spawning `wsl.exe` in either case would
+    // add startup latency for a value nothing reads. This runs before the
+    // window is shown, so that matters.
+    let wsl_usable = if docker_present && !native_dir_exists {
+        dml_core::setup::distro_registered(&dml_core::setup::SetupProbeEnv::new(
+            dml_core::runner::DISTRO,
+            dml_core::runner::USER,
+        ))
+    } else {
+        dml_core::setup::Tri::Unknown
+    };
 
     let backend = dml_core::backend::resolve(
         env_backend_raw.as_deref(),
         cfg.backend.as_deref(),
         native_dir_exists,
         docker_present,
+        wsl_usable,
     );
     let backend_str = match backend {
         dml_core::backend::Backend::Native => "native",

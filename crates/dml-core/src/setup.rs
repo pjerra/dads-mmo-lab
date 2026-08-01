@@ -764,6 +764,32 @@ pub fn probe(env: &SetupProbeEnv) -> BackendStatus {
     })
 }
 
+/// JUST the first link: is the distro registered?
+///
+/// [`backend::detect`](crate::backend::detect) needs this at startup to avoid
+/// routing a machine with no distro to the WSL backend, and it must not pay for
+/// the rest of the chain to learn it. This is affordable precisely because
+/// `wsl --list --quiet` is a host-side registry read on the WARM budget — it
+/// does not cold-start the WSL2 VM, so it cannot add VM boot time to launching
+/// the app. Running the full chain here would, and startup happens before the
+/// window is shown.
+///
+/// Returns a [`Tri`], and callers must respect it: `Unknown` means the question
+/// went unanswered, never "no distro".
+pub fn distro_registered_with(
+    distro: &str,
+    mut run: impl FnMut(&[&str], ProbeBudget) -> ProbeOutcome,
+) -> Tri {
+    classify_wsl_list(&run(&["--list", "--quiet"], ProbeBudget::Warm), distro).distro
+}
+
+/// [`distro_registered_with`] against the real `wsl.exe`.
+pub fn distro_registered(env: &SetupProbeEnv) -> Tri {
+    distro_registered_with(&env.distro, |args, budget| {
+        spawn_probe(&env.wsl_program, args, env.budget(budget))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
