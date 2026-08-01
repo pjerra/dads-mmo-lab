@@ -16,6 +16,35 @@ order.** If an item is not here, it is not blocking the beta.
 
 ---
 
+## SCOPE, FIXED BY THE USER 2026-08-01
+
+**v0.1.0 ships WoW Playerbots on the native backend. Nothing else.**
+
+Vanilla, TBC and Wrath Unbound move to **v0.2**. They need the
+`.sh`-in-a-detected-distro runner (B4b), which is roughly a week: distro
+detection, streaming a Linux installer through the terminal, and an apt path for
+the two pacman-first scripts. Playerbots native is built and click-verified
+today, so holding the release for three more titles trades a working thing in a
+tester's hands for a longer wait.
+
+Two further decisions taken the same day:
+
+* **Port guard: REFUSE on 3724 / 8085 / 7878, keep 3306 advisory.** Those three
+  have no remedy — the `ac-*` container names are global to the docker engine, so
+  a second stack simply cannot work, and letting it crash-loop only spends the
+  user's time arriving at the same answer. 3306 keeps warning because it HAS an
+  automatic fix (the `.env` `DOCKER_DB_EXTERNAL_PORT` override). A probe that
+  cannot answer never blocks — tri-state discipline holds.
+* **`native-test` is kept.** The launcher wiring is verified but nothing has yet
+  streamed a real build through the UI, and its warm Docker cache makes that
+  re-test minutes rather than hours.
+
+**What remains between here and the beta:** Task 11 (account + SOAP bootstrap —
+without it every SOAP feature is dead with no cause shown) and Task 8
+(`Install-DML-Native.ps1`), plus the live gates only a human can run.
+
+---
+
 ## THE DECISION THIS ROADMAP RESTS ON
 
 **The beta waits for native** (user, 2026-08-01, reversing the WSL-only scope of
