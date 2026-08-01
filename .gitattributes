@@ -53,3 +53,15 @@ poc/native-docker/migrate/*.yml text eol=lf
 # bytes ARE the docker-compose files a native install writes out. Keep LF so a
 # Windows checkout can't hand the Linux containers CRLF YAML.
 crates/dml-wow/data/*.tmpl text eol=lf
+
+# The Wrath Unbound add-on payload: C++, SQL, Lua and a git patch extracted
+# byte-for-byte from install-wrath-unbound-addon.sh and embedded via
+# include_str!. RECURSIVE on purpose — the `data/*.json` and `data/*.tmpl`
+# globs above do NOT reach a subdirectory, and this tree is three levels deep.
+#
+# The patch is why this matters more here than anywhere else in the repo:
+# `git apply` compares context lines EXACTLY, and six of them are a single
+# space (unified-diff context for blank source lines). A CRLF checkout turns
+# each into " \r" and the patch stops applying — against a server the user
+# already plays on, mid-rebuild. Nothing else in the run would report a cause.
+crates/dml-wow/data/unbound/** text eol=lf
