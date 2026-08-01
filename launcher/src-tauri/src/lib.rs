@@ -6185,6 +6185,45 @@ async fn games_install_native(
     Ok(())
 }
 
+/// Is there a half-finished native install in this title's directory, and where
+/// did it get to?
+///
+/// Exists so the Library button can stop lying. Re-running the engine on a
+/// partly-installed title continues from the first unfinished stage rather than
+/// starting over, so a button labelled "Install" describes something the app is
+/// not about to do — and the difference matters most to the user who just lost
+/// a two-hour build and needs to know they are not paying for it twice.
+///
+/// Reads the state file only. Deliberately NOT a verdict on whether the install
+/// is healthy: the engine re-checks every stage against the disk when it runs
+/// (a recorded stage whose evidence is gone is redone), and duplicating that
+/// judgement here would give the UI a second opinion that can disagree with the
+/// engine's.
+#[tauri::command]
+async fn games_install_native_state(
+    id: String,
+    _state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    if !dml_wow::install_native::valid_title_id(&id) {
+        return Err(CmdError {
+            code: "BAD_ID".into(),
+            message: format!("{id:?} is not a valid title name."),
+            hint: "Use letters, digits, '.', '_' and '-' only.".into(),
+        });
+    }
+    let title_dir = dml_core::compose::games_dir_from_env().join(&id);
+    let st = dml_wow::install_native::load_state(&title_dir);
+    // `next_stage` is None when every stage is recorded — an install that is
+    // finished, not one that is resumable. Reporting `in_progress` for it would
+    // put "Resume" on a title that has nothing left to do.
+    let next = st.as_ref().and_then(dml_wow::install_native::next_stage);
+    Ok(serde_json::json!({
+        "in_progress": next.is_some(),
+        "next_stage": next.map(|s| s.name()),
+        "last_error": st.as_ref().and_then(|s| s.last_error.clone()),
+    }))
+}
+
 #[tauri::command]
 async fn games_install_input(text: String, state: State<'_, AppState>) -> Result<(), CmdError> {
     use std::io::Write;
@@ -6590,6 +6629,7 @@ pub fn run() {
             games_catalog,
             games_install,
             games_install_native,
+            games_install_native_state,
             url_install,
             games_install_input,
             games_install_cancel,

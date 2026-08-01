@@ -12,6 +12,9 @@
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
+  import { nativeInstallRunner } from "$lib/native-install";
+  import { gamesInstallNativeState } from "$lib/api";
+  import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
@@ -23,6 +26,12 @@
   // never flashes "you can't install here" -- the honest default is the one
   // that matches every WSL install.
   let installSupported = $state(true);
+  // Which backend drives Install. Starts "wsl" -- the historical behaviour --
+  // so a slow resolve never briefly arms a native-only control on a WSL box.
+  let backendMode = $state<"wsl" | "native">("wsl");
+  // Title ids with a half-finished native install on disk. Drives the button
+  // label only -- the engine resumes whether or not the UI knows.
+  let resumable = $state<Set<string>>(new Set());
   let loadError: string | null = $state(null);
   let actionError: string | null = $state(null);
   let note: string | null = $state(null);
@@ -78,7 +87,7 @@
   const installed = $derived(catalog.filter((t) => t.installed));
   const available = $derived(catalog.filter((t) => !t.installed));
   const installNotice = $derived(
-    installUnavailableNotice({ installSupported, availableCount: available.length }),
+    installUnavailableNotice({ installSupported, availableCount: available.length, backendMode }),
   );
   // A URL install runs a community installer the same way on the same host, so
   // the host verdict binds it too -- it is only exempt from the shipped-scripts
@@ -97,6 +106,35 @@
     }
   }
   onMount(refresh);
+  onMount(async () => {
+    // Failure leaves the "wsl" default in place: a backend probe that fell over
+    // must not arm the native engine on a machine we could not identify.
+    try {
+      backendMode = (await resolveBackendMode()) === "native" ? "native" : "wsl";
+    } catch {
+      backendMode = "wsl";
+    }
+    if (backendMode === "native") await refreshResumable();
+  });
+
+  // Best-effort throughout: a title we cannot ask about simply keeps the
+  // "Install" label. Getting this wrong in the safe direction costs a word;
+  // blocking the page on it would cost the whole Library.
+  async function refreshResumable() {
+    const found = new Set<string>();
+    await Promise.all(
+      catalog
+        .filter((t) => !t.installed)
+        .map(async (t) => {
+          try {
+            if ((await gamesInstallNativeState(t.id)).in_progress) found.add(t.id);
+          } catch {
+            /* leave it out */
+          }
+        }),
+    );
+    resumable = found;
+  }
 
   function showActionErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
@@ -319,7 +357,7 @@
   {/if}
   <div class="cards">
     {#each available as t (t.id)}
-      {@const gate = titleInstallGate({ installSupported, scriptAvailable: t.script_available })}
+      {@const gate = titleInstallGate({ installSupported, scriptAvailable: t.script_available, backendMode, id: t.id })}
       <div class="card">
         <div class="card-row">
           <div class="card-title">{t.name}</div>
@@ -332,7 +370,7 @@
                   title={featureLocked("title-install") ? LOCKED_HINT : undefined}
                   onclick={() => startInstall(t.id)}
                 >
-                  Install
+                  {resumable.has(t.id) ? "Resume install" : "Install"}
                 </button>
               {:else}
                 <!-- One hint per REASON (title-install.ts). The old copy named
@@ -404,6 +442,11 @@
           lockFlag="title-url-install"
           onExit={onInstallExit}
         />
+      {:else if backendMode === "native"}
+        <!-- The native engine speaks the project's NDJSON vocabulary rather
+             than a pty's chunk/exit, so it goes through the translating runner
+             in native-install.ts. InstallTerminal itself is untouched. -->
+        <InstallTerminal id={installStore.id} runner={nativeInstallRunner} onExit={onInstallExit} />
       {:else}
         <InstallTerminal id={installStore.id} onExit={onInstallExit} />
       {/if}

@@ -1510,6 +1510,20 @@ export const gamesInstallNative = (
   ch.onmessage = onEvent;
   return invoke("games_install_native", { id, allowUnderspec, onEvent: ch });
 };
+/** A half-finished native install, as the Library button needs it. */
+export interface NativeInstallState {
+  in_progress: boolean;
+  next_stage: string | null;
+  last_error: string | null;
+}
+
+// Lets the button stop lying: re-running the engine on a partly-installed title
+// CONTINUES rather than starting over, so labelling it "Install" describes
+// something the app is not about to do.
+export async function gamesInstallNativeState(id: string): Promise<NativeInstallState> {
+  return await invoke("games_install_native_state", { id });
+}
+
 export async function gamesInstallInput(text: string): Promise<void> {
   return await invoke("games_install_input", { text });
 }

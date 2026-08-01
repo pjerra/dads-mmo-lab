@@ -22,7 +22,28 @@
 import type { TitleInfo } from "./api";
 
 /** Why Install is not offered. `none` = it is offered. */
-export type InstallBlock = "none" | "unsupported-host" | "missing-scripts";
+export type InstallBlock =
+  | "none"
+  | "unsupported-host"
+  | "missing-scripts"
+  /** Native backend, but this title has no native engine (yet). */
+  | "no-native-engine";
+
+/** How an armed Install should be performed. */
+export type InstallRoute = "wsl-script" | "native-engine";
+
+/**
+ * The titles the native install engine can build.
+ *
+ * Deliberately a SET rather than a "does it look like WoW" guess.
+ * `crates/dml-wow/src/install_native.rs` is AzerothCore-shaped throughout — the
+ * `ac-*` container names, `apps/docker/Dockerfile`, the `env/dist/etc` layout —
+ * so it does not generalise even to the other WoW titles: Vanilla and TBC are
+ * CMaNGOS (`cmangos/mangos-classic`, `cmangos/mangos-tbc`), a different server
+ * family entirely. Adding an id here without an engine behind it would arm a
+ * button that fails hours into a build.
+ */
+export const NATIVE_ENGINE_TITLES: ReadonlySet<string> = new Set(["wow-server-playerbots"]);
 
 export interface InstallGate {
   block: InstallBlock;
@@ -30,6 +51,15 @@ export interface InstallGate {
   canInstall: boolean;
   /** Tooltip for the disabled button. Empty string when `canInstall`. */
   hint: string;
+  /**
+   * Which command an armed Install must call. `null` when it is not armed.
+   *
+   * Returned rather than re-derived at the call site: the page would otherwise
+   * have to repeat the backend test to choose between two invoke wrappers, and
+   * a page that decides "can I?" and "how?" separately can answer them
+   * inconsistently.
+   */
+  route: InstallRoute | null;
 }
 
 /**
@@ -38,6 +68,17 @@ export interface InstallGate {
  */
 export const UNSUPPORTED_HOST_HINT =
   "Installing titles needs the WSL backend — these installers are Linux scripts and can't run on the Docker Desktop (native) backend.";
+
+/**
+ * Native backend, and this title's installer is a Linux script with no native
+ * engine behind it.
+ *
+ * Says WHICH titles native can build rather than a bare "not supported", so the
+ * sentence is useful to someone looking at a disabled button on a Vanilla card
+ * while the Playerbots card next to it is armed.
+ */
+export const NO_NATIVE_ENGINE_HINT =
+  "This title's installer is a Linux script, and the native backend can currently build only WoW WotLK (Playerbots) — switch to the WSL backend to install this one.";
 
 /**
  * The host CAN run them, they just aren't shipped here. This is the only case
@@ -66,8 +107,8 @@ export const MISSING_SCRIPTS_HINT =
  */
 export function urlInstallGate(o: { installSupported: boolean }): InstallGate {
   return o.installSupported
-    ? { block: "none", canInstall: true, hint: "" }
-    : { block: "unsupported-host", canInstall: false, hint: UNSUPPORTED_HOST_HINT };
+    ? { block: "none", canInstall: true, hint: "", route: "wsl-script" }
+    : { block: "unsupported-host", canInstall: false, hint: UNSUPPORTED_HOST_HINT, route: null };
 }
 
 /**
@@ -81,14 +122,30 @@ export function urlInstallGate(o: { installSupported: boolean }): InstallGate {
 export function titleInstallGate(o: {
   installSupported: boolean;
   scriptAvailable: boolean;
+  /** Which backend is driving. Absent is treated as "wsl" — see below. */
+  backendMode?: "wsl" | "native";
+  /** The catalog id, needed only to answer the native question. */
+  id?: string;
 }): InstallGate {
+  // THE NATIVE BRANCH COMES FIRST, and it must, because the two facts under it
+  // are both about the WSL route and are both FALSE on a native host: the
+  // installers dir is a Linux path that does not exist there, so every title
+  // reports `scriptAvailable:false`, and `installSupported` is false by design.
+  // Testing them first would keep the native engine permanently unreachable
+  // behind an explanation about a backend the user is not using.
+  if (o.backendMode === "native") {
+    if (o.id !== undefined && NATIVE_ENGINE_TITLES.has(o.id)) {
+      return { block: "none", canInstall: true, hint: "", route: "native-engine" };
+    }
+    return { block: "no-native-engine", canInstall: false, hint: NO_NATIVE_ENGINE_HINT, route: null };
+  }
   if (!o.installSupported) {
-    return { block: "unsupported-host", canInstall: false, hint: UNSUPPORTED_HOST_HINT };
+    return { block: "unsupported-host", canInstall: false, hint: UNSUPPORTED_HOST_HINT, route: null };
   }
   if (!o.scriptAvailable) {
-    return { block: "missing-scripts", canInstall: false, hint: MISSING_SCRIPTS_HINT };
+    return { block: "missing-scripts", canInstall: false, hint: MISSING_SCRIPTS_HINT, route: null };
   }
-  return { block: "none", canInstall: true, hint: "" };
+  return { block: "none", canInstall: true, hint: "", route: "wsl-script" };
 }
 
 export interface InstallNotice {
@@ -108,7 +165,13 @@ export interface InstallNotice {
 export function installUnavailableNotice(o: {
   installSupported: boolean;
   availableCount: number;
+  backendMode?: "wsl" | "native";
 }): InstallNotice | null {
+  // On native this notice is now a LIE by omission: it says installing needs
+  // the WSL backend while the Playerbots card beside it is armed and works.
+  // Native explains itself per-card (NO_NATIVE_ENGINE_HINT names what native
+  // can build), so a page-wide contradiction earns nothing.
+  if (o.backendMode === "native") return null;
   if (o.installSupported) return null;
   if (o.availableCount <= 0) return null;
   return {

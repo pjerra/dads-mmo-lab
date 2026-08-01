@@ -29,7 +29,7 @@ describe("titleInstallGate", () => {
     // Fails if the gate ever defaults closed -- that would kill installs on
     // the WSL backend, which is the one place they work.
     const g = titleInstallGate({ installSupported: true, scriptAvailable: true });
-    expect(g).toEqual({ block: "none", canInstall: true, hint: "" });
+    expect(g).toEqual({ block: "none", canInstall: true, hint: "", route: "wsl-script" });
   });
 
   it("blames the BACKEND, not dev-install, when the host can't run installers", () => {
@@ -135,6 +135,7 @@ describe("urlInstallGate", () => {
       block: "none",
       canInstall: true,
       hint: "",
+      route: "wsl-script",
     });
   });
 });
@@ -146,5 +147,68 @@ describe("hint honesty", () => {
     // route. Naming it as THE instruction would repeat this bug in miniature.
     expect(MISSING_SCRIPTS_HINT).toMatch(/dev-install step/);
     expect(MISSING_SCRIPTS_HINT).not.toMatch(/^Installer scripts aren't on this backend yet — re-run cli\/dev-install\.ps1/);
+  });
+
+  // -- the native backend --------------------------------------------------
+
+  it("arms Install on native for the title the engine can actually build", () => {
+    // THE POINT OF TASK 6. Before this, native reached neither branch: the
+    // installers dir is a Linux path that does not exist on a Windows host, so
+    // every title reported scriptAvailable:false and installSupported:false,
+    // and the proven native engine stayed unreachable behind an explanation
+    // about a backend the user is not using.
+    const g = titleInstallGate({
+      installSupported: false,
+      scriptAvailable: false,
+      backendMode: "native",
+      id: "wow-server-playerbots",
+    });
+    expect(g.canInstall).toBe(true);
+    expect(g.route).toBe("native-engine");
+  });
+
+  it("does NOT arm native Install for a title with no native engine", () => {
+    // Vanilla and TBC are CMaNGOS, a different server family; install_native.rs
+    // is AzerothCore-shaped throughout. Arming these would start a build that
+    // fails hours in.
+    for (const id of ["wow-vanilla-server", "wow-tbc-server", "runescape-server"]) {
+      const g = titleInstallGate({
+        installSupported: false,
+        scriptAvailable: false,
+        backendMode: "native",
+        id,
+      });
+      expect(g.canInstall).toBe(false);
+      expect(g.block).toBe("no-native-engine");
+      expect(g.route).toBeNull();
+    }
+  });
+
+  it("names what native CAN build, rather than a bare refusal", () => {
+    // The user is looking at a disabled Vanilla card next to an armed
+    // Playerbots one; "not supported" alone reads as a bug.
+    const g = titleInstallGate({
+      installSupported: false,
+      scriptAvailable: false,
+      backendMode: "native",
+      id: "wow-vanilla-server",
+    });
+    expect(g.hint).toMatch(/Playerbots/);
+  });
+
+  it("treats an absent backendMode as wsl, so nothing changes for existing callers", () => {
+    const g = titleInstallGate({ installSupported: true, scriptAvailable: true });
+    expect(g.route).toBe("wsl-script");
+  });
+
+  it("drops the page-wide 'installing needs WSL' notice on native", () => {
+    // It would contradict the armed Playerbots button directly below it.
+    expect(
+      installUnavailableNotice({ installSupported: false, availableCount: 3, backendMode: "native" }),
+    ).toBeNull();
+    // ...and still explains itself on WSL.
+    expect(
+      installUnavailableNotice({ installSupported: false, availableCount: 3 }),
+    ).not.toBeNull();
   });
 });
