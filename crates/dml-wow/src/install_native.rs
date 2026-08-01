@@ -80,7 +80,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use dml_core::error::CmdError;
-use dml_core::events::{done_event, error_event, line_event, section_end, section_start};
+use dml_core::events::{
+    done_event, error_event, line_event, pct_event, section_end, section_start,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -904,6 +906,106 @@ pub fn build_log_name_at(unix_secs: u64) -> String {
     format!("build-{}.log", crate::backup::format_utc_compact(unix_secs))
 }
 
+// ---------------------------------------------------------------------------
+// Build progress
+// ---------------------------------------------------------------------------
+
+/// One ninja step, as BuildKit's plain progress passes it through.
+///
+/// AzerothCore configures with ninja (`apps/docker/Dockerfile` installs
+/// `ninja-build`), and ninja prints a step counter with a KNOWN denominator —
+/// which is the only reason this feature reports a real percentage instead of a
+/// wall-clock guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildStep {
+    /// The BuildKit vertex (`#26`) the line belongs to.
+    pub vertex: u32,
+    pub done: u64,
+    pub total: u64,
+}
+
+/// `#26 782.2 [1803/1808] Building CXX object …` → that fraction.
+///
+/// Two shapes in the same stream look almost identical and only one of them is
+/// progress:
+///
+/// ```text
+/// #26 782.2 [1803/1808] Building CXX object …          <- ninja: real progress
+/// #7 [ac-client-data-init skeleton 2/4] RUN mkdir -pv  <- BuildKit vertex header
+/// ```
+///
+/// The second one's `2/4` is a DOCKERFILE STAGE step — matching it would jump
+/// the bar to 50% during a 0.1s `mkdir`. What separates them is the
+/// elapsed-seconds field: BuildKit prefixes a vertex's OUTPUT with `#N <secs>`
+/// and its own status lines (`DONE`, `CACHED`, the header) with nothing. So the
+/// second token must parse as a number, and the third must be a bracket holding
+/// nothing but `<digits>/<digits>`.
+pub fn parse_build_step(line: &str) -> Option<BuildStep> {
+    let mut tokens = line.strip_prefix('#')?.split_ascii_whitespace();
+    let vertex: u32 = tokens.next()?.parse().ok()?;
+
+    let elapsed = tokens.next()?;
+    // `.` alone would satisfy an all()-style check, so a digit is required
+    // rather than merely permitted.
+    if !elapsed.bytes().any(|b| b.is_ascii_digit())
+        || !elapsed.bytes().all(|b| b.is_ascii_digit() || b == b'.')
+    {
+        return None;
+    }
+
+    let fraction = tokens.next()?.strip_prefix('[')?.strip_suffix(']')?;
+    let (done_raw, total_raw) = fraction.split_once('/')?;
+    if !done_raw.bytes().all(|b| b.is_ascii_digit())
+        || !total_raw.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(BuildStep { vertex, done: done_raw.parse().ok()?, total: total_raw.parse().ok()? })
+}
+
+/// A stream of build lines → at most 101 percentages.
+///
+/// Two rules beyond the parsing, both from what a real build actually looks
+/// like:
+///
+///  * **The largest total wins.** Four images build in PARALLEL, so fractions
+///    from different vertices interleave. A three-step sidecar reporting `2/3`
+///    must not shove the display to 66% while the 1808-step compile is at 4%.
+///  * **The number never goes down.** A bar that walks backwards reads as a bug
+///    even when every number behind it is honest.
+///
+/// Emitting only on CHANGE is what keeps a 1808-step build to ~101 events
+/// rather than 1808.
+#[derive(Debug, Default)]
+pub struct BuildProgress {
+    best_total: u64,
+    /// The last value REPORTED — a floor, not a memory of the previous line.
+    reported: Option<u8>,
+}
+
+impl BuildProgress {
+    /// The percentage to report for this line, or `None` when the line is not
+    /// progress, is progress from a lesser vertex, or would not move the
+    /// number forward.
+    pub fn observe(&mut self, line: &str) -> Option<u8> {
+        let step = parse_build_step(line)?;
+        // A zero total is a malformed line, not a finished build: reporting
+        // anything for it would mean dividing by it.
+        if step.total == 0 || step.total < self.best_total {
+            return None;
+        }
+        self.best_total = step.total;
+        let pct = ((step.done.min(step.total) * 100) / step.total) as u8;
+        match self.reported {
+            Some(prev) if pct <= prev => None,
+            _ => {
+                self.reported = Some(pct);
+                Some(pct)
+            }
+        }
+    }
+}
+
 /// Compare two clone URLs for "same repository": trailing `/` and `.git` are
 /// cosmetic, and Git hosting is case-insensitive about the host.
 fn same_repo(a: &str, b: &str) -> bool {
@@ -974,6 +1076,22 @@ impl<'a> Engine<'a> {
     /// line into `tee`. Used for the clones, the build and the `up` — the three
     /// places a user is watching a progress wall.
     fn run_echo(&self, call: &Call, tee: Option<&Path>) -> RunOutcome {
+        self.run_echo_with(call, tee, &mut |_| {})
+    }
+
+    /// [`Self::run_echo`] plus a per-line hook, for the one caller that also
+    /// mines the output for progress.
+    ///
+    /// The hook runs LAST, after the tee and after the terminal line. So the
+    /// raw output a user is watching is never delayed or reordered by anything
+    /// derived from it, and a derived event can only ever follow the line it
+    /// came from.
+    fn run_echo_with(
+        &self,
+        call: &Call,
+        tee: Option<&Path>,
+        on_line: &mut dyn FnMut(&str),
+    ) -> RunOutcome {
         use std::io::Write;
         let mut file = tee.and_then(|p| {
             p.parent().map(|d| std::fs::create_dir_all(d));
@@ -985,6 +1103,7 @@ impl<'a> Engine<'a> {
                 let _ = f.flush();
             }
             self.line("info", l);
+            on_line(l);
         })
     }
 
@@ -1432,8 +1551,19 @@ impl<'a> Engine<'a> {
             "info",
             "you can close the launcher -- reopening and running the install again continues from here, reusing Docker's build cache.",
         );
-        let outcome =
-            self.run_echo(&self.docker(build_argv(), Some(self.title_dir.clone())), Some(&log_path));
+        // The one place a `pct` event comes from. Local to this call, so a
+        // resumed build starts its percentage over rather than inheriting a
+        // floor from an attempt whose step total no longer applies.
+        let mut progress = BuildProgress::default();
+        let outcome = self.run_echo_with(
+            &self.docker(build_argv(), Some(self.title_dir.clone())),
+            Some(&log_path),
+            &mut |l| {
+                if let Some(pct) = progress.observe(l) {
+                    (self.emit)(pct_event(pct));
+                }
+            },
+        );
         if outcome.is_ok() {
             return Ok(());
         }
@@ -3122,6 +3252,143 @@ mod tests {
         );
         drop(c2);
         let _ = std::fs::remove_dir_all(&games2);
+    }
+
+    // -- build progress ------------------------------------------------------
+    //
+    // Every fixture below is a line copied verbatim out of a real build log on
+    // this machine (`dml-native/native-test/logs/build-20260731-210436.log` and
+    // `dml-uitest/wow-server-playerbots/logs/build-20260801-081450.log`), not a
+    // line invented to match the parser.
+
+    #[test]
+    fn a_ninja_step_line_parses_to_its_fraction() {
+        assert_eq!(
+            parse_build_step("#26 782.2 [1803/1808] Building CXX object modules/CMakeFiles/modules.dir/mod-playerbots/src/Mgr/Travel/TravelMgr.cpp.o"),
+            Some(BuildStep { vertex: 26, done: 1803, total: 1808 })
+        );
+        assert_eq!(
+            parse_build_step("#26 3.703 [16/1808] Building CXX object deps/fmt/CMakeFiles/fmt.dir/src/os.cc.o"),
+            Some(BuildStep { vertex: 26, done: 16, total: 1808 })
+        );
+    }
+
+    /// THE trap this parser exists to avoid. BuildKit's vertex header carries a
+    /// DOCKERFILE STAGE step (`skeleton 2/4`) that looks exactly like progress
+    /// and is not: matching it would slam the bar to 50% during a 0.1s `mkdir`
+    /// and then walk it back.
+    #[test]
+    fn a_buildkit_vertex_header_is_not_progress() {
+        assert_eq!(
+            parse_build_step("#7 [ac-client-data-init skeleton 2/4] RUN mkdir -pv /azerothcore/bin"),
+            None
+        );
+        assert_eq!(
+            parse_build_step("#12 [ac-client-data-init client-data 3/3] COPY --chown=acore:acore apps apps"),
+            None
+        );
+    }
+
+    #[test]
+    fn buildkit_status_lines_are_not_progress() {
+        for line in [
+            "#49 DONE 0.0s",
+            "#7 CACHED",
+            "#14 ...",
+            "#6 transferring context: 6.69kB done",
+            " Image dml.local/ac-wotlk-worldserver:native-5c541930 Building ",
+            "",
+        ] {
+            assert_eq!(parse_build_step(line), None, "{line:?} must not parse as progress");
+        }
+    }
+
+    #[test]
+    fn progress_is_reported_once_per_change_and_never_backwards() {
+        let mut p = BuildProgress::default();
+        assert_eq!(p.observe("#26 1.0 [18/1808] Building CXX object a.cpp.o"), Some(0));
+        // 181/1808 is 10%, and so is 190/1808 -- one event, not two.
+        assert_eq!(p.observe("#26 2.0 [181/1808] Building CXX object b.cpp.o"), Some(10));
+        assert_eq!(p.observe("#26 3.0 [190/1808] Building CXX object c.cpp.o"), None);
+        // Ninja does not go backwards, but a stale line arriving late must not
+        // be able to walk the display back either.
+        assert_eq!(p.observe("#26 4.0 [20/1808] Building CXX object d.cpp.o"), None);
+        assert_eq!(p.observe("#26 5.0 [1808/1808] Linking CXX executable worldserver"), Some(100));
+    }
+
+    /// Four images build in PARALLEL. A three-step sidecar reporting 2/3 must
+    /// not shove the display to 66% while the 1808-step compile is at 1%.
+    #[test]
+    fn a_lesser_vertex_cannot_outbid_the_real_compile() {
+        let mut p = BuildProgress::default();
+        assert_eq!(p.observe("#26 1.0 [181/1808] Building CXX object a.cpp.o"), Some(10));
+        assert_eq!(
+            p.observe("#31 1.1 [2/3] Building CXX object side.cpp.o"),
+            None,
+            "a 3-step vertex must not speak for a 1808-step build"
+        );
+        assert_eq!(p.observe("#26 2.0 [362/1808] Building CXX object b.cpp.o"), Some(20));
+    }
+
+    #[test]
+    fn a_zero_total_is_a_malformed_line_not_a_finished_build() {
+        let mut p = BuildProgress::default();
+        assert_eq!(p.observe("#26 1.0 [0/0] Building CXX object a.cpp.o"), None);
+        assert_eq!(p.observe("#26 2.0 [5/10] Building CXX object b.cpp.o"), Some(50));
+    }
+
+    /// The parser is only worth having if the ENGINE actually feeds it. This
+    /// drives the real `install_native_stream_with` with ninja lines coming
+    /// back from the build call, so a `do_build` that stopped emitting would
+    /// fail here even with every parser test above still green.
+    #[test]
+    fn the_build_stage_emits_pct_events_from_the_lines_it_streams() {
+        let games = fixture("pct-events");
+        let io = happy_io().reply(
+            "docker-compose.build.yml build",
+            0,
+            &[
+                "#26 1.0 [18/1808] Building CXX object a.cpp.o",
+                "#7 [ac-client-data-init skeleton 2/4] RUN mkdir -pv /azerothcore/bin",
+                "#26 2.0 [904/1808] Building CXX object b.cpp.o",
+                "#26 3.0 [1808/1808] Linking CXX executable worldserver",
+                "#49 DONE 0.0s",
+            ],
+        );
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+
+        let pcts: Vec<u64> = events
+            .iter()
+            .filter(|e| e["event"] == "pct")
+            .map(|e| e["value"].as_u64().unwrap_or_default())
+            .collect();
+        assert_eq!(pcts, vec![0, 50, 100], "{events:#?}");
+
+        // Advisory means advisory: the raw lines still reach the terminal
+        // unchanged, because the install panel shows the build wall and not a
+        // percentage.
+        let lines: Vec<String> = events
+            .iter()
+            .filter(|e| e["event"] == "line")
+            .map(|e| e["text"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("[904/1808]")),
+            "the build output must still be echoed verbatim: {lines:#?}"
+        );
+
+        // Every pct belongs to the build section. A percentage attributed to
+        // `up` or `ready` would be a lie about what is being measured.
+        let mut section = String::new();
+        for e in &events {
+            if e["event"] == "section_start" {
+                section = e["name"].as_str().unwrap_or_default().to_string();
+            }
+            if e["event"] == "pct" {
+                assert_eq!(section, Stage::Build.name(), "{events:#?}");
+            }
+        }
     }
 
     // -- the real adapter ----------------------------------------------------

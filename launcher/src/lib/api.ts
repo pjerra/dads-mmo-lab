@@ -36,9 +36,14 @@ export type TermEvent =
   | { event: "section_start"; name: string }
   | { event: "line"; level: "info" | "warn" | "error"; text: string }
   | { event: "section_end"; name: string; status: "ok" | "error" }
+  // Advisory progress within the currently-open section, 0-100. Sparse by
+  // design: most sections never emit it, and one that does may emit nothing for
+  // a long time first. Absence means "no number available", never 0. Nothing
+  // may depend on it -- see docs/cli-contract.md.
+  | { event: "pct"; value: number }
   | { event: "done"; data: unknown }
   | { event: "error"; error: DmlErr }
-  | { event: string; [key: string]: unknown }; // forward-compat: pct etc.
+  | { event: string; [key: string]: unknown }; // forward-compat
 
 // Native save dialog + write, both on the rust side -- returns false when
 // the user cancels. The webview never chooses the path.

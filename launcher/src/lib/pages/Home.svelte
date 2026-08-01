@@ -7,8 +7,9 @@
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
-  import { chipStart, serverStatus, refreshServerStatus } from "$lib/server-status.svelte";
+  import { chipStart, serverStatus, refreshServerStatus, statusLabel } from "$lib/server-status.svelte";
   import { restartState, clearApplyNeeded } from "$lib/restart-state.svelte";
+  import { installProgress } from "$lib/install-progress.svelte";
   import { bannerText, fastRestartBlockedReason } from "$lib/apply-needed";
   import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
@@ -263,7 +264,26 @@
     <button onclick={refresh} disabled={refreshing || busy}>Refresh</button>
   </header>
 
-  {#if serverStatus.detail}
+  <!-- An install in flight is answered ABOVE the `serverStatus.detail` gate, not
+       inside the verdict chain, and that placement is the whole point: on a
+       FIRST install there is no compose file yet, so `server-detail` errors,
+       `detail` stays null, and this page fell through to the "Couldn't read
+       world status" card below -- for the entire multi-hour build. The status
+       chip and this card share statusLabel() so the two can never disagree
+       about which state wins. -->
+  {#if installProgress.active}
+    {@const s = statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress)}
+    <div class="card status-card">
+      <div class="card-title">
+        <span class="dot status-dot mid"></span>
+        <strong>{s.label}</strong>
+      </div>
+      <p class="muted">
+        Installing the server. This takes hours and the Library page has the full
+        output — you can leave this window open, or close it and come back.
+      </p>
+    </div>
+  {:else if serverStatus.detail}
     {@const d = serverStatus.detail}
     <div
       class="card status-card"

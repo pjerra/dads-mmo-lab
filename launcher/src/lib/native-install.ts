@@ -22,6 +22,7 @@
 // two independent reviewers.
 
 import { gamesInstallNative, type InstallEvent, type TermEvent } from "./api";
+import { noteInstallEvent, setInstallActive } from "./install-progress.svelte";
 
 /** What one engine event becomes on the terminal. */
 export interface Translated {
@@ -102,6 +103,13 @@ export function nativeInstallRunner(
   onEvent: (e: InstallEvent) => void,
 ): Promise<void> {
   let ended = false;
+  // Committed BEFORE the first event: the engine's preflight takes a few
+  // seconds, and a status chip that reads "Stopped" for those seconds and then
+  // jumps is worse than one that commits the moment the work starts. Set HERE
+  // rather than in Library's startInstall() so it can never leak onto the WSL
+  // install path, which speaks raw pty chunks and would never clear it —
+  // pinning the chip to "Installing…" until the app restarts.
+  setInstallActive(true);
   const emit = (t: Translated) => {
     if (t.text) onEvent({ event: "chunk", text: t.text });
     if (t.exit !== null) {
@@ -109,7 +117,14 @@ export function nativeInstallRunner(
       onEvent({ event: "exit", code: t.exit });
     }
   };
-  return gamesInstallNative(id, (e) => emit(translateNativeEvent(e))).then(
+  return gamesInstallNative(id, (e) => {
+    // The status store and the terminal read the SAME stream independently:
+    // `pct` is invisible in the panel (which shows the raw build wall) and
+    // `line` is invisible to the status. Neither translation is the other's
+    // input, so neither can distort the other.
+    noteInstallEvent(e);
+    emit(translateNativeEvent(e));
+  }).then(
     () => {
       // A stream that resolved without a terminal event is a contract
       // violation somewhere upstream. Close the panel anyway — silently
@@ -117,6 +132,7 @@ export function nativeInstallRunner(
       if (!ended) {
         onEvent({ event: "chunk", text: "\n[error] The install ended without reporting a result.\n" });
         onEvent({ event: "exit", code: -1 });
+        setInstallActive(false);
       }
     },
     (err: unknown) => {
@@ -125,6 +141,9 @@ export function nativeInstallRunner(
       const msg = `${e?.message ?? String(err)}${e?.hint ? ` — ${e.hint}` : ""}`;
       onEvent({ event: "chunk", text: `\n[error] ${msg}\n` });
       onEvent({ event: "exit", code: -1 });
+      // The terminal `done`/`error` events clear this through the reducer; this
+      // is the path where NEITHER arrived, so nothing else ever will.
+      setInstallActive(false);
     },
   );
 }

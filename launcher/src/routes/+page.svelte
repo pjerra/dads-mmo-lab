@@ -9,6 +9,7 @@
     statusLabel,
   } from "$lib/server-status.svelte";
   import { restartState } from "$lib/restart-state.svelte";
+  import { installProgress } from "$lib/install-progress.svelte";
   import { initAutoShutdown } from "$lib/auto-shutdown.svelte";
   import { trayAction } from "$lib/tray-action.svelte";
   import { listen } from "@tauri-apps/api/event";
@@ -126,7 +127,9 @@
     });
   });
 
-  let status = $derived(statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting));
+  let status = $derived(
+    statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress),
+  );
 
   // Server-required greeting (DECIDED 2026-07-21): pages that can't function
   // with the server down are replaced by ServerRequired rather than mounted

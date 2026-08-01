@@ -76,6 +76,7 @@ Event vocabulary (one verbatim wire example each, Rust key order):
 | `section_start` | `{"event":"section_start","name":"compose-up"}` |
 | `line` | `{"event":"line","level":"info","text":"Starting containers"}` |
 | `section_end` | `{"event":"section_end","name":"compose-up","status":"ok"}` |
+| `pct` (advisory) | `{"event":"pct","value":62}` |
 | `done` (terminal) | `{"data":{"state":"running"},"event":"done"}` |
 | `error` (terminal) | `{"error":{"code":"CLI_CRASH","hint":"Check WSL: wsl -d dml-arch","message":"dml exited with code 3 before finishing"},"event":"error"}` |
 
@@ -102,6 +103,22 @@ Terminal-event rule:
   `error` event and exit 1 — a consumer that treats a streaming command as a stream is
   unaffected — but do not expect every rejection to arrive as a bare envelope.
 - Unknown event types must be ignored by consumers, never crash on them.
+
+`pct` is **advisory** and carries no stage name — it reports progress within whichever section is
+currently open, so a consumer reads the stage from the enclosing `section_start`. Rules a consumer
+can rely on:
+
+- `value` is an integer 0–100.
+- It is emitted **only on change and only upward**, so a 1808-step build produces at most 101
+  events rather than 1808. A consumer may render it directly without smoothing or clamping.
+- It is **sparse by design**: most sections never emit it, and a section that does may emit
+  nothing for a long time first (a compile that has not started yet has no honest number). Absence
+  means "no number available", never 0.
+- Nothing depends on it. Ignoring `pct` entirely must still produce a correct run — it is the
+  reference case for the unknown-event rule above.
+
+Emitted today by exactly one place: `install-native`'s `build` stage, parsed from ninja's
+`[1803/1808]` step counter in the streamed docker build output.
 
 Section-name constants live with each owning module in `dml-wow` (e.g. the module manager), not
 in `dml-core`. Not yet documented: the full inventory of section names per streaming command.

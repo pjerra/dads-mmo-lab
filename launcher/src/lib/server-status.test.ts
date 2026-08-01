@@ -36,37 +36,70 @@ function detailWith(containers: ServerDetail["containers"]): ServerDetail {
 // stopped/starting mid-restart).
 describe("statusLabel", () => {
   it("shows Restarting (amber) whenever restarting is true, for every verdict", () => {
-    expect(statusLabel("online", true)).toEqual({ label: "Restarting…", dot: "mid" });
-    expect(statusLabel("starting", true)).toEqual({ label: "Restarting…", dot: "mid" });
-    expect(statusLabel("stopped", true)).toEqual({ label: "Restarting…", dot: "mid" });
-    expect(statusLabel("soap_unreachable", true)).toEqual({ label: "Restarting…", dot: "mid" });
-    expect(statusLabel(null, true)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel("online", true, null)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel("starting", true, null)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel("stopped", true, null)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel("soap_unreachable", true, null)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel(null, true, null)).toEqual({ label: "Restarting…", dot: "mid" });
   });
 
   it("maps online to World is up / green, not restarting", () => {
-    expect(statusLabel("online", false)).toEqual({ label: "World is up", dot: "on" });
+    expect(statusLabel("online", false, null)).toEqual({ label: "World is up", dot: "on" });
   });
 
   it("maps starting to Starting… / amber, not restarting", () => {
-    expect(statusLabel("starting", false)).toEqual({ label: "Starting…", dot: "mid" });
+    expect(statusLabel("starting", false, null)).toEqual({ label: "Starting…", dot: "mid" });
   });
 
   it("maps soap_unreachable to Unreachable / orange-bad, not restarting", () => {
-    expect(statusLabel("soap_unreachable", false)).toEqual({ label: "Unreachable", dot: "bad" });
+    expect(statusLabel("soap_unreachable", false, null)).toEqual({ label: "Unreachable", dot: "bad" });
   });
 
   it("maps stopped to Stopped / red-off, not restarting", () => {
-    expect(statusLabel("stopped", false)).toEqual({ label: "Stopped", dot: "off" });
+    expect(statusLabel("stopped", false, null)).toEqual({ label: "Stopped", dot: "off" });
   });
 
   it("maps crashed to Server crashed with its own distinct dot kind", () => {
-    expect(statusLabel("crashed", false)).toEqual({ label: "Server crashed", dot: "crash" });
+    expect(statusLabel("crashed", false, null)).toEqual({ label: "Server crashed", dot: "crash" });
     // Restarting still wins -- recovering FROM a crash shows the restart.
-    expect(statusLabel("crashed", true)).toEqual({ label: "Restarting…", dot: "mid" });
+    expect(statusLabel("crashed", true, null)).toEqual({ label: "Restarting…", dot: "mid" });
   });
 
   it("falls back to Stopped for an unpolled/null verdict, not restarting", () => {
-    expect(statusLabel(null, false)).toEqual({ label: "Stopped", dot: "off" });
+    expect(statusLabel(null, false, null)).toEqual({ label: "Stopped", dot: "off" });
+  });
+
+  // Precedence: installing > restarting > polled verdict.
+  it("lets a running install outrank every verdict AND the restart flag", () => {
+    // The case this exists for: during a FIRST install there is no stack, so
+    // the poll reports "stopped" for the hours the machine spends compiling.
+    // Reporting the busiest the PC ever gets as an idle server is the bug.
+    const building = { active: true, stage: "build", pct: 62 };
+    for (const verdict of ["stopped", "crashed", "online", "starting", null] as const) {
+      expect(statusLabel(verdict, false, building)).toEqual({
+        label: "Building… 62%",
+        dot: "mid",
+      });
+      expect(statusLabel(verdict, true, building)).toEqual({
+        label: "Building… 62%",
+        dot: "mid",
+      });
+    }
+  });
+
+  it("shows the stage without a number before the compile starts counting", () => {
+    expect(statusLabel("stopped", false, { active: true, stage: "clone-core", pct: null })).toEqual(
+      { label: "Downloading AzerothCore…", dot: "mid" },
+    );
+  });
+
+  it("hands the display back the moment the install goes inactive", () => {
+    // A store left active would pin the chip to a stage that is not running.
+    // An INACTIVE store carrying leftover stage/pct must not linger either.
+    expect(statusLabel("online", false, { active: false, stage: "build", pct: 99 })).toEqual({
+      label: "World is up",
+      dot: "on",
+    });
   });
 });
 

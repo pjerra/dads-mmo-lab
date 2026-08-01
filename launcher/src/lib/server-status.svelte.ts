@@ -20,6 +20,7 @@ import {
   type ServerDetail,
 } from "./api";
 import { featureLocked } from "./features.svelte";
+import { installStatusText, type InstallProgress } from "./install-progress.svelte";
 import { toolPrefs } from "./tool-prefs.svelte";
 import { parseLanStatus, shouldEngageKeepAwake, verdictTransitionActions } from "./transitions";
 
@@ -269,7 +270,15 @@ export type StatusLabel = {
 export function statusLabel(
   verdict: ServerDetail["verdict"] | null,
   restarting: boolean,
+  install: InstallProgress | null,
 ): StatusLabel {
+  // An install in flight wins outright, ahead of even the restart override.
+  // During a first install the polled verdict is not just uninformative but
+  // WRONG-BY-OMISSION: there is no stack yet, so it reports "stopped" for hours
+  // while the machine compiles 1808 objects. `install` is a REQUIRED parameter
+  // rather than an optional one precisely so a call site cannot quietly opt out
+  // of that and go back to reporting a busy machine as an idle one.
+  if (install?.active) return { label: installStatusText(install), dot: "mid" };
   if (restarting) return { label: "Restarting…", dot: "mid" };
   switch (verdict) {
     case "online":

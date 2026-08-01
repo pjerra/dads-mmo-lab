@@ -17,6 +17,17 @@ pub fn section_start(name: &str) -> Value {
 pub fn section_end(name: &str, status: &str) -> Value {
     serde_json::json!({"event": "section_end", "name": name, "status": status})
 }
+/// Coarse progress within the section that is currently running, 0–100.
+///
+/// ADVISORY, and deliberately so: it carries no stage name (the consumer
+/// already knows the stage from `section_start`), it is not emitted by every
+/// section, and no outcome depends on it. A consumer that ignores it entirely
+/// must still see a correct install — which is what the standing
+/// forward-compat rule for this union already required of it while it was
+/// merely reserved.
+pub fn pct_event(value: u8) -> Value {
+    serde_json::json!({"event": "pct", "value": value})
+}
 pub fn done_event(data: Value) -> Value {
     serde_json::json!({"event": "done", "data": data})
 }
