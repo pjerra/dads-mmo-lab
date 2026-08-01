@@ -218,60 +218,47 @@ pub fn db_port_conflict_message(port_3306_in_use: bool, env_already_has_override
     }
 }
 
-/// The ports THIS stack actually binds — the only ones a collision on can be
-/// fatal, and the reason the refusal below is narrower than [`CONFLICT_PORTS`].
+/// REFUSE to start when another stack already owns the `ac-*` container names.
 ///
-/// The big list is a courtesy sweep for other games' servers on the same box;
-/// EverQuest holding 4000 has nothing to do with whether a WoW stack can come
-/// up. These three are ours, published by the generated compose file.
+/// ## This replaced a port check, and the reason is measured
 ///
-/// 3306 is deliberately ABSENT even though the stack uses it: it is the one
-/// collision with a real automatic remedy (the `.env` `DOCKER_DB_EXTERNAL_PORT`
-/// remap that [`check_port_conflicts`] already writes), and clients never
-/// connect to it directly. Turning a fixable collision into a refusal would be
-/// a downgrade.
-pub const STACK_PORTS: &[(u16, &str)] = &[
-    (3724, "the login server"),
-    (8085, "the world server"),
-    (7878, "the SOAP API the launcher's GM tools, My Party and console all use"),
-];
-
-/// REFUSE to start when a port this stack must own is definitely taken.
+/// The first version of this guard asked "can I bind 3724/8085/7878?" and
+/// refused if not. On Windows with Docker Desktop -- the only platform the beta
+/// ships on -- that question has NO BEARING on whether `docker compose up` will
+/// work, verified both directions on 2026-08-01 against a live engine:
 ///
-/// Advisory-only was considered and rejected, in the plan and again by the user
-/// (2026-08-01). The `ac-*` container names are global to the docker ENGINE, so
-/// a second stack cannot work no matter how it is started: a start that loses
-/// the port race crash-loops, and the boot-loop watch then spends the user's
-/// time arriving at the answer we already had. Refusing up front is the honest
-/// surface.
+/// | situation | bind probe said | reality |
+/// |---|---|---|
+/// | Docker publishing 0.0.0.0:47893 (`netstat` LISTENING, serving HTTP 200) | **FREE** | taken |
+/// | a plain `TcpListener` holding 0.0.0.0:47895 | **TAKEN** | `docker run -p 47895:80` came up anyway |
 ///
-/// TRI-STATE, and it is load-bearing here in a way it is not for a warning.
-/// `probe` must distinguish "definitely bound" from "could not tell": only
-/// `Tri::Yes` blocks. A probe that fails for any other reason — a permission
-/// error, one of Hyper-V's reserved Windows port ranges — must let the start
-/// proceed, because the cost of a wrong refusal is a user who cannot start a
-/// server that would have worked, with no override.
-pub fn stack_port_refusal(probe: impl Fn(u16) -> dml_core::setup::Tri) -> Option<(String, String)> {
-    use dml_core::setup::Tri;
-    let taken: Vec<&(u16, &str)> =
-        STACK_PORTS.iter().filter(|(p, _)| probe(*p) == Tri::Yes).collect();
-    if taken.is_empty() {
-        return None;
-    }
-    // Every colliding port is named. A message that reports only the first one
-    // sends the user round the loop again for the second.
-    let listed = taken
-        .iter()
-        .map(|(p, what)| format!("{p} ({what})"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let message = format!(
-        "Something is already using {}: {listed}.",
-        if taken.len() == 1 { "a port this server needs" } else { "ports this server needs" }
-    );
-    let hint = "The most likely cause is another DML server already running — only one can be up at a time, because they share the same container names. Stop it from Home, or close whatever else is using those ports, then start again."
-        .to_string();
-    Some((message, hint))
+/// So it was inert for the only cause its own message named ("another DML
+/// server is already running") and fired for cases where that message was
+/// wrong -- with no override. A guard that is wrong in both directions is worse
+/// than none, because people trust it.
+///
+/// The honest question was never about ports. It is the one the INSTALL guard
+/// already asks: the `ac-*` container names are global to the docker ENGINE, so
+/// a second stack cannot exist regardless of which ports anything holds. This
+/// now uses the same pure helpers ([`crate::install_native::parse_stack_owners`]
+/// / [`conflicting_owner`](crate::install_native::conflicting_owner)), so the
+/// install-time and start-time answers cannot disagree.
+///
+/// `ps_output` is the raw `docker ps -a --format '{{.Names}} {{.Label ...}}'`
+/// text, or `None` when docker could not answer -- which is evidence of
+/// NOTHING and never refuses.
+pub fn stack_conflict_refusal(
+    ps_output: Option<&str>,
+    our_project: &str,
+) -> Option<(String, String)> {
+    let out = ps_output?;
+    let owners = crate::install_native::parse_stack_owners(out);
+    let (container, owner) = crate::install_native::conflicting_owner(&owners, our_project)?;
+    Some((
+        crate::install_native::stack_conflict_message(&container, &owner),
+        "Stop the other server first (Home > Stop, or `docker compose down` in its folder), then start this one."
+            .to_string(),
+    ))
 }
 
 /// Pure core of the game-port warn loop (`90-main.sh:287-295`): two lines per
@@ -860,6 +847,32 @@ pub fn games_status(id: &str, games_dir: &std::path::Path) -> Result<serde_json:
     Ok(serde_json::json!({ "id": id, "state": state }))
 }
 
+/// Every container on this engine and the compose project that owns it, or
+/// `None` when docker could not answer.
+///
+/// `None` is a could-not-tell and the caller must treat it as evidence of
+/// nothing: a docker that is slow, wedged or mid-restart must never be read as
+/// "the names are taken" (which would block a legitimate start) OR as "the
+/// names are free" — the caller simply does not refuse, and a real collision
+/// then surfaces as a compose error we did not fabricate.
+fn stack_owner_ps(docker_program: &std::ffi::OsStr) -> Option<String> {
+    let mut cmd = std::process::Command::new(docker_program);
+    cmd.args(crate::install_native::stack_owner_argv());
+    crate::status::windows_no_window(&mut cmd);
+    let out = crate::status::output_bounded_draining(cmd, crate::maint::PROBE_TIMEOUT)?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The compose project name this title's stack runs under — the same
+/// derivation `composegen` uses, so the owner comparison is against our OWN
+/// project rather than a guess.
+fn dml_wow_project_name(compose_dir: &std::path::Path) -> String {
+    crate::composegen::project_name_for(compose_dir)
+}
+
 /// The blocking flow itself (real docker/SOAP I/O + wall-clock sleeps) — run
 /// under `spawn_blocking`. `emit` sends one NDJSON event per call; every
 /// return path emits its own terminal event(s) first, so the caller never
@@ -1111,17 +1124,28 @@ pub fn games_lifecycle_stream_with(
     // Cold starts only: on a restart the ports are (expectedly) held by this
     // server's own still-running containers, so the check would cry wolf.
     if mode == "start" {
-        // REFUSAL FIRST, and only for the ports this stack must own. The
-        // container names are global to the docker engine, so a second stack
-        // cannot work; letting it start and crash-loop only reaches the same
-        // conclusion slower, from a log the user has to read.
+        // REFUSAL FIRST, and it asks about CONTAINER NAMES rather than ports.
+        //
+        // The first version of this guard probed the three published ports and
+        // refused if it could not bind them. Measured against a live Docker
+        // Desktop on 2026-08-01, that question turned out to have no bearing on
+        // whether the start can work: a port Docker was publishing (LISTENING,
+        // serving) probed as FREE, and a port a plain listener held probed as
+        // TAKEN yet `docker run -p` came up over it anyway. Wrong in both
+        // directions, i.e. worse than nothing, because people trust a guard.
+        //
+        // The `ac-*` names ARE global to the docker engine, so this asks the
+        // same question the install-time guard asks, through the same pure
+        // helpers -- the two cannot now disagree.
         //
         // Deliberately AHEAD of the advisory sweep below: emitting a page of
         // warnings and then refusing anyway buries the sentence that matters.
-        if let Some((message, hint)) = lifecycle::stack_port_refusal(dml_core::compose::port_probe)
+        let project = dml_wow_project_name(&compose_dir);
+        let ps_out = stack_owner_ps(&docker_program);
+        if let Some((message, hint)) = lifecycle::stack_conflict_refusal(ps_out.as_deref(), &project)
         {
             emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
-            emit(gl_error("PORT_CONFLICT", message, &hint));
+            emit(gl_error("STACK_CONFLICT", message, &hint));
             return;
         }
         for line in lifecycle::check_port_conflicts(&compose_dir, lifecycle::port_listening) {
@@ -1423,74 +1447,75 @@ mod tests {
         assert_eq!(db_port_conflict_message(false, true), None);
     }
 
-    // -- the stack-port REFUSAL (Task 7, user decision 2026-08-01) -----------
+    // -- the stack-conflict REFUSAL (Task 7) ---------------------------------
+    //
+    // These replaced a set of tests that pinned a PORT-BIND guard. The guard
+    // was measured wrong in both directions against a live Docker Desktop on
+    // 2026-08-01 -- a port Docker was publishing probed as FREE, a port a plain
+    // listener held probed as TAKEN yet `docker run -p` came up over it -- so
+    // the old tests were green over a guard that could not work. Deleted rather
+    // than adapted: they asserted the wrong question confidently.
 
-    #[test]
-    fn a_taken_stack_port_refuses_the_start() {
-        use dml_core::setup::Tri;
-        for &(port, _) in STACK_PORTS {
-            let got = stack_port_refusal(|p| if p == port { Tri::Yes } else { Tri::No });
-            let (message, hint) = got.unwrap_or_else(|| panic!("port {port} must refuse"));
-            assert!(message.contains(&port.to_string()), "{message}");
-            assert!(!hint.is_empty());
-        }
+    fn ps_line(name: &str, project: &str) -> String {
+        format!("{name} {project}\n")
     }
 
     #[test]
-    fn free_stack_ports_start_normally() {
-        use dml_core::setup::Tri;
-        assert!(stack_port_refusal(|_| Tri::No).is_none());
-    }
-
-    /// THE TRI-STATE RULE, and the reason `port_listening` could not simply be
-    /// reused: it reads ANY bind failure as "in use". A permission error, or one
-    /// of the port ranges Hyper-V reserves on Windows, would otherwise become a
-    /// hard refusal to start a server that would have started fine -- with no
-    /// override anywhere in the UI.
-    #[test]
-    fn a_probe_that_could_not_answer_never_blocks_a_start() {
-        use dml_core::setup::Tri;
-        assert!(
-            stack_port_refusal(|_| Tri::Unknown).is_none(),
-            "could-not-tell must never refuse a start"
-        );
+    fn another_stack_holding_our_container_names_refuses_the_start() {
+        let out = ps_line("ac-worldserver", "some-other-stack");
+        let (message, hint) = stack_conflict_refusal(Some(&out), "ours").expect("must refuse");
+        assert!(message.contains("ac-worldserver"), "{message}");
+        // Naming the OTHER stack is the whole point: "a conflict" the user
+        // cannot locate is not actionable.
+        assert!(message.contains("some-other-stack"), "{message}");
+        assert!(hint.contains("Stop the other server"), "{hint}");
     }
 
     #[test]
-    fn every_colliding_port_is_named_not_just_the_first() {
-        use dml_core::setup::Tri;
-        // Reporting one at a time sends the user round the loop again.
-        let (message, _) = stack_port_refusal(|p| {
-            if p == 3724 || p == 8085 { Tri::Yes } else { Tri::No }
-        })
-        .expect("two collisions must refuse");
-        assert!(message.contains("3724"), "{message}");
-        assert!(message.contains("8085"), "{message}");
+    fn our_own_running_stack_never_refuses_our_own_start() {
+        // The names being held BY US is the normal state of a restart or a
+        // re-start after a partial stop. Refusing here would make the app
+        // unable to start the very server it manages.
+        let out = ps_line("ac-worldserver", "ours") + &ps_line("ac-database", "ours");
+        assert!(stack_conflict_refusal(Some(&out), "ours").is_none());
     }
 
-    /// 3306 has an automatic remedy (`check_port_conflicts` writes the `.env`
-    /// remap) and clients never talk to it directly, so it stays ADVISORY.
-    /// Promoting it would turn a fixable collision into a hard stop.
     #[test]
-    fn the_db_port_is_not_part_of_the_refusal() {
-        use dml_core::setup::Tri;
-        assert!(stack_port_refusal(|p| if p == 3306 { Tri::Yes } else { Tri::No }).is_none());
+    fn an_unrelated_container_is_not_a_conflict() {
+        let out = ps_line("nginx", "someone-else") + &ps_line("postgres", "another");
+        assert!(stack_conflict_refusal(Some(&out), "ours").is_none());
     }
 
-    /// The refusal is narrower than the advisory sweep ON PURPOSE: another
-    /// game's server holding its own port says nothing about whether a WoW
-    /// stack can come up.
+    /// TRI-STATE. Docker being slow, wedged or mid-restart is evidence of
+    /// NOTHING. Reading it as "the names are taken" would block a legitimate
+    /// start with no override; a real collision instead surfaces as a compose
+    /// error we did not fabricate.
     #[test]
-    fn another_games_port_does_not_refuse_a_wow_start() {
-        use dml_core::setup::Tri;
-        for other in [4000u16, 2593, 7171, 43594] {
+    fn a_docker_that_could_not_answer_never_refuses() {
+        assert!(stack_conflict_refusal(None, "ours").is_none());
+    }
+
+    #[test]
+    fn a_hand_run_container_with_no_compose_project_still_conflicts() {
+        // `docker run --name ac-database ...` owns the name just as firmly as a
+        // compose stack does, and reports an EMPTY project label. Skipping the
+        // unlabelled case is how that sails past the guard.
+        let out = ps_line("ac-database", "");
+        let (message, _) = stack_conflict_refusal(Some(&out), "ours").expect("must refuse");
+        assert!(message.contains("not managed by Docker Compose"), "{message}");
+    }
+
+    #[test]
+    fn every_container_the_generated_stack_claims_is_covered() {
+        // A name missing from the guard is a collision it cannot see. Asserted
+        // against the install engine's own list so the two cannot drift.
+        for name in crate::install_native::OWNED_CONTAINERS {
+            let out = ps_line(name, "other");
             assert!(
-                stack_port_refusal(|p| if p == other { Tri::Yes } else { Tri::No }).is_none(),
-                "port {other} belongs to another game and must not block a WoW start"
+                stack_conflict_refusal(Some(&out), "ours").is_some(),
+                "{name} must be guarded"
             );
         }
-        // ...while still being reported by the advisory sweep.
-        assert!(!game_port_conflict_lines(|p| p == 4000).is_empty());
     }
 
     #[test]

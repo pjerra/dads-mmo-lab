@@ -4503,52 +4503,59 @@ _check_port_conflicts() {
     done
 }
 
-# The ports THIS stack binds -- the only ones a collision on is fatal, and the
-# reason this list is much shorter than the advisory sweep above. EverQuest
-# holding 4000 says nothing about whether a WoW stack can come up.
-#
-# 3306 is deliberately ABSENT even though the stack uses it: it is the one
-# collision with a real automatic remedy (the .env DOCKER_DB_EXTERNAL_PORT
-# remap written above) and clients never connect to it directly. Promoting it
-# would turn a fixable collision into a hard stop.
-#
-# MIRRORS crates/dml-wow/src/lifecycle.rs `STACK_PORTS` / `stack_port_refusal`.
-# Changing one surface only half-ships (standing doctrine).
-_stack_ports() {
+# The container names THIS stack claims. GLOBAL to the docker ENGINE, not
+# per-server, which is exactly why only one DML server can exist on a PC.
+# Same set, same spelling as crates/dml-wow/src/install_native.rs
+# OWNED_CONTAINERS and data/native-compose.yml.tmpl.
+_stack_containers() {
 cat <<'EOF'
-3724:the login server
-8085:the world server
-7878:the SOAP API the launcher's GM tools, My Party and console all use
+ac-database
+ac-db-import
+ac-client-data-init
+ac-authserver
+ac-worldserver
 EOF
 }
 
-# REFUSE a start when a port this stack must own is definitely taken.
+# REFUSE a start when another stack already owns one of those names.
 #
-# Advisory-only was considered and rejected: the ac-* container names are global
-# to the docker ENGINE, so a second stack cannot work however it is started. A
-# start that loses the port race crash-loops and the user reads a log to reach
-# the answer we already had.
+# THIS REPLACED A PORT CHECK, and the reason was measured rather than argued
+# (2026-08-01, live Docker Desktop): asking "can I bind this port" has no
+# bearing on whether `docker compose up` will work. A port Docker was
+# publishing -- LISTENING in netstat, serving HTTP 200 -- probed as FREE, and a
+# port held by an ordinary listener probed as TAKEN yet `docker run -p` came up
+# over it anyway. Wrong in both directions is worse than absent, because people
+# trust a guard.
 #
-# TRI-STATE. `ss` not being present, or failing, is evidence of NOTHING -- the
-# check is SKIPPED rather than treated as "ports are free" or as a refusal. The
-# cost of a wrong refusal is a user who cannot start a server that would have
-# worked, with no override.
-_stack_port_refusal() {
-    local in_use entry port what taken=""
-    in_use="$(ss -tlnp 2>/dev/null)" || return 0
-    [[ -z "$in_use" ]] && return 0
-    while IFS= read -r entry || [[ -n "$entry" ]]; do
-        [[ -z "$entry" ]] && continue
-        port="${entry%%:*}"
-        what="${entry#*:}"
-        if echo "$in_use" | grep -q ":${port}[[:space:]]"; then
-            [[ -n "$taken" ]] && taken+=", "
-            taken+="$port ($what)"
-        fi
-    done < <(_stack_ports)
-    [[ -z "$taken" ]] && return 0
-    echo "[dml] ERROR: Something is already using ports this server needs: $taken." >&2
-    echo "[dml]   The most likely cause is another DML server already running -- only one can be up at a time, because they share the same container names. Stop it, or close whatever else is using those ports, then start again." >&2
+# The container names are the real constraint, on every platform, and this is
+# the same question the install-time guard asks.
+#
+# TRI-STATE: docker failing to answer is evidence of NOTHING. The check is
+# SKIPPED rather than read as a conflict -- a wedged docker must never block a
+# start it knows nothing about.
+_stack_conflict_refusal() {
+    local out name project line found_name="" found_project=""
+    out="$(docker ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}' 2>/dev/null)" || return 0
+    [[ -z "$out" ]] && return 0
+    while IFS= read -r name || [[ -n "$name" ]]; do
+        [[ -z "$name" ]] && continue
+        # The name must match a WHOLE field, never a substring: `ac-database`
+        # must not be satisfied by a container called `my-ac-database-backup`.
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" ]] && continue
+            if [[ "${line%% *}" == "$name" ]]; then
+                project="${line#* }"
+                [[ "$project" == "$line" ]] && project=""
+                found_name="$name"; found_project="$project"
+                break 2
+            fi
+        done <<< "$out"
+    done < <(_stack_containers)
+    [[ -z "$found_name" ]] && return 0
+    local owner="the stack \"$found_project\""
+    [[ -z "$found_project" ]] && owner="something that is not managed by Docker Compose"
+    echo "[dml] ERROR: The container name $found_name is already taken by $owner. Those names are global to Docker, not per server, so only one DML server can exist on this PC at a time." >&2
+    echo "[dml]   Stop the other server first (docker compose down in its folder), then start this one." >&2
     return 1
 }
 
@@ -4737,7 +4744,7 @@ case "$cmd" in
     cd "$compose_dir"
     # Refusal first: emitting a page of advisory warnings and then refusing
     # anyway buries the sentence that matters.
-    _stack_port_refusal || exit 1
+    _stack_conflict_refusal || exit 1
     _check_port_conflicts
     echo "[dml] Starting $title..."
     docker compose up -d

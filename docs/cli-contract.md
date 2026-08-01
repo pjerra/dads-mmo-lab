@@ -324,6 +324,7 @@ Error codes (all exit 1, all arriving as in-stream terminal `error` events unles
 | `INSTALL_UNDERSPEC` | preflight: below the RAM/disk floor — the one refusal `--allow-underspec` downgrades to a warning (which still carries the numbers) |
 | `INSTALL_COMPOSE_EXISTS` | a compose file DML did not generate is already in the title dir |
 | `INSTALL_STACK_CONFLICT` | another compose project owns an `ac-*` container name |
+| `STACK_CONFLICT` | the same collision, refused at `games start` rather than at install time. Emitted by `games_lifecycle_stream` on a cold start only. Deliberately NOT a port check: the `ac-*` names are global to the docker engine, and a bind probe was measured (2026-08-01) to be wrong in both directions on Docker Desktop — a Docker-published port reads as free, and a port an ordinary listener holds reads as taken while `docker run -p` succeeds over it. A docker that cannot answer never refuses. |
 | `INSTALL_DIR_NOT_EMPTY` | the clone destination exists and holds files that are not ours |
 | `INSTALL_WRONG_REMOTE` | an existing checkout points at a different repository |
 | `INSTALL_CLONE_FAILED` / `INSTALL_BUILD_FAILED` / `INSTALL_UP_FAILED` | that stage's command failed |

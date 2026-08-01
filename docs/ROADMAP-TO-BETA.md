@@ -223,14 +223,31 @@ file + the BuildKit cache, not process suspension).
 
 ### ✅ B2, B3, B4 — all three shipped 2026-08-01
 
-**Task 7 — the port guard refuses.** Only on the three ports this stack binds
-(3724/8085/7878); 3306 stays advisory because it is the one collision with a
-real automatic remedy. Tri-state throughout: a probe that cannot answer never
-blocks a start, which is why `port_listening` could not simply be reused (it
-reads ANY bind failure as "in use"). Mirrored into bash. **The tri-state test
-found a pre-existing bug**: `_check_port_conflicts` ran an unguarded `ss`
-substitution under `set -euo pipefail`, so on a machine without `ss` the whole
-command died silently — `dml start <title>` exited 1 with no output at all.
+**Task 7 — the start refuses on a CONTAINER-NAME conflict.** It shipped first as
+a *port* guard and an adversarial audit measured that guard wrong in both
+directions against a live Docker Desktop, which is worth recording because the
+idea is so plausible:
+
+| situation | the bind probe said | reality |
+|---|---|---|
+| Docker publishing `0.0.0.0:47893` — `netstat` LISTENING, serving HTTP 200 | **FREE** | taken |
+| a plain `TcpListener` holding `0.0.0.0:47895` | **TAKEN** | `docker run -p 47895:80` came up anyway |
+
+So it was inert for the only cause its own message named ("another DML server is
+already running") and fired for cases where that message was wrong — with no
+override. **A guard wrong in both directions is worse than none, because people
+trust it.** Independently reproduced before acting on it.
+
+The question was never about ports: the `ac-*` names are global to the docker
+ENGINE, so a second stack cannot exist whatever the ports are doing. The guard
+now asks exactly what the install-time guard asks, through the same pure helpers,
+so the two cannot disagree. Mirrored into bash. Tri-state holds — a docker that
+cannot answer never blocks a start.
+
+**The tri-state test also found a pre-existing bug**: `_check_port_conflicts`
+ran an unguarded `ss` substitution under `set -euo pipefail`, so on a machine
+without `ss` the whole command died silently — `dml start <title>` exited 1 with
+no output at all.
 
 **Task 11 — the account + SOAP bootstrap.** Guided, because automation is not
 available: `docker attach` REFUSES piped stdin against a TTY container
