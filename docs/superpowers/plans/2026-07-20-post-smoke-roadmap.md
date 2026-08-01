@@ -849,6 +849,33 @@ NOT SCOPED YET. The open questions, all of which change the size of the job:
 Blocked on nothing technically, but it is a FEATURE, and SHIP-LIST's one rule is
 no new features until Phase 4 is done. Post-beta.
 
+## Round 5.6 — Fully automatic SOAP account setup (user request, 2026-08-01)
+
+**Spec: `docs/superpowers/specs/2026-08-01-soap-account-autosetup-design.md`.**
+Design approved by the user the same day it was asked for. Not yet implemented.
+
+The direct-write route (`srp6.rs`, `account_write.rs`, `wow_soap_account_create`)
+already removed the worldserver-console step earlier that day, but three manual
+acts remained at the end of a multi-hour install: the card renders only inside
+`Library.svelte`, the user must invent and type a password, and the user must
+click a button. This removes all three.
+
+Four decisions, all user-taken 2026-08-01:
+
+1. The launcher **generates** the password (16 chars — AzerothCore's own ceiling,
+   enforced by `valid_account_pass`), revealable from Home's health panel.
+2. It fires **any time SOAP is reachable and rejecting us**, off the existing
+   status poll — so the migrated `dml-native` server self-heals too, not only
+   fresh installs.
+3. **Silent, with a dismissible shell-level banner** naming the account. Not a
+   prompt.
+4. On a name collision it creates `dmlsoap_<random>`. It **never** overwrites or
+   resets an account it did not create.
+
+Accepted risk, recorded here as well as in the spec: pointing the launcher at any
+AzerothCore whose SOAP rejects it now creates a GM3 account. Guarded by
+`Rejected`-only, never-overwrite, one attempt per launcher run, and the banner.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
