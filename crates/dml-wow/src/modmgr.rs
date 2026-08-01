@@ -499,7 +499,10 @@ pub fn mysql_run_stmt(program: &OsStr, password: &str, db: &str, stmt: &str) -> 
 /// concurrently, so neither a large SQL file nor a chatty `mysql` response
 /// can deadlock the pipe — same reasoning as `status::
 /// output_bounded_draining`'s own doc comment.
-fn run_with_stdin_bounded_draining(mut cmd: Command, input: Vec<u8>, timeout: Duration) -> Option<std::process::Output> {
+/// `pub(crate)`: `unbound`'s SQL-migration stage pipes the embedded payload
+/// files into `docker exec -i … mysql` through this same runner rather than
+/// growing a second stdin-feeding subprocess loop.
+pub(crate) fn run_with_stdin_bounded_draining(mut cmd: Command, input: Vec<u8>, timeout: Duration) -> Option<std::process::Output> {
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
     let mut stdin = child.stdin.take().expect("stdin was piped");
