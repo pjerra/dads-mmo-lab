@@ -82,6 +82,7 @@ use std::time::{Duration, Instant};
 use dml_core::error::CmdError;
 use dml_core::events::{
     done_event, error_event, line_event, pct_event, section_end, section_start,
+    section_start_limited,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -544,7 +545,18 @@ impl InstallIo for ProcIo {
             };
         }
         let args: Vec<&str> = call.args.iter().map(String::as_str).collect();
-        match dml_core::proc::run_streamed_lines(program, &args, call.cwd.as_deref(), |l| on_line(l)) {
+        // Derived from the TOOL, not carried on the Call: git is the one that
+        // reports progress by redrawing a line with `\r`, and docker's build
+        // wall is plain `\n` output whose blank lines separate vertices. Making
+        // it a Call field would put the same constant answer at every
+        // construction site and invite one of them to get it wrong.
+        let split = match call.program {
+            Program::Git => dml_core::proc::LineSplit::NewlineOrReturn,
+            Program::Docker => dml_core::proc::LineSplit::Newline,
+        };
+        match dml_core::proc::run_streamed_lines(program, &args, call.cwd.as_deref(), split, |l| {
+            on_line(l)
+        }) {
             Some(st) => RunOutcome::Exited(st.code().unwrap_or(-1)),
             // The ONLY `None` this helper returns is a spawn failure, so it is a
             // could-not-tell and never a fabricated exit code.
@@ -709,6 +721,11 @@ pub fn valid_title_id(id: &str) -> bool {
 pub fn clone_argv(repo: &RepoRef, dest: &Path) -> Vec<String> {
     let mut argv = vec![
         "clone".to_string(),
+        // Git suppresses its counter entirely when stdout is not a terminal,
+        // and ours never is. Without this flag the download is silent for the
+        // however-many minutes AzerothCore's full history takes, and there is
+        // nothing for `CloneProgress` to read.
+        "--progress".to_string(),
         "--config".to_string(),
         "core.autocrlf=input".to_string(),
         "--branch".to_string(),
@@ -1006,6 +1023,143 @@ impl BuildProgress {
     }
 }
 
+/// The two `git clone` phases worth reporting.
+///
+/// Git runs FOUR — Enumerating, Counting, Compressing, Receiving, then
+/// Resolving — and each counts 0-100% on its own. Reporting them raw gives four
+/// sawtooths that every user reads as a broken bar. The first three are the
+/// SERVER's work and are announced with a `remote: ` prefix (which is also what
+/// keeps them from matching here, since these prefixes are anchored); the two
+/// that describe the local machine's wait are these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClonePhase {
+    /// The download itself. On AzerothCore's full history this is the long one.
+    Receiving,
+    /// Rebuilding the objects afterwards. Shorter, but far from instant on a
+    /// repository this size.
+    Resolving,
+}
+
+/// `Receiving objects:  45% (12345/27000), 12.34 MiB | 5.67 MiB/s` → the phase
+/// and its own percentage.
+pub fn parse_clone_phase(line: &str) -> Option<(ClonePhase, u8)> {
+    let text = line.trim_start();
+    let (phase, rest) = if let Some(r) = text.strip_prefix("Receiving objects:") {
+        (ClonePhase::Receiving, r)
+    } else if let Some(r) = text.strip_prefix("Resolving deltas:") {
+        (ClonePhase::Resolving, r)
+    } else {
+        return None;
+    };
+    let rest = rest.trim_start();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    // The `%` must be the very next character. Without that check a future git
+    // line beginning with these words but counting something else would be read
+    // as a percentage.
+    if digits.is_empty() || !rest[digits.len()..].starts_with('%') {
+        return None;
+    }
+    Some((phase, digits.parse::<u32>().ok()?.min(100) as u8))
+}
+
+/// Is this line one of git's progress redraws?
+///
+/// Asked separately from the percentage because the two questions have
+/// different answers: a redraw that did not move the number is still a redraw,
+/// and showing it would bury the clone's real output under hundreds of
+/// near-identical lines.
+pub fn is_clone_progress_line(line: &str) -> bool {
+    parse_clone_phase(line).is_some()
+}
+
+/// A stream of clone lines → one monotonic 0-100.
+///
+/// The two phases are WEIGHTED into a single climb — receiving 0-90, resolving
+/// 90-100 — rather than shown as two runs of 0-100. The split is deliberately
+/// uneven because the phases are: on AzerothCore's history the download
+/// dominates, and giving resolving an equal half would park the number at 50%
+/// for most of the wait.
+#[derive(Debug, Default)]
+pub struct CloneProgress {
+    reported: Option<u8>,
+}
+
+impl CloneProgress {
+    const RECEIVING_SHARE: u32 = 90;
+
+    pub fn observe(&mut self, line: &str) -> Option<u8> {
+        let (phase, p) = parse_clone_phase(line)?;
+        let pct = match phase {
+            ClonePhase::Receiving => u32::from(p) * Self::RECEIVING_SHARE / 100,
+            ClonePhase::Resolving => {
+                Self::RECEIVING_SHARE + u32::from(p) * (100 - Self::RECEIVING_SHARE) / 100
+            }
+        } as u8;
+        match self.reported {
+            Some(prev) if pct <= prev => None,
+            _ => {
+                self.reported = Some(pct);
+                Some(pct)
+            }
+        }
+    }
+}
+
+/// `Container ac-worldserver Started` → the container and the state.
+pub fn parse_container_event(line: &str) -> Option<(String, String)> {
+    let mut parts = line.trim().strip_prefix("Container ")?.split_whitespace();
+    let name = parts.next()?.to_string();
+    let state = parts.next()?.to_string();
+    Some((name, state))
+}
+
+/// The states that mean a container is ACCOUNTED FOR.
+///
+/// `Creating`/`Created`/`Starting`/`Waiting` are all mid-flight and every
+/// container passes through several of them, so counting those would run the
+/// number past 100% and back. `Exited` belongs here because the one-shot
+/// services (`ac-db-import`, `ac-client-data-init`) finish that way BY DESIGN —
+/// treating their success as "not done yet" would leave the step stuck at 60%
+/// through a working install.
+pub const UP_DONE_STATES: [&str; 4] = ["Started", "Running", "Healthy", "Exited"];
+
+/// Containers finished / containers expected.
+///
+/// Counts each container ONCE (compose narrates several states per container),
+/// and only ever climbs.
+#[derive(Debug)]
+pub struct UpProgress {
+    total: usize,
+    seen: std::collections::BTreeSet<String>,
+    reported: Option<u8>,
+}
+
+impl UpProgress {
+    pub fn new(total: usize) -> Self {
+        UpProgress { total, seen: std::collections::BTreeSet::new(), reported: None }
+    }
+
+    pub fn observe(&mut self, line: &str) -> Option<u8> {
+        if self.total == 0 {
+            return None;
+        }
+        let (name, state) = parse_container_event(line)?;
+        if !UP_DONE_STATES.contains(&state.as_str()) || !self.seen.insert(name) {
+            return None;
+        }
+        // Capped rather than trusted: a container this build did not declare
+        // (an override adding one) must not produce 120%.
+        let pct = (self.seen.len().min(self.total) * 100 / self.total) as u8;
+        match self.reported {
+            Some(prev) if pct <= prev => None,
+            _ => {
+                self.reported = Some(pct);
+                Some(pct)
+            }
+        }
+    }
+}
+
 /// Compare two clone URLs for "same repository": trailing `/` and `.git` are
 /// cosmetic, and Git hosting is case-insensitive about the host.
 fn same_repo(a: &str, b: &str) -> bool {
@@ -1076,21 +1230,25 @@ impl<'a> Engine<'a> {
     /// line into `tee`. Used for the clones, the build and the `up` — the three
     /// places a user is watching a progress wall.
     fn run_echo(&self, call: &Call, tee: Option<&Path>) -> RunOutcome {
-        self.run_echo_with(call, tee, &mut |_| {})
+        self.run_echo_with(call, tee, &mut |_| true)
     }
 
-    /// [`Self::run_echo`] plus a per-line hook, for the one caller that also
-    /// mines the output for progress.
+    /// [`Self::run_echo`] with a per-line hook that both observes each line and
+    /// decides whether it reaches the TERMINAL (`true` = show it).
     ///
-    /// The hook runs LAST, after the tee and after the terminal line. So the
-    /// raw output a user is watching is never delayed or reordered by anything
-    /// derived from it, and a derived event can only ever follow the line it
-    /// came from.
+    /// The ordering is fixed and load-bearing: the tee is written FIRST, so the
+    /// log file on disk stays the complete record no matter what the hook
+    /// decides. Only the on-screen wall is ever filtered.
+    ///
+    /// That distinction exists because of the clone. `git clone --progress`
+    /// redraws its counter hundreds of times a second; showing every redraw
+    /// would bury the surrounding output, and dropping them from the LOG too
+    /// would destroy exactly the evidence a stalled download needs.
     fn run_echo_with(
         &self,
         call: &Call,
         tee: Option<&Path>,
-        on_line: &mut dyn FnMut(&str),
+        on_line: &mut dyn FnMut(&str) -> bool,
     ) -> RunOutcome {
         use std::io::Write;
         let mut file = tee.and_then(|p| {
@@ -1102,8 +1260,9 @@ impl<'a> Engine<'a> {
                 let _ = writeln!(f, "{l}");
                 let _ = f.flush();
             }
-            self.line("info", l);
-            on_line(l);
+            if on_line(l) {
+                self.line("info", l);
+            }
         })
     }
 
@@ -1386,7 +1545,20 @@ impl<'a> Engine<'a> {
 
         self.line("info", format!("cloning {what} ({}, branch {})...", repo.url, repo.branch));
         let argv = clone_argv(repo, &dest);
-        let outcome = self.run_echo(&self.git_clone(argv), None);
+        let mut progress = CloneProgress::default();
+        let outcome = self.run_echo_with(&self.git_clone(argv), None, &mut |l| {
+            match progress.observe(l) {
+                Some(pct) => {
+                    (self.emit)(pct_event(pct));
+                    // The redraw that MOVED the number is worth one line; that
+                    // caps a download at ~101 lines instead of thousands.
+                    true
+                }
+                // A redraw that did not move the number is noise. Anything that
+                // is not a redraw at all is real output and always shown.
+                None => !is_clone_progress_line(l),
+            }
+        });
         if outcome.is_ok() {
             if let Some(sha) = repo.commit.clone() {
                 self.apply_pin(&dest, &sha, what)?;
@@ -1562,6 +1734,10 @@ impl<'a> Engine<'a> {
                 if let Some(pct) = progress.observe(l) {
                     (self.emit)(pct_event(pct));
                 }
+                // The build wall is shown in FULL: BuildKit's plain output does
+                // not redraw, so there is nothing here to suppress and every
+                // line is one a failed build needs.
+                true
             },
         );
         if outcome.is_ok() {
@@ -1579,7 +1755,19 @@ impl<'a> Engine<'a> {
 
     fn do_up(&mut self) -> Result<(), Fail> {
         self.line("info", "starting the server containers...");
-        let outcome = self.run_echo(&self.docker(up_argv(), Some(self.title_dir.clone())), None);
+        let mut progress = UpProgress::new(composegen::base_container_names().len());
+        let outcome = self.run_echo_with(
+            &self.docker(up_argv(), Some(self.title_dir.clone())),
+            None,
+            &mut |l| {
+                if let Some(pct) = progress.observe(l) {
+                    (self.emit)(pct_event(pct));
+                }
+                // Compose's up output is a few dozen lines and does not redraw;
+                // all of it is shown.
+                true
+            },
+        );
         if outcome.is_ok() {
             return Ok(());
         }
@@ -1693,7 +1881,15 @@ impl<'a> Engine<'a> {
     }
 
     fn run_stage(&mut self, stage: Stage) -> Result<(), Fail> {
-        (self.emit)(section_start(stage.name()));
+        // `ready` is the one stage with no denominator — it WAITS. It carries
+        // its ceiling instead of a percentage so a consumer can show "waited
+        // 4:31 of up to 30:00" without dressing a clock up as progress.
+        (self.emit)(match stage {
+            Stage::Ready => {
+                section_start_limited(stage.name(), self.opts.ready_timeout.as_secs())
+            }
+            _ => section_start(stage.name()),
+        });
         let result = match stage {
             Stage::Preflight => self.do_preflight(),
             Stage::Guard => self.do_guard(),
@@ -2246,6 +2442,26 @@ mod tests {
         (rc, events.into_inner())
     }
 
+    /// The `pct` values emitted while `section` was the open one.
+    ///
+    /// Scoping is the assertion, not a convenience: a percentage credited to
+    /// the wrong stage is a lie about what is being measured, and every stage
+    /// that can report a number now does — so a global collection would pass
+    /// while measuring the wrong thing.
+    fn pcts_in_section(events: &[Value], section: &str) -> Vec<u64> {
+        let mut open = String::new();
+        let mut out = Vec::new();
+        for e in events {
+            if e["event"] == "section_start" {
+                open = e["name"].as_str().unwrap_or_default().to_string();
+            }
+            if e["event"] == "pct" && open == section {
+                out.push(e["value"].as_u64().unwrap_or_default());
+            }
+        }
+        out
+    }
+
     fn sections(events: &[Value]) -> Vec<String> {
         events
             .iter()
@@ -2403,7 +2619,7 @@ mod tests {
             error_message(&events)
         );
         assert!(
-            !io.has("clone --config"),
+            !io.has("clone --progress"),
             "nothing may be cloned once the guard has refused: {:#?}",
             io.log()
         );
@@ -2436,7 +2652,7 @@ mod tests {
         assert!(msg.contains("ac-database"), "must name the container it collided on: {msg}");
         assert!(msg.contains("dml-wow-native"), "must name the stack that owns it: {msg}");
         assert!(
-            !io.has("clone --config"),
+            !io.has("clone --progress"),
             "nothing may be cloned once the guard has refused: {:#?}",
             io.log()
         );
@@ -2667,7 +2883,7 @@ mod tests {
         let (rc, events) = run_install(&io, &fast_opts(&games));
 
         assert_eq!(rc, 0, "{events:#?}");
-        assert!(!io.has("clone --config"), "a resume must not re-clone: {:#?}", io.log());
+        assert!(!io.has("clone --progress"), "a resume must not re-clone: {:#?}", io.log());
         assert!(
             !io.has("docker-compose.build.yml build"),
             "a resume must not re-run a completed build: {:#?}",
@@ -2867,7 +3083,7 @@ mod tests {
 
         assert_eq!(rc, 0, "{events:#?}");
         assert!(
-            io.has("clone --config"),
+            io.has("clone --progress"),
             "a checkout that is not on disk must be re-cloned, whatever the state file says: {:#?}",
             io.log()
         );
@@ -2933,7 +3149,7 @@ mod tests {
         );
         // The module checkout on disk was ADOPTED rather than re-cloned.
         assert!(io.has("remote get-url"), "{:#?}", io.log());
-        assert!(!io.has("clone --config"), "{:#?}", io.log());
+        assert!(!io.has("clone --progress"), "{:#?}", io.log());
         let _ = std::fs::remove_dir_all(&games);
     }
 
@@ -2954,7 +3170,7 @@ mod tests {
         assert_eq!(rc, 1);
         assert_eq!(error_code(&events), CODE_WRONG_REMOTE, "{events:#?}");
         assert!(error_message(&events).contains("example.invalid"), "{}", error_message(&events));
-        assert!(!io.has("clone --config"), "the stranger's checkout must not be clobbered: {:#?}", io.log());
+        assert!(!io.has("clone --progress"), "the stranger's checkout must not be clobbered: {:#?}", io.log());
         let _ = std::fs::remove_dir_all(&games);
     }
 
@@ -3010,7 +3226,7 @@ mod tests {
         let io2 = happy_io();
         let (rc2, events2) = run_install(&io2, &fast_opts(&games));
         assert_eq!(rc2, 0, "{events2:#?}");
-        assert!(!io2.has("clone --config"), "{:#?}", io2.log());
+        assert!(!io2.has("clone --progress"), "{:#?}", io2.log());
         assert!(io2.has("docker-compose.build.yml build"), "{:#?}", io2.log());
         assert!(
             load_state(&title).unwrap().last_error.is_none(),
@@ -3024,7 +3240,7 @@ mod tests {
     fn a_failing_clone_reports_it_and_records_nothing_as_done() {
         let games = fixture("fail-clone");
         let title = games.join("wow-server-playerbots");
-        let io = happy_io().reply("clone --config", 128, &["fatal: could not read from remote"]);
+        let io = happy_io().reply("clone --progress", 128, &["fatal: could not read from remote"]);
         let (rc, events) = run_install(&io, &fast_opts(&games));
 
         assert_eq!(rc, 1);
@@ -3222,7 +3438,7 @@ mod tests {
                 "probe `{needle}` must be time-bounded -- a wedged dockerd answers the socket and then never replies"
             );
         }
-        for needle in ["clone --config", "docker-compose.build.yml build", "compose up -d"] {
+        for needle in ["clone --progress", "docker-compose.build.yml build", "compose up -d"] {
             assert!(
                 find(needle).timeout.is_none(),
                 "`{needle}` must NOT be killed on a timer: a first build legitimately runs for hours"
@@ -3358,11 +3574,9 @@ mod tests {
         let (rc, events) = run_install(&io, &fast_opts(&games));
         assert_eq!(rc, 0, "{events:#?}");
 
-        let pcts: Vec<u64> = events
-            .iter()
-            .filter(|e| e["event"] == "pct")
-            .map(|e| e["value"].as_u64().unwrap_or_default())
-            .collect();
+        // Scoped to the build section. Every stage that can report a number now
+        // does, so a global collection here would silently mix in `up`'s.
+        let pcts = pcts_in_section(&events, Stage::Build.name());
         assert_eq!(pcts, vec![0, 50, 100], "{events:#?}");
 
         // Advisory means advisory: the raw lines still reach the terminal
@@ -3378,17 +3592,204 @@ mod tests {
             "the build output must still be echoed verbatim: {lines:#?}"
         );
 
-        // Every pct belongs to the build section. A percentage attributed to
-        // `up` or `ready` would be a lie about what is being measured.
-        let mut section = String::new();
-        for e in &events {
-            if e["event"] == "section_start" {
-                section = e["name"].as_str().unwrap_or_default().to_string();
-            }
-            if e["event"] == "pct" {
-                assert_eq!(section, Stage::Build.name(), "{events:#?}");
-            }
+    }
+
+    // -- clone progress ------------------------------------------------------
+
+    #[test]
+    fn a_git_progress_redraw_parses_to_its_phase_and_percentage() {
+        assert_eq!(
+            parse_clone_phase("Receiving objects:  45% (12345/27000), 12.34 MiB | 5.67 MiB/s"),
+            Some((ClonePhase::Receiving, 45))
+        );
+        assert_eq!(
+            parse_clone_phase("Resolving deltas: 100% (900000/900000), done."),
+            Some((ClonePhase::Resolving, 100))
+        );
+    }
+
+    /// The SERVER's phases each count 0-100% too, and counting them would make
+    /// the bar run to 100 and restart three times before the download even
+    /// begins. They are excluded by anchoring the match, which the `remote: `
+    /// prefix defeats.
+    #[test]
+    fn the_servers_own_phases_are_not_our_progress() {
+        for line in [
+            "remote: Enumerating objects: 1234567, done.",
+            "remote: Counting objects: 100% (123/123), done.",
+            "remote: Compressing objects:  67% (100/150)",
+            "Cloning into '/games/wow-server-playerbots'...",
+            "Receiving objects: not-a-number",
+            "",
+        ] {
+            assert_eq!(parse_clone_phase(line), None, "{line:?} must not parse as progress");
         }
+    }
+
+    #[test]
+    fn the_two_phases_are_one_monotonic_climb_not_two_runs_of_a_hundred() {
+        let mut p = CloneProgress::default();
+        assert_eq!(p.observe("Receiving objects:   0% (1/27000)"), Some(0));
+        assert_eq!(p.observe("Receiving objects:  50% (13500/27000)"), Some(45));
+        assert_eq!(p.observe("Receiving objects: 100% (27000/27000), done."), Some(90));
+        // Resolving starts its OWN 0-100 here. If it were reported raw the bar
+        // would fall from 90 to 0 -- the exact thing users read as a crash.
+        assert_eq!(p.observe("Resolving deltas:   0% (0/900000)"), None);
+        assert_eq!(p.observe("Resolving deltas:  50% (450000/900000)"), Some(95));
+        assert_eq!(p.observe("Resolving deltas: 100% (900000/900000), done."), Some(100));
+    }
+
+    #[test]
+    fn a_redraw_that_does_not_move_the_number_reports_nothing() {
+        let mut p = CloneProgress::default();
+        assert_eq!(p.observe("Receiving objects:  10% (2700/27000)"), Some(9));
+        // 11% of 90 is still 9 after integer division -- one event, not two.
+        assert_eq!(p.observe("Receiving objects:  11% (2970/27000)"), None);
+        assert_eq!(p.observe("Receiving objects:  12% (3240/27000)"), Some(10));
+    }
+
+    /// Drives the REAL engine: `--progress` on the argv, `pct` events out, and
+    /// the terminal filtered to the redraws that moved the number while the
+    /// non-progress lines all survive.
+    #[test]
+    fn the_clone_stage_reports_progress_and_keeps_the_wall_readable() {
+        let games = fixture("clone-progress");
+        let io = happy_io().reply_seq(
+            "clone --progress",
+            0,
+            &[
+                &[
+                    "Cloning into '/games/wow-server-playerbots'...",
+                    "remote: Counting objects: 100% (123/123), done.",
+                    "Receiving objects:   0% (1/27000)",
+                    "Receiving objects:  50% (13500/27000)",
+                    "Receiving objects:  51% (13770/27000)",
+                    "Receiving objects: 100% (27000/27000), done.",
+                    "Resolving deltas: 100% (900000/900000), done.",
+                ],
+                &["Cloning into '/games/modules/mod-playerbots'...", "Receiving objects: 100% (5/5), done."],
+            ],
+        );
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+
+        assert!(
+            io.has("clone --progress"),
+            "git prints nothing to a pipe without --progress: {:#?}",
+            io.log()
+        );
+
+        let pcts = pcts_in_section(&events, Stage::CloneCore.name());
+        assert_eq!(pcts, vec![0, 45, 90, 100], "{events:#?}");
+
+        let lines: Vec<String> = events
+            .iter()
+            .filter(|e| e["event"] == "line")
+            .map(|e| e["text"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("Cloning into")),
+            "real clone output must survive the filter: {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("51% (13770/27000)")),
+            "a redraw that did not move the number must not reach the wall: {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("50% (13500/27000)")),
+            "the redraw that DID move it is worth one line: {lines:#?}"
+        );
+    }
+
+    // -- compose-up progress -------------------------------------------------
+
+    #[test]
+    fn the_up_denominator_comes_from_the_template_that_declares_the_containers() {
+        let names = composegen::base_container_names();
+        assert_eq!(
+            names,
+            vec![
+                "ac-database".to_string(),
+                "ac-db-import".to_string(),
+                "ac-client-data-init".to_string(),
+                "ac-authserver".to_string(),
+                "ac-worldserver".to_string(),
+            ],
+            "a service added to native-compose.yml.tmpl changes this -- update it deliberately"
+        );
+    }
+
+    #[test]
+    fn a_container_is_counted_once_and_only_on_a_state_that_means_finished() {
+        let mut p = UpProgress::new(5);
+        // Mid-flight states are not progress: every container passes through
+        // several, so counting them would run past 100% and back.
+        assert_eq!(p.observe(" Container ac-database  Creating"), None);
+        assert_eq!(p.observe(" Container ac-database  Created"), None);
+        assert_eq!(p.observe(" Container ac-database  Starting"), None);
+        assert_eq!(p.observe(" Container ac-database  Started"), Some(20));
+        // Same container reaching another terminal state adds nothing.
+        assert_eq!(p.observe(" Container ac-database  Healthy"), None);
+        // A one-shot service finishing is SUCCESS, not a stall.
+        assert_eq!(p.observe(" Container ac-db-import  Exited"), Some(40));
+        assert_eq!(p.observe(" Network ac-network  Created"), None);
+    }
+
+    #[test]
+    fn an_undeclared_container_cannot_push_the_number_past_a_hundred() {
+        let mut p = UpProgress::new(2);
+        assert_eq!(p.observe("Container ac-database Started"), Some(50));
+        assert_eq!(p.observe("Container ac-worldserver Started"), Some(100));
+        assert_eq!(p.observe("Container ac-someone-elses Started"), None);
+    }
+
+    #[test]
+    fn the_up_stage_emits_pct_from_the_lines_it_streams() {
+        let games = fixture("up-progress");
+        let io = happy_io().reply(
+            "compose up -d",
+            0,
+            &[
+                " Container ac-database  Started",
+                " Container ac-db-import  Exited",
+                " Container ac-client-data-init  Exited",
+                " Container ac-authserver  Started",
+                " Container ac-worldserver  Started",
+            ],
+        );
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "{events:#?}");
+
+        assert_eq!(pcts_in_section(&events, Stage::Up.name()), vec![20, 40, 60, 80, 100], "{events:#?}");
+    }
+
+    #[test]
+    fn the_ready_stage_carries_its_ceiling_and_no_percentage() {
+        let games = fixture("ready-ceiling");
+        let io = happy_io();
+        let mut opts = fast_opts(&games);
+        opts.ready_timeout = Duration::from_secs(1800);
+        let (_rc, events) = run_install(&io, &opts);
+
+        let ready = events
+            .iter()
+            .find(|e| e["event"] == "section_start" && e["name"] == Stage::Ready.name())
+            .unwrap_or_else(|| panic!("no ready section: {events:#?}"));
+        assert_eq!(ready["limit_secs"].as_u64(), Some(1800), "{ready:#?}");
+
+        // Every OTHER section stays a bare section_start -- the ceiling is not a
+        // field every stage suddenly has to answer for.
+        let build = events
+            .iter()
+            .find(|e| e["event"] == "section_start" && e["name"] == Stage::Build.name())
+            .unwrap();
+        assert!(build["limit_secs"].is_null(), "{build:#?}");
+
+        // A WAIT has no denominator, so it must never report one.
+        assert!(
+            pcts_in_section(&events, Stage::Ready.name()).is_empty(),
+            "the ready wait must not report a percentage: {events:#?}"
+        );
     }
 
     // -- the real adapter ----------------------------------------------------

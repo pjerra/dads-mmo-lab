@@ -117,8 +117,31 @@ can rely on:
 - Nothing depends on it. Ignoring `pct` entirely must still produce a correct run — it is the
   reference case for the unknown-event rule above.
 
-Emitted today by exactly one place: `install-native`'s `build` stage, parsed from ninja's
-`[1803/1808]` step counter in the streamed docker build output.
+Emitted today by four `install-native` stages, each from a real denominator rather than a clock:
+
+| Stage | Denominator |
+|---|---|
+| `clone-core`, `clone-module` | git's own counter (`Receiving objects: 45%` weighted 0–90, `Resolving deltas` 90–100) |
+| `build` | ninja's `[1803/1808]` step counter |
+| `up` | containers reaching a finished state / containers the compose file declares |
+
+`preflight`, `guard` and `generate-compose` are instant and emit none.
+
+### `limit_secs` on `section_start`
+
+A section that is a bounded **wait** rather than work carries `limit_secs` — the number of
+seconds it may run before giving up:
+
+```json
+{"event":"section_start","name":"ready","limit_secs":1800}
+```
+
+Emitted today only by `install-native`'s `ready` stage. It exists so a consumer can render
+"waited 4:31 of up to 30:00" **without inventing a percentage**: elapsed-over-timeout measures the
+clock and not the work, and the thing being waited for can arrive at 20% or at 99% — so "97%" on a
+wait that is about to fail is the worst reading available. That stage therefore emits no `pct` at
+all, deliberately. The field is optional and absent everywhere else; treat a missing one as
+"unbounded or unknown", never as 0.
 
 Section-name constants live with each owning module in `dml-wow` (e.g. the module manager), not
 in `dml-core`. Not yet documented: the full inventory of section names per streaming command.
@@ -458,6 +481,7 @@ settings: `DML_GAMES_DIR` whenever the process cwd is not the games directory; `
 | `DML_BACKUP_KEEP` | 10 | Keep-newest-N retention for `~/.dml/backups`; trimmed usize; unparseable → 10. `prune` runs after every `backup create`. |
 | `DML_LOG_SNAPSHOT_KEEP` | 10 | Keep-newest-N retention for `~/.dml/logs`; trimmed usize; unparseable → 10. Prune runs after every snapshot write, over `world-*.log` only, and **never over the snapshot just written** — retention is a plain descending NAME sort, so a backwards clock jump would otherwise delete the file the caller reports as saved. The others are trimmed to `keep - 1`, so the directory still holds at most `keep`. `0` = the feature is **off**: no read, no file, no line (rather than write-then-delete). |
 | `DML_LOG_SNAPSHOT_TIMEOUT` | 20 | Seconds cap on the snapshot's `docker logs` read; unparseable **or `0`** → 20 (coreutils' `timeout 0` means *no* limit to the bash twin, so zero is refused on both surfaces rather than meaning opposite things). The read sits in FRONT of the compose `down`, and a dockerd wedged during startup accepts the socket-activated connection and never answers — unbounded, evidence capture would block the stop the user asked for. The container-resolution call (`compose ps -a -q`) has its own fixed 10s cap. |
+| `DML_BOT_ACCOUNT_PREFIX` | `AiPlayerbot.RandomBotAccountPrefix` from the title's `playerbots.conf`, else its `.conf.dist`, else `rndbot` | The reserved bot account-name prefix — the SECOND signal in bot-vs-human identity (`crates/dml-wow/src/botid.rs`, bash `_bot_prefix` in `cli/src/30-db.sh`). A character is a bot when its account is in `acore_playerbots.playerbots_account_type` (`account_type IN (1,2)`) **OR** its `acore_auth.account.username` matches `<prefix>%`. The registry alone is not enough: mod-playerbots populates it itself and on a freshly built install it can be EMPTY while 1000 bots play — and `account NOT IN (<empty set>)` is TRUE for every row, so "who is online" listed every bot as a real player while "bots online" reported 0 (2026-08-01). An **empty** value (env set to `""`, or a blank conf value) is treated as unset and falls back, never as a match-all `LIKE '%'`; `%`, `_`, `\` and `'` in a custom prefix are escaped. |
 | `DML_PARTY_POLL_TRIES` | 12 | Party add-bot new-member poll retries (u32, trimmed). |
 | `DML_PARTY_POLL_SLEEP` | 0.5 | Poll sleep in fractional seconds (f64 → Duration; default 500 ms). |
 | `DML_CLIENT_SCAN_ROOTS` | built-in root list | `client-path detect` roots, split with the platform path-list separator (`;` on Windows). Absent: `home\Games`, `home\wow wotlk`, home itself, then per existing drive letter A–Z: `<drive>:\Games`, `<drive>:\Program Files (x86)`, `<drive>:\wow wotlk`, `<drive>:\`. One level deep, dirs only, capped at 10 candidates. |

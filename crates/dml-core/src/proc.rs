@@ -225,11 +225,48 @@ pub fn run_captured(program: &OsStr, args: &[&str], timeout: Duration) -> Captur
 /// the next call. Pure, so the incremental-decode logic is unit-tested
 /// without spawning anything.
 pub fn drain_lines(buf: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
+    drain_lines_split(buf, chunk, LineSplit::Newline)
+}
+
+/// What counts as the end of a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineSplit {
+    /// `\n` only. The default, and right for every command whose output is
+    /// ordinary log lines.
+    #[default]
+    Newline,
+    /// `\n` **or** `\r`.
+    ///
+    /// For tools that report progress by REDRAWING one line. `git clone
+    /// --progress` writes `Receiving objects:  1% …\rReceiving objects:  2% …\r`
+    /// and emits a newline only when the phase ENDS — so under [`Self::Newline`]
+    /// a whole download arrives as a single line, once, after the download it
+    /// was describing is already over. That is not a cosmetic difference: it is
+    /// the difference between live progress and none.
+    NewlineOrReturn,
+}
+
+/// [`drain_lines`] with the line terminator chosen by the caller.
+///
+/// Under [`LineSplit::NewlineOrReturn`], EMPTY segments are dropped. A `\r\n`
+/// pair would otherwise yield the real line followed by a phantom empty one,
+/// and a blank progress redraw carries nothing worth forwarding. Under
+/// [`LineSplit::Newline`] blank lines are preserved exactly as before — the
+/// docker build wall uses them to separate vertices.
+pub fn drain_lines_split(buf: &mut Vec<u8>, chunk: &[u8], split: LineSplit) -> Vec<String> {
     buf.extend_from_slice(chunk);
     let mut out = Vec::new();
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+    let is_end = |b: u8| match split {
+        LineSplit::Newline => b == b'\n',
+        LineSplit::NewlineOrReturn => b == b'\n' || b == b'\r',
+    };
+    while let Some(pos) = buf.iter().position(|&b| is_end(b)) {
         let line_bytes: Vec<u8> = buf.drain(..=pos).collect();
-        out.push(String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]).into_owned());
+        let line = String::from_utf8_lossy(&line_bytes[..line_bytes.len() - 1]).into_owned();
+        if split == LineSplit::NewlineOrReturn && line.is_empty() {
+            continue;
+        }
+        out.push(line);
     }
     out
 }
@@ -240,14 +277,18 @@ pub fn drain_lines(buf: &mut Vec<u8>, chunk: &[u8]) -> Vec<String> {
 /// newline still surface. Returns early if the receiver has gone away
 /// (`tx.send` failing means main thread already exited its loop, e.g. the
 /// child died and BOTH threads are racing to notice — not an error).
-fn stream_reader<R: std::io::Read>(mut reader: R, tx: std::sync::mpsc::Sender<String>) {
+fn stream_reader<R: std::io::Read>(
+    mut reader: R,
+    tx: std::sync::mpsc::Sender<String>,
+    split: LineSplit,
+) {
     let mut pending = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                for line in drain_lines(&mut pending, &chunk[..n]) {
+                for line in drain_lines_split(&mut pending, &chunk[..n], split) {
                     if tx.send(line).is_err() {
                         return;
                     }
@@ -296,7 +337,7 @@ pub fn run_streamed_unbounded(
     // both-pipes-drained streaming WITHOUT a log file (the native install
     // engine's git/docker probes) does not have to reimplement it — or invent a
     // scratch file per probe just to satisfy this signature.
-    run_streamed_lines(program, args, Some(cwd), |line| {
+    run_streamed_lines(program, args, Some(cwd), LineSplit::Newline, |line| {
         let _ = writeln!(log_file, "{line}");
         let _ = log_file.flush();
         on_line(line);
@@ -317,6 +358,7 @@ pub fn run_streamed_lines(
     program: &OsStr,
     args: &[&str],
     cwd: Option<&Path>,
+    split: LineSplit,
     mut on_line: impl FnMut(&str),
 ) -> Option<std::process::ExitStatus> {
     let mut cmd = Command::new(program);
@@ -332,8 +374,8 @@ pub fn run_streamed_lines(
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let tx_err = tx.clone();
-    let out_handle = std::thread::spawn(move || stream_reader(stdout, tx));
-    let err_handle = std::thread::spawn(move || stream_reader(stderr, tx_err));
+    let out_handle = std::thread::spawn(move || stream_reader(stdout, tx, split));
+    let err_handle = std::thread::spawn(move || stream_reader(stderr, tx_err, split));
 
     // Ends when BOTH reader threads have dropped their `Sender` (EOF on both
     // pipes) — not on any timer.
@@ -512,6 +554,58 @@ mod tests {
     fn drain_lines_empty_chunk_yields_nothing() {
         let mut buf = Vec::new();
         assert!(drain_lines(&mut buf, b"").is_empty());
+    }
+
+    /// THE reason `LineSplit` exists. `git clone --progress` redraws one line
+    /// with `\r` and only emits `\n` when the phase ends, so the default mode
+    /// hands the caller a whole download as ONE line after it is over.
+    #[test]
+    fn newline_only_hides_a_carriage_return_progress_phase_until_it_ends() {
+        let chunk = b"Receiving objects:   1% (270/27000)\rReceiving objects:  50% (13500/27000)\r";
+        let mut buf = Vec::new();
+        assert!(
+            drain_lines(&mut buf, chunk).is_empty(),
+            "under Newline the redraws are still buffered -- nothing to report yet"
+        );
+
+        let mut buf = Vec::new();
+        let got = drain_lines_split(&mut buf, chunk, LineSplit::NewlineOrReturn);
+        assert_eq!(
+            got,
+            vec![
+                "Receiving objects:   1% (270/27000)".to_string(),
+                "Receiving objects:  50% (13500/27000)".to_string(),
+            ],
+            "each redraw must surface AS IT ARRIVES"
+        );
+    }
+
+    #[test]
+    fn a_crlf_does_not_produce_a_phantom_empty_line() {
+        // Both terminators are line ends in this mode, so "abc\r\n" would
+        // otherwise yield "abc" plus an empty string.
+        let mut buf = Vec::new();
+        let got = drain_lines_split(&mut buf, b"abc\r\ndef\n", LineSplit::NewlineOrReturn);
+        assert_eq!(got, vec!["abc".to_string(), "def".to_string()]);
+    }
+
+    #[test]
+    fn newline_mode_still_preserves_blank_lines() {
+        // The docker build wall separates vertices with blank lines, and the
+        // install panel's readability depends on them. Only the \r mode drops
+        // empties.
+        let mut buf = Vec::new();
+        let got = drain_lines_split(&mut buf, b"#12 DONE\n\n#13 CACHED\n", LineSplit::Newline);
+        assert_eq!(got, vec!["#12 DONE".to_string(), String::new(), "#13 CACHED".to_string()]);
+    }
+
+    #[test]
+    fn a_partial_redraw_is_buffered_until_its_terminator_arrives() {
+        let mut buf = Vec::new();
+        assert!(drain_lines_split(&mut buf, b"Receiving objects:  7", LineSplit::NewlineOrReturn)
+            .is_empty());
+        let got = drain_lines_split(&mut buf, b"5% (20250/27000)\r", LineSplit::NewlineOrReturn);
+        assert_eq!(got, vec!["Receiving objects:  75% (20250/27000)".to_string()]);
     }
 
     // -- real-subprocess test plumbing: same fixture-file convention as

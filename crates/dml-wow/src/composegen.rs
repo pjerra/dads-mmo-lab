@@ -601,6 +601,22 @@ pub fn override_env(opts: &ComposeOpts) -> Vec<(String, String)> {
 /// its compose project name and the tag its build products carry — has to come
 /// from the dir; there is no safe default for either, and a shared one is how a
 /// new install ends up mounting an existing server's volumes.
+/// Every `container_name` the generated base declares, in file order.
+///
+/// Derived from the template rather than restated as a constant, and the
+/// distinction is the point: these are the exact strings `docker compose up`
+/// prints back ("Container ac-worldserver Started"), so a service added to the
+/// template is counted without anyone remembering to bump a number. A hardcoded
+/// total would drift silently and report 5/4 containers, or stall at 80%.
+pub fn base_container_names() -> Vec<String> {
+    BASE_TMPL
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("container_name:"))
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 pub fn render_base(title_dir: &Path, opts: &ComposeOpts) -> Result<String, CmdError> {
     validate(opts)?;
     let project = opts.project_name.clone().unwrap_or_else(|| project_name_for(title_dir));

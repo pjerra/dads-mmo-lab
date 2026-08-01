@@ -33,7 +33,10 @@ export interface Game {
 }
 
 export type TermEvent =
-  | { event: "section_start"; name: string }
+  // `limit_secs` appears only on a section that is a bounded WAIT (today just
+  // install-native's `ready`). It is the ceiling, not a percentage -- see
+  // docs/cli-contract.md for why that stage deliberately has no number.
+  | { event: "section_start"; name: string; limit_secs?: number }
   | { event: "line"; level: "info" | "warn" | "error"; text: string }
   | { event: "section_end"; name: string; status: "ok" | "error" }
   // Advisory progress within the currently-open section, 0-100. Sparse by

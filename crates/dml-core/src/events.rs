@@ -14,6 +14,20 @@ pub fn line_event(level: &str, text: impl Into<String>) -> Value {
 pub fn section_start(name: &str) -> Value {
     serde_json::json!({"event": "section_start", "name": name})
 }
+/// `section_start` for a section that is a bounded WAIT rather than work with a
+/// denominator.
+///
+/// `limit_secs` is how long the section may run before it gives up. It exists so
+/// a consumer can say "waited 4:31 of up to 30:00" WITHOUT inventing a
+/// percentage: elapsed-over-timeout looks like progress and is a clock — the
+/// thing being waited for can arrive at 20% or at 99%, and "97%" on a wait about
+/// to fail is the worst reading available.
+///
+/// The ceiling travels with the event so the number has ONE source (the engine's
+/// own timeout) instead of a frontend constant that drifts from it.
+pub fn section_start_limited(name: &str, limit_secs: u64) -> Value {
+    serde_json::json!({"event": "section_start", "name": name, "limit_secs": limit_secs})
+}
 pub fn section_end(name: &str, status: &str) -> Value {
     serde_json::json!({"event": "section_end", "name": name, "status": status})
 }
