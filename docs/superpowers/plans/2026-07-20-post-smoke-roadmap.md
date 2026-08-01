@@ -852,7 +852,15 @@ no new features until Phase 4 is done. Post-beta.
 ## Round 5.6 — Fully automatic SOAP account setup (user request, 2026-08-01)
 
 **Spec: `docs/superpowers/specs/2026-08-01-soap-account-autosetup-design.md`.**
-Design approved by the user the same day it was asked for. Not yet implemented.
+Design approved by the user the same day it was asked for. **BUILT** the same
+day (`crates/dml-wow/src/soap_autosetup.rs`, the `wow_soap_autosetup` /
+`wow_soap_credentials` Tauri commands, the shell banner, the reveal control on
+Home), plus two adversarial review waves whose fixes are folded into the spec —
+the deleted `Latched` outcome and the `family_taken` guard being the two that
+changed behaviour. **Remaining USER GATE: the live click-through** — start the
+launcher against a server whose SOAP is rejecting it, confirm the banner appears
+naming the account, that GM Tools and My Party then work without further input,
+and that Home's health panel reveals the password.
 
 The direct-write route (`srp6.rs`, `account_write.rs`, `wow_soap_account_create`)
 already removed the worldserver-console step earlier that day, but three manual
@@ -874,7 +882,11 @@ Four decisions, all user-taken 2026-08-01:
 
 Accepted risk, recorded here as well as in the spec: pointing the launcher at any
 AzerothCore whose SOAP rejects it now creates a GM3 account. Guarded by
-`Rejected`-only, never-overwrite, one attempt per launcher run, and the banner.
+`Rejected`-only, never-overwrite, one attempt per launcher run, and the banner —
+plus, from fix wave 2, a refusal once any `dmlsoap_*` account exists. The latch
+only bounds a single run; that family check is what bounds the total, and
+without it an exported `DML_SOAP_USER`/`PASS` pair (which outranks the file the
+feature writes) turned every launcher start into one more GM3 account.
 
 ## Round 6 — Merge + housekeeping
 

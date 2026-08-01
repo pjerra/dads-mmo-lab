@@ -213,7 +213,7 @@ prints them.
 | `account create` | `<USER> <PASS>` (3–20 char user, 4–16 char password — validated by the library) | envelope | Create a game account over SOAP |
 | `account set-password` | `<USER> <PASS>` | envelope | Change an account's password |
 | `account set-gm` | `<USER> <LEVEL>` (LEVEL is a **string**; literal `0\|1\|2\|3` matched by the library — out-of-range earns `BAD_ARG` "--level must be 0-3", not a clap error) | envelope | Set an account's GM level |
-| `account delete` | `<USER>` (refuses `admin`, the launcher's own SOAP account) | envelope | Delete an account |
+| `account delete` | `<USER>` — refuses the literal `admin`, case-insensitively, and nothing else | envelope | Delete an account. The guard was written when `admin` **was** the launcher's own SOAP account; since 2026-08-01 the launcher creates and uses `dmlsoap` (or `dmlsoap_<hex>` on a collision), which this arm will delete without complaint. Stated rather than quietly corrected: widening the guard is an unmade decision, not a documentation fix. |
 | `gm level` | `<PLAYER> <LEVEL>` (i32, negatives reach the library; 1–255 checked in-library; works offline) | envelope | Set a character's level |
 | `gm gold` | `<PLAYER> <GOLD>` (i32; 0–214748 checked in-library; character must be online) | envelope | Give whole gold via the DML bridge |
 | `gm heal` | `<PLAYER>` (must be online) | envelope | Heal to full via the DML bridge |
@@ -578,7 +578,12 @@ Two `KEY=VALUE` file parsers exist with **opposite** duplicate-key rules:
 - `~/.dml/soap.env`: only the three keys `DML_SOAP_URL`/`DML_SOAP_USER`/`DML_SOAP_PASS` are
   recognized; trailing `\r` stripped (CRLF tolerated), keys/values trimmed, quotes stripped,
   non-`KEY=VALUE` and unrecognized lines ignored, **last** occurrence wins (shell re-assignment
-  semantics).
+  semantics). **This CLI only reads it** — no `dml-wow` arm writes it. The writer is
+  `dml_wow::soap_bootstrap::write_soap_env`, driven from the launcher's account setup, and it
+  runs only after a real SOAP round-trip has succeeded with those exact credentials, so the file
+  never describes a login nobody has tried. Note the precedence direction, which is easy to get
+  backwards: env beats file, per key, so an exported `DML_SOAP_USER`/`DML_SOAP_PASS` silently
+  shadows a `soap.env` that is perfectly correct.
 
 Backups: `~/.dml/backups`, on-disk format shared with the WSL/bash `dml` in both directions.
 Retention keeps the newest N `.sql.gz` (N = `DML_BACKUP_KEEP`, default 10); `prune` sweeps
