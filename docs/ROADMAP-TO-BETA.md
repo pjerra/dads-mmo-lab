@@ -130,7 +130,7 @@ full output — the harness can no longer be the cause of the two mechanisms abo
 ## 🔴 PHASE B — make native reachable (the actual beta blocker)
 
 Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native-first-install.md),
-14 tasks. Six are done.
+14 tasks. Seven are done.
 
 | # | Task | State |
 |---|---|---|
@@ -140,7 +140,7 @@ Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native
 | 4 | Honest hardware preflight | ✅ `e354cb5` |
 | 5 | `dml-wow install-native` CLI surface | ✅ |
 | 9 | Migration scripts fixed to match their own lessons | ✅ `e354cb5` |
-| **6** | **Launcher wiring** | ❌ **THE ONE THAT MATTERS** |
+| 6 | Launcher wiring | ✅ built + **click-verified 2026-08-01** (both scenarios; see B1) |
 | **8** | **`Install-DML-Native.ps1`** | ❌ not started |
 | **11** | **Account + SOAP bootstrap** | ❌ not started |
 | 7 | Port guard armed on native start | ⚠️ **armed, but as a WARNING where the plan specified a REFUSAL** — see below |
@@ -148,7 +148,35 @@ Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native
 | 12, 13 | LIVE gates — real build, kill-mid-build resume, first login | 🙋 user |
 | 14 | Docs + doctrine reconciliation | partial |
 
-### B1 — Task 6: launcher wiring — *the single highest-value item in the repo*
+### B1 — Task 6: launcher wiring — ✅ BUILT + CLICK-VERIFIED 2026-08-01
+
+**Live gate PASSED on the user's machine**, both scenarios, against a scratch
+games dir so the real server was never touched:
+
+* **Fresh-PC scenario** (games dir absent) → "No game server installed yet" +
+  Open Library → Library offers an armed **Install** on WoW Playerbots →
+  clicking it raises the consent panel (hours / tens of GB / cannot be
+  cancelled) → "Not now" starts nothing.
+* **Half-finished-install scenario** (a real `.dml-install.json` recorded
+  through `generate-compose`, path-bound to the scratch dir so `load_state`
+  accepts it) → the **"unfinished install"** badge, the explanation, and
+  **"Resume install"** — with **no Start button**.
+
+**WHAT THIS DID NOT PROVE, so none of it may be assumed:**
+
+1. **A native install has never been run from the UI.** Both scenarios stop at
+   the button. The engine has an 8/8 live run behind it from the CLI, and the
+   translation layer is unit-tested, but no build has ever been streamed through
+   `InstallTerminal`. That is why `native-install` still reads `"untested"` in
+   the feature registry and why the consent panel says so out loud.
+2. **Auto-detect was not exercised.** This machine has `dml-arch`, so `detect`
+   correctly answers Wsl and the backend had to be pinned with `DML_BACKEND`.
+   The fresh-machine path (Docker present, no distro → Native) is unit-tested
+   only; it needs a machine with no distro, which is the Task 12 VM leg.
+3. **Nothing about the build itself** — no cold cache, no resume of a REAL
+   interrupted build, no first login.
+
+### B1 (original scope) — what the wiring had to fix
 
 Today `install-native` is reachable **only by running the binary from a
 terminal**. Three specific things are missing:
