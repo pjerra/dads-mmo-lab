@@ -22,6 +22,11 @@ setup() {
   make_fixture
   export HOME="$FIXTURE"
   add_game wow compose
+  # A REAL compose body, not add_game's empty touch: the guard now gates on
+  # the compose file actually claiming the ac-* names (audit #8), so an empty
+  # file would skip the guard and pass every REFUSES test below vacuously.
+  printf 'services:\n  ac-worldserver:\n    container_name: ac-worldserver\n' \
+    > "$DML_GAMES_DIR/wow/docker-compose.yml"
   STUB_BIN="$FIXTURE/bin"
   mkdir -p "$STUB_BIN"
   export PATH="$STUB_BIN:$PATH"
@@ -55,7 +60,7 @@ EOS
 }
 
 @test "another stack owning ac-worldserver REFUSES the start" {
-  stub_docker "ac-worldserver some-other-stack"
+  stub_docker $'ac-worldserver	some-other-stack' 
   run bash "$DML" start wow
   [ "$status" -ne 0 ]
   [[ "$output" == *"ac-worldserver"* ]]
@@ -69,7 +74,7 @@ EOS
 @test "every container the stack claims is guarded" {
   # A name missing from the list is a collision the guard cannot see.
   for name in ac-database ac-db-import ac-client-data-init ac-authserver ac-worldserver; do
-    stub_docker "$name other-stack"
+    stub_docker "$name"$'	'"other-stack"
     run bash "$DML" start wow
     [ "$status" -ne 0 ]
     [[ "$output" == *"$name"* ]]
@@ -88,7 +93,7 @@ EOS
 @test "a name that merely CONTAINS ours is not a conflict" {
   # Substring matching would refuse a start because of somebody's unrelated
   # backup container.
-  stub_docker "my-ac-database-backup other-stack"
+  stub_docker $'my-ac-database-backup	other-stack' 
   run bash "$DML" start wow
   [ "$status" -eq 0 ]
   [[ "$output" == *"Starting wow"* ]]
@@ -108,4 +113,47 @@ EOS
   run bash "$DML" start wow
   [ "$status" -eq 0 ]
   [[ "$output" == *"Starting wow"* ]]
+}
+
+@test "the JSON games path refuses too -- the route the launcher takes" {
+  # Audit #6: the guard lived only in the legacy start arm, so
+  # `dml games start --json` (Home's Start button) sailed past it and
+  # compose clobbered whichever stack owned the names.
+  stub_docker $'ac-worldserver	some-other-stack'
+  run bash "$DML" games start wow --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'"code":"STACK_CONFLICT"'* ]]
+  [[ "$output" == *"some-other-stack"* ]]
+  [[ "$output" != *'"event":"done"'* ]]
+}
+
+@test "a non-AC title is never refused over WoW's containers" {
+  # Audit #8: starting maplestory while a WoW server ran used to refuse,
+  # telling the user to stop a server that was not in the way at all.
+  add_game maple compose
+  printf 'services:
+  maple:
+    container_name: maple-server
+'     > "$DML_GAMES_DIR/maple/docker-compose.yml"
+  stub_docker $'ac-worldserver	wow-stack'
+  run bash "$DML" start maple
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Starting maple"* ]]
+}
+
+@test "our own stopped stack is not a conflict with starting ourselves" {
+  # `docker compose stop` leaves the containers in ps -a, owned by this very
+  # stack. Refusing a start over our own stopped containers told the user to
+  # go stop the server they were trying to start.
+  stub_docker "ac-worldserver"$'	'"wow"$'	'"$DML_GAMES_DIR/wow"
+  run bash "$DML" start wow
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Starting wow"* ]]
+}
+
+@test "the JSON path lets our own stopped stack start too" {
+  stub_docker "ac-worldserver"$'	'"wow"$'	'"$DML_GAMES_DIR/wow"
+  run bash "$DML" games start wow --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"done"'* ]]
 }

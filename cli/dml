@@ -4506,6 +4506,24 @@ _games_start_impl() {
         else echo "[dml] WARN: $_fheal" >&2; fi
     fi
     cd "$compose_dir"
+    # THE REFUSAL, FIRST -- and on THIS path, which is the one the launcher's
+    # Start button actually takes (audit #6: the guard lived only in the
+    # legacy `start` arm, so `dml games start --json` sailed past it and
+    # `compose up` clobbered whichever stack owned the ac-* names). Cold
+    # starts only: a restart's own containers legitimately hold the names,
+    # and the own-stack exclusion inside the check covers the stopped case.
+    if [[ "$mode" == "start" ]] && _stack_conflict_check "$compose_dir"; then
+        local _scmsg
+        _scmsg="$(_stack_conflict_message)"
+        if [[ "$DML_JSON" == 1 ]]; then
+            ndjson_section_end "$mode" error
+            ndjson_error STACK_CONFLICT "$_scmsg" "Stop the other server first (docker compose down in its folder), then start this one."
+        else
+            echo "[dml] ERROR: $_scmsg" >&2
+            echo "[dml]   Stop the other server first (docker compose down in its folder), then start this one." >&2
+        fi
+        exit 1
+    fi
     # Restart only, and BEFORE anything below recreates containers (both the
     # dml-start.sh hook and the raw `compose down` branch do). A cold start
     # destroys no evidence it could have preserved, so it gets no snapshot.
@@ -4645,28 +4663,84 @@ EOF
 # TRI-STATE: docker failing to answer is evidence of NOTHING. The check is
 # SKIPPED rather than read as a conflict -- a wedged docker must never block a
 # start it knows nothing about.
-_stack_conflict_refusal() {
-    local out name project line found_name="" found_project=""
-    out="$(docker ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}' 2>/dev/null)" || return 0
-    [[ -z "$out" ]] && return 0
+#
+# TWO FIXES from the 2026-08-01 audit (#8 and the own-stack half of #6), both
+# of which made the guard refuse starts it had no business refusing:
+#
+#   * AC-SHAPE GATE. The ac-* names only matter to a stack that CLAIMS them.
+#     Starting maplestory while a WoW server ran used to refuse here, telling
+#     the user to stop a server that was not in the way at all.
+#   * OWN-STACK EXCLUSION. `docker compose stop` leaves the containers in
+#     `ps -a`, owned by this very stack -- so starting your own stopped server
+#     refused over ITSELF. The Rust mirror (`lifecycle::stack_conflict_refusal`)
+#     always excluded `our_project`; bash now matches, keyed on the compose
+#     working-dir LABEL rather than a re-derivation of the project name,
+#     because compose honours overrides (COMPOSE_PROJECT_NAME, top-level
+#     `name:`) that a bash re-derivation would get wrong.
+
+# Does this directory's compose file claim any of the ac-* container names?
+_stack_is_ac() {
+    local dir="$1" f
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+        [[ -f "$dir/$f" ]] || continue
+        grep -Eq 'ac-(database|db-import|client-data-init|authserver|worldserver)' "$dir/$f" 2>/dev/null && return 0
+    done
+    return 1
+}
+
+# Detection only: returns 0 when a FOREIGN owner holds one of our names, with
+# the finding in _SC_NAME/_SC_OWNER. Presentation stays with the call sites,
+# because the JSON path must refuse as an ndjson error event and the text
+# path as stderr -- one printer here would get one of them wrong.
+_SC_NAME=""; _SC_OWNER=""
+_stack_conflict_check() {
+    local compose_dir="${1:-$PWD}"
+    _SC_NAME=""; _SC_OWNER=""
+    _stack_is_ac "$compose_dir" || return 1
+    local out
+    out="$(docker ps -a --format '{{.Names}}{{"\t"}}{{.Label "com.docker.compose.project"}}{{"\t"}}{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)" || return 1
+    [[ -z "$out" ]] && return 1
+    # Normalize ours once; realpath may be absent on a minimal box, in which
+    # case the raw spelling still matches everything dml itself started (dml
+    # always cds to the same $GAMES_DIR path).
+    local ours
+    ours="$(realpath -m "$compose_dir" 2>/dev/null || echo "$compose_dir")"
+    ours="${ours%/}"
+    local name line cname rest project wdir
     while IFS= read -r name || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
         # The name must match a WHOLE field, never a substring: `ac-database`
         # must not be satisfied by a container called `my-ac-database-backup`.
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" ]] && continue
-            if [[ "${line%% *}" == "$name" ]]; then
-                project="${line#* }"
-                [[ "$project" == "$line" ]] && project=""
-                found_name="$name"; found_project="$project"
-                break 2
+            cname="${line%%$'\t'*}"
+            [[ "$cname" == "$name" ]] || continue
+            rest="${line#*$'\t'}"; [[ "$rest" == "$line" ]] && rest=""
+            project="${rest%%$'\t'*}"
+            wdir="${rest#*$'\t'}"; [[ "$wdir" == "$rest" ]] && wdir=""
+            if [[ -n "$wdir" ]]; then
+                local w
+                w="$(realpath -m "$wdir" 2>/dev/null || echo "$wdir")"
+                # Our own stack's (possibly stopped) containers are never a
+                # conflict with starting ourselves.
+                [[ "${w%/}" == "$ours" ]] && continue
             fi
+            _SC_NAME="$name"; _SC_OWNER="$project"
+            return 0
         done <<< "$out"
     done < <(_stack_containers)
-    [[ -z "$found_name" ]] && return 0
-    local owner="the stack \"$found_project\""
-    [[ -z "$found_project" ]] && owner="something that is not managed by Docker Compose"
-    echo "[dml] ERROR: The container name $found_name is already taken by $owner. Those names are global to Docker, not per server, so only one DML server can exist on this PC at a time." >&2
+    return 1
+}
+
+_stack_conflict_message() {
+    local owner="the stack \"$_SC_OWNER\""
+    [[ -z "$_SC_OWNER" ]] && owner="something that is not managed by Docker Compose"
+    echo "The container name $_SC_NAME is already taken by $owner. Those names are global to Docker, not per server, so only one DML server can exist on this PC at a time."
+}
+
+_stack_conflict_refusal() {
+    _stack_conflict_check "${1:-$PWD}" || return 0
+    echo "[dml] ERROR: $(_stack_conflict_message)" >&2
     echo "[dml]   Stop the other server first (docker compose down in its folder), then start this one." >&2
     return 1
 }
