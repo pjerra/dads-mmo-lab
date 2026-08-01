@@ -27,7 +27,10 @@
     type SoapBootstrapVerdict,
   } from "$lib/api";
 
-  let { onverified = () => {} }: { onverified?: () => void } = $props();
+  let {
+    onverified = () => {},
+    ondismiss = () => {},
+  }: { onverified?: () => void; ondismiss?: () => void } = $props();
 
   let info = $state<SoapBootstrapInfo | null>(null);
   let user = $state("");
@@ -140,6 +143,10 @@
       >
         {busy ? "Checking…" : "Check it worked"}
       </button>
+      <!-- Dismissable on purpose. This is important, not urgent: a user who
+           wants to look around first must not be held hostage by it, and Tools
+           carries the same step for later. -->
+      <button disabled={busy} onclick={ondismiss}>Later</button>
     </div>
 
     {#if verdict}

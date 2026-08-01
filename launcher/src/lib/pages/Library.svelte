@@ -14,6 +14,11 @@
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { nativeInstallRunner } from "$lib/native-install";
   import SoapBootstrap from "$lib/SoapBootstrap.svelte";
+  import {
+    soapSetupState,
+    noteNativeInstallFinished,
+    clearSoapSetup,
+  } from "$lib/soap-setup-state.svelte";
   import { gamesInstallNativeState } from "$lib/api";
   import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
@@ -40,12 +45,13 @@
   // registry can go on truthfully calling the wiring untested without locking
   // the button and dead-ending onboarding.
   let confirmingInstall = $state<string | null>(null);
-  // Shown after a native install finishes. A server with no account leaves GM
-  // Tools, My Party, the console's send box and announcements all dead with a
-  // SOAP_AUTH that explains nothing -- the worst thing that can happen at the
-  // end of a multi-hour install, and the reason this is surfaced rather than
-  // left as a documented step.
-  let showSoapSetup = $state(false);
+  // Shown after a native install finishes. NOT component-local: a native
+  // install runs for hours, and one sidebar click destroys this component while
+  // it continues. The flag lives in a module store so the orphaned onExit
+  // closure writes something the freshly mounted Library can still read --
+  // otherwise the account step is lost for exactly the users who wandered off
+  // during the build, and their server's SOAP features are all dead with no
+  // screen explaining why. See soap-setup-state.svelte.ts.
   // The subset that the catalog nonetheless calls INSTALLED -- i.e. a title dir
   // that exists but whose install never finished. This is the state the catalog
   // cannot express, because its `installed` test is only "does the directory
@@ -331,7 +337,7 @@
     // Only on success, and only on native: the WSL installers run their own
     // account step interactively, so raising this there would ask the user to
     // do a thing they were just walked through.
-    if (code === 0 && backendMode === "native") showSoapSetup = true;
+    if (code === 0 && backendMode === "native") noteNativeInstallFinished();
     void refresh();
   }
 </script>
@@ -588,8 +594,8 @@
     {/key}
   {/if}
 
-  {#if showSoapSetup}
-    <SoapBootstrap onverified={() => (showSoapSetup = false)} />
+  {#if soapSetupState.needed}
+    <SoapBootstrap onverified={clearSoapSetup} ondismiss={clearSoapSetup} />
   {/if}
 
   {#if buf.show}
