@@ -239,6 +239,127 @@ impl Stage {
     }
 }
 
+/// Uninstall stages, in run order. The database revert comes FIRST among the
+/// mutations (the bash's order, kept): it needs the OLD worldserver still
+/// happily running against a database whose unbound tables are going away —
+/// mod-unbound tolerates missing tables far better than a rebuilt stock
+/// server tolerates their presence mattering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallStage {
+    Preflight,
+    Locate,
+    Guard,
+    Backup,
+    SqlRevert,
+    RemoveFiles,
+    PatchRevert,
+    ConfRevert,
+    Build,
+    Up,
+    Ready,
+}
+
+pub const UNINSTALL_ORDER: [UninstallStage; 11] = [
+    UninstallStage::Preflight,
+    UninstallStage::Locate,
+    UninstallStage::Guard,
+    UninstallStage::Backup,
+    UninstallStage::SqlRevert,
+    UninstallStage::RemoveFiles,
+    UninstallStage::PatchRevert,
+    UninstallStage::ConfRevert,
+    UninstallStage::Build,
+    UninstallStage::Up,
+    UninstallStage::Ready,
+];
+
+impl UninstallStage {
+    pub fn name(self) -> &'static str {
+        match self {
+            UninstallStage::Preflight => "preflight",
+            UninstallStage::Locate => "locate",
+            UninstallStage::Guard => "guard",
+            UninstallStage::Backup => "backup",
+            UninstallStage::SqlRevert => "sql-revert",
+            UninstallStage::RemoveFiles => "remove-files",
+            UninstallStage::PatchRevert => "patch-revert",
+            UninstallStage::ConfRevert => "conf-revert",
+            UninstallStage::Build => "build",
+            UninstallStage::Up => "up",
+            UninstallStage::Ready => "ready",
+        }
+    }
+    pub fn records_completion(self) -> bool {
+        !matches!(
+            self,
+            UninstallStage::Preflight | UninstallStage::Locate | UninstallStage::Guard
+        )
+    }
+}
+
+/// The database revert, verbatim from the bash uninstaller (order included:
+/// `creature_addon` references `creature.guid`, so it goes first).
+///
+/// Two of these look recklessly wide and are NOT: migration 06 opens with
+/// `DELETE FROM skillraceclassinfo_dbc WHERE ID >= 10000` as its OWN
+/// idempotency header, and 03 opens with the exact classmask wipe — the
+/// add-on defines those ranges as add-on-owned, so they are the canonical
+/// revert predicates, not an approximation of one. (This is why the design
+/// doc's "narrowed predicates" idea was dropped: narrower than the add-on's
+/// own re-run semantics would revert less than an upgrade already deletes.)
+pub const REVERT_SQL: [(&str, &str, &str); 11] = [
+    (
+        "acore_world",
+        "DELETE FROM creature_addon WHERE guid IN (SELECT guid FROM creature WHERE id1 = 900001);",
+        "Mentor spawn add-on rows removed",
+    ),
+    ("acore_world", "DELETE FROM creature WHERE id1 = 900001;", "Mentor spawns despawned"),
+    (
+        "acore_world",
+        "DELETE FROM creature_template_model WHERE CreatureID = 900001;",
+        "Mentor model removed",
+    ),
+    (
+        "acore_world",
+        "DELETE FROM creature_template WHERE entry = 900001;",
+        "Mentor template removed",
+    ),
+    (
+        "acore_world",
+        "DELETE FROM playercreateinfo_item WHERE itemid = 900100;",
+        "Mentor Stone removed from character creation",
+    ),
+    (
+        "acore_world",
+        "DELETE FROM item_template WHERE entry = 900100;",
+        "Mentor Stone item template removed",
+    ),
+    (
+        "acore_world",
+        "DELETE FROM playercreateinfo_spell_custom WHERE racemask = 0 AND classmask IN (1,2,4,8,16,64,128,256,1024);",
+        "creation gift spells removed",
+    ),
+    (
+        "acore_world",
+        "DELETE FROM skillraceclassinfo_dbc WHERE ID >= 10000;",
+        "universal skill access rows removed",
+    ),
+    ("acore_world", "DROP TABLE IF EXISTS unbound_class_catalog;", "unbound_class_catalog dropped"),
+    ("acore_world", "DROP TABLE IF EXISTS unbound_milestones;", "unbound_milestones dropped"),
+    (
+        "acore_characters",
+        "DROP TABLE IF EXISTS unbound_character_unlocks;",
+        "unbound_character_unlocks dropped (character class-unlock progression)",
+    ),
+];
+
+/// Handed to the user as TEXT in the uninstall's done event, never executed:
+/// deleting items out of character inventories is a decision about people's
+/// bags, not cleanup.
+pub const MENTOR_STONE_CLEANUP_SQL: &str = "DELETE ci FROM character_inventory ci JOIN item_instance ii ON ci.item=ii.guid WHERE ii.itemEntry=900100; DELETE FROM item_instance WHERE itemEntry=900100;";
+
+pub const CODE_NOT_INSTALLED: &str = "UNBOUND_NOT_INSTALLED";
+
 // ---------------------------------------------------------------------------
 // Options and state
 // ---------------------------------------------------------------------------
@@ -256,6 +377,10 @@ pub struct UnboundOpts {
     pub accept_data_changes: bool,
     /// Re-run everything over an install this engine believes is complete.
     pub repair: bool,
+    /// Uninstall only: run the revert even when no evidence of an install is
+    /// found. The revert statements are all IF-EXISTS-shaped, so this is safe
+    /// — it exists for the server where the evidence itself is broken.
+    pub force: bool,
     pub ready_timeout: Duration,
     pub ready_poll: Duration,
 }
@@ -267,6 +392,7 @@ impl UnboundOpts {
             games_dir: games_dir.into(),
             accept_data_changes: false,
             repair: false,
+            force: false,
             ready_timeout: READY_TIMEOUT,
             ready_poll: READY_POLL,
         }
@@ -288,6 +414,12 @@ pub struct UnboundState {
     /// `ValidateSkillLearnedBySpells` as found BEFORE the conf stage first
     /// touched it. `None` = never recorded (conf stage not reached yet).
     pub prior_validate_skill: Option<String>,
+    /// Uninstall progress, tracked separately so an interrupted uninstall
+    /// resumes instead of starting over. A COMPLETED uninstall deletes the
+    /// whole state file — a file claiming install-complete on a stock server
+    /// would be a lie the next install trips over.
+    #[serde(default)]
+    pub uninstalling: Vec<String>,
     pub last_error: Option<String>,
     pub updated_unix: u64,
 }
@@ -300,6 +432,7 @@ impl UnboundState {
             addon_version: ADDON_VERSION.to_string(),
             completed: Vec::new(),
             prior_validate_skill: None,
+            uninstalling: Vec::new(),
             last_error: None,
             updated_unix: 0,
         }
@@ -310,6 +443,14 @@ impl UnboundState {
     pub fn mark(&mut self, stage: Stage) {
         if !self.is_done(stage) {
             self.completed.push(stage.name().to_string());
+        }
+    }
+    pub fn is_undone(&self, stage: UninstallStage) -> bool {
+        self.uninstalling.iter().any(|s| s == stage.name())
+    }
+    pub fn mark_undone(&mut self, stage: UninstallStage) {
+        if !self.is_undone(stage) {
+            self.uninstalling.push(stage.name().to_string());
         }
     }
     /// All recordable install stages claimed?
@@ -551,6 +692,9 @@ struct Engine<'a> {
     db_container: Option<String>,
     db_password: String,
     backup_file: Option<String>,
+    /// Uninstall only: everything the run could not (or deliberately did not)
+    /// revert. Reported in the done event, never silently banner-ed away.
+    residue: Vec<String>,
 }
 
 impl<'a> Engine<'a> {
@@ -1178,7 +1322,9 @@ impl<'a> Engine<'a> {
         let sdir = self.sdir().to_path_buf();
         let log_dir = sdir.join("logs");
         let log_path = log_dir.join(build_log_name(now_unix()));
-        self.line("info", "rebuilding the worldserver with mod-unbound compiled in...");
+        // Neutral wording on purpose: this stage serves BOTH directions -- the
+        // install compiles mod-unbound in, the uninstall compiles it back out.
+        self.line("info", "rebuilding the worldserver from the current module set (30-90 minutes)...");
         self.line("info", format!("build log: {}", log_path.display()));
 
         // A fresh BuildProgress per attempt — a resumed build's bar starts
@@ -1360,6 +1506,383 @@ impl<'a> Engine<'a> {
         }
         Ok(())
     }
+
+    // -- uninstall stages ----------------------------------------------------
+
+    /// Resolve the running ac-database container through THIS server's
+    /// compose project — shared by both guards.
+    fn resolve_db_container(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        let (outcome, out) = self.run_collect(&self.docker_probe(
+            vec!["compose".into(), "ps".into(), "-q".into(), "ac-database".into()],
+            Some(sdir),
+        ));
+        let cid = if outcome.is_ok() { logsnap::parse_container_id(out.as_bytes()) } else { None };
+        match cid {
+            Some(cid) => {
+                self.db_container = Some(cid);
+                Ok(())
+            }
+            None => Err(Fail::new(
+                CODE_SERVER_NOT_RUNNING,
+                "The server's database container is not running.",
+                "Start the server first (Home page, or `dml-wow start`) -- the database revert needs a live database.",
+            )),
+        }
+    }
+
+    fn do_un_guard(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        self.resolve_db_container()?;
+
+        // Evidence of an install, from FOUR independent signals. Any one is
+        // enough to proceed (a half-install still wants cleaning up); NONE
+        // means there is nothing here to remove, and running the revert
+        // anyway is a --force decision, not a default.
+        let state_evidence = self.resumed;
+        let canary = self.run_collect(&self.mysql_probe("acore_world", CANARY_SQL)).0.is_ok();
+        let module = sdir.join(MODULE_REL).exists();
+        let patched = probe_patch_presence(&sdir) != PatchPresence::None;
+        if !(state_evidence || canary || module || patched) && !self.opts.force {
+            return Err(Fail::new(
+                CODE_NOT_INSTALLED,
+                "No trace of Wrath Unbound was found on this server (no state file, no unbound tables, no module tree, no core patch).",
+                "Nothing to uninstall. Run with --force to run the revert anyway (every statement is IF-EXISTS-shaped).",
+            ));
+        }
+
+        if !self.opts.accept_data_changes {
+            return Err(Fail::new(
+                CODE_CONSENT_REQUIRED,
+                "Uninstalling DROPS unbound_character_unlocks -- every character's class-unlock \
+                 progression -- and runs the add-on's own wide revert deletes \
+                 (playercreateinfo_spell_custom for 9 class masks, skillraceclassinfo_dbc ID >= 10000).",
+                "Re-run with --accept-data-changes after taking that in. A full safety backup is made first either way.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn do_un_backup(&mut self) -> Result<(), Fail> {
+        if self.state.as_ref().is_some_and(|s| s.is_undone(UninstallStage::Backup)) {
+            self.line("info", "a safety backup from this uninstall already exists -- not taking another.");
+            return Ok(());
+        }
+        let password = self.db_password.clone();
+        let mut lines: Vec<(String, String)> = Vec::new();
+        let result = self.io.safety_backup(&password, &mut |lvl, txt| lines.push((lvl, txt)));
+        for (lvl, txt) in lines {
+            self.line(&lvl, txt);
+        }
+        match result {
+            Ok(file) => {
+                self.line("info", format!("backup created: {file}"));
+                self.backup_file = Some(file);
+                Ok(())
+            }
+            Err(tail) => Err(Fail::new(
+                CODE_BACKUP_FAILED,
+                if tail.is_empty() {
+                    "The safety backup failed, so nothing was changed.".to_string()
+                } else {
+                    format!("The safety backup failed, so nothing was changed: {tail}")
+                },
+                "Nothing on the server was touched. Fix the backup problem and run this again.",
+            )),
+        }
+    }
+
+    fn do_sql_revert(&mut self) -> Result<(), Fail> {
+        // Per-statement, warn-and-continue — the bash's deliberate choice,
+        // kept: half a cleanup beats stranding the user mid-revert. What the
+        // bash then FORGOT is the other half of the deal: every failure here
+        // lands in `residue`, so the done event still tells the whole truth.
+        for (db, sql, label) in REVERT_SQL {
+            let call = self.mysql_probe(db, sql);
+            let (outcome, out) = self.run_collect(&call);
+            if outcome.is_ok() {
+                self.line("info", label.to_string());
+            } else {
+                let detail = stderr_tail(&out);
+                self.line("warn", format!("{label} -- FAILED: {detail}"));
+                self.residue.push(format!("database revert failed: {label} ({detail})"));
+            }
+        }
+        Ok(())
+    }
+
+    fn do_remove_files(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        let module = sdir.join(MODULE_REL);
+        if module.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&module) {
+                // A locked file (an editor holding UnboundSystem.cpp open) is
+                // recoverable by hand; the rest of the uninstall is not made
+                // better by aborting over it.
+                self.line("warn", format!("could not remove {}: {e}", module.display()));
+                self.residue.push(format!("modules/mod-unbound left on disk ({e})"));
+            } else {
+                self.line("info", "modules/mod-unbound removed.");
+            }
+        }
+        for rel in
+            ["env/dist/etc/modules/lua_scripts/unbound_mentor.lua", "lua_scripts/unbound_mentor.lua"]
+        {
+            let p = sdir.join(rel);
+            if p.is_file() {
+                match std::fs::remove_file(&p) {
+                    Ok(()) => self.line("info", format!("{rel} removed.")),
+                    Err(e) => {
+                        self.line("warn", format!("could not remove {rel}: {e}"));
+                        self.residue.push(format!("{rel} left on disk ({e})"));
+                    }
+                }
+            }
+        }
+        // Deliberate residue, named every time: the Lua ENGINE stays. Other
+        // ALE scripts may use it, and an unused engine is harmless; removing
+        // a shared component during an uninstall of one consumer is how other
+        // people's mods break.
+        if sdir.join("modules/mod-ale").exists() {
+            self.residue.push(
+                "modules/mod-ale left in place (shared Lua engine, harmless without the Mentor script)"
+                    .to_string(),
+            );
+        }
+        if sdir.join("env/dist/etc/modules/mod_ale.conf").exists() {
+            self.residue
+                .push("mod_ale.conf left in place (shared with any other ALE scripts)".to_string());
+        }
+        Ok(())
+    }
+
+    fn do_patch_revert(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        match probe_patch_presence(&sdir) {
+            PatchPresence::None => {
+                self.line("info", "the core patch is not applied -- nothing to revert.");
+                return Ok(());
+            }
+            PatchPresence::Mixed { missing } => {
+                self.line(
+                    "warn",
+                    format!(
+                        "the core patch is HALF-applied ({} of 6 files) -- leaving it; a reverse-apply cannot succeed on a mixed tree.",
+                        6 - missing.len()
+                    ),
+                );
+                self.residue.push(
+                    "core patch left half-applied (restore the six files with git checkout -- <file>)"
+                        .to_string(),
+                );
+                return Ok(());
+            }
+            PatchPresence::All => {}
+        }
+
+        // remove-files already deleted the staged patch, so the reverse apply
+        // uses a temp copy of the EMBEDDED bytes — the uninstall must never
+        // depend on a file it just removed (the bash uninstaller carries its
+        // own copy for exactly this reason).
+        let tmp = sdir.join(".dml-unbound-revert.patch");
+        let body = unbound_payload::file(unbound_payload::PATCH_DEST)
+            .expect("patch is pinned into MANIFEST")
+            .body;
+        if let Err(e) = conf::atomic_write(&tmp, body) {
+            self.residue.push(format!("core patch left applied (could not stage revert file: {e})"));
+            return Ok(());
+        }
+        let check = self.git_probe(vec![
+            "-C".into(),
+            sdir.display().to_string(),
+            "apply".into(),
+            "-R".into(),
+            "--check".into(),
+            ".dml-unbound-revert.patch".into(),
+        ]);
+        let (outcome, _) = self.run_collect(&check);
+        if !outcome.is_ok() {
+            // The bash got this one RIGHT and it is kept verbatim: a tree
+            // that has diverged cannot be force-reverted, and the patch is
+            // inert without mod-unbound (m_unboundClassMask just stays 0).
+            let _ = std::fs::remove_file(&tmp);
+            self.line("warn", "the core patch cannot be cleanly reverted (the source tree has diverged) -- leaving it; it is inert without mod-unbound.");
+            self.residue.push("core patch left applied (inert without mod-unbound)".to_string());
+            return Ok(());
+        }
+        let apply = self.git_probe(vec![
+            "-C".into(),
+            sdir.display().to_string(),
+            "apply".into(),
+            "-R".into(),
+            ".dml-unbound-revert.patch".into(),
+        ]);
+        let (outcome, out) = self.run_collect(&apply);
+        let _ = std::fs::remove_file(&tmp);
+        if !outcome.is_ok() {
+            self.line("warn", format!("reverse-apply failed after a clean check: {}", stderr_tail(&out)));
+            self.residue.push("core patch left applied (reverse-apply failed)".to_string());
+            return Ok(());
+        }
+        if probe_patch_presence(&sdir) != PatchPresence::None {
+            self.residue
+                .push("core patch symbols still present after the reverse-apply".to_string());
+        } else {
+            self.line("info", "core patch reverted across all six files.");
+        }
+        Ok(())
+    }
+
+    fn do_conf_revert(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        let ws = sdir.join("env/dist/etc/worldserver.conf");
+        // Restore what the INSTALL recorded, not a hardcoded 1: a user who ran
+        // with 0 before Unbound existed gets their 0 back. The bash restored a
+        // literal 1 no matter what — residue in its purest form.
+        let prior = self
+            .state
+            .as_ref()
+            .and_then(|s| s.prior_validate_skill.clone())
+            .unwrap_or_else(|| "1".to_string());
+        if ws.is_file() {
+            match conf::conf_write(&ws, VALIDATE_KEY, &prior) {
+                Ok(true) => self.line("info", format!("{VALIDATE_KEY} restored to {prior}.")),
+                Ok(false) => self.line("info", format!("{VALIDATE_KEY} already {prior}.")),
+                Err(e) => {
+                    self.line("warn", format!("could not restore {VALIDATE_KEY}: {e}"));
+                    self.residue.push(format!("{VALIDATE_KEY} left at 0 ({e})"));
+                }
+            }
+        } else {
+            self.residue.push(format!("{VALIDATE_KEY} not restored (worldserver.conf missing)"));
+        }
+        if self.state.as_ref().and_then(|s| s.prior_validate_skill.as_deref()).is_none() {
+            self.residue.push(format!(
+                "{VALIDATE_KEY} restored to the stock default ({prior}) -- the install that set it left no record of the prior value"
+            ));
+        }
+        Ok(())
+    }
+
+    fn do_un_ready(&mut self) -> Result<(), Fail> {
+        let sdir = self.sdir().to_path_buf();
+        self.line("info", "waiting for the stock world server to come back up...");
+        let started = Instant::now();
+        let deadline = started + self.opts.ready_timeout;
+        let mut watch = lifecycle::BootLoopWatch::new();
+
+        loop {
+            let (ps_outcome, ps_out) = self.run_collect(&self.docker_probe(
+                logsnap::world_container_argv().into_iter().map(String::from).collect(),
+                Some(sdir.clone()),
+            ));
+            let container =
+                if ps_outcome.is_ok() { logsnap::parse_container_id(ps_out.as_bytes()) } else { None };
+
+            if let Some(cid) = container {
+                let (rc_outcome, rc_out) = self.run_collect(&self.docker_probe(
+                    vec![
+                        "inspect".into(),
+                        "-f".into(),
+                        crate::install_native::READY_INSPECT_FORMAT.into(),
+                        cid.clone(),
+                    ],
+                    None,
+                ));
+                let (started_at, reading) = if rc_outcome.is_ok() {
+                    crate::install_native::parse_started_and_restarts(&rc_out)
+                } else {
+                    (None, None)
+                };
+                let log_args = match started_at.as_deref() {
+                    Some(s) => vec!["logs".to_string(), "--since".into(), s.into(), cid.clone()],
+                    None => vec![
+                        "logs".to_string(),
+                        "--tail".into(),
+                        lifecycle::BOOT_LOOP_CAUSE_TAIL_LINES.to_string(),
+                        cid.clone(),
+                    ],
+                };
+                let (log_outcome, logs) = self.run_collect(&self.docker_probe(log_args, None));
+                // INVERTED AND DOUBLED: the world must be ready AND the
+                // Unbound marker must be absent from THIS boot. A crash-looping
+                // server fails the first; a build that quietly kept the module
+                // fails the second. Either alone can look like a clean
+                // uninstall while being nothing of the kind.
+                if log_outcome.is_ok() && crate::status::world_ready_from_logs(&logs) {
+                    if logs.contains(READY_MARKER) {
+                        self.line("warn", "the rebuilt server STILL prints the Unbound marker -- the module is still compiled in.");
+                        self.residue.push(
+                            "the rebuilt worldserver still loads Unbound (marker present after rebuild)"
+                                .to_string(),
+                        );
+                    } else {
+                        self.line("info", "the stock world server is up, without the add-on.");
+                    }
+                    return Ok(());
+                }
+                if let Some(new_restarts) = watch.observe(reading) {
+                    let mysql = crate::status::mysql_connect_failures(&logs)
+                        >= lifecycle::BOOT_LOOP_MYSQL_HITS_MIN;
+                    self.line("warn", lifecycle::boot_loop_note(new_restarts, mysql));
+                }
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            std::thread::sleep(self.opts.ready_poll.min(deadline.saturating_duration_since(now)));
+        }
+        Err(Fail::new(
+            CODE_READY_TIMEOUT,
+            format!(
+                "The rebuilt server did not report ready within {} minutes.",
+                self.opts.ready_timeout.as_secs() / 60
+            ),
+            "The containers are still running -- check the worldserver log to see where it stopped.",
+        ))
+    }
+
+    fn run_un_stage(&mut self, stage: UninstallStage) -> Result<(), Fail> {
+        (self.emit)(match stage {
+            UninstallStage::Ready => {
+                section_start_limited(stage.name(), self.opts.ready_timeout.as_secs())
+            }
+            _ => section_start(stage.name()),
+        });
+        let result = match stage {
+            UninstallStage::Preflight => self.do_preflight(),
+            UninstallStage::Locate => self.do_locate(),
+            UninstallStage::Guard => self.do_un_guard(),
+            UninstallStage::Backup => self.do_un_backup(),
+            UninstallStage::SqlRevert => self.do_sql_revert(),
+            UninstallStage::RemoveFiles => self.do_remove_files(),
+            UninstallStage::PatchRevert => self.do_patch_revert(),
+            UninstallStage::ConfRevert => self.do_conf_revert(),
+            UninstallStage::Build => self.do_build(),
+            UninstallStage::Up => self.do_up(),
+            UninstallStage::Ready => self.do_un_ready(),
+        };
+        match &result {
+            Ok(()) => {
+                (self.emit)(section_end(stage.name(), "ok"));
+                if stage.records_completion() {
+                    self.st().mark_undone(stage);
+                    self.persist();
+                }
+            }
+            Err(_) => (self.emit)(section_end(stage.name(), "error")),
+        }
+        result
+    }
+
+    fn go_uninstall(&mut self) -> Result<(), Fail> {
+        for stage in UNINSTALL_ORDER {
+            self.run_un_stage(stage)?;
+        }
+        Ok(())
+    }
 }
 
 fn stage_write_fail(path: &Path, e: &std::io::Error) -> Fail {
@@ -1415,6 +1938,7 @@ pub fn unbound_install_stream_with(
         db_container: None,
         db_password: String::new(),
         backup_file: None,
+        residue: Vec::new(),
     };
     match engine.go() {
         Ok(()) => {
@@ -1431,6 +1955,76 @@ pub fn unbound_install_stream_with(
                 // not have). `done` says so instead of claiming it happened —
                 // the bash banner's lie, not repeated.
                 "manual_step": "In game as a GM, stand where the Mentor should appear and run: .npc add 900001",
+            })));
+            0
+        }
+        Err(f) => {
+            engine.persist_failure(&f);
+            (engine.emit)(error_event(f.code, f.message, &f.hint));
+            1
+        }
+    }
+}
+
+/// Uninstall (or resume uninstalling) the add-on, streaming NDJSON.
+/// Returns the process exit code: 0 uninstalled, 1 refused or failed.
+///
+/// Honest-inverse policy: what cannot be reverted is NAMED in the done
+/// event's `residue` array, never silently banner-ed. The permanent classes
+/// (mod-ale kept, cross-class spells in `character_spell` until each
+/// character's next login, Mentor Stones in inventories) are always there;
+/// per-run failures join them.
+pub fn unbound_uninstall_stream(opts: &UnboundOpts, emit: impl Fn(Value)) -> i32 {
+    unbound_uninstall_stream_with(&ProcUnboundIo::from_env(), opts, &emit)
+}
+
+pub fn unbound_uninstall_stream_with(
+    io: &dyn UnboundIo,
+    opts: &UnboundOpts,
+    emit: &dyn Fn(Value),
+) -> i32 {
+    if !crate::install_native::valid_title_id(&opts.id) {
+        emit(error_event(
+            "BAD_ARG",
+            format!("{:?} is not a valid title name.", opts.id),
+            "Use letters, digits, '.', '_' and '-' only.",
+        ));
+        return 1;
+    }
+    let mut engine = Engine {
+        io,
+        opts,
+        emit,
+        server_dir: None,
+        state: None,
+        resumed: false,
+        db_container: None,
+        db_password: String::new(),
+        backup_file: None,
+        residue: Vec::new(),
+    };
+    match engine.go_uninstall() {
+        Ok(()) => {
+            // The permanent residue classes, stated every time -- these are
+            // true of EVERY uninstall, not only ones that hit a snag.
+            engine.residue.push(
+                "characters keep already-learned cross-class spells until their next login"
+                    .to_string(),
+            );
+            engine.residue.push(
+                "Mentor Stones already in character inventories were not touched (see mentor_stone_cleanup_sql)"
+                    .to_string(),
+            );
+            // A COMPLETED uninstall removes the state file: leaving one that
+            // claims install-complete on a now-stock server would misdirect
+            // both `unbound status` and the next install's guard.
+            let _ = std::fs::remove_file(state_path(engine.sdir()));
+            (engine.emit)(done_event(serde_json::json!({
+                "addon_version": ADDON_VERSION,
+                "server_dir": engine.sdir().display().to_string(),
+                "backup": engine.backup_file,
+                "residue": engine.residue,
+                "mentor_stone_cleanup_sql": MENTOR_STONE_CLEANUP_SQL,
             })));
             0
         }
@@ -1603,7 +2197,7 @@ mod tests {
                 .reply("compose up -d --force-recreate ac-worldserver", 0, &[])
                 .reply("compose ps -a -q ac-worldserver", 0, &["cid-world-9999"])
                 .reply("inspect -f", 0, &["2026-08-02T10:00:00Z|0"])
-                .reply("logs --since", 0, &["World initialized", READY_MARKER])
+                .reply("logs --since", 0, &["World initialized in 33 sec", READY_MARKER])
         }
 
         /// Register or REPLACE-IN-PLACE — the FakeIo lesson from
@@ -1658,9 +2252,16 @@ mod tests {
                     && call.args.iter().any(|a| a == "apply")
                     && !call.args.iter().any(|a| a == "--check")
                 {
+                    // Forward apply writes the symbol into all six files;
+                    // reverse (-R) strips it -- mirroring what git would do.
+                    let reverse = call.args.iter().any(|a| a == "-R");
                     for rel in PATCHED_FILES {
                         let p = world.join(rel);
-                        let _ = std::fs::write(&p, format!("// patched {PATCH_SYMBOL}\n"));
+                        let _ = if reverse {
+                            std::fs::write(&p, "// clean azerothcore source\n")
+                        } else {
+                            std::fs::write(&p, format!("// patched {PATCH_SYMBOL}\n"))
+                        };
                     }
                 }
             }
@@ -2154,6 +2755,211 @@ mod tests {
         let mut out = String::new();
         io.run(&call, &mut |l| out.push_str(l));
         assert_eq!(out, "SECOND");
+    }
+
+    // -- uninstall -----------------------------------------------------------
+
+    /// A server with the add-on fully on it: patched files, module tree,
+    /// state file claiming a complete install, canary answering.
+    fn installed_server(name: &str) -> (PathBuf, PathBuf) {
+        let (games, sdir) = fake_server(name);
+        for rel in PATCHED_FILES {
+            std::fs::write(sdir.join(rel), format!("// patched {PATCH_SYMBOL}\n")).unwrap();
+        }
+        std::fs::create_dir_all(sdir.join(MODULE_REL).join("src")).unwrap();
+        std::fs::write(
+            sdir.join("env/dist/etc/worldserver.conf"),
+            "SomeKey = 1\nValidateSkillLearnedBySpells = 0\n",
+        )
+        .unwrap();
+        let lua = sdir.join("env/dist/etc/modules/lua_scripts");
+        std::fs::create_dir_all(&lua).unwrap();
+        std::fs::write(lua.join("unbound_mentor.lua"), "-- mentor\n").unwrap();
+        // The install staged the shared Lua engine too -- the uninstall must
+        // LEAVE both of these and say so.
+        std::fs::create_dir_all(sdir.join("modules/mod-ale")).unwrap();
+        std::fs::write(sdir.join("modules/mod-ale/CMakeLists.txt"), "ale\n").unwrap();
+        std::fs::write(
+            sdir.join("env/dist/etc/modules/mod_ale.conf"),
+            "ALE.Enabled = 1\nALE.ScriptPath = \"/azerothcore/env/dist/etc/modules/lua_scripts\"\n",
+        )
+        .unwrap();
+        let mut st = UnboundState::new(&composegen::install_id(&sdir));
+        for s in STAGE_ORDER {
+            if s.records_completion() {
+                st.mark(s);
+            }
+        }
+        st.prior_validate_skill = Some("1".to_string());
+        save_state(&sdir, &st).unwrap();
+        (games, sdir)
+    }
+
+    fn happy_uninstall_io(sdir: &Path) -> FakeIo {
+        FakeIo::happy(sdir)
+            .reply(CANARY_SQL, 0, &["1"])
+            // The stock server after the rebuild: ready, NO marker.
+            .reply("logs --since", 0, &["World initialized in 31 sec"])
+    }
+
+    fn run_uninstall(io: &FakeIo, opts: &UnboundOpts) -> (i32, Vec<Value>) {
+        let events = RefCell::new(Vec::new());
+        let code = unbound_uninstall_stream_with(io, opts, &|v| events.borrow_mut().push(v));
+        (code, events.into_inner())
+    }
+
+    #[test]
+    fn uninstall_happy_path_reverts_and_names_its_residue() {
+        let (games, sdir) = installed_server("unhappy");
+        let io = happy_uninstall_io(&sdir);
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        let t = terminal(&events);
+        assert_eq!(code, 0, "terminal: {t}");
+        assert_eq!(t["event"], "done");
+
+        // Every revert statement fired, in order, against the resolved
+        // container id -- never the global name.
+        let sql_calls: Vec<String> = io
+            .log()
+            .into_iter()
+            .filter(|l| l.contains("cid-db-1234") && (l.contains("DELETE") || l.contains("DROP")))
+            .collect();
+        assert_eq!(sql_calls.len(), REVERT_SQL.len());
+        for (call, (_, sql, _)) in sql_calls.iter().zip(REVERT_SQL) {
+            assert!(call.contains(sql), "revert order drifted: expected {sql} in {call}");
+            assert!(!call.contains(" ac-database "), "global name used: {call}");
+        }
+
+        // Files gone; shared engine kept.
+        assert!(!sdir.join(MODULE_REL).exists());
+        assert!(!sdir.join("env/dist/etc/modules/lua_scripts/unbound_mentor.lua").exists());
+
+        // Patch reverted through -R with a --check first, from the EMBEDDED
+        // bytes (the staged copy was already deleted by remove-files).
+        let log = io.log();
+        let check = log.iter().position(|l| l.contains("-R --check")).expect("check ran");
+        let apply = log
+            .iter()
+            .position(|l| l.contains("apply -R .dml-unbound-revert.patch"))
+            .expect("reverse apply ran");
+        assert!(check < apply);
+        assert!(!sdir.join(".dml-unbound-revert.patch").exists(), "temp patch cleaned up");
+        assert_eq!(probe_patch_presence(&sdir), PatchPresence::None);
+
+        // Conf restored to the RECORDED prior value, not a hardcoded 1.
+        let ws = std::fs::read_to_string(sdir.join("env/dist/etc/worldserver.conf")).unwrap();
+        assert!(ws.contains("ValidateSkillLearnedBySpells = 1"), "{ws}");
+
+        // The state file is GONE -- a stock server carries no claim.
+        assert!(load_state(&sdir).is_none());
+
+        // Residue names the permanent classes and the cleanup SQL is TEXT.
+        let residue = t["data"]["residue"].as_array().unwrap();
+        let joined = residue.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("mod-ale left in place"), "{joined}");
+        assert!(joined.contains("next login"), "{joined}");
+        assert!(joined.contains("Mentor Stones"), "{joined}");
+        assert!(t["data"]["mentor_stone_cleanup_sql"].as_str().unwrap().contains("item_instance"));
+    }
+
+    #[test]
+    fn uninstall_refuses_without_consent_and_mutates_nothing() {
+        let (games, sdir) = installed_server("unconsent");
+        let io = happy_uninstall_io(&sdir);
+        let mut opts = opts_for(&games);
+        opts.accept_data_changes = false;
+        let (code, events) = run_uninstall(&io, &opts);
+        assert_eq!(code, 1);
+        assert_eq!(error_code(&events), CODE_CONSENT_REQUIRED);
+        // The message names the DROP that destroys progression.
+        assert!(error_message(&events).contains("unbound_character_unlocks"));
+        assert_eq!(io.backup_calls.get(), 0);
+        assert!(sdir.join(MODULE_REL).exists(), "nothing may be deleted on a refusal");
+        assert!(
+            !io.log().iter().any(|l| l.contains("DELETE") || l.contains("DROP")),
+            "no revert SQL may run on a refusal"
+        );
+    }
+
+    #[test]
+    fn uninstall_on_a_virgin_server_refuses_unless_forced() {
+        let (games, sdir) = fake_server("unvirgin");
+        let io = FakeIo::happy(&sdir); // canary errors -> no evidence anywhere
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        assert_eq!(code, 1);
+        assert_eq!(error_code(&events), CODE_NOT_INSTALLED);
+
+        let io = FakeIo::happy(&sdir).reply("logs --since", 0, &["World initialized in 3 sec"]);
+        let mut opts = opts_for(&games);
+        opts.force = true;
+        let (code, events) = run_uninstall(&io, &opts);
+        assert_eq!(code, 0, "terminal: {}", terminal(&events));
+    }
+
+    #[test]
+    fn a_failed_revert_statement_continues_and_lands_in_residue() {
+        let (games, sdir) = installed_server("unsqlfail");
+        let io = happy_uninstall_io(&sdir)
+            .reply("skillraceclassinfo_dbc", 1, &["ERROR 1142 (42000): DELETE command denied"]);
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        // The run COMPLETES -- half a cleanup beats stranding -- but the done
+        // event carries the failure, which is the half the bash forgot.
+        assert_eq!(code, 0, "terminal: {}", terminal(&events));
+        let residue = terminal(&events)["data"]["residue"].as_array().unwrap();
+        let joined = residue.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("universal skill access"), "{joined}");
+        assert!(joined.contains("1142"), "the mysql error travels: {joined}");
+        // The statements AFTER the failed one still ran.
+        assert!(io.log().iter().any(|l| l.contains("unbound_character_unlocks")));
+    }
+
+    #[test]
+    fn a_diverged_tree_leaves_the_patch_and_says_so() {
+        let (games, sdir) = installed_server("undiverged");
+        let io = happy_uninstall_io(&sdir).reply("-R --check", 1, &["error: patch does not apply"]);
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        assert_eq!(code, 0, "terminal: {}", terminal(&events));
+        // No reverse apply after a failed check.
+        assert!(
+            !io.log().iter().any(|l| l.contains("apply -R .dml-unbound-revert.patch")),
+            "reverse apply must not run after a failed check"
+        );
+        let residue = terminal(&events)["data"]["residue"].as_array().unwrap();
+        let joined = residue.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("core patch left applied"), "{joined}");
+        assert!(joined.contains("inert"), "the user is told it is harmless: {joined}");
+    }
+
+    #[test]
+    fn a_rebuild_that_still_prints_the_marker_is_named_in_residue() {
+        // The build "succeeded" but the module is somehow still compiled in
+        // (BuildKit cache pathology, a second module copy). world-ready alone
+        // would call this a clean uninstall; the inverted marker check says
+        // otherwise.
+        let (games, sdir) = installed_server("unmarker");
+        let io = happy_uninstall_io(&sdir)
+            .reply("logs --since", 0, &["World initialized in 31 sec", READY_MARKER]);
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        assert_eq!(code, 0);
+        let residue = terminal(&events)["data"]["residue"].as_array().unwrap();
+        let joined = residue.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("still loads Unbound"), "{joined}");
+    }
+
+    #[test]
+    fn uninstall_restores_the_stock_default_and_flags_it_when_no_prior_was_recorded() {
+        let (games, sdir) = installed_server("unnoprior");
+        // A bash-scripted install left no state file at all.
+        std::fs::remove_file(state_path(&sdir)).unwrap();
+        let io = happy_uninstall_io(&sdir);
+        let (code, events) = run_uninstall(&io, &opts_for(&games));
+        assert_eq!(code, 0, "terminal: {}", terminal(&events));
+        let ws = std::fs::read_to_string(sdir.join("env/dist/etc/worldserver.conf")).unwrap();
+        assert!(ws.contains("ValidateSkillLearnedBySpells = 1"));
+        // ...and the guess is DECLARED, not passed off as a restoration.
+        let residue = terminal(&events)["data"]["residue"].as_array().unwrap();
+        let joined = residue.iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>().join(" | ");
+        assert!(joined.contains("no record of the prior value"), "{joined}");
     }
 
     #[test]
