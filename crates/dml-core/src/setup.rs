@@ -121,6 +121,10 @@ pub enum SetupStep {
     Distro,
     Cli,
     Titles,
+    /// Native chain: is Docker Desktop installed on this PC?
+    Docker,
+    /// Native chain: is its engine actually up?
+    Engine,
 }
 
 /// The single value a consumer switches on. Ordered by the chain: the first
@@ -141,6 +145,12 @@ pub enum SetupState {
     /// on a fresh substrate install, which bootstraps an old CLI). Same fix
     /// as `NoCli`.
     CliOutdated,
+    /// NATIVE chain only: Docker Desktop is not on this PC. The launcher does
+    /// not install it — it is a separate download with its own licence terms.
+    NoDocker,
+    /// NATIVE chain only: Docker Desktop is installed but its engine is not
+    /// running. THIS the launcher fixes, by starting the engine.
+    DockerStopped,
     /// Fully provisioned, no titles installed yet — send them to Library.
     NoTitles,
     /// Everything is in place.
@@ -764,6 +774,75 @@ pub fn probe(env: &SetupProbeEnv) -> BackendStatus {
     })
 }
 
+/// What the NATIVE chain needs to know. Facts in, decision out — same shape as
+/// [`derive`], and pure for the same reason: the states a user can land in are
+/// worth testing without owning a machine that happens to be in each of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFacts {
+    /// Is Docker Desktop on this PC? `Unknown` when the look-up itself failed.
+    pub docker_installed: Tri,
+    /// Is its engine answering? Only meaningful when `docker_installed` is
+    /// `Yes`; the chain never reads it otherwise.
+    pub engine_running: Tri,
+    /// Installed titles. `None` is a could-not-tell, NOT zero — the distinction
+    /// is the difference between "install your server" and "we could not look".
+    pub titles: Option<usize>,
+}
+
+/// The native chain: Docker Desktop installed → engine up → a title installed.
+///
+/// The WSL chain asks about WSL, a distro and a `dml` binary, none of which
+/// exist in native mode — which is why running it there produced an answer
+/// (`no_wsl`) that would have told a user with a perfectly good Docker setup to
+/// go install WSL. The frontend's defence was to show a native user NOTHING at
+/// all, so a native machine with no server got a status card for a server that
+/// does not exist: exactly the first-run problem this whole phase exists to
+/// remove, still present for the backend the project is moving to.
+///
+/// Same discipline as [`derive`]: first missing link wins, so there is always
+/// exactly one next step, and `Unknown` is never read as absence — a Docker
+/// look-up that fell over offers a retry, never an "install Docker" button
+/// aimed at someone who already has it.
+pub fn derive_native(f: NativeFacts) -> BackendStatus {
+    let probes = Probes {
+        // The native chain answers none of these; leaving them Unknown is the
+        // honest encoding. They are diagnostics only, and `derive_native` never
+        // reads them back.
+        wsl: Tri::Unknown,
+        distro: Tri::Unknown,
+        cli: Tri::Unknown,
+        cli_version: None,
+        titles: f.titles,
+        detail: None,
+    };
+    let at = |state: SetupState, blocked_at: Option<SetupStep>| BackendStatus {
+        state,
+        blocked_at,
+        detail: None,
+        // Native mode has no distro. Naming one here would put "dml-arch" in
+        // front of a user who has deliberately never had it.
+        distro: String::new(),
+        expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
+        probes: probes.clone(),
+    };
+
+    match f.docker_installed {
+        Tri::Unknown => return at(SetupState::Unknown, Some(SetupStep::Docker)),
+        Tri::No => return at(SetupState::NoDocker, None),
+        Tri::Yes => {}
+    }
+    match f.engine_running {
+        Tri::Unknown => return at(SetupState::Unknown, Some(SetupStep::Engine)),
+        Tri::No => return at(SetupState::DockerStopped, None),
+        Tri::Yes => {}
+    }
+    match f.titles {
+        None => at(SetupState::Unknown, Some(SetupStep::Titles)),
+        Some(0) => at(SetupState::NoTitles, None),
+        Some(_) => at(SetupState::Ready, None),
+    }
+}
+
 /// JUST the first link: is the distro registered?
 ///
 /// [`backend::detect`](crate::backend::detect) needs this at startup to avoid
@@ -803,6 +882,86 @@ mod tests {
 
     fn ran_err(code: i32, stderr: &str) -> ProbeOutcome {
         ProbeOutcome::Ran { code: Some(code), stdout: String::new(), stderr: stderr.to_string() }
+    }
+
+    // -- the NATIVE chain ----------------------------------------------------
+
+    fn native_ok() -> NativeFacts {
+        NativeFacts { docker_installed: Tri::Yes, engine_running: Tri::Yes, titles: Some(1) }
+    }
+
+    #[test]
+    fn native_ready_needs_docker_engine_and_a_title() {
+        assert_eq!(derive_native(native_ok()).state, SetupState::Ready);
+    }
+
+    #[test]
+    fn native_no_docker_is_its_own_state_not_no_wsl() {
+        // Running the WSL chain in native mode answered `no_wsl` here, which
+        // would tell a user with a perfectly good Docker setup to install WSL.
+        let f = NativeFacts { docker_installed: Tri::No, ..native_ok() };
+        assert_eq!(derive_native(f).state, SetupState::NoDocker);
+    }
+
+    #[test]
+    fn native_engine_down_is_distinguishable_from_docker_absent() {
+        // These need different buttons: one starts the engine, the other sends
+        // the user to a download page. Collapsing them is how a user with
+        // Docker installed gets told to install Docker.
+        let f = NativeFacts { engine_running: Tri::No, ..native_ok() };
+        assert_eq!(derive_native(f).state, SetupState::DockerStopped);
+    }
+
+    /// THE ARM TASK 6 EXISTS FOR: a native machine that is fully able to run a
+    /// server and simply has not installed one. Before this chain existed the
+    /// frontend showed such a user nothing at all, so they landed on Home
+    /// looking at a status card for a server that does not exist.
+    #[test]
+    fn native_with_no_titles_sends_the_user_to_install_one() {
+        let f = NativeFacts { titles: Some(0), ..native_ok() };
+        assert_eq!(derive_native(f).state, SetupState::NoTitles);
+    }
+
+    #[test]
+    fn native_unknowns_are_never_read_as_absence() {
+        // Each shrug names the step that went dark and stays Unknown -- an
+        // Unknown docker probe must NOT become "install Docker", which is a
+        // repair aimed at someone who may already have it.
+        let f = NativeFacts { docker_installed: Tri::Unknown, ..native_ok() };
+        let got = derive_native(f);
+        assert_eq!(got.state, SetupState::Unknown);
+        assert_eq!(got.blocked_at, Some(SetupStep::Docker));
+
+        let f = NativeFacts { engine_running: Tri::Unknown, ..native_ok() };
+        let got = derive_native(f);
+        assert_eq!(got.state, SetupState::Unknown);
+        assert_eq!(got.blocked_at, Some(SetupStep::Engine));
+
+        // None titles is a could-not-tell, NOT zero.
+        let f = NativeFacts { titles: None, ..native_ok() };
+        let got = derive_native(f);
+        assert_eq!(got.state, SetupState::Unknown);
+        assert_eq!(got.blocked_at, Some(SetupStep::Titles));
+    }
+
+    #[test]
+    fn native_never_names_a_distro() {
+        // "dml-arch" in front of a user who has deliberately never had one.
+        for f in [
+            native_ok(),
+            NativeFacts { docker_installed: Tri::No, ..native_ok() },
+            NativeFacts { titles: Some(0), ..native_ok() },
+        ] {
+            assert_eq!(derive_native(f).distro, "", "native mode has no distro to name");
+        }
+    }
+
+    #[test]
+    fn native_stops_at_the_first_missing_link() {
+        // No docker AND no titles: the answer is the FIRST one, so there is
+        // always exactly one next step rather than a list of complaints.
+        let f = NativeFacts { docker_installed: Tri::No, engine_running: Tri::No, titles: Some(0) };
+        assert_eq!(derive_native(f).state, SetupState::NoDocker);
     }
 
     // -- classify_wsl_list ---------------------------------------------------

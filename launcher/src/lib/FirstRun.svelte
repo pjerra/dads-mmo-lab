@@ -49,6 +49,8 @@
   // Exhaustive by type: adding a FirstRunKind without a glyph is a
   // svelte-check error rather than a blank square in front of a new user.
   const GLYPH: Record<FirstRunKind, string> = {
+    "no-docker": "🐳",
+    "docker-stopped": "🐳",
     "no-wsl": "🧰",
     "no-distro": "🧰",
     "no-cli": "📦",

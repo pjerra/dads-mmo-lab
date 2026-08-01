@@ -303,6 +303,11 @@ fn step_name(step: SetupStep) -> &'static str {
         SetupStep::Distro => "the dml-arch distro",
         SetupStep::Cli => "the dml CLI",
         SetupStep::Titles => "the installed titles",
+        // Native-chain steps. This module only ever provisions the WSL distro,
+        // so these are unreachable here -- named anyway rather than swept into
+        // a `_`, so the next step added still forces a decision.
+        SetupStep::Docker => "Docker Desktop",
+        SetupStep::Engine => "the Docker engine",
     }
 }
 
@@ -336,6 +341,15 @@ pub fn refusal(status: &BackendStatus) -> Option<(&'static str, String, String)>
         // and Ready mean it is already provisioned -- re-running is safe and
         // is the honest way to repair a half-broken install, so it is allowed.
         SetupState::NoCli | SetupState::CliOutdated | SetupState::NoTitles | SetupState::Ready => None,
+        // Native-chain states. This command provisions the WSL distro, so
+        // reaching it in native mode means the caller routed wrongly -- refuse
+        // and say which backend it belongs to rather than half-running.
+        SetupState::NoDocker | SetupState::DockerStopped => Some((
+            "WRONG_BACKEND",
+            "This sets up the WSL distro, and this PC is running in native Docker mode.".to_string(),
+            "Nothing was changed. Native mode needs no distro -- install a server from the Library instead."
+                .to_string(),
+        )),
     }
 }
 
@@ -413,7 +427,14 @@ pub fn verify_failure(after: &BackendStatus) -> Option<(&'static str, String, St
         }
         // NoWsl/NoDistro here would mean the distro vanished mid-run; treat it
         // the same as any other failed verification rather than as success.
-        SetupState::NoWsl | SetupState::NoDistro => Some((
+        // A native-chain answer here would mean the backend flipped mid-run.
+        // Grouped with the vanished-distro case for the same reason: the copies
+        // happened, the verification did not, and calling that success is the
+        // one thing this function must never do.
+        SetupState::NoWsl
+        | SetupState::NoDistro
+        | SetupState::NoDocker
+        | SetupState::DockerStopped => Some((
             "VERIFY_UNKNOWN",
             format!("The files were copied, but {} could no longer be reached.", after.distro),
             "Try again in a moment.".to_string(),

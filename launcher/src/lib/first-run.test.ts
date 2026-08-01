@@ -53,13 +53,55 @@ describe("firstRunState — when NOT to take over Home", () => {
     expect(firstRunState({ report: report(), everReady: false })).toBeNull();
   });
 
-  it("renders nothing in native mode, whatever the WSL chain says", () => {
-    // A native-backend user runs a real server with no distro at all. The
-    // chain honestly answers no_wsl for them, and showing it would tell
-    // someone with a working server to go install WSL.
-    expect(
-      firstRunState({ report: report({ state: "no_wsl", backend_mode: "native" }), everReady: false }),
-    ).toBeNull();
+  it("never gives a native user WSL advice", () => {
+    // This used to be "renders nothing in native mode", because the backend ran
+    // the WSL chain even in native mode and its honest `no_wsl` would have told
+    // someone with a working Docker setup to go install WSL. Showing nothing was
+    // the lesser evil, and it cost native users any first-run screen at all.
+    //
+    // The backend now branches before it picks a chain, so these four states are
+    // unreachable in native mode. The guard stays anyway: the harm is specific
+    // and should not depend on two files staying in step.
+    for (const state of ["no_wsl", "no_distro", "no_cli", "cli_outdated"] as const) {
+      const got = firstRunState({
+        report: report({ state, backend_mode: "native" }),
+        everReady: false,
+      });
+      expect(got?.kind).toBe("unknown");
+      expect(JSON.stringify(got)).not.toMatch(/WSL|Install-DML/i);
+    }
+  });
+
+  it("tells a native user with no Docker where to get it, and does not offer to install it", () => {
+    const got = firstRunState({
+      report: report({ state: "no_docker", backend_mode: "native" }),
+      everReady: false,
+    });
+    expect(got?.kind).toBe("no-docker");
+    // A link, never a "setup" button: Docker Desktop is a separate product with
+    // its own licence terms and is not ours to install for someone.
+    expect(got?.action.kind).toBe("link");
+  });
+
+  it("separates a stopped Docker from a missing one", () => {
+    // Collapsing these would tell a user who already HAS Docker to install it.
+    const got = firstRunState({
+      report: report({ state: "docker_stopped", backend_mode: "native" }),
+      everReady: false,
+    });
+    expect(got?.kind).toBe("docker-stopped");
+    expect(got?.action.kind).toBe("retry");
+  });
+
+  it("sends a ready native machine with no server to the Library", () => {
+    // THE ARM TASK 6 EXISTS FOR. Before it, this user saw nothing and landed on
+    // Home with a status card for a server that does not exist.
+    const got = firstRunState({
+      report: report({ state: "no_titles", backend_mode: "native" }),
+      everReady: false,
+    });
+    expect(got?.kind).toBe("no-titles");
+    expect(got?.action).toEqual({ kind: "nav", label: "Open Library", page: "library" });
   });
 
   it("never takes Home away again once this session has seen the machine ready", () => {

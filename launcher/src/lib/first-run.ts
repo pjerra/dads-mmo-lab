@@ -45,9 +45,13 @@ export type SetupState =
   | "cli_outdated"
   | "no_titles"
   | "ready"
-  | "unknown";
+  | "unknown"
+  // Native chain only (dml_core::setup::derive_native). Mirrors the Rust enum;
+  // adding one there without adding it here is a silent fall-through.
+  | "no_docker"
+  | "docker_stopped";
 
-export type SetupStep = "wsl" | "distro" | "cli" | "titles";
+export type SetupStep = "wsl" | "distro" | "cli" | "titles" | "docker" | "engine";
 
 export interface BackendProbes {
   wsl: Tri;
@@ -83,6 +87,8 @@ export interface BackendStatusReport {
 // --- the screen -------------------------------------------------------------
 
 export type FirstRunKind =
+  | "no-docker"
+  | "docker-stopped"
   | "no-wsl"
   | "no-distro"
   | "no-cli"
@@ -126,6 +132,15 @@ export interface FirstRunState {
  * offered as a place to download the app itself.
  */
 export const PROJECT_URL = "https://github.com/DadsMmoLab/dads-mmo-lab";
+
+/**
+ * Docker Desktop's own download page. Native mode's one external dependency.
+ *
+ * The launcher does not install it and must not offer to: it is a separate
+ * product with its own licence terms (free for personal use, paid for larger
+ * companies), and silently pulling it onto someone's PC is not ours to do.
+ */
+export const DOCKER_URL = "https://www.docker.com/products/docker-desktop/";
 
 /**
  * The diagnostics line, made readable by a human.
@@ -294,10 +309,33 @@ export function firstRunState(o: {
     return o.error ? couldNotTell(null, null, o.error) : null;
   }
 
-  // Native backend: a real server with no distro at all. The chain honestly
-  // answers `no_wsl` for these users, and showing it would tell someone with a
-  // working server to go install WSL.
-  if (r.backend_mode === "native") return null;
+  // Native mode used to return null here -- because the WSL chain ran even in
+  // native mode, and its honest `no_wsl` answer would have told someone with a
+  // working Docker setup to go install WSL. Showing NOTHING was the lesser
+  // evil, not a correct answer: a native PC with no server landed on Home
+  // looking at a status card for a server that does not exist.
+  //
+  // The backend now runs a NATIVE chain (docker installed -> engine up -> a
+  // title), so native gets real screens. The states below are shared with the
+  // WSL chain where they genuinely mean the same thing (`ready`, `unknown`,
+  // `no_titles`) and native-only where they do not.
+  //
+  // The one guard that survives from the old behaviour: a native report must
+  // never render WSL ADVICE. Those four states are unreachable now that the
+  // backend branches before it picks a chain, so this cannot fire from our own
+  // code -- but "install WSL" in front of someone who deliberately has no distro
+  // is the specific harm the old blanket `return null` existed to prevent, and
+  // it should not depend on two files staying in step. A stale backend, or a
+  // future chain change, gets a could-not-tell instead of bad advice.
+  if (
+    r.backend_mode === "native" &&
+    (r.state === "no_wsl" ||
+      r.state === "no_distro" ||
+      r.state === "no_cli" ||
+      r.state === "cli_outdated")
+  ) {
+    return couldNotTell(null, null, o.error ?? "");
+  }
 
   switch (r.state) {
     case "ready":
@@ -307,6 +345,27 @@ export function firstRunState(o: {
       // The machine's OWN words first: `error` describes our IPC, `detail`
       // describes their PC, and this is the one screen with no repair on it.
       return couldNotTell(r.blocked_at, r.distro, r.detail ?? o.error ?? "");
+
+    case "no_docker":
+      return {
+        kind: "no-docker",
+        title: "Docker Desktop isn't installed on this PC yet",
+        body: "Your server runs inside Docker, and Docker Desktop is a separate free download with its own licence terms — so the launcher doesn't install it for you. Install it, start it once, then come back here.",
+        action: { kind: "link", label: "Get Docker Desktop ↗", url: DOCKER_URL },
+        detail: "",
+      };
+
+    case "docker_stopped":
+      // Distinct from no_docker ON PURPOSE. Collapsing the two would tell a
+      // user who already HAS Docker to go and install Docker, which reads as
+      // the app not knowing what is on their machine.
+      return {
+        kind: "docker-stopped",
+        title: "Docker Desktop isn't running",
+        body: "Docker Desktop is installed on this PC but its engine is stopped, so there's nothing for your server to run in. Starting it takes a moment the first time.",
+        action: { kind: "retry", label: "Check again" },
+        detail: "",
+      };
 
     case "no_wsl":
       return {

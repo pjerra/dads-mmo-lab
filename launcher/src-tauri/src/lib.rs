@@ -1534,11 +1534,60 @@ pub fn backend_status_with(
         std::time::Duration,
     ) -> dml_core::setup::ProbeOutcome,
 ) -> BackendStatusReport {
-    let env = backend_probe_env();
-    let backend = dml_core::setup::probe_with(&env.distro, &env.user, |args, budget| {
-        spawn(&env.wsl_program, args, env.budget(budget))
-    });
+    // Native mode asks native questions. Running the WSL chain here answered
+    // `no_wsl` for a machine with a perfectly good Docker setup, and the
+    // frontend's only defence was to show a native user NO first-run screen at
+    // all — so a native PC with no server landed on Home staring at a status
+    // card for a server that does not exist. That is the exact problem this
+    // phase exists to remove, and it was still live for the backend the project
+    // is moving to.
+    let backend = if native {
+        dml_core::setup::derive_native(native_facts())
+    } else {
+        let env = backend_probe_env();
+        dml_core::setup::probe_with(&env.distro, &env.user, |args, budget| {
+            spawn(&env.wsl_program, args, env.budget(budget))
+        })
+    };
     backend_status_report(backend, crate::payload::resolve_opt(resource_dir), native)
+}
+
+/// The three facts the native chain runs on, gathered from this machine.
+///
+/// Tri-state throughout, and the ordering matters: `engine_running` is only
+/// asked when Docker is actually installed, because `docker info` against a
+/// program that does not exist is a failure that says nothing about the engine.
+fn native_facts() -> dml_core::setup::NativeFacts {
+    use dml_core::setup::Tri;
+    let program = dml_core::engine::docker_desktop_program();
+    let docker_installed = if program.is_some() { Tri::Yes } else { Tri::No };
+    let engine_running = match &program {
+        Some(_) => {
+            if dml_core::engine::engine_running(&dml_core::engine::docker_program()) {
+                Tri::Yes
+            } else {
+                Tri::No
+            }
+        }
+        None => Tri::Unknown,
+    };
+    dml_core::setup::NativeFacts { docker_installed, engine_running, titles: native_title_count() }
+}
+
+/// How many titles are installed, or `None` when we could not look.
+///
+/// `None` is NOT zero: "install your server" and "we could not read your games
+/// folder" are different screens, and conflating them would offer a fresh
+/// install to someone whose existing server is merely unreadable.
+fn native_title_count() -> Option<usize> {
+    let dir = dml_core::compose::games_dir_from_env();
+    let entries = std::fs::read_dir(&dir).ok()?;
+    Some(
+        entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().join(dml_wow::composegen::BASE_FILE).is_file())
+            .count(),
+    )
 }
 
 /// Probe this machine and report the FIRST thing standing between the user and
