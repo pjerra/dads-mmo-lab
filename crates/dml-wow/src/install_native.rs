@@ -422,6 +422,19 @@ pub trait InstallIo {
     /// they arrive) to `on_line`. Unbounded on purpose: a build legitimately
     /// runs for hours.
     fn run(&self, call: &Call, on_line: &mut dyn FnMut(&str)) -> RunOutcome;
+
+    /// Bring the Docker engine up if it is down, WITHOUT showing the dashboard.
+    ///
+    /// Returns `true` when a start was actually attempted, meaning the caller
+    /// must re-gather its facts rather than trust the ones it holds. `false`
+    /// means nothing was tried: the engine was already up, or there is no
+    /// Docker Desktop to start.
+    ///
+    /// Default is "did not try", so a fake that does not care need not
+    /// implement it; [`ProcIo`] supplies the real behaviour.
+    fn ensure_engine(&self, _on_line: &mut dyn FnMut(String, String)) -> bool {
+        false
+    }
 }
 
 /// The production [`InstallIo`]: real subprocesses.
@@ -455,6 +468,45 @@ impl ProcIo {
 impl InstallIo for ProcIo {
     fn preflight(&self, games_dir: &Path) -> preflight::PreflightFacts {
         preflight::gather(&self.docker, games_dir)
+    }
+
+    /// The real engine start, reusing the SAME path Home's Start button takes
+    /// ([`crate::native::ensure_engine_up_stream`]): `docker desktop start -d`,
+    /// which asks for the ENGINE and not the GUI, so no dashboard window pops
+    /// up over whatever the user was doing. It polls until the engine answers
+    /// and gives up on a bounded timeout.
+    fn ensure_engine(&self, on_line: &mut dyn FnMut(String, String)) -> bool {
+        use dml_core::engine;
+        if engine::engine_running(&self.docker) {
+            return false; // nothing to start, nothing to re-probe for
+        }
+        if engine::docker_desktop_program().is_none() {
+            // Nothing to start it WITH. The preflight refusal that follows
+            // already says the right thing; a second message here would only
+            // be noise in front of it.
+            return false;
+        }
+        // `ensure_engine_up_stream` takes an `Fn`, so the lines are collected
+        // here and replayed after it returns rather than forwarded live. The
+        // whole call is seconds and its output is a handful of lines, so
+        // nothing is lost by not streaming it -- and the alternative would mean
+        // widening a shared helper's bound for one caller.
+        let collected = std::cell::RefCell::new(Vec::<(String, String)>::new());
+        crate::native::ensure_engine_up_stream(|v| {
+            // Only the human-readable lines. The helper's own section events
+            // belong to its caller's framing, and this engine already has the
+            // user inside a `preflight` section.
+            if v.get("event").and_then(|e| e.as_str()) == Some("line") {
+                let level = v.get("level").and_then(|l| l.as_str()).unwrap_or("info");
+                let text = v.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                collected.borrow_mut().push((level.to_string(), text.to_string()));
+            }
+        })
+        .ok();
+        for (level, text) in collected.into_inner() {
+            on_line(level, text);
+        }
+        true
     }
 
     fn run(&self, call: &Call, on_line: &mut dyn FnMut(&str)) -> RunOutcome {
@@ -1024,7 +1076,30 @@ impl<'a> Engine<'a> {
     // -- stages ------------------------------------------------------------
 
     fn do_preflight(&mut self) -> Result<(), Fail> {
-        let facts = self.io.preflight(&self.opts.games_dir);
+        let mut facts = self.io.preflight(&self.opts.games_dir);
+        // START THE ENGINE RATHER THAN REFUSING OVER IT.
+        //
+        // A stopped Docker Desktop is the single most likely reason an install
+        // cannot begin: it does not run at boot on a default install, so a user
+        // resuming a build the next day meets this every time. Home's Start
+        // button already brings the engine up hidden, so the installer telling
+        // the user to go and do by hand what the app does for them elsewhere
+        // was an inconsistency, not a safeguard.
+        //
+        // Only attempted when the facts say docker did not answer, and the
+        // facts are RE-GATHERED afterwards -- deciding on the stale ones would
+        // refuse over a state that no longer exists. If the engine still will
+        // not come up, the refusal below is unchanged and still honest.
+        if facts.docker.reachable != dml_core::setup::Tri::Yes {
+            let mut lines: Vec<(String, String)> = Vec::new();
+            let attempted = self.io.ensure_engine(&mut |level, text| lines.push((level, text)));
+            for (level, text) in lines {
+                self.line(&level, text);
+            }
+            if attempted {
+                facts = self.io.preflight(&self.opts.games_dir);
+            }
+        }
         let report = preflight::decide(&facts, self.opts.allow_underspec);
         for f in &report.findings {
             let level = match f.severity {
@@ -1651,15 +1726,41 @@ mod tests {
         facts: preflight::PreflightFacts,
         calls: RefCell<Vec<Call>>,
         replies: Vec<Reply>,
+        /// `Some(true)` = the engine is down and a start would SUCCEED;
+        /// `Some(false)` = down and the start fails. `None` = already up, so
+        /// `ensure_engine` is never reached. Mirrors what ProcIo does for real.
+        engine_start: Option<bool>,
+        engine_tried: RefCell<bool>,
     }
 
     impl FakeIo {
         fn healthy() -> Self {
-            FakeIo { facts: healthy_facts(), calls: RefCell::new(Vec::new()), replies: Vec::new() }
+            FakeIo {
+                facts: healthy_facts(),
+                calls: RefCell::new(Vec::new()),
+                replies: Vec::new(),
+                engine_start: None,
+                engine_tried: RefCell::new(false),
+            }
         }
         fn facts(mut self, f: preflight::PreflightFacts) -> Self {
             self.facts = f;
             self
+        }
+        /// Model a STOPPED engine that a start will (or will not) revive.
+        ///
+        /// The initial facts are set unreachable here rather than by the test,
+        /// so a test cannot accidentally exercise the autostart path while
+        /// still reporting a healthy docker -- which would pass for the wrong
+        /// reason.
+        fn with_engine_start(mut self, succeeds: bool) -> Self {
+            self.facts.docker.reachable = dml_core::setup::Tri::No;
+            self.facts.docker.detail = Some("stub: engine down".to_string());
+            self.engine_start = Some(succeeds);
+            self
+        }
+        fn engine_start_attempted(&self) -> bool {
+            *self.engine_tried.borrow()
         }
         /// Register `reply`, REPLACING any existing entry with the same key
         /// in place rather than appending a second one.
@@ -1723,7 +1824,29 @@ mod tests {
 
     impl InstallIo for FakeIo {
         fn preflight(&self, _games_dir: &Path) -> preflight::PreflightFacts {
-            self.facts.clone()
+            let mut f = self.facts.clone();
+            // The RE-GATHER is what makes the autostart real: after a
+            // successful start the engine answers, and deciding on the
+            // pre-start facts would refuse over a state that no longer exists.
+            if *self.engine_tried.borrow() && self.engine_start == Some(true) {
+                f.docker.reachable = dml_core::setup::Tri::Yes;
+                f.docker.detail = None;
+            }
+            f
+        }
+
+        fn ensure_engine(&self, on_line: &mut dyn FnMut(String, String)) -> bool {
+            match self.engine_start {
+                None => false, // already up -- ProcIo returns false here too
+                Some(ok) => {
+                    *self.engine_tried.borrow_mut() = true;
+                    on_line(
+                        "info".to_string(),
+                        if ok { "engine started".into() } else { "engine did not start".to_string() },
+                    );
+                    true
+                }
+            }
         }
         fn run(&self, call: &Call, on_line: &mut dyn FnMut(&str)) -> RunOutcome {
             self.calls.borrow_mut().push(call.clone());
@@ -1903,6 +2026,48 @@ mod tests {
         // passing because the whole stage was skipped.
         let base = std::fs::read_to_string(title.join(composegen::BASE_FILE)).unwrap();
         assert!(!base.contains("STALE-GENERATED-OUTPUT"), "the base file must still be regenerated");
+    }
+
+    /// A STOPPED DOCKER DESKTOP MUST NOT END AN INSTALL.
+    ///
+    /// It does not run at boot on a default install, so a user resuming a build
+    /// the next day meets this every single time -- and Home's Start button
+    /// already brings the engine up hidden. Refusing here while doing it there
+    /// was an inconsistency, not a safeguard.
+    ///
+    /// The FACTS ARE RE-GATHERED after the start. Deciding on the pre-start
+    /// facts would refuse over a state that no longer exists, which is the
+    /// whole bug this closes.
+    #[test]
+    fn a_stopped_engine_is_started_rather_than_refused() {
+        let games = fixture("engine-autostart");
+        let io = happy_io().with_engine_start(true);
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0, "a startable engine must not fail the install: {events:#?}");
+        assert!(io.engine_start_attempted(), "the engine start was never tried");
+    }
+
+    /// ...and when it genuinely cannot be started, the refusal is unchanged.
+    /// An autostart that swallowed the failure would be worse than none: the
+    /// user would watch a clone begin against an engine that is not there.
+    #[test]
+    fn an_engine_that_will_not_start_still_refuses_honestly() {
+        let games = fixture("engine-dead");
+        let io = happy_io().with_engine_start(false);
+        let (rc, events) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 1, "{events:#?}");
+        assert_eq!(error_code(&events), preflight::CODE_DOCKER_UNREACHABLE, "{events:#?}");
+    }
+
+    /// A healthy engine must not be poked. Calling `docker desktop start` on a
+    /// running engine is harmless but slow, and this runs before every install.
+    #[test]
+    fn a_running_engine_is_left_alone() {
+        let games = fixture("engine-up");
+        let io = happy_io();
+        let (rc, _) = run_install(&io, &fast_opts(&games));
+        assert_eq!(rc, 0);
+        assert!(!io.engine_start_attempted(), "a running engine must not be restarted");
     }
 
     fn happy_io() -> FakeIo {
