@@ -159,7 +159,7 @@ full output — the harness can no longer be the cause of the two mechanisms abo
 ## 🔴 PHASE B — make native reachable (the actual beta blocker)
 
 Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native-first-install.md),
-14 tasks. Seven are done.
+14 tasks. TEN are done — only the two LIVE gates and the docs pass remain.
 
 | # | Task | State |
 |---|---|---|
@@ -170,9 +170,9 @@ Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native
 | 5 | `dml-wow install-native` CLI surface | ✅ |
 | 9 | Migration scripts fixed to match their own lessons | ✅ `e354cb5` |
 | 6 | Launcher wiring | ✅ built + **click-verified 2026-08-01** (both scenarios; see B1) |
-| **8** | **`Install-DML-Native.ps1`** | ❌ not started |
-| **11** | **Account + SOAP bootstrap** | ❌ not started |
-| 7 | Port guard armed on native start | ⚠️ **armed, but as a WARNING where the plan specified a REFUSAL** — see below |
+| 8 | `Install-DML-Native.ps1` | ✅ **2026-08-01** + a 40-check harness, 3 mutations caught |
+| 11 | Account + SOAP bootstrap | ✅ **2026-08-01** — verified before it saves |
+| 7 | Port guard on native start | ✅ **2026-08-01** — refuses on the three stack ports, mirrored bash↔Rust |
 | 10 | `migrate-import` | ❌ not started |
 | 12, 13 | LIVE gates — real build, kill-mid-build resume, first login | 🙋 user |
 | 14 | Docs + doctrine reconciliation | partial |
@@ -221,7 +221,34 @@ Plus a Resume button when a title dir carries `.dml-install.json`, and cancel
 copy that tells the truth (cancel is `taskkill /F /T`; resumability is the state
 file + the BuildKit cache, not process suspension).
 
-### B2 — Task 8: `Install-DML-Native.ps1`
+### ✅ B2, B3, B4 — all three shipped 2026-08-01
+
+**Task 7 — the port guard refuses.** Only on the three ports this stack binds
+(3724/8085/7878); 3306 stays advisory because it is the one collision with a
+real automatic remedy. Tri-state throughout: a probe that cannot answer never
+blocks a start, which is why `port_listening` could not simply be reused (it
+reads ANY bind failure as "in use"). Mirrored into bash. **The tri-state test
+found a pre-existing bug**: `_check_port_conflicts` ran an unguarded `ss`
+substitution under `set -euo pipefail`, so on a machine without `ss` the whole
+command died silently — `dml start <title>` exited 1 with no output at all.
+
+**Task 11 — the account + SOAP bootstrap.** Guided, because automation is not
+available: `docker attach` REFUSES piped stdin against a TTY container
+(verified live), and without the tty it accepts the pipe and never returns. The
+only other route is an SRP6 write, which would be a third sanctioned MySQL write
+and is the user's call. What the module guarantees instead is that **"done" is
+earned** — `~/.dml/soap.env` is written only after a real round-trip succeeds.
+Rejected and Unreachable are separate outcomes, because the usual cause of
+unreachable is a world server still booting and blaming the password sends the
+user to recreate a working account.
+
+**Task 8 — `Install-DML-Native.ps1`.** No WSL, no Arch, no C# tray (which
+resolves SHIP-LIST 4.0b by construction). Docker Desktop is instructed rather
+than installed — its licence is the user's decision. The yq pin was *obtained*:
+I first wrote a plausible hash from nothing, which would have failed every
+install for a reason resembling tampering.
+
+### B2 (original scope) — Task 8: `Install-DML-Native.ps1`
 
 The WSL-free machine installer. `Install-DML.ps1` stays untouched as the WSL
 route. This one: detect-or-install Docker Desktop, install Git for Windows
