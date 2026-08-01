@@ -23,6 +23,7 @@
   import {
     wowSoapBootstrapInfo,
     wowSoapBootstrapVerify,
+    wowSoapAccountCreate,
     type SoapBootstrapInfo,
     type SoapBootstrapVerdict,
   } from "$lib/api";
@@ -67,6 +68,34 @@
   const commands = $derived(
     usable ? [`account create ${user} ${pass}`, `account set gmlevel ${user} 3 -1`] : [],
   );
+
+  // The one-click path. Creates the account directly and verifies it, so the
+  // user never opens a console -- which also means the password never passes
+  // through the worldserver log that DML snapshots and people share.
+  let creating = $state(false);
+  let showManual = $state(false);
+
+  async function createIt() {
+    creating = true;
+    verdict = null;
+    try {
+      verdict = await wowSoapAccountCreate(user, pass);
+      if (verdict.status === "ok") onverified();
+      // A refusal is an answer about the server, so the manual route is opened
+      // rather than left hidden behind a "show me" the user has to find.
+      else showManual = true;
+    } catch (e) {
+      const err = e as { message?: string; hint?: string };
+      verdict = {
+        status: "refused",
+        detail: `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`,
+        saved_to: null,
+      };
+      showManual = true;
+    } finally {
+      creating = false;
+    }
+  }
 
   async function verify() {
     busy = true;
@@ -126,6 +155,10 @@
       <p class="err">{ruleError}</p>
     {/if}
 
+    {#if showManual}
+    <p class="muted small">
+      The manual route, if you'd rather do it yourself or the automatic one couldn't:
+    </p>
     <ol class="steps">
       <li>
         Open your server's console:
@@ -156,14 +189,19 @@
         </span>
       </li>
     </ol>
+    <div class="row">
+      <button disabled={busy || !usable} onclick={verify}>
+        {busy ? "Checking…" : "I typed them — check it worked"}
+      </button>
+    </div>
+    {/if}
 
     <div class="row">
-      <button
-        class="primary"
-        disabled={busy || !usable}
-        onclick={verify}
-      >
-        {busy ? "Checking…" : "Check it worked"}
+      <button class="primary" disabled={busy || creating || !usable} onclick={createIt}>
+        {creating ? "Creating…" : "Create the account"}
+      </button>
+      <button disabled={busy || creating} onclick={() => (showManual = !showManual)}>
+        {showManual ? "Hide the manual steps" : "Do it myself instead"}
       </button>
       <!-- Dismissable on purpose. This is important, not urgent: a user who
            wants to look around first must not be held hostage by it, and Tools

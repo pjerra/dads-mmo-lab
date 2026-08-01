@@ -1574,6 +1574,17 @@ export interface SoapBootstrapVerdict {
 // Verifies a REAL SOAP round-trip and only then saves the credentials. A
 // "rejected" or "unreachable" verdict arrives as a resolved promise, not a
 // throw -- both are answers about the machine, not failures of the call.
+// One click: writes the SRP6 account row, then verifies by real SOAP round-trip
+// and saves only if that passes. A refusal (name taken, schema we do not
+// understand) arrives as status:"refused" -- an answer about the server, not a
+// thrown error -- so the card can show it beside the manual steps.
+export async function wowSoapAccountCreate(
+  user: string,
+  pass: string,
+): Promise<SoapBootstrapVerdict> {
+  return await invoke("wow_soap_account_create", { user, pass });
+}
+
 export async function wowSoapBootstrapVerify(
   user: string,
   pass: string,
