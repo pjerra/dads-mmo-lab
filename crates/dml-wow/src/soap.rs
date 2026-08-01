@@ -52,25 +52,71 @@ impl SoapConfig {
     /// `~/.dml/soap.env` (when present and non-empty); else the built-in
     /// default.
     pub fn load() -> SoapConfig {
-        let (file_url, file_user, file_pass) = soap_env_path()
+        Self::load_with_provenance().0
+    }
+
+    /// [`load`](SoapConfig::load), plus the one thing only this resolver can
+    /// answer: **did anybody actually supply these credentials?**
+    ///
+    /// `true` when the user or the password came from `DML_SOAP_USER`/
+    /// `DML_SOAP_PASS` or from `~/.dml/soap.env`; `false` when both fell through
+    /// to the compiled-in `admin`/`admin`.
+    ///
+    /// It has to be answered HERE because nowhere downstream can. The credential
+    /// panel used to decide by comparing the resolved strings against `"admin"`,
+    /// which cannot tell an install with no account at all from one whose SOAP
+    /// account is genuinely named `admin` — so it either invented an account for
+    /// a fresh install or denied a real one.
+    ///
+    /// **A `DML_SOAP_URL` on its own does NOT count**, even though it is a
+    /// `DML_SOAP_*` variable. Pointing the launcher at a different host says
+    /// nothing about whether an account exists there, and reporting "configured"
+    /// while the credentials are still `admin`/`admin` is exactly the invented
+    /// pair this boolean exists to stop being shown.
+    pub fn load_with_provenance() -> (SoapConfig, bool) {
+        let file = soap_env_path()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|contents| parse_soap_env(&contents))
             .unwrap_or((None, None, None));
-
-        SoapConfig {
-            url: resolve(std::env::var("DML_SOAP_URL").ok(), file_url, "http://127.0.0.1:7878/"),
-            user: resolve(std::env::var("DML_SOAP_USER").ok(), file_user, "admin"),
-            pass: resolve(std::env::var("DML_SOAP_PASS").ok(), file_pass, "admin"),
-        }
+        let env = (
+            std::env::var("DML_SOAP_URL").ok(),
+            std::env::var("DML_SOAP_USER").ok(),
+            std::env::var("DML_SOAP_PASS").ok(),
+        );
+        resolve_config(env, file)
     }
 }
 
+/// The whole resolution as a pure function of what the environment and the file
+/// offered, each as `(url, user, pass)`.
+///
+/// Pure so the provenance rule can be proven without setting process-wide env
+/// vars: `cargo test` runs these in threads of ONE process, so a test that
+/// exported `DML_SOAP_USER` and removed it again would race every other test
+/// that reads it.
+fn resolve_config(
+    env: (Option<String>, Option<String>, Option<String>),
+    file: (Option<String>, Option<String>, Option<String>),
+) -> (SoapConfig, bool) {
+    let (url, _) = resolve_supplied(env.0, file.0, "http://127.0.0.1:7878/");
+    let (user, user_supplied) = resolve_supplied(env.1, file.1, "admin");
+    let (pass, pass_supplied) = resolve_supplied(env.2, file.2, "admin");
+    (SoapConfig { url, user, pass }, user_supplied || pass_supplied)
+}
+
 /// Env wins over file wins over default — matching bash's `${VAR:-default}`
-/// treatment of "set but empty" as equivalent to "unset" on both sides.
-fn resolve(env: Option<String>, file: Option<String>, default: &str) -> String {
-    env.filter(|s| !s.is_empty())
+/// treatment of "set but empty" as equivalent to "unset" on both sides. The
+/// flag is `true` when a real value was supplied, i.e. the default was NOT
+/// reached; an empty value is not a supplied one, for the same reason it is not
+/// a winning one.
+fn resolve_supplied(env: Option<String>, file: Option<String>, default: &str) -> (String, bool) {
+    match env
+        .filter(|s| !s.is_empty())
         .or_else(|| file.filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| default.to_string())
+    {
+        Some(v) => (v, true),
+        None => (default.to_string(), false),
+    }
 }
 
 /// Build the `executeCommand` SOAP envelope for `command`, XML-escaping it —
@@ -385,4 +431,83 @@ not a valid line
         assert_eq!(cfg.user, "testuser");
         assert_eq!(cfg.pass, "testpass");
     }
+
+    // -- provenance (`configured`) --------------------------------------------
+
+    /// The triple shape `resolve_config` takes, for readability at the call
+    /// sites below.
+    fn none3() -> (Option<String>, Option<String>, Option<String>) {
+        (None, None, None)
+    }
+
+    #[test]
+    fn nothing_supplied_resolves_to_admin_admin_and_is_not_configured() {
+        // The whole point of the flag. A fresh install has no account at all,
+        // and `admin`/`admin` is a value this code invented -- printing it as
+        // "your SOAP account" sends the user to log in with a pair that does
+        // not exist on their server.
+        let (cfg, configured) = resolve_config(none3(), none3());
+        assert_eq!(cfg.user, "admin");
+        assert_eq!(cfg.pass, "admin");
+        assert!(!configured, "the compiled-in default is not a configured account");
+    }
+
+    #[test]
+    fn an_env_or_file_credential_is_configured() {
+        // Env.
+        let (cfg, configured) =
+            resolve_config((None, Some("gm3".into()), None), none3());
+        assert_eq!(cfg.user, "gm3");
+        assert!(configured);
+
+        // The file, which is what the autosetup writes after a real round-trip.
+        let (cfg, configured) =
+            resolve_config(none3(), (None, Some("dmlsoap".into()), Some("Gen_1234".into())));
+        assert_eq!(cfg.user, "dmlsoap");
+        assert!(configured);
+
+        // A password alone counts: someone who set only DML_SOAP_PASS has
+        // configured an account called `admin`, and it is a real one.
+        let (_, configured) = resolve_config((None, None, Some("hunter2".into())), none3());
+        assert!(configured);
+    }
+
+    #[test]
+    fn an_account_literally_named_admin_is_still_configured() {
+        // The case the deleted string comparison could not express. `admin` is
+        // a legal account name; a user who has one is configured, and telling
+        // them otherwise hides the credential they asked to see.
+        let (cfg, configured) =
+            resolve_config((None, Some("admin".into()), Some("admin".into())), none3());
+        assert_eq!(cfg.user, "admin");
+        assert!(configured, "provenance, not the string, is what decides");
+    }
+
+    #[test]
+    fn a_set_but_empty_value_is_not_a_configured_one() {
+        // Same rule the resolution itself follows (bash's `${VAR:-default}`).
+        // `DML_SOAP_USER=` must not report an account whose name is `admin`.
+        let (cfg, configured) =
+            resolve_config((None, Some(String::new()), Some(String::new())), none3());
+        assert_eq!(cfg.user, "admin");
+        assert!(!configured);
+    }
+
+    #[test]
+    fn a_url_on_its_own_does_not_claim_an_account_exists() {
+        // A host override says where to knock, not who we are. With the
+        // credentials still `admin`/`admin` there is nothing to show.
+        let (cfg, configured) =
+            resolve_config((Some("http://10.0.0.5:7878/".into()), None, None), none3());
+        assert_eq!(cfg.url, "http://10.0.0.5:7878/");
+        assert!(!configured);
+    }
+
+    // NB there is deliberately no "load and load_with_provenance agree" test.
+    // `load` IS `load_with_provenance().0`, so the only version of that test
+    // that could fail is one that calls both and compares -- and `cargo test`
+    // runs these in threads of one process alongside
+    // `load_env_vars_win_over_defaults`, which sets and removes the very env
+    // vars they read. Measured: it failed on the first run, comparing a config
+    // resolved before that test's `set_var` against one resolved after.
 }

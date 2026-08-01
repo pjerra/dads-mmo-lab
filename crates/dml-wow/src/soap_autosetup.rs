@@ -85,6 +85,16 @@ pub fn fallback_user(hex6: &str) -> String {
     format!("{DEFAULT_SOAP_USER}_{hex6}")
 }
 
+/// The prefix every fallback name shares: `dmlsoap_`.
+///
+/// The unit the `family_taken` seam asks about. It deliberately does NOT cover
+/// `dmlsoap` itself: `dmlsoap` being taken is the whole reason a fallback is
+/// being considered, so a pattern that also matched it would refuse every
+/// install that already has one.
+pub fn fallback_prefix() -> String {
+    format!("{DEFAULT_SOAP_USER}_")
+}
+
 /// How many verification attempts a created-but-unverified account gets before
 /// the manual card takes over.
 ///
@@ -126,8 +136,6 @@ pub enum AutoOutcome {
     Pending,
     /// This run will not try again. The manual card takes over.
     GaveUp { reason: String },
-    /// Already concluded this run. No seam was touched.
-    Latched,
 }
 
 /// The wire word for an outcome. The frontend switches on these literals.
@@ -137,7 +145,27 @@ pub fn outcome_status(o: &AutoOutcome) -> &'static str {
         AutoOutcome::Created { .. } => "created",
         AutoOutcome::Pending => "pending",
         AutoOutcome::GaveUp { .. } => "gave_up",
-        AutoOutcome::Latched => "latched",
+    }
+}
+
+/// What a run that has already concluded reports — re-derived from what it
+/// concluded, every time it is asked.
+///
+/// **There is no contentless "already done" outcome, and that is deliberate.**
+/// One used to exist. It cost the manual fallback card: the frontend's record
+/// of how setup went lives in a module-level store, a webview reload wipes it,
+/// and a reloaded UI that asks again and hears only "already concluded" learns
+/// nothing — so the card never rendered again for the rest of the process, on
+/// the exact path where the launcher had FAILED to make the account and the
+/// card was the only thing left that worked.
+///
+/// Both "already concluded" guards — the launcher command's cheap exit and
+/// [`advance_with`]'s own — answer through here, so they cannot drift into
+/// telling the frontend two different things about the same run.
+pub fn concluded_outcome(c: &Conclusion) -> AutoOutcome {
+    match c {
+        Conclusion::Saved { user } => AutoOutcome::Created { user: user.clone() },
+        Conclusion::GaveUp { reason } => AutoOutcome::GaveUp { reason: reason.clone() },
     }
 }
 
@@ -155,6 +183,7 @@ fn gave_up(reason: String) -> (AutoSetup, AutoOutcome) {
 /// not cause a single DB read.
 ///
 /// * `exists` — `account_write::account_exists`
+/// * `family_taken` — `account_write::account_family_exists`
 /// * `create` — `account_write::create_gm_account`
 /// * `verify` — `soap_bootstrap::bootstrap_verify_with`, which is also what
 ///   WRITES `~/.dml/soap.env`, and only after a real round-trip succeeds. That
@@ -164,13 +193,15 @@ pub fn advance_with(
     state: AutoSetup,
     status: &VerifyOutcome,
     exists: impl Fn(&str) -> Result<bool, CmdError>,
+    family_taken: impl Fn(&str) -> Result<bool, CmdError>,
     create: impl Fn(&str, &str) -> Result<i64, CmdError>,
     verify: impl Fn(&str, &str) -> Result<VerifyOutcome, CmdError>,
     hex6: impl Fn() -> String,
     gen_pass: impl Fn() -> String,
 ) -> (AutoSetup, AutoOutcome) {
-    if matches!(state, AutoSetup::Done(_)) {
-        return (state, AutoOutcome::Latched);
+    if let AutoSetup::Done(c) = &state {
+        let out = concluded_outcome(c);
+        return (state, out);
     }
     // ONLY for a server that answers and refuses us. `Ok` means there is
     // nothing to do; `Unreachable` means we know nothing at all, and a booting
@@ -211,6 +242,28 @@ pub fn advance_with(
                     // Taken. Work around it -- never over it. Resetting an
                     // account this code did not create is a different and more
                     // dangerous operation, and `create_gm_account` refuses to.
+                    //
+                    // Ask about the FAMILY before minting, because asking about
+                    // the minted name bounds nothing: `dmlsoap_<random hex>` is
+                    // free BY CONSTRUCTION, so that check can only ever answer
+                    // "free". Something has to bound it, because "created"
+                    // does not always stick -- `SoapConfig::load` gives
+                    // `DML_SOAP_USER`/`DML_SOAP_PASS` precedence over the
+                    // `~/.dml/soap.env` this run writes, so with those exported
+                    // the status stays `Rejected` and EVERY launcher start
+                    // would insert one more GM-level-3 account, forever.
+                    match family_taken(&fallback_prefix()) {
+                        Ok(true) => {
+                            return gave_up(format!(
+                                "{DEFAULT_SOAP_USER:?} is taken and a {}* account already \
+                                 exists, so no further account was created. Use that \
+                                 account's password, or make a GM account by hand.",
+                                fallback_prefix()
+                            ))
+                        }
+                        Ok(false) => {}
+                        Err(e) => return gave_up(e.message),
+                    }
                     let alt = fallback_user(&hex6());
                     match exists(&alt) {
                         Ok(false) => alt,
@@ -249,6 +302,35 @@ pub fn advance_with(
             }
         }
     }
+}
+
+/// `(user, url, pass, configured)` for the credentials panel.
+///
+/// The password is opt-in at this boundary rather than filtered in the UI. A
+/// secret that always crosses the IPC boundary is a secret in every devtools
+/// trace, whether or not a control is showing it.
+///
+/// `configured` is carried through UNCHANGED from
+/// [`crate::soap::SoapConfig::load_with_provenance`], because that resolver is
+/// the only thing that knows whether these values came from `DML_SOAP_*` /
+/// `~/.dml/soap.env` or from the compiled-in `admin`/`admin`. The panel used to
+/// decide by comparing the strings against `"admin"`, which reads a real account
+/// named `admin` as "nothing set up" and a fresh install as an account that
+/// exists. Deriving it again here would just rebuild that same guess one layer
+/// closer to the UI.
+pub fn credentials_payload(
+    user: &str,
+    pass: &str,
+    url: &str,
+    configured: bool,
+    reveal: bool,
+) -> (String, String, Option<String>, bool) {
+    (
+        user.to_string(),
+        url.to_string(),
+        if reveal { Some(pass.to_string()) } else { None },
+        configured,
+    )
 }
 
 #[cfg(test)]
@@ -293,10 +375,20 @@ mod tests {
     fn bytes_at_or_above_the_rejection_limit_are_discarded() {
         // 256 = 3*70 + 46. Plain `byte % 70` would fold 210..=255 back onto the
         // first 46 symbols and give them a fourth chance the other 24 never get.
-        // Feed exactly those rejects followed by 0..16 and assert NONE of the
-        // rejects reached the output: the password must be the first 16 symbols
-        // of the alphabet, in order.
-        let feed: Vec<u8> = (210u8..=255).chain(0..16).collect();
+        // Feed rejects followed by 0..16 and assert NONE of the rejects reached
+        // the output: the password must be the first 16 symbols of the
+        // alphabet, in order.
+        //
+        // THE FEED IS NOT ARBITRARY, do not "simplify" it back to `210..=255`.
+        // That range ALIASES onto the answer: 210 == 3*70, so 210..=225 under
+        // plain modulo map to indices 0..=15 -- character for character the
+        // prefix this test expects. With that feed the assertion passes whether
+        // or not the discard rule exists, and the one test whose stated purpose
+        // is proving rejection sampling cannot tell it from `byte % 70`
+        // (measured: deleting the `if b < limit` guard left it green).
+        // 255 % 70 == 45 instead, so an unguarded run starts with 46 copies of
+        // PASSWORD_ALPHABET[45] and this test fails loudly.
+        let feed: Vec<u8> = std::iter::repeat(255u8).take(46).chain(0..16).collect();
         let mut k = 0usize;
         let pw = generate_password_from(|buf| {
             for slot in buf.iter_mut() {
@@ -333,16 +425,38 @@ mod tests {
 
     use std::cell::RefCell;
 
+    /// What a lookup against a database that is simply not there comes back as.
+    /// Wrong `DML_DB_*` credentials or a stopped MySQL container both land
+    /// here, and the launcher polls this feature WHILE the stack is coming up,
+    /// so it is the ordinary case rather than an exotic one.
+    const DB_DOWN: &str = "Could not reach the database: Connection refused (os error 111).";
+
+    fn db_down() -> CmdError {
+        CmdError { code: "DB_ERROR".into(), message: DB_DOWN.into(), hint: String::new() }
+    }
+
     /// A scripted set of seams. Counters are what the assertions read: the
     /// property that matters most is a NEGATIVE one (create was not called),
     /// and a stub that only returned values could not express it.
+    ///
+    /// Every lookup can also FAIL rather than answer. A seam that can only
+    /// succeed leaves the "the DB did not answer" arms with zero coverage,
+    /// which is how they stayed unreachable-in-tests while being the arms a
+    /// real user hits first on a server that is still starting.
     #[derive(Default)]
     struct Seams {
         existing: Vec<String>,
         creates: RefCell<Vec<(String, String)>>,
         verifies: RefCell<Vec<(String, String)>>,
         verify_results: RefCell<Vec<VerifyOutcome>>,
-        create_fails: bool,
+        /// `(message, hint)` of a create that fails. BOTH halves, because the
+        /// hint is the actionable one and dropping it is invisible in a
+        /// `contains` assertion.
+        create_error: Option<(String, String)>,
+        /// Names whose existence lookup errors instead of answering.
+        exists_fails_for: Vec<String>,
+        /// Whether the family lookup errors instead of answering.
+        family_fails: bool,
     }
 
     impl Seams {
@@ -350,17 +464,32 @@ mod tests {
             advance_with(
                 state,
                 status,
-                |u| Ok(self.existing.iter().any(|e| e.eq_ignore_ascii_case(u))),
+                |u| {
+                    if self.exists_fails_for.iter().any(|e| e.eq_ignore_ascii_case(u)) {
+                        return Err(db_down());
+                    }
+                    Ok(self.existing.iter().any(|e| e.eq_ignore_ascii_case(u)))
+                },
+                |p| {
+                    if self.family_fails {
+                        return Err(db_down());
+                    }
+                    // The real seam is a `LIKE 'PREFIX%'`; upper-cased here for
+                    // the same reason it is there -- AzerothCore stores names
+                    // upper-cased, so a case-sensitive scan would report a
+                    // family free that is not.
+                    let p = p.to_ascii_uppercase();
+                    Ok(self.existing.iter().any(|e| e.to_ascii_uppercase().starts_with(&p)))
+                },
                 |u, p| {
                     self.creates.borrow_mut().push((u.to_string(), p.to_string()));
-                    if self.create_fails {
-                        Err(CmdError {
+                    match &self.create_error {
+                        Some((message, hint)) => Err(CmdError {
                             code: "ACCOUNT_WRITE_FAILED".into(),
-                            message: "schema".into(),
-                            hint: "by hand".into(),
-                        })
-                    } else {
-                        Ok(1)
+                            message: message.clone(),
+                            hint: hint.clone(),
+                        }),
+                        None => Ok(1),
                     }
                 },
                 |u, p| {
@@ -446,17 +575,118 @@ mod tests {
         assert!(s.creates.borrow().is_empty());
     }
 
+    /// ONE GM-LEVEL-3 ACCOUNT PER LAUNCHER START, and this is what stops it.
+    ///
+    /// The fallback name carries fresh random hex, so "is `dmlsoap_ab12ef`
+    /// free?" is free by construction and guards nothing. Here an EARLIER
+    /// fallback (`dmlsoap_99beef`) already exists and the name about to be
+    /// minted does not: without the family question this run would happily
+    /// insert a second GM3 account, and the next start a third — the latch is
+    /// per-process, and the trigger is ordinary (`DML_SOAP_USER`/`PASS`
+    /// exported shadow the credentials we save, so SOAP keeps reading
+    /// `Rejected` no matter how many accounts get made).
     #[test]
-    fn a_failed_insert_gives_up_and_carries_the_reason() {
-        let s = Seams { create_fails: true, ..Default::default() };
+    fn an_existing_fallback_account_stops_a_second_one_from_being_minted() {
+        let s = Seams {
+            existing: vec!["DMLSOAP".into(), "DMLSOAP_99BEEF".into()],
+            ..Default::default()
+        };
         let (state, out) = s.run(AutoSetup::Idle, &rejected());
         match out {
-            // The user needs the server's own words here: "schema this build
-            // does not know" is actionable, "setup failed" is not.
-            AutoOutcome::GaveUp { reason } => assert!(reason.contains("schema"), "{reason}"),
+            AutoOutcome::GaveUp { reason } => {
+                assert!(reason.contains("dmlsoap_"), "the reason must name the family: {reason}")
+            }
             other => panic!("{other:?}"),
         }
         assert!(matches!(state, AutoSetup::Done(Conclusion::GaveUp { .. })));
+        assert!(s.creates.borrow().is_empty(), "minted another GM3 account: {:?}", s.creates);
+    }
+
+    #[test]
+    fn a_failed_insert_gives_up_carrying_both_the_message_and_the_hint() {
+        // Both halves verbatim from `account_write`: the hint is the ACTIONABLE
+        // one, and a `contains("schema")` assertion cannot tell a reason that
+        // carries it from one that silently dropped it.
+        let message = "The account was created but could not be given GM access: \
+                       Unknown table 'account_access'."
+            .to_string();
+        let hint = "Run `account set gmlevel <name> 3 -1` in the worldserver console to finish it."
+            .to_string();
+        let s = Seams {
+            create_error: Some((message.clone(), hint.clone())),
+            ..Default::default()
+        };
+        let (state, out) = s.run(AutoSetup::Idle, &rejected());
+        match out {
+            AutoOutcome::GaveUp { reason } => assert_eq!(reason, format!("{message} {hint}")),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(state, AutoSetup::Done(Conclusion::GaveUp { .. })));
+    }
+
+    #[test]
+    fn a_failure_with_no_hint_does_not_grow_a_trailing_space() {
+        // The other arm of the same branch. Not cosmetic: this string is
+        // rendered straight into the fallback card, and a reason that ends in
+        // whitespace reads as a sentence that got truncated.
+        let message = "Could not create the account: the connection was lost.".to_string();
+        let s = Seams {
+            create_error: Some((message.clone(), String::new())),
+            ..Default::default()
+        };
+        let (_, out) = s.run(AutoSetup::Idle, &rejected());
+        match out {
+            AutoOutcome::GaveUp { reason } => {
+                assert_eq!(reason, message);
+                assert!(!reason.ends_with(' '), "trailing space: {reason:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The lookups can FAIL rather than answer — a stopped MySQL container or
+    /// wrong `DML_DB_*` credentials, which is the state a launcher polling a
+    /// stack that is still starting sees constantly. All three call sites must
+    /// end the run with the database's OWN words and write nothing: guessing
+    /// "the name is free" would send an INSERT down the same dead connection,
+    /// and guessing "taken" would abandon setup on a healthy server.
+    #[test]
+    fn a_lookup_that_cannot_answer_gives_up_with_the_databases_own_words() {
+        // 1. The first question of all.
+        let s = Seams { exists_fails_for: vec!["dmlsoap".into()], ..Default::default() };
+        let (state, out) = s.run(AutoSetup::Idle, &rejected());
+        match out {
+            AutoOutcome::GaveUp { reason } => assert_eq!(reason, DB_DOWN),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(state, AutoSetup::Done(Conclusion::GaveUp { .. })));
+        assert!(s.creates.borrow().is_empty());
+
+        // 2. The family question, reached only once `dmlsoap` is taken.
+        let s = Seams {
+            existing: vec!["DMLSOAP".into()],
+            family_fails: true,
+            ..Default::default()
+        };
+        let (_, out) = s.run(AutoSetup::Idle, &rejected());
+        match out {
+            AutoOutcome::GaveUp { reason } => assert_eq!(reason, DB_DOWN),
+            other => panic!("{other:?}"),
+        }
+        assert!(s.creates.borrow().is_empty());
+
+        // 3. The minted name's own check, the last one before a write.
+        let s = Seams {
+            existing: vec!["DMLSOAP".into()],
+            exists_fails_for: vec!["dmlsoap_ab12ef".into()],
+            ..Default::default()
+        };
+        let (_, out) = s.run(AutoSetup::Idle, &rejected());
+        match out {
+            AutoOutcome::GaveUp { reason } => assert_eq!(reason, DB_DOWN),
+            other => panic!("{other:?}"),
+        }
+        assert!(s.creates.borrow().is_empty());
     }
 
     /// THE TEST THIS STATE MACHINE EXISTS FOR.
@@ -508,35 +738,100 @@ mod tests {
         let (state, out) = s.run(state, &rejected());
         assert!(matches!(out, AutoOutcome::Pending), "{out:?}");
         let (state, out) = s.run(state, &rejected());
-        assert!(matches!(out, AutoOutcome::GaveUp { .. }), "{out:?}");
+        let reason = match out {
+            AutoOutcome::GaveUp { reason } => reason,
+            other => panic!("{other:?}"),
+        };
         assert_eq!(s.verifies.borrow().len(), MAX_VERIFY_TRIES as usize);
 
-        // And it STOPS. A give-up that kept being retried is the loop this
-        // whole design refuses to ship.
+        // And it STOPS -- while still ANSWERING. A give-up that kept being
+        // retried is the loop this whole design refuses to ship; a give-up that
+        // stopped SAYING WHY is how the manual fallback card disappeared after
+        // a webview reload, on the one path where it is all the user has left.
         let (_, out) = s.run(state, &rejected());
-        assert!(matches!(out, AutoOutcome::Latched));
+        match out {
+            AutoOutcome::GaveUp { reason: again } => assert_eq!(again, reason),
+            other => panic!("{other:?}"),
+        }
         assert_eq!(s.verifies.borrow().len(), MAX_VERIFY_TRIES as usize);
     }
 
     #[test]
-    fn a_finished_run_touches_no_seam_ever_again() {
+    fn a_finished_run_touches_no_seam_ever_again_and_still_reports_its_verdict() {
         let s = Seams::default();
         let state = AutoSetup::Done(Conclusion::Saved { user: "dmlsoap".into() });
         let (state, out) = s.run(state, &rejected());
-        assert!(matches!(out, AutoOutcome::Latched));
+        // Re-derived from the stored conclusion rather than a contentless
+        // "already done": the frontend's memory of this run is module-level
+        // state that a reload wipes, so every answer has to stand alone.
+        match out {
+            AutoOutcome::Created { user } => assert_eq!(user, "dmlsoap"),
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(state, AutoSetup::Done(_)));
         assert!(s.creates.borrow().is_empty());
         assert!(s.verifies.borrow().is_empty());
     }
 
     #[test]
+    fn a_concluded_run_is_reported_as_what_it_concluded() {
+        // The shared derivation both "already concluded" guards use -- the
+        // launcher command's cheap exit and `advance_with`'s own. They must not
+        // be able to answer differently about the same run.
+        assert_eq!(
+            concluded_outcome(&Conclusion::Saved { user: "dmlsoap_ab12ef".into() }),
+            AutoOutcome::Created { user: "dmlsoap_ab12ef".into() }
+        );
+        assert_eq!(
+            concluded_outcome(&Conclusion::GaveUp { reason: "no schema".into() }),
+            AutoOutcome::GaveUp { reason: "no schema".into() }
+        );
+    }
+
+    #[test]
     fn the_status_strings_are_the_ones_the_frontend_switches_on() {
         // The TypeScript switch matches these literals. A rename on one side
-        // only would silently fall through to "do nothing".
+        // only would silently fall through to "do nothing". There is no
+        // "latched" here any more, and there must not be one again: the
+        // frontend has no case for it, by agreement.
         assert_eq!(outcome_status(&AutoOutcome::NotNeeded), "not_needed");
         assert_eq!(outcome_status(&AutoOutcome::Created { user: "x".into() }), "created");
         assert_eq!(outcome_status(&AutoOutcome::Pending), "pending");
         assert_eq!(outcome_status(&AutoOutcome::GaveUp { reason: "x".into() }), "gave_up");
-        assert_eq!(outcome_status(&AutoOutcome::Latched), "latched");
+    }
+
+    /// The reveal must be OPT-IN at the boundary, not filtered in the UI.
+    /// A password that always crosses the IPC boundary is a password in every
+    /// devtools trace of every poll, whether or not a control shows it.
+    #[test]
+    fn credentials_hide_the_password_unless_it_is_asked_for() {
+        let shown = credentials_payload("dmlsoap", "hunter2", "http://x/", true, true);
+        assert_eq!(shown.2, Some("hunter2".to_string()));
+        let hidden = credentials_payload("dmlsoap", "hunter2", "http://x/", true, false);
+        assert_eq!(hidden.2, None);
+        assert_eq!(hidden.0, "dmlsoap", "the name is never secret");
+    }
+
+    /// The two booleans sit next to each other in the signature, so a swapped
+    /// call site is a live hazard -- and a swap is not cosmetic: it would leak
+    /// the password on every unconfigured poll while telling the UI there is no
+    /// account to show. Each case here pins a DIFFERENT pair, so the two cannot
+    /// be exchanged without one of them failing.
+    #[test]
+    fn configured_is_reported_independently_of_the_reveal() {
+        let (_, _, pass, configured) =
+            credentials_payload("admin", "admin", "http://x/", false, false);
+        assert_eq!(pass, None);
+        assert!(!configured, "the built-in default is not a configured account");
+
+        let (_, _, pass, configured) =
+            credentials_payload("dmlsoap", "hunter2", "http://x/", true, false);
+        assert_eq!(pass, None, "a configured account still hides its password");
+        assert!(configured);
+
+        let (_, _, pass, configured) =
+            credentials_payload("admin", "admin", "http://x/", false, true);
+        assert_eq!(pass, Some("admin".to_string()), "revealing works when unconfigured too");
+        assert!(!configured);
     }
 }

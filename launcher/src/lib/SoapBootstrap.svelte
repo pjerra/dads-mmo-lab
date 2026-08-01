@@ -127,9 +127,10 @@
 <div class="soap-card">
   <h4>Finish setup: let the launcher talk to your server</h4>
   <p class="why">
-    Your server has no accounts yet. Until one exists, GM Tools, My Party, the console's
-    command box and announcements can't work — they'll fail with an authentication error that
-    doesn't explain itself. This takes a minute.
+    Your server has no account the launcher can use. Until one exists, GM Tools, My Party,
+    the console's command box and announcements can't work — they'll fail with an
+    authentication error that doesn't explain itself. The launcher tried to set this up on
+    its own and couldn't, so it needs you for a minute.
   </p>
 
   {#if loadError}

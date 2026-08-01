@@ -1595,6 +1595,56 @@ export async function wowSoapBootstrapVerify(
   return await invoke("wow_soap_bootstrap_verify", { user, pass });
 }
 
+/** What automatic SOAP setup concluded this launcher run. */
+export interface SoapAutosetupVerdict {
+  /** "not_needed" | "created" | "pending" | "gave_up" */
+  status: string;
+  /** The account that now exists. Non-null ONLY on "created". */
+  user: string | null;
+  /** Why this run stopped trying. Non-null ONLY on "gave_up". */
+  reason: string | null;
+}
+// One call per launcher run does real work; every later call re-derives the
+// same verdict ("created"/"gave_up") from the concluded run without opening a
+// SOAP or DB connection. Safe to invoke from the poll loop.
+//
+// It deliberately does NOT answer a contentless "already ran". A webview reload
+// resets the frontend's module-level state, so an answer carrying no user and
+// no reason left the reloaded UI unable to rebuild the manual fallback card --
+// on the exact path where the launcher had already failed to set the account
+// up.
+export async function wowSoapAutosetup(): Promise<SoapAutosetupVerdict> {
+  return await invoke("wow_soap_autosetup");
+}
+
+/** The SOAP account the launcher uses. `pass` is non-null only when revealed. */
+export interface SoapCredentials {
+  user: string;
+  url: string;
+  pass: string | null;
+  /**
+   * These values came from somewhere REAL — `DML_SOAP_*` or `~/.dml/soap.env` —
+   * rather than from the resolver's compiled-in admin/admin fallback.
+   *
+   * Only the backend can answer this, and that is the whole point. Home used to
+   * decide it by comparing the returned pair against the literal strings
+   * "admin"/"admin", which cannot tell the built-in default from a real account
+   * that happens to be named that — and admin/admin is the pair every
+   * AzerothCore tutorial tells people to create, it passes the launcher's own
+   * account validator, and CLAUDE.md documents DML_SOAP_USER/PASS as defaulting
+   * to it. So a user with a genuine, working admin account clicked "Show
+   * account" and was told nothing was saved, in a panel that reported SOAP
+   * healthy in the row above: unfalsifiable from the UI.
+   */
+  configured: boolean;
+}
+// The password crosses the IPC boundary ONLY when reveal is true — it is a
+// generated secret, and a secret that rides along on every status render is a
+// secret in every devtools trace.
+export async function wowSoapCredentials(reveal: boolean): Promise<SoapCredentials> {
+  return await invoke("wow_soap_credentials", { reveal });
+}
+
 export async function gamesInstallInput(text: string): Promise<void> {
   return await invoke("games_install_input", { text });
 }

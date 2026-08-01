@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, type PlayerOnline, type NativeSetupStatus } from "$lib/api";
+  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, wowSoapCredentials, type PlayerOnline, type NativeSetupStatus, type SoapCredentials } from "$lib/api";
   import { dockerRestartCardVisible } from "$lib/docker-restart";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
@@ -15,6 +15,7 @@
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
   import { toolPrefs } from "$lib/tool-prefs.svelte";
   import { saveallPref, setSaveBeforeRestart, wouldSkipSaveall, saveallBoxChecked } from "$lib/saveall-pref.svelte";
+  import { soapSetupState, showSoapSetup } from "$lib/soap-setup-state.svelte";
   import type { PageId } from "$lib/nav";
 
   // Cross-page nav, wired by the shell exactly like Help's (+page.svelte).
@@ -44,6 +45,46 @@
   let statusError: string | null = $state(null);
   let refreshing = $state(false);
   let expanded = $state(false);
+
+  // The SOAP credentials row in the health panel. Nobody types this password
+  // any more -- the launcher generates it -- so this is the only place a user
+  // can read it back.
+  //
+  // Both pieces of state live HERE, at component scope, not inside the health
+  // markup: those rows re-render on every status poll, and state declared
+  // alongside them would be reset (and a fetch re-fired) a few seconds after
+  // every reveal. The only thing that calls the backend is the click handler.
+  let soapCreds: SoapCredentials | null = $state(null);
+  let soapPassShown = $state(false);
+
+  // "Is anything actually configured?" is the BACKEND's answer (`configured`),
+  // never a comparison here.
+  //
+  // This row used to decide it by testing the returned pair against the literal
+  // strings "admin"/"admin" -- the resolver's compiled-in fallback when neither
+  // DML_SOAP_* nor ~/.dml/soap.env supplies anything. That cannot distinguish
+  // the fallback from a REAL account: admin/admin is the pair every AzerothCore
+  // tutorial tells people to create, it passes the launcher's own account
+  // validator, and CLAUDE.md documents the env vars as defaulting to it. A user
+  // with a working admin account was told "No credentials saved yet" directly
+  // under a row reporting SOAP healthy, with nothing in the UI able to settle
+  // which was true.
+
+  // Fetched on demand, never on render: an always-fetched password is a
+  // password in every devtools trace of every poll.
+  async function toggleSoapPass() {
+    if (soapPassShown) {
+      soapCreds = null;
+      soapPassShown = false;
+      return;
+    }
+    try {
+      soapCreds = await wowSoapCredentials(true);
+      soapPassShown = true;
+    } catch {
+      soapCreds = null;
+    }
+  }
 
   let busy = $state(false);
   const buf = termBuf("home");
@@ -489,6 +530,41 @@
                 {d.soap.reachable ? "reachable" : "unreachable"}{d.soap.auth_ok === false
                   ? " — authentication failing, check ~/.dml/soap.env"
                   : ""}
+                <button class="linky" onclick={toggleSoapPass}>
+                  {soapPassShown ? "Hide account" : "Show account"}
+                </button>
+                <!-- The way back into the account step, in the one row that
+                     already reports the problem. "Later" on the fallback card
+                     only HIDES it, and nothing else re-raises it: the gave_up
+                     verdict that would is behind a settled-once latch, and the
+                     Library re-check that used to be the second route was
+                     deleted with the old surface. Without a control here,
+                     "Later" is a one-way door out of GM Tools, My Party and the
+                     console. Gated on `needed` alone -- the card is unresolved
+                     either way, and it renders at the bottom of the window, so
+                     pointing at it is useful even when it is already there. -->
+                {#if soapSetupState.needed}
+                  <button class="linky" onclick={showSoapSetup}>Set up server access…</button>
+                {/if}
+                {#if soapPassShown && soapCreds}
+                  {#if !soapCreds.configured}
+                    <!-- Says what IS true and promises only what this app will
+                         actually do. The old copy ("the launcher sets this up
+                         automatically") is a promise it may never keep:
+                         autosetup fires only when SOAP is reachable AND auth is
+                         failing, so with the server down, or with a hand-made
+                         admin account that works, nothing is ever created and
+                         the user waits for a step that is not coming. -->
+                    <span class="creds muted">
+                      Nothing saved in ~/.dml/soap.env — the launcher is trying the built-in default
+                      account. If the server refuses it, the launcher creates a proper one.
+                    </span>
+                  {:else}
+                    <span class="creds">
+                      {soapCreds.user} / <code>{soapCreds.pass ?? "?"}</code>
+                    </span>
+                  {/if}
+                {/if}
               </span>
             </div>
           {:else}
@@ -549,6 +625,20 @@
   .hrow { display: flex; gap: 10px; align-items: center; font-size: 14px; }
   .hname { min-width: 150px; color: #8b949e; }
   .hval { color: #c9d1d9; }
+  /* The "Show account" toggle: a link, not a button, because it reveals rather
+     than acts -- the health panel's other rows are read-only too. */
+  .linky {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-left: 0.4rem;
+    color: var(--accent, #4a90d9);
+    font: inherit;
+    font-size: 0.8rem;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .creds { display: block; font-size: 0.8rem; opacity: 0.85; }
   button { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
   button.primary { background: #238636; border-color: #2ea043; color: white; }
   button:disabled { opacity: 0.5; cursor: default; }

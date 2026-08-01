@@ -105,8 +105,8 @@ pub struct AppState {
     /// One attempt per run, and that bound is the feature. The trigger is the
     /// status poll, which ticks every few seconds; without a latch a server
     /// that keeps refusing us would get one INSERT per tick. Once this reaches
-    /// `Done`, `wow_soap_autosetup` returns `latched` without opening a SOAP
-    /// connection or a DB connection.
+    /// `Done`, `wow_soap_autosetup` re-reports the conclusion it already
+    /// reached without opening a SOAP connection or a DB connection.
     ///
     /// Known limit, deliberate: wiping the auth database mid-session needs a
     /// launcher restart to self-heal. The alternative is an unlatched loop
@@ -6291,8 +6291,9 @@ async fn games_install_native_state(
 /// The guided post-install step: what to type, where, and the warning that
 /// keeps a user from stopping their own server on the way out.
 ///
-/// Read-only and instant — it composes strings from `dml_wow::soap_bootstrap`
-/// and touches nothing. Kept as a command rather than duplicated in TypeScript
+/// Read-only: it composes strings from `dml_wow::soap_bootstrap` and asks the
+/// auth database exactly one question (is `dmlsoap` taken?) to decide which
+/// name to prefill. Kept as a command rather than duplicated in TypeScript
 /// so the console commands, the clipboard copy and the Rust tests all come from
 /// one source: a mistyped account is indistinguishable from a broken SOAP
 /// setup from the outside, and two copies of these two lines WILL drift.
@@ -6302,7 +6303,27 @@ async fn wow_soap_bootstrap_info(
     pass: Option<String>,
 ) -> Result<serde_json::Value, CmdError> {
     use dml_wow::soap_bootstrap as sb;
-    let user = user.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| sb::DEFAULT_SOAP_USER.to_string());
+    // Which name to PREFILL. Not always `dmlsoap`: this card renders after
+    // automatic setup gave up, and two of the four ways it gives up mean
+    // `dmlsoap` is already taken -- so prefilling it would hand the user a name
+    // whose "Create the account" click is certain to come back "already
+    // exists", from the one screen that exists to unstick them.
+    //
+    // DEGRADES DELIBERATELY: a database we cannot reach keeps the documented
+    // default. This command is read-only and instant, and a card that fails to
+    // load is worse than one carrying a stale default the user can retype.
+    let default_user = tauri::async_runtime::spawn_blocking(|| {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        match dml_wow::account_write::account_exists(&cfg, sb::DEFAULT_SOAP_USER) {
+            Ok(true) => dml_wow::soap_autosetup::fallback_user(
+                &dml_wow::soap_autosetup::random_hex6(),
+            ),
+            _ => sb::DEFAULT_SOAP_USER.to_string(),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| sb::DEFAULT_SOAP_USER.to_string());
+    let user = user.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| default_user.clone());
     // A placeholder, never a generated secret: the password shown here is the
     // one the user is about to TYPE, so inventing one would mean the app knows
     // a credential the user does not.
@@ -6315,7 +6336,7 @@ async fn wow_soap_bootstrap_info(
         "commands": sb::console_commands(&user, &pass),
         "attach_hint": sb::attach_hint(&project),
         "detach_warning": sb::DETACH_WARNING,
-        "default_user": sb::DEFAULT_SOAP_USER,
+        "default_user": default_user,
     }))
 }
 
@@ -6469,11 +6490,15 @@ async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Va
     let latch = state.soap_autosetup.clone();
 
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        // Cheap exit first: a concluded run must not even ask the server.
+        // Cheap exit first: a concluded run must not even ask the server. It
+        // still ANSWERS, through the same derivation `advance_with` uses -- a
+        // reloaded webview has forgotten how this run went, and a contentless
+        // "already concluded" would leave it unable to render the fallback card
+        // on the exact path where the card is the only remaining way in.
         {
             let g = latch.lock().unwrap();
-            if matches!(*g, auto::AutoSetup::Done(_)) {
-                return auto::AutoOutcome::Latched;
+            if let auto::AutoSetup::Done(c) = &*g {
+                return auto::concluded_outcome(c);
             }
         }
 
@@ -6489,6 +6514,7 @@ async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Va
             state_now,
             &status,
             |u| dml_wow::account_write::account_exists(&cfg, u),
+            |p| dml_wow::account_write::account_family_exists(&cfg, p),
             |u, p| dml_wow::account_write::create_gm_account(&cfg, u, p),
             |u, p| {
                 // This is the writer of ~/.dml/soap.env, and it writes only
@@ -6519,6 +6545,35 @@ async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Va
             _ => serde_json::Value::Null,
         },
     }))
+}
+
+/// Which account the launcher uses, and — only when asked — its password.
+///
+/// The launcher generates that password, so it is the one credential the app
+/// knows and the user does not. This is where they can read it back: a
+/// generated secret with no way to see it is a secret the user cannot use when
+/// they need it (a second tool, a support question, a manual SOAP call).
+///
+/// `configured` says whether anyone SUPPLIED these credentials (`DML_SOAP_*` or
+/// `~/.dml/soap.env`) or whether they fell through to the compiled-in
+/// `admin`/`admin`. It is resolved by `SoapConfig::load_with_provenance` and
+/// passed through untouched, because that resolver is the only thing that knows:
+/// the frontend previously guessed by comparing `user`/`pass` against `"admin"`,
+/// which reads a server whose SOAP account really is named `admin` as
+/// unconfigured, and a fresh install with no account at all as configured.
+///
+/// Read-only. There is no write path here.
+#[tauri::command]
+async fn wow_soap_credentials(reveal: bool) -> Result<serde_json::Value, CmdError> {
+    let (cfg, is_configured) = dml_wow::soap::SoapConfig::load_with_provenance();
+    let (user, url, pass, configured) = dml_wow::soap_autosetup::credentials_payload(
+        &cfg.user,
+        &cfg.pass,
+        &cfg.url,
+        is_configured,
+        reveal,
+    );
+    Ok(serde_json::json!({ "user": user, "url": url, "pass": pass, "configured": configured }))
 }
 
 /// Prove the account works, and ONLY then remember it.
@@ -6992,6 +7047,7 @@ pub fn run() {
             games_install_native_state,
             wow_soap_bootstrap_info,
             wow_soap_autosetup,
+            wow_soap_credentials,
             wow_soap_status,
             wow_soap_account_create,
             wow_soap_bootstrap_verify,

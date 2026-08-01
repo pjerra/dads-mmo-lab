@@ -36,6 +36,12 @@
   import { requiresServer, serverGate } from "$lib/server-gate";
   import FirstRun from "$lib/FirstRun.svelte";
   import { firstRunState, firstRunNeedsProbe, type BackendStatusReport } from "$lib/first-run";
+  import SoapBootstrap from "$lib/SoapBootstrap.svelte";
+  import {
+    soapSetupState,
+    clearSoapSetup,
+    dismissSoapSetup,
+  } from "$lib/soap-setup-state.svelte";
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -325,6 +331,43 @@
     {#if page === "help"}<Help onnav={(p) => go(p)} />{/if}
   {/if}
 
+  {#if soapSetupState.autoResult}
+    <!-- Silent by default, but not invisible: a GM3 account now exists on the
+         user's server because the launcher put it there, and that is theirs to
+         know. Shell-level because a native install runs for HOURS and the user
+         will be on some other page when it lands -- the old card rendered only
+         inside Library, which is the bug this replaces. -->
+    <button
+      class="soap-banner"
+      onclick={clearSoapSetup}
+      title="Dismiss"
+    >
+      Server access set up automatically as <strong>{soapSetupState.autoResult.user}</strong>.
+      <span class="soap-sub">GM Tools, My Party and the console are live.</span>
+    </button>
+  {/if}
+
+  {#if soapSetupState.needed && !soapSetupState.dismissed}
+    <!-- The fallback, and it lives here for the same reason the banner does. A
+         fallback reachable from one page only is the failure path inheriting
+         the bug the success path just lost.
+
+         DISMISSAL IS NOT RESOLUTION, and conflating them cost a regression
+         once already: "Later" used to call clearSoapSetup, which drops
+         `needed` -- and `needed` is now raised by exactly one thing, the
+         gave_up arm, which the poll's autosetupSettled flag stops asking for.
+         With Library's on-mount re-probe gone too, one click on Later put the
+         step out of reach for the rest of the process. The condition stays
+         INLINE rather than behind a helper because soap-surface.test.ts
+         asserts the literal `soapSetupState.needed` appears in this shell. -->
+    <div class="soap-fallback">
+      {#if soapSetupState.gaveUpReason}
+        <p class="soap-gaveup">{soapSetupState.gaveUpReason}</p>
+      {/if}
+      <SoapBootstrap onverified={clearSoapSetup} ondismiss={dismissSoapSetup} />
+    </div>
+  {/if}
+
   {#if serverStatus.readyToast}
     <!-- Batch 3 F10: in-app "world just came up" toast, visible from any
          page; mirrors the Windows notification the status store fires. -->
@@ -360,8 +403,25 @@
   :global(select:focus) { outline: none; border-color: #58a6ff; }
   :global(select:disabled) { opacity: 0.5; }
   :global(option) { background: #161b22; color: #c9d1d9; }
-  .shell { display: grid; grid-template-columns: 200px 1fr; height: 100vh; }
-  .sidebar { background: #0d1117; border-right: 1px solid #30363d; padding: 16px 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+  /* Explicit ROWS, not columns alone. With only `grid-template-columns`, every
+     shell-level block after the page (the SOAP banner, the fallback card) landed
+     in a fresh IMPLICIT row that `.sidebar` did not span, and an `auto` row takes
+     its height out of row 1: with the ~500px fallback card up, the sidebar grew an
+     internal scrollbar, its `margin-top: auto` footer rode up onto the card's top
+     edge, and column 1 beside the card painted bare body background. `1 / -1`
+     spans that away only because the tracks are explicit -- with implicit rows,
+     `-1` resolves to line 2 and the "span" covers row 1 alone.
+     Row 1 is minmax(0, 1fr), not 1fr: `1fr` means minmax(AUTO, 1fr), and that auto
+     floor is the page's full content height for any page root that is not a scroll
+     container, which pushes the card off the bottom instead of shrinking the page.
+     Nothing between the card and the viewport sets `overflow: hidden`, so a card
+     taller than 100vh still scrolls into view on the document scrollbar.
+     Two auto tracks for two surfaces even though applyAutosetupOutcome makes them
+     mutually exclusive: that invariant lives in JS, an unused track costs zero
+     height, and if it ever slips the second surface still lands in a spanned row
+     rather than back in an implicit one. */
+  .shell { display: grid; grid-template-columns: 200px 1fr; grid-template-rows: minmax(0, 1fr) auto auto; height: 100vh; }
+  .sidebar { grid-column: 1; grid-row: 1 / -1; background: #0d1117; border-right: 1px solid #30363d; padding: 16px 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
   .sidebar h1 { font-size: 16px; margin: 0 16px 8px; color: #58a6ff; }
   .sidebar h1 span { color: #c9d1d9; font-weight: 300; margin-left: 4px; }
   /* Always-visible live status chip (Round Q) -- sits above the nav so it's
@@ -451,6 +511,41 @@
   }
   .ready-toast .ready-sub { color: #c9d1d9; font-size: 12.5px; font-weight: 400; }
   @keyframes ready-pop { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+  /* grid-column on BOTH of these, because `.shell` is a grid and these are the
+     first in-flow children it ever had besides the sidebar and the page. An
+     auto-placed item goes into the next free cell, which is column 1 -- the
+     200px sidebar track -- so the banner rendered as a 200px box under the nav
+     and the fallback's two elements landed in two DIFFERENT cells (reason in
+     column 1, card in column 2, side by side instead of stacked). `.ready-toast`
+     escaped this only by being position: fixed. */
+  .soap-banner {
+    grid-column: 2;
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin: 0.6rem 0 0;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid var(--ok-fg, #8ec07c);
+    border-radius: 0.4rem;
+    background: rgba(142, 192, 124, 0.08);
+    color: inherit;
+    font: inherit;
+    font-size: 0.88rem;
+    cursor: pointer;
+  }
+  .soap-sub { display: block; opacity: 0.75; font-size: 0.8rem; }
+  /* One grid item for the whole fallback, and the wrapper earns its keep twice:
+     it keeps the reason directly ABOVE the card (block flow inside one cell,
+     not two auto-placed cells), and it is the only handle this component has on
+     the card's placement at all -- Svelte's scoped CSS stops at the component
+     boundary, so `.soap-card` inside SoapBootstrap cannot be reached from
+     here. */
+  .soap-fallback { grid-column: 2; }
+  .soap-gaveup {
+    margin: 0.6rem 0 0;
+    font-size: 0.88rem;
+    color: var(--warn-fg, #f0c674);
+  }
   .sidebar button { padding: 8px 16px; color: #8b949e; font-size: 14px; background: none; border: none; text-align: left; cursor: pointer; border-left: 2px solid transparent; }
   .sidebar button.active { color: #f0f6fc; background: #161b22; border-left-color: #58a6ff; }
   /* "playing as" footer (Batch 3 F12): pinned to the sidebar bottom. */

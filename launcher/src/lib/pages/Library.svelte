@@ -13,13 +13,7 @@
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { nativeInstallRunner } from "$lib/native-install";
-  import SoapBootstrap from "$lib/SoapBootstrap.svelte";
-  import {
-    soapSetupState,
-    noteNativeInstallFinished,
-    clearSoapSetup,
-  } from "$lib/soap-setup-state.svelte";
-  import { gamesInstallNativeState, wowSoapStatus } from "$lib/api";
+  import { gamesInstallNativeState } from "$lib/api";
   import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -153,27 +147,15 @@
       backendMode = "wsl";
     }
     await refresh();
-    if (backendMode === "native") await refreshSoapNeed();
   });
 
-  // Ask whether SOAP actually WORKS rather than remembering that an install
-  // once finished. The event-driven flag could only ever be true in the app run
-  // that completed the install -- restart the launcher and the step vanished --
-  // and the obvious file check is wrong too: a leftover ~/.dml/soap.env from a
-  // DIFFERENT server carries a real account name and a real password for a
-  // realm that no longer exists, so "the file is there" reports everything
-  // configured while every SOAP feature fails.
-  //
-  // Best-effort: a probe that throws leaves the card as-is rather than raising
-  // a setup prompt on evidence we do not have.
-  async function refreshSoapNeed() {
-    try {
-      if ((await wowSoapStatus()).needs_bootstrap) noteNativeInstallFinished();
-      else clearSoapSetup();
-    } catch {
-      /* leave whatever the install flow already decided */
-    }
-  }
+  // (The post-install account step used to live here. It is automatic now --
+  // see crates/dml-wow/src/soap_autosetup.rs -- and the notice it produces is a
+  // shell surface in routes/+page.svelte, because a native install runs for
+  // HOURS and one sidebar click destroys this component. The rule this page
+  // used to carry is kept: the step still ASKS whether SOAP works rather than
+  // remembering an install finished, and an unreachable server is still not a
+  // broken account. Both now live where they do not need a page to be mounted.)
 
   // EVERY title, not just the ones the catalog calls available -- and that is
   // the whole point.
@@ -353,17 +335,12 @@
   // witnesses the exit event is an orphaned one from before a nav-away) --
   // this callback's only remaining job is refreshing the catalog so the
   // "installed" flag updates promptly while this page is mounted.
-  function onInstallExit(code: number) {
-    // Only on success, and only on native: the WSL installers run their own
-    // account step interactively, so raising this there would ask the user to
-    // do a thing they were just walked through.
-    // ASK, do not assert. A build that just finished may have a world server
-    // still opening its SOAP port -- that is `unreachable`, not "needs setup",
-    // and raising the account step then asks the user to type into a console
-    // that is not listening yet. refreshSoapNeed also runs on every later
-    // mount, so the card appears as soon as the server really is
-    // answering-and-refusing.
-    if (code === 0 && backendMode === "native") void refreshSoapNeed();
+  function onInstallExit(_code: number) {
+    // No account step here any more. A build that has just finished may have a
+    // world server still opening its SOAP port, which is `unreachable` and NOT
+    // "needs setup" -- the automatic path encodes that rule itself and simply
+    // tries again on the next status poll, instead of needing this component to
+    // be alive and re-mounted to re-probe.
     void refresh();
   }
 </script>
@@ -618,10 +595,6 @@
         <InstallTerminal id={installStore.id} onExit={onInstallExit} />
       {/if}
     {/key}
-  {/if}
-
-  {#if soapSetupState.needed}
-    <SoapBootstrap onverified={clearSoapSetup} ondismiss={clearSoapSetup} />
   {/if}
 
   {#if buf.show}

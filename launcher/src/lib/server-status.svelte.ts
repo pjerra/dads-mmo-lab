@@ -17,10 +17,12 @@ import {
   traySetStatus,
   wowLan,
   wowServerDetail,
+  wowSoapAutosetup,
   type ServerDetail,
 } from "./api";
 import { featureLocked } from "./features.svelte";
 import { installStatusText, type InstallProgress } from "./install-progress.svelte";
+import { applyAutosetupOutcome } from "./soap-setup-state.svelte";
 import { toolPrefs } from "./tool-prefs.svelte";
 import { parseLanStatus, shouldEngageKeepAwake, verdictTransitionActions } from "./transitions";
 
@@ -56,6 +58,43 @@ export function shouldReleaseKeepAwakeOnFailure(
   return keepAwakeActive && consecutiveFailures >= KEEP_AWAKE_FAILURE_LIMIT;
 }
 
+// Automatic SOAP account setup rides the poll that already runs, rather than
+// adding a second one.
+//
+// `soap.reachable && soap.auth_ok === false` is exactly "the server answered
+// and refused us" -- the one state in which an account needs creating. Rust
+// re-derives that verdict authoritatively with `soap_bootstrap::classify`
+// before it writes anything, so this is a cheap trigger and NOT the decision:
+// a false positive costs one `server info` call and nothing else.
+//
+// `auth_ok === null` means the poll did not determine it. Treating null as
+// false would create a GM3 account on evidence we do not have.
+export function shouldTryAutosetup(
+  detail: ServerDetail | null,
+  settled: boolean,
+  inFlight: boolean,
+): boolean {
+  if (settled || inFlight || !detail) return false;
+  return detail.soap.reachable === true && detail.soap.auth_ok === false;
+}
+
+let autosetupSettled = false;
+let autosetupInFlight = false;
+
+// Best-effort by design: a failed autosetup call must never break the status
+// poll it rides on. The manual card is still reachable either way.
+async function maybeAutosetup(): Promise<void> {
+  if (!shouldTryAutosetup(serverStatus.detail, autosetupSettled, autosetupInFlight)) return;
+  autosetupInFlight = true;
+  try {
+    autosetupSettled = applyAutosetupOutcome(await wowSoapAutosetup());
+  } catch {
+    /* leave it unsettled; the next poll tries again */
+  } finally {
+    autosetupInFlight = false;
+  }
+}
+
 // Single-flight: refreshServerStatus can be called concurrently from the
 // poll loop, a manual Refresh click, and post-action refreshes -- only one
 // underlying request runs at a time, everyone else is a no-op.
@@ -68,6 +107,7 @@ export async function refreshServerStatus(): Promise<void> {
     serverStatus.lastError = null;
     consecutivePollFailures = 0;
     runTransitionActions(prev, serverStatus.detail.verdict);
+    void maybeAutosetup();
   } catch (e) {
     // A failed poll must NOT clobber the last-known detail -- the bar/chip
     // would otherwise blank out on every transient error during a restart.

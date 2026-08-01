@@ -55,6 +55,85 @@ pub fn account_exists(cfg: &DbConfig, user: &str) -> Result<bool, CmdError> {
     Ok(!res.rows.is_empty())
 }
 
+/// Escape a value that is about to become the fixed part of a `LIKE` pattern,
+/// with `!` as the escape character.
+///
+/// `_` matches any single character and `%` any run, so an unescaped `dmlsoap_`
+/// would also match `dmlsoapX`, and a prefix containing `%` would match every
+/// account on the server.
+///
+/// **`!` rather than `\`, because the `ESCAPE` argument is a string LITERAL and
+/// MySQL parses it per `sql_mode`.** `ESCAPE '\\'` is one backslash under the
+/// default mode and TWO characters under `NO_BACKSLASH_ESCAPES` — and MySQL
+/// requires that argument to be exactly one character, so the statement errors
+/// out on a server whose only unusual property is a stricter `sql_mode`, taking
+/// the family guard down with it. `'!'` needs no string-literal escaping in any
+/// mode, so `ESCAPE '!'` means the same thing on every server. `pages::bots_where`
+/// and bash's `_bot_prefix_like` already reason about `NO_BACKSLASH_ESCAPES` the
+/// same way; this follows them.
+///
+/// The escape character escapes ITSELF, and that arm is load-bearing rather than
+/// decorative: without it a prefix `A!B` would be sent as `A!B`, MySQL would read
+/// the `!` as escaping `B`, and the pattern would match `AB` — the `!` swallowed.
+/// Worse, `A!_B` would become `A!!_B`, whose `_` is left unescaped and matches
+/// any character. One pass over the input, so an emitted `!!` is never rescanned;
+/// a two-pass replace chain that added `!%`/`!_` before doubling `!` would escape
+/// its own escapes.
+///
+/// A literal backslash now needs nothing: with `ESCAPE '!'` declared it is not
+/// special to `LIKE`, and this pattern is BOUND rather than spliced, so no
+/// string-literal parser sees it either.
+///
+/// The one arm NOT copied from `botid::escape_like_literal` is its `'` -> `''`:
+/// that module splices its pattern into SQL text, this one BINDS it, and
+/// doubling a quote inside a bound value would search for a name that literally
+/// contains two quotes.
+fn escape_like_prefix(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '!' => out.push_str("!!"),
+            '%' => out.push_str("!%"),
+            '_' => out.push_str("!_"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// The `LIKE` pattern [`account_family_exists`] binds, split out so the exact
+/// string can be pinned by a test rather than re-derived by eye.
+///
+/// Upper-cased for the same reason as [`account_exists`], escaped, and only THEN
+/// given its trailing `%` — that one is the single wildcard here that is meant
+/// to be a wildcard, so it must be appended after the escaping rather than
+/// travel through it.
+fn family_pattern(prefix: &str) -> String {
+    format!("{}%", escape_like_prefix(&prefix.to_ascii_uppercase()))
+}
+
+/// Does ANY account whose name starts with `prefix` already exist?
+///
+/// [`account_exists`] cannot answer the question the fallback name needs asked.
+/// A fallback name carries fresh random hex, so asking whether THAT name is
+/// taken is not a guard at all — it is free by construction, and can only ever
+/// answer "free". The bounded question is whether the launcher has already put
+/// an account of this family on this server.
+///
+/// The pattern comes from [`family_pattern`]; the explicit `ESCAPE '!'` is what
+/// makes its escaping mean anything, and `!` is the character that survives
+/// every `sql_mode` — see [`escape_like_prefix`] for why `'\\'` does not.
+pub fn account_family_exists(cfg: &DbConfig, prefix: &str) -> Result<bool, CmdError> {
+    let res = db::query_with_params(
+        cfg,
+        Database::Auth,
+        "SELECT 1 FROM account WHERE username LIKE ? ESCAPE '!' LIMIT 1",
+        vec![mysql::Value::from(family_pattern(prefix))],
+    )
+    .map_err(db::db_err_to_cmd)?;
+    Ok(!res.rows.is_empty())
+}
+
 /// Create the account at GM level 3 on every realm.
 ///
 /// Refuses rather than overwrites if the name is taken. Returns the account id.
@@ -163,6 +242,41 @@ mod tests {
         };
         assert!(!err.hint.to_lowercase().contains("reset"));
         assert!(!err.hint.to_lowercase().contains("overwrite"));
+    }
+
+    #[test]
+    fn a_family_prefix_cannot_widen_into_a_wildcard() {
+        // `dmlsoap_` is the real caller, and its underscore is a LIKE wildcard:
+        // unescaped it would report the family "taken" because of an unrelated
+        // `dmlsoapX`, and this launcher would then refuse to set SOAP up on a
+        // server that had room for it.
+        assert_eq!(escape_like_prefix("DMLSOAP_"), "DMLSOAP!_");
+        // The mirror-image hazard, and the worse one: a `%` in the prefix would
+        // match every account and report the family taken on a virgin server.
+        assert_eq!(escape_like_prefix("A%B"), "A!%B");
+        // The escape character escaping itself. Left alone, `A!B` reaches MySQL
+        // as `A!B`, the `!` is read as escaping `B`, and the pattern matches
+        // `AB` -- the character SWALLOWED rather than searched for.
+        assert_eq!(escape_like_prefix("A!B"), "A!!B");
+        // And the compound case, which is the widening one: unescaped, `A!_B`
+        // would go out as `A!!_B`, whose `_` is then no longer escaped at all
+        // and matches any single character.
+        assert_eq!(escape_like_prefix("A!_B"), "A!!!_B");
+        // Backslash is NOT escaped any more, and must not be: `ESCAPE '!'`
+        // takes `\` out of LIKE's vocabulary, and the pattern is bound rather
+        // than spliced, so no string-literal parser sees it either. Escaping it
+        // would search for a name containing two backslashes.
+        assert_eq!(escape_like_prefix("a\\b"), "a\\b");
+    }
+
+    /// The exact bytes the real caller sends, pinned rather than re-derived by
+    /// eye. `dmlsoap_` is 8 characters ending in a LIKE wildcard, and the whole
+    /// point of the guard is that the 8th one is a literal underscore: the
+    /// pattern must find `DMLSOAP_AB12EF` and must NOT be satisfied by an
+    /// unrelated `DMLSOAPX`.
+    #[test]
+    fn the_family_pattern_binds_a_literal_underscore_and_one_real_wildcard() {
+        assert_eq!(family_pattern(&crate::soap_autosetup::fallback_prefix()), "DMLSOAP!_%");
     }
 
     /// LIVE. Creates a throwaway account, proves the launcher can authenticate
