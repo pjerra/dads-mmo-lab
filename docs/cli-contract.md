@@ -254,6 +254,9 @@ prints them.
 | `commands` | — | envelope | The in-game `.` commands cheat sheet (`NOT_FOUND` if the server is not installed) |
 | `install` | `[ID]` (positional, default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`) | passthrough | Interactively install a title — stdio passthrough, no envelope on success |
 | `install-native` | `[--id <ID>]` (default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`, else `BAD_ID`) `[--allow-underspec]` | stream | Install the WoW server natively on Docker Desktop, no WSL — resumable |
+| `unbound install` | `[--id <ID>]` `--accept-data-changes` `[--repair]` | stream | Layer the Wrath Unbound add-on onto an existing server + rebuild — resumable |
+| `unbound uninstall` | `[--id <ID>]` `--accept-data-changes` `[--force]` | stream | Remove the add-on + rebuild; `done` names its residue |
+| `unbound status` | `[--id <ID>]` | envelope | Add-on install/uninstall progress from disk evidence only |
 
 Not yet documented: the `data` payload schema of each command's ok envelope (known payloads:
 `version` as above; `lan` and `console` return `{"result": "<text>"}` on success).
@@ -385,6 +388,60 @@ per-install is a recorded follow-up, not this command's job.
 `dml-wow` binary directly; the Library-page flow that drives it is a separate task. The bash copy in
 `games install`'s Windows refusal already points at this command, so keep that in mind when reading
 it as a user-facing promise.
+
+### `unbound` (the Wrath Unbound add-on, native)
+
+`dml-wow unbound install|uninstall|status` layers the Wrath Unbound multi-class add-on onto an
+EXISTING native WotLK Playerbots server, or takes it back off. A native-only port of
+`guides/unbound-wrath/install-wrath-unbound-addon.sh` v1.2.2 in the `install-native` engine shape:
+staged, resumable (state file `.dml-unbound.json` in the SERVER dir, bound to the directory by
+`install_id`, written only after a stage really finished), streamed, with `pct` during the
+30–90-minute worldserver rebuild both directions. The WSL route keeps the interactive `dml unbound`
+script; there is no bash mirror of this arm.
+
+**These are MySQL writes, and they are sanctioned.** The install pipes 15 embedded,
+fingerprint-pinned SQL files into `docker exec -i … mysql` (14 migrations + the Mentor NPC
+template); the uninstall runs 11 revert statements including two `DROP TABLE`s. Sanctioned by the
+user on 2026-08-02 as part of commissioning the port — recorded in CLAUDE.md's write-policy list.
+Neither direction runs ANY of it before a verified safety dump (world included) has landed, and
+neither runs at all without `--accept-data-changes`, whose refusal text enumerates the third-party
+rows touched (`playercreateinfo_spell_custom` for 9 class masks, `skillraceclassinfo_dbc ID >=
+10000`, catalog tables; uninstall additionally DROPS `unbound_character_unlocks` — character
+progression). Every `docker exec` targets the container ID resolved through the server's own
+compose project, never the engine-global name `ac-database`.
+
+| Subcommand | Flags | Mode |
+|---|---|---|
+| `unbound install` | `[--id <ID>]` `--accept-data-changes` `[--repair]` | stream |
+| `unbound uninstall` | `[--id <ID>]` `--accept-data-changes` `[--force]` | stream |
+| `unbound status` | `[--id <ID>]` | envelope (no docker, no DB — works while stopped) |
+
+Error codes (exit 1, terminal `error` events; `BAD_ID`/`NO_GAMES_DIR` arrive as bare envelopes
+before the stream opens): `UNBOUND_NO_SERVER`, `UNBOUND_NOT_AZEROTHCORE`,
+`UNBOUND_SERVER_NOT_RUNNING` (the migrations need a live database), `UNBOUND_DB_UNREACHABLE`
+(the container is up but mysql cannot answer — deliberately distinct from "not compatible"),
+`UNBOUND_NOT_PLAYERBOTS` (trainer probe), `UNBOUND_ALREADY_INSTALLED` (hint: `--repair`),
+`UNBOUND_VERSION_MISMATCH` (no in-place upgrade — uninstall first), `UNBOUND_PATCH_INCOHERENT`
+(SOME of the six core files carry the patch — a half-applied tree, named file by file),
+`UNBOUND_CONSENT_REQUIRED`, `UNBOUND_DISK_LOW`, `UNBOUND_GIT_MISSING`, `UNBOUND_DOCKER_UNAVAILABLE`,
+`UNBOUND_BACKUP_FAILED` (hard stop BEFORE any change), `UNBOUND_WRITE_FAILED`,
+`UNBOUND_ALE_CLONE_FAILED`, `UNBOUND_ALE_PIN_MISMATCH` (the pinned mod-ale commit is a refusal, not
+a warning), `UNBOUND_SQL_FAILED` (names the file, carries the mysql stderr tail and the backup
+path), `UNBOUND_PATCH_CHECK_FAILED`, `UNBOUND_CONF_MISSING`, `UNBOUND_VERIFY_FAILED`,
+`UNBOUND_BUILD_FAILED`, `UNBOUND_UP_FAILED`, `UNBOUND_READY_TIMEOUT`, `UNBOUND_NOT_INSTALLED`
+(uninstall on a server with no trace of the add-on; `--force` overrides).
+
+Install readiness is the line `[UNBOUND] Prereq map built.` in the worldserver log **since the
+container's own StartedAt** — it proves the module compiled in, Eluna loaded and the Mentor's Lua
+ran. Uninstall readiness is inverted AND doubled: world-ready must be true and that marker ABSENT.
+The uninstall's `done` event carries a `residue` array naming everything not reverted (mod-ale and
+`mod_ale.conf` are deliberately kept — shared Lua engine; characters keep learned cross-class
+spells until next login; Mentor Stones in inventories are untouched, their cleanup SQL shipped as
+TEXT in `mentor_stone_cleanup_sql`, never executed). `done` also names the one manual step —
+spawning the Mentor (`.npc add 900001`) — instead of claiming it happened.
+
+**Not yet wired into the launcher** — same status as `install-native`: reachable only via the
+binary; the Tools-page flow is a separate task.
 
 ### Deliberately not ported
 
