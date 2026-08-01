@@ -6346,6 +6346,77 @@ async fn wow_soap_status(state: State<'_, AppState>) -> Result<serde_json::Value
     }))
 }
 
+/// Create the SOAP account directly, then prove it works.
+///
+/// The one-click replacement for the worldserver-console step. It is a WRITE
+/// into `acore_auth` -- the third sanctioned MySQL write, user-approved
+/// 2026-08-01 -- and `dml_wow::account_write` documents why SOAP could not do
+/// this itself: SOAP needs the very account it would be creating.
+///
+/// VERIFIES BEFORE IT SAVES, exactly like the manual path: the credentials are
+/// only written to `~/.dml/soap.env` after a real round-trip succeeds with
+/// them. That matters more here, not less -- a mistake in the SRP6 produces a
+/// verifier that is perfectly well-formed and simply never authenticates, so
+/// "the INSERT returned Ok" proves nothing at all.
+///
+/// Never returns `Err` for an unhappy server: a refusal (name taken, bad
+/// password, schema we do not understand) comes back as a verdict the card can
+/// render alongside the manual instructions, which stay on screen as the
+/// fallback.
+#[tauri::command]
+async fn wow_soap_account_create(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    use dml_wow::soap_bootstrap as sb;
+    let home = dml_core::util::home_dir().ok_or_else(|| CmdError {
+        code: "NO_HOME".into(),
+        message: "Could not find your user folder, so the credentials could not be saved.".into(),
+        hint: String::new(),
+    })?;
+    let url = dml_wow::soap::SoapConfig::load().url;
+    let soap_lock = state.soap_lock.clone();
+
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let cfg = dml_wow::db::DbConfig::from_env();
+        if let Err(e) = dml_wow::account_write::create_gm_account(&cfg, &user, &pass) {
+            return Err(e);
+        }
+        // Same verify-then-save routine the manual path uses, so there is one
+        // definition of "done" rather than two that can disagree.
+        sb::bootstrap_verify_with(&home, &url, &user, &pass, |c, cmd| {
+            let _guard = soap_lock.lock();
+            dml_wow::soap::exec(c, cmd)
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+
+    match result {
+        Ok((outcome, path)) => {
+            let (status, detail) = match &outcome {
+                sb::VerifyOutcome::Ok => ("ok", String::new()),
+                sb::VerifyOutcome::Rejected(m) => ("rejected", m.clone()),
+                sb::VerifyOutcome::Unreachable(m) => ("unreachable", m.clone()),
+            };
+            Ok(serde_json::json!({
+                "status": status,
+                "detail": detail,
+                "saved_to": path.map(|p| p.display().to_string()),
+            }))
+        }
+        // A refusal is an ANSWER about the server, not a failure of the command,
+        // so it renders in the card next to the manual steps rather than as a
+        // dead-end error toast.
+        Err(e) => Ok(serde_json::json!({
+            "status": "refused",
+            "detail": format!("{}{}", e.message, if e.hint.is_empty() { String::new() } else { format!(" {}", e.hint) }),
+            "saved_to": serde_json::Value::Null,
+        })),
+    }
+}
+
 /// Prove the account works, and ONLY then remember it.
 ///
 /// The ordering is the entire feature. Writing `~/.dml/soap.env` first and
@@ -6816,6 +6887,7 @@ pub fn run() {
             games_install_native_state,
             wow_soap_bootstrap_info,
             wow_soap_status,
+            wow_soap_account_create,
             wow_soap_bootstrap_verify,
             url_install,
             games_install_input,

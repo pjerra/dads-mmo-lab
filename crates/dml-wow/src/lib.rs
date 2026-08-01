@@ -6,10 +6,12 @@
 //! moved to `dml-core`; they keep every existing call site's module path
 //! (`config`, `db`, `soap`, `status`, …) working unchanged.
 
+pub mod account_write;
 pub mod accountwide;
 pub mod ahbot;
 pub use dml_core::backend;
 pub mod backup;
+pub mod botid;
 pub mod bridge;
 pub mod cachestatus;
 pub mod clientpath;
@@ -39,6 +41,7 @@ pub mod registry;
 pub mod restore;
 pub use dml_core::runner;
 pub mod soap;
+pub mod srp6;
 pub mod soap_bootstrap;
 pub mod soap_cmds;
 pub mod stats;

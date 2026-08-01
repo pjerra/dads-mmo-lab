@@ -36,3 +36,9 @@ flate2 = "1"
 # C/OpenSSL dependency. Moved off the launcher manifest with `module repair`
 # itself (cargo-workspace refactor, Task 9b).
 sha1 = "0.10"
+# SRP6 account registration (`srp6`) -- the sanctioned direct write that
+# replaces the manual worldserver-console step. Both were ALREADY in
+# Cargo.lock via the mysql/reqwest trees, so this adds no new compile units,
+# only direct visibility. `sha1` above is shared with `module repair`.
+num-bigint = { version = "0.4", default-features = false }
+getrandom = "0.3"
