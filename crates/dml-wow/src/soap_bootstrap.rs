@@ -238,6 +238,41 @@ pub fn bootstrap_verify_with(
     Ok((outcome, Some(path)))
 }
 
+/// Is the launcher's SOAP access actually working RIGHT NOW?
+///
+/// Asked with the credentials the rest of the app would use
+/// ([`soap::SoapConfig::load`]), so a "yes" here means every SOAP feature will
+/// work — not that a file exists somewhere.
+///
+/// THE FILE'S EXISTENCE IS NOT THE QUESTION, and assuming it was would have
+/// shipped a bug that is already sitting on the author's own machine: a
+/// `~/.dml/soap.env` left over from a DIFFERENT server carries a real account
+/// name and a real password for a realm that no longer exists. Every SOAP
+/// feature fails, and a presence check reports everything configured.
+///
+/// The three outcomes carry their usual meanings, and the caller must respect
+/// the difference: only [`VerifyOutcome::Rejected`] means "this needs setting
+/// up". `Unreachable` means the server is not answering — which is also the
+/// state in which the setup step is IMPOSSIBLE, because creating the account
+/// needs a running worldserver console.
+pub fn soap_status_with(
+    exec: impl Fn(&soap::SoapConfig, &str) -> soap::SoapOutcome,
+) -> VerifyOutcome {
+    let cfg = soap::SoapConfig::load();
+    classify(&exec(&cfg, VERIFY_COMMAND))
+}
+
+/// Should the guided account step be offered?
+///
+/// `true` ONLY for a server that is answering and refusing us. Deliberately not
+/// for an unreachable one: the setup asks the user to type into the
+/// worldserver's console, which does not exist while the server is down, so
+/// raising it then would present a task that cannot be performed and would fire
+/// on every machine with a stopped server.
+pub fn needs_bootstrap(outcome: &VerifyOutcome) -> bool {
+    matches!(outcome, VerifyOutcome::Rejected(_))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +282,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The card must appear for a server that is UP and refusing us -- and for
+    /// nothing else.
+    #[test]
+    fn the_step_is_offered_only_when_the_server_answers_and_refuses() {
+        assert!(needs_bootstrap(&VerifyOutcome::Rejected("nope".into())));
+        assert!(!needs_bootstrap(&VerifyOutcome::Ok));
+        // NOT for an unreachable server. Creating the account means typing into
+        // the worldserver console, which does not exist while it is down, so
+        // offering it then presents a task that cannot be performed -- and
+        // would fire on every machine with a stopped server.
+        assert!(!needs_bootstrap(&VerifyOutcome::Unreachable("down".into())));
+    }
+
+    /// A leftover `soap.env` from a DIFFERENT server is the case a
+    /// file-existence check gets wrong, and it is not hypothetical: exactly
+    /// that file, carrying a real account for a realm that no longer exists,
+    /// was sitting on the author's machine while every SOAP feature failed.
+    #[test]
+    fn stale_credentials_read_as_needing_setup_not_as_configured() {
+        let got = soap_status_with(|_, _| soap::SoapOutcome::Auth);
+        assert!(needs_bootstrap(&got), "{got:?}");
     }
 
     #[test]

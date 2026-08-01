@@ -6307,6 +6307,45 @@ async fn wow_soap_bootstrap_info(
     }))
 }
 
+/// Does SOAP actually work right now, with the credentials the rest of the app
+/// uses?
+///
+/// Drives whether the guided account step is OFFERED, and it asks by doing a
+/// real round-trip rather than by looking for `~/.dml/soap.env`. That
+/// distinction is not academic: a leftover soap.env from a DIFFERENT server
+/// carries a real account name and a real password for a realm that no longer
+/// exists, so a presence check reports "configured" while every SOAP feature
+/// fails. Exactly that file was sitting on the author's machine.
+///
+/// Bounded by the SOAP client's own connect/read timeouts and serialized on the
+/// same lock every other native SOAP call takes.
+#[tauri::command]
+async fn wow_soap_status(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    use dml_wow::soap_bootstrap as sb;
+    let soap_lock = state.soap_lock.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        sb::soap_status_with(|cfg, cmd| {
+            let _guard = soap_lock.lock();
+            dml_wow::soap::exec(cfg, cmd)
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    let status = match &outcome {
+        sb::VerifyOutcome::Ok => "ok",
+        sb::VerifyOutcome::Rejected(_) => "rejected",
+        sb::VerifyOutcome::Unreachable(_) => "unreachable",
+    };
+    Ok(serde_json::json!({
+        "status": status,
+        // The UI must not re-derive this. "Offer the setup" is true ONLY for a
+        // server that answers and refuses us -- never for one that is simply
+        // down, because the setup asks the user to type into a worldserver
+        // console that does not exist then.
+        "needs_bootstrap": sb::needs_bootstrap(&outcome),
+    }))
+}
+
 /// Prove the account works, and ONLY then remember it.
 ///
 /// The ordering is the entire feature. Writing `~/.dml/soap.env` first and
@@ -6776,6 +6815,7 @@ pub fn run() {
             games_install_native,
             games_install_native_state,
             wow_soap_bootstrap_info,
+            wow_soap_status,
             wow_soap_bootstrap_verify,
             url_install,
             games_install_input,
