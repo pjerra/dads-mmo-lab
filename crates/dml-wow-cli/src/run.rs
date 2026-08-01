@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     AccountCmd, AccountwideCmd, BackupCmd, CacheCmd, Cmd, ClientPathCmd, ConfigCmd, GmCmd,
-    ModuleCmd, PartyCmd, TuningCmd,
+    ModuleCmd, PartyCmd, TuningCmd, UnboundCmd,
 };
 use crate::out::{emit_err, emit_ok, stream_exit, stream_sink, TerminalSeen};
 
@@ -824,7 +824,60 @@ pub fn dispatch(command: Cmd) -> i32 {
                 );
             })
         }
+
+        Cmd::Unbound { cmd } => cmd_unbound(cmd),
     }
+}
+
+/// `dml-wow unbound …` — `dml_wow::unbound`. Same discipline as
+/// `InstallNative`: id validated before it joins a path, the games dir must
+/// be configured (never the cwd fallback), and the exit code comes from the
+/// terminal-event tracker, not from the engine's return value.
+fn cmd_unbound(cmd: UnboundCmd) -> i32 {
+    // Status is the read-only one: no stream, no docker, plain envelope.
+    if let UnboundCmd::Status { id } = &cmd {
+        if !valid_game_id(id) {
+            let e = bad_id(id);
+            return emit_err(&e.code, &e.message, &e.hint);
+        }
+        let games_dir = match dml_wow::install_native::games_dir_for_install() {
+            Ok(d) => d,
+            Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+        };
+        let status = dml_wow::unbound::unbound_status(&games_dir, id);
+        return emit_ok(serde_json::to_value(status).unwrap_or_default());
+    }
+
+    let (id, accept, repair, force, uninstall) = match cmd {
+        UnboundCmd::Install { id, accept_data_changes, repair } => {
+            (id, accept_data_changes, repair, false, false)
+        }
+        UnboundCmd::Uninstall { id, accept_data_changes, force } => {
+            (id, accept_data_changes, false, force, true)
+        }
+        UnboundCmd::Status { .. } => unreachable!("handled above"),
+    };
+    if !valid_game_id(&id) {
+        let e = bad_id(&id);
+        return emit_err(&e.code, &e.message, &e.hint);
+    }
+    let games_dir = match dml_wow::install_native::games_dir_for_install() {
+        Ok(d) => d,
+        Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+    };
+    let mut opts = dml_wow::unbound::UnboundOpts::new(games_dir);
+    opts.id = id;
+    opts.accept_data_changes = accept;
+    opts.repair = repair;
+    opts.force = force;
+    stream_dispatch(|emit| {
+        let io = dml_wow::unbound::ProcUnboundIo::from_env();
+        let _ = if uninstall {
+            dml_wow::unbound::unbound_uninstall_stream_with(&io, &opts, emit)
+        } else {
+            dml_wow::unbound::unbound_install_stream_with(&io, &opts, emit)
+        };
+    })
 }
 
 /// `dml-wow cache …` — `dml_wow::cachestatus`. No guards beyond

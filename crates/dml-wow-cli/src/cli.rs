@@ -382,6 +382,61 @@ pub enum Cmd {
         #[arg(long)]
         allow_underspec: bool,
     },
+    /// The Wrath Unbound multi-class add-on: layer it onto an EXISTING native
+    /// WotLK Playerbots server, or take it back off. Both directions rebuild
+    /// the worldserver (30-90 minutes, `pct` events during the compile) and
+    /// both are RESUMABLE. Native-only, like install-native — the WSL route
+    /// keeps the interactive `dml unbound` script.
+    Unbound {
+        #[command(subcommand)]
+        cmd: UnboundCmd,
+    },
+}
+
+/// `dml-wow unbound …` — `dml_wow::unbound`.
+#[derive(Subcommand, Debug)]
+pub enum UnboundCmd {
+    /// Install (or resume installing) the add-on. STREAMS NDJSON.
+    ///
+    /// Refuses without `--accept-data-changes`, because the migrations
+    /// delete and re-seed rows other mods may also touch: it is consent,
+    /// collected by the caller, verified here.
+    Install {
+        #[arg(long, default_value = dml_wow::unbound::DEFAULT_TITLE_ID)]
+        id: String,
+        /// Accept the add-on's data changes (playercreateinfo_spell_custom
+        /// re-seeded for 9 class masks, skillraceclassinfo_dbc ID >= 10000
+        /// replaced, catalog rows replaced).
+        #[arg(long)]
+        accept_data_changes: bool,
+        /// Re-run every stage over an install this engine believes is
+        /// already complete (takes a fresh safety backup first).
+        #[arg(long)]
+        repair: bool,
+    },
+    /// Uninstall (or resume uninstalling) the add-on. STREAMS NDJSON; the
+    /// done event carries a `residue` array naming what could not be
+    /// reverted — this command never pretends to be a perfect inverse.
+    Uninstall {
+        #[arg(long, default_value = dml_wow::unbound::DEFAULT_TITLE_ID)]
+        id: String,
+        /// Accept the destructive half: unbound_character_unlocks (character
+        /// class-unlock progression) is DROPPED, and the add-on's own wide
+        /// revert deletes run.
+        #[arg(long)]
+        accept_data_changes: bool,
+        /// Run the revert even when no trace of an install is found. Safe —
+        /// every statement is IF-EXISTS-shaped — but it is a decision, so it
+        /// is a flag.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Install/uninstall progress and on-disk evidence, from the state file
+    /// and the six patched files. No docker, no DB — works while stopped.
+    Status {
+        #[arg(long, default_value = dml_wow::unbound::DEFAULT_TITLE_ID)]
+        id: String,
+    },
 }
 
 /// `dml-wow cache …` — `dml_wow::cachestatus`.
