@@ -18,16 +18,30 @@
   // URL install whose own flag was flipped tested-but-title-install-still-
   // locked left the reply box and Cancel disabled -- the single global install
   // slot stuck on an unanswerable prompt until an app restart.
+  // `interactive` says whether the run behind `runner` can be TYPED AT and
+  // KILLED. Default true, because that is what every existing caller wraps: an
+  // interactive bash installer in a pty.
+  //
+  // The native engine is neither. It asks no questions (nothing to reply to)
+  // and its git/docker children are the launcher's own, so `taskkill /F /T` on
+  // our pid would close the app -- the backend refuses both with
+  // NOT_INTERACTIVE and NOT_CANCELLABLE. Rendering the controls anyway meant
+  // the two-step confirm warned "Cancelling mid-install can leave a partial
+  // install behind. Cancel anyway?", the user accepted that outcome, and then
+  // the app refused -- leaving an error card parked above the scrollback for
+  // the rest of an hours-long build.
   let {
     id,
     onExit,
     runner = gamesInstall,
     lockFlag = "title-install",
+    interactive = true,
   }: {
     id: string;
     onExit: (code: number) => void;
     runner?: (id: string, onEvent: (e: InstallEvent) => void) => Promise<void>;
     lockFlag?: string;
+    interactive?: boolean;
   } = $props();
 
   // Strip ANSI escape sequences (cursor moves, colors) out of installer
@@ -196,6 +210,7 @@
     <div class="exit-note {installStore.exitCode === 0 ? 'ok' : 'err'}">{note}</div>
   {/if}
 
+  {#if interactive}
   <form
     class="sendrow"
     onsubmit={(e) => {
@@ -219,23 +234,36 @@
       Send
     </button>
   </form>
+  {/if}
 
   {#if !exited}
-    <div class="row">
-      {#if !confirmingCancel}
-        <button
-          onclick={cancel}
-          disabled={cancelling || featureLocked(lockFlag)}
-          title={featureLocked(lockFlag) ? LOCKED_HINT : undefined}
-        >
-          Cancel install
-        </button>
-      {:else}
-        <span class="warn-text">Cancelling mid-install can leave a partial install behind. Cancel anyway?</span>
-        <button onclick={cancel} disabled={cancelling}>Confirm</button>
-        <button onclick={() => (confirmingCancel = false)} disabled={cancelling}>Back</button>
-      {/if}
-    </div>
+    {#if interactive}
+      <div class="row">
+        {#if !confirmingCancel}
+          <button
+            onclick={cancel}
+            disabled={cancelling || featureLocked(lockFlag)}
+            title={featureLocked(lockFlag) ? LOCKED_HINT : undefined}
+          >
+            Cancel install
+          </button>
+        {:else}
+          <span class="warn-text">Cancelling mid-install can leave a partial install behind. Cancel anyway?</span>
+          <button onclick={cancel} disabled={cancelling}>Confirm</button>
+          <button onclick={() => (confirmingCancel = false)} disabled={cancelling}>Back</button>
+        {/if}
+      </div>
+    {:else}
+      <!-- Static copy in place of a Cancel that would be refused. Deliberately
+           does NOT claim closing the window stops the build: close-to-tray is
+           ON by default, so the X hides the app and leaves the build running.
+           Promising a stop we do not perform is the error this replaces. -->
+      <p class="noncancel-note">
+        This build keeps going on its own. Leaving this page is fine — it carries on, and
+        running the install again later continues from the last finished step, reusing
+        Docker's build cache, so nothing is paid for twice.
+      </p>
+    {/if}
   {/if}
 </div>
 
@@ -281,6 +309,12 @@
   .exit-note { font-size: 13px; font-weight: 600; }
   .exit-note.ok { color: #3fb950; }
   .exit-note.err { color: #f85149; }
+  .noncancel-note {
+    margin: 0.6rem 0 0;
+    font-size: 0.85rem;
+    opacity: 0.8;
+    line-height: 1.45;
+  }
   .sendrow { display: flex; gap: 8px; }
   .sendrow input {
     flex: 1;

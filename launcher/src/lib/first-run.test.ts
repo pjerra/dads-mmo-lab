@@ -586,7 +586,21 @@ describe("firstRunNeedsProbe", () => {
     expect(firstRunNeedsProbe(null, true)).toBe(false);
   });
 
-  it("stops probing in native mode, which has no distro to ask about", () => {
-    expect(firstRunNeedsProbe(report({ state: "no_wsl", backend_mode: "native" }), false)).toBe(false);
+  it("KEEPS probing in native mode, so an install can clear the screen", () => {
+    // This test used to assert the opposite, and it was a vacuous pass twice
+    // over: it pinned a short-circuit that had become a latch, using
+    // {state:"no_wsl", backend_mode:"native"} -- a combination derive_native
+    // can never emit, so it proved nothing about a reachable state either.
+    //
+    // The bug it locked in: a native user installs a server, clicks Home, and
+    // is still told they have none -- with tray Start and chip Start
+    // suppressed while the stale screen stands -- until they relaunch. The two
+    // native screens most likely to go stale carry no retry of their own
+    // (no_titles navigates, no_docker links out), so this was the only way back.
+    expect(firstRunNeedsProbe(report({ state: "no_titles", backend_mode: "native" }), false)).toBe(true);
+    expect(firstRunNeedsProbe(report({ state: "no_docker", backend_mode: "native" }), false)).toBe(true);
+    expect(firstRunNeedsProbe(report({ state: "docker_stopped", backend_mode: "native" }), false)).toBe(true);
+    // ...and still stops once the machine is genuinely ready.
+    expect(firstRunNeedsProbe(report({ state: "ready", backend_mode: "native" }), false)).toBe(false);
   });
 });

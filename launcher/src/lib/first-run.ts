@@ -455,9 +455,24 @@ export function firstRunButton(
  *
  * Called on every navigation to Home, so a user who leaves for the Library,
  * installs a title and comes back sees the screen update instead of a stale
- * "no game server installed". It stops once the machine is set up (or is a
- * native-backend one, which has no distro to ask about) so an established user
- * pays exactly one probe per session.
+ * "no game server installed". It stops once the machine is set up, so an
+ * established user pays exactly one probe per session.
+ *
+ * THERE USED TO BE A `backend_mode === "native"` SHORT-CIRCUIT HERE, and
+ * deleting it is the fix rather than a relaxation. It was correct while
+ * `firstRunState` blanket-returned null for native — there was no screen, so
+ * nothing could go stale. Once native got real screens the line became a latch:
+ * the shell's only navigation-time re-probe was dead in native mode, and the two
+ * native arms most likely to become untrue carry no retry of their own
+ * (`no_titles` navigates, `no_docker` opens a link). So a native user could
+ * install a server, click Home, and still be told they had none — with tray
+ * Start and chip Start silently suppressed while the screen stood — until they
+ * relaunched the app. Installing Docker Desktop and coming back behaved the
+ * same way.
+ *
+ * The `everReady` guard above already caps an established user at one probe per
+ * session, and native's last link (titles) is precisely the fact an install
+ * changes, so re-probing is exactly what should happen.
  */
 export function firstRunNeedsProbe(
   report: BackendStatusReport | null,
@@ -465,6 +480,5 @@ export function firstRunNeedsProbe(
 ): boolean {
   if (everReady) return false;
   if (!report) return true;
-  if (report.backend_mode === "native") return false;
   return report.state !== "ready";
 }

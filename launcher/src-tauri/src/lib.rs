@@ -1562,8 +1562,18 @@ fn native_facts() -> dml_core::setup::NativeFacts {
     let program = dml_core::engine::docker_desktop_program();
     let docker_installed = if program.is_some() { Tri::Yes } else { Tri::No };
     let engine_running = match &program {
+        // BOUNDED, and that matters more here than almost anywhere else. This
+        // runs on the path that gates Home on every app start, and the screen
+        // it feeds is the one with no other repair on it -- a wedged docker
+        // daemon would leave `probing` true forever and disable the single
+        // button the user has. `dml_core::engine::engine_running` calls
+        // `Command::status()` with no deadline at all; `maint::docker_engine_up`
+        // exists precisely because of that and says so in its own doc comment.
         Some(_) => {
-            if dml_core::engine::engine_running(&dml_core::engine::docker_program()) {
+            if dml_wow::maint::docker_engine_up(
+                &dml_core::engine::docker_program(),
+                dml_wow::maint::PROBE_TIMEOUT,
+            ) {
                 Tri::Yes
             } else {
                 Tri::No
@@ -1581,13 +1591,55 @@ fn native_facts() -> dml_core::setup::NativeFacts {
 /// install to someone whose existing server is merely unreadable.
 fn native_title_count() -> Option<usize> {
     let dir = dml_core::compose::games_dir_from_env();
-    let entries = std::fs::read_dir(&dir).ok()?;
-    Some(
-        entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().join(dml_wow::composegen::BASE_FILE).is_file())
-            .count(),
-    )
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(it) => it,
+        // A GAMES DIR THAT IS NOT THERE HOLDS ZERO TITLES. That is a definite
+        // answer, not a shrug, and collapsing it into `None` broke the fresh
+        // native machine this whole arm was built for: nothing creates
+        // `%USERPROFILE%\dml-native` before the first install (the engine makes
+        // it itself), so EVERY new native user hit the could-not-tell screen —
+        // "the launcher couldn't read back the list of installed games", which
+        // is false twice over — behind a "Check again" button that re-ran the
+        // identical failing read forever. The `no_titles` → "Open Library" arm
+        // was unreachable for exactly the user it exists for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(0),
+        // Anything else — a permissions failure, a dead drive — genuinely is a
+        // could-not-tell, and must stay one.
+        Err(_) => return None,
+    };
+    Some(entries.filter_map(|e| e.ok()).filter(|e| native_title_is_usable(&e.path())).count())
+}
+
+/// Is this directory a title the user could actually PLAY, as opposed to one
+/// that merely exists?
+///
+/// Two conditions, and the second is the one that was missing:
+///
+/// 1. It has a generated compose file, so it is a title directory at all rather
+///    than `tools/` or a stray folder.
+/// 2. Its install is not still in progress. `generate-compose` is stage 5 of 8,
+///    so a build that died during the multi-hour `build` stage leaves a
+///    perfectly good compose file behind and satisfies condition 1 alone. Left
+///    at that, the first-run chain called such a machine `Ready`, showed no
+///    first-run screen, and dropped the user on Home in front of a Start button
+///    for a server whose image was never compiled.
+///
+/// The state file is the authority for the second question — the same one
+/// `games_install_native_state` and the engine's own resume logic use, so the
+/// three cannot disagree.
+fn native_title_is_usable(path: &std::path::Path) -> bool {
+    if !path.join(dml_wow::composegen::BASE_FILE).is_file() {
+        return false;
+    }
+    match dml_wow::install_native::load_state(path) {
+        // An unfinished install is not a title the user can play. `next_stage`
+        // is None when every stage is recorded, i.e. it DID finish.
+        Some(st) => dml_wow::install_native::next_stage(&st).is_none(),
+        // No state file: either a title installed some other way (the WSL
+        // route, or a migrated server) or one predating the engine. Both are
+        // real, working servers, so absence must not read as "unfinished".
+        None => true,
+    }
 }
 
 /// Probe this machine and report the FIRST thing standing between the user and
@@ -6262,7 +6314,16 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
                 return Err(CmdError {
                     code: "NOT_CANCELLABLE".into(),
                     message: "A native install cannot be cancelled from here yet.".into(),
-                    hint: "Closing the launcher stops it. Nothing is lost: running the install again continues from the last finished step, reusing Docker's build cache."
+                    // Says only what is TRUE. The previous wording -- "closing
+                    // the launcher stops it" -- was false under the shipped
+                    // default: close-to-tray is ON, so the X hides the window
+                    // and the build carries on. And "quit from the tray" was
+                    // not offered instead, because nothing in this launcher
+                    // puts the git/docker children in a job object, so quitting
+                    // may orphan them rather than kill them. Promising a stop
+                    // we have not verified is exactly the error being fixed, so
+                    // the hint promises only what the engine really guarantees.
+                    hint: "The build carries on by itself. Nothing is lost: running the install again continues from the last finished step, reusing Docker's build cache."
                         .into(),
                 })
             }
@@ -6868,6 +6929,106 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- native_title_is_usable ---------------------------------------------
+    //
+    // The bug these pin, found by the user on 2026-08-01: `games catalog`
+    // decides `installed` with `[[ -d "$GAMES_DIR/$1" ]]` and the engine
+    // creates that directory at stage 3 of 8, so a build that died hours in
+    // still presented as an installed, startable server.
+
+    fn title_fixture(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("dml-usable-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_compose(dir: &std::path::Path) {
+        std::fs::write(dir.join(dml_wow::composegen::BASE_FILE), "services: {}
+").unwrap();
+    }
+
+    /// THE FRESH-MACHINE BLOCKER. Nothing creates `%USERPROFILE%\dml-native`
+    /// before the first install -- the engine makes it itself -- so a games dir
+    /// that is simply ABSENT is the normal state of every new native PC.
+    ///
+    /// Collapsing that into `None` made the chain answer `Unknown` blocked at
+    /// Titles, and the user's very first screen read "the launcher couldn't read
+    /// back the list of installed games" (false twice over) behind a "Check
+    /// again" button that re-ran the identical failing read forever. The
+    /// `no_titles` -> "Open Library" arm was unreachable for exactly the user it
+    /// was built for.
+    #[test]
+    fn an_absent_games_dir_holds_zero_titles_not_an_unknown_number() {
+        let missing = std::env::temp_dir().join(format!("dml-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(!missing.exists());
+        let prev = std::env::var_os("DML_GAMES_DIR");
+        unsafe { std::env::set_var("DML_GAMES_DIR", &missing) };
+        let got = native_title_count();
+        match prev {
+            Some(v) => unsafe { std::env::set_var("DML_GAMES_DIR", v) },
+            None => unsafe { std::env::remove_var("DML_GAMES_DIR") },
+        }
+        assert_eq!(got, Some(0), "a games dir that is not there holds zero titles");
+    }
+
+    #[test]
+    fn a_directory_without_a_compose_file_is_not_a_title() {
+        // `tools/` lives in the games dir alongside real titles.
+        let d = title_fixture("no-compose");
+        assert!(!native_title_is_usable(&d));
+    }
+
+    #[test]
+    fn a_title_with_no_state_file_is_usable() {
+        // A WSL-route install, or a migrated server, or one predating the
+        // engine. Absence of the bookkeeping file must never read as
+        // "unfinished" -- that would hide every existing server behind a
+        // Resume button.
+        let d = title_fixture("no-state");
+        write_compose(&d);
+        assert!(native_title_is_usable(&d));
+    }
+
+    #[test]
+    fn a_half_finished_install_is_not_usable_even_with_a_compose_file() {
+        // THE BUG. generate-compose is stage 5 of 8, so a build that died in
+        // the multi-hour `build` stage leaves a perfectly good compose file.
+        use dml_wow::install_native::{InstallState, Stage};
+        let d = title_fixture("half");
+        write_compose(&d);
+        let mut st = InstallState::new("wow-server-playerbots", &dml_wow::composegen::install_id(&d));
+        st.mark(Stage::CloneCore);
+        st.mark(Stage::CloneModule);
+        st.mark(Stage::GenerateCompose);
+        dml_wow::install_native::save_state(&d, &st).unwrap();
+        assert!(
+            !native_title_is_usable(&d),
+            "an install that never built an image is not a server the user can start"
+        );
+    }
+
+    #[test]
+    fn a_completed_install_is_usable() {
+        use dml_wow::install_native::{InstallState, Stage};
+        let d = title_fixture("done");
+        write_compose(&d);
+        let mut st = InstallState::new("wow-server-playerbots", &dml_wow::composegen::install_id(&d));
+        for stage in [
+            Stage::CloneCore,
+            Stage::CloneModule,
+            Stage::GenerateCompose,
+            Stage::Build,
+            Stage::Up,
+            Stage::Ready,
+        ] {
+            st.mark(stage);
+        }
+        dml_wow::install_native::save_state(&d, &st).unwrap();
+        assert!(native_title_is_usable(&d), "{:?}", st.completed);
+    }
 
     // -- WSL-only backend guard (incident follow-up 1: wow_docker_restart) ---
     // Tested through the pure half so the decision is provable without

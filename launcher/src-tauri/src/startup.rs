@@ -80,9 +80,20 @@ pub fn resolve_and_export() {
         .or_else(default_games_dir);
 
     // --- probes for auto-detection ---------------------------------------
+    // A COMPOSE FILE, not a bare directory. Same weak-evidence class as the
+    // catalog's `[[ -d ... ]]` test: the install engine creates the title dir at
+    // stage 3 of 8, so bare existence would call a folder holding nothing but a
+    // half-done clone a native install. Requiring the generated compose file at
+    // least means something was configured. (It does not close the class --
+    // generate-compose is stage 5, so a failed BUILD still looks
+    // native-installed. That is the right answer here anyway: it IS a native
+    // title dir, and `native_title_count` is what decides whether it is
+    // playable.)
     let native_dir_exists = games_dir
         .as_ref()
-        .map(|g| g.join("wow-server-playerbots").is_dir())
+        .map(|g| {
+            g.join("wow-server-playerbots").join(dml_wow::composegen::BASE_FILE).is_file()
+        })
         .unwrap_or(false);
     // `docker_desktop_program` has NO bare-name fallback, so `Some` means a
     // real Docker Desktop executable was found on disk.

@@ -115,6 +115,16 @@ export const ONBOARDING_KEYS: ReadonlySet<string> = new Set([
   // First-run ends by sending the user to Library to install a title; with
   // this locked that button is disabled and onboarding dead-ends.
   "title-install",
+  // Same reason, native route. The native first-run screen's only forward
+  // action is "Open Library", so locking the button it leads to would dead-end
+  // the very onboarding this key was added for.
+  //
+  // The registry keeps saying "untested" because that is TRUE -- the engine has
+  // an 8/8 live run behind it, but the launcher wiring has never been clicked
+  // through. Consent replaces the lock instead: the native route asks before it
+  // starts, naming the hours, the disk and the fact that it cannot be
+  // cancelled. See Library.svelte's install-confirm panel.
+  "native-install",
 ]);
 
 export const LOCKED_HINT =

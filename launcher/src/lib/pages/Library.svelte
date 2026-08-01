@@ -32,6 +32,18 @@
   // Title ids with a half-finished native install on disk. Drives the button
   // label only -- the engine resumes whether or not the UI knows.
   let resumable = $state<Set<string>>(new Set());
+  // Which title is showing the native install-consent panel. A native install
+  // is hours long, tens of GB, and CANNOT be cancelled (its children are the
+  // launcher's own processes), so it gets the same "say what this costs before
+  // you do it" treatment Remove and URL-install already have -- and the
+  // registry can go on truthfully calling the wiring untested without locking
+  // the button and dead-ending onboarding.
+  let confirmingInstall = $state<string | null>(null);
+  // The subset that the catalog nonetheless calls INSTALLED -- i.e. a title dir
+  // that exists but whose install never finished. This is the state the catalog
+  // cannot express, because its `installed` test is only "does the directory
+  // exist" and the engine creates that directory in stage 3 of 8.
+  const unfinished = $derived(new Set([...resumable].filter((id) => installedIds.has(id))));
   let loadError: string | null = $state(null);
   let actionError: string | null = $state(null);
   let note: string | null = $state(null);
@@ -85,6 +97,7 @@
   const installBlocked = $derived(busy || installStore.running);
 
   const installed = $derived(catalog.filter((t) => t.installed));
+  const installedIds = $derived(new Set(installed.map((t) => t.id)));
   const available = $derived(catalog.filter((t) => !t.installed));
   const installNotice = $derived(
     installUnavailableNotice({ installSupported, availableCount: available.length, backendMode }),
@@ -100,12 +113,24 @@
       catalog = c.titles;
       installSupported = c.installSupported;
       loadError = null;
+      // Recomputed HERE rather than at mount, so the Refresh button and the
+      // post-install refresh both update the labels. A resumable set that is
+      // only ever computed once is stale the moment an install starts.
+      if (backendMode === "native") await refreshResumable();
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       loadError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
     }
   }
-  onMount(refresh);
+  // ONE onMount, and the ORDER is the fix. These were two, and the second
+  // awaited only `backend_mode` -- an in-process, memoized IPC -- while the
+  // first awaited `games catalog`, which spawns a bash subprocess. The cheap
+  // read always won, so `refreshResumable()` iterated an empty `catalog`,
+  // assigned an empty Set, and was never recomputed by anything: not `refresh`,
+  // not the Refresh button, not `onInstallExit`. The entire
+  // games_install_native_state -> resumable -> "Resume install" chain was dead
+  // code, and fixing the catalog's `installed` rule alone would have LOOKED
+  // like it worked while still saying "Install".
   onMount(async () => {
     // Failure leaves the "wsl" default in place: a backend probe that fell over
     // must not arm the native engine on a machine we could not identify.
@@ -114,24 +139,34 @@
     } catch {
       backendMode = "wsl";
     }
-    if (backendMode === "native") await refreshResumable();
+    await refresh();
   });
 
-  // Best-effort throughout: a title we cannot ask about simply keeps the
-  // "Install" label. Getting this wrong in the safe direction costs a word;
-  // blocking the page on it would cost the whole Library.
+  // EVERY title, not just the ones the catalog calls available -- and that is
+  // the whole point.
+  //
+  // `games catalog` decides `installed` with `[[ -d "$GAMES_DIR/$1" ]]`
+  // (cli/src/80-titles.sh) -- the directory merely EXISTING. The native engine
+  // creates that directory at stage 3 of 8, so from the first minute of a
+  // multi-hour build the title reports installed:true. Scanning only the
+  // available list therefore missed a half-finished install ENTIRELY: it is
+  // never in that list, which made the Resume affordance dead code on exactly
+  // the path it exists for, and left the user looking at a Start button for a
+  // server that was never compiled.
+  //
+  // Best-effort throughout: a title we cannot ask about keeps the plain
+  // labels. Getting this wrong in the safe direction costs a word; blocking
+  // the page on it would cost the whole Library.
   async function refreshResumable() {
     const found = new Set<string>();
     await Promise.all(
-      catalog
-        .filter((t) => !t.installed)
-        .map(async (t) => {
-          try {
-            if ((await gamesInstallNativeState(t.id)).in_progress) found.add(t.id);
-          } catch {
-            /* leave it out */
-          }
-        }),
+      catalog.map(async (t) => {
+        try {
+          if ((await gamesInstallNativeState(t.id)).in_progress) found.add(t.id);
+        } catch {
+          /* leave it out */
+        }
+      }),
     );
     resumable = found;
   }
@@ -226,6 +261,21 @@
     }
   }
 
+  // The native route asks first; the WSL route is unchanged (its installer is
+  // interactive and cancellable, and it already asks its own questions).
+  function requestInstall(id: string) {
+    if (backendMode === "native") {
+      confirmingInstall = id;
+      return;
+    }
+    startInstall(id);
+  }
+
+  function confirmInstall(id: string) {
+    confirmingInstall = null;
+    startInstall(id);
+  }
+
   function startInstall(id: string) {
     // Always a FRESH session (the Install button that calls this is only
     // rendered while !busy, i.e. no session is already running -- see the
@@ -303,11 +353,25 @@
       <div class="card">
         <div class="card-row">
           <div class="card-title">
-            <span class="dot {t.running === 'running' ? 'on' : 'off'}"></span>
+            <span class="dot {unfinished.has(t.id) ? 'off' : t.running === 'running' ? 'on' : 'off'}"></span>
             {t.name}
+            {#if unfinished.has(t.id)}<span class="badge-unfinished">unfinished install</span>{/if}
           </div>
           <div class="card-actions">
-            {#if t.running === "running"}
+            {#if unfinished.has(t.id)}
+              <!-- The install never finished, so there is nothing to start:
+                   the image was never built. Offering Start here sends the user
+                   into a compose up that fails for reasons nothing on screen
+                   explains. Resume continues from the last finished stage. -->
+              <button
+                class="primary"
+                disabled={installBlocked || featureLocked("native-install")}
+                title={featureLocked("native-install") ? LOCKED_HINT : undefined}
+                onclick={() => requestInstall(t.id)}
+              >
+                Resume install
+              </button>
+            {:else if t.running === "running"}
               <button disabled={busy} onclick={() => act(t.id, "stop")}>Stop</button>
             {:else}
               <button class="primary" disabled={busy} onclick={() => act(t.id, "start")}>Start</button>
@@ -323,6 +387,28 @@
             {/if}
           </div>
         </div>
+        {#if confirmingInstall === t.id}
+          <div class="install-confirm">
+            <p><strong>Before you start — this one is a big job.</strong></p>
+            <ul>
+              <li>It builds the server from source. On this kind of PC that is <strong>hours</strong>, not minutes.</li>
+              <li>It downloads and writes <strong>tens of gigabytes</strong>.</li>
+              <li>It <strong>can't be cancelled</strong> once started. You can close this page or the launcher — the build carries on, and running the install again later continues from the last finished step rather than starting over.</li>
+              <li>The launcher's own install flow hasn't been through a full click-through yet. The engine behind it has completed a real build on this machine, but expect rough edges and please report them.</li>
+            </ul>
+            <div class="row">
+              <button class="primary" onclick={() => confirmInstall(t.id)}>Start the build</button>
+              <button onclick={() => (confirmingInstall = null)}>Not now</button>
+            </div>
+          </div>
+        {/if}
+        {#if unfinished.has(t.id)}
+          <p class="unfinished-note">
+            This server's install stopped before it finished, so it can't start yet —
+            nothing was built. Resuming continues from the last completed step and
+            reuses Docker's build cache, so you don't pay for it twice.
+          </p>
+        {/if}
         {#if removingId === t.id}
           <div class="remove-confirm">
             <p>Removing deletes the server and its data. Backups under ~/.dml are kept. Type the title id to confirm:</p>
@@ -364,14 +450,31 @@
           <div class="card-actions">
             {#if !installBlocked}
               {#if gate.canInstall}
-                <button
-                  class="primary"
-                  disabled={featureLocked("title-install")}
-                  title={featureLocked("title-install") ? LOCKED_HINT : undefined}
-                  onclick={() => startInstall(t.id)}
-                >
-                  {resumable.has(t.id) ? "Resume install" : "Install"}
-                </button>
+                <!-- Two branches rather than one computed key, so each feature
+                     key appears as a LITERAL. feature-keys.test.ts scans the UI
+                     for lock calls with a quoted key, and a key hidden behind a
+                     variable is invisible to the one test whose job is catching
+                     registry drift -- exactly how "native-install" came to be
+                     registered and wired to nothing. -->
+                {#if gate.route === "native-engine"}
+                  <button
+                    class="primary"
+                    disabled={featureLocked("native-install")}
+                    title={featureLocked("native-install") ? LOCKED_HINT : undefined}
+                    onclick={() => requestInstall(t.id)}
+                  >
+                    {resumable.has(t.id) ? "Resume install" : "Install"}
+                  </button>
+                {:else}
+                  <button
+                    class="primary"
+                    disabled={featureLocked("title-install")}
+                    title={featureLocked("title-install") ? LOCKED_HINT : undefined}
+                    onclick={() => requestInstall(t.id)}
+                  >
+                    Install
+                  </button>
+                {/if}
               {:else}
                 <!-- One hint per REASON (title-install.ts). The old copy named
                      cli/dev-install.ps1 unconditionally, which sent every
@@ -382,6 +485,22 @@
             {/if}
           </div>
         </div>
+        {#if confirmingInstall === t.id}
+          <div class="install-confirm">
+            <p><strong>Before you start &mdash; this one is a big job.</strong></p>
+            <ul>
+              <li>It builds the server from source. On this kind of PC that is <strong>hours</strong>, not minutes.</li>
+              <li>It downloads and writes <strong>tens of gigabytes</strong>.</li>
+              <li>It <strong>can't be cancelled</strong> once started. You can close this page or the launcher &mdash; the build carries on, and running the install again later continues from the last finished step rather than starting over.</li>
+              <li>The launcher's own install flow hasn't been through a full click-through yet. The engine behind it has completed a real build on this machine, but expect rough edges and please report them.</li>
+            </ul>
+            <div class="row">
+              <button class="primary" onclick={() => confirmInstall(t.id)}>Start the build</button>
+              <button onclick={() => (confirmingInstall = null)}>Not now</button>
+            </div>
+          </div>
+        {/if}
+
       </div>
     {/each}
   </div>
@@ -446,7 +565,12 @@
         <!-- The native engine speaks the project's NDJSON vocabulary rather
              than a pty's chunk/exit, so it goes through the translating runner
              in native-install.ts. InstallTerminal itself is untouched. -->
-        <InstallTerminal id={installStore.id} runner={nativeInstallRunner} onExit={onInstallExit} />
+        <InstallTerminal
+          id={installStore.id}
+          runner={nativeInstallRunner}
+          interactive={false}
+          onExit={onInstallExit}
+        />
       {:else}
         <InstallTerminal id={installStore.id} onExit={onInstallExit} />
       {/if}
@@ -459,6 +583,34 @@
 </section>
 
 <style>
+  .badge-unfinished {
+    margin-left: 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.35rem;
+    background: var(--warn-bg, #4a3a12);
+    color: var(--warn-fg, #f0c674);
+    vertical-align: middle;
+  }
+  .install-confirm {
+    margin-top: 0.6rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--warn-fg, #f0c674);
+    border-radius: 0.4rem;
+    background: var(--warn-bg-soft, rgba(240, 198, 116, 0.08));
+    font-size: 0.86rem;
+    line-height: 1.45;
+  }
+  .install-confirm p { margin: 0 0 0.4rem; }
+  .install-confirm ul { margin: 0 0 0.6rem; padding-left: 1.1rem; }
+  .install-confirm li { margin-bottom: 0.25rem; }
+  .unfinished-note {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+    opacity: 0.85;
+    line-height: 1.4;
+  }
   .content { padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
   .bar { display: flex; justify-content: space-between; align-items: center; }
   .bar h2 { margin: 0; font-size: 18px; }

@@ -40,6 +40,33 @@ describe("feature keys used by the UI", () => {
     expect(new Set(usedKeys.map((u) => u.file)).size).toBeGreaterThanOrEqual(5);
   });
 
+  it("every REGISTERED key is actually used by the UI", () => {
+    // The missing direction, and it hid a real defect: "native-install" sat in
+    // FEATURES with the comment "stays locked until its live gates pass" while
+    // no featureLocked("native-install") call existed anywhere, so the lock the
+    // registry asserted did not exist. The registry feeds docs/SMOKE-TESTS.md
+    // and the release notes, so an entry wired to nothing is a claim the
+    // product does not keep -- and the one test whose whole job is catching
+    // this drift only checked used -> registered.
+    // Pre-existing drift, recorded rather than deleted. Each is a registry
+    // entry with no control behind it TODAY; listing them keeps the check
+    // useful for NEW drift while making the debt visible instead of silently
+    // exempting everything. Removing a name from this list is how the entry
+    // gets fixed -- adding one should need a reason.
+    const KNOWN_UNWIRED = new Set([
+      // Settings saves are gated per-row by the config editor, not by one key.
+      "settings-save",
+      // The live-apply path for rate changes was never built; only
+      // restart-to-apply exists.
+      "rates-live",
+      // Server naming/rename is filed in the roadmap and not built.
+      "server-rename",
+    ]);
+    const used = new Set(usedKeys.map((u) => u.key));
+    const unused = Object.keys(FEATURES).filter((k) => !used.has(k) && !KNOWN_UNWIRED.has(k));
+    expect(unused).toEqual([]);
+  });
+
   it("every key the UI passes to featureLocked() is registered in FEATURES", () => {
     // An unregistered key is not a locked control -- it is an UNLOCKED one.
     const unregistered = usedKeys
