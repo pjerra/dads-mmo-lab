@@ -220,9 +220,35 @@ Shell-level, so it is visible on whatever page the user happens to be on when a
 multi-hour install finishes. This is the part that fixes problem (1) — the
 current card is unreachable from anywhere but Library.
 
-**`SoapBootstrap.svelte`** is unchanged. It renders when `needed` is true, which
-now means autosetup gave up, and its manual console instructions remain the
-honest fallback for a schema this build does not understand.
+**`SoapBootstrap.svelte`**'s internals are unchanged, but it **moves out of
+`Library.svelte` and into the shell**, next to the banner. It renders when
+`needed` is true, which now means autosetup gave up, and its manual console
+instructions remain the honest fallback for a schema this build does not
+understand. A fallback that is only reachable from one page is the same bug as
+the one this design exists to remove — it must not survive in the failure path.
+
+**`Library.svelte` loses the SOAP step entirely** (user instruction,
+2026-08-01). Three deletions:
+
+- `refreshSoapNeed()` and both its call sites — the `onMount` probe and the
+  `onInstallExit(code === 0 && backendMode === "native")` hook.
+- The `{#if soapSetupState.needed}<SoapBootstrap …>` mount and its import.
+- `wowSoapStatus` from the page's imports.
+
+The reasoning those call sites carry is not being discarded, it is being
+satisfied better. `refreshSoapNeed`'s comment argues that the step must ASK
+whether SOAP works rather than remember that an install finished, because the
+event-driven flag dies when the launcher restarts and a leftover `soap.env` from
+a different server makes a file check lie. Autosetup keeps that rule exactly —
+it asks `soap_status_with` every time — and drops the part that made it a
+Library-page concern. `onInstallExit`'s worry about a world server whose SOAP
+port has not opened yet is likewise preserved: `Unreachable` is `NotNeeded`, and
+the poll simply tries again on the next tick instead of needing a remount to
+re-probe.
+
+Net effect on the install flow: an install that ends at `ready` now ends. There
+is no post-install account card, because by the time the user looks the account
+exists.
 
 **`Home.svelte`** health panel: next to the existing SOAP row, show the account
 name and a **Show password** toggle backed by `wow_soap_credentials`. Collapsed
@@ -286,6 +312,11 @@ reads this as a decision rather than as bash↔Rust drift.
 - `needed` is set only for `gave_up`; `created` sets `autoResult` and leaves
   `needed` false.
 - The banner renders from the shell, so it is present on a non-Library page.
+- **`Library.svelte` contains no SOAP surface at all** — asserted by scanning the
+  component for `soap`, the same shape as `feature-keys.test.ts`. That test bit
+  this repo twice on 2026-08-01 by reading a comment as a call site, so it must
+  strip comments before matching (this file is dense with `// … soap …` prose
+  that a raw grep would trip over).
 
 ## Risks
 
