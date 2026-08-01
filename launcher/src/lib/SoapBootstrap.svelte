@@ -26,6 +26,7 @@
     type SoapBootstrapInfo,
     type SoapBootstrapVerdict,
   } from "$lib/api";
+  import { accountRuleError } from "$lib/account-rules";
 
   let {
     onverified = () => {},
@@ -53,10 +54,18 @@
   // The commands are recomputed locally as the user edits, so what is on screen
   // is always what their current inputs would create. Asking the backend on
   // every keystroke would send a password over IPC for no gain.
+  // VALIDATED BEFORE THE COMMANDS ARE SHOWN, not after they are run. These are
+  // the server's own rules (account-rules.ts, ported from the CLI). Showing
+  // paste-ready commands for a password the launcher will later reject means
+  // the user creates a REAL GM3 account first -- and the retry re-emits
+  // `account create`, which AzerothCore refuses as "already exists", so the
+  // password is never updated and the failure blames the wrong command.
+  const ruleError = $derived(
+    user.trim() === "" || pass === "" ? null : accountRuleError(user, pass),
+  );
+  const usable = $derived(user.trim() !== "" && pass !== "" && ruleError === null);
   const commands = $derived(
-    user.trim() === "" || pass === ""
-      ? []
-      : [`account create ${user} ${pass}`, `account set gmlevel ${user} 3 -1`],
+    usable ? [`account create ${user} ${pass}`, `account set gmlevel ${user} 3 -1`] : [],
   );
 
   async function verify() {
@@ -113,6 +122,9 @@
       3–20 characters for the name, 4–16 for the password. This is a server admin account,
       not your game login.
     </p>
+    {#if ruleError}
+      <p class="err">{ruleError}</p>
+    {/if}
 
     <ol class="steps">
       <li>
@@ -126,19 +138,29 @@
           <pre class="cmds">{commands.join("\n")}</pre>
           <button onclick={copyCommands} disabled={busy}>Copy both lines</button>
         {:else}
-          <p class="muted small">Fill in a name and password above and the exact lines appear here.</p>
+          <p class="muted small">
+            Fill in a name and password above and the exact lines appear here.
+          </p>
         {/if}
       </li>
       <li>
         Leave the console: <strong>Ctrl-P</strong> then <strong>Ctrl-Q</strong>.
         <span class="warn">{info.detach_warning}</span>
+        <!-- The console echoes what is typed into the worldserver's log, and
+             DML snapshots that log to ~/.dml/logs before every stop -- which is
+             exactly the file a user sends someone when asking for help. -->
+        <span class="warn">
+          Heads up: this password is typed into the server console, so it appears in the
+          server's log — including the log files DML saves and that you might share when
+          asking for help. Use a password you don't use anywhere else.
+        </span>
       </li>
     </ol>
 
     <div class="row">
       <button
         class="primary"
-        disabled={busy || user.trim() === "" || pass === ""}
+        disabled={busy || !usable}
         onclick={verify}
       >
         {busy ? "Checking…" : "Check it worked"}

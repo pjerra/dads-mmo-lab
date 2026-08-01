@@ -1544,6 +1544,26 @@ export async function wowSoapBootstrapInfo(
   return await invoke("wow_soap_bootstrap_info", { user, pass });
 }
 
+/** Whether SOAP works right now, and whether to offer the guided setup. */
+export interface SoapStatus {
+  /** "ok" | "rejected" | "unreachable" */
+  status: string;
+  /**
+   * Offer the account step? TRUE only for a server that ANSWERS and refuses us.
+   *
+   * Computed in Rust and consumed as-is. Deliberately not re-derived from
+   * `status` here: two places deciding the same thing is how they come to
+   * disagree, and the rule has a subtlety worth keeping in one place -- an
+   * unreachable server must NOT offer the step, because creating the account
+   * means typing into a worldserver console that does not exist while it is
+   * down.
+   */
+  needs_bootstrap: boolean;
+}
+export async function wowSoapStatus(): Promise<SoapStatus> {
+  return await invoke("wow_soap_status");
+}
+
 export interface SoapBootstrapVerdict {
   /** "ok" | "rejected" | "unreachable" */
   status: string;
