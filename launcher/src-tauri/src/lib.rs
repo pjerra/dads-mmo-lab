@@ -6276,6 +6276,90 @@ async fn games_install_native_state(
     }))
 }
 
+/// The guided post-install step: what to type, where, and the warning that
+/// keeps a user from stopping their own server on the way out.
+///
+/// Read-only and instant — it composes strings from `dml_wow::soap_bootstrap`
+/// and touches nothing. Kept as a command rather than duplicated in TypeScript
+/// so the console commands, the clipboard copy and the Rust tests all come from
+/// one source: a mistyped account is indistinguishable from a broken SOAP
+/// setup from the outside, and two copies of these two lines WILL drift.
+#[tauri::command]
+async fn wow_soap_bootstrap_info(
+    user: Option<String>,
+    pass: Option<String>,
+) -> Result<serde_json::Value, CmdError> {
+    use dml_wow::soap_bootstrap as sb;
+    let user = user.filter(|u| !u.trim().is_empty()).unwrap_or_else(|| sb::DEFAULT_SOAP_USER.to_string());
+    // A placeholder, never a generated secret: the password shown here is the
+    // one the user is about to TYPE, so inventing one would mean the app knows
+    // a credential the user does not.
+    let pass = pass.unwrap_or_default();
+    let project = dml_wow::composegen::project_name_for(
+        &dml_core::compose::games_dir_from_env().join("wow-server-playerbots"),
+    );
+    Ok(serde_json::json!({
+        "user": user,
+        "commands": sb::console_commands(&user, &pass),
+        "attach_hint": sb::attach_hint(&project),
+        "detach_warning": sb::DETACH_WARNING,
+        "default_user": sb::DEFAULT_SOAP_USER,
+    }))
+}
+
+/// Prove the account works, and ONLY then remember it.
+///
+/// The ordering is the entire feature. Writing `~/.dml/soap.env` first and
+/// hoping would leave a plausible-looking credentials file that does not work —
+/// exactly the "the app thinks it is configured while every SOAP button is
+/// dead" state this step exists to eliminate, and harder to diagnose than
+/// having no file at all.
+///
+/// Never returns `Err` for a server that answered honestly: rejected
+/// credentials and an unreachable port are both `Ok` with a verdict, because
+/// they are answers about the machine rather than failures of this command.
+/// `Err` is reserved for a malformed request or a disk that would not take the
+/// file.
+#[tauri::command]
+async fn wow_soap_bootstrap_verify(
+    user: String,
+    pass: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    use dml_wow::soap_bootstrap as sb;
+    let home = dml_core::util::home_dir().ok_or_else(|| CmdError {
+        code: "NO_HOME".into(),
+        message: "Could not find your user folder, so the credentials could not be saved.".into(),
+        hint: String::new(),
+    })?;
+    // The URL comes from the SAME resolver every other SOAP call uses, so a
+    // verification cannot pass against an address the rest of the app will not
+    // use.
+    let url = dml_wow::soap::SoapConfig::load().url;
+    let soap_lock = state.soap_lock.clone();
+    let (outcome, path) = tauri::async_runtime::spawn_blocking(move || {
+        sb::bootstrap_verify_with(&home, &url, &user, &pass, |cfg, cmd| {
+            // Serialized like every other native SOAP call: the worldserver's
+            // SOAP listener runs on the single world thread.
+            let _guard = soap_lock.lock();
+            dml_wow::soap::exec(cfg, cmd)
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })??;
+
+    let (status, detail) = match &outcome {
+        sb::VerifyOutcome::Ok => ("ok", String::new()),
+        sb::VerifyOutcome::Rejected(m) => ("rejected", m.clone()),
+        sb::VerifyOutcome::Unreachable(m) => ("unreachable", m.clone()),
+    };
+    Ok(serde_json::json!({
+        "status": status,
+        "detail": detail,
+        "saved_to": path.map(|p| p.display().to_string()),
+    }))
+}
+
 #[tauri::command]
 async fn games_install_input(text: String, state: State<'_, AppState>) -> Result<(), CmdError> {
     use std::io::Write;
@@ -6691,6 +6775,8 @@ pub fn run() {
             games_install,
             games_install_native,
             games_install_native_state,
+            wow_soap_bootstrap_info,
+            wow_soap_bootstrap_verify,
             url_install,
             games_install_input,
             games_install_cancel,

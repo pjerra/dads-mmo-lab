@@ -39,6 +39,7 @@ pub mod registry;
 pub mod restore;
 pub use dml_core::runner;
 pub mod soap;
+pub mod soap_bootstrap;
 pub mod soap_cmds;
 pub mod stats;
 pub mod status;

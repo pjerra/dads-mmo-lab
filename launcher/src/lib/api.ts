@@ -1524,6 +1524,38 @@ export async function gamesInstallNativeState(id: string): Promise<NativeInstall
   return await invoke("games_install_native_state", { id });
 }
 
+/** The guided SOAP account step: what to type and where. */
+export interface SoapBootstrapInfo {
+  user: string;
+  commands: string[];
+  attach_hint: string;
+  detach_warning: string;
+  default_user: string;
+}
+export async function wowSoapBootstrapInfo(
+  user?: string,
+  pass?: string,
+): Promise<SoapBootstrapInfo> {
+  return await invoke("wow_soap_bootstrap_info", { user, pass });
+}
+
+export interface SoapBootstrapVerdict {
+  /** "ok" | "rejected" | "unreachable" */
+  status: string;
+  detail: string;
+  /** Where the credentials were saved. Non-null ONLY on "ok". */
+  saved_to: string | null;
+}
+// Verifies a REAL SOAP round-trip and only then saves the credentials. A
+// "rejected" or "unreachable" verdict arrives as a resolved promise, not a
+// throw -- both are answers about the machine, not failures of the call.
+export async function wowSoapBootstrapVerify(
+  user: string,
+  pass: string,
+): Promise<SoapBootstrapVerdict> {
+  return await invoke("wow_soap_bootstrap_verify", { user, pass });
+}
+
 export async function gamesInstallInput(text: string): Promise<void> {
   return await invoke("games_install_input", { text });
 }

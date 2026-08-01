@@ -13,6 +13,7 @@
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { nativeInstallRunner } from "$lib/native-install";
+  import SoapBootstrap from "$lib/SoapBootstrap.svelte";
   import { gamesInstallNativeState } from "$lib/api";
   import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
@@ -39,6 +40,12 @@
   // registry can go on truthfully calling the wiring untested without locking
   // the button and dead-ending onboarding.
   let confirmingInstall = $state<string | null>(null);
+  // Shown after a native install finishes. A server with no account leaves GM
+  // Tools, My Party, the console's send box and announcements all dead with a
+  // SOAP_AUTH that explains nothing -- the worst thing that can happen at the
+  // end of a multi-hour install, and the reason this is surfaced rather than
+  // left as a documented step.
+  let showSoapSetup = $state(false);
   // The subset that the catalog nonetheless calls INSTALLED -- i.e. a title dir
   // that exists but whose install never finished. This is the state the catalog
   // cannot express, because its `installed` test is only "does the directory
@@ -320,7 +327,11 @@
   // witnesses the exit event is an orphaned one from before a nav-away) --
   // this callback's only remaining job is refreshing the catalog so the
   // "installed" flag updates promptly while this page is mounted.
-  function onInstallExit(_code: number) {
+  function onInstallExit(code: number) {
+    // Only on success, and only on native: the WSL installers run their own
+    // account step interactively, so raising this there would ask the user to
+    // do a thing they were just walked through.
+    if (code === 0 && backendMode === "native") showSoapSetup = true;
     void refresh();
   }
 </script>
@@ -575,6 +586,10 @@
         <InstallTerminal id={installStore.id} onExit={onInstallExit} />
       {/if}
     {/key}
+  {/if}
+
+  {#if showSoapSetup}
+    <SoapBootstrap onverified={() => (showSoapSetup = false)} />
   {/if}
 
   {#if buf.show}
