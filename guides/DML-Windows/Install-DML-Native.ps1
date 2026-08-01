@@ -109,10 +109,18 @@ function Test-CommandExists([string]$Name) {
 # present from another source (a WSL distro's, a leftover shim) while Docker
 # Desktop itself is absent, and native mode needs the Desktop engine.
 function Get-DockerDesktopPath {
+    # THESE MUST MATCH crates/dml-core/src/engine.rs's own candidate list. They
+    # did not: this probed %LOCALAPPDATA%\Docker\Docker Desktop.exe, which is
+    # Docker's DATA folder (log, run, wsl, backend.lock) and never holds the
+    # exe. The per-user install lives under %LOCALAPPDATA%\Programs\DockerDesktop.
+    #
+    # Verified on the author's own machine, where the launcher's path exists and
+    # this one does not -- so the installer told a user with Docker Desktop
+    # installed that Docker Desktop was missing, on every run, permanently.
     $candidates = @(
         (Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'),
         (Join-Path ${env:ProgramFiles(x86)} 'Docker\Docker\Docker Desktop.exe'),
-        (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe')
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe')
     )
     foreach ($c in $candidates) {
         if ($c -and (Test-Path -LiteralPath $c)) { return $c }
@@ -176,9 +184,24 @@ function Add-NativeDefenderExclusions([string]$Path) {
         Info 'Defender cmdlets not available -- skipping exclusions'
         return
     }
-    Invoke-Change "add a Defender exclusion for $Path" {
-        Add-MpPreference -ExclusionPath $Path -ErrorAction Stop
-    } | Out-Null
+    # NEVER FATAL. Add-MpPreference needs elevation, and this script is designed
+    # to run WITHOUT it -- its own DESCRIPTION says so. Under
+    # $ErrorActionPreference='Stop' an unhandled throw here killed the whole run
+    # at step 5, so the two steps that actually matter (yq, and writing
+    # launcher.json) never happened and the "Not ready yet" summary never
+    # printed. An OPTIONAL performance tweak was ending the install.
+    #
+    # The guard above tests whether the cmdlet EXISTS, which is a different
+    # question from whether we may call it.
+    try {
+        Invoke-Change "add a Defender exclusion for $Path" {
+            Add-MpPreference -ExclusionPath $Path -ErrorAction Stop
+        } | Out-Null
+    } catch {
+        Warn 'Could not add the Defender exclusion (this usually needs Administrator).'
+        Info 'Not fatal: the install works without it, the first build is just slower.'
+        Info 'To speed it up, re-run this script as Administrator, or exclude the games folder in Windows Security by hand.'
+    }
 }
 
 # Merge, never overwrite. The file also carries close_to_tray and
@@ -195,9 +218,19 @@ function Write-LauncherConfig([string]$Path, [string]$Games, [string]$YqBin) {
             Warn "Existing launcher.json could not be read -- writing a fresh one"
         }
     }
+    # CAMEL CASE, because crates/dml-core/src/launcher_config.rs is
+    # #[serde(rename_all = "camelCase")] with NO serde(alias). snake_case keys
+    # are silently DROPPED -- not an error, just ignored -- so only `backend`
+    # survived and the games dir the user asked for went nowhere.
+    #
+    # It hid because the default -GamesDir happens to equal what startup.rs
+    # reconstructs on its own. With -GamesDir D:\dml the build lands on C:, the
+    # Defender exclusion protects a folder nothing writes to, DML_YQ_BIN points
+    # at a file that does not exist, and the script prints the D: path as
+    # success.
     $existing['backend']   = 'native'
-    $existing['games_dir'] = $Games
-    $existing['yq_bin']    = $YqBin
+    $existing['gamesDir']  = $Games
+    $existing['yqBin']     = $YqBin
 
     Invoke-Change "write $Path" {
         $dir = Split-Path -Parent $Path
@@ -309,4 +342,5 @@ Say '  Next: start Docker Desktop, open the DML Launcher, and install a server' 
 Say '  from the Library. The first install builds from source and takes hours.' 'Gray'
 if ($DryRun) { Say '' ; Say '  (Dry run -- nothing was actually changed.)' 'Yellow' }
 exit 0
+
 

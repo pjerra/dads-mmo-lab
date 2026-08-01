@@ -123,17 +123,31 @@ if ($wingetCalls -eq 1) {
     }, $true) | Select-Object -First 1
     Assert-True ($null -ne $wingetAst) 'the winget call is a real command, not a string'
     if ($wingetAst) {
+        # MEMBERSHIP, not ancestry. The first version walked ancestor
+        # if-statements and asked whether ANY of their conditions mentioned
+        # InstallDocker -- which stays true when the call is moved into the
+        # unguarded `else` of that very statement, the one mutation this check
+        # exists to catch. Reproduced by a reviewer.
+        #
+        # The call must fall inside the BODY of a clause whose condition names
+        # InstallDocker.
         $guarded = $false
         $node = $wingetAst.Parent
         while ($null -ne $node) {
             if ($node -is [System.Management.Automation.Language.IfStatementAst]) {
                 foreach ($clause in $node.Clauses) {
-                    if ($clause.Item1.Extent.Text -match 'InstallDocker') { $guarded = $true }
+                    if ($clause.Item1.Extent.Text -match 'InstallDocker') {
+                        $b = $clause.Item2.Extent
+                        $w = $wingetAst.Extent
+                        if ($w.StartOffset -ge $b.StartOffset -and $w.EndOffset -le $b.EndOffset) {
+                            $guarded = $true
+                        }
+                    }
                 }
             }
             $node = $node.Parent
         }
-        Assert-True $guarded 'the winget call is inside a branch guarded by -InstallDocker'
+        Assert-True $guarded 'the winget call is inside the BODY of the -InstallDocker branch'
     }
 }
 Assert-True ($src -match 'personal use') 'the licence position is stated to the user'
@@ -158,8 +172,17 @@ if ($chg) {
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("dml-native-dry-" + [System.Guid]::NewGuid().ToString('N'))
 try {
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $installer -GamesDir $scratch -DryRun 2>&1
+    $joined = ($out -join "`n")
     Assert-True (-not (Test-Path -LiteralPath $scratch)) '-DryRun created no games directory'
-    Assert-True (($out -join "`n") -match 'DRY') '-DryRun announced what it would have done'
+    Assert-True ($joined -match 'DRY') '-DryRun announced what it would have done'
+    # AND IT REACHED THE END. "no directory + the word DRY" is satisfied by an
+    # installer that dies right after the banner, which is exactly the failure
+    # mode the Defender fix exists for -- so on its own it proved nothing.
+    #
+    # Anchored on the LAST step's own heading rather than on exit 0: exit 1 is
+    # legitimate here (this machine may have no Docker Desktop), so requiring
+    # success would make the check fail for an honest reason.
+    Assert-True ($joined -match 'Writing launcher settings') '-DryRun ran through to the final step'
 } catch {
     Assert-True $false "the -DryRun run failed: $($_.Exception.Message)"
 } finally {
@@ -193,8 +216,41 @@ if ($cfgFn) {
     . ([scriptblock]::Create($cfgFn.Extent.Text))
     Write-LauncherConfig $tmpCfg 'C:\games' 'C:\games\tools\yq.exe'
     $after = Get-Content -LiteralPath $tmpCfg -Raw | ConvertFrom-Json
+    $names0 = @($after.PSObject.Properties.Name)
     Assert-Eq 'native' $after.backend 'backend was set to native'
-    Assert-Eq 'C:\games' $after.games_dir 'games_dir was set'
+
+    # THE KEYS ARE CHECKED AGAINST THE RUST STRUCT, not against the installer's
+    # own spelling. This assertion used to read `$after.games_dir` -- the exact
+    # string the writer emitted -- so it validated the writer against itself and
+    # stayed green while `games_dir` and `yq_bin` were being SILENTLY DROPPED by
+    # serde. launcher_config.rs is #[serde(rename_all = "camelCase")] with no
+    # alias, so a snake_case key is not an error, it is ignored, and only
+    # `backend` (one word, identical in both cases) survived.
+    #
+    # Reading the contract from the Rust source is what makes this test able to
+    # fail: rename a field there and this goes red rather than agreeing with
+    # whatever the PowerShell happens to say.
+    $cfgRs = Join-Path (Split-Path -Parent (Split-Path -Parent $guides)) 'crates\dml-core\src\launcher_config.rs'
+    Assert-True (Test-Path -LiteralPath $cfgRs) 'launcher_config.rs found (the contract this must match)'
+    if (Test-Path -LiteralPath $cfgRs) {
+        $rs = Get-Content -LiteralPath $cfgRs -Raw
+        Assert-True ($rs -match 'rename_all\s*=\s*"camelCase"') 'launcher_config.rs still uses camelCase'
+        # snake_case field -> the camelCase key serde actually reads.
+        function ConvertTo-CamelKey([string]$snake) {
+            $parts = $snake -split '_'
+            $out = $parts[0]
+            foreach ($x in $parts[1..($parts.Count - 1)]) {
+                if ($x.Length -gt 0) { $out += $x.Substring(0,1).ToUpper() + $x.Substring(1) }
+            }
+            return $out
+        }
+        foreach ($field in @('games_dir', 'yq_bin')) {
+            Assert-True ($rs -match "pub\s+$field\s*:") "launcher_config.rs still declares $field"
+            $key = ConvertTo-CamelKey $field
+            Assert-True ($names0 -contains $key) "the installer writes '$key' (the key serde reads for $field)"
+        }
+        Assert-Eq 'C:\games' $after.gamesDir 'the games dir landed under the key serde reads'
+    }
     # Asked via PSObject.Properties: under StrictMode a MISSING property throws
     # rather than comparing false, which turns the clobber mutation into a crash
     # instead of a clean red. A test that explodes still fails, but it fails
