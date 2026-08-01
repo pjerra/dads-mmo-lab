@@ -100,6 +100,18 @@ pub struct AppState {
     /// window close, a hidden window whose timers WebView2 throttles would
     /// otherwise hold the sleep block forever.
     pub last_status_push: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Where automatic SOAP account setup got to THIS launcher run.
+    ///
+    /// One attempt per run, and that bound is the feature. The trigger is the
+    /// status poll, which ticks every few seconds; without a latch a server
+    /// that keeps refusing us would get one INSERT per tick. Once this reaches
+    /// `Done`, `wow_soap_autosetup` returns `latched` without opening a SOAP
+    /// connection or a DB connection.
+    ///
+    /// Known limit, deliberate: wiping the auth database mid-session needs a
+    /// launcher restart to self-heal. The alternative is an unlatched loop
+    /// writing rows into a database that keeps losing them.
+    pub soap_autosetup: Arc<Mutex<dml_wow::soap_autosetup::AutoSetup>>,
 }
 
 pub use dml_core::error::CmdError;
@@ -6417,6 +6429,98 @@ async fn wow_soap_account_create(
     }
 }
 
+/// Set SOAP up by itself, once per launcher run.
+///
+/// The fully automatic replacement for the account card: the user types
+/// nothing, clicks nothing, and — when this succeeds — never learns the step
+/// existed. `dml_wow::soap_autosetup` holds the decision tree; this function is
+/// only the wiring between its seams and the real database, SOAP client and
+/// filesystem.
+///
+/// Three properties are load-bearing and all three live in the seams below:
+///
+/// * **It asks before it acts.** The status comes from `soap_status_with`, the
+///   same classifier `wow_soap_status` uses, so a `Fault` is not mistaken for
+///   an auth failure and a world server that is merely still booting is not
+///   mistaken for a broken account. A non-`Rejected` verdict returns
+///   `not_needed` having opened no DB connection at all.
+/// * **It proves itself before it saves.** The verify seam is
+///   `bootstrap_verify_with`, which writes `~/.dml/soap.env` only after a real
+///   round-trip. A mistake in the SRP6 produces a verifier that is perfectly
+///   well-formed and simply never authenticates, so "the INSERT returned Ok"
+///   proves nothing.
+/// * **It stops.** The `AppState` latch means a poll that ticks every few
+///   seconds cannot turn into one INSERT per tick.
+///
+/// Never returns `Err` for an unhappy server — a refusal is an answer about the
+/// machine and comes back as a verdict the banner or the fallback card renders.
+#[tauri::command]
+async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    use dml_wow::soap_autosetup as auto;
+    use dml_wow::soap_bootstrap as sb;
+
+    let home = dml_core::util::home_dir().ok_or_else(|| CmdError {
+        code: "NO_HOME".into(),
+        message: "Could not find your user folder, so the credentials could not be saved.".into(),
+        hint: String::new(),
+    })?;
+    let url = dml_wow::soap::SoapConfig::load().url;
+    let soap_lock = state.soap_lock.clone();
+    let latch = state.soap_autosetup.clone();
+
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        // Cheap exit first: a concluded run must not even ask the server.
+        {
+            let g = latch.lock().unwrap();
+            if matches!(*g, auto::AutoSetup::Done(_)) {
+                return auto::AutoOutcome::Latched;
+            }
+        }
+
+        let status = sb::soap_status_with(|cfg, cmd| {
+            let _guard = soap_lock.lock();
+            dml_wow::soap::exec(cfg, cmd)
+        });
+
+        let cfg = dml_wow::db::DbConfig::from_env();
+        let mut g = latch.lock().unwrap();
+        let state_now = g.clone();
+        let (next, outcome) = auto::advance_with(
+            state_now,
+            &status,
+            |u| dml_wow::account_write::account_exists(&cfg, u),
+            |u, p| dml_wow::account_write::create_gm_account(&cfg, u, p),
+            |u, p| {
+                // This is the writer of ~/.dml/soap.env, and it writes only
+                // after the round-trip below succeeds.
+                sb::bootstrap_verify_with(&home, &url, u, p, |c, cmd| {
+                    let _guard = soap_lock.lock();
+                    dml_wow::soap::exec(c, cmd)
+                })
+                .map(|(v, _path)| v)
+            },
+            auto::random_hex6,
+            auto::generate_password,
+        );
+        *g = next;
+        outcome
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+
+    Ok(serde_json::json!({
+        "status": auto::outcome_status(&outcome),
+        "user": match &outcome {
+            auto::AutoOutcome::Created { user } => serde_json::Value::String(user.clone()),
+            _ => serde_json::Value::Null,
+        },
+        "reason": match &outcome {
+            auto::AutoOutcome::GaveUp { reason } => serde_json::Value::String(reason.clone()),
+            _ => serde_json::Value::Null,
+        },
+    }))
+}
+
 /// Prove the account works, and ONLY then remember it.
 ///
 /// The ordering is the entire feature. Writing `~/.dml/soap.env` first and
@@ -6785,6 +6889,7 @@ pub fn run() {
             soap_lock: Arc::new(Mutex::new(())),
             config_lock: Arc::new(Mutex::new(())),
             last_status_push: Arc::new(Mutex::new(None)),
+            soap_autosetup: Arc::new(Mutex::new(dml_wow::soap_autosetup::AutoSetup::Idle)),
         })
         .setup(|app| {
             // (Task 8 removed the startup registry prefetch here: the config/
@@ -6886,6 +6991,7 @@ pub fn run() {
             games_install_native,
             games_install_native_state,
             wow_soap_bootstrap_info,
+            wow_soap_autosetup,
             wow_soap_status,
             wow_soap_account_create,
             wow_soap_bootstrap_verify,
