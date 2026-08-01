@@ -82,6 +82,27 @@ pub fn port_listening(port: u16) -> bool {
     std::net::TcpListener::bind(("0.0.0.0", port)).is_err()
 }
 
+/// The same question, answered honestly enough to REFUSE on.
+///
+/// [`port_listening`] cannot be used for that and says so in its own doc: it
+/// reads ANY bind failure as "in use", which is the right conservative bias for
+/// a warning and completely wrong for a gate. A `PermissionDenied`, or a port
+/// inside one of the ranges Hyper-V/WSL reserves on Windows, would become a hard
+/// refusal to start a server that would in fact have started.
+///
+/// So only `AddrInUse` is a `Yes`. A clean bind is a `No`. Everything else is
+/// `Unknown`, and callers must treat that as evidence of NOTHING — the standing
+/// tri-state rule, and the one that keeps this from blocking a start it should
+/// not.
+pub fn port_probe(port: u16) -> crate::setup::Tri {
+    use crate::setup::Tri;
+    match std::net::TcpListener::bind(("0.0.0.0", port)) {
+        Ok(_) => Tri::No,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Tri::Yes,
+        Err(_) => Tri::Unknown,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compose command sequencing -- `_games_start_impl`'s mode branch
 // (`90-main.sh:225-236`, the bash arm's ELSE/no-`dml-start.sh` path) + the
