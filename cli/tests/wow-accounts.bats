@@ -60,8 +60,34 @@ teardown() { teardown_fixture; }
   export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
   run bash "$DML" wow accounts --json
   [ "$status" -eq 0 ]
-  grep -q "NOT LIKE 'RNDBOT%'" "$FIXTURE/query.log"
+  grep -q "NOT UPPER(a.username) LIKE 'RNDBOT%'" "$FIXTURE/query.log"
   grep -q "<> 'AHBOT'" "$FIXTURE/query.log"
+}
+
+@test "accounts SQL honours a customised bot account prefix" {
+  # Was hardcoded 'RNDBOT%': a server that changed
+  # AiPlayerbot.RandomBotAccountPrefix got all of its bot accounts in the
+  # launcher's character picker.
+  printf '' > "$FIXTURE/rows.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  export DML_BOT_ACCOUNT_PREFIX="fakebot"
+  run bash "$DML" wow accounts --json
+  [ "$status" -eq 0 ]
+  grep -q "NOT UPPER(a.username) LIKE 'FAKEBOT%'" "$FIXTURE/query.log"
+  ! grep -q 'RNDBOT' "$FIXTURE/query.log"
+}
+
+@test "accounts SQL never depends on the acore_playerbots schema" {
+  # Deliberately prefix-only: the character picker is the one bot filter that
+  # must keep working on a box with no playerbots module, so the registry
+  # subselect (which would error there) stays out of THIS query.
+  printf '' > "$FIXTURE/rows.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  run bash "$DML" wow accounts --json
+  [ "$status" -eq 0 ]
+  ! grep -q 'acore_playerbots' "$FIXTURE/query.log"
 }
 
 @test "accounts SQL orders by a.id (grouping depends on contiguous rows)" {

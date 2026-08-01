@@ -85,7 +85,7 @@ _backup_summary_json() {
     accts="$(db_auth_query "SELECT COUNT(*) FROM account;")" || accts=""
     accts="${accts%%$'\n'*}"
     [[ "$chars" =~ ^[0-9]+$ && "$accts" =~ ^[0-9]+$ ]] || return 1
-    bots="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || bots=""
+    bots="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE $(_bot_account_where account);")" || bots=""
     bots="${bots%%$'\n'*}"
     if [[ "$bots" =~ ^[0-9]+$ ]]; then bots="$((10#$bots))"; else bots=null; fi
     printf '{"characters":%s,"accounts":%s,"bots":%s}' "$((10#$chars))" "$((10#$accts))" "$bots"

@@ -570,18 +570,22 @@ pub fn read_ports(program: &OsStr, timeout: Duration) -> Ports {
     }
 }
 
-/// The `SELECT COUNT(*)` the `_bots_counts` "online" half runs — same
-/// cross-schema playerbots-registry idiom as `players online`/`party
-/// online` (`dml::pages`), inverted to INCLUDE bot accounts.
-const BOTS_ONLINE_SQL: &str = "SELECT COUNT(*) FROM characters WHERE online = 1 \
-    AND account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type \
-    WHERE account_type IN (1,2));";
+/// The `SELECT COUNT(*)` the `_bots_counts` "online" half runs — the same
+/// [`crate::botid`] bot identity as `players online`/`party online`
+/// (`dml::pages`), inverted to INCLUDE bot accounts. Registry-only detection
+/// reported 0 bots online on an install whose registry was never populated.
+fn bots_online_sql(bot_prefix: &str) -> String {
+    format!(
+        "SELECT COUNT(*) FROM characters WHERE online = 1 AND {};",
+        crate::botid::bot_clause("account", bot_prefix)
+    )
+}
 
 /// Live online-bot count. A query/connection failure degrades to `None`
 /// (matches `_bots_counts`'s `|| true` swallow — a read-only lookup never
 /// errors the whole `server-detail` envelope).
-pub fn bots_online(cfg: &DbConfig) -> Result<Option<i64>, DbError> {
-    let res = db::query(cfg, Database::Characters, BOTS_ONLINE_SQL)?;
+pub fn bots_online(cfg: &DbConfig, bot_prefix: &str) -> Result<Option<i64>, DbError> {
+    let res = db::query(cfg, Database::Characters, &bots_online_sql(bot_prefix))?;
     let raw = res.rows.first().and_then(|r| r.first()).map(super::pages::cell_text).unwrap_or_default();
     Ok(is_digits(&raw).then(|| raw.parse().ok()).flatten())
 }
@@ -613,7 +617,9 @@ pub fn bots_for_state(world_state: &str, cfg: &DbConfig, reader: &mut ConfigRead
     if world_state != "running" {
         return (None, None);
     }
-    let online = bots_online(cfg).ok().flatten();
+    // One reader answers both: the bot-account prefix and MaxRandomBots.
+    let prefix = crate::botid::resolve_prefix(reader);
+    let online = bots_online(cfg, &prefix).ok().flatten();
     let max = bots_max(reader);
     (online, max)
 }

@@ -2,9 +2,9 @@
 # `wow stats` (Statistics page): ONE read-only envelope with every number the
 # page needs, so a page load is a single dml invocation. All queries go
 # through the read-only db helpers in 30-db.sh -- this file adds ZERO write
-# paths. Bot detection reuses the authoritative playerbots_account_type
-# idiom from _bots_counts (40-config.sh); "family" is every non-bot account
-# EXCLUDING the AHBOT and DMLSOAP system accounts.
+# paths. Bot detection reuses the shared two-signal identity from 30-db.sh
+# (_bot_account_where); "family" is every non-bot account EXCLUDING the AHBOT
+# and DMLSOAP system accounts.
 #
 # The query order is FIXED -- tests stub the mysql calls positionally via
 # DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change.
@@ -49,10 +49,12 @@ _stats_bool() {
 # zeros / empty arrays (a freshly-installed empty DB is a valid state).
 _stats_payload() {
     local bot sys fam rows
-    # Bot accounts: the authoritative cross-schema idiom (account_type 1 =
-    # random bot, 2 = ahbot-style system bot pool) used by _bots_counts,
-    # `players online` and the backup summary.
-    bot="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+    # Bot accounts: the shared two-signal identity from 30-db.sh (playerbots
+    # registry OR the reserved bot account-name prefix) used by _bots_counts,
+    # `players online` and the backup summary. Registry-only detection put
+    # every bot in the FAMILY totals on an install whose registry was never
+    # populated -- see 30-db.sh's header.
+    bot="$(_bot_account_where c.account)"
     # System accounts that are neither family nor ambient bots: the auction
     # house seeder and the launcher's own SOAP account.
     sys="c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))"
@@ -60,12 +62,14 @@ _stats_payload() {
     # -- 1: playerbots schema probe (review finding 8c). A box without the
     # acore_playerbots schema (playerbots module absent / not yet migrated)
     # used to fail EVERY $bot-referencing query and surface as one opaque
-    # DB_UNREACHABLE. Probe it once; when missing, substitute a constant
-    # FALSE so all bot counts degrade to zeros and the rest of the page
-    # keeps working. A fully-down DB fails this probe too -- and then also
-    # fails query 2, so the envelope still errors exactly as before.
+    # DB_UNREACHABLE. Probe it once; when missing, drop the registry half and
+    # keep the account-prefix half, so bots on a box whose playerbots schema
+    # is unreadable are still counted as bots (this used to degrade to a
+    # constant FALSE -- "there are no bots here" -- which quietly moved every
+    # bot into the family totals). A fully-down DB fails this probe too --
+    # and then also fails query 2, so the envelope still errors as before.
     if ! db_chars_query "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;" >/dev/null 2>&1; then
-        bot="0=1"
+        bot="$(_bot_account_where_prefix_only c.account)"
     fi
     fam="NOT ($bot) AND NOT ($sys)"
 

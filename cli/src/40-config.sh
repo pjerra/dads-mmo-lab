@@ -924,7 +924,7 @@ _flush_heal_flag() {
 _bots_counts() {
     local state="$1" online=null max=null rows val conf
     if [[ "$state" == running ]]; then
-        rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || true
+        rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND $(_bot_account_where account);")" || true
         rows="${rows%%$'\n'*}"
         # $((10#...)) after the regex gate: strips leading zeros, which would
         # otherwise emit invalid JSON (e.g. "max":0500) and break the whole

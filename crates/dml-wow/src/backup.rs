@@ -374,8 +374,16 @@ pub fn list_backups(dir: &Path) -> Vec<BackupEntry> {
 
 const SUMMARY_CHARS_SQL: &str = "SELECT COUNT(*) FROM characters;";
 const SUMMARY_ACCOUNTS_SQL: &str = "SELECT COUNT(*) FROM account;";
-const SUMMARY_BOTS_SQL: &str = "SELECT COUNT(*) FROM characters WHERE account IN \
-    (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));";
+/// The snapshot's bot count. Bot identity is [`crate::botid`]'s two-signal
+/// clause — the registry alone reported 0 bots on an install whose
+/// `playerbots_account_type` was never populated, which made a 1000-bot
+/// snapshot look like a 1000-character family server in the backup list.
+fn summary_bots_sql() -> String {
+    format!(
+        "SELECT COUNT(*) FROM characters WHERE {};",
+        crate::botid::bot_clause("account", &crate::botid::bot_account_prefix())
+    )
+}
 
 /// Decode a single-cell `COUNT(*)` result: the binary protocol should hand
 /// back a native `Int`, but a `Text` digit-string is accepted too (defensive
@@ -413,7 +421,7 @@ pub fn format_summary_line(chars: i64, accounts: i64, bots: Option<i64>, name: O
 pub fn compute_summary(cfg: &DbConfig) -> Option<Value> {
     let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
     let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
-    let bots = db::query(cfg, Database::Characters, SUMMARY_BOTS_SQL).ok().and_then(|r| scalar_i64(&r));
+    let bots = db::query(cfg, Database::Characters, &summary_bots_sql()).ok().and_then(|r| scalar_i64(&r));
     serde_json::from_str(&format_summary_line(chars, accounts, bots, None)).ok()
 }
 
@@ -435,7 +443,7 @@ pub fn write_meta(cfg: &DbConfig, sql_gz_path: &Path, name: Option<&str>) {
 fn compute_summary_parts(cfg: &DbConfig) -> Option<(i64, i64, Option<i64>)> {
     let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
     let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
-    let bots = db::query(cfg, Database::Characters, SUMMARY_BOTS_SQL).ok().and_then(|r| scalar_i64(&r));
+    let bots = db::query(cfg, Database::Characters, &summary_bots_sql()).ok().and_then(|r| scalar_i64(&r));
     Some((chars, accounts, bots))
 }
 

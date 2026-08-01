@@ -270,22 +270,36 @@ pub const GROUP_MEMBER_GUIDS_SQL: &str =
 /// The bot-members-of-a-party query shared BYTE-IDENTICALLY by `dismiss-all`
 /// (`90-main.sh:3189-3194`) and `preset-load`'s kick phase (`90-main.sh:3377-
 /// 3382`).
-pub const BOT_MEMBER_NAMES_SQL: &str = "SELECT c.name \
-     FROM group_member gm \
-     JOIN characters c ON c.guid = gm.memberGuid \
-     WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
-       AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) \
-     ORDER BY c.name";
+/// Bot identity is [`crate::botid::bot_clause`] (registry OR reserved account
+/// prefix): with registry-only detection, a party full of bots read back as
+/// zero bots, so `dismiss-all` dismissed nobody and `preset-save` saved an
+/// empty preset.
+pub fn bot_member_names_sql(bot_prefix: &str) -> String {
+    format!(
+        "SELECT c.name \
+         FROM group_member gm \
+         JOIN characters c ON c.guid = gm.memberGuid \
+         WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
+           AND {} \
+         ORDER BY c.name",
+        crate::botid::bot_clause("c.account", bot_prefix)
+    )
+}
 
 /// `preset-save`'s bot-class query (`90-main.sh:3296-3301`) — same JOIN
-/// shape as [`BOT_MEMBER_NAMES_SQL`] but selects `c.class` (no name needed
+/// shape as [`bot_member_names_sql`] but selects `c.class` (no name needed
 /// for a class-only preset).
-pub const BOT_MEMBER_CLASSES_SQL: &str = "SELECT c.class \
-     FROM group_member gm \
-     JOIN characters c ON c.guid = gm.memberGuid \
-     WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
-       AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) \
-     ORDER BY c.name";
+pub fn bot_member_classes_sql(bot_prefix: &str) -> String {
+    format!(
+        "SELECT c.class \
+         FROM group_member gm \
+         JOIN characters c ON c.guid = gm.memberGuid \
+         WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
+           AND {} \
+         ORDER BY c.name",
+        crate::botid::bot_clause("c.account", bot_prefix)
+    )
+}
 
 /// Bot name-by-guid lookup after a successful join (`90-main.sh:3102,3417`).
 pub const CHAR_NAME_BY_GUID_SQL: &str = "SELECT name FROM characters WHERE guid=? LIMIT 1";
@@ -464,7 +478,8 @@ pub fn char_name_by_guid(cfg: &crate::db::DbConfig, guid: i64) -> Option<String>
 /// silently-emptied `Vec`.
 pub fn bot_member_names(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::BOT_MEMBER_NAMES_SQL, params)
+    let sql = bot_member_names_sql(&crate::botid::bot_account_prefix());
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, &sql, params)
         .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))
 }
@@ -477,7 +492,8 @@ pub fn bot_member_names(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<Str
 /// swallowed into an empty (and thus falsely "no bots to save") list.
 pub fn bot_member_classes(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::BOT_MEMBER_CLASSES_SQL, params)
+    let sql = bot_member_classes_sql(&crate::botid::bot_account_prefix());
+    crate::db::query_with_params(cfg, crate::db::Database::Characters, &sql, params)
         .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))
 }

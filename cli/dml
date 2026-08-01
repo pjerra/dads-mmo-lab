@@ -286,6 +286,114 @@ sql_escape() {
     printf '%s' "$s"
 }
 
+# ---------------------------------------------------------------------------
+# Bot-vs-human account identity -- the ONE place that answers "is this
+# characters.account a playerbot?". Mirrored in Rust by crates/dml-wow/src/
+# botid.rs (see that file's header for the full incident write-up).
+#
+# INCIDENT 2026-08-01. Every bot check used to be the single question "is the
+# account in acore_playerbots.playerbots_account_type with account_type IN
+# (1,2)?". mod-playerbots populates that registry itself, and on a freshly
+# built install it can be COMPLETELY EMPTY while 1000 bot characters play:
+# `account NOT IN (<empty set>)` is TRUE for every row, so the human filter
+# failed OPEN and the launcher's Home page listed every bot as a real player
+# (while `bots online`, the same predicate inverted, reported 0).
+#
+# The second signal does not depend on the mod writing a row: mod-playerbots
+# names every account it creates <AiPlayerbot.RandomBotAccountPrefix><n>, and
+# its own conf reserves the prefix ("Prefix for created bot accounts (of any
+# type). Do not change this prefix while there are existing bot accounts.").
+# A bot is registry-tagged OR prefix-named; the two fail independently.
+# ---------------------------------------------------------------------------
+
+# _bot_prefix: the reserved bot account-name prefix. Env override (a test seam
+# and an escape hatch), else the deployed playerbots.conf, else its .dist (a
+# fresh native install ships ONLY the .dist), else the shipped default. An
+# EMPTY answer is refused at the end: spliced into LIKE '%' it would match
+# every account and report the whole family as bots -- the mirror image of the
+# bug this exists to fix.
+_bot_prefix() {
+    local p="" dir conf
+    if [[ -n "${DML_BOT_ACCOUNT_PREFIX-}" ]]; then
+        p="$DML_BOT_ACCOUNT_PREFIX"
+    else
+        dir="$(_wow_server_dir 2>/dev/null)" || dir=""
+        if [[ -n "$dir" ]]; then
+            for conf in "$dir/env/dist/etc/modules/playerbots.conf" \
+                        "$dir/env/dist/etc/modules/playerbots.conf.dist"; do
+                [[ -f "$conf" ]] || continue
+                # Anchor on a following `=` so only this key matches, same
+                # doctrine as _bots_counts' MaxRandomBots read.
+                p="$(grep -E '^[[:space:]]*AiPlayerbot\.RandomBotAccountPrefix[[:space:]]*=' "$conf" 2>/dev/null | tail -n1)" || p=""
+                p="${p#*=}"
+                p="${p//[[:space:]]/}"; p="${p//\"/}"; p="${p//\'/}"
+                [[ -n "$p" ]] && break
+            done
+        fi
+    fi
+    p="${p//[[:space:]]/}"; p="${p//\"/}"; p="${p//\'/}"
+    [[ -n "$p" ]] || p="rndbot"
+    printf '%s' "$p"
+    return 0
+}
+
+# _bot_prefix_like <value>: escape for a single-quoted MySQL LIKE pattern.
+# Backslash FIRST (else the escapes added below get escaped in turn), then the
+# two LIKE wildcards -- an unescaped `_` in a custom prefix matches any single
+# character and would silently widen the bot set. The quote is DOUBLED rather
+# than backslash-escaped (sql_escape's style) so the literal survives
+# NO_BACKSLASH_ESCAPES, and so both surfaces emit the same bytes.
+_bot_prefix_like() {
+    local p="${1-}"
+    p="${p//\\/\\\\}"
+    p="${p//%/\\%}"
+    p="${p//_/\\_}"
+    p="${p//\'/\'\'}"
+    printf '%s' "$p"
+    return 0
+}
+
+# _bot_username_is_bot <username column>: the prefix test applied DIRECTLY to a
+# username column, for queries already selecting from acore_auth.account (the
+# `accounts` picker). UPPER() on both sides because the two disagree on case by
+# nature: AzerothCore stores account names upper-cased (RNDBOT0) while the conf
+# value naming them is lower-case ("rndbot") -- a bare LIKE 'rndbot%' works only
+# under a case-insensitive collation. The single definition of the pattern;
+# _bot_account_where's subselect form wraps THIS.
+_bot_username_is_bot() {
+    local col="${1:?column required}" p
+    p="$(_bot_prefix)"; p="${p^^}"
+    p="$(_bot_prefix_like "$p")"
+    printf "UPPER(%s) LIKE '%s%%'" "$col" "$p"
+    return 0
+}
+
+# _bot_account_where <column>: "<column> is a bot account", parenthesised so it
+# can be AND-ed into a larger WHERE without re-associating.
+_bot_account_where() {
+    local col="${1:?column required}"
+    printf "(%s IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) OR %s IN (SELECT id FROM acore_auth.account WHERE %s))" \
+        "$col" "$col" "$(_bot_username_is_bot username)"
+    return 0
+}
+
+# _bot_account_where_prefix_only <column>: the degraded form for callers that
+# probed the playerbots schema and found it unusable. Was a constant `0=1`
+# ("this box has no bots"), which is a lie on any box that has them.
+_bot_account_where_prefix_only() {
+    local col="${1:?column required}"
+    printf "(%s IN (SELECT id FROM acore_auth.account WHERE %s))" \
+        "$col" "$(_bot_username_is_bot username)"
+    return 0
+}
+
+# _human_account_where <column>: the exact negation of _bot_account_where, so
+# the two can never drift and double-count or double-drop a character.
+_human_account_where() {
+    printf 'NOT %s' "$(_bot_account_where "${1:?column required}")"
+    return 0
+}
+
 # All args required; "-" means "omit this filter".
 build_item_search_sql() {
     local name="$1" quality="$2" minl="$3" maxl="$4" limit="$5"
@@ -1289,7 +1397,7 @@ _flush_heal_flag() {
 _bots_counts() {
     local state="$1" online=null max=null rows val conf
     if [[ "$state" == running ]]; then
-        rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || true
+        rows="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE online = 1 AND $(_bot_account_where account);")" || true
         rows="${rows%%$'\n'*}"
         # $((10#...)) after the regex gate: strips leading zeros, which would
         # otherwise emit invalid JSON (e.g. "max":0500) and break the whole
@@ -2180,9 +2288,9 @@ _npc_coord_specs() {
 # `wow stats` (Statistics page): ONE read-only envelope with every number the
 # page needs, so a page load is a single dml invocation. All queries go
 # through the read-only db helpers in 30-db.sh -- this file adds ZERO write
-# paths. Bot detection reuses the authoritative playerbots_account_type
-# idiom from _bots_counts (40-config.sh); "family" is every non-bot account
-# EXCLUDING the AHBOT and DMLSOAP system accounts.
+# paths. Bot detection reuses the shared two-signal identity from 30-db.sh
+# (_bot_account_where); "family" is every non-bot account EXCLUDING the AHBOT
+# and DMLSOAP system accounts.
 #
 # The query order is FIXED -- tests stub the mysql calls positionally via
 # DML_STUB_DB_ROWS_SEQ, so reordering or inserting a query is a test change.
@@ -2227,10 +2335,12 @@ _stats_bool() {
 # zeros / empty arrays (a freshly-installed empty DB is a valid state).
 _stats_payload() {
     local bot sys fam rows
-    # Bot accounts: the authoritative cross-schema idiom (account_type 1 =
-    # random bot, 2 = ahbot-style system bot pool) used by _bots_counts,
-    # `players online` and the backup summary.
-    bot="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+    # Bot accounts: the shared two-signal identity from 30-db.sh (playerbots
+    # registry OR the reserved bot account-name prefix) used by _bots_counts,
+    # `players online` and the backup summary. Registry-only detection put
+    # every bot in the FAMILY totals on an install whose registry was never
+    # populated -- see 30-db.sh's header.
+    bot="$(_bot_account_where c.account)"
     # System accounts that are neither family nor ambient bots: the auction
     # house seeder and the launcher's own SOAP account.
     sys="c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))"
@@ -2238,12 +2348,14 @@ _stats_payload() {
     # -- 1: playerbots schema probe (review finding 8c). A box without the
     # acore_playerbots schema (playerbots module absent / not yet migrated)
     # used to fail EVERY $bot-referencing query and surface as one opaque
-    # DB_UNREACHABLE. Probe it once; when missing, substitute a constant
-    # FALSE so all bot counts degrade to zeros and the rest of the page
-    # keeps working. A fully-down DB fails this probe too -- and then also
-    # fails query 2, so the envelope still errors exactly as before.
+    # DB_UNREACHABLE. Probe it once; when missing, drop the registry half and
+    # keep the account-prefix half, so bots on a box whose playerbots schema
+    # is unreadable are still counted as bots (this used to degrade to a
+    # constant FALSE -- "there are no bots here" -- which quietly moved every
+    # bot into the family totals). A fully-down DB fails this probe too --
+    # and then also fails query 2, so the envelope still errors as before.
     if ! db_chars_query "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;" >/dev/null 2>&1; then
-        bot="0=1"
+        bot="$(_bot_account_where_prefix_only c.account)"
     fi
     fam="NOT ($bot) AND NOT ($sys)"
 
@@ -2827,7 +2939,7 @@ _backup_summary_json() {
     accts="$(db_auth_query "SELECT COUNT(*) FROM account;")" || accts=""
     accts="${accts%%$'\n'*}"
     [[ "$chars" =~ ^[0-9]+$ && "$accts" =~ ^[0-9]+$ ]] || return 1
-    bots="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2));")" || bots=""
+    bots="$(db_chars_query "SELECT COUNT(*) FROM characters WHERE $(_bot_account_where account);")" || bots=""
     bots="${bots%%$'\n'*}"
     if [[ "$bots" =~ ^[0-9]+$ ]]; then bots="$((10#$bots))"; else bots=null; fi
     printf '{"characters":%s,"accounts":%s,"bots":%s}' "$((10#$chars))" "$((10#$accts))" "$bots"
@@ -6472,17 +6584,25 @@ case "$cmd" in
         ;;
       accounts)
         # Read-only list of real player accounts and their characters.
-        # The 250 RNDBOT* ambient-bot accounts and AHBOT are noise for the
-        # GUI's character picker; SOAP-only accounts (e.g. DMLSOAP) simply
-        # have no characters and are harmless to include. gmlevel is pulled
-        # from account_access (MAX across realms, since a per-realm 0 row
-        # can coexist with a real grant) so the GUI can show GM badges
-        # without a second round trip.
+        # The 250 ambient-bot accounts and AHBOT are noise for the GUI's
+        # character picker; SOAP-only accounts (e.g. DMLSOAP) simply have no
+        # characters and are harmless to include. gmlevel is pulled from
+        # account_access (MAX across realms, since a per-realm 0 row can
+        # coexist with a real grant) so the GUI can show GM badges without a
+        # second round trip.
+        #
+        # The bot test is _bot_username_is_bot (the shared prefix, read from
+        # playerbots.conf) rather than a hardcoded RNDBOT%, so a server with a
+        # customised AiPlayerbot.RandomBotAccountPrefix does not get its bot
+        # accounts in the picker. Deliberately PREFIX-ONLY: this is the one
+        # bot filter that does not require the acore_playerbots schema to
+        # exist, and the character picker must not start erroring on a box
+        # without the playerbots module.
         sql="SELECT a.id, a.username, COALESCE(g.gmlevel,0), COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
              FROM acore_auth.account a
              LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM acore_auth.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
-             WHERE a.username NOT LIKE 'RNDBOT%' AND a.username <> 'AHBOT'
+             WHERE NOT $(_bot_username_is_bot a.username) AND a.username <> 'AHBOT'
              ORDER BY a.id, c.level DESC;"
         rows="$(db_chars_query "$sql")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
@@ -7564,18 +7684,17 @@ case "$cmd" in
         ;;
       players)
         # Batch 3 F11a: read-only "who's playing right now" for the Home
-        # card. Same cross-schema exclusion as `party online` below (bot
-        # accounts filtered via acore_playerbots.playerbots_account_type),
-        # plus the zone id for a bit of flavor.
+        # card. Same bot exclusion as `party online` below, via the shared
+        # _human_account_where (registry OR reserved account prefix -- the
+        # registry alone is empty on some installs and let every bot
+        # through), plus the zone id for a bit of flavor.
         psub="${1:-}"; shift || true
         case "$psub" in
           online)
             sql="SELECT c.name, c.level, c.class, c.zone
                  FROM characters c
                  WHERE c.online = 1
-                   AND c.account NOT IN (
-                     SELECT account_id FROM acore_playerbots.playerbots_account_type
-                     WHERE account_type IN (1,2))
+                   AND $(_human_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not query online players" "Is ac-database running?"; exit 1; }
@@ -7608,9 +7727,7 @@ case "$cmd" in
             sql="SELECT c.guid, c.name, c.class, c.level
                  FROM characters c
                  WHERE c.online = 1
-                   AND c.account NOT IN (
-                     SELECT account_id FROM acore_playerbots.playerbots_account_type
-                     WHERE account_type IN (1,2))
+                   AND $(_human_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not query online characters" "Is ac-database running?"; exit 1; }
@@ -7727,7 +7844,7 @@ case "$cmd" in
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             sql="SELECT c.guid, c.name, c.class, c.level,
-                        CASE WHEN c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) THEN 1 ELSE 0 END AS is_bot,
+                        CASE WHEN $(_bot_account_where c.account) THEN 1 ELSE 0 END AS is_bot,
                         c.online AS onl
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
@@ -7782,7 +7899,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
@@ -7889,7 +8006,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
@@ -7970,7 +8087,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" || kicklist=""
             while IFS= read -r b || [[ -n "$b" ]]; do
@@ -8498,7 +8615,7 @@ case "$cmd" in
             btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
             (( btlimit > 200 )) && btlimit=200
             (( btlimit < 1 )) && btlimit=1
-            btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+            btwhere="$(_bot_account_where c.account)"
             # --name is a LIKE prefix. _valid_charname permits '_', which is a
             # single-char LIKE wildcard, so a name like Foo_bar would also match
             # Foo<any>bar. Escape the LIKE metacharacters (_ and %) with a marker

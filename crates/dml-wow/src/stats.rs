@@ -40,9 +40,27 @@ use super::pages::cell_text;
 /// down) the `bot` predicate becomes `0=1`. Mirrors 48-stats.sh:67.
 pub const PROBE_SQL: &str = "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;";
 
+/// DEPRECATED as a predicate: the registry-only clause, kept as a named
+/// constant purely so tests can assert it is NOT what production splices any
+/// more (an install with an empty `playerbots_account_type` counted every bot
+/// as family). Live detection goes through [`bot_predicate`].
+///
 /// The authoritative bot-account predicate (account_type 1|2), used verbatim by
 /// `_bots_counts` / `players online` / the stats envelope (48-stats.sh:55).
 pub const BOT_SUBQUERY: &str = "c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))";
+
+/// The live bot predicate for the stats envelope: both signals when the
+/// playerbots schema answers, the account-prefix signal alone when it does
+/// not. `probe_ok == false` used to mean `0=1` — "this box has no bots" —
+/// which is a lie on any box that has them and silently moved every bot into
+/// the family totals.
+pub fn bot_predicate(probe_ok: bool, bot_prefix: &str) -> String {
+    if probe_ok {
+        crate::botid::bot_clause("c.account", bot_prefix)
+    } else {
+        crate::botid::bot_clause_prefix_only("c.account", bot_prefix)
+    }
+}
 
 /// System accounts that are neither family nor ambient bots (48-stats.sh:58).
 pub const SYS_SUBQUERY: &str = "c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))";
@@ -492,15 +510,13 @@ fn richest(res: &QueryResult, family: bool) -> Vec<Value> {
 /// CLI's `stats` arm does); an empty result set is NOT a failure (a fresh DB
 /// answers with zeros / empty arrays).
 pub fn read_stats(cfg: &DbConfig) -> Result<Value, DbError> {
-    // Query 1: probe. Any error (schema absent OR DB down) -> `0=1`, exactly
-    // like the bash. A fully-down DB then also fails query 2 below, so the
-    // envelope still errors.
-    let bot = if db::query(cfg, Database::Characters, PROBE_SQL).is_err() {
-        "0=1"
-    } else {
-        BOT_SUBQUERY
-    };
-    let queries = build_queries(bot, SYS_SUBQUERY);
+    // Query 1: probe. An error (schema absent OR DB down) drops the registry
+    // half and leaves the account-prefix half standing — bots stay counted as
+    // bots. A fully-down DB then also fails query 2 below, so the envelope
+    // still errors.
+    let probe_ok = db::query(cfg, Database::Characters, PROBE_SQL).is_ok();
+    let bot = bot_predicate(probe_ok, &crate::botid::bot_account_prefix());
+    let queries = build_queries(&bot, SYS_SUBQUERY);
     let results = run_concurrent(cfg, &queries)?;
     Ok(assemble_stats(&results))
 }

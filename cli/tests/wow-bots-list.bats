@@ -37,14 +37,58 @@ seed_two_bots() {
   [ "$(echo "$output" | jq -r '.data.bots[1].zone')" = "14" ]
 }
 
-@test "bots list identifies bots via the playerbots table, never RNDBOT%" {
+# Was "never RNDBOT%": bot identity used to be the playerbots table ALONE.
+# That table is populated by mod-playerbots itself and can be EMPTY on a
+# freshly built install (measured 2026-08-01: 0 rows next to 1000 bot
+# characters), and `account IN (<empty set>)` is FALSE for every row -- so the
+# bots page listed nothing while Home listed all 1000 bots as real players.
+# Both signals are required now; the registry stays FIRST and authoritative.
+@test "bots list identifies bots by the playerbots table OR the reserved account prefix" {
   seed_two_bots
   export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
   run bash "$DML" wow bots list --json
   [ "$status" -eq 0 ]
   grep -q 'acore_playerbots.playerbots_account_type' "$FIXTURE/q.log"
   grep -q 'account_type IN (1,2)' "$FIXTURE/q.log"
-  ! grep -q 'RNDBOT' "$FIXTURE/q.log"
+  grep -q "UPPER(username) LIKE 'RNDBOT%'" "$FIXTURE/q.log"
+  # OR, never AND: an install with an unpopulated registry must still match.
+  grep -q 'account_type IN (1,2)) OR ' "$FIXTURE/q.log"
+}
+
+@test "bot identity: a custom prefix is read from playerbots.conf and LIKE-escaped" {
+  seed_two_bots
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
+  # _wow_server_dir resolves through _resolve_compose_dir, so the title dir
+  # only counts once it holds a compose file.
+  add_game wow-server-playerbots compose
+  mkdir -p "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules"
+  printf 'AiPlayerbot.RandomBotAccountPrefix = "my_bot"\n' \
+    > "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules/playerbots.conf"
+  run bash "$DML" wow bots list --json
+  [ "$status" -eq 0 ]
+  # `_` is a single-char LIKE wildcard -- unescaped, `my_bot%` would also
+  # match `myXbot...` and silently widen the bot set.
+  grep -q "UPPER(username) LIKE 'MY\\\\_BOT%'" "$FIXTURE/q.log"
+}
+
+@test "bot identity: an EMPTY prefix falls back, it never becomes LIKE '%'" {
+  seed_two_bots
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
+  # A BLANK CONF VALUE is the path that actually reaches the guard. Setting
+  # only DML_BOT_ACCOUNT_PREFIX="" would prove nothing here: empty is treated
+  # as unset, so with no conf on disk the default arrives by a second route
+  # and the test stays green even with the guard deleted.
+  add_game wow-server-playerbots compose
+  mkdir -p "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules"
+  printf 'AiPlayerbot.RandomBotAccountPrefix = ""\n' \
+    > "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules/playerbots.conf"
+  export DML_BOT_ACCOUNT_PREFIX=""
+  run bash "$DML" wow bots list --json
+  [ "$status" -eq 0 ]
+  # The mirror-image failure: a match-all prefix would call every real
+  # player's account a bot.
+  ! grep -q "LIKE '%'" "$FIXTURE/q.log"
+  grep -q "UPPER(username) LIKE 'RNDBOT%'" "$FIXTURE/q.log"
 }
 
 @test "bots list builds each filter into the SQL exactly" {

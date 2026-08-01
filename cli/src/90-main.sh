@@ -2546,17 +2546,25 @@ case "$cmd" in
         ;;
       accounts)
         # Read-only list of real player accounts and their characters.
-        # The 250 RNDBOT* ambient-bot accounts and AHBOT are noise for the
-        # GUI's character picker; SOAP-only accounts (e.g. DMLSOAP) simply
-        # have no characters and are harmless to include. gmlevel is pulled
-        # from account_access (MAX across realms, since a per-realm 0 row
-        # can coexist with a real grant) so the GUI can show GM badges
-        # without a second round trip.
+        # The 250 ambient-bot accounts and AHBOT are noise for the GUI's
+        # character picker; SOAP-only accounts (e.g. DMLSOAP) simply have no
+        # characters and are harmless to include. gmlevel is pulled from
+        # account_access (MAX across realms, since a per-realm 0 row can
+        # coexist with a real grant) so the GUI can show GM badges without a
+        # second round trip.
+        #
+        # The bot test is _bot_username_is_bot (the shared prefix, read from
+        # playerbots.conf) rather than a hardcoded RNDBOT%, so a server with a
+        # customised AiPlayerbot.RandomBotAccountPrefix does not get its bot
+        # accounts in the picker. Deliberately PREFIX-ONLY: this is the one
+        # bot filter that does not require the acore_playerbots schema to
+        # exist, and the character picker must not start erroring on a box
+        # without the playerbots module.
         sql="SELECT a.id, a.username, COALESCE(g.gmlevel,0), COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
              FROM acore_auth.account a
              LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM acore_auth.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
-             WHERE a.username NOT LIKE 'RNDBOT%' AND a.username <> 'AHBOT'
+             WHERE NOT $(_bot_username_is_bot a.username) AND a.username <> 'AHBOT'
              ORDER BY a.id, c.level DESC;"
         rows="$(db_chars_query "$sql")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
@@ -3638,18 +3646,17 @@ case "$cmd" in
         ;;
       players)
         # Batch 3 F11a: read-only "who's playing right now" for the Home
-        # card. Same cross-schema exclusion as `party online` below (bot
-        # accounts filtered via acore_playerbots.playerbots_account_type),
-        # plus the zone id for a bit of flavor.
+        # card. Same bot exclusion as `party online` below, via the shared
+        # _human_account_where (registry OR reserved account prefix -- the
+        # registry alone is empty on some installs and let every bot
+        # through), plus the zone id for a bit of flavor.
         psub="${1:-}"; shift || true
         case "$psub" in
           online)
             sql="SELECT c.name, c.level, c.class, c.zone
                  FROM characters c
                  WHERE c.online = 1
-                   AND c.account NOT IN (
-                     SELECT account_id FROM acore_playerbots.playerbots_account_type
-                     WHERE account_type IN (1,2))
+                   AND $(_human_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not query online players" "Is ac-database running?"; exit 1; }
@@ -3682,9 +3689,7 @@ case "$cmd" in
             sql="SELECT c.guid, c.name, c.class, c.level
                  FROM characters c
                  WHERE c.online = 1
-                   AND c.account NOT IN (
-                     SELECT account_id FROM acore_playerbots.playerbots_account_type
-                     WHERE account_type IN (1,2))
+                   AND $(_human_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not query online characters" "Is ac-database running?"; exit 1; }
@@ -3801,7 +3806,7 @@ case "$cmd" in
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             sql="SELECT c.guid, c.name, c.class, c.level,
-                        CASE WHEN c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) THEN 1 ELSE 0 END AS is_bot,
+                        CASE WHEN $(_bot_account_where c.account) THEN 1 ELSE 0 END AS is_bot,
                         c.online AS onl
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
@@ -3856,7 +3861,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
@@ -3963,7 +3968,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             rows="$(db_chars_query "$sql")" \
               || { json_err DB_UNREACHABLE "Could not read the party" "Is ac-database running?"; exit 1; }
@@ -4044,7 +4049,7 @@ case "$cmd" in
                  FROM group_member gm
                  JOIN characters c ON c.guid = gm.memberGuid
                  WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=$pguid LIMIT 1)
-                   AND c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))
+                   AND $(_bot_account_where c.account)
                  ORDER BY c.name;"
             kicklist="$(db_chars_query "$sql")" || kicklist=""
             while IFS= read -r b || [[ -n "$b" ]]; do
@@ -4572,7 +4577,7 @@ case "$cmd" in
             btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
             (( btlimit > 200 )) && btlimit=200
             (( btlimit < 1 )) && btlimit=1
-            btwhere="c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+            btwhere="$(_bot_account_where c.account)"
             # --name is a LIKE prefix. _valid_charname permits '_', which is a
             # single-char LIKE wildcard, so a name like Foo_bar would also match
             # Foo<any>bar. Escape the LIKE metacharacters (_ and %) with a marker

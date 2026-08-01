@@ -58,6 +58,114 @@ sql_escape() {
     printf '%s' "$s"
 }
 
+# ---------------------------------------------------------------------------
+# Bot-vs-human account identity -- the ONE place that answers "is this
+# characters.account a playerbot?". Mirrored in Rust by crates/dml-wow/src/
+# botid.rs (see that file's header for the full incident write-up).
+#
+# INCIDENT 2026-08-01. Every bot check used to be the single question "is the
+# account in acore_playerbots.playerbots_account_type with account_type IN
+# (1,2)?". mod-playerbots populates that registry itself, and on a freshly
+# built install it can be COMPLETELY EMPTY while 1000 bot characters play:
+# `account NOT IN (<empty set>)` is TRUE for every row, so the human filter
+# failed OPEN and the launcher's Home page listed every bot as a real player
+# (while `bots online`, the same predicate inverted, reported 0).
+#
+# The second signal does not depend on the mod writing a row: mod-playerbots
+# names every account it creates <AiPlayerbot.RandomBotAccountPrefix><n>, and
+# its own conf reserves the prefix ("Prefix for created bot accounts (of any
+# type). Do not change this prefix while there are existing bot accounts.").
+# A bot is registry-tagged OR prefix-named; the two fail independently.
+# ---------------------------------------------------------------------------
+
+# _bot_prefix: the reserved bot account-name prefix. Env override (a test seam
+# and an escape hatch), else the deployed playerbots.conf, else its .dist (a
+# fresh native install ships ONLY the .dist), else the shipped default. An
+# EMPTY answer is refused at the end: spliced into LIKE '%' it would match
+# every account and report the whole family as bots -- the mirror image of the
+# bug this exists to fix.
+_bot_prefix() {
+    local p="" dir conf
+    if [[ -n "${DML_BOT_ACCOUNT_PREFIX-}" ]]; then
+        p="$DML_BOT_ACCOUNT_PREFIX"
+    else
+        dir="$(_wow_server_dir 2>/dev/null)" || dir=""
+        if [[ -n "$dir" ]]; then
+            for conf in "$dir/env/dist/etc/modules/playerbots.conf" \
+                        "$dir/env/dist/etc/modules/playerbots.conf.dist"; do
+                [[ -f "$conf" ]] || continue
+                # Anchor on a following `=` so only this key matches, same
+                # doctrine as _bots_counts' MaxRandomBots read.
+                p="$(grep -E '^[[:space:]]*AiPlayerbot\.RandomBotAccountPrefix[[:space:]]*=' "$conf" 2>/dev/null | tail -n1)" || p=""
+                p="${p#*=}"
+                p="${p//[[:space:]]/}"; p="${p//\"/}"; p="${p//\'/}"
+                [[ -n "$p" ]] && break
+            done
+        fi
+    fi
+    p="${p//[[:space:]]/}"; p="${p//\"/}"; p="${p//\'/}"
+    [[ -n "$p" ]] || p="rndbot"
+    printf '%s' "$p"
+    return 0
+}
+
+# _bot_prefix_like <value>: escape for a single-quoted MySQL LIKE pattern.
+# Backslash FIRST (else the escapes added below get escaped in turn), then the
+# two LIKE wildcards -- an unescaped `_` in a custom prefix matches any single
+# character and would silently widen the bot set. The quote is DOUBLED rather
+# than backslash-escaped (sql_escape's style) so the literal survives
+# NO_BACKSLASH_ESCAPES, and so both surfaces emit the same bytes.
+_bot_prefix_like() {
+    local p="${1-}"
+    p="${p//\\/\\\\}"
+    p="${p//%/\\%}"
+    p="${p//_/\\_}"
+    p="${p//\'/\'\'}"
+    printf '%s' "$p"
+    return 0
+}
+
+# _bot_username_is_bot <username column>: the prefix test applied DIRECTLY to a
+# username column, for queries already selecting from acore_auth.account (the
+# `accounts` picker). UPPER() on both sides because the two disagree on case by
+# nature: AzerothCore stores account names upper-cased (RNDBOT0) while the conf
+# value naming them is lower-case ("rndbot") -- a bare LIKE 'rndbot%' works only
+# under a case-insensitive collation. The single definition of the pattern;
+# _bot_account_where's subselect form wraps THIS.
+_bot_username_is_bot() {
+    local col="${1:?column required}" p
+    p="$(_bot_prefix)"; p="${p^^}"
+    p="$(_bot_prefix_like "$p")"
+    printf "UPPER(%s) LIKE '%s%%'" "$col" "$p"
+    return 0
+}
+
+# _bot_account_where <column>: "<column> is a bot account", parenthesised so it
+# can be AND-ed into a larger WHERE without re-associating.
+_bot_account_where() {
+    local col="${1:?column required}"
+    printf "(%s IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2)) OR %s IN (SELECT id FROM acore_auth.account WHERE %s))" \
+        "$col" "$col" "$(_bot_username_is_bot username)"
+    return 0
+}
+
+# _bot_account_where_prefix_only <column>: the degraded form for callers that
+# probed the playerbots schema and found it unusable. Was a constant `0=1`
+# ("this box has no bots"), which is a lie on any box that has them.
+_bot_account_where_prefix_only() {
+    local col="${1:?column required}"
+    printf "(%s IN (SELECT id FROM acore_auth.account WHERE %s))" \
+        "$col" "$(_bot_username_is_bot username)"
+    return 0
+}
+
+# _human_account_where <column>: the exact negation of _bot_account_where, so
+# the two can never drift and double-count or double-drop a character.
+_human_account_where() {
+    printf 'NOT %s' "$(_bot_account_where "${1:?column required}")"
+    return 0
+}
+
 # All args required; "-" means "omit this filter".
 build_item_search_sql() {
     local name="$1" quality="$2" minl="$3" maxl="$4" limit="$5"

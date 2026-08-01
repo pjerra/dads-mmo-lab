@@ -193,9 +193,14 @@ make_stats_rows() {
   grep -q 'CASE WHEN c.map IN (0,1,530,571)' "$FIXTURE/q.log"
 }
 
-@test "stats: a missing playerbots schema degrades bot stats to zero instead of failing (8c)" {
+@test "stats: a missing playerbots schema keeps counting bots by account prefix (8c)" {
   # Call 1 (the probe) fails; every later query succeeds. The envelope must
   # come back ok, and no post-probe query may reference the missing schema.
+  #
+  # CHANGED 2026-08-01: the substitute used to be a constant `0=1`, i.e. "this
+  # box has no bots" -- which is a lie on any box that has them, and silently
+  # moved every bot into the FAMILY totals. The registry half is dropped; the
+  # reserved-account-prefix half still stands, so bots stay counted as bots.
   make_stats_rows
   export DML_STUB_DB_EXIT_SEQ="1 0"
   export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
@@ -204,8 +209,9 @@ make_stats_rows() {
   [ "$(echo "$output" | jq -r '.ok')" = "true" ]
   # Only the probe itself mentions the playerbots schema...
   [ "$(grep -c 'playerbots_account_type' "$FIXTURE/q.log")" = "1" ]
-  # ...and the substituted FALSE reaches the real queries.
-  grep -q '0=1' "$FIXTURE/q.log"
+  # ...and the surviving prefix half reaches the real queries.
+  grep -q "UPPER(username) LIKE 'RNDBOT%'" "$FIXTURE/q.log"
+  ! grep -q '0=1' "$FIXTURE/q.log"
 }
 
 @test "stats: a failed query on a REACHABLE database gets the honest hint (8c)" {

@@ -9,7 +9,7 @@
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { chipStart, serverStatus, refreshServerStatus, statusLabel } from "$lib/server-status.svelte";
   import { restartState, clearApplyNeeded } from "$lib/restart-state.svelte";
-  import { installProgress } from "$lib/install-progress.svelte";
+  import { installProgress, installDetailText } from "$lib/install-progress.svelte";
   import { bannerText, fastRestartBlockedReason } from "$lib/apply-needed";
   import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
@@ -110,14 +110,25 @@
       // Best-effort card -- a transient DB error just keeps the last list.
     }
   }
-  let lastVerdict: string | null = null;
+  // Refetched on EVERY successful poll while the world is up, not only on a
+  // verdict flip: this list is now also the SOURCE of the "Players online"
+  // number (SOAP's "Connected players" counts bot sessions, so it cannot be),
+  // and a count that only moves when the server starts or stops is worse than
+  // no count. `serverStatus.detail` is replaced by each successful poll and
+  // left untouched by a failed one, so its identity IS the poll heartbeat.
+  let lastDetail: unknown = null;
   $effect(() => {
-    const v = serverStatus.detail?.verdict ?? null;
-    if (v !== lastVerdict) {
-      lastVerdict = v;
+    const d = serverStatus.detail;
+    if (d !== lastDetail) {
+      lastDetail = d;
       void refreshPlayers();
     }
   });
+
+  // The bot-free count behind the "Players online" rows. `null` (rendered
+  // "?") until the list has actually loaded once -- never 0, which would
+  // claim an empty world on a failed read.
+  const humansOnline = $derived(playersLoaded ? players.length : null);
 
   // Chip quick-start consumer (Batch 2 F8): the sidebar ▶ sets the request
   // and navigates here; this effect runs on mount AND when the request flips
@@ -279,8 +290,8 @@
         <strong>{s.label}</strong>
       </div>
       <p class="muted">
-        Installing the server. This takes hours and the Library page has the full
-        output — you can leave this window open, or close it and come back.
+        {installDetailText(installProgress) ??
+          "Installing the server. This takes hours and the Library page has the full output — you can leave this window open, or close it and come back."}
       </p>
     </div>
   {:else if serverStatus.detail}
@@ -312,7 +323,7 @@
         <p class="muted">Restarting — this takes a minute or two while the world reloads.</p>
       {:else if d.verdict === "online"}
         <div class="stats">
-          <span>Players online: <strong>{d.soap.players ?? "?"}</strong></span>
+          <span>Players online: <strong>{humansOnline ?? "?"}</strong></span>
           <span>Uptime: <strong>{d.soap.uptime ?? "?"}</strong></span>
           <span>Update time: <strong>{d.soap.mean_ms ?? "?"} ms avg</strong></span>
           <span>Bots: <strong>{d.bots.online ?? "?"} / {d.bots.max ?? "?"}</strong></span>
@@ -454,8 +465,13 @@
             {#if d.verdict === "online"}
               <div class="hrow"><span class="hname">Version</span><span class="hval">{d.soap.version ?? "?"}</span></div>
               <div class="hrow"><span class="hname">Uptime</span><span class="hval">{d.soap.uptime ?? "?"}</span></div>
-              <div class="hrow"><span class="hname">Players online</span><span class="hval">{d.soap.players ?? "?"}</span></div>
+              <div class="hrow"><span class="hname">Players online</span><span class="hval">{humansOnline ?? "?"}</span></div>
               <div class="hrow"><span class="hname">Bots online</span><span class="hval">{d.bots.online ?? "?"} of {d.bots.max ?? "?"} max</span></div>
+              <!-- The raw SOAP figure, kept ONLY here and honestly labelled:
+                   `.server info`'s "Connected players" counts bot sessions
+                   too, which is exactly why it can no longer be the "Players
+                   online" number above. -->
+              <div class="hrow"><span class="hname">Sessions (incl. bots)</span><span class="hval">{d.soap.players ?? "?"}</span></div>
               <div class="hrow">
                 <span class="hname">World update time</span>
                 <span class="hval">{d.soap.mean_ms ?? "?"} ms mean · {d.soap.median_ms ?? "?"} ms median</span>
