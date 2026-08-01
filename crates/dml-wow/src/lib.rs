@@ -42,6 +42,7 @@ pub mod restore;
 pub use dml_core::runner;
 pub mod soap;
 pub mod srp6;
+pub mod soap_autosetup;
 pub mod soap_bootstrap;
 pub mod soap_cmds;
 pub mod stats;
