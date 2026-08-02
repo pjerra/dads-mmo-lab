@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::cli::{
     AccountCmd, AccountwideCmd, BackupCmd, CacheCmd, Cmd, ClientPathCmd, ConfigCmd, GmCmd,
-    ModuleCmd, PartyCmd, TuningCmd, UnboundCmd,
+    AddonsCmd, ModuleCmd, PartyCmd, TuningCmd, UnboundCmd,
 };
 use crate::out::{emit_err, emit_ok, stream_exit, stream_sink, TerminalSeen};
 
@@ -848,6 +848,57 @@ fn cmd_unbound(cmd: UnboundCmd) -> i32 {
         return emit_ok(serde_json::to_value(status).unwrap_or_default());
     }
 
+    // The CLIENT addons: no games dir, no docker, no server at all.
+    if let UnboundCmd::Addons { cmd } = cmd {
+        use dml_wow::unbound_addons;
+        return match cmd {
+            AddonsCmd::Install { client } => {
+                let dir = match client {
+                    Some(c) => std::path::PathBuf::from(c),
+                    None => {
+                        let cp = dml_wow::clientpath::read_client_path();
+                        let saved = cp
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .filter(|p| !p.is_empty())
+                            .map(std::path::PathBuf::from);
+                        match saved {
+                            Some(p) => p,
+                            None => {
+                                return emit_err(
+                                    "NOT_FOUND",
+                                    "No WoW client folder is configured.",
+                                    "Run `dml-wow client-path set <dir>` first, or pass --client.",
+                                )
+                            }
+                        }
+                    }
+                };
+                if !dml_wow::clientpath::valid_client_dir(&dir) {
+                    return emit_err(
+                        "BAD_ARG",
+                        &format!("{} does not look like a WoW client folder.", dir.display()),
+                        "It should contain Wow.exe or an Interface directory.",
+                    );
+                }
+                match unbound_addons::install_addons(&dir) {
+                    Ok(d) => emit_ok(serde_json::json!({
+                        "addons_dir": d.addons_dir, "files": d.files, "addons": d.addons,
+                    })),
+                    Err(e) => emit_err("WRITE_FAILED", &e, "Check the folder is writable."),
+                }
+            }
+            AddonsCmd::Export { dir } => {
+                match unbound_addons::export_addons(std::path::Path::new(&dir)) {
+                    Ok(d) => emit_ok(serde_json::json!({
+                        "dir": d.addons_dir, "files": d.files, "addons": d.addons,
+                    })),
+                    Err(e) => emit_err("WRITE_FAILED", &e, "Check the folder is writable."),
+                }
+            }
+        };
+    }
+
     let (id, accept, repair, force, uninstall) = match cmd {
         UnboundCmd::Install { id, accept_data_changes, repair } => {
             (id, accept_data_changes, repair, false, false)
@@ -855,7 +906,7 @@ fn cmd_unbound(cmd: UnboundCmd) -> i32 {
         UnboundCmd::Uninstall { id, accept_data_changes, force } => {
             (id, accept_data_changes, false, force, true)
         }
-        UnboundCmd::Status { .. } => unreachable!("handled above"),
+        UnboundCmd::Status { .. } | UnboundCmd::Addons { .. } => unreachable!("handled above"),
     };
     if !valid_game_id(&id) {
         let e = bad_id(&id);

@@ -437,6 +437,36 @@ pub enum UnboundCmd {
         #[arg(long, default_value = dml_wow::unbound::DEFAULT_TITLE_ID)]
         id: String,
     },
+    /// The CLIENT addons (talent UI, spellbook, shared resources).
+    ///
+    /// `unbound install` already puts these into your own client
+    /// automatically. These arms exist for the other two cases: repairing your
+    /// client without a 90-minute rebuild, and producing a copy to hand to
+    /// other players.
+    Addons {
+        #[command(subcommand)]
+        cmd: AddonsCmd,
+    },
+}
+
+/// `dml-wow unbound addons …` — `dml_wow::unbound_addons`.
+#[derive(Subcommand, Debug)]
+pub enum AddonsCmd {
+    /// Install into your own WoW client's Interface/AddOns.
+    Install {
+        /// Client folder. Defaults to the one saved by `client-path set`.
+        #[arg(long)]
+        client: Option<String>,
+    },
+    /// Write the addon folders somewhere you can zip and share.
+    ///
+    /// A folder rather than a .zip: re-zipping would be a second artifact that
+    /// can drift from the embedded bytes, and a folder is what the recipient
+    /// needs anyway.
+    Export {
+        /// Destination directory (created if missing).
+        dir: String,
+    },
 }
 
 /// `dml-wow cache …` — `dml_wow::cachestatus`.

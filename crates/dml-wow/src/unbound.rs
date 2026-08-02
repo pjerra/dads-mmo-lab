@@ -1759,6 +1759,51 @@ impl<'a> Engine<'a> {
         ))
     }
 
+    /// Put the CLIENT addons in place, if we know where the client is.
+    ///
+    /// Runs AFTER `ready`, and NEVER fails the install: a 30–90 minute rebuild
+    /// that worked must not be reported as failed because a file copy into a
+    /// different application's folder did not. What it returns is recorded in
+    /// the done event so "installed" is not ambiguous about which half
+    /// happened.
+    ///
+    /// The talent system is why this is automatic at all: the server-side
+    /// bridge only validates picks the client addon SENDS, so a server with the
+    /// bridge and no addon has a feature the player cannot see, with nothing
+    /// in-game explaining the absence.
+    fn install_client_addons(&mut self) -> Value {
+        use crate::unbound_addons;
+        let cp = crate::clientpath::read_client_path();
+        let path = cp.get("path").and_then(|v| v.as_str()).unwrap_or_default();
+        let valid = cp.get("valid").and_then(|v| v.as_bool()).unwrap_or(false);
+        if path.is_empty() {
+            self.line("warn", "no WoW client folder is configured, so the Wrath Unbound addons were NOT installed -- set it on the Settings page, then use 'Install addons' on the Tools card.");
+            return serde_json::json!({"installed": false, "reason": "no_client_path"});
+        }
+        if !valid {
+            self.line("warn", format!("the configured WoW client folder ({path}) does not look like a client, so the addons were NOT installed."));
+            return serde_json::json!({"installed": false, "reason": "client_path_invalid", "path": path});
+        }
+        match unbound_addons::install_addons(std::path::Path::new(path)) {
+            Ok(done) => {
+                self.line(
+                    "info",
+                    format!("installed {} client addon files into {}", done.files, done.addons_dir),
+                );
+                serde_json::json!({
+                    "installed": true,
+                    "files": done.files,
+                    "addons_dir": done.addons_dir,
+                    "addons": done.addons,
+                })
+            }
+            Err(e) => {
+                self.line("warn", format!("could not install the client addons: {e}"));
+                serde_json::json!({"installed": false, "reason": "write_failed", "detail": e})
+            }
+        }
+    }
+
     fn run_stage(&mut self, stage: Stage) -> Result<(), Fail> {
         (self.emit)(match stage {
             Stage::Ready => section_start_limited(stage.name(), self.opts.ready_timeout.as_secs()),
@@ -2248,6 +2293,10 @@ pub fn unbound_install_stream_with(
         Ok(()) => {
             engine.st().last_error = None;
             engine.persist();
+            // LAST, and outside the stage machine on purpose: this writes into
+            // the user's GAME folder, not the server's, and must never be able
+            // to fail a rebuild that succeeded.
+            let addons = engine.install_client_addons();
             (engine.emit)(done_event(serde_json::json!({
                 "addon_version": ADDON_VERSION,
                 "server_dir": engine.sdir().display().to_string(),
@@ -2266,6 +2315,10 @@ pub fn unbound_install_stream_with(
                 } else {
                     "In game as a GM, stand where the Mentor should appear and run: .npc add 900001"
                 },
+                // Which half of "installed" actually happened for the client.
+                // The cross-class talent UI lives here, so a silent skip would
+                // leave a feature the player can neither see nor ask about.
+                "client_addons": addons,
             })));
             0
         }
