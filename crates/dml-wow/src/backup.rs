@@ -649,9 +649,21 @@ pub const DUMP_TIMEOUT: Duration = Duration::from_secs(1800);
 /// The `docker exec ac-database mysqldump …` argv — a port of
 /// `_backup_dump_to`'s command line (`60-backup.sh:56`).
 pub fn mysqldump_args(password: &str, include_world: bool) -> Vec<String> {
+    mysqldump_args_for("ac-database", password, include_world)
+}
+
+/// [`mysqldump_args`] against an explicit container — id or name.
+///
+/// Exists for `unbound`'s safety backup (review finding, 2026-08-02): that
+/// engine resolves its database container through the server's OWN compose
+/// project for every mutation, and a safety dump taken from whichever stack
+/// happens to own the global name `ac-database` could capture a DIFFERENT
+/// server's databases than the ones about to be mutated — a backup that
+/// exists and is useless.
+pub fn mysqldump_args_for(container: &str, password: &str, include_world: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "exec".into(),
-        "ac-database".into(),
+        container.into(),
         "mysqldump".into(),
         "-uroot".into(),
         format!("-p{password}"),
@@ -723,6 +735,18 @@ fn push_bounded_tail(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) {
 /// millisecond-scale deadline instead.
 pub fn dump_to(program: &OsStr, password: &str, include_world: bool, out_path: &Path) -> Result<(), String> {
     dump_stream(program, &mysqldump_args(password, include_world), out_path, DUMP_TIMEOUT)
+}
+
+/// [`dump_to`] against an explicit container id/name — see
+/// [`mysqldump_args_for`] for why `unbound` must not dump by the global name.
+pub fn dump_to_container(
+    program: &OsStr,
+    container: &str,
+    password: &str,
+    include_world: bool,
+    out_path: &Path,
+) -> Result<(), String> {
+    dump_stream(program, &mysqldump_args_for(container, password, include_world), out_path, DUMP_TIMEOUT)
 }
 
 /// The generic streaming-pipe engine behind [`dump_to`] — see that

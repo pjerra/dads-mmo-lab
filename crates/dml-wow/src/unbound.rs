@@ -359,6 +359,9 @@ pub const REVERT_SQL: [(&str, &str, &str); 11] = [
 pub const MENTOR_STONE_CLEANUP_SQL: &str = "DELETE ci FROM character_inventory ci JOIN item_instance ii ON ci.item=ii.guid WHERE ii.itemEntry=900100; DELETE FROM item_instance WHERE itemEntry=900100;";
 
 pub const CODE_NOT_INSTALLED: &str = "UNBOUND_NOT_INSTALLED";
+/// The server has no `build:` configuration for ac-worldserver anywhere —
+/// it runs from prebuilt images and the module can never be compiled in.
+pub const CODE_NO_BUILD_CONFIG: &str = "UNBOUND_NO_BUILD_CONFIG";
 
 // ---------------------------------------------------------------------------
 // Options and state
@@ -378,8 +381,14 @@ pub struct UnboundOpts {
     /// Re-run everything over an install this engine believes is complete.
     pub repair: bool,
     /// Uninstall only: run the revert even when no evidence of an install is
-    /// found. The revert statements are all IF-EXISTS-shaped, so this is safe
-    /// — it exists for the server where the evidence itself is broken.
+    /// found - for the server whose evidence is itself broken.
+    ///
+    /// NOT a safe no-op, and the earlier claim that it was ("every statement
+    /// is IF-EXISTS-shaped") was false: the DROPs are, but two of the eleven
+    /// are unconditional wide DELETEs on tables OTHER mods share
+    /// (`playercreateinfo_spell_custom` racemask=0 across 9 class masks, and
+    /// `skillraceclassinfo_dbc ID >= 10000`). On a server that never had the
+    /// add-on, those delete somebody else's rows.
     pub force: bool,
     pub ready_timeout: Duration,
     pub ready_poll: Duration,
@@ -418,8 +427,20 @@ pub struct UnboundState {
     /// resumes instead of starting over. A COMPLETED uninstall deletes the
     /// whole state file — a file claiming install-complete on a stock server
     /// would be a lie the next install trips over.
+    ///
+    /// CLEARED by any successful install (review CRITICAL, 2026-08-02): left
+    /// in place, a `backup` token from a long-abandoned uninstall attempt
+    /// would let every FUTURE uninstall of this server skip its safety dump
+    /// forever — right before the DROP of character progression.
     #[serde(default)]
     pub uninstalling: Vec<String>,
+    /// The safety dump this install/uninstall run is protected by — the FILE
+    /// NAME under `~/.dml/backups`. Recorded so a resume can check the dump
+    /// still EXISTS before trusting the `backup` completion token: the backup
+    /// pool is shared and pruned to newest-N by every other dump on the box,
+    /// so "recorded done" and "still on disk" genuinely diverge.
+    #[serde(default)]
+    pub backup_file: Option<String>,
     pub last_error: Option<String>,
     pub updated_unix: u64,
 }
@@ -433,6 +454,7 @@ impl UnboundState {
             completed: Vec::new(),
             prior_validate_skill: None,
             uninstalling: Vec::new(),
+            backup_file: None,
             last_error: None,
             updated_unix: 0,
         }
@@ -505,13 +527,25 @@ pub trait UnboundIo: InstallIo {
     fn run_stdin(&self, call: &Call, input: &[u8], on_line: &mut dyn FnMut(&str)) -> RunOutcome;
 
     /// The pre-mutation safety dump (world INCLUDED — the migrations write
-    /// acore_world). `Ok(file_name)` only when the dump really landed;
-    /// `Err(tail)` carries the stderr tail the bash used to discard.
+    /// acore_world), taken from `container` — the database container the
+    /// GUARD resolved through this server's own compose project, never the
+    /// engine-global name (a dump of whichever stack owns `ac-database` can
+    /// capture a different server's data than the one about to be mutated).
+    /// `Ok(file_name)` only when the dump really landed; `Err(tail)` carries
+    /// the stderr tail the bash used to discard.
     fn safety_backup(
         &self,
+        container: &str,
         password: &str,
         on_line: &mut dyn FnMut(String, String),
     ) -> Result<String, String>;
+
+    /// Is this dump file still present in the backup pool? A resume consults
+    /// this before trusting a recorded `backup` token: the pool is shared and
+    /// pruned to newest-N by every other dump on the box.
+    fn backup_exists(&self, file_name: &str) -> bool {
+        crate::backup::backup_dir().is_some_and(|d| d.join(file_name).is_file())
+    }
 }
 
 /// Production IO: [`ProcIo`] for run/preflight/ensure_engine, plus the real
@@ -571,6 +605,7 @@ impl UnboundIo for ProcUnboundIo {
 
     fn safety_backup(
         &self,
+        container: &str,
         password: &str,
         on_line: &mut dyn FnMut(String, String),
     ) -> Result<String, String> {
@@ -583,7 +618,7 @@ impl UnboundIo for ProcUnboundIo {
             "info".into(),
             "backing up characters, bots, accounts and world before changing anything...".into(),
         );
-        backup::dump_to(&self.inner.docker, password, true, &out_path)?;
+        backup::dump_to_container(&self.inner.docker, container, password, true, &out_path)?;
         for p in backup::prune(&bdir) {
             on_line("info".into(), format!("pruned old backup: {p}"));
         }
@@ -695,6 +730,15 @@ struct Engine<'a> {
     /// Uninstall only: everything the run could not (or deliberately did not)
     /// revert. Reported in the done event, never silently banner-ed away.
     residue: Vec<String>,
+    /// Which direction this engine is running — locate uses it to clean up
+    /// the OTHER direction's leftovers in the state file.
+    uninstalling_mode: bool,
+    /// The `-f` arguments the build stage needs. Empty = let compose
+    /// auto-load. Filled by the guard: a composegen server keeps its `build:`
+    /// sections in docker-compose.build.yml, which compose NEVER auto-loads —
+    /// so a bare `compose build` there "succeeds" in seconds having built
+    /// nothing, and the ready stage then times out on an unmodified server.
+    build_files: Vec<String>,
 }
 
 impl<'a> Engine<'a> {
@@ -728,11 +772,25 @@ impl<'a> Engine<'a> {
         Call { program: Program::Git, args, cwd: None, timeout: Some(PROBE_TIMEOUT) }
     }
 
-    /// `docker exec <cid> mysql …` for a single statement against a database.
+    /// `docker exec <cid> mysql …` for a single READ probe against a
+    /// database. PROBE_TIMEOUT — its answer is the point.
     fn mysql_probe(&self, db: &str, sql: &str) -> Call {
+        let mut call = self.mysql_stmt_call(db, sql);
+        call.timeout = Some(PROBE_TIMEOUT);
+        call
+    }
+
+    /// The same exec for a MUTATING statement — bounded by the SQL timeout,
+    /// not the probe one (review finding, 2026-08-02: the uninstall's DROPs
+    /// ran under the 30s probe bound; a big `unbound_character_unlocks` or a
+    /// cold buffer pool can exceed that, and killing the docker-exec CLIENT
+    /// does not stop the statement inside mysqld — the engine then reports a
+    /// failure for a revert that in fact completed).
+    fn mysql_stmt_call(&self, db: &str, sql: &str) -> Call {
         let cid = self.db_container.clone().expect("guard resolved the container");
-        self.docker_probe(
-            vec![
+        Call {
+            program: Program::Docker,
+            args: vec![
                 "exec".into(),
                 cid,
                 "mysql".into(),
@@ -743,8 +801,26 @@ impl<'a> Engine<'a> {
                 "-e".into(),
                 sql.into(),
             ],
-            None,
-        )
+            cwd: None,
+            timeout: Some(crate::modmgr::SQL_APPLY_TIMEOUT),
+        }
+    }
+
+    /// Which `-f` files the BUILD needs, from disk evidence. Composegen keeps
+    /// build: sections in [`composegen::BUILD_FILE`]; a bash-era server keeps
+    /// them in the base compose and needs no flags.
+    fn resolve_build_files(&mut self) {
+        let sdir = self.sdir().to_path_buf();
+        let mut files: Vec<String> = Vec::new();
+        if sdir.join(composegen::BUILD_FILE).is_file() {
+            for f in [composegen::BASE_FILE, composegen::OVERRIDE_FILE, composegen::BUILD_FILE] {
+                if sdir.join(f).is_file() {
+                    files.push("-f".into());
+                    files.push(f.into());
+                }
+            }
+        }
+        self.build_files = files;
     }
 
     fn persist(&mut self) {
@@ -830,12 +906,27 @@ impl<'a> Engine<'a> {
 
         let existing = load_state(&sdir);
         self.resumed = existing.is_some();
-        let state =
+        let mut state =
             existing.unwrap_or_else(|| UnboundState::new(&composegen::install_id(&sdir)));
         if self.resumed {
             if let Some(err) = state.last_error.as_deref() {
                 self.line("info", format!("the last attempt stopped with: {err}"));
             }
+        }
+        // An INSTALL over an interrupted UNINSTALL starts FRESH: the disk is
+        // half-reverted in ways `completed` no longer describes, so every
+        // stage must re-run (and the backup must be retaken -- clearing
+        // `completed` is what makes that happen). `prior_validate_skill` is
+        // deliberately KEPT: it is still the best record of the pre-Unbound
+        // value.
+        if !self.uninstalling_mode && !state.uninstalling.is_empty() {
+            self.line(
+                "info",
+                "an interrupted uninstall was found -- running every install stage fresh over it.",
+            );
+            state.completed.clear();
+            state.uninstalling.clear();
+            state.backup_file = None;
         }
         self.state = Some(state);
         self.server_dir = Some(sdir);
@@ -946,6 +1037,8 @@ impl<'a> Engine<'a> {
                 self.line("info", "repair requested -- re-running every stage over the existing install.");
                 let st = self.st();
                 st.completed.clear();
+                st.uninstalling.clear();
+                st.backup_file = None;
                 st.addon_version = ADDON_VERSION.to_string();
             } else {
                 return Err(Fail::new(
@@ -954,6 +1047,50 @@ impl<'a> Engine<'a> {
                     "Run with --repair to re-apply everything, or uninstall first.",
                 ));
             }
+        }
+
+        // (g) The rebuild must be able to BUILD. On a composegen server the
+        // build: sections live in docker-compose.build.yml, which compose
+        // never auto-loads -- and `compose build <svc>` for a service with no
+        // build section exits 0 with only a warning, so without this check
+        // the "rebuild" finishes in seconds having compiled nothing and the
+        // ready stage times out on an unmodified server (review CRITICAL,
+        // 2026-08-02). A server running from imported images with no build
+        // config at all cannot compile the module, and refusing HERE --
+        // before the backup and the migrations -- is what keeps that from
+        // being discovered after the database was already changed.
+        self.resolve_build_files();
+        let mut cfg_args: Vec<String> = vec!["compose".into()];
+        cfg_args.extend(self.build_files.iter().cloned());
+        cfg_args.extend(["config".into(), "--format".into(), "json".into()]);
+        let (outcome, out) = self.run_collect(&self.docker_probe(cfg_args, Some(sdir.clone())));
+        if outcome.is_ok() {
+            match serde_json::from_str::<serde_json::Value>(&out) {
+                Ok(cfg) => {
+                    let has_build = cfg
+                        .get("services")
+                        .and_then(|s| s.get("ac-worldserver"))
+                        .map(|w| w.get("build").is_some())
+                        .unwrap_or(false);
+                    if !has_build {
+                        return Err(Fail::new(
+                            CODE_NO_BUILD_CONFIG,
+                            "This server has no build configuration for ac-worldserver -- it runs from prebuilt images, so mod-unbound cannot be compiled into it.",
+                            "Wrath Unbound needs a server whose worldserver is built from source (a native install, or a WSL install with its compose build sections). A migrated image-only server cannot take the add-on.",
+                        ));
+                    }
+                }
+                Err(_) => self.line(
+                    "warn",
+                    "could not parse the compose configuration -- proceeding without the build-config check.",
+                ),
+            }
+        } else {
+            // Tri-state: a compose that cannot answer is evidence of nothing.
+            self.line(
+                "warn",
+                "could not read the compose configuration -- proceeding without the build-config check.",
+            );
         }
 
         // (f) Consent — the LAST guard, so everything above can refuse for a
@@ -973,21 +1110,37 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
-    fn do_backup(&mut self) -> Result<(), Fail> {
-        if self.state.as_ref().is_some_and(|s| s.is_done(Stage::Backup)) {
-            self.line("info", "a safety backup from this install already exists -- not taking another.");
-            return Ok(());
+    /// Can this run skip its backup stage? Only when the state RECORDS one
+    /// AND the recorded file is still on disk — the pool is shared and
+    /// pruned to newest-N by every other dump on the box, so a completion
+    /// token from two weeks ago routinely outlives its file (review finding,
+    /// 2026-08-02). A recorded-done with a missing file re-runs the dump.
+    fn backup_skippable(&self, recorded: bool) -> bool {
+        if !recorded {
+            return false;
         }
+        match self.state.as_ref().and_then(|s| s.backup_file.as_deref()) {
+            Some(f) => self.io.backup_exists(f),
+            // Recorded done but no file name (a pre-fix state file): the
+            // claim cannot be verified, so it is not trusted.
+            None => false,
+        }
+    }
+
+    fn take_backup(&mut self) -> Result<(), Fail> {
         let password = self.db_password.clone();
+        let container = self.db_container.clone().expect("guard resolved the container");
         let mut lines: Vec<(String, String)> = Vec::new();
-        let result = self.io.safety_backup(&password, &mut |lvl, txt| lines.push((lvl, txt)));
+        let result =
+            self.io.safety_backup(&container, &password, &mut |lvl, txt| lines.push((lvl, txt)));
         for (lvl, txt) in lines {
             self.line(&lvl, txt);
         }
         match result {
             Ok(file) => {
                 self.line("info", format!("backup created: {file}"));
-                self.backup_file = Some(file);
+                self.backup_file = Some(file.clone());
+                self.st().backup_file = Some(file);
                 Ok(())
             }
             Err(tail) => Err(Fail::new(
@@ -1000,6 +1153,19 @@ impl<'a> Engine<'a> {
                 "Nothing on the server was touched. Fix the backup problem (disk space is the usual one) and run this again.",
             )),
         }
+    }
+
+    fn do_backup(&mut self) -> Result<(), Fail> {
+        let recorded = self.state.as_ref().is_some_and(|s| s.is_done(Stage::Backup));
+        if self.backup_skippable(recorded) {
+            self.backup_file = self.state.as_ref().and_then(|s| s.backup_file.clone());
+            self.line("info", "this install's safety backup is still on disk -- not taking another.");
+            return Ok(());
+        }
+        if recorded {
+            self.line("warn", "the recorded safety backup is gone (the backup pool prunes to the newest few) -- taking a fresh one.");
+        }
+        self.take_backup()
     }
 
     fn do_stage_files(&mut self) -> Result<(), Fail> {
@@ -1015,6 +1181,18 @@ impl<'a> Engine<'a> {
                 return Err(stage_write_fail(&dest, &e));
             }
         }
+        // The pre-1.2.2 location. ALE scans one directory, but an upgrade
+        // that leaves this copy behind can have BOTH registered when an old
+        // override still points ALE at lua_scripts/ - two gossip handlers on
+        // creature 900001. The bash installer had the same gap and only its
+        // uninstaller cleaned it; removing it here is cheap and one-way.
+        let legacy = sdir.join("lua_scripts/unbound_mentor.lua");
+        if legacy.is_file() {
+            match std::fs::remove_file(&legacy) {
+                Ok(()) => self.line("info", "removed the pre-1.2.2 copy at lua_scripts/unbound_mentor.lua."),
+                Err(e) => self.line("warn", format!("could not remove the legacy lua_scripts/unbound_mentor.lua: {e}")),
+            }
+        }
         self.line("info", format!("staged {} module files.", MANIFEST.len()));
         Ok(())
     }
@@ -1028,6 +1206,41 @@ impl<'a> Engine<'a> {
         // before the working tree, so an interrupted clone leaves a non-empty
         // dir that a bare existence check would call "done" forever.
         if ale.join("CMakeLists.txt").is_file() {
+            // ...but a complete-looking checkout can still be the WRONG
+            // commit: a previous run that cloned fine and then FAILED the pin
+            // checkout left exactly this state, and skipping here would build
+            // untested mod-ale HEAD under a 90-minute rebuild -- the bash
+            // behaviour whose refusal was the point (review finding,
+            // 2026-08-02). Verify the pin; re-pin if the answer is wrong; a
+            // probe that cannot answer refuses nothing (tri-state).
+            let (outcome, out) = self.run_collect(&self.git_probe(vec![
+                "-C".into(),
+                ale.display().to_string(),
+                "rev-parse".into(),
+                "HEAD".into(),
+            ]));
+            if outcome.is_ok() {
+                let head = out.trim();
+                if !head.starts_with(MOD_ALE_COMMIT) {
+                    self.line("info", "mod-ale is present but not at the pinned commit -- re-pinning it.");
+                    let (co, _) = self.run_collect(&self.git_probe(vec![
+                        "-C".into(),
+                        ale.display().to_string(),
+                        "checkout".into(),
+                        "--quiet".into(),
+                        MOD_ALE_COMMIT.into(),
+                    ]));
+                    if !co.is_ok() {
+                        return Err(Fail::new(
+                            CODE_ALE_PIN_MISMATCH,
+                            format!("mod-ale is checked out at {head}, not the pinned commit, and re-pinning failed."),
+                            "The add-on is tested against exactly that commit. Fetch it (git -C modules/mod-ale fetch) or remove modules/mod-ale and run this again.",
+                        ));
+                    }
+                }
+            } else {
+                self.line("warn", "could not verify mod-ale's pinned commit -- continuing with what is there.");
+            }
             self.line("info", "mod-ale (the Lua engine) is already present -- skipping the clone.");
             return Ok(());
         }
@@ -1078,12 +1291,26 @@ impl<'a> Engine<'a> {
     }
 
     fn do_sql(&mut self) -> Result<(), Fail> {
+        // The container id was resolved by the guard, but Backup and CloneAle
+        // between there and here can take many minutes -- long enough for a
+        // restart to have recreated ac-database under a new id. Re-resolving
+        // is one bounded compose call; a stale id would make every exec fail
+        // (or worse, hit a same-named container from another stack).
+        self.resolve_db_container()?;
         if self.state.as_ref().is_some_and(|s| s.is_done(Stage::Sql)) {
-            // Recorded means every file REALLY applied once. The migrations
-            // are idempotent, but three of them are DELETE-then-INSERT --
-            // re-firing those on every resume is churn with no upside.
-            self.line("info", "migrations already applied by this install -- not re-running them.");
-            return Ok(());
+            // Recorded means every file REALLY applied once -- but the
+            // DATABASE outranks the bookkeeping: a restore-from-backup
+            // between attempts rolls the migrations back while the state
+            // still claims them, and resuming into a 90-minute rebuild whose
+            // server then cannot come up helps nobody. The canary table
+            // (migration 01's own artifact) is the cheap tiebreaker.
+            let canary_ok =
+                self.run_collect(&self.mysql_probe("acore_world", CANARY_SQL)).0.is_ok();
+            if canary_ok {
+                self.line("info", "migrations already applied by this install -- not re-running them.");
+                return Ok(());
+            }
+            self.line("warn", "the state file claims the migrations ran, but the database disagrees (restored from a backup?) -- re-applying them.");
         }
         let backup_hint = self.backup_hint();
         for (dest, db) in SQL_ORDER {
@@ -1230,14 +1457,33 @@ impl<'a> Engine<'a> {
         }
         // Record what we are about to replace, ONCE — uninstall restores this
         // instead of guessing the AzerothCore default was in force.
+        //
+        // NEVER record "0" as the prior (review finding, 2026-08-02): a "0"
+        // found here is far more likely the ADD-ON's own earlier write (a
+        // bash-scripted install being taken over, a state file invalidated by
+        // a dir move) than a user's deliberate pre-Unbound choice — and
+        // recording it makes uninstall "restore" the add-on's value while
+        // claiming it restored the user's. Left unrecorded, uninstall
+        // restores the stock default and DECLARES the guess in residue.
         if self.st().prior_validate_skill.is_none() {
-            let prior = std::fs::read_to_string(&ws)
+            let current = std::fs::read_to_string(&ws)
                 .map(|t| conf::parse_conf(&t))
                 .ok()
-                .and_then(|m| m.get(VALIDATE_KEY).cloned())
-                .unwrap_or_else(|| "1".to_string());
-            self.st().prior_validate_skill = Some(prior);
-            self.persist();
+                .and_then(|m| m.get(VALIDATE_KEY).map(|v| conf::strip_conf_quotes(v)));
+            match current.as_deref() {
+                Some("0") => self.line(
+                    "info",
+                    format!("{VALIDATE_KEY} is already 0 (likely from an earlier Unbound install) -- an uninstall will restore the stock default."),
+                ),
+                Some(v) => {
+                    self.st().prior_validate_skill = Some(v.to_string());
+                    self.persist();
+                }
+                None => {
+                    self.st().prior_validate_skill = Some("1".to_string());
+                    self.persist();
+                }
+            }
         }
         backup_sibling_once(&ws);
         match conf::conf_write(&ws, VALIDATE_KEY, "0") {
@@ -1330,14 +1576,19 @@ impl<'a> Engine<'a> {
         // A fresh BuildProgress per attempt — a resumed build's bar starts
         // over BY CONSTRUCTION rather than continuing a dead run's number.
         let mut progress = BuildProgress::default();
-        let call = self.docker_unbounded(
-            vec!["compose".into(), "build".into(), "ac-worldserver".into()],
-            Some(sdir.clone()),
-        );
+        // The -f set the guard resolved: a composegen server keeps build:
+        // in docker-compose.build.yml, which compose never auto-loads — a
+        // bare `compose build` there builds NOTHING and exits 0.
+        self.resolve_build_files();
+        let mut args: Vec<String> = vec!["compose".into()];
+        args.extend(self.build_files.iter().cloned());
+        args.extend(["build".into(), "ac-worldserver".into()]);
+        let call = self.docker_unbounded(args, Some(sdir.clone()));
 
         use std::io::Write;
         let _ = std::fs::create_dir_all(&log_dir);
         let mut log = std::fs::File::create(&log_path).ok();
+        let log_landed = log.is_some();
         let emit = self.emit;
         let outcome = self.io.run(&call, &mut |l| {
             if let Some(f) = log.as_mut() {
@@ -1349,14 +1600,18 @@ impl<'a> Engine<'a> {
             emit(line_event("info", l));
         });
         if !outcome.is_ok() {
+            // Only name the log file when it actually exists — a hint
+            // pointing at a file that could not be created sends the user
+            // hunting for evidence that is not there.
+            let where_ = if log_landed {
+                format!("The full build log is at {}.", log_path.display())
+            } else {
+                "The full build output is in the terminal above (the log file could not be created).".to_string()
+            };
             return Err(Fail::new(
                 CODE_BUILD_FAILED,
                 format!("The worldserver rebuild failed ({}).", outcome.detail()),
-                format!(
-                    "The full build log is at {}. {}",
-                    log_path.display(),
-                    self.backup_hint()
-                ),
+                format!("{where_} {}", self.backup_hint()),
             ));
         }
         Ok(())
@@ -1539,7 +1794,11 @@ impl<'a> Engine<'a> {
         // enough to proceed (a half-install still wants cleaning up); NONE
         // means there is nothing here to remove, and running the revert
         // anyway is a --force decision, not a default.
-        let state_evidence = self.resumed;
+        // An interrupted uninstall is itself evidence: its own progress list
+        // says the add-on WAS here, even after remove-files deleted the tree
+        // and sql-revert dropped the canary.
+        let state_evidence = self.resumed
+            || self.state.as_ref().is_some_and(|s| !s.uninstalling.is_empty());
         let canary = self.run_collect(&self.mysql_probe("acore_world", CANARY_SQL)).0.is_ok();
         let module = sdir.join(MODULE_REL).exists();
         let patched = probe_patch_presence(&sdir) != PatchPresence::None;
@@ -1547,7 +1806,7 @@ impl<'a> Engine<'a> {
             return Err(Fail::new(
                 CODE_NOT_INSTALLED,
                 "No trace of Wrath Unbound was found on this server (no state file, no unbound tables, no module tree, no core patch).",
-                "Nothing to uninstall. Run with --force to run the revert anyway (every statement is IF-EXISTS-shaped).",
+                "Nothing to uninstall. --force runs the revert anyway, but it is NOT a no-op: two of its statements delete rows in tables other mods share (playercreateinfo_spell_custom, and skillraceclassinfo_dbc ID >= 10000). Only use it if you know the add-on was here.",
             ));
         }
 
@@ -1564,41 +1823,43 @@ impl<'a> Engine<'a> {
     }
 
     fn do_un_backup(&mut self) -> Result<(), Fail> {
-        if self.state.as_ref().is_some_and(|s| s.is_undone(UninstallStage::Backup)) {
-            self.line("info", "a safety backup from this uninstall already exists -- not taking another.");
+        let recorded =
+            self.state.as_ref().is_some_and(|s| s.is_undone(UninstallStage::Backup));
+        if self.backup_skippable(recorded) {
+            self.backup_file = self.state.as_ref().and_then(|s| s.backup_file.clone());
+            self.line("info", "this uninstall's safety backup is still on disk -- not taking another.");
             return Ok(());
         }
-        let password = self.db_password.clone();
-        let mut lines: Vec<(String, String)> = Vec::new();
-        let result = self.io.safety_backup(&password, &mut |lvl, txt| lines.push((lvl, txt)));
-        for (lvl, txt) in lines {
-            self.line(&lvl, txt);
+        if recorded {
+            self.line("warn", "the recorded safety backup is gone (the backup pool prunes to the newest few) -- taking a fresh one.");
         }
-        match result {
-            Ok(file) => {
-                self.line("info", format!("backup created: {file}"));
-                self.backup_file = Some(file);
-                Ok(())
-            }
-            Err(tail) => Err(Fail::new(
-                CODE_BACKUP_FAILED,
-                if tail.is_empty() {
-                    "The safety backup failed, so nothing was changed.".to_string()
-                } else {
-                    format!("The safety backup failed, so nothing was changed: {tail}")
-                },
-                "Nothing on the server was touched. Fix the backup problem and run this again.",
-            )),
-        }
+        self.take_backup()
     }
 
     fn do_sql_revert(&mut self) -> Result<(), Fail> {
+        // Same stale-id hazard as do_sql: the multi-minute backup ran since
+        // the guard resolved the container.
+        self.resolve_db_container()?;
         // Per-statement, warn-and-continue — the bash's deliberate choice,
         // kept: half a cleanup beats stranding the user mid-revert. What the
         // bash then FORGOT is the other half of the deal: every failure here
         // lands in `residue`, so the done event still tells the whole truth.
-        for (db, sql, label) in REVERT_SQL {
-            let call = self.mysql_probe(db, sql);
+        //
+        // ONE ordering exception: statement 0 deletes creature_addon rows
+        // through a subquery anchored on the creature rows statement 1 then
+        // deletes. If 0 FAILS and 1 succeeds, the addon rows are orphaned
+        // with their anchor gone — unremovable by any re-run, including
+        // --force. So a failure of 0 SKIPS 1, keeping the anchor alive for
+        // the retry, and both land in residue.
+        let mut skip_next = false;
+        for (i, (db, sql, label)) in REVERT_SQL.iter().enumerate() {
+            if skip_next {
+                skip_next = false;
+                self.line("warn", format!("{label} -- SKIPPED (its companion delete failed; re-run uninstall to retry both)"));
+                self.residue.push(format!("database revert skipped: {label} (companion failed)"));
+                continue;
+            }
+            let call = self.mysql_stmt_call(db, sql);
             let (outcome, out) = self.run_collect(&call);
             if outcome.is_ok() {
                 self.line("info", label.to_string());
@@ -1606,6 +1867,9 @@ impl<'a> Engine<'a> {
                 let detail = stderr_tail(&out);
                 self.line("warn", format!("{label} -- FAILED: {detail}"));
                 self.residue.push(format!("database revert failed: {label} ({detail})"));
+                if i == 0 {
+                    skip_next = true;
+                }
             }
         }
         Ok(())
@@ -1939,6 +2203,8 @@ pub fn unbound_install_stream_with(
         db_password: String::new(),
         backup_file: None,
         residue: Vec::new(),
+        uninstalling_mode: false,
+        build_files: Vec::new(),
     };
     match engine.go() {
         Ok(()) => {
@@ -1954,7 +2220,14 @@ pub fn unbound_install_stream_with(
                 // NPC needs a GM in-game (or SOAP, which a fresh server may
                 // not have). `done` says so instead of claiming it happened —
                 // the bash banner's lie, not repeated.
-                "manual_step": "In game as a GM, stand where the Mentor should appear and run: .npc add 900001",
+                "manual_step": if engine.opts.repair {
+                    // On a REPAIR the previous install's Mentor is still
+                    // standing - nothing here deletes creature spawns - so
+                    // telling the user to add another leaves two.
+                    "If your Mentor from the previous install is still standing, there is nothing to do. Otherwise, in game as a GM: .npc add 900001"
+                } else {
+                    "In game as a GM, stand where the Mentor should appear and run: .npc add 900001"
+                },
             })));
             0
         }
@@ -2002,6 +2275,8 @@ pub fn unbound_uninstall_stream_with(
         db_password: String::new(),
         backup_file: None,
         residue: Vec::new(),
+        uninstalling_mode: true,
+        build_files: Vec::new(),
     };
     match engine.go_uninstall() {
         Ok(()) => {
@@ -2018,7 +2293,16 @@ pub fn unbound_uninstall_stream_with(
             // A COMPLETED uninstall removes the state file: leaving one that
             // claims install-complete on a now-stock server would misdirect
             // both `unbound status` and the next install's guard.
-            let _ = std::fs::remove_file(state_path(engine.sdir()));
+            let sp = state_path(engine.sdir());
+            if sp.exists() {
+                if let Err(e) = std::fs::remove_file(&sp) {
+                    engine.line("warn", format!("could not remove {}: {e}", sp.display()));
+                    engine.residue.push(format!(
+                        "{} is still on disk and claims the add-on is installed - delete it by hand, or `unbound status` and the next install will disagree with reality",
+                        sp.display()
+                    ));
+                }
+            }
             (engine.emit)(done_event(serde_json::json!({
                 "addon_version": ADDON_VERSION,
                 "server_dir": engine.sdir().display().to_string(),
@@ -2045,6 +2329,15 @@ pub struct UnboundStatus {
     pub addon_version: Option<String>,
     pub completed: Vec<String>,
     pub next_stage: Option<String>,
+    /// Uninstall stages already done. NON-EMPTY means an uninstall was
+    /// interrupted - without this field the same state reads as a COMPLETED
+    /// INSTALL (every install stage recorded), which is the opposite of the
+    /// truth about a server whose module tree is already gone.
+    pub uninstalling: Vec<String>,
+    pub next_uninstall_stage: Option<String>,
+    /// `installed` | `installing` | `uninstalling` | `absent`, derived from
+    /// the state file and the disk together.
+    pub phase: String,
     pub patch: String,
     pub module_staged: bool,
     pub last_error: Option<String>,
@@ -2058,6 +2351,9 @@ pub fn unbound_status(games_dir: &Path, id: &str) -> UnboundStatus {
             addon_version: None,
             completed: Vec::new(),
             next_stage: None,
+            uninstalling: Vec::new(),
+            next_uninstall_stage: None,
+            phase: "absent".into(),
             patch: "unknown".into(),
             module_staged: false,
             last_error: None,
@@ -2072,14 +2368,38 @@ pub fn unbound_status(games_dir: &Path, id: &str) -> UnboundStatus {
     let next = state.as_ref().and_then(|s| {
         STAGE_ORDER.iter().find(|st| st.records_completion() && !s.is_done(**st)).map(|st| st.name().to_string())
     });
+    let next_un = state.as_ref().and_then(|s| {
+        UNINSTALL_ORDER
+            .iter()
+            .find(|st| st.records_completion() && !s.is_undone(**st))
+            .map(|st| st.name().to_string())
+    });
+    let module_staged = sdir.join(unbound_payload::MODULE_REL).join("src").is_dir();
+    let uninstalling = state.as_ref().map(|s| s.uninstalling.clone()).unwrap_or_default();
+    // An in-flight uninstall OUTRANKS every install claim in the same file:
+    // its stages ran later and have already undone some of them.
+    let phase = if !uninstalling.is_empty() {
+        "uninstalling"
+    } else if state.as_ref().is_some_and(|s| s.complete()) {
+        "installed"
+    } else if state.is_some() {
+        "installing"
+    } else if module_staged || patch == "applied" {
+        "installed"
+    } else {
+        "absent"
+    };
     UnboundStatus {
         server_dir: Some(sdir.display().to_string()),
         state_present: state.is_some(),
         addon_version: state.as_ref().map(|s| s.addon_version.clone()),
         completed: state.as_ref().map(|s| s.completed.clone()).unwrap_or_default(),
         next_stage: next,
+        uninstalling,
+        next_uninstall_stage: next_un,
+        phase: phase.into(),
         patch: patch.into(),
-        module_staged: sdir.join(unbound_payload::MODULE_REL).join("src").is_dir(),
+        module_staged,
         last_error: state.and_then(|s| s.last_error),
     }
 }
@@ -2170,6 +2490,9 @@ mod tests {
         replies: RefCell<Vec<Reply>>,
         backup: Result<String, String>,
         backup_calls: Cell<usize>,
+        /// What `backup_exists` answers -- the fake's model of the shared,
+        /// pruned ~/.dml/backups pool.
+        existing_backups: RefCell<Vec<String>>,
         /// When Some, git clone/apply MUTATE the fixture like the real tools
         /// would (clone creates CMakeLists.txt; apply writes the symbol).
         world: Option<PathBuf>,
@@ -2184,6 +2507,7 @@ mod tests {
                 replies: RefCell::new(Vec::new()),
                 backup: Ok("backup-test.sql.gz".to_string()),
                 backup_calls: Cell::new(0),
+                existing_backups: RefCell::new(vec!["backup-test.sql.gz".to_string()]),
                 world: Some(world.to_path_buf()),
             };
             io.reply("compose ps -q ac-database", 0, &["cid-db-1234"])
@@ -2304,11 +2628,18 @@ mod tests {
         }
         fn safety_backup(
             &self,
+            container: &str,
             _password: &str,
             _on_line: &mut dyn FnMut(String, String),
         ) -> Result<String, String> {
+            // The dump must target the container the GUARD resolved -- the
+            // engine-global name was the review finding.
+            assert_eq!(container, "cid-db-1234", "backup dumped the wrong container");
             self.backup_calls.set(self.backup_calls.get() + 1);
             self.backup.clone()
+        }
+        fn backup_exists(&self, file_name: &str) -> bool {
+            self.existing_backups.borrow().iter().any(|f| f == file_name)
         }
     }
 
@@ -2489,10 +2820,14 @@ mod tests {
         for s in [Stage::Backup, Stage::StageFiles, Stage::CloneAle, Stage::Sql] {
             st.mark(s);
         }
+        st.backup_file = Some("backup-test.sql.gz".into());
         st.last_error = Some("UNBOUND_BUILD_FAILED: boom".into());
         save_state(&sdir, &st).unwrap();
 
-        let io = FakeIo::happy(&sdir);
+        // The DB agrees with the state (the canary table exists) -- do_sql's
+        // restored-from-backup tiebreaker must find them consistent, or the
+        // skip under test would be overridden for the right reason.
+        let io = FakeIo::happy(&sdir).reply(CANARY_SQL, 0, &["1"]);
         let (code, events) = run(&io, &opts_for(&games));
         assert_eq!(code, 0, "terminal: {}", terminal(&events));
 
@@ -2707,6 +3042,7 @@ mod tests {
             replies: RefCell::new(Vec::new()),
             backup: Ok("x".into()),
             backup_calls: Cell::new(0),
+            existing_backups: RefCell::new(Vec::new()),
             world: None,
         };
         let (code, events) = run(&io, &opts_for(&games));
