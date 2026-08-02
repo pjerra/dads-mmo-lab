@@ -184,9 +184,11 @@
         dockerError = "Docker Desktop could not be launched. Start it from the Start menu, then use Check again.";
         return;
       }
-      // Up to ~2 minutes: a cold engine start on a first run is genuinely
-      // slow, and giving up early would send the user back to a screen that
-      // says the thing they already fixed.
+      // Up to ~2 minutes, and that bound is MEASURED rather than guessed: a
+      // cold start on this box took 50s from issuing the same command to the
+      // engine answering (2026-08-03). Giving up early would send the user
+      // back to a screen naming the thing they already fixed -- the failure
+      // mode the Tailscale login had when its 8s bound was a guess.
       for (let i = 0; i < 40; i++) {
         await new Promise((r) => setTimeout(r, 3000));
         onrecheck();
