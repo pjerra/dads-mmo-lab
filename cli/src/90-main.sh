@@ -471,10 +471,14 @@ _games_start_impl() {
     # THE REFUSAL, FIRST -- and on THIS path, which is the one the launcher's
     # Start button actually takes (audit #6: the guard lived only in the
     # legacy `start` arm, so `dml games start --json` sailed past it and
-    # `compose up` clobbered whichever stack owned the ac-* names). Cold
-    # starts only: a restart's own containers legitimately hold the names,
-    # and the own-stack exclusion inside the check covers the stopped case.
-    if [[ "$mode" == "start" ]] && _stack_conflict_check "$compose_dir"; then
+    # `compose up` clobbered whichever stack owned the ac-* names).
+    #
+    # BOTH modes, deliberately (review finding, 2026-08-02): the original
+    # start-only gate reasoned "a restart's own containers hold the names" --
+    # but the own-stack exclusion inside the check already handles that, so
+    # the gate only opened a hole where `restart` reached `compose down`
+    # with zero protection against a name-coincident FOREIGN stack.
+    if _stack_conflict_check "$compose_dir"; then
         local _scmsg
         _scmsg="$(_stack_conflict_message)"
         if [[ "$DML_JSON" == 1 ]]; then
@@ -640,12 +644,17 @@ EOF
 #     because compose honours overrides (COMPOSE_PROJECT_NAME, top-level
 #     `name:`) that a bash re-derivation would get wrong.
 
-# Does this directory's compose file claim any of the ac-* container names?
+# Does this directory's compose set actually CLAIM any of the ac-* container
+# names? Anchored on a real `container_name:` key (comments and image names
+# mentioning ac-worldserver claim nothing — an unanchored grep re-created the
+# audit-#8 false refusal for any title whose compose merely REFERENCES an AC
+# image). The override file is scanned too: compose auto-loads it, and a
+# claim is a claim wherever it is written.
 _stack_is_ac() {
     local dir="$1" f
-    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
+    for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml docker-compose.override.yml; do
         [[ -f "$dir/$f" ]] || continue
-        grep -Eq 'ac-(database|db-import|client-data-init|authserver|worldserver)' "$dir/$f" 2>/dev/null && return 0
+        grep -Eq '^[[:space:]]*container_name:[[:space:]]*["'"'"']?ac-(database|db-import|client-data-init|authserver|worldserver)' "$dir/$f" 2>/dev/null && return 0
     done
     return 1
 }

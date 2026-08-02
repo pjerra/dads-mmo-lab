@@ -194,3 +194,30 @@ EOS
   # POSIX paths keep their case: /srv/A and /srv/a really differ on Linux.
   [ "$(_canon_path '/srv/Games/wow/')" = "/srv/Games/wow" ]
 }
+
+@test "restart refuses a foreign owner too -- compose down must never reach their stack" {
+  # The start-only gate left `games restart` reaching `compose down` with
+  # zero protection; the own-stack exclusion already covers the legitimate
+  # case, so the gate bought nothing but the hole.
+  stub_docker $'ac-worldserver\tsome-other-stack\t/somewhere/else'
+  run bash "$DML" games restart wow --json
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'"code":"STACK_CONFLICT"'* ]]
+}
+
+@test "restart of our own running stack still proceeds" {
+  stub_docker "ac-worldserver"$'\t'"wow"$'\t'"$DML_GAMES_DIR/wow"
+  run bash "$DML" games restart wow --json
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"event":"done"'* ]]
+}
+
+@test "a compose file that merely MENTIONS an ac name in a comment is not AC-shaped" {
+  add_game chatter compose
+  printf '# like ac-worldserver upstream\nservices:\n  chat:\n    image: ac-worldserver-fork:latest\n    container_name: chatter\n' \
+    > "$DML_GAMES_DIR/chatter/docker-compose.yml"
+  stub_docker $'ac-worldserver\twow-stack\t/elsewhere'
+  run bash "$DML" start chatter
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Starting chatter"* ]]
+}
