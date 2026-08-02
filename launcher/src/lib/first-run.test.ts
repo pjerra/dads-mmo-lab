@@ -90,7 +90,38 @@ describe("firstRunState — when NOT to take over Home", () => {
       everReady: false,
     });
     expect(got?.kind).toBe("docker-stopped");
-    expect(got?.action.kind).toBe("retry");
+  });
+
+  /**
+   * A stopped engine is the ONE blocked state the launcher can repair, and
+   * this used to assert `retry` -- pinning the bug rather than the behaviour.
+   *
+   * "Check again" re-probes a condition we could have fixed. Worse, because
+   * this screen replaces Home entirely, the sidebar play chip and every gated
+   * page's "Start server" both navigated here and did nothing at all: the
+   * request was dropped because the first-run screen was up. Reported live,
+   * 2026-08-03 -- "it just changes tab to home and tries to refresh".
+   */
+  it("offers to START a stopped Docker rather than merely re-checking it", () => {
+    const got = firstRunState({
+      report: report({ state: "docker_stopped", backend_mode: "native" }),
+      everReady: false,
+    });
+    expect(got?.action.kind).toBe("start-docker");
+    expect(got?.action.label).toMatch(/start/i);
+  });
+
+  it("still only OFFERS a repair for states the launcher can actually fix", () => {
+    // The counterpart, so the fix above cannot spread. Docker not installed,
+    // WSL absent and no distro all need something only the user can do, and a
+    // button that pretended otherwise would fail with nothing to say.
+    for (const state of ["no_docker", "no_wsl", "no_distro"] as const) {
+      const got = firstRunState({
+        report: report({ state, backend_mode: state === "no_docker" ? "native" : "wsl" }),
+        everReady: false,
+      });
+      expect(got?.action.kind, state).not.toBe("start-docker");
+    }
   });
 
   it("sends a ready native machine with no server to the Library", () => {

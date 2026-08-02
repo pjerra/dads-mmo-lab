@@ -134,7 +134,7 @@
   });
 
   let status = $derived(
-    statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress),
+    statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress, restartState.stopping),
   );
 
   // Server-required greeting (DECIDED 2026-07-21): pages that can't function
@@ -157,11 +157,19 @@
   // counterpart on the chip (accidental-click risk).
   function requestChipStart() {
     go("home");
-    // Same reason as the tray handler above: Home is the consumer, and it is
-    // not mounted while the first-run screen is up. Land the user on the
-    // screen that tells them what is actually missing instead of queueing a
-    // start for later.
-    if (firstRun) return;
+    // Home is the consumer, and it is not mounted while the first-run screen
+    // is up -- so for states the launcher CANNOT repair (Docker not installed,
+    // WSL not set up, no distro) landing the user on the screen that names the
+    // missing piece beats queueing a start that could never run.
+    //
+    // `docker-stopped` is the exception, and getting it wrong is what the user
+    // reported: the play chip and every gated page's "Start server" both
+    // navigated here and did nothing, because a stopped engine put the
+    // first-run screen up and this early return swallowed the request. A
+    // stopped engine is precisely what a start FIXES -- `games start` brings
+    // Docker up itself before composing -- so the request is kept, and the
+    // first-run screen's own button now performs the same repair.
+    if (firstRun && firstRun.kind !== "docker-stopped") return;
     chipStart.requested = true;
   }
 

@@ -9,6 +9,16 @@ import { escalate, type ApplyNeeded } from "$lib/apply-needed";
 export const restartState = $state({
   needed: false,
   restarting: false,
+  /**
+   * A STOP is in flight.
+   *
+   * Sibling of `restarting` and added for the same reason: while containers
+   * are coming down the polled verdict flaps to `soap_unreachable`, and Home
+   * rendered that as "World is running, but the launcher can't reach it" --
+   * an alarming sentence about a server the user just asked to stop. Reported
+   * live, 2026-08-03.
+   */
+  stopping: false,
   apply: "none" as ApplyNeeded,
 });
 

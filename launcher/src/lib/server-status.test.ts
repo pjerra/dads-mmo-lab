@@ -60,6 +60,47 @@ describe("statusLabel", () => {
     expect(statusLabel("stopped", false, null)).toEqual({ label: "Stopped", dot: "off" });
   });
 
+  /**
+   * A stop in flight, reported live on 2026-08-03.
+   *
+   * Containers on their way down make the poll flap to `soap_unreachable`, and
+   * Home renders that as "World is running, but the launcher can't reach it" --
+   * an alarm, about a server the user just asked to stop. The same reasoning
+   * that already gave `restarting` an override applies here; it was simply
+   * never wired for the stop path.
+   */
+  it("overrides every verdict while a stop is in flight", () => {
+    for (const v of ["online", "starting", "soap_unreachable", "crashed", "stopped", null] as const) {
+      expect(statusLabel(v, false, null, true)).toEqual({ label: "Stopping…", dot: "mid" });
+    }
+  });
+
+  it("never renders a FAULT dot while stopping", () => {
+    // Home keys its alarming warn/crash card styling on `s.dot`, not on the raw
+    // verdict, so this is the property that keeps a stopping server from
+    // flashing red. Stated separately from the label because a future edit
+    // could keep the wording and lose the styling guarantee.
+    for (const v of ["soap_unreachable", "crashed"] as const) {
+      expect(statusLabel(v, false, null, true).dot).not.toBe("bad");
+      expect(statusLabel(v, false, null, true).dot).not.toBe("crash");
+    }
+  });
+
+  it("ranks install over restart over stop", () => {
+    // A restart passes THROUGH a stop, so if both flags are ever set at once
+    // the restart is the truthful one -- "Stopping…" on a server that is about
+    // to come back up would send the user to press Start.
+    expect(statusLabel("online", true, null, true).label).toBe("Restarting…");
+    const inst = { ...emptyProgress(), active: true, stage: "build", pct: 40 };
+    expect(statusLabel("online", true, inst, true).label).not.toBe("Restarting…");
+  });
+
+  it("defaults `stopping` to false so no call site is silently opted in", () => {
+    // The opposite of `install`, which is REQUIRED. A stop is the rare state
+    // and defaulting it true would mislabel every ordinary poll.
+    expect(statusLabel("online", false, null).label).toBe("World is up");
+  });
+
   it("maps crashed to Server crashed with its own distinct dot kind", () => {
     expect(statusLabel("crashed", false, null)).toEqual({ label: "Server crashed", dot: "crash" });
     // Restarting still wins -- recovering FROM a crash shows the restart.

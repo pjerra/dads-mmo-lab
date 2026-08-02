@@ -226,6 +226,11 @@
     // covers the Home buttons (a start after a stop reads as "starting" via
     // the polled verdict, so only restart needs the explicit flag).
     if (action === "restart") restartState.restarting = true;
+    // ...and the same for a STOP. Without it the polled verdict flaps to
+    // soap_unreachable as the containers come down, and the card announces
+    // "World is running, but the launcher can't reach it" about a server the
+    // user just asked to stop (reported live, 2026-08-03).
+    if (action === "stop") restartState.stopping = true;
     // Only a run that actually SUCCEEDED may clear the pending-apply banner.
     //
     // "await returned" is not success: a streaming command resolves Ok even when
@@ -280,6 +285,7 @@
     } finally {
       taskbarIdle();
       if (action === "restart") restartState.restarting = false;
+      if (action === "stop") restartState.stopping = false;
       if (applied) clearApplyNeeded();
       busy = false;
       await refresh();
@@ -339,7 +345,7 @@
        chip and this card share statusLabel() so the two can never disagree
        about which state wins. -->
   {#if installProgress.active}
-    {@const s = statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress)}
+    {@const s = statusLabel(serverStatus.detail?.verdict ?? null, restartState.restarting, installProgress, restartState.stopping)}
     <div class="card status-card">
       <div class="card-title">
         <span class="dot status-dot mid"></span>
@@ -352,30 +358,27 @@
     </div>
   {:else if serverStatus.detail}
     {@const d = serverStatus.detail}
-    <div
-      class="card status-card"
-      class:warn={!restartState.restarting && d.verdict === "soap_unreachable"}
-      class:crash={!restartState.restarting && d.verdict === "crashed"}
-    >
+    <!-- Everything visual here comes from statusLabel(), including the dot and
+         the alarming warn/crash styling, which are keyed on `s.dot` and NOT on
+         the raw verdict. That indirection is the point. This card used to
+         re-derive the whole chain by hand behind ten separate
+         `!restartState.restarting &&` guards, so when a stop was added to the
+         store the chip learned about it and the card did not -- and a server on
+         its way down announced "World is running, but the launcher can't reach
+         it", which is both alarming and the opposite of what the user just
+         asked for. Keying on the dot makes "a transient state never renders as
+         a fault" a property of one function instead of a convention ten call
+         sites have to remember. -->
+    {@const s = statusLabel(d.verdict, restartState.restarting, installProgress, restartState.stopping)}
+    {@const settling = restartState.restarting || restartState.stopping}
+    <div class="card status-card" class:warn={s.dot === "bad"} class:crash={s.dot === "crash"}>
       <div class="card-title">
-        <span
-          class="dot status-dot"
-          class:on={!restartState.restarting && d.verdict === "online"}
-          class:mid={restartState.restarting || d.verdict === "starting"}
-          class:bad={!restartState.restarting && d.verdict === "soap_unreachable"}
-          class:off={!restartState.restarting && d.verdict === "stopped"}
-          class:crash={!restartState.restarting && d.verdict === "crashed"}
-        ></span>
-        <strong class:crash-text={!restartState.restarting && d.verdict === "crashed"}>
-          {#if restartState.restarting}Restarting…
-          {:else if d.verdict === "online"}World is up
-          {:else if d.verdict === "starting"}Starting up…
-          {:else if d.verdict === "soap_unreachable"}World is running, but the launcher can't reach it
-          {:else if d.verdict === "crashed"}Server crashed
-          {:else}Server is stopped{/if}
-        </strong>
+        <span class="dot status-dot {s.dot}"></span>
+        <strong class:crash-text={s.dot === "crash"}>{s.label}</strong>
       </div>
-      {#if restartState.restarting}
+      {#if restartState.stopping}
+        <p class="muted">Stopping — the containers are coming down.</p>
+      {:else if restartState.restarting}
         <p class="muted">Restarting — this takes a minute or two while the world reloads.</p>
       {:else if d.verdict === "online"}
         <div class="stats">
@@ -386,7 +389,7 @@
         </div>
       {:else if d.verdict === "starting"}
         <p class="muted">The world is still loading — this takes a couple of minutes while bots spawn.</p>
-      {:else if d.verdict === "soap_unreachable"}
+      {:else if d.verdict === "soap_unreachable" && !settling}
         <div class="recover-row">
           {#if dockerRestartCardVisible(nativeStatus)}
             <p class="muted">
@@ -404,7 +407,7 @@
             </p>
           {/if}
         </div>
-      {:else if d.verdict === "crashed"}
+      {:else if d.verdict === "crashed" && !settling}
         <div class="recover-row">
           <p class="muted">
             The world server stopped unexpectedly{d.exit_code !== null ? ` (exit code ${d.exit_code})` : ""}.

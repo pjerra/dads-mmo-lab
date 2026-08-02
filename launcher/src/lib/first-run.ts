@@ -109,7 +109,16 @@ export type FirstRunAction =
   | { kind: "setup"; label: string }
   | { kind: "nav"; label: string; page: PageId }
   | { kind: "link"; label: string; url: string }
-  | { kind: "retry"; label: string };
+  | { kind: "retry"; label: string }
+  /**
+   * Start the Docker engine, then re-probe.
+   *
+   * Exists because "Check again" was the wrong answer to the one first-run
+   * state the launcher can actually repair. Every other blocked state needs
+   * something only the user can do (install Docker, enable WSL, run the
+   * installer); a stopped engine needs a button the app already has.
+   */
+  | { kind: "start-docker"; label: string };
 
 export interface FirstRunState {
   kind: FirstRunKind;
@@ -363,7 +372,11 @@ export function firstRunState(o: {
         kind: "docker-stopped",
         title: "Docker Desktop isn't running",
         body: "Docker Desktop is installed on this PC but its engine is stopped, so there's nothing for your server to run in. Starting it takes a moment the first time.",
-        action: { kind: "retry", label: "Check again" },
+        // NOT "Check again". This is the only blocked state the launcher can
+        // repair itself -- every other one needs the user to install or enable
+        // something. Re-probing a condition we could have fixed made the play
+        // chip and every gated page's "Start server" dead-end here.
+        action: { kind: "start-docker", label: "Start Docker Desktop" },
         detail: "",
       };
 

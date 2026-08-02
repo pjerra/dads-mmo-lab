@@ -311,6 +311,7 @@ export function statusLabel(
   verdict: ServerDetail["verdict"] | null,
   restarting: boolean,
   install: InstallProgress | null,
+  stopping = false,
 ): StatusLabel {
   // An install in flight wins outright, ahead of even the restart override.
   // During a first install the polled verdict is not just uninformative but
@@ -320,6 +321,11 @@ export function statusLabel(
   // of that and go back to reporting a busy machine as an idle one.
   if (install?.active) return { label: installStatusText(install), dot: "mid" };
   if (restarting) return { label: "Restarting…", dot: "mid" };
+  // A stop in flight, for the same reason a restart overrides: containers on
+  // their way down make the verdict flap to `soap_unreachable`, which Home
+  // renders as "running, but the launcher can't reach it" -- alarming, and
+  // about a server the user just asked to stop.
+  if (stopping) return { label: "Stopping…", dot: "mid" };
   switch (verdict) {
     case "online":
       return { label: "World is up", dot: "on" };
