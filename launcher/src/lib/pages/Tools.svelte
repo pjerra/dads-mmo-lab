@@ -25,6 +25,8 @@
     wowCacheClean,
     nativeSetupStatus,
     wowUnboundStatus,
+    wowUnboundAddonsInstall,
+    wowUnboundAddonsExport,
     type UnboundStatus,
     startDockerDesktop,
     nativeYqInstall,
@@ -614,6 +616,48 @@
         return "Not installed.";
     }
   });
+
+  // --- The CLIENT addons (talent UI + spellbook) ------------------------
+  //
+  // A successful `unbound install` already writes these into the configured
+  // client. These two buttons cover what that cannot: a client that lost them,
+  // one configured after the server install, and handing a copy to other
+  // players -- none of which deserves a 30-90 minute rebuild.
+  let addonBusy = $state(false);
+  let addonNote: string | null = $state(null);
+  let addonErr: string | null = $state(null);
+
+  async function installAddons() {
+    addonBusy = true;
+    addonNote = null;
+    addonErr = null;
+    try {
+      const r = await wowUnboundAddonsInstall();
+      addonNote = `Installed ${r.files} files into ${r.dir} (${r.addons.join(", ")}). Restart WoW or /reload.`;
+    } catch (e) {
+      addonErr = fmtErr(e);
+    } finally {
+      addonBusy = false;
+    }
+  }
+
+  async function exportAddons() {
+    addonBusy = true;
+    addonNote = null;
+    addonErr = null;
+    try {
+      const r = await wowUnboundAddonsExport();
+      // null = the user closed the folder picker. Not a failure, and saying
+      // "export failed" for a deliberate cancel is its own small lie.
+      addonNote = r
+        ? `Wrote ${r.files} files to ${r.dir}. Zip that folder and tell players to extract it into World of Warcraft/Interface/AddOns.`
+        : null;
+    } catch (e) {
+      addonErr = fmtErr(e);
+    } finally {
+      addonBusy = false;
+    }
+  }
 
   function startUnbound(mode: "install" | "uninstall") {
     installStore.id = `tool:unbound-native-${mode}`;
@@ -1609,6 +1653,32 @@
       </div>
     {/if}
 
+    {#if unboundNative}
+      <!--
+        The client half. The talent system's UI lives in these addons, so a
+        server with the bridge and no addon is a feature the player cannot see
+        -- which is why a successful install writes them automatically and why
+        these buttons exist for when it could not.
+      -->
+      <div class="addon-row">
+        <p class="muted">
+          <strong>Client addons</strong> — the talent UI and Unbound spellbook. An install
+          puts these in your own WoW automatically; use these to repair your client or to
+          make a copy for other players.
+        </p>
+        {#if addonNote}<p class="muted">{addonNote}</p>{/if}
+        {#if addonErr}<p class="warn-text">{addonErr}</p>{/if}
+        <div class="row">
+          <button disabled={addonBusy || toolBusy} onclick={installAddons}>
+            Install addons to my client
+          </button>
+          <button disabled={addonBusy || toolBusy} onclick={exportAddons}>
+            Export for players…
+          </button>
+        </div>
+      </div>
+    {/if}
+
     {#if toolInstallId}
       {#key installStore.nonce}
         <InstallTerminal
@@ -1847,6 +1917,9 @@
   .card p { margin: 0; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .confirm-row { border-top: 1px solid #21262d; padding-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+  /* Same separated-block shape as .confirm-row: the client addons are a
+     different machine from everything else on this card. */
+  .addon-row { border-top: 1px solid #21262d; padding-top: 10px; margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
   .section-head { margin: 8px 0 0; font-size: 14px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.06em; }
   .fld { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #8b949e; }

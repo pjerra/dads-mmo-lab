@@ -257,6 +257,8 @@ prints them.
 | `unbound install` | `[--id <ID>]` `--accept-data-changes` `[--repair]` | stream | Layer the Wrath Unbound add-on onto an existing server + rebuild — resumable |
 | `unbound uninstall` | `[--id <ID>]` `--accept-data-changes` `[--force]` | stream | Remove the add-on + rebuild; `done` names its residue |
 | `unbound status` | `[--id <ID>]` | envelope | Add-on install/uninstall progress from disk evidence only |
+| `unbound addons install` | `[--client <DIR>]` (defaults to the saved client path) | envelope | Write the 3 CLIENT addons into `<client>/Interface/AddOns` |
+| `unbound addons export` | `<DIR>` | envelope | Write the same addon folders somewhere shareable |
 
 Not yet documented: the `data` payload schema of each command's ok envelope (known payloads:
 `version` as above; `lan` and `console` return `{"result": "<text>"}` on success).

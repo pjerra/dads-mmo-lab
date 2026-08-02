@@ -6354,6 +6354,65 @@ async fn wow_unbound_uninstall(
     Ok(())
 }
 
+/// Install the CLIENT addons into the saved WoW client folder.
+///
+/// The path is resolved HERE from `~/.dml/client-path`, never supplied by the
+/// webview — same rule as `save_text_file`: a compromised webview must not be
+/// able to name a directory to write 43 files into.
+///
+/// `unbound install` already does this automatically at the end of a run. This
+/// exists for the case that does not deserve a 90-minute rebuild: a client that
+/// lost its addons, or one configured after the server install.
+#[tauri::command]
+async fn wow_unbound_addons_install(
+    _state: State<'_, AppState>,
+) -> Result<serde_json::Value, CmdError> {
+    let cp = dml_wow::clientpath::read_client_path();
+    let path = cp.get("path").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    if path.is_empty() {
+        return Err(CmdError {
+            code: "NOT_FOUND".into(),
+            message: "No WoW client folder is configured.".into(),
+            hint: "Set your client folder on the Settings page first.".into(),
+        });
+    }
+    if !cp.get("valid").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(CmdError {
+            code: "BAD_ARG".into(),
+            message: format!("{path} does not look like a WoW client folder."),
+            hint: "It should contain Wow.exe or an Interface directory.".into(),
+        });
+    }
+    let done = dml_wow::unbound_addons::install_addons(std::path::Path::new(&path)).map_err(
+        |e| CmdError {
+            code: "WRITE_FAILED".into(),
+            message: e,
+            hint: "Check the folder is writable — close WoW if it is running.".into(),
+        },
+    )?;
+    Ok(serde_json::json!({
+        "addons_dir": done.addons_dir, "files": done.files, "addons": done.addons,
+    }))
+}
+
+/// Export the addons to a folder the user picks, for handing to other players.
+///
+/// Sync on purpose, like `save_text_file`: Tauri runs it off the main thread,
+/// which `blocking_pick_folder` requires. Returns `null` when the user cancels
+/// — a cancel is not an error and must not surface as one.
+#[tauri::command]
+fn wow_unbound_addons_export(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let Some(picked) = app.dialog().file().blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let dir = picked.into_path().map_err(|e| e.to_string())?;
+    let done = dml_wow::unbound_addons::export_addons(&dir)?;
+    Ok(Some(serde_json::json!({
+        "dir": done.addons_dir, "files": done.files, "addons": done.addons,
+    })))
+}
+
 /// On-disk evidence about the add-on: installed, part-way, or absent.
 ///
 /// Reads the state file and the six patched core files. No docker and no
@@ -7170,6 +7229,8 @@ pub fn run() {
             wow_unbound_install,
             wow_unbound_uninstall,
             wow_unbound_status,
+            wow_unbound_addons_install,
+            wow_unbound_addons_export,
             wow_soap_bootstrap_info,
             wow_soap_autosetup,
             wow_soap_credentials,

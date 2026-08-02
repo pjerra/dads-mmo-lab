@@ -1582,6 +1582,38 @@ export const wowUnboundUninstall = (
   return invoke("wow_unbound_uninstall", { acceptDataChanges, force, onEvent: ch });
 };
 
+/** What an addon install/export wrote, and where. */
+export interface UnboundAddonResult {
+  /** The directory written to (`addons_dir` on install, `dir` on export). */
+  dir: string;
+  files: number;
+  addons: string[];
+}
+
+// The three CLIENT addons — the talent UI and spellbook. `wowUnboundInstall`
+// already does this at the end of a run; this is the repair path, for a client
+// that lost them or was configured after the server install.
+//
+// NB the client folder is resolved on the RUST side from the saved client path
+// and is never passed from here: the webview must not be able to name a
+// directory to write 43 files into. Same rule as `saveTextFile`.
+export async function wowUnboundAddonsInstall(): Promise<UnboundAddonResult> {
+  const r = await invoke<{ addons_dir: string; files: number; addons: string[] }>(
+    "wow_unbound_addons_install",
+  );
+  return { dir: r.addons_dir, files: r.files, addons: r.addons };
+}
+
+/**
+ * Export the addons to a folder the user picks, for handing to other players.
+ *
+ * `null` means the user CANCELLED the picker — not a failure, and callers must
+ * not report it as one.
+ */
+export async function wowUnboundAddonsExport(): Promise<UnboundAddonResult | null> {
+  return await invoke<UnboundAddonResult | null>("wow_unbound_addons_export");
+}
+
 /** The guided SOAP account step: what to type and where. */
 export interface SoapBootstrapInfo {
   user: string;
