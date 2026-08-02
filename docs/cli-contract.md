@@ -440,8 +440,17 @@ spells until next login; Mentor Stones in inventories are untouched, their clean
 TEXT in `mentor_stone_cleanup_sql`, never executed). `done` also names the one manual step —
 spawning the Mentor (`.npc add 900001`) — instead of claiming it happened.
 
-**Not yet wired into the launcher** — same status as `install-native`: reachable only via the
-binary; the Tools-page flow is a separate task.
+**Wired into the launcher on the NATIVE backend (2026-08-02).** The Tools page's Wrath Unbound card
+drives the engine through `wow_unbound_install` / `wow_unbound_uninstall` / `wow_unbound_status`,
+holding the same global install slot as `games_install_native` (a 30–90-minute rebuild must not run
+underneath a title install). The card collects `--accept-data-changes` as an explicit checkbox that
+names the affected tables BEFORE the run, rather than letting the user meet that list as a refusal
+after committing to the rebuild.
+
+On the **WSL** backend the card still runs the upstream bash installer through `tool_install`, which
+is correct there. It cannot work natively: under Git Bash the script's own `IS_WSL2` probe is false,
+so its auto-detection searches Linux home directories for a server that lives at a Windows path,
+then prompts for one — a question no button can answer.
 
 ### Deliberately not ported
 

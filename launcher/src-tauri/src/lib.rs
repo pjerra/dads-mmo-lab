@@ -6249,6 +6249,128 @@ async fn games_install_native(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Wrath Unbound add-on (native engine)
+// ---------------------------------------------------------------------------
+//
+// These REPLACE the `tool_install("unbound")` route on the native backend.
+// That route curl-downloads the upstream bash installer and runs it under Git
+// Bash, where its `IS_WSL2` probe is false and its auto-detection therefore
+// searches Linux home directories for a server that lives at a Windows path.
+// The user met it as "Could not find a Dad's MMO Lab WotLK Playerbots install
+// automatically" followed by a prompt no GUI can answer (2026-08-02).
+//
+// The engine takes the title dir as a parameter instead of searching for one,
+// and refuses rather than prompting — which is what makes it drivable from a
+// button at all. The WSL route is untouched and still correct there.
+
+/// Install (or resume) the add-on. Streams the engine's NDJSON events.
+///
+/// Holds the SAME global install slot as `games_install_native`: this is a
+/// 30–90 minute rebuild, and letting a title install start underneath it would
+/// have two engines composing the same stack.
+#[tauri::command]
+async fn wow_unbound_install(
+    accept_data_changes: bool,
+    repair: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Native);
+    }
+    let slot = state.install.clone();
+    let ch = on_event.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut opts =
+            dml_wow::unbound::UnboundOpts::new(dml_core::compose::games_dir_from_env());
+        // Consent is COLLECTED BY THE CALLER and merely carried here. The
+        // engine refuses without it and its refusal enumerates the deletes,
+        // so a frontend that forgot to ask gets a readable error rather than
+        // a silent data change.
+        opts.accept_data_changes = accept_data_changes;
+        opts.repair = repair.unwrap_or(false);
+        dml_wow::unbound::unbound_install_stream(&opts, |v| {
+            let _ = ch.send(v);
+        })
+    })
+    .await;
+    *slot.lock().unwrap() = None;
+    result.map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })?;
+    Ok(())
+}
+
+/// Remove the add-on and rebuild back to stock. Same slot, same streaming.
+#[tauri::command]
+async fn wow_unbound_uninstall(
+    accept_data_changes: bool,
+    force: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Native);
+    }
+    let slot = state.install.clone();
+    let ch = on_event.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut opts =
+            dml_wow::unbound::UnboundOpts::new(dml_core::compose::games_dir_from_env());
+        opts.accept_data_changes = accept_data_changes;
+        opts.force = force.unwrap_or(false);
+        dml_wow::unbound::unbound_uninstall_stream(&opts, |v| {
+            let _ = ch.send(v);
+        })
+    })
+    .await;
+    *slot.lock().unwrap() = None;
+    result.map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })?;
+    Ok(())
+}
+
+/// On-disk evidence about the add-on: installed, part-way, or absent.
+///
+/// Reads the state file and the six patched core files. No docker and no
+/// database, so the card can label its buttons honestly while the server is
+/// stopped — which is most of the time a user is deciding whether to install.
+#[tauri::command]
+async fn wow_unbound_status(_state: State<'_, AppState>) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let games = dml_core::compose::games_dir_from_env();
+    let st = dml_wow::unbound::unbound_status(&games, dml_wow::unbound::DEFAULT_TITLE_ID);
+    serde_json::to_value(st).map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })
+}
+
 /// Is there a half-finished native install in this title's directory, and where
 /// did it get to?
 ///
@@ -7045,6 +7167,9 @@ pub fn run() {
             games_install,
             games_install_native,
             games_install_native_state,
+            wow_unbound_install,
+            wow_unbound_uninstall,
+            wow_unbound_status,
             wow_soap_bootstrap_info,
             wow_soap_autosetup,
             wow_soap_credentials,

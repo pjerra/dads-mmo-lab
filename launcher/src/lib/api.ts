@@ -1532,6 +1532,56 @@ export async function gamesInstallNativeState(id: string): Promise<NativeInstall
   return await invoke("games_install_native_state", { id });
 }
 
+// --- Wrath Unbound add-on (native engine) ----------------------------------
+//
+// The native replacement for `toolInstall("unbound")`, which downloads the
+// upstream bash installer and runs it under Git Bash — where its own WSL probe
+// is false, its auto-detection hunts Linux home directories for a server that
+// lives at a Windows path, and it then PROMPTS, which no button can answer.
+//
+// These speak the ordinary NDJSON TermEvent vocabulary like every other
+// streamed engine command, so the same rule applies: the promise RESOLVES even
+// when the run failed. Read the outcome from the `done`/`error` event.
+
+/** On-disk evidence about the add-on. No docker, no DB — works while stopped. */
+export interface UnboundStatus {
+  server_dir: string | null;
+  state_present: boolean;
+  addon_version: string | null;
+  completed: string[];
+  next_stage: string | null;
+  /** `installed` | `installing` | `uninstalling` | `absent`. */
+  phase: string;
+  /** `applied` | `absent` | `MIXED` — MIXED is a half-applied core patch. */
+  patch: string;
+  module_staged: boolean;
+  last_error: string | null;
+}
+
+export async function wowUnboundStatus(): Promise<UnboundStatus> {
+  return await invoke("wow_unbound_status");
+}
+
+export const wowUnboundInstall = (
+  acceptDataChanges: boolean,
+  onEvent: (e: TermEvent) => void,
+  repair?: boolean,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_unbound_install", { acceptDataChanges, repair, onEvent: ch });
+};
+
+export const wowUnboundUninstall = (
+  acceptDataChanges: boolean,
+  onEvent: (e: TermEvent) => void,
+  force?: boolean,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_unbound_uninstall", { acceptDataChanges, force, onEvent: ch });
+};
+
 /** The guided SOAP account step: what to type and where. */
 export interface SoapBootstrapInfo {
   user: string;

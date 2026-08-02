@@ -63,7 +63,7 @@ use dml_core::events::{
 use crate::install_native::{
     BuildProgress, Call, InstallIo, ProcIo, Program, RunOutcome, PROBE_TIMEOUT,
 };
-use crate::unbound_payload::{self, PayloadFile, ADDON_VERSION, MANIFEST, SQL_ORDER};
+use crate::unbound_payload::{self, ADDON_VERSION, MANIFEST, SQL_ORDER};
 use crate::{composegen, lifecycle, logsnap, maint};
 
 // ---------------------------------------------------------------------------

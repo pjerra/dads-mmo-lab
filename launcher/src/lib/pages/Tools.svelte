@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { unboundRunner } from "$lib/unbound-run";
   import {
     wowLan,
     wowLanPublicIp,
@@ -23,6 +24,8 @@
     wowCacheStatus,
     wowCacheClean,
     nativeSetupStatus,
+    wowUnboundStatus,
+    type UnboundStatus,
     startDockerDesktop,
     nativeYqInstall,
     nativeSoapCopy,
@@ -127,6 +130,9 @@
     nsError = null;
     try {
       nativeStatus = await nativeSetupStatus();
+      // Only meaningful once the backend is known -- the unbound probe is
+      // native-only and would just throw WRONG_BACKEND on WSL.
+      await refreshUnbound();
     } catch (e) {
       nsError = fmtErr(e);
     } finally {
@@ -558,9 +564,65 @@
   }
 
   // --- Wrath Unbound addon ---------------------------------------------
+  //
+  // TWO ROUTES, chosen by backend. On WSL the upstream bash installer still
+  // runs interactively through `toolInstall` and is still correct there. On
+  // NATIVE it cannot work at all: run under Git Bash its own `IS_WSL2` probe
+  // is false, so it hunts Linux home directories for a server that lives at a
+  // Windows path, fails to find it, and then PROMPTS for a path -- which no
+  // button can answer. The user met exactly that (2026-08-02). Native gets the
+  // ported engine, which takes the directory as a parameter and refuses
+  // instead of asking.
   let unboundNote: string | null = $state(null);
   let uninstallArmed = $state(false);
   let uninstallInput = $state("");
+
+  const unboundNative = $derived.by(() => nativeStatus?.native === true);
+  let unboundStatus: UnboundStatus | null = $state(null);
+  let unboundStatusErr: string | null = $state(null);
+  // Consent is a DELIBERATE, separate act. The engine refuses without it and
+  // its refusal enumerates the deletes; asking here means the user reads that
+  // list BEFORE a 30-90 minute rebuild rather than after a refusal.
+  let unboundConsent = $state(false);
+
+  async function refreshUnbound() {
+    if (!unboundNative) return;
+    try {
+      unboundStatus = await wowUnboundStatus();
+      unboundStatusErr = null;
+    } catch (e) {
+      unboundStatus = null;
+      unboundStatusErr = fmtErr(e);
+    }
+  }
+
+  /** What the card says about the add-on right now, in one line. */
+  const unboundPhaseText = $derived.by(() => {
+    const s = unboundStatus;
+    if (!s) return null;
+    if (s.patch === "MIXED") {
+      return "The core patch is HALF-applied — install will refuse until the six patched files are restored.";
+    }
+    switch (s.phase) {
+      case "installed":
+        return `Installed${s.addon_version ? ` (${s.addon_version})` : ""}.`;
+      case "installing":
+        return `A previous install stopped part-way${s.next_stage ? ` at "${s.next_stage}"` : ""} — Install resumes from there.`;
+      case "uninstalling":
+        return "A previous uninstall stopped part-way — Uninstall resumes from there.";
+      default:
+        return "Not installed.";
+    }
+  });
+
+  function startUnbound(mode: "install" | "uninstall") {
+    installStore.id = `tool:unbound-native-${mode}`;
+    installStore.nonce += 1;
+    installStore.running = true;
+    installStore.exitCode = null;
+    installStore.text = "";
+    unboundNote = null;
+  }
 
   // installStore is the single global interactive-install slot shared with
   // Library's game installs (same backend InstallSlot) -- Tools' own
@@ -600,11 +662,15 @@
     if (uninstallInput !== "unbound") return;
     uninstallArmed = false;
     uninstallInput = "";
-    startToolInstall("unbound-remove");
+    if (unboundNative) startUnbound("uninstall");
+    else startToolInstall("unbound-remove");
   }
 
   function onToolInstallExit(code: number) {
     unboundNote = code === 0 ? "Finished." : `Exited with code ${code}.`;
+    // The on-disk evidence changed either way -- a failed run still leaves a
+    // recorded stage the next click should reflect ("Resume", not "Install").
+    void refreshUnbound();
   }
 
   // --- Disk & performance (Batch 4 F17) --------------------------------
@@ -1475,21 +1541,53 @@
       it recompiles. Uninstalling reverses this: it drops the addon's tables and rebuilds
       again, so it takes just as long.
     </p>
+    {#if unboundNative}
+      {#if unboundStatusErr}
+        <p class="muted">Couldn't read the add-on's state: {unboundStatusErr}</p>
+      {:else if unboundPhaseText}
+        <p class="muted"><strong>{unboundPhaseText}</strong></p>
+      {/if}
+      <!--
+        THE CONSENT, up front and specific. The engine refuses without it, and
+        its refusal names these same rows -- but a user who only meets the list
+        AS a refusal has already committed to a 30-90 minute rebuild. Naming
+        the third-party tables here is also the thing the upstream bash
+        installer's own consent text omitted (it mentioned migrations 03/05 and
+        not 06's skillraceclassinfo_dbc delete).
+      -->
+      <label class="saveall-opt">
+        <input type="checkbox" bind:checked={unboundConsent} disabled={toolBusy} />
+        <span>
+          I understand this changes shared world data: it re-seeds
+          <code>playercreateinfo_spell_custom</code> for 9 class masks, deletes
+          <code>skillraceclassinfo_dbc</code> rows with ID ≥ 10000, and replaces catalog
+          rows. A full backup is taken first, and nothing is written until it lands.
+        </span>
+      </label>
+    {/if}
     {#if unboundNote}<p class="muted">{unboundNote}</p>{/if}
     <div class="row">
       <button
         class="primary"
-        onclick={() => startToolInstall("unbound")}
-        disabled={toolBusy || featureLocked("unbound-addon")}
-        title={featureLocked("unbound-addon") ? LOCKED_HINT : undefined}
+        onclick={() => (unboundNative ? startUnbound("install") : startToolInstall("unbound"))}
+        disabled={toolBusy || featureLocked("unbound-addon") || (unboundNative && !unboundConsent)}
+        title={featureLocked("unbound-addon")
+          ? LOCKED_HINT
+          : unboundNative && !unboundConsent
+            ? "Tick the box above first — this changes shared world data."
+            : undefined}
       >
-        Install / Update
+        {unboundStatus?.phase === "installing" ? "Resume install" : "Install / Update"}
       </button>
       {#if !uninstallArmed}
         <button
           onclick={armUninstall}
-          disabled={toolBusy || featureLocked("unbound-addon")}
-          title={featureLocked("unbound-addon") ? LOCKED_HINT : undefined}
+          disabled={toolBusy || featureLocked("unbound-addon") || (unboundNative && !unboundConsent)}
+          title={featureLocked("unbound-addon")
+            ? LOCKED_HINT
+            : unboundNative && !unboundConsent
+              ? "Tick the box above first — this drops character class-unlock progression."
+              : undefined}
         >
           Uninstall
         </button>
@@ -1515,7 +1613,13 @@
       {#key installStore.nonce}
         <InstallTerminal
           id={toolInstallId}
-          runner={(_id, onEvent) => toolInstall(toolFromId(toolInstallId), onEvent)}
+          runner={
+            toolInstallId === "tool:unbound-native-install"
+              ? unboundRunner("install", true, { repair: unboundStatus?.phase === "installed" })
+              : toolInstallId === "tool:unbound-native-uninstall"
+                ? unboundRunner("uninstall", true)
+                : (_id, onEvent) => toolInstall(toolFromId(toolInstallId), onEvent)
+          }
           lockFlag="unbound-addon"
           onExit={onToolInstallExit}
         />
