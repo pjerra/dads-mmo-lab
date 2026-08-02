@@ -83,44 +83,38 @@ describe("firstRunState — when NOT to take over Home", () => {
     expect(got?.action.kind).toBe("link");
   });
 
-  it("separates a stopped Docker from a missing one", () => {
-    // Collapsing these would tell a user who already HAS Docker to install it.
-    const got = firstRunState({
-      report: report({ state: "docker_stopped", backend_mode: "native" }),
-      everReady: false,
-    });
-    expect(got?.kind).toBe("docker-stopped");
-  });
-
   /**
-   * A stopped engine is the ONE blocked state the launcher can repair, and
-   * this used to assert `retry` -- pinning the bug rather than the behaviour.
+   * A stopped engine does NOT take over Home. User's call, 2026-08-03, and it
+   * generalises past the button they pointed at: both paths that need the
+   * engine start it themselves before touching compose (`games start` and
+   * `install_native` each call `ensure_engine_up_stream` first), so a stopped
+   * engine blocks nothing reachable from the UI.
    *
-   * "Check again" re-probes a condition we could have fixed. Worse, because
-   * this screen replaces Home entirely, the sidebar play chip and every gated
-   * page's "Start server" both navigated here and did nothing at all: the
-   * request was dropped because the first-run screen was up. Reported live,
-   * 2026-08-03 -- "it just changes tab to home and tries to refresh".
+   * It used to be a screen with a "Check again" button -- a re-probe of a
+   * condition the next click repairs -- and because the screen replaces Home,
+   * it also hid the Start button that would have done the repairing AND
+   * swallowed any start queued from the play chip or a gated page.
+   *
+   * Home explains the condition instead, next to the button that fixes it.
    */
-  it("offers to START a stopped Docker rather than merely re-checking it", () => {
+  it("does NOT take over Home for a stopped engine", () => {
     const got = firstRunState({
       report: report({ state: "docker_stopped", backend_mode: "native" }),
       everReady: false,
     });
-    expect(got?.action.kind).toBe("start-docker");
-    expect(got?.action.label).toMatch(/start/i);
+    expect(got).toBeNull();
   });
 
-  it("still only OFFERS a repair for states the launcher can actually fix", () => {
-    // The counterpart, so the fix above cannot spread. Docker not installed,
-    // WSL absent and no distro all need something only the user can do, and a
-    // button that pretended otherwise would fail with nothing to say.
-    for (const state of ["no_docker", "no_wsl", "no_distro"] as const) {
+  it("still takes over for the states the user has to fix themselves", () => {
+    // The counterpart, so the removal above cannot spread to states where a
+    // screen is the only thing that can help. Each needs an install, an
+    // elevated script, or a download -- none of them repair on the next click.
+    for (const state of ["no_docker", "no_wsl", "no_distro", "no_titles"] as const) {
       const got = firstRunState({
         report: report({ state, backend_mode: state === "no_docker" ? "native" : "wsl" }),
         everReady: false,
       });
-      expect(got?.action.kind, state).not.toBe("start-docker");
+      expect(got, `${state} still needs a screen`).not.toBeNull();
     }
   });
 

@@ -157,19 +157,18 @@
   // counterpart on the chip (accidental-click risk).
   function requestChipStart() {
     go("home");
-    // Home is the consumer, and it is not mounted while the first-run screen
-    // is up -- so for states the launcher CANNOT repair (Docker not installed,
-    // WSL not set up, no distro) landing the user on the screen that names the
-    // missing piece beats queueing a start that could never run.
+    // Home is the consumer and it is not mounted while the first-run screen
+    // is up, so a queued start would never run. Every state that still puts
+    // that screen up needs something only the user can do -- install Docker,
+    // enable WSL, run the installer, install a title -- so landing them on the
+    // screen that names the missing piece is the right answer.
     //
-    // `docker-stopped` is the exception, and getting it wrong is what the user
-    // reported: the play chip and every gated page's "Start server" both
-    // navigated here and did nothing, because a stopped engine put the
-    // first-run screen up and this early return swallowed the request. A
-    // stopped engine is precisely what a start FIXES -- `games start` brings
-    // Docker up itself before composing -- so the request is kept, and the
-    // first-run screen's own button now performs the same repair.
-    if (firstRun && firstRun.kind !== "docker-stopped") return;
+    // This used to need an exception. A stopped Docker engine put the screen
+    // up and this early return swallowed the request, so the play chip and
+    // every gated page's "Start server" did nothing at all. That state is no
+    // longer a screen (see first-run.ts), which removes the exception rather
+    // than special-casing it.
+    if (firstRun) return;
     chipStart.requested = true;
   }
 

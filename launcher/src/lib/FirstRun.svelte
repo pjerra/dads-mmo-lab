@@ -13,14 +13,13 @@
   import { openUrl } from "@tauri-apps/plugin-opener";
   import type { PageId } from "$lib/nav";
   import { firstRunButton, type FirstRunKind, type FirstRunState } from "$lib/first-run";
-  import { backendSetup, startDockerDesktop } from "$lib/api";
+  import { backendSetup } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { backendSetupRun } from "$lib/backend-setup.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
-  import { chipStart } from "$lib/server-status.svelte";
 
   let {
     state: fr,
@@ -51,7 +50,6 @@
   // svelte-check error rather than a blank square in front of a new user.
   const GLYPH: Record<FirstRunKind, string> = {
     "no-docker": "🐳",
-    "docker-stopped": "🐳",
     "no-wsl": "🧰",
     "no-distro": "🧰",
     "no-cli": "📦",
@@ -131,78 +129,6 @@
       case "retry":
         onrecheck();
         break;
-      case "start-docker":
-        void startDocker();
-        break;
-    }
-  }
-
-  // A start requested from elsewhere lands here when the engine is stopped.
-  //
-  // The play chip and every gated page's "Start server" queue their request on
-  // `chipStart` and navigate to Home -- but Home is not mounted while this
-  // screen is up, so nothing consumed it and the click did nothing. Rather
-  // than drop the request, DO what it asked: bring the engine up. Once the
-  // probe clears, Home mounts and consumes the still-pending request, so one
-  // click really does end with a running server.
-  //
-  // Only for docker-stopped. Every other first-run state needs something the
-  // launcher cannot do, and auto-running a repair there would be a button
-  // pressing itself for no reason.
-  //
-  // Latched, and the latch is load-bearing rather than defensive: `startingDocker`
-  // is a tracked dependency, so a failed attempt flipping it back to false
-  // re-triggers this effect, which sees a still-pending request and starts a
-  // fresh two-minute wait -- forever, with the error message it just wrote
-  // being wiped each time. One automatic attempt; after that the button is
-  // there, and it is the user's call whether to try again.
-  let autoStartTried = false;
-  $effect(() => {
-    if (fr.kind === "docker-stopped" && chipStart.requested && !autoStartTried) {
-      autoStartTried = true;
-      void startDocker();
-    }
-  });
-
-  // Launch Docker Desktop, then re-probe until the engine answers.
-  //
-  // The re-probe matters: launching the app returns immediately while the
-  // ENGINE takes tens of seconds to come up, so a single check right after
-  // would report the same "not running" the user just clicked to fix, and
-  // read as the button doing nothing. `onrecheck` is the same probe the old
-  // "Check again" ran -- this just does the repair first, and keeps asking.
-  let startingDocker = $state(false);
-  let dockerError: string | null = $state(null);
-
-  async function startDocker() {
-    if (startingDocker) return;
-    startingDocker = true;
-    dockerError = null;
-    try {
-      const r = await startDockerDesktop();
-      if (!r.launched) {
-        dockerError = "Docker Desktop could not be launched. Start it from the Start menu, then use Check again.";
-        return;
-      }
-      // Up to ~2 minutes, and that bound is MEASURED rather than guessed: a
-      // cold start on this box took 50s from issuing the same command to the
-      // engine answering (2026-08-03). Giving up early would send the user
-      // back to a screen naming the thing they already fixed -- the failure
-      // mode the Tailscale login had when its 8s bound was a guess.
-      for (let i = 0; i < 40; i++) {
-        await new Promise((r) => setTimeout(r, 3000));
-        onrecheck();
-        // The parent re-renders this component with a new `state` when the
-        // probe changes; if we are no longer the docker-stopped screen the
-        // loop has nothing left to wait for.
-        if (fr.kind !== "docker-stopped") return;
-      }
-      dockerError = "Docker Desktop is taking longer than usual to start. Check its window, then use Check again.";
-    } catch (e) {
-      const err = e as { message?: string };
-      dockerError = err.message ?? String(e);
-    } finally {
-      startingDocker = false;
     }
   }
 </script>
@@ -215,16 +141,11 @@
     <button
       class="primary"
       onclick={act}
-      disabled={btn.disabled || startingDocker}
+      disabled={btn.disabled}
       title={fr.action.kind === "setup" && setupLocked ? LOCKED_HINT : undefined}
     >
-      {startingDocker ? "Starting Docker…" : btn.label}
+      {btn.label}
     </button>
-    {#if dockerError}
-      <p class="detail">{dockerError}</p>
-    {:else if startingDocker}
-      <p class="detail">Starting Docker Desktop… this takes a moment the first time.</p>
-    {/if}
     {#if fr.detail}
       <p class="detail">{fr.detail}</p>
     {/if}

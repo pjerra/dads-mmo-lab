@@ -36,6 +36,25 @@ export function dockerRestartCardVisible(status: Pick<NativeSetupStatus, "native
   return status !== null && !status.native;
 }
 
+/**
+ * Blame a failed status read on a stopped Docker engine?
+ *
+ * Only when we are in native mode AND the engine probe came back saying so.
+ * Native because the answer is about Docker Desktop, which is not what a WSL
+ * install runs on; and `=== false` rather than a falsy check because a null
+ * probe means we could not ask -- the tri-state rule this project applies
+ * everywhere. Guessing here would blame Docker for an unrelated failure.
+ *
+ * Sibling of [`dockerRestartCardVisible`] and here for the same reason: Home
+ * is pinned against re-deriving the backend from `.native` inline, so the
+ * question gets answered once, in one place, with tests of its own.
+ */
+export function dockerStoppedExplainsFailure(
+  status: Pick<NativeSetupStatus, "native" | "docker"> | null,
+): boolean {
+  return status !== null && status.native && status.docker.running === false;
+}
+
 /** Exact-match typed confirmation, mirroring Restart WSL's `restart-wsl`. */
 export function dockerRestartConfirmed(input: string): boolean {
   return input === DOCKER_RESTART_CONFIRM;

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, wowSoapCredentials, wowUnboundStatus, type PlayerOnline, type NativeSetupStatus, type SoapCredentials, type UnboundStatus } from "$lib/api";
-  import { dockerRestartCardVisible } from "$lib/docker-restart";
+  import { dockerRestartCardVisible, dockerStoppedExplainsFailure } from "$lib/docker-restart";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -130,6 +130,25 @@
     }
     await refreshServerStatus();
     void refreshPlayers();
+    // Re-probe Docker ONLY when the read failed, and only to explain it.
+    //
+    // Since the docker-stopped first-run screen was removed (it announced a
+    // condition that Start repairs by itself, while hiding the Start button
+    // that would have done it), a stopped engine lands here instead -- and
+    // every status call fails with a message about a docker pipe, which reads
+    // as a broken launcher rather than as "Docker isn't up yet".
+    //
+    // Re-probed rather than reusing the mount-time value, because the claim is
+    // only worth making if it is current: a stale `running: false` would blame
+    // Docker for an unrelated failure minutes after the user started it.
+    if (serverStatus.lastError) {
+      try {
+        nativeStatus = await nativeSetupStatus();
+      } catch {
+        // Unchanged from the mount-time probe: if we cannot ask, we say
+        // nothing extra rather than guess at the cause.
+      }
+    }
     refreshing = false;
   }
   onMount(refresh);
@@ -424,7 +443,19 @@
       <p class="muted refresh-warn">Last refresh failed ({serverStatus.lastError}) — showing the last known status.</p>
     {/if}
   {:else if serverStatus.lastError}
-    <div class="error-card"><strong>Couldn't read world status.</strong><p>{serverStatus.lastError}</p></div>
+    <div class="error-card">
+      {#if dockerStoppedExplainsFailure(nativeStatus)}
+        <!-- The one job the removed docker-stopped screen was doing: naming
+             the cause. Says what to press rather than telling the user to go
+             and start Docker themselves -- Start brings the engine up before
+             it composes, so the button below really is the whole fix. -->
+        <strong>Docker Desktop isn't running yet.</strong>
+        <p>Press Start below and the launcher will bring Docker up first — a cold start takes about a minute.</p>
+      {:else}
+        <strong>Couldn't read world status.</strong>
+        <p>{serverStatus.lastError}</p>
+      {/if}
+    </div>
   {/if}
 
   {#if serverStatus.detail?.verdict === "online" && playersLoaded}

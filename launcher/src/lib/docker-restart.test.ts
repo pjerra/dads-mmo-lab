@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DOCKER_RESTART_CONFIRM,
   dockerRestartCardVisible,
+  dockerStoppedExplainsFailure,
   dockerRestartConfirmed,
   dockerRestartButtonDisabled,
   dockerRestartNote,
@@ -10,6 +11,34 @@ import {
 
 // Pure decision + copy helpers for the Tools "Restart Docker in the distro"
 // card. No Svelte, no Tauri -- vitest's default node environment.
+
+describe("dockerStoppedExplainsFailure", () => {
+  const st = (native: boolean, running: boolean) => ({ native, docker: { running, path: null } });
+
+  /**
+   * Home shows this instead of a raw status error, since the docker-stopped
+   * first-run screen was removed. It must be RIGHT: the copy tells the user
+   * that pressing Start is the whole fix, which is true of a stopped engine
+   * and false of anything else that can break a status read.
+   */
+  it("blames Docker only when native mode says the engine is down", () => {
+    expect(dockerStoppedExplainsFailure(st(true, false))).toBe(true);
+    expect(dockerStoppedExplainsFailure(st(true, true))).toBe(false);
+  });
+
+  it("never blames Docker Desktop in WSL mode", () => {
+    // A WSL install runs dockerd inside the distro. "Press Start and we'll
+    // bring Docker Desktop up" would be advice about the wrong product --
+    // and the Tools card, not Start, is the repair there.
+    expect(dockerStoppedExplainsFailure(st(false, false))).toBe(false);
+  });
+
+  it("says nothing when the probe never answered", () => {
+    // The tri-state rule: a null probe is evidence of NOTHING. Treating it as
+    // "engine down" would blame Docker for every unrelated bridge failure.
+    expect(dockerStoppedExplainsFailure(null)).toBe(false);
+  });
+});
 
 describe("dockerRestartCardVisible", () => {
   it("shows the card on the WSL backend (there IS a distro to restart)", () => {

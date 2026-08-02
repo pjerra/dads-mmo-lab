@@ -88,7 +88,6 @@ export interface BackendStatusReport {
 
 export type FirstRunKind =
   | "no-docker"
-  | "docker-stopped"
   | "no-wsl"
   | "no-distro"
   | "no-cli"
@@ -109,16 +108,7 @@ export type FirstRunAction =
   | { kind: "setup"; label: string }
   | { kind: "nav"; label: string; page: PageId }
   | { kind: "link"; label: string; url: string }
-  | { kind: "retry"; label: string }
-  /**
-   * Start the Docker engine, then re-probe.
-   *
-   * Exists because "Check again" was the wrong answer to the one first-run
-   * state the launcher can actually repair. Every other blocked state needs
-   * something only the user can do (install Docker, enable WSL, run the
-   * installer); a stopped engine needs a button the app already has.
-   */
-  | { kind: "start-docker"; label: string };
+  | { kind: "retry"; label: string };
 
 export interface FirstRunState {
   kind: FirstRunKind;
@@ -365,20 +355,24 @@ export function firstRunState(o: {
       };
 
     case "docker_stopped":
-      // Distinct from no_docker ON PURPOSE. Collapsing the two would tell a
-      // user who already HAS Docker to go and install Docker, which reads as
-      // the app not knowing what is on their machine.
-      return {
-        kind: "docker-stopped",
-        title: "Docker Desktop isn't running",
-        body: "Docker Desktop is installed on this PC but its engine is stopped, so there's nothing for your server to run in. Starting it takes a moment the first time.",
-        // NOT "Check again". This is the only blocked state the launcher can
-        // repair itself -- every other one needs the user to install or enable
-        // something. Re-probing a condition we could have fixed made the play
-        // chip and every gated page's "Start server" dead-end here.
-        action: { kind: "start-docker", label: "Start Docker Desktop" },
-        detail: "",
-      };
+      // NOT a screen. Deliberate, and the reason is that a stopped engine
+      // blocks nothing a native user can actually do from the UI: BOTH paths
+      // that need it start it themselves before touching compose --
+      // `games start` and `install_native` each call
+      // `dml_wow::native::ensure_engine_up_stream` as their first step.
+      //
+      // So this took over Home to announce a condition that repairs itself on
+      // the very next click, and in doing so hid the button that would have
+      // done the repairing. (User's call, 2026-08-03: "when we start server it
+      // starts docker desktop".) A cold start measured 50s on a real box, so
+      // the wait is real -- but it belongs under a progress line on Home, not
+      // behind a screen that has to be dismissed first.
+      //
+      // The state itself stays meaningful in the backend chain: it is still
+      // the honest answer to "what is the first thing missing", and Home's
+      // status card uses it to explain a failed read instead of showing a bare
+      // error. This is only about whether it takes the whole page.
+      return null;
 
     case "no_wsl":
       return {
