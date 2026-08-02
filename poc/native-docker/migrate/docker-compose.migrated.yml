@@ -60,7 +60,7 @@ services:
 
   ac-db-import:
     container_name: ac-db-import
-    image: acore/ac-wotlk-db-import:${IMAGE_TAG:-master}
+    image: dml.local/ac-wotlk-db-import:${DML_LOCAL_TAG:-migrated}
     networks: [ac-network]
     environment:
       AC_DATA_DIR: "/azerothcore/env/dist/data"
@@ -78,13 +78,13 @@ services:
 
   ac-client-data-init:
     container_name: ac-client-data-init
-    image: acore/ac-wotlk-client-data:${IMAGE_TAG:-master}
+    image: dml.local/ac-wotlk-client-data:${DML_LOCAL_TAG:-migrated}
     volumes:
       - client-data:/azerothcore/env/dist/data
 
   ac-authserver:
     container_name: ac-authserver
-    image: acore/ac-wotlk-authserver:${IMAGE_TAG:-master}
+    image: dml.local/ac-wotlk-authserver:${DML_LOCAL_TAG:-migrated}
     networks: [ac-network]
     tty: true
     restart: unless-stopped
@@ -105,7 +105,7 @@ services:
 
   ac-worldserver:
     container_name: ac-worldserver
-    image: acore/ac-wotlk-worldserver:${IMAGE_TAG:-master}
+    image: dml.local/ac-wotlk-worldserver:${DML_LOCAL_TAG:-migrated}
     networks: [ac-network]
     stdin_open: true
     tty: true

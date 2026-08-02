@@ -270,12 +270,33 @@ pub fn stack_conflict_refusal(
     ))
 }
 
+/// The IANA dynamic/private range. The OS hands these out to OUTBOUND client
+/// sockets, so "port N is in use" there says nothing about which server is
+/// running — it usually means a browser opened a connection a moment ago.
+pub const EPHEMERAL_FLOOR: u16 = 49152;
+
 /// Pure core of the game-port warn loop (`90-main.sh:287-295`): two lines per
 /// occupied port, in [`CONFLICT_PORTS`] order. `port_in_use` is injected so
 /// this stays testable without a real socket.
+///
+/// PORTS IN THE EPHEMERAL RANGE NEVER WARN (found live, 2026-08-02). A start
+/// reported "Port 54230 is already in use -- Final Fantasy XI auth server
+/// (Darkstar)" on a machine running no such thing; by the time it was
+/// checked, nothing held the port at all. Windows' dynamic range is
+/// 49152-65535 (`netsh int ipv4 show dynamicport tcp`, confirmed on the
+/// user's box), which swallows the two Darkstar entries whole — so that
+/// warning fires on a transient client socket and can never be trusted.
+///
+/// This matters more than the noise: the three ports that DO mean something
+/// (3724/8085/7878, the ones `stack_conflict_refusal` actually refuses on)
+/// all sit far below the floor, and a user taught to scroll past port
+/// warnings is a user who will scroll past those too.
 pub fn game_port_conflict_lines(port_in_use: impl Fn(u16) -> bool) -> Vec<String> {
     let mut lines = Vec::new();
     for &(port, desc) in CONFLICT_PORTS {
+        if port >= EPHEMERAL_FLOOR {
+            continue;
+        }
         if port_in_use(port) {
             lines.push(format!("[WARN] Port {port} is already in use -- {desc}."));
             lines.push(format!("[WARN]   Stop whatever is using port {port} before starting this server."));
@@ -1601,6 +1622,42 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(lines[0].contains("8085"));
         assert!(lines[2].contains("7878"));
+    }
+
+    #[test]
+    fn an_ephemeral_range_port_never_warns_even_when_it_is_in_use() {
+        // FOUND LIVE 2026-08-02: a start reported "Port 54230 is already in
+        // use -- Final Fantasy XI auth server (Darkstar)" on a machine with no
+        // such thing, and by the time it was checked nothing held the port --
+        // a browser had briefly borrowed it. Windows hands out 49152-65535 to
+        // OUTBOUND sockets, so occupancy there is not evidence about servers.
+        let lines = game_port_conflict_lines(|p| p == 54230 || p == 54231);
+        assert!(lines.is_empty(), "ephemeral-range ports must never warn: {lines:?}");
+    }
+
+    #[test]
+    fn the_ports_this_stack_publishes_are_all_below_the_ephemeral_floor() {
+        // The filter must never silence the ports that matter -- the three
+        // this stack actually publishes. If one ever moved above the floor it
+        // would become unwarnable, so assert it rather than assume it.
+        for p in [3724u16, 8085, 7878] {
+            assert!(
+                p < EPHEMERAL_FLOOR,
+                "port {p} is published by this stack but sits in the ephemeral range, where warnings are suppressed"
+            );
+            assert!(
+                CONFLICT_PORTS.iter().any(|(c, _)| *c == p),
+                "port {p} is published by this stack but is not in the advisory registry"
+            );
+            assert_eq!(
+                game_port_conflict_lines(|q| q == p).len(),
+                2,
+                "port {p} must still warn"
+            );
+        }
+        // ...and the suppression is real, not vacuous: something IS filtered.
+        let suppressed = CONFLICT_PORTS.iter().filter(|(p, _)| *p >= EPHEMERAL_FLOOR).count();
+        assert!(suppressed > 0, "nothing is above the floor -- the filter test proves nothing");
     }
 
     #[test]

@@ -128,7 +128,18 @@ must_lit "migration template binds the host log dir" "$MIGRATED" "./env/dist/log
 must "migration template wires the playerbots database" "$MIGRATED" 'AC_PLAYERBOTS_DATABASE_INFO'
 must_lit "migration template keeps the client-data volume read-only on the world" \
   "$MIGRATED" "client-data:/azerothcore/env/dist/data/:ro"
-must "migration template keeps the image tag a seam" "$MIGRATED" 'acore/ac-wotlk-worldserver:\$\{IMAGE_TAG:-master\}'
+# WAS: 'keeps the image tag a seam', asserting acore/…:${IMAGE_TAG:-master}.
+# That seam was the BUG (incident 2026-08-02). A migrated stack carries the
+# user's OWN images -- playerbots compiled in -- and parking them on upstream's
+# moving `:master` meant an ordinary `docker compose up` pulled a fresher
+# upstream build and overwrote all four. Stock AzerothCore came up wearing the
+# user's server's name: bots gone from the binary, mmaps demanding newer client
+# data, client-data-init failing outright. Nothing in the output named a cause.
+must "migration template runs the images from a namespace no registry serves" \
+  "$MIGRATED" 'dml\.local/ac-wotlk-worldserver:\$\{DML_LOCAL_TAG:-migrated\}'
+must_not "migration template never runs an image off upstream's moving tag" \
+  "$MIGRATED" 'image: *acore/ac-wotlk-[a-z-]*:\$\{IMAGE_TAG:-master\}'
+must "import retags every loaded image into dml.local" "$IMPORT_SH" 'docker tag .*dml\.local/ac-wotlk-'
 
 section "soap.env carry-over (README: required, script never did it)"
 must_code "export carries ~/.dml/soap.env into the export dir" "$EXPORT_SH" 'soap\.env'

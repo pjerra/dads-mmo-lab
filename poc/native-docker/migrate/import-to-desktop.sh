@@ -66,6 +66,12 @@ docker info >/dev/null 2>&1 || { echo "[import] Docker Desktop engine is not run
 DIR="${1:-$HOME/dml-native/wow-server-playerbots}"
 cd "$DIR" || { echo "[import] export dir not found: $DIR"; exit 1; }
 P="${COMPOSE_PROJECT_NAME:-dml-wow-native}"
+# The tag the tarballs LOAD as -- upstream's own, because that is what the WSL
+# server ran under. Must match export-from-wsl.sh's DML_IMAGE_TAG.
+IMAGE_TAG="${DML_IMAGE_TAG:-master}"
+# The tag the stack RUNS as. A namespace no registry serves, so an upstream
+# pull can never substitute these images -- see the retag step below.
+LOCAL_TAG="${DML_LOCAL_TAG:-migrated}"
 DB_PASS="${DB_ROOT_PASSWORD:-password}"
 HEALTH_TRIES="${DML_HEALTH_TRIES:-60}"
 HEALTH_SLEEP="${DML_HEALTH_SLEEP:-5}"
@@ -191,6 +197,27 @@ cp -r etc/. env/dist/etc/ || { echo "[import] could not stage etc/ into env/dist
 echo "[import] loading server images..."
 for i in worldserver authserver db-import client-data; do
   gunzip -c "img-$i.tar.gz" | docker load || { echo "[import] failed to load img-$i.tar.gz"; exit 1; }
+done
+
+# RETAG INTO A NAMESPACE DOCKER CANNOT PULL. This is not tidiness -- it is the
+# fix for a real incident (2026-08-02, the author's own server).
+#
+# The tarballs carry upstream's own tag, `acore/ac-wotlk-<svc>:master`, because
+# that is what the WSL server ran under. Loading them therefore parks a
+# CUSTOM-BUILT server (playerbots compiled in) on a MOVING upstream tag. Weeks
+# later an ordinary `docker compose up` pulled a fresher `:master` and
+# overwrote all four images with stock AzerothCore: the bots vanished (the code
+# was no longer in the binary), the worldserver demanded newer client data than
+# the volume held, and the client-data init container then failed outright --
+# three symptoms, no error naming the cause, and a server that had worked for
+# weeks.
+#
+# `dml.local/` exists on no registry, so the failure mode inverts: a missing
+# image is a loud "pull access denied" instead of a silent substitution.
+echo "[import] pinning the loaded images so no upstream pull can replace them..."
+for i in worldserver authserver db-import client-data; do
+  docker tag "acore/ac-wotlk-$i:$IMAGE_TAG" "dml.local/ac-wotlk-$i:$LOCAL_TAG" \
+    || { echo "[import] could not retag ac-wotlk-$i"; exit 1; }
 done
 
 echo "[import] creating stack shell (volumes/network, nothing started)..."

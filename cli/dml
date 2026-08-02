@@ -4626,10 +4626,22 @@ _check_port_conflicts() {
         "44453:Star Wars Galaxies login server"
         "44462:Star Wars Galaxies connection server"
     )
+    # PORTS IN THE EPHEMERAL RANGE NEVER WARN (found live, 2026-08-02). A start
+    # reported "Port 54230 is already in use -- Final Fantasy XI auth server
+    # (Darkstar)" on a machine running no such thing, and by the time it was
+    # checked nothing held the port at all: the OS hands 49152-65535 to
+    # OUTBOUND client sockets, so occupancy there says nothing about which
+    # server is running. Windows' dynamic range is exactly 49152-65535, which
+    # swallows both Darkstar entries. Mirrors lifecycle::EPHEMERAL_FLOOR.
+    #
+    # The three ports that DO mean something (3724/8085/7878 -- the ones the
+    # stack guard refuses on) sit far below the floor, and a user taught to
+    # scroll past port warnings will scroll past those too.
     local entry port desc
     for entry in "${_ports[@]}"; do
         port="${entry%%:*}"
         desc="${entry#*:}"
+        [[ "$port" -ge 49152 ]] && continue
         if echo "$in_use" | grep -q ":${port}[[:space:]]"; then
             echo "[WARN] Port $port is already in use -- $desc."
             echo "[WARN]   Stop whatever is using port $port before starting this server."
