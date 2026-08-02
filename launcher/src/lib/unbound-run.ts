@@ -22,6 +22,7 @@
 // undo the whole thing.
 
 import { translateNativeEvent, type Translated } from "./native-install";
+import { noteInstallEvent, setInstallActive } from "./install-progress.svelte";
 import {
   wowUnboundInstall,
   wowUnboundUninstall,
@@ -104,14 +105,30 @@ export function unboundRunner(
 ): (id: string, onEvent: (e: InstallEvent) => void) => Promise<void> {
   return (_id, onEvent) => {
     let ended = false;
+    // Committed BEFORE the first event, exactly as nativeInstallRunner does.
+    //
+    // WITHOUT THIS the status chip falls through to the POLLED verdict, and
+    // during a rebuild the OLD worldserver is still running -- so a machine
+    // compiling 1877 objects reported "World is up" for an hour (seen live,
+    // 2026-08-03). The polled answer is not merely uninformative there, it is
+    // wrong in the most reassuring possible direction.
+    setInstallActive(true);
     const emit = (t: Translated) => {
       if (t.text) onEvent({ event: "chunk", text: t.text });
       if (t.exit !== null) {
         ended = true;
+        setInstallActive(false);
         onEvent({ event: "exit", code: t.exit });
       }
     };
-    const handle = (e: TermEvent) => emit(translateUnboundEvent(e, mode));
+    const handle = (e: TermEvent) => {
+      // The store and the terminal read the SAME stream independently: `pct`
+      // is invisible in the panel (which shows the raw build wall) and `line`
+      // is invisible to the status. Neither translation is the other's input,
+      // so neither can distort the other.
+      noteInstallEvent(e);
+      emit(translateUnboundEvent(e, mode));
+    };
     const run =
       mode === "install"
         ? wowUnboundInstall(acceptDataChanges, handle, opts?.repair)
@@ -125,6 +142,7 @@ export function unboundRunner(
             text: "\n[error] The run ended without reporting a result.\n",
           });
           onEvent({ event: "exit", code: -1 });
+          setInstallActive(false);
         }
       },
       (err: unknown) => {
@@ -137,6 +155,9 @@ export function unboundRunner(
         if (e.hint) parts.push(e.hint);
         onEvent({ event: "chunk", text: `\n[error] ${parts.join(" ")}\n` });
         onEvent({ event: "exit", code: -1 });
+        // A dead session must not pin the chip to "Installing…" until the app
+        // restarts -- the same reason nativeInstallRunner clears it here.
+        setInstallActive(false);
       },
     );
   };
