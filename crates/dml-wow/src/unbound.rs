@@ -1336,6 +1336,44 @@ impl<'a> Engine<'a> {
             }
         }
         self.line("info", format!("all {} migrations applied.", SQL_ORDER.len()));
+
+        // THE SUMMONS MODULE'S SCRIPT ROWS, best-effort (v1.4.0).
+        //
+        // Not in SQL_ORDER because a failure here must not abort the install:
+        // it registers spell_script_names for mod-multiclass-summons, and the
+        // module's own file lives at data/sql/db-world/base/, the one module
+        // path AzerothCore's DBUpdater applies itself. The bash pre-applies it
+        // "so the rebuilt worldserver registers them on its next startup" and
+        // treats a failure as a warning for that reason.
+        //
+        // It is NOT redundant, though, and the reason is worth stating: the
+        // rebuild ends in `up -d --force-recreate ac-worldserver`, which
+        // recreates ONLY the worldserver -- `ac-db-import` does not re-run. So
+        // on the path this engine actually takes, the pre-apply may be the only
+        // thing that puts these rows in before the world caches the table, and
+        // the auto-apply is the backstop rather than the mechanism. Both, then:
+        // try it, and say plainly when it did not take.
+        let (dest, db) = (unbound_payload::SUMMONS_SQL_DEST, unbound_payload::SqlDb::World);
+        if let Some(f) = unbound_payload::file(dest) {
+            let call = self.mysql_apply_call(db.database());
+            let mut out = String::new();
+            let outcome = self.io.run_stdin(&call, f.body.as_bytes(), &mut |l| {
+                out.push_str(l);
+                out.push('\n');
+            });
+            if outcome.is_ok() {
+                self.line("info", "multi-class summons spell scripts registered.");
+            } else {
+                self.line(
+                    "warn",
+                    format!(
+                        "could not pre-register the multi-class summons spell scripts ({}): {} -- AzerothCore should apply them itself on the next full stack start.",
+                        outcome.detail(),
+                        stderr_tail(&out)
+                    ),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2767,13 +2805,29 @@ mod tests {
         // The migrations went through stdin in EXACTLY payload order, against
         // the container ID the guard resolved -- never the global name.
         let stdin = io.stdin_bytes.borrow();
-        assert_eq!(stdin.len(), SQL_ORDER.len());
+        assert_eq!(
+            stdin.len(),
+            SQL_ORDER.len() + 1,
+            "expected the {} migrations plus the summons registration",
+            SQL_ORDER.len()
+        );
         for ((argv, nbytes), (dest, db)) in stdin.iter().zip(SQL_ORDER) {
             assert!(argv.contains("cid-db-1234"), "SQL went to the wrong container: {argv}");
             assert!(!argv.contains("ac-database"), "SQL used the global name: {argv}");
             assert!(argv.contains(db.database()), "{argv} vs {dest}");
             assert_eq!(*nbytes, unbound_payload::file(dest).unwrap().body.len());
         }
+        // ...and the v1.4.0 summons registration goes LAST, through the same
+        // resolved container. It is best-effort, but "best-effort" must still
+        // mean it was attempted -- silently skipping it would leave
+        // spell_script_names unregistered on the exact path this engine takes
+        // (`up --force-recreate ac-worldserver` never re-runs ac-db-import).
+        let (argv, nbytes) = stdin.last().expect("a last stdin call");
+        assert!(argv.contains("cid-db-1234"), "summons SQL went to the wrong container: {argv}");
+        assert_eq!(
+            *nbytes,
+            unbound_payload::file(unbound_payload::SUMMONS_SQL_DEST).unwrap().body.len()
+        );
 
         // conf: the required key landed; the prior value was recorded first.
         let ws = std::fs::read_to_string(sdir.join("env/dist/etc/worldserver.conf")).unwrap();

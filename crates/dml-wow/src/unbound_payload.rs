@@ -3,12 +3,31 @@
 //!
 //! ## Where these bytes came from
 //!
-//! `guides/unbound-wrath/install-wrath-unbound-addon.sh` is 3124 lines, but
-//! only ~406 of them are logic. 1898 are heredocs writing C++, SQL, Lua and a
-//! git patch into the server directory. Those are payload, not code, so they
-//! live under `../data/unbound/` as real files and are embedded here with
+//! `guides/unbound-wrath/install-wrath-unbound-addon.sh` (**v1.4.0**) is 5140
+//! lines, and roughly 4000 of them are heredocs writing C++, SQL, Lua and a git
+//! patch into the server directory. Those are payload, not code, so they live
+//! under `../data/unbound/` as real files and are embedded here with
 //! `include_str!` — the same shape as the config/tuning/catalog snapshots in
 //! [`crate::registry`].
+//!
+//! ## What v1.4.0 added over the 1.2.2 this port started from
+//!
+//! Two whole subsystems, and neither needed a new install STAGE — both are
+//! files, so they arrive through the same manifest loop:
+//!
+//! * **Cross-class talents** (`lua/unbound_addon_sync.lua` +
+//!   `lua/unbound_talent_data.lua`, 58 KB): a server-side bridge that validates
+//!   talent picks from the client addon — allowlist, tier gating, prereqs, rank
+//!   order and a shared point pool. The Mentor also sells talent points now,
+//!   which is why `unbound_mentor.lua` grew 820 → 924 lines.
+//! * **`mod-multiclass-summons`** (5 files under `summons/`): a SECOND C++
+//!   module fixing warlock/mage/DK pet conflicts for multiclass characters.
+//!
+//! NB that module **does** ship its own `CMakeLists.txt` (an `AC_ADD_SCRIPT`
+//! pair), unlike mod-unbound — so the "AzerothCore globs module sources" note
+//! below explains why mod-unbound needs none, not a rule that modules never
+//! have one. Its SQL sits under `data/sql/db-world/base/`, the one module path
+//! AzerothCore's own DBUpdater auto-applies at startup.
 //!
 //! Extraction was proven, not reviewed: the extractor rebuilt the original
 //! installer from the extracted files and diffed it against the source,
@@ -34,19 +53,20 @@
 //! repair-in-place branches into one idempotent path and cannot produce the
 //! duplicate-key or sed-matched-nothing outcomes the bash could.
 //!
-//! No `CMakeLists.txt` either, and that is correct rather than missing:
-//! AzerothCore's `modules/CMakeLists.txt` globs module sources with
+//! No `CMakeLists.txt` for **mod-unbound**, and that is correct rather than
+//! missing: AzerothCore's `modules/CMakeLists.txt` globs module sources with
 //! `CollectSourceFiles()`, and 4 of the 5 modules on a stock DML server ship
 //! none. The loader we DO ship defines `Addmod_unboundScripts()`, which is
 //! exactly the symbol `ConfigureScriptLoader` generates for a directory named
-//! `mod-unbound`.
+//! `mod-unbound`. (mod-multiclass-summons ships one because it wants explicit
+//! `AC_ADD_SCRIPT` entries; that file is part of the payload, not invented.)
 
 /// Where the module tree lives inside a server directory.
 pub const MODULE_REL: &str = "modules/mod-unbound";
 
 /// The add-on version these bytes were extracted from. Bump only together with
 /// a re-extraction — it is what `UNBOUND_VERSION_MISMATCH` compares against.
-pub const ADDON_VERSION: &str = "1.2.2";
+pub const ADDON_VERSION: &str = "1.4.0";
 
 /// One payload file: where it goes (relative to the SERVER dir) and its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,76 +86,32 @@ macro_rules! payload {
 /// not matter because nothing reads these until the rebuild. (SQL APPLICATION
 /// order very much does matter: see [`SQL_ORDER`].)
 pub const MANIFEST: &[PayloadFile] = &[
-    payload!("modules/mod-unbound/src/UnboundSystem.cpp", "module/src/UnboundSystem.cpp"),
-    payload!(
-        "modules/mod-unbound/src/UnboundSystem_loader.cpp",
-        "module/src/UnboundSystem_loader.cpp"
-    ),
+    payload!("env/dist/etc/modules/lua_scripts/unbound_addon_sync.lua", "lua/unbound_addon_sync.lua"),
+    payload!("env/dist/etc/modules/lua_scripts/unbound_mentor.lua", "lua/unbound_mentor.lua"),
+    payload!("env/dist/etc/modules/lua_scripts/unbound_talent_data.lua", "lua/unbound_talent_data.lua"),
     payload!("modules/mod-unbound/npc_setup.sql", "module/npc_setup.sql"),
-    payload!(
-        "modules/mod-unbound/unbound-core-access.patch",
-        "module/unbound-core-access.patch"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/01_unbound_world.sql",
-        "module/sql/db-world/01_unbound_world.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/02_fix_catalog_req_level.sql",
-        "module/sql/db-world/02_fix_catalog_req_level.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/03_creation_gift_spells.sql",
-        "module/sql/db-world/03_creation_gift_spells.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/04_catalog_druid_forms.sql",
-        "module/sql/db-world/04_catalog_druid_forms.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/05_individual_purchase_prereqs.sql",
-        "module/sql/db-world/05_individual_purchase_prereqs.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/06_universal_skill_access.sql",
-        "module/sql/db-world/06_universal_skill_access.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/07_mentor_stone.sql",
-        "module/sql/db-world/07_mentor_stone.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/08_catalog_additions.sql",
-        "module/sql/db-world/08_catalog_additions.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/10_catalog_audit_fixes.sql",
-        "module/sql/db-world/10_catalog_audit_fixes.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/11_catalog_gap_additions.sql",
-        "module/sql/db-world/11_catalog_gap_additions.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/12_mount_spell_fix.sql",
-        "module/sql/db-world/12_mount_spell_fix.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/13_flight_form_fix.sql",
-        "module/sql/db-world/13_flight_form_fix.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-world/14_judgement_fix.sql",
-        "module/sql/db-world/14_judgement_fix.sql"
-    ),
-    payload!(
-        "modules/mod-unbound/data/sql/db-characters/01_unbound_characters.sql",
-        "module/sql/db-characters/01_unbound_characters.sql"
-    ),
-    payload!(
-        "env/dist/etc/modules/lua_scripts/unbound_mentor.lua",
-        "lua/unbound_mentor.lua"
-    ),
+    payload!("modules/mod-unbound/data/sql/db-characters/01_unbound_characters.sql", "module/sql/db-characters/01_unbound_characters.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/01_unbound_world.sql", "module/sql/db-world/01_unbound_world.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/02_fix_catalog_req_level.sql", "module/sql/db-world/02_fix_catalog_req_level.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/03_creation_gift_spells.sql", "module/sql/db-world/03_creation_gift_spells.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/04_catalog_druid_forms.sql", "module/sql/db-world/04_catalog_druid_forms.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/05_individual_purchase_prereqs.sql", "module/sql/db-world/05_individual_purchase_prereqs.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/06_universal_skill_access.sql", "module/sql/db-world/06_universal_skill_access.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/07_mentor_stone.sql", "module/sql/db-world/07_mentor_stone.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/08_catalog_additions.sql", "module/sql/db-world/08_catalog_additions.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/10_catalog_audit_fixes.sql", "module/sql/db-world/10_catalog_audit_fixes.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/11_catalog_gap_additions.sql", "module/sql/db-world/11_catalog_gap_additions.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/12_mount_spell_fix.sql", "module/sql/db-world/12_mount_spell_fix.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/13_flight_form_fix.sql", "module/sql/db-world/13_flight_form_fix.sql"),
+    payload!("modules/mod-unbound/data/sql/db-world/14_judgement_fix.sql", "module/sql/db-world/14_judgement_fix.sql"),
+    payload!("modules/mod-unbound/src/UnboundSystem.cpp", "module/src/UnboundSystem.cpp"),
+    payload!("modules/mod-unbound/src/UnboundSystem_loader.cpp", "module/src/UnboundSystem_loader.cpp"),
+    payload!("modules/mod-unbound/unbound-core-access.patch", "module/unbound-core-access.patch"),
+    payload!("modules/mod-multiclass-summons/CMakeLists.txt", "summons/CMakeLists.txt"),
+    payload!("modules/mod-multiclass-summons/data/sql/db-world/base/multiclass_summons.sql", "summons/data/sql/db-world/base/multiclass_summons.sql"),
+    payload!("modules/mod-multiclass-summons/src/mod_multiclass_summons_loader.cpp", "summons/src/mod_multiclass_summons_loader.cpp"),
+    payload!("modules/mod-multiclass-summons/src/multiclass_pet_fix.cpp", "summons/src/multiclass_pet_fix.cpp"),
+    payload!("modules/mod-multiclass-summons/src/multiclass_pet_fix_loader.h", "summons/src/multiclass_pet_fix_loader.h"),
 ];
 
 /// Which database a migration is applied to.
@@ -189,6 +165,13 @@ pub const SQL_ORDER: &[(&str, SqlDb)] = &[
     ("modules/mod-unbound/npc_setup.sql", SqlDb::World),
 ];
 
+/// The multi-class summons module's spell-script registration, applied
+/// best-effort by the SQL stage. Deliberately NOT in [`SQL_ORDER`]: a failure
+/// must not abort the install, because AzerothCore also applies this file
+/// itself from the module's `data/sql/db-world/base/` path.
+pub const SUMMONS_SQL_DEST: &str =
+    "modules/mod-multiclass-summons/data/sql/db-world/base/multiclass_summons.sql";
+
 /// The core patch, by destination — the one payload file that is applied with
 /// `git apply` rather than merely written.
 pub const PATCH_DEST: &str = "modules/mod-unbound/unbound-core-access.patch";
@@ -223,18 +206,19 @@ pub fn manifest_fingerprint() -> u64 {
 mod tests {
     use super::*;
 
-    /// The single pin, for add-on 1.2.2 as extracted on 2026-08-01.
+    /// The single pin, for add-on **1.4.0** as extracted on 2026-08-02.
     ///
     /// Regenerate ONLY together with a deliberate re-extraction, and say so in
-    /// the commit message. Proven non-vacuous the day it was written: flipping
-    /// one byte of `02_fix_catalog_req_level.sql` turned this red.
-    const FINGERPRINT: u64 = 0xd811_9e34_f27a_c082;
+    /// the commit message. Proven non-vacuous when written for 1.2.2 (flipping
+    /// one byte of `02_fix_catalog_req_level.sql` turned it red), and it earned
+    /// the keep again on the 1.4.0 re-extraction, which moved it.
+    const FINGERPRINT: u64 = 0x900f_d971_3f34_2982;
 
     #[test]
     fn the_payload_is_byte_pinned() {
-        assert_eq!(MANIFEST.len(), 19, "payload file count changed");
+        assert_eq!(MANIFEST.len(), 26, "payload file count changed");
         let total: usize = MANIFEST.iter().map(|f| f.body.len()).sum();
-        assert_eq!(total, 84_976, "payload total byte count changed");
+        assert_eq!(total, 171_748, "payload total byte count changed");
         assert_eq!(
             manifest_fingerprint(),
             FINGERPRINT,
@@ -314,16 +298,58 @@ mod tests {
     }
 
     #[test]
-    fn the_lua_lands_where_the_server_actually_reads_it() {
-        // The one payload file that does NOT go under modules/. It belongs to
-        // the ALE script path, and writing it into the module tree would leave
-        // a server that builds, boots, and silently has no Mentor.
-        let lua = file("env/dist/etc/modules/lua_scripts/unbound_mentor.lua");
-        assert!(lua.is_some(), "the mentor lua moved out of the ALE script path");
-        assert_eq!(
-            MANIFEST.iter().filter(|f| !f.dest.starts_with(MODULE_REL)).count(),
-            1,
-            "exactly one payload file belongs outside the module tree"
-        );
+    fn every_payload_file_lands_in_one_of_the_three_trees_it_belongs_to() {
+        // v1.4.0 spreads the payload across THREE destinations, and putting a
+        // file in the wrong one produces a server that builds, boots, and is
+        // quietly missing a feature:
+        //
+        //   * the ALE script dir -- the Lua the server actually SCANS. A
+        //     mentor/talent script written under modules/ instead leaves a
+        //     working server with no Mentor and no talent bridge.
+        //   * mod-unbound -- the original C++ module, its patch and its SQL.
+        //   * mod-multiclass-summons -- the v1.4.0 pet-conflict module, in its
+        //     own tree, because two modules' sources must never mingle.
+        const ALE: &str = "env/dist/etc/modules/lua_scripts/";
+        const SUMMONS: &str = "modules/mod-multiclass-summons/";
+        let (mut ale, mut unbound, mut summons) = (0, 0, 0);
+        for f in MANIFEST {
+            if f.dest.starts_with(ALE) {
+                ale += 1;
+            } else if f.dest.starts_with(SUMMONS) {
+                summons += 1;
+            } else if f.dest.starts_with(MODULE_REL) {
+                unbound += 1;
+            } else {
+                panic!("{} is in none of the three known trees", f.dest);
+            }
+        }
+        assert_eq!(ale, 3, "mentor + talent bridge + talent data");
+        assert_eq!(summons, 5, "CMakeLists + 3 sources + its base SQL");
+        assert_eq!(unbound, 18, "2 sources + patch + npc_setup + 14 migrations");
+
+        // Named explicitly: a rename that silently dropped one of the three
+        // would still satisfy the count above.
+        for name in ["unbound_mentor.lua", "unbound_addon_sync.lua", "unbound_talent_data.lua"] {
+            let dest = format!("{ALE}{name}");
+            assert!(
+                file(&dest).is_some(),
+                "{name} is not in the ALE script path -- the server would never load it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_summons_module_keeps_its_sql_where_azerothcore_auto_applies_it() {
+        // data/sql/db-world/base/ is the ONE module path AzerothCore's own
+        // DBUpdater applies at startup, and it runs BEFORE
+        // LoadSpellScriptNames() caches spell_script_names -- which is why the
+        // module registers its script rows there rather than from C++ at
+        // runtime. The source says so in a comment written by someone who
+        // evidently tried the other way and had it picked up a restart late.
+        let sql =
+            file("modules/mod-multiclass-summons/data/sql/db-world/base/multiclass_summons.sql")
+                .expect("summons SQL in manifest");
+        assert!(sql.body.contains("spell_script_names"));
+        assert!(sql.body.contains("spell_summon_pet_override"));
     }
 }

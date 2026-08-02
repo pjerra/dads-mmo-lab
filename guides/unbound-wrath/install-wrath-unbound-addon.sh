@@ -56,7 +56,7 @@
 #  does NOT build a server from scratch.
 # ============================================================
 
-WIZARD_VERSION="1.2.2"
+WIZARD_VERSION="1.4.0"
 
 # Default server location (install-wow-wotlk.sh / install-wow.sh standard).
 # detect_server_dir() in MAIN will auto-detect if this path doesn't exist.
@@ -1551,6 +1551,16 @@ local MENTOR_ENTRY      = 900001
 local MENTOR_STONE_ENTRY = 900100
 local PAGE_SIZE          = 10   -- spells shown per gossip page
 
+-- ── Talent points for sale ────────────────────────────────────────────────
+-- Flat price, no scaling with level or with how many you already own.
+local TALENT_POINT_COST    = 750000            -- 75g in copper
+local TALENT_POINT_BUNDLES = { 1, 5, 10 }      -- purchase sizes offered
+-- A bought point becomes a permanent bonus talent point: AddBonusTalent feeds
+-- Player::CalculateTalentsPoints(), and the running total is saved in
+-- characters.extraBonusTalentCount, so it survives relog, level-up and respec.
+-- AzerothCore reads that column back as a uint8, so the total must stay <= 255.
+local MAX_BONUS_TALENT_POINTS = 255
+
 -- Per-player timestamp (os.time seconds) of last Mentor Stone use.
 -- Used to enforce the 3-minute cooldown on the Lua side as a guard.
 local STONE_LAST_USE = {}
@@ -1972,6 +1982,42 @@ local function ShowBrowsePage(player, creature, classId, page)
 end
 
 -- ============================================================
+-- Talent point purchase
+-- ============================================================
+
+local function TalentPointMenuLabel(player)
+    return string.format("Buy talent points  [%s each]  (%d unspent)",
+        FormatCopper(TALENT_POINT_COST), player:GetFreeTalentPoints())
+end
+
+local function ShowTalentPointMenu(player, creature)
+    player:GossipClearMenu()
+
+    local purchased = player:GetBonusTalentCount()
+    player:GossipMenuAddItem(0, string.format(
+        "── %d unspent talent point(s), %d purchased ──",
+        player:GetFreeTalentPoints(), purchased), 0, 99, false)
+
+    local offered = 0
+    for _, amount in ipairs(TALENT_POINT_BUNDLES) do
+        if purchased + amount <= MAX_BONUS_TALENT_POINTS then
+            player:GossipMenuAddItem(0, string.format(
+                "Buy %d talent point%s  [%s]",
+                amount, amount == 1 and "" or "s",
+                FormatCopper(TALENT_POINT_COST * amount)), 31, amount, false)
+            offered = offered + 1
+        end
+    end
+    if offered == 0 then
+        player:GossipMenuAddItem(0,
+            "You have bought every talent point I can grant.", 0, 99, false)
+    end
+
+    player:GossipMenuAddItem(0, "← Back", 32, 0, false)
+    player:GossipSendMenu(100, creature)
+end
+
+-- ============================================================
 -- Gossip: Hello
 -- ============================================================
 
@@ -1991,6 +2037,7 @@ local function OnGossipHello(event, player, creature)
             player:GossipMenuAddItem(0, string.format(
                 "(Reach level %d to begin the Unbound path.)", lvl), 0, 99, false)
         end
+        player:GossipMenuAddItem(0, TalentPointMenuLabel(player), 30, 0, false)
         player:GossipMenuAddItem(0, "Farewell.", 99, 0, false)
         player:GossipSendMenu(100, creature)
         return
@@ -2014,6 +2061,7 @@ local function OnGossipHello(event, player, creature)
             "Browse " .. CLASS_NAMES[classId] .. " abilities", 2, classId, false)
     end
 
+    player:GossipMenuAddItem(0, TalentPointMenuLabel(player), 30, 0, false)
     player:GossipMenuAddItem(0, "Farewell.", 99, 0, false)
     player:GossipSendMenu(100, creature)
 end
@@ -2026,6 +2074,9 @@ end
 -- sender=24  → paginate (intid = classId*1000 + page)
 -- sender=25  → buy individual spell directly, then refresh Browse (intid = encoded classId+spellId)
 -- sender=27  → buy every currently-available spell for the class (intid = classId)
+-- sender=30  → open the talent point shop
+-- sender=31  → buy talent points (intid = how many)
+-- sender=32  → back to the main menu
 -- sender=99  → close
 -- ============================================================
 
@@ -2227,6 +2278,59 @@ local function OnGossipSelect(event, player, creature, sender, intid, code, menu
                 "|cff00ff00Learned %d %s abilities!|r", learned, CLASS_NAMES[classId]))
         end
         ShowBrowsePage(player, creature, classId, 0)
+        return
+    end
+
+    -- ---- sender=30: open the talent point shop ----
+    if sender == 30 then
+        ShowTalentPointMenu(player, creature)
+        return
+    end
+
+    -- ---- sender=31: buy talent points ----
+    if sender == 31 then
+        local amount = 0
+        for _, bundle in ipairs(TALENT_POINT_BUNDLES) do
+            if intid == bundle then amount = bundle end
+        end
+        if amount == 0 then
+            player:GossipComplete()
+            return
+        end
+
+        if player:GetBonusTalentCount() + amount > MAX_BONUS_TALENT_POINTS then
+            player:SendBroadcastMessage(
+                "You have bought every talent point I can grant.")
+            ShowTalentPointMenu(player, creature)
+            return
+        end
+
+        local cost = TALENT_POINT_COST * amount
+        if player:GetCoinage() < cost then
+            player:SendBroadcastMessage(string.format(
+                "You need %s for %d talent point%s.",
+                FormatCopper(cost), amount, amount == 1 and "" or "s"))
+            ShowTalentPointMenu(player, creature)
+            return
+        end
+
+        player:ModifyMoney(-cost)
+        -- AddBonusTalent makes the point permanent (saved in
+        -- characters.extraBonusTalentCount, re-added by CalculateTalentsPoints
+        -- on every login/level-up/respec); SetFreeTalentPoints makes it
+        -- spendable right now, without waiting for that recalculation.
+        player:AddBonusTalent(amount)
+        player:SetFreeTalentPoints(player:GetFreeTalentPoints() + amount)
+        player:SendBroadcastMessage(string.format(
+            "|cff00ff00Gained %d talent point%s for %s.|r",
+            amount, amount == 1 and "" or "s", FormatCopper(cost)))
+        ShowTalentPointMenu(player, creature)
+        return
+    end
+
+    -- ---- sender=32: back to the main menu ----
+    if sender == 32 then
+        OnGossipHello(event, player, creature)
         return
     end
 
@@ -2488,6 +2592,1887 @@ WU_PAYLOAD_EOF_19
 #  on this server, or staged by a prior run), this is a no-op.
 # ============================================================
 MOD_ALE_COMMIT="1cb86c9600260c3731c96dc3c98d25b4fc3f2153"
+
+# ============================================================
+#  stage_talent_bridge()   (added v1.3.0)
+#
+#  Cross-class TALENT system. Two Lua files into the shared ALE
+#  lua_scripts dir:
+#    unbound_addon_sync.lua  — MCUB addon-message bridge: class-unlock
+#      sync + validated cross-class talent learn/respec. Enforces the
+#      talent allowlist, tier gating, prereqs, rank order, and a shared
+#      talent-point pool (Get/SetFreeTalentPoints). Self-creates the
+#      unbound_character_talents tracking table.
+#    unbound_talent_data.lua — per-class talent metadata the bridge
+#      validates against (tier/col/maxRank/ranks/prereq).
+#
+#  Additive + idempotent: overwrites only these two files; the tracking
+#  table is CREATE TABLE IF NOT EXISTS. No SQL migration, no schema risk.
+#  Players need the CLIENT addons (WrathUnbound-Addons.zip) to use it.
+# ============================================================
+stage_talent_bridge() {
+    print_step "Staging the cross-class talent bridge (Lua)..."
+
+    local LUA_DIR="$SERVER_DIR/env/dist/etc/modules/lua_scripts"
+    mkdir -p "$LUA_DIR"
+
+    cat > "$LUA_DIR/unbound_addon_sync.lua" <<'WU_TALENT_BRIDGE_EOF'
+-- Unbound <-> Multiclass Talents bridge (mod-ale / Eluna).
+--   1. Class-unlock sync ("SYNC")  -> replies "CLASSES:<ids>".
+--   2. Cross-class talent learn ("LEARN:<classId>:<spellId>") -> validated grant.
+--
+-- Cross-class talents are made to behave like REAL talents, enforced here:
+--   * spell must be a real talent rank of that class (allowlist)
+--   * you must own the class (unbound_character_unlocks) or it is your native
+--   * rank order: you learn rank N only after rank N-1
+--   * tier gating: (tier-1)*5 points already spent in THAT class tree
+--   * prereq talent (if any) must be maxed
+--   * budget: drawn from your REAL talent pool (GetFreeTalentPoints), shared
+--     across your native tree and every cross-class tree
+-- Spent cross-class ranks are tracked in unbound_character_talents so the tier
+-- gate and rank order survive relog. The `.learn` GM command is never used.
+--
+-- Metadata comes from unbound_talent_data.lua (global UnboundTalentData).
+
+local PREFIX = "MCUB"
+local CHAT_MSG_WHISPER = 7
+local ADDON_EVENT_ON_MESSAGE = 30
+local PLAYER_EVENT_ON_LOGIN = 3
+local PLAYER_EVENT_ON_LEVEL_CHANGE = 13
+local POINTS_PER_TIER = 5
+
+-- ---------------------------------------------------------------------------
+-- Build lookup indices from UnboundTalentData (once, at load).
+--   talentMeta[classId][talentId]      = { t,c,mr,r,p }
+--   spellIndex[classId][spellId]       = { tid = talentId, ri = rankIndex }
+--   tierColIndex[classId][tier][col]   = talentId       (for prereq lookup)
+-- ---------------------------------------------------------------------------
+local talentMeta, spellIndex, tierColIndex = {}, {}, {}
+local indicesBuilt = false
+local missingDataWarned = false
+
+-- Built lazily on first use: ALE loads the lua_scripts dir alphabetically, so
+-- unbound_talent_data.lua loads AFTER this file. By the time any addon message
+-- arrives every script is loaded, so UnboundTalentData is guaranteed present.
+local function EnsureIndices()
+    if indicesBuilt then return true end
+    if not UnboundTalentData then
+        if not missingDataWarned then
+            print("[UNBOUND] ERROR: unbound_talent_data.lua not loaded — " ..
+                "cross-class talent learn will DENY. Check the data file exists " ..
+                "in lua_scripts and `.reload ale`.")
+            missingDataWarned = true
+        end
+        return false
+    end
+    for classId, talents in pairs(UnboundTalentData) do
+        talentMeta[classId] = talents
+        spellIndex[classId] = {}
+        tierColIndex[classId] = {}
+        for talentId, meta in pairs(talents) do
+            tierColIndex[classId][meta.t] = tierColIndex[classId][meta.t] or {}
+            tierColIndex[classId][meta.t][meta.c] = talentId
+            for ri, rankSpell in ipairs(meta.r) do
+                spellIndex[classId][rankSpell] = { tid = talentId, ri = ri }
+            end
+        end
+    end
+    indicesBuilt = true
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Persistent spent-rank tracking (self-creating table, acore_characters).
+-- ---------------------------------------------------------------------------
+local function EnsureTable()
+    CharDBExecute(
+        "CREATE TABLE IF NOT EXISTS `unbound_character_talents` (" ..
+        "`char_guid` INT UNSIGNED NOT NULL, " ..
+        "`class_id` TINYINT UNSIGNED NOT NULL, " ..
+        "`talent_id` INT UNSIGNED NOT NULL, " ..
+        "`rank` TINYINT UNSIGNED NOT NULL, " ..
+        "PRIMARY KEY (`char_guid`, `talent_id`)) " ..
+        "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;")
+end
+
+local function GetStoredRank(guid, talentId)
+    local Q = CharDBQuery(string.format(
+        "SELECT `rank` FROM unbound_character_talents WHERE char_guid = %d AND talent_id = %d",
+        guid, talentId))
+    return Q and Q:GetUInt32(0) or 0
+end
+
+local function GetTreePoints(guid, classId)
+    local Q = CharDBQuery(string.format(
+        "SELECT COALESCE(SUM(`rank`),0) FROM unbound_character_talents " ..
+        "WHERE char_guid = %d AND class_id = %d", guid, classId))
+    return Q and Q:GetUInt32(0) or 0
+end
+
+-- Every cross-class rank this character has paid for, across all trees.
+local function GetTotalSpent(guid)
+    local Q = CharDBQuery(string.format(
+        "SELECT COALESCE(SUM(`rank`),0) FROM unbound_character_talents " ..
+        "WHERE char_guid = %d", guid))
+    return Q and Q:GetUInt32(0) or 0
+end
+
+local function StoreRank(guid, classId, talentId, rank)
+    CharDBExecute(string.format(
+        "INSERT INTO unbound_character_talents (char_guid, class_id, talent_id, `rank`) " ..
+        "VALUES (%d, %d, %d, %d) ON DUPLICATE KEY UPDATE `rank` = %d",
+        guid, classId, talentId, rank, rank))
+end
+
+-- ---------------------------------------------------------------------------
+-- Class-unlock helpers
+-- ---------------------------------------------------------------------------
+local function GetUnlockedSet(player)
+    local set = {}
+    local Q = CharDBQuery(string.format(
+        "SELECT class_id FROM unbound_character_unlocks WHERE char_guid = %d",
+        player:GetGUIDLow()))
+    if Q then
+        repeat set[Q:GetUInt32(0)] = true until not Q:NextRow()
+    end
+    return set
+end
+
+local function BuildClassList(player)
+    local ids = {}
+    for classId in pairs(GetUnlockedSet(player)) do ids[#ids + 1] = classId end
+    table.sort(ids)
+    for i = 1, #ids do ids[i] = tostring(ids[i]) end
+    return table.concat(ids, ",")
+end
+
+local function Reply(player, text)
+    player:SendAddonMessage(PREFIX, text, CHAT_MSG_WHISPER, player)
+end
+
+local function SendSync(player)
+    if not player then return end
+    Reply(player, "CLASSES:" .. BuildClassList(player))
+end
+
+-- ---------------------------------------------------------------------------
+-- Cross-class talent learn
+-- ---------------------------------------------------------------------------
+local function HandleLearn(player, payload)
+    local classId, spellId = payload:match("^(%d+):(%d+)$")
+    classId = tonumber(classId)
+    spellId = tonumber(spellId)
+    if not classId or not spellId then return end
+
+    local function deny(reason)
+        Reply(player, string.format("DENY:%s:%d:%d", reason, classId, spellId))
+    end
+
+    -- 1. Class access: native class, or unlocked in Unbound.
+    if classId ~= player:GetClass() then
+        if not GetUnlockedSet(player)[classId] then
+            return deny("LOCKED")
+        end
+    end
+
+    -- 2. Must be a real talent rank of that class.
+    if not EnsureIndices() then
+        return deny("INVALID")
+    end
+    local idx = spellIndex[classId] and spellIndex[classId][spellId]
+    if not idx then
+        return deny("INVALID")
+    end
+    local meta = talentMeta[classId][idx.tid]
+    local guid = player:GetGUIDLow()
+    local stored = GetStoredRank(guid, idx.tid)
+
+    -- 3. Idempotent: already have this rank (or higher) -> ack, no charge.
+    if idx.ri <= stored then
+        return Reply(player, string.format("LEARNED:%d:%d", classId, spellId))
+    end
+
+    -- 4. Rank order: only the next rank, never skip.
+    if idx.ri ~= stored + 1 then
+        return deny("RANK")
+    end
+
+    -- 5. Tier gating: (tier-1)*5 points already spent in this class tree.
+    if GetTreePoints(guid, classId) < (meta.t - 1) * POINTS_PER_TIER then
+        return deny("TIER")
+    end
+
+    -- 6. Prereq talent (if any) must be at max rank.
+    if meta.p then
+        local pTid = tierColIndex[classId][meta.p[1]] and
+                     tierColIndex[classId][meta.p[1]][meta.p[2]]
+        if pTid then
+            local pMeta = talentMeta[classId][pTid]
+            if GetStoredRank(guid, pTid) < pMeta.mr then
+                return deny("PREREQ")
+            end
+        end
+    end
+
+    -- 7. Budget: shared real talent pool.
+    local free = player:GetFreeTalentPoints()
+    if free < 1 then
+        return deny("NOPOINTS")
+    end
+
+    -- Grant: learn this rank, drop the superseded lower rank, debit a point,
+    -- record the spend.
+    player:LearnSpell(spellId)
+    if idx.ri > 1 then
+        player:RemoveSpell(meta.r[idx.ri - 1])
+    end
+    player:SetFreeTalentPoints(free - 1)
+    StoreRank(guid, classId, idx.tid, idx.ri)
+    Reply(player, string.format("LEARNED:%d:%d", classId, spellId))
+end
+
+-- ---------------------------------------------------------------------------
+-- Respec: wipe EVERY talent this character has — the native class tree as well
+-- as every cross-class tree — and hand back all of the points.
+--
+-- Two halves, and the order matters:
+--   1. Cross-class ranks live only in unbound_character_talents / the spellbook,
+--      so we unlearn them, credit the points back and drop the rows ourselves.
+--   2. Native ranks are real talents, so Player::resetTalents() does the work.
+--      It recomputes free points as CalculateTalentsPoints() — level total plus
+--      any Mentor-purchased bonus points — which is exactly the right end state
+--      once step 1 has zeroed the cross-class side. If the character had no
+--      native talents spent, resetTalents() early-outs without touching the
+--      counter, which is fine: step 1 already left it at the same value.
+-- ---------------------------------------------------------------------------
+local function HandleReset(player)
+    if not EnsureIndices() then return end
+    local guid = player:GetGUIDLow()
+    local before = player:GetFreeTalentPoints()
+    local crossRefund = 0
+
+    local Q = CharDBQuery(string.format(
+        "SELECT class_id, talent_id, `rank` FROM unbound_character_talents " ..
+        "WHERE char_guid = %d", guid))
+    if Q then
+        repeat
+            local classId = Q:GetUInt32(0)
+            local talentId = Q:GetUInt32(1)
+            local rank = Q:GetUInt32(2)
+            local meta = talentMeta[classId] and talentMeta[classId][talentId]
+            if meta then
+                for i = 1, rank do
+                    if meta.r[i] then player:RemoveSpell(meta.r[i]) end
+                end
+            end
+            crossRefund = crossRefund + rank
+        until not Q:NextRow()
+    end
+
+    if crossRefund > 0 then
+        player:SetFreeTalentPoints(before + crossRefund)
+    end
+    CharDBExecute(string.format(
+        "DELETE FROM unbound_character_talents WHERE char_guid = %d", guid))
+
+    -- true = no reset cost; the cross-class half has always been free.
+    player:ResetTalents(true)
+
+    local after = player:GetFreeTalentPoints()
+    Reply(player, "RESET:" .. (after > before and (after - before) or crossRefund))
+end
+
+-- ---------------------------------------------------------------------------
+-- Free-point reconciliation.
+--
+-- Cross-class ranks are paid for out of the real talent pool, but the server
+-- only knows about native talents: Player::InitTalentForLevel() recomputes free
+-- points as (level total + purchased bonus - native spent) on login and after
+-- every level-up. Without this pass that silently handed every cross-class
+-- point back while the spells stayed learned — free respecs by relogging.
+-- ---------------------------------------------------------------------------
+local function ReconcileFreePoints(player)
+    local spent = GetTotalSpent(player:GetGUIDLow())
+    if spent <= 0 then return end
+    local free = player:GetFreeTalentPoints()
+    player:SetFreeTalentPoints(free > spent and (free - spent) or 0)
+end
+
+-- Runs on a short delay in both cases: the Player userdata captured here goes
+-- stale across the login -> in-world transition, and on level-up GiveLevel()
+-- must finish its own InitTalentForLevel() before we adjust the total.
+local function ScheduleReconcile(player, delayMs)
+    local guid = player:GetGUID()
+    player:RegisterEvent(function()
+        local live = GetPlayerByGUID(guid)
+        if not live or not live:IsInWorld() then return end
+        local ok, err = pcall(function() ReconcileFreePoints(live) end)
+        if not ok then
+            print("[UNBOUND] talent point reconcile ERROR: " .. tostring(err))
+        end
+    end, delayMs, 1)
+end
+
+-- ---------------------------------------------------------------------------
+-- Router
+-- ---------------------------------------------------------------------------
+local function OnAddonMessage(event, sender, msgType, prefix, msg, target)
+    if prefix ~= PREFIX or not sender then return end
+
+    if msg == "SYNC" then
+        SendSync(sender)
+        return false
+    end
+
+    if msg == "RESET" then
+        HandleReset(sender)
+        return false
+    end
+
+    local learnPayload = msg:match("^LEARN:(.+)$")
+    if learnPayload then
+        HandleLearn(sender, learnPayload)
+        return false
+    end
+end
+
+RegisterServerEvent(ADDON_EVENT_ON_MESSAGE, OnAddonMessage)
+
+RegisterPlayerEvent(PLAYER_EVENT_ON_LOGIN, function(event, player)
+    ScheduleReconcile(player, 1000)
+end)
+
+RegisterPlayerEvent(PLAYER_EVENT_ON_LEVEL_CHANGE, function(event, player, oldLevel)
+    ScheduleReconcile(player, 200)
+end)
+
+EnsureTable()
+-- Indices bind lazily on the first cross-class pick (load-order safe).
+print("[UNBOUND] Multiclass sync + cross-class talent bridge loaded " ..
+    "(tier/prereq/budget enforced; talent metadata binds on first use).")
+WU_TALENT_BRIDGE_EOF
+
+    cat > "$LUA_DIR/unbound_talent_data.lua" <<'WU_TALENT_DATA_EOF'
+-- AUTO-GENERATED cross-class talent metadata for the Unbound learn bridge.
+-- Source: multiclass-talents-ui/Data/Talents_*.lua  (gen_talent_data.py).
+-- Per class: talentId -> { t=tier, c=col, mr=maxRank, r={rank spellIds}, p={ptier,pcol}? }
+-- Do not hand-edit.
+UnboundTalentData = {
+    [1] = { -- Warrior
+        [12163]={t=4,c=2,mr=3,r={12163,12711,12712}},
+        [12281]={t=5,c=4,mr=5,r={12281,12812,12813,12814,12815}},
+        [12282]={t=1,c=1,mr=3,r={12282,12663,12664}},
+        [12284]={t=5,c=3,mr=5,r={12284,12701,12702,12703,12704}},
+        [12285]={t=2,c=1,mr=2,r={12285,12697}},
+        [12286]={t=1,c=3,mr=2,r={12286,12658}},
+        [12287]={t=1,c=3,mr=3,r={12287,12665,12666}},
+        [12289]={t=6,c=3,mr=3,r={12289,12668,23695}},
+        [12290]={t=3,c=1,mr=2,r={12290,12963}},
+        [12292]={t=5,c=2,mr=1,r={12292}},
+        [12294]={t=7,c=2,mr=1,r={12294}, p={5,2}},
+        [12295]={t=2,c=3,mr=3,r={12295,12676,12677}},
+        [12296]={t=3,c=2,mr=1,r={12296}},
+        [12297]={t=2,c=3,mr=5,r={12297,12750,12751,12752,12753}},
+        [12298]={t=1,c=2,mr=5,r={12298,12724,12725,12726,12727}},
+        [12299]={t=3,c=4,mr=5,r={12299,12761,12762,12763,12764}},
+        [12300]={t=2,c=2,mr=3,r={12300,12959,12960}},
+        [12301]={t=1,c=1,mr=2,r={12301,12818}},
+        [12308]={t=4,c=3,mr=3,r={12308,12810,12811}},
+        [12311]={t=5,c=3,mr=2,r={12311,12958}},
+        [12312]={t=5,c=1,mr=2,r={12312,12803}},
+        [12313]={t=4,c=2,mr=2,r={12313,12804}},
+        [12317]={t=4,c=3,mr=5,r={12317,13045,13046,13047,13048}},
+        [12318]={t=3,c=4,mr=5,r={12318,12857,12858,12860,12861}},
+        [12319]={t=6,c=3,mr=5,r={12319,12971,12972,12973,12974}},
+        [12320]={t=1,c=3,mr=5,r={12320,12852,12853,12855,12856}},
+        [12321]={t=1,c=2,mr=2,r={12321,12835}},
+        [12322]={t=2,c=3,mr=5,r={12322,12999,13000,13001,13002}},
+        [12323]={t=3,c=2,mr=1,r={12323}},
+        [12324]={t=2,c=2,mr=5,r={12324,12876,12877,12878,12879}},
+        [12328]={t=5,c=2,mr=1,r={12328}},
+        [12329]={t=3,c=1,mr=3,r={12329,12950,20496}},
+        [12700]={t=5,c=1,mr=5,r={12700,12781,12783,12784,12785}},
+        [12797]={t=3,c=2,mr=2,r={12797,12799}},
+        [12809]={t=5,c=2,mr=1,r={12809}},
+        [12834]={t=3,c=4,mr=3,r={12834,12849,12867}, p={3,3}},
+        [12862]={t=7,c=4,mr=2,r={12862,12330}},
+        [12975]={t=3,c=1,mr=1,r={12975}},
+        [16462]={t=1,c=2,mr=5,r={16462,16463,16464,16465,16466}},
+        [16487]={t=3,c=3,mr=3,r={16487,16489,16492}},
+        [16493]={t=3,c=3,mr=2,r={16493,16494}},
+        [16538]={t=6,c=3,mr=5,r={16538,16539,16540,16541,16542}},
+        [20243]={t=9,c=2,mr=1,r={20243}},
+        [20500]={t=6,c=1,mr=2,r={20500,20501}},
+        [20502]={t=4,c=2,mr=2,r={20502,20503}},
+        [20504]={t=6,c=1,mr=2,r={20504,20505}},
+        [23584]={t=4,c=1,mr=5,r={23584,23585,23586,23587,23588}},
+        [23881]={t=7,c=2,mr=1,r={23881}, p={5,2}},
+        [29140]={t=8,c=2,mr=3,r={29140,29143,29144}},
+        [29590]={t=5,c=1,mr=3,r={29590,29591,29592}},
+        [29593]={t=7,c=1,mr=2,r={29593,29594}},
+        [29598]={t=3,c=3,mr=2,r={29598,29599}},
+        [29623]={t=9,c=2,mr=1,r={29623}},
+        [29721]={t=7,c=4,mr=2,r={29721,29776}},
+        [29723]={t=9,c=1,mr=3,r={29723,29725,29724}},
+        [29759]={t=8,c=4,mr=5,r={29759,29760,29761,29762,29763}},
+        [29787]={t=7,c=3,mr=3,r={29787,29790,29792}},
+        [29801]={t=9,c=2,mr=1,r={29801}, p={7,2}},
+        [29834]={t=7,c=1,mr=2,r={29834,29838}},
+        [29836]={t=9,c=3,mr=2,r={29836,29859}},
+        [29888]={t=5,c=3,mr=2,r={29888,29889}},
+        [35446]={t=8,c=2,mr=3,r={35446,35448,35449}, p={7,2}},
+        [46854]={t=6,c=4,mr=2,r={46854,46855}},
+        [46859]={t=8,c=3,mr=2,r={46859,46860}},
+        [46865]={t=7,c=3,mr=2,r={46865,46866}},
+        [46867]={t=10,c=2,mr=5,r={46867,56611,56612,56613,56614}},
+        [46908]={t=7,c=1,mr=3,r={46908,46909,56924}},
+        [46910]={t=8,c=1,mr=2,r={46910,46911}},
+        [46913]={t=9,c=3,mr=3,r={46913,46914,46915}, p={7,2}},
+        [46917]={t=11,c=2,mr=1,r={46917}},
+        [46924]={t=11,c=2,mr=1,r={46924}},
+        [46945]={t=8,c=3,mr=2,r={46945,46949}},
+        [46951]={t=10,c=2,mr=3,r={46951,46952,46953}, p={9,2}},
+        [46968]={t=11,c=2,mr=1,r={46968}},
+        [47294]={t=9,c=3,mr=3,r={47294,47295,47296}},
+        [50685]={t=2,c=2,mr=3,r={50685,50686,50687}},
+        [50720]={t=7,c=2,mr=1,r={50720}, p={5,2}},
+        [56636]={t=4,c=3,mr=3,r={56636,56637,56638}},
+        [56927]={t=10,c=2,mr=5,r={56927,56929,56930,56931,56932}},
+        [57499]={t=9,c=1,mr=1,r={57499}},
+        [58872]={t=10,c=3,mr=2,r={58872,58874}},
+        [59088]={t=4,c=1,mr=2,r={59088,59089}},
+        [60970]={t=9,c=1,mr=1,r={60970}},
+        [61216]={t=1,c=1,mr=3,r={61216,61221,61222}},
+        [64976]={t=8,c=1,mr=1,r={64976}},
+    },
+    [2] = { -- Paladin
+        [5923]={t=6,c=3,mr=5,r={5923,5924,5925,5926,25829}},
+        [9452]={t=3,c=1,mr=2,r={9452,26016}},
+        [9453]={t=2,c=3,mr=2,r={9453,25836}},
+        [9799]={t=4,c=1,mr=2,r={9799,25988}},
+        [20042]={t=2,c=3,mr=2,r={20042,20045}},
+        [20049]={t=6,c=2,mr=3,r={20049,20056,20057}, p={3,2}},
+        [20060]={t=1,c=2,mr=5,r={20060,20061,20062,20063,20064}},
+        [20066]={t=7,c=2,mr=1,r={20066}},
+        [20096]={t=2,c=3,mr=5,r={20096,20097,20098,20099,20100}},
+        [20101]={t=1,c=3,mr=5,r={20101,20102,20103,20104,20105}},
+        [20111]={t=5,c=1,mr=3,r={20111,20112,20113}},
+        [20117]={t=3,c=2,mr=5,r={20117,20118,20119,20120,20121}},
+        [20127]={t=8,c=1,mr=3,r={20127,20130,20135}},
+        [20138]={t=4,c=3,mr=3,r={20138,20139,20140}},
+        [20143]={t=3,c=3,mr=5,r={20143,20144,20145,20146,20147}},
+        [20174]={t=2,c=2,mr=2,r={20174,20175}},
+        [20177]={t=5,c=3,mr=5,r={20177,20179,20181,20180,20182}},
+        [20196]={t=6,c=3,mr=3,r={20196,20197,20198}},
+        [20205]={t=1,c=2,mr=5,r={20205,20206,20207,20209,20208}},
+        [20210]={t=3,c=2,mr=5,r={20210,20212,20213,20214,20215}},
+        [20216]={t=5,c=2,mr=1,r={20216}, p={3,2}},
+        [20224]={t=1,c=3,mr=5,r={20224,20225,20330,20331,20332}},
+        [20234]={t=3,c=3,mr=2,r={20234,20235}},
+        [20237]={t=2,c=1,mr=3,r={20237,20238,20239}},
+        [20244]={t=4,c=3,mr=2,r={20244,20245}},
+        [20254]={t=4,c=1,mr=3,r={20254,20255,20256}},
+        [20257]={t=2,c=2,mr=5,r={20257,20258,20259,20260,20261}},
+        [20262]={t=1,c=3,mr=5,r={20262,20263,20264,20265,20266}},
+        [20335]={t=2,c=2,mr=3,r={20335,20336,20337}},
+        [20359]={t=5,c=3,mr=3,r={20359,20360,20361}},
+        [20375]={t=3,c=3,mr=1,r={20375}},
+        [20468]={t=3,c=2,mr=3,r={20468,20469,20470}},
+        [20473]={t=7,c=2,mr=1,r={20473}, p={5,2}},
+        [20487]={t=4,c=2,mr=2,r={20487,20488}},
+        [20911]={t=5,c=2,mr=1,r={20911}},
+        [20925]={t=7,c=2,mr=1,r={20925}, p={5,2}},
+        [25956]={t=2,c=1,mr=2,r={25956,25957}},
+        [26022]={t=3,c=4,mr=2,r={26022,26023}},
+        [31785]={t=7,c=1,mr=2,r={31785,33776}},
+        [31821]={t=3,c=1,mr=1,r={31821}},
+        [31822]={t=5,c=1,mr=2,r={31822,31823}},
+        [31825]={t=6,c=1,mr=2,r={31825,31826}},
+        [31828]={t=7,c=3,mr=3,r={31828,31829,31830}},
+        [31833]={t=7,c=1,mr=3,r={31833,31835,31836}},
+        [31837]={t=8,c=3,mr=5,r={31837,31838,31839,31840,31841}},
+        [31842]={t=9,c=1,mr=1,r={31842}},
+        [31844]={t=2,c=1,mr=3,r={31844,31845,53519}},
+        [31848]={t=6,c=1,mr=2,r={31848,31849}},
+        [31850]={t=7,c=3,mr=3,r={31850,31851,31852}},
+        [31858]={t=8,c=3,mr=3,r={31858,31859,31860}},
+        [31866]={t=4,c=4,mr=3,r={31866,31867,31868}},
+        [31869]={t=5,c=3,mr=1,r={31869}},
+        [31871]={t=6,c=3,mr=2,r={31871,31872}},
+        [31876]={t=7,c=3,mr=3,r={31876,31877,31878}},
+        [31879]={t=8,c=2,mr=3,r={31879,31880,31881}, p={7,2}},
+        [31935]={t=9,c=2,mr=1,r={31935}, p={7,2}},
+        [32043]={t=4,c=3,mr=3,r={32043,35396,35397}},
+        [35395]={t=9,c=2,mr=1,r={35395}},
+        [53375]={t=8,c=3,mr=2,r={53375,53376}},
+        [53379]={t=9,c=1,mr=3,r={53379,53484,53648}},
+        [53380]={t=10,c=2,mr=3,r={53380,53381,53382}},
+        [53385]={t=11,c=2,mr=1,r={53385}},
+        [53486]={t=7,c=1,mr=2,r={53486,53488}},
+        [53501]={t=9,c=3,mr=3,r={53501,53502,53503}},
+        [53527]={t=4,c=1,mr=2,r={53527,53530}, p={3,1}},
+        [53551]={t=8,c=1,mr=3,r={53551,53552,53553}},
+        [53556]={t=10,c=3,mr=2,r={53556,53557}},
+        [53563]={t=11,c=2,mr=1,r={53563}},
+        [53569]={t=10,c=2,mr=2,r={53569,53576}, p={7,2}},
+        [53583]={t=9,c=3,mr=2,r={53583,53585}},
+        [53590]={t=9,c=1,mr=3,r={53590,53591,53592}},
+        [53595]={t=11,c=2,mr=1,r={53595}},
+        [53660]={t=4,c=4,mr=2,r={53660,53661}},
+        [53671]={t=9,c=3,mr=5,r={53671,53673,54151,54154,54155}},
+        [53695]={t=10,c=3,mr=2,r={53695,53696}},
+        [53709]={t=10,c=2,mr=3,r={53709,53710,53711}, p={9,2}},
+        [63646]={t=1,c=2,mr=5,r={63646,63647,63648,63649,63650}},
+        [64205]={t=3,c=1,mr=1,r={64205}},
+    },
+    [3] = { -- Hunter
+        [3674]={t=9,c=2,mr=1,r={3674}},
+        [19159]={t=1,c=3,mr=2,r={19159,19160}},
+        [19168]={t=6,c=1,mr=5,r={19168,19180,19181,24296,24297}},
+        [19184]={t=2,c=2,mr=3,r={19184,19387,19388}},
+        [19255]={t=3,c=1,mr=5,r={19255,19256,19257,19258,19259}},
+        [19286]={t=3,c=4,mr=2,r={19286,19287}},
+        [19290]={t=2,c=1,mr=3,r={19290,19294,24283}},
+        [19295]={t=3,c=3,mr=3,r={19295,19297,19298}},
+        [19306]={t=5,c=3,mr=1,r={19306}, p={3,3}},
+        [19370]={t=5,c=2,mr=3,r={19370,19371,19373}},
+        [19376]={t=2,c=3,mr=3,r={19376,63457,63458}},
+        [19386]={t=7,c=2,mr=1,r={19386}, p={5,2}},
+        [19407]={t=1,c=1,mr=2,r={19407,19412}},
+        [19416]={t=4,c=3,mr=5,r={19416,19417,19418,19419,19420}},
+        [19421]={t=2,c=2,mr=3,r={19421,19422,19423}},
+        [19426]={t=1,c=3,mr=5,r={19426,19427,19429,19430,19431}},
+        [19434]={t=3,c=3,mr=1,r={19434}, p={2,3}},
+        [19454]={t=3,c=2,mr=3,r={19454,19455,19456}},
+        [19461]={t=5,c=3,mr=3,r={19461,19462,24691}},
+        [19464]={t=4,c=2,mr=3,r={19464,19465,19466}},
+        [19485]={t=2,c=3,mr=5,r={19485,19487,19488,19489,19490}},
+        [19498]={t=1,c=2,mr=3,r={19498,19499,19500}},
+        [19503]={t=3,c=2,mr=1,r={19503}},
+        [19506]={t=7,c=2,mr=1,r={19506}, p={5,2}},
+        [19507]={t=6,c=4,mr=3,r={19507,19508,19509}},
+        [19549]={t=2,c=2,mr=3,r={19549,19550,19551}},
+        [19552]={t=1,c=2,mr=5,r={19552,19553,19554,19555,19556}},
+        [19559]={t=3,c=1,mr=2,r={19559,19560}},
+        [19572]={t=4,c=2,mr=2,r={19572,19573}},
+        [19574]={t=7,c=2,mr=1,r={19574}, p={5,2}},
+        [19577]={t=5,c=2,mr=1,r={19577}},
+        [19578]={t=5,c=1,mr=2,r={19578,20895}},
+        [19583]={t=1,c=3,mr=5,r={19583,19584,19585,19586,19587}},
+        [19590]={t=5,c=4,mr=2,r={19590,19592}},
+        [19598]={t=4,c=3,mr=5,r={19598,19599,19600,19601,19602}},
+        [19609]={t=2,c=3,mr=3,r={19609,19610,19612}},
+        [19616]={t=3,c=3,mr=5,r={19616,19617,19618,19619,19620}},
+        [19621]={t=6,c=3,mr=5,r={19621,19622,19623,19624,19625}, p={4,3}},
+        [23989]={t=5,c=2,mr=1,r={23989}},
+        [24443]={t=2,c=4,mr=2,r={24443,19575}},
+        [34453]={t=6,c=1,mr=2,r={34453,34454}},
+        [34455]={t=7,c=1,mr=3,r={34455,34459,34460}},
+        [34462]={t=7,c=3,mr=3,r={34462,34464,34465}},
+        [34466]={t=8,c=3,mr=5,r={34466,34467,34468,34469,34470}},
+        [34475]={t=6,c=1,mr=2,r={34475,34476}},
+        [34482]={t=2,c=1,mr=3,r={34482,34483,34484}},
+        [34485]={t=8,c=2,mr=5,r={34485,34486,34487,34488,34489}},
+        [34490]={t=9,c=2,mr=1,r={34490}, p={8,2}},
+        [34491]={t=6,c=3,mr=3,r={34491,34492,34493}},
+        [34494]={t=2,c=4,mr=2,r={34494,34496}},
+        [34497]={t=7,c=3,mr=3,r={34497,34498,34499}},
+        [34500]={t=7,c=1,mr=3,r={34500,34502,34503}, p={6,1}},
+        [34506]={t=8,c=1,mr=5,r={34506,34507,34508,34838,34839}},
+        [34692]={t=9,c=2,mr=1,r={34692}, p={7,2}},
+        [34948]={t=3,c=4,mr=2,r={34948,34949}},
+        [34950]={t=3,c=1,mr=2,r={34950,34954}},
+        [35029]={t=2,c=1,mr=2,r={35029,35030}},
+        [35100]={t=5,c=1,mr=2,r={35100,35102}},
+        [35104]={t=7,c=3,mr=3,r={35104,35110,35111}, p={5,3}},
+        [52783]={t=1,c=1,mr=5,r={52783,52785,52786,52787,52788}},
+        [53209]={t=11,c=2,mr=1,r={53209}},
+        [53215]={t=9,c=1,mr=3,r={53215,53216,53217}},
+        [53221]={t=9,c=3,mr=3,r={53221,53222,53224}},
+        [53228]={t=8,c=3,mr=2,r={53228,53232}},
+        [53234]={t=7,c=1,mr=3,r={53234,53237,53238}},
+        [53241]={t=10,c=2,mr=5,r={53241,53243,53244,53245,53246}},
+        [53252]={t=8,c=1,mr=2,r={53252,53253}, p={7,1}},
+        [53256]={t=9,c=3,mr=3,r={53256,53259,53260}, p={8,3}},
+        [53262]={t=9,c=1,mr=3,r={53262,53263,53264}},
+        [53265]={t=3,c=2,mr=1,r={53265}},
+        [53270]={t=11,c=2,mr=1,r={53270}},
+        [53290]={t=10,c=3,mr=3,r={53290,53291,53292}, p={7,3}},
+        [53295]={t=8,c=2,mr=3,r={53295,53296,53297}, p={7,2}},
+        [53298]={t=9,c=1,mr=2,r={53298,53299}},
+        [53301]={t=11,c=2,mr=1,r={53301}, p={9,2}},
+        [53302]={t=9,c=4,mr=3,r={53302,53303,53304}},
+        [53620]={t=1,c=2,mr=3,r={53620,53621,53622}},
+        [56314]={t=10,c=2,mr=5,r={56314,56315,56316,56317,56318}},
+        [56333]={t=4,c=2,mr=3,r={56333,56336,56337}},
+        [56339]={t=5,c=1,mr=3,r={56339,56340,56341}, p={3,1}},
+        [56342]={t=4,c=4,mr=3,r={56342,56343,56344}},
+    },
+    [4] = { -- Rogue
+        [1329]={t=9,c=2,mr=1,r={1329}, p={7,2}},
+        [5952]={t=8,c=1,mr=2,r={5952,51679}},
+        [13705]={t=2,c=4,mr=5,r={13705,13832,13843,13844,13845}},
+        [13706]={t=3,c=3,mr=5,r={13706,13804,13805,13806,13807}, p={1,3}},
+        [13709]={t=5,c=1,mr=5,r={13709,13800,13801,13802,13803}},
+        [13712]={t=4,c=3,mr=3,r={13712,13788,13789}},
+        [13713]={t=2,c=2,mr=3,r={13713,13853,13854}},
+        [13715]={t=1,c=3,mr=5,r={13715,13848,13849,13851,13852}},
+        [13732]={t=1,c=2,mr=2,r={13732,13863}},
+        [13733]={t=2,c=4,mr=3,r={13733,13865,13866}},
+        [13741]={t=1,c=1,mr=3,r={13741,13793,13792}},
+        [13742]={t=3,c=1,mr=2,r={13742,13872}},
+        [13743]={t=4,c=2,mr=2,r={13743,13875}},
+        [13750]={t=7,c=2,mr=1,r={13750}},
+        [13754]={t=4,c=1,mr=2,r={13754,13867}},
+        [13877]={t=5,c=2,mr=1,r={13877}},
+        [13958]={t=1,c=2,mr=3,r={13958,13970,13971}},
+        [13960]={t=5,c=3,mr=5,r={13960,13961,13962,13963,13964}},
+        [13975]={t=2,c=3,mr=3,r={13975,14062,14063}},
+        [13976]={t=4,c=2,mr=3,r={13976,13979,13980}},
+        [13981]={t=3,c=1,mr=2,r={13981,14066}},
+        [13983]={t=4,c=1,mr=3,r={13983,14070,14071}},
+        [14057]={t=1,c=3,mr=2,r={14057,14072}},
+        [14076]={t=2,c=2,mr=2,r={14076,14094}},
+        [14079]={t=4,c=3,mr=2,r={14079,14080}},
+        [14082]={t=5,c=3,mr=2,r={14082,14083}},
+        [14113]={t=4,c=3,mr=5,r={14113,14114,14115,14116,14117}},
+        [14128]={t=3,c=3,mr=5,r={14128,14132,14135,14136,14137}, p={1,3}},
+        [14138]={t=1,c=3,mr=5,r={14138,14139,14140,14141,14142}},
+        [14144]={t=1,c=2,mr=2,r={14144,14148}},
+        [14156]={t=2,c=1,mr=3,r={14156,14160,14161}},
+        [14158]={t=6,c=3,mr=2,r={14158,14159}},
+        [14162]={t=1,c=1,mr=3,r={14162,14163,14164}},
+        [14165]={t=2,c=1,mr=2,r={14165,14166}},
+        [14168]={t=3,c=2,mr=2,r={14168,14169}},
+        [14171]={t=3,c=3,mr=3,r={14171,14172,14173}},
+        [14174]={t=5,c=3,mr=3,r={14174,14175,14176}},
+        [14177]={t=5,c=2,mr=1,r={14177}},
+        [14179]={t=1,c=1,mr=5,r={14179,58422,58423,58424,58425}},
+        [14183]={t=7,c=2,mr=1,r={14183}, p={5,2}},
+        [14185]={t=5,c=2,mr=1,r={14185}},
+        [14186]={t=6,c=2,mr=5,r={14186,14190,14193,14194,14195}, p={5,2}},
+        [14251]={t=3,c=2,mr=1,r={14251}, p={2,2}},
+        [14278]={t=3,c=2,mr=1,r={14278}},
+        [14983]={t=3,c=1,mr=1,r={14983}},
+        [16511]={t=5,c=4,mr=1,r={16511}, p={3,3}},
+        [16513]={t=4,c=2,mr=3,r={16513,16514,16515}},
+        [18427]={t=4,c=4,mr=5,r={18427,18428,18429,61330,61331}},
+        [30892]={t=2,c=1,mr=2,r={30892,30893}},
+        [30894]={t=5,c=1,mr=2,r={30894,30895}},
+        [30902]={t=6,c=3,mr=5,r={30902,30903,30904,30905,30906}},
+        [30919]={t=6,c=2,mr=2,r={30919,30920}, p={5,2}},
+        [31122]={t=7,c=1,mr=3,r={31122,31123,61329}},
+        [31124]={t=6,c=3,mr=2,r={31124,31126}},
+        [31130]={t=7,c=3,mr=2,r={31130,31131}},
+        [31208]={t=5,c=1,mr=2,r={31208,31209}},
+        [31211]={t=7,c=1,mr=3,r={31211,31212,31213}},
+        [31216]={t=8,c=2,mr=5,r={31216,31217,31218,31219,31220}, p={7,2}},
+        [31221]={t=6,c=1,mr=3,r={31221,31222,31223}},
+        [31226]={t=9,c=1,mr=3,r={31226,31227,58410}},
+        [31228]={t=7,c=3,mr=3,r={31228,31229,31230}},
+        [31234]={t=8,c=3,mr=3,r={31234,31235,31236}},
+        [31244]={t=5,c=4,mr=2,r={31244,31245}},
+        [31380]={t=7,c=3,mr=3,r={31380,31382,31383}},
+        [32601]={t=9,c=2,mr=1,r={32601}, p={7,2}},
+        [35541]={t=8,c=3,mr=5,r={35541,35550,35551,35552,35553}},
+        [36554]={t=9,c=2,mr=1,r={36554}},
+        [51625]={t=7,c=1,mr=2,r={51625,51626}},
+        [51627]={t=9,c=3,mr=3,r={51627,51628,51629}},
+        [51632]={t=2,c=2,mr=2,r={51632,51633}},
+        [51634]={t=8,c=1,mr=3,r={51634,51635,51636}},
+        [51662]={t=11,c=2,mr=1,r={51662}},
+        [51664]={t=10,c=2,mr=5,r={51664,51665,51667,51668,51669}},
+        [51672]={t=9,c=1,mr=2,r={51672,51674}},
+        [51682]={t=9,c=3,mr=2,r={51682,58413}},
+        [51685]={t=10,c=2,mr=5,r={51685,51686,51687,51688,51689}},
+        [51690]={t=11,c=2,mr=1,r={51690}},
+        [51692]={t=8,c=3,mr=2,r={51692,51696}},
+        [51698]={t=9,c=1,mr=3,r={51698,51700,51701}},
+        [51708]={t=10,c=2,mr=5,r={51708,51709,51710,51711,51712}},
+        [51713]={t=11,c=2,mr=1,r={51713}},
+        [58414]={t=9,c=3,mr=2,r={58414,58415}},
+        [58426]={t=7,c=2,mr=1,r={58426}},
+    },
+    [5] = { -- Priest
+        [724]={t=7,c=2,mr=1,r={724}, p={5,2}},
+        [10060]={t=7,c=2,mr=1,r={10060}, p={5,2}},
+        [14520]={t=4,c=2,mr=3,r={14520,14780,14781}},
+        [14521]={t=3,c=1,mr=3,r={14521,14776,14777}},
+        [14522]={t=1,c=2,mr=5,r={14522,14788,14789,14790,14791}},
+        [14523]={t=2,c=1,mr=3,r={14523,14784,14785}},
+        [14531]={t=2,c=4,mr=2,r={14531,14774}},
+        [14747]={t=2,c=2,mr=3,r={14747,14770,14771}},
+        [14748]={t=3,c=3,mr=3,r={14748,14768,14769}},
+        [14749]={t=2,c=3,mr=2,r={14749,14767}},
+        [14750]={t=4,c=4,mr=2,r={14750,14772}},
+        [14751]={t=3,c=2,mr=1,r={14751}},
+        [14889]={t=1,c=3,mr=5,r={14889,15008,15009,15010,15011}},
+        [14892]={t=3,c=4,mr=3,r={14892,15362,15363}},
+        [14898]={t=6,c=3,mr=5,r={14898,15349,15354,15355,15356}},
+        [14901]={t=5,c=3,mr=5,r={14901,15028,15029,15030,15031}},
+        [14908]={t=1,c=2,mr=3,r={14908,15020,17191}},
+        [14909]={t=4,c=3,mr=2,r={14909,15017}, p={2,3}},
+        [14910]={t=6,c=1,mr=2,r={14910,33371}},
+        [14911]={t=5,c=1,mr=2,r={14911,15018}},
+        [14912]={t=4,c=2,mr=3,r={14912,15013,15014}},
+        [14913]={t=1,c=1,mr=2,r={14913,15012}},
+        [15257]={t=4,c=4,mr=3,r={15257,15331,15332}},
+        [15259]={t=1,c=3,mr=5,r={15259,15307,15308,15309,15310}},
+        [15260]={t=2,c=3,mr=3,r={15260,15327,15328}},
+        [15270]={t=1,c=1,mr=3,r={15270,15335,15336}},
+        [15273]={t=3,c=2,mr=5,r={15273,15312,15313,15314,15316}},
+        [15274]={t=4,c=2,mr=2,r={15274,15311}},
+        [15275]={t=2,c=2,mr=2,r={15275,15317}},
+        [15286]={t=5,c=2,mr=1,r={15286}},
+        [15318]={t=2,c=1,mr=3,r={15318,15272,15320}},
+        [15337]={t=1,c=2,mr=2,r={15337,15338}, p={1,1}},
+        [15392]={t=3,c=1,mr=2,r={15392,15448}},
+        [15407]={t=3,c=3,mr=1,r={15407}},
+        [15473]={t=7,c=2,mr=1,r={15473}, p={5,2}},
+        [15487]={t=5,c=1,mr=1,r={15487}, p={3,1}},
+        [17322]={t=4,c=3,mr=2,r={17322,17323}},
+        [18530]={t=2,c=3,mr=5,r={18530,18531,18533,18534,18535}},
+        [18551]={t=5,c=2,mr=5,r={18551,18552,18553,18554,18555}},
+        [19236]={t=3,c=1,mr=1,r={19236}},
+        [20711]={t=5,c=2,mr=1,r={20711}},
+        [27789]={t=4,c=1,mr=2,r={27789,27790}},
+        [27811]={t=3,c=2,mr=3,r={27811,27815,27816}},
+        [27839]={t=5,c=3,mr=2,r={27839,27840}, p={5,2}},
+        [27900]={t=2,c=2,mr=5,r={27900,27901,27902,27903,27904}},
+        [33142]={t=7,c=3,mr=3,r={33142,33145,33146}},
+        [33150]={t=6,c=1,mr=2,r={33150,33154}},
+        [33158]={t=8,c=2,mr=5,r={33158,33159,33160,33161,33162}},
+        [33167]={t=4,c=1,mr=3,r={33167,33171,33172}},
+        [33186]={t=6,c=1,mr=2,r={33186,33190}},
+        [33191]={t=8,c=3,mr=3,r={33191,33192,33193}},
+        [33201]={t=5,c=1,mr=2,r={33201,33202}},
+        [33206]={t=9,c=2,mr=1,r={33206}},
+        [33213]={t=5,c=4,mr=3,r={33213,33214,33215}},
+        [33221]={t=7,c=3,mr=5,r={33221,33222,33223,33224,33225}},
+        [34753]={t=7,c=1,mr=3,r={34753,34859,34860}},
+        [34861]={t=9,c=2,mr=1,r={34861}},
+        [34908]={t=6,c=3,mr=3,r={34908,34909,34910}},
+        [34914]={t=9,c=2,mr=1,r={34914}, p={7,2}},
+        [45234]={t=7,c=1,mr=3,r={45234,45243,45244}},
+        [47507]={t=8,c=3,mr=2,r={47507,47508}},
+        [47509]={t=9,c=1,mr=3,r={47509,47511,47515}},
+        [47516]={t=9,c=3,mr=2,r={47516,47517}},
+        [47535]={t=8,c=2,mr=3,r={47535,47536,47537}},
+        [47540]={t=11,c=2,mr=1,r={47540}},
+        [47558]={t=9,c=3,mr=3,r={47558,47559,47560}},
+        [47562]={t=10,c=2,mr=5,r={47562,47564,47565,47566,47567}},
+        [47569]={t=8,c=1,mr=2,r={47569,47570}, p={7,2}},
+        [47573]={t=10,c=3,mr=5,r={47573,47577,47578,51166,51167}},
+        [47580]={t=9,c=3,mr=3,r={47580,47581,47582}},
+        [47585]={t=11,c=2,mr=1,r={47585}, p={9,2}},
+        [47586]={t=1,c=3,mr=5,r={47586,47587,47588,52802,52803}},
+        [47788]={t=11,c=2,mr=1,r={47788}},
+        [52795]={t=10,c=2,mr=5,r={52795,52797,52798,52799,52800}},
+        [57470]={t=8,c=1,mr=2,r={57470,57472}},
+        [63504]={t=7,c=3,mr=3,r={63504,63505,63506}},
+        [63534]={t=9,c=1,mr=3,r={63534,63542,63543}},
+        [63574]={t=5,c=3,mr=1,r={63574}, p={3,3}},
+        [63625]={t=6,c=3,mr=3,r={63625,63626,63627}},
+        [63730]={t=8,c=3,mr=3,r={63730,63733,63737}},
+        [64044]={t=9,c=1,mr=1,r={64044}},
+        [64127]={t=8,c=1,mr=2,r={64127,64129}},
+    },
+    [6] = { -- DeathKnight
+        [48962]={t=1,c=2,mr=3,r={48962,49567,49568}},
+        [48963]={t=2,c=2,mr=3,r={48963,49564,49565}},
+        [48965]={t=2,c=4,mr=3,r={48965,49571,49572}},
+        [48977]={t=5,c=1,mr=3,r={48977,49394,49395}},
+        [48978]={t=2,c=1,mr=5,r={48978,49390,49391,49392,49393}},
+        [48979]={t=1,c=1,mr=2,r={48979,49483}},
+        [48982]={t=3,c=1,mr=1,r={48982}},
+        [48985]={t=4,c=1,mr=3,r={48985,49488,49489}, p={3,1}},
+        [48987]={t=3,c=2,mr=5,r={48987,49477,49478,49479,49480}},
+        [48988]={t=6,c=2,mr=3,r={48988,49503,49504}, p={3,2}},
+        [48997]={t=1,c=2,mr=3,r={48997,49490,49491}},
+        [49004]={t=2,c=2,mr=3,r={49004,49508,49509}},
+        [49005]={t=5,c=4,mr=1,r={49005}},
+        [49006]={t=5,c=3,mr=3,r={49006,49526,50029}},
+        [49013]={t=3,c=1,mr=3,r={49013,55236,55237}},
+        [49015]={t=4,c=4,mr=3,r={49015,50154,55136}},
+        [49016]={t=7,c=2,mr=1,r={49016}},
+        [49018]={t=8,c=2,mr=3,r={49018,49529,49530}},
+        [49023]={t=9,c=3,mr=3,r={49023,49533,49534}},
+        [49024]={t=6,c=2,mr=2,r={49024,49538}},
+        [49027]={t=7,c=1,mr=3,r={49027,49542,49543}},
+        [49028]={t=11,c=2,mr=1,r={49028}},
+        [49032]={t=8,c=2,mr=3,r={49032,49631,49632}},
+        [49036]={t=2,c=1,mr=2,r={49036,49562}},
+        [49039]={t=3,c=2,mr=1,r={49039}},
+        [49042]={t=1,c=3,mr=5,r={49042,49786,49787,49788,49789}},
+        [49137]={t=4,c=4,mr=2,r={49137,49657}},
+        [49140]={t=2,c=3,mr=5,r={49140,49661,49662,49663,49664}},
+        [49143]={t=9,c=2,mr=1,r={49143}},
+        [49145]={t=4,c=3,mr=3,r={49145,49495,49497}},
+        [49146]={t=4,c=2,mr=2,r={49146,51267}},
+        [49149]={t=4,c=3,mr=2,r={49149,50115}},
+        [49158]={t=3,c=3,mr=1,r={49158}},
+        [49175]={t=1,c=1,mr=3,r={49175,50031,51456}},
+        [49182]={t=1,c=3,mr=5,r={49182,49500,49501,55225,55226}},
+        [49184]={t=11,c=2,mr=1,r={49184}},
+        [49186]={t=5,c=2,mr=3,r={49186,51108,51109}},
+        [49188]={t=6,c=3,mr=3,r={49188,56822,59057}},
+        [49189]={t=9,c=1,mr=3,r={49189,50149,50150}},
+        [49194]={t=5,c=1,mr=1,r={49194}},
+        [49200]={t=9,c=1,mr=3,r={49200,50151,50152}},
+        [49202]={t=10,c=2,mr=5,r={49202,50127,50128,50129,50130}},
+        [49203]={t=7,c=2,mr=1,r={49203}},
+        [49206]={t=11,c=2,mr=1,r={49206}},
+        [49208]={t=6,c=3,mr=3,r={49208,56834,56835}},
+        [49217]={t=9,c=1,mr=3,r={49217,49654,49655}},
+        [49219]={t=4,c=3,mr=3,r={49219,49627,49628}},
+        [49220]={t=5,c=2,mr=5,r={49220,49633,49635,49636,49638}},
+        [49222]={t=8,c=3,mr=1,r={49222}},
+        [49223]={t=5,c=3,mr=2,r={49223,49599}},
+        [49224]={t=6,c=2,mr=3,r={49224,49610,49611}},
+        [49226]={t=2,c=4,mr=3,r={49226,50137,50138}},
+        [49455]={t=1,c=2,mr=2,r={49455,50147}},
+        [49467]={t=3,c=3,mr=3,r={49467,50033,50034}},
+        [49471]={t=5,c=3,mr=3,r={49471,49790,49791}},
+        [49588]={t=2,c=3,mr=2,r={49588,49589}},
+        [49796]={t=5,c=4,mr=1,r={49796}},
+        [50040]={t=7,c=1,mr=3,r={50040,50041,50043}},
+        [50117]={t=10,c=2,mr=5,r={50117,50118,50119,50120,50121}},
+        [50187]={t=9,c=3,mr=3,r={50187,50190,50191}},
+        [50365]={t=7,c=3,mr=2,r={50365,50371}},
+        [50384]={t=7,c=3,mr=2,r={50384,50385}},
+        [50391]={t=7,c=3,mr=2,r={50391,50392}},
+        [50880]={t=3,c=1,mr=5,r={50880,50884,50885,50886,50887}, p={1,1}},
+        [51052]={t=7,c=2,mr=1,r={51052}, p={6,2}},
+        [51099]={t=9,c=2,mr=3,r={51099,51160,51161}, p={8,2}},
+        [51123]={t=4,c=2,mr=5,r={51123,51127,51128,51129,51130}},
+        [51271]={t=8,c=3,mr=1,r={51271}},
+        [51459]={t=3,c=2,mr=5,r={51459,51462,51463,51464,51465}},
+        [51468]={t=3,c=3,mr=3,r={51468,51472,51473}},
+        [51745]={t=1,c=1,mr=2,r={51745,51746}},
+        [52143]={t=6,c=4,mr=1,r={52143}, p={4,4}},
+        [53137]={t=6,c=3,mr=2,r={53137,53138}},
+        [54639]={t=8,c=2,mr=3,r={54639,54638,54637}},
+        [55050]={t=9,c=2,mr=1,r={55050}},
+        [55061]={t=2,c=2,mr=2,r={55061,55062}},
+        [55090]={t=9,c=3,mr=1,r={55090}},
+        [55107]={t=2,c=3,mr=2,r={55107,55108}},
+        [55129]={t=1,c=3,mr=5,r={55129,55130,55131,55132,55133}},
+        [55233]={t=8,c=3,mr=1,r={55233}},
+        [55610]={t=6,c=1,mr=1,r={55610}, p={3,1}},
+        [55620]={t=4,c=4,mr=2,r={55620,55623}},
+        [55666]={t=6,c=1,mr=2,r={55666,55667}},
+        [61154]={t=10,c=2,mr=5,r={61154,61155,61156,61157,61158}},
+        [62905]={t=8,c=1,mr=2,r={62905,62908}},
+        [63560]={t=7,c=4,mr=1,r={63560}, p={6,4}},
+        [65661]={t=8,c=1,mr=3,r={65661,66191,66192}},
+        [66799]={t=7,c=1,mr=5,r={66799,66814,66815,66816,66817}},
+    },
+    [7] = { -- Shaman
+        [974]={t=9,c=2,mr=1,r={974}},
+        [16035]={t=1,c=3,mr=5,r={16035,16105,16106,16107,16108}},
+        [16038]={t=2,c=1,mr=3,r={16038,16160,16161}},
+        [16039]={t=1,c=2,mr=5,r={16039,16109,16110,16111,16112}},
+        [16040]={t=3,c=1,mr=5,r={16040,16113,16114,16115,16116}},
+        [16041]={t=5,c=2,mr=1,r={16041}, p={3,2}},
+        [16043]={t=1,c=2,mr=2,r={16043,16130}},
+        [16086]={t=4,c=1,mr=2,r={16086,16544}},
+        [16089]={t=3,c=3,mr=5,r={16089,60184,60185,60187,60188}},
+        [16164]={t=3,c=2,mr=1,r={16164}},
+        [16166]={t=7,c=2,mr=1,r={16166}, p={5,2}},
+        [16173]={t=1,c=3,mr=5,r={16173,16222,16223,16224,16225}},
+        [16176]={t=3,c=4,mr=3,r={16176,16235,16240}},
+        [16178]={t=6,c=3,mr=5,r={16178,16210,16211,16212,16213}},
+        [16179]={t=2,c=3,mr=5,r={16179,16214,16215,16216,16217}},
+        [16180]={t=3,c=1,mr=3,r={16180,16196,16198}},
+        [16181]={t=3,c=2,mr=3,r={16181,16230,16232}},
+        [16182]={t=1,c=2,mr=5,r={16182,16226,16227,16228,16229}},
+        [16184]={t=2,c=1,mr=2,r={16184,16209}},
+        [16187]={t=4,c=2,mr=3,r={16187,16205,16206}},
+        [16188]={t=5,c=3,mr=1,r={16188}},
+        [16190]={t=7,c=2,mr=1,r={16190}, p={4,2}},
+        [16194]={t=4,c=3,mr=5,r={16194,16218,16219,16220,16221}},
+        [16252]={t=4,c=3,mr=5,r={16252,16306,16307,16308,16309}},
+        [16254]={t=3,c=4,mr=3,r={16254,16271,16272}},
+        [16255]={t=2,c=2,mr=5,r={16255,16302,16303,16304,16305}},
+        [16256]={t=4,c=2,mr=5,r={16256,16281,16282,16283,16284}, p={2,2}},
+        [16258]={t=2,c=1,mr=2,r={16258,16293}},
+        [16259]={t=1,c=1,mr=3,r={16259,16295,52456}},
+        [16261]={t=2,c=4,mr=3,r={16261,16290,51881}},
+        [16262]={t=2,c=3,mr=2,r={16262,16287}},
+        [16266]={t=3,c=1,mr=3,r={16266,29079,29080}},
+        [16268]={t=5,c=2,mr=1,r={16268}},
+        [16578]={t=6,c=3,mr=5,r={16578,16579,16580,16581,16582}, p={3,3}},
+        [17364]={t=7,c=3,mr=1,r={17364}},
+        [17485]={t=1,c=3,mr=5,r={17485,17486,17487,17488,17489}},
+        [28996]={t=2,c=2,mr=3,r={28996,28997,28998}},
+        [28999]={t=5,c=1,mr=2,r={28999,29000}},
+        [29062]={t=4,c=4,mr=3,r={29062,29064,29065}},
+        [29082]={t=6,c=3,mr=3,r={29082,29084,29086}},
+        [29187]={t=2,c=2,mr=3,r={29187,29189,29191}},
+        [29192]={t=5,c=1,mr=2,r={29192,29193}},
+        [29206]={t=5,c=1,mr=3,r={29206,29205,29202}},
+        [30160]={t=2,c=3,mr=3,r={30160,29179,29180}},
+        [30664]={t=5,c=4,mr=3,r={30664,30665,30666}},
+        [30672]={t=6,c=1,mr=3,r={30672,30673,30674}},
+        [30675]={t=8,c=3,mr=3,r={30675,30678,30679}},
+        [30706]={t=9,c=2,mr=1,r={30706}},
+        [30798]={t=7,c=2,mr=1,r={30798}, p={5,2}},
+        [30802]={t=6,c=1,mr=3,r={30802,30808,30809}},
+        [30812]={t=9,c=1,mr=3,r={30812,30813,30814}},
+        [30816]={t=7,c=1,mr=3,r={30816,30818,30819}, p={7,2}},
+        [30823]={t=9,c=2,mr=1,r={30823}},
+        [30864]={t=5,c=4,mr=3,r={30864,30865,30866}},
+        [30867]={t=8,c=3,mr=3,r={30867,30868,30869}},
+        [30872]={t=8,c=2,mr=2,r={30872,30873}},
+        [30881]={t=7,c=1,mr=5,r={30881,30883,30884,30885,30886}},
+        [43338]={t=3,c=3,mr=1,r={43338}},
+        [51466]={t=8,c=2,mr=2,r={51466,51470}, p={7,2}},
+        [51474]={t=9,c=1,mr=3,r={51474,51478,51479}},
+        [51480]={t=9,c=3,mr=3,r={51480,51481,51482}},
+        [51483]={t=7,c=3,mr=3,r={51483,51485,51486}},
+        [51490]={t=11,c=2,mr=1,r={51490}},
+        [51521]={t=8,c=3,mr=2,r={51521,51522}, p={7,3}},
+        [51523]={t=9,c=3,mr=2,r={51523,51524}},
+        [51525]={t=8,c=1,mr=3,r={51525,51526,51527}},
+        [51528]={t=10,c=2,mr=5,r={51528,51529,51530,51531,51532}},
+        [51533]={t=11,c=2,mr=1,r={51533}},
+        [51554]={t=8,c=1,mr=2,r={51554,51555}},
+        [51556]={t=9,c=1,mr=3,r={51556,51557,51558}},
+        [51560]={t=9,c=3,mr=2,r={51560,51561}, p={9,2}},
+        [51562]={t=10,c=2,mr=5,r={51562,51563,51564,51565,51566}},
+        [51883]={t=5,c=3,mr=3,r={51883,51884,51885}},
+        [51886]={t=7,c=3,mr=1,r={51886}, p={6,3}},
+        [55198]={t=3,c=3,mr=1,r={55198}},
+        [60103]={t=8,c=2,mr=1,r={60103}, p={7,2}},
+        [61295]={t=11,c=2,mr=1,r={61295}},
+        [62097]={t=10,c=2,mr=5,r={62097,62098,62099,62100,62101}},
+        [63370]={t=8,c=1,mr=2,r={63370,63372}},
+        [63373]={t=6,c=4,mr=2,r={63373,63374}},
+    },
+    [8] = { -- Mage
+        [11069]={t=1,c=3,mr=5,r={11069,12338,12339,12340,12341}},
+        [11070]={t=1,c=2,mr=5,r={11070,12473,16763,16765,16766}},
+        [11071]={t=1,c=1,mr=3,r={11071,12496,12497}},
+        [11078]={t=1,c=1,mr=2,r={11078,11080}},
+        [11083]={t=3,c=4,mr=2,r={11083,12351}},
+        [11094]={t=4,c=2,mr=2,r={11094,13043}},
+        [11095]={t=4,c=1,mr=3,r={11095,12872,12873}},
+        [11100]={t=3,c=1,mr=2,r={11100,12353}},
+        [11103]={t=3,c=2,mr=3,r={11103,12357,12358}},
+        [11108]={t=2,c=3,mr=3,r={11108,12349,12350}},
+        [11113]={t=5,c=3,mr=1,r={11113}, p={3,3}},
+        [11115]={t=5,c=2,mr=3,r={11115,11367,11368}},
+        [11119]={t=2,c=1,mr=5,r={11119,11120,12846,12847,12848}},
+        [11124]={t=6,c=3,mr=5,r={11124,12378,12398,12399,12400}},
+        [11129]={t=7,c=2,mr=1,r={11129}, p={5,2}},
+        [11151]={t=3,c=1,mr=3,r={11151,12952,12953}},
+        [11160]={t=4,c=2,mr=3,r={11160,12518,12519}},
+        [11170]={t=4,c=3,mr=3,r={11170,12982,12983}},
+        [11175]={t=2,c=4,mr=3,r={11175,12569,12571}},
+        [11180]={t=6,c=3,mr=3,r={11180,28592,28593}},
+        [11185]={t=3,c=3,mr=3,r={11185,12487,12488}},
+        [11189]={t=2,c=2,mr=2,r={11189,28332}},
+        [11190]={t=5,c=3,mr=3,r={11190,12489,12490}},
+        [11207]={t=2,c=1,mr=3,r={11207,12672,15047}},
+        [11210]={t=1,c=1,mr=2,r={11210,12592}},
+        [11213]={t=2,c=3,mr=5,r={11213,12574,12575,12576,12577}},
+        [11222]={t=1,c=2,mr=3,r={11222,12839,12840}},
+        [11232]={t=5,c=4,mr=5,r={11232,12500,12501,12502,12503}},
+        [11237]={t=1,c=3,mr=5,r={11237,12463,12464,16769,16770}},
+        [11242]={t=3,c=2,mr=3,r={11242,12467,12469}},
+        [11247]={t=3,c=1,mr=2,r={11247,12606}},
+        [11252]={t=4,c=1,mr=2,r={11252,12605}},
+        [11255]={t=4,c=2,mr=2,r={11255,12598}},
+        [11366]={t=3,c=3,mr=1,r={11366}},
+        [11426]={t=7,c=2,mr=1,r={11426}, p={5,2}},
+        [11958]={t=5,c=2,mr=1,r={11958}},
+        [12042]={t=7,c=2,mr=1,r={12042}, p={6,2}},
+        [12043]={t=5,c=2,mr=1,r={12043}},
+        [12472]={t=3,c=2,mr=1,r={12472}},
+        [15058]={t=6,c=2,mr=3,r={15058,15059,15060}, p={5,2}},
+        [16757]={t=4,c=1,mr=2,r={16757,16758}},
+        [18459]={t=1,c=2,mr=3,r={18459,18460,54734}},
+        [18462]={t=4,c=3,mr=3,r={18462,18463,18464}},
+        [28574]={t=2,c=1,mr=3,r={28574,54658,54659}},
+        [29074]={t=4,c=4,mr=3,r={29074,29075,29076}},
+        [29438]={t=2,c=3,mr=3,r={29438,29439,29440}},
+        [29441]={t=2,c=2,mr=2,r={29441,29444}},
+        [29447]={t=4,c=4,mr=3,r={29447,55339,55340}},
+        [31569]={t=5,c=1,mr=2,r={31569,31570}},
+        [31571]={t=6,c=3,mr=2,r={31571,31572}, p={5,2}},
+        [31574]={t=6,c=1,mr=3,r={31574,31575,54354}},
+        [31579]={t=7,c=1,mr=3,r={31579,31582,31583}},
+        [31584]={t=8,c=3,mr=5,r={31584,31585,31586,31587,31588}},
+        [31589]={t=9,c=2,mr=1,r={31589}},
+        [31638]={t=5,c=1,mr=3,r={31638,31639,31640}},
+        [31641]={t=6,c=1,mr=2,r={31641,31642}},
+        [31656]={t=8,c=3,mr=3,r={31656,31657,31658}},
+        [31661]={t=9,c=2,mr=1,r={31661}, p={7,2}},
+        [31667]={t=5,c=4,mr=3,r={31667,31668,31669}},
+        [31670]={t=1,c=3,mr=3,r={31670,31672,55094}},
+        [31674]={t=7,c=3,mr=5,r={31674,31675,31676,31677,31678}},
+        [31679]={t=7,c=3,mr=2,r={31679,31680}},
+        [31682]={t=8,c=2,mr=2,r={31682,31683}},
+        [31687]={t=9,c=2,mr=1,r={31687}},
+        [34293]={t=7,c=1,mr=3,r={34293,34295,34296}},
+        [35578]={t=10,c=3,mr=2,r={35578,35581}},
+        [44378]={t=8,c=2,mr=2,r={44378,44379}, p={7,2}},
+        [44394]={t=7,c=3,mr=3,r={44394,44395,44396}},
+        [44397]={t=3,c=3,mr=3,r={44397,44398,44399}},
+        [44400]={t=10,c=2,mr=3,r={44400,44402,44403}},
+        [44404]={t=9,c=3,mr=5,r={44404,54486,54488,54489,54490}},
+        [44425]={t=11,c=2,mr=1,r={44425}},
+        [44442]={t=9,c=1,mr=2,r={44442,44443}, p={9,2}},
+        [44445]={t=9,c=3,mr=3,r={44445,44446,44448}},
+        [44449]={t=10,c=2,mr=5,r={44449,44469,44470,44471,44472}},
+        [44457]={t=11,c=2,mr=1,r={44457}},
+        [44543]={t=8,c=3,mr=2,r={44543,44545}},
+        [44546]={t=9,c=1,mr=3,r={44546,44548,44549}},
+        [44557]={t=9,c=3,mr=3,r={44557,44560,44561}, p={9,2}},
+        [44566]={t=10,c=2,mr=5,r={44566,44567,44568,44570,44571}},
+        [44572]={t=11,c=2,mr=1,r={44572}},
+        [44745]={t=7,c=1,mr=2,r={44745,54787}, p={7,2}},
+        [54646]={t=3,c=4,mr=1,r={54646}},
+        [54747]={t=2,c=2,mr=2,r={54747,54749}},
+        [55091]={t=6,c=1,mr=2,r={55091,55092}, p={5,2}},
+        [64353]={t=8,c=1,mr=2,r={64353,64357}},
+    },
+    [9] = { -- Warlock
+        [17778]={t=2,c=3,mr=3,r={17778,17779,17780}},
+        [17783]={t=3,c=2,mr=3,r={17783,17784,17785}},
+        [17788]={t=1,c=3,mr=5,r={17788,17789,17790,17791,17792}},
+        [17793]={t=1,c=2,mr=5,r={17793,17796,17801,17802,17803}},
+        [17804]={t=2,c=4,mr=2,r={17804,17805}},
+        [17810]={t=1,c=3,mr=5,r={17810,17811,17812,17813,17814}},
+        [17815]={t=5,c=2,mr=3,r={17815,17833,17834}},
+        [17877]={t=3,c=2,mr=1,r={17877}},
+        [17917]={t=4,c=2,mr=2,r={17917,17918}},
+        [17927]={t=4,c=4,mr=3,r={17927,17929,17930}},
+        [17954]={t=6,c=3,mr=5,r={17954,17955,17956,17957,17958}},
+        [17959]={t=3,c=3,mr=5,r={17959,59738,59739,59740,59741}},
+        [17962]={t=7,c=2,mr=1,r={17962}, p={5,2}},
+        [18094]={t=4,c=2,mr=2,r={18094,18095}},
+        [18096]={t=7,c=4,mr=3,r={18096,18073,63245}},
+        [18119]={t=2,c=1,mr=2,r={18119,18120}},
+        [18126]={t=3,c=1,mr=2,r={18126,18127}},
+        [18130]={t=5,c=3,mr=1,r={18130}, p={3,3}},
+        [18135]={t=4,c=1,mr=2,r={18135,18136}},
+        [18174]={t=1,c=2,mr=3,r={18174,18175,18176}},
+        [18179]={t=2,c=1,mr=2,r={18179,18180}},
+        [18182]={t=2,c=3,mr=2,r={18182,18183}},
+        [18213]={t=2,c=2,mr=2,r={18213,18372}},
+        [18218]={t=4,c=1,mr=2,r={18218,18219}},
+        [18220]={t=7,c=3,mr=1,r={18220}},
+        [18223]={t=5,c=3,mr=1,r={18223}, p={3,3}},
+        [18271]={t=6,c=2,mr=5,r={18271,18272,18273,18274,18275}, p={5,2}},
+        [18288]={t=3,c=3,mr=1,r={18288}},
+        [18692]={t=1,c=1,mr=2,r={18692,18693}},
+        [18694]={t=1,c=2,mr=3,r={18694,18695,18696}},
+        [18697]={t=1,c=3,mr=3,r={18697,18698,18699}},
+        [18703]={t=2,c=1,mr=2,r={18703,18704}},
+        [18705]={t=2,c=2,mr=3,r={18705,18706,18707}},
+        [18708]={t=3,c=3,mr=1,r={18708}},
+        [18709]={t=4,c=3,mr=2,r={18709,18710}, p={3,3}},
+        [18731]={t=2,c=3,mr=3,r={18731,18743,18744}},
+        [18754]={t=3,c=1,mr=3,r={18754,18755,18756}},
+        [18767]={t=5,c=3,mr=2,r={18767,18768}},
+        [18769]={t=4,c=2,mr=5,r={18769,18770,18771,18772,18773}, p={3,2}},
+        [18827]={t=1,c=1,mr=2,r={18827,18829}},
+        [19028]={t=3,c=2,mr=1,r={19028}},
+        [23785]={t=6,c=2,mr=5,r={23785,23822,23823,23824,23825}, p={4,2}},
+        [30054]={t=8,c=1,mr=2,r={30054,30057}},
+        [30060]={t=7,c=2,mr=5,r={30060,30061,30062,30063,30064}},
+        [30108]={t=9,c=2,mr=1,r={30108}, p={7,2}},
+        [30143]={t=3,c=4,mr=3,r={30143,30144,30145}},
+        [30146]={t=9,c=2,mr=1,r={30146}},
+        [30242]={t=8,c=2,mr=5,r={30242,30245,30246,30247,30248}},
+        [30283]={t=9,c=2,mr=1,r={30283}},
+        [30288]={t=8,c=2,mr=5,r={30288,30289,30290,30291,30292}},
+        [30293]={t=7,c=3,mr=3,r={30293,30295,30296}},
+        [30299]={t=6,c=1,mr=3,r={30299,30301,30302}},
+        [30319]={t=7,c=1,mr=3,r={30319,30320,30321}},
+        [30326]={t=5,c=1,mr=1,r={30326}, p={4,2}},
+        [32381]={t=4,c=4,mr=3,r={32381,32382,32383}},
+        [32385]={t=5,c=1,mr=5,r={32385,32387,32392,32393,32394}},
+        [32477]={t=8,c=3,mr=3,r={32477,32483,32484}},
+        [34935]={t=5,c=1,mr=3,r={34935,34938,34939}, p={4,1}},
+        [35691]={t=7,c=3,mr=3,r={35691,35692,35693}},
+        [47193]={t=7,c=2,mr=1,r={47193}, p={6,2}},
+        [47195]={t=7,c=1,mr=3,r={47195,47196,47197}},
+        [47198]={t=9,c=1,mr=3,r={47198,47199,47200}},
+        [47201]={t=10,c=2,mr=5,r={47201,47202,47203,47204,47205}},
+        [47220]={t=9,c=3,mr=3,r={47220,47221,47223}},
+        [47230]={t=1,c=4,mr=2,r={47230,47231}},
+        [47236]={t=10,c=2,mr=5,r={47236,47237,47238,47239,47240}},
+        [47245]={t=6,c=3,mr=3,r={47245,47246,47247}},
+        [47258]={t=9,c=1,mr=3,r={47258,47259,47260}, p={7,2}},
+        [47266]={t=10,c=2,mr=5,r={47266,47267,47268,47269,47270}},
+        [48181]={t=11,c=2,mr=1,r={48181}},
+        [50796]={t=11,c=2,mr=1,r={50796}},
+        [53754]={t=3,c=1,mr=2,r={53754,53759}},
+        [54037]={t=6,c=1,mr=2,r={54037,54038}},
+        [54117]={t=8,c=3,mr=2,r={54117,54118}, p={7,3}},
+        [54347]={t=9,c=1,mr=3,r={54347,54348,54349}, p={8,2}},
+        [58435]={t=9,c=3,mr=1,r={58435}, p={9,2}},
+        [59672]={t=11,c=2,mr=1,r={59672}},
+        [63108]={t=5,c=2,mr=1,r={63108}},
+        [63117]={t=9,c=3,mr=3,r={63117,63121,63123}},
+        [63156]={t=8,c=3,mr=2,r={63156,63158}},
+        [63349]={t=2,c=2,mr=3,r={63349,63350,63351}},
+    },
+    [11] = { -- Druid
+        [5570]={t=5,c=2,mr=1,r={5570}},
+        [16814]={t=1,c=2,mr=5,r={16814,16815,16816,16817,16818}},
+        [16819]={t=3,c=4,mr=2,r={16819,16820}},
+        [16821]={t=2,c=4,mr=2,r={16821,16822}},
+        [16833]={t=2,c=3,mr=3,r={16833,16834,16835}},
+        [16836]={t=3,c=1,mr=3,r={16836,16839,16840}},
+        [16845]={t=2,c=1,mr=3,r={16845,16846,16847}},
+        [16850]={t=4,c=3,mr=3,r={16850,16923,16924}},
+        [16858]={t=1,c=3,mr=5,r={16858,16859,16860,16861,16862}},
+        [16864]={t=3,c=2,mr=1,r={16864}},
+        [16880]={t=3,c=2,mr=3,r={16880,61345,61346}, p={2,2}},
+        [16896]={t=6,c=2,mr=3,r={16896,16897,16899}},
+        [16909]={t=4,c=2,mr=5,r={16909,16910,16911,16912,16913}},
+        [16929]={t=2,c=3,mr=3,r={16929,16930,16931}},
+        [16934]={t=1,c=2,mr=5,r={16934,16935,16936,16937,16938}},
+        [16940]={t=5,c=1,mr=2,r={16940,16941}},
+        [16942]={t=3,c=3,mr=3,r={16942,16943,16944}},
+        [16947]={t=2,c=1,mr=3,r={16947,16948,16949}},
+        [16966]={t=4,c=1,mr=2,r={16966,16968}},
+        [16972]={t=4,c=2,mr=3,r={16972,16974,16975}},
+        [16998]={t=2,c=2,mr=2,r={16998,16999}},
+        [17002]={t=3,c=1,mr=2,r={17002,24866}},
+        [17003]={t=6,c=2,mr=5,r={17003,17004,17005,17006,24894}, p={4,2}},
+        [17007]={t=7,c=2,mr=1,r={17007}},
+        [17050]={t=1,c=1,mr=2,r={17050,17051}},
+        [17056]={t=1,c=3,mr=5,r={17056,17058,17059,17060,17061}},
+        [17063]={t=1,c=2,mr=3,r={17063,17065,17066}},
+        [17069]={t=2,c=1,mr=5,r={17069,17070,17071,17072,17073}},
+        [17074]={t=6,c=3,mr=5,r={17074,17075,17076,17077,17078}, p={4,3}},
+        [17104]={t=5,c=2,mr=5,r={17104,24943,24944,24945,24946}},
+        [17106]={t=3,c=1,mr=3,r={17106,17107,17108}},
+        [17111]={t=4,c=3,mr=3,r={17111,17112,17113}},
+        [17116]={t=5,c=1,mr=1,r={17116}, p={3,1}},
+        [17118]={t=2,c=2,mr=3,r={17118,17119,17120}},
+        [17123]={t=5,c=4,mr=2,r={17123,17124}},
+        [18562]={t=7,c=2,mr=1,r={18562}, p={5,2}},
+        [24858]={t=7,c=2,mr=1,r={24858}},
+        [24968]={t=4,c=2,mr=5,r={24968,24969,24970,24971,24972}},
+        [33589]={t=5,c=1,mr=3,r={33589,33590,33591}},
+        [33592]={t=6,c=3,mr=2,r={33592,33596}},
+        [33597]={t=6,c=1,mr=3,r={33597,33599,33956}},
+        [33600]={t=7,c=4,mr=3,r={33600,33601,33602}},
+        [33603]={t=8,c=3,mr=5,r={33603,33604,33605,33606,33607}},
+        [33831]={t=9,c=3,mr=1,r={33831}},
+        [33851]={t=7,c=4,mr=3,r={33851,33852,33957}},
+        [33853]={t=6,c=3,mr=3,r={33853,33855,33856}},
+        [33859]={t=8,c=3,mr=3,r={33859,33866,33867}},
+        [33872]={t=5,c=4,mr=2,r={33872,33873}},
+        [33879]={t=6,c=1,mr=2,r={33879,33880}},
+        [33881]={t=7,c=3,mr=3,r={33881,33882,33883}},
+        [33886]={t=8,c=2,mr=5,r={33886,33887,33888,33889,33890}},
+        [33917]={t=9,c=2,mr=1,r={33917}, p={7,2}},
+        [34151]={t=7,c=1,mr=3,r={34151,34152,34153}},
+        [34297]={t=7,c=3,mr=2,r={34297,34300}, p={7,2}},
+        [35363]={t=2,c=2,mr=2,r={35363,35364}},
+        [37116]={t=4,c=3,mr=2,r={37116,37117}, p={3,3}},
+        [48384]={t=7,c=3,mr=3,r={48384,48395,48396}, p={7,2}},
+        [48389]={t=8,c=1,mr=3,r={48389,48392,48393}, p={7,2}},
+        [48409]={t=4,c=4,mr=2,r={48409,48410}, p={3,3}},
+        [48411]={t=3,c=3,mr=2,r={48411,48412}, p={2,3}},
+        [48432]={t=10,c=2,mr=5,r={48432,48433,48434,51268,51269}},
+        [48438]={t=11,c=2,mr=1,r={48438}, p={9,2}},
+        [48483]={t=8,c=4,mr=3,r={48483,48484,48485}},
+        [48488]={t=9,c=4,mr=2,r={48488,48514}},
+        [48492]={t=9,c=1,mr=3,r={48492,48494,48495}},
+        [48496]={t=8,c=3,mr=3,r={48496,48499,48500}},
+        [48505]={t=11,c=2,mr=1,r={48505}},
+        [48506]={t=10,c=2,mr=3,r={48506,48510,48511}},
+        [48516]={t=9,c=1,mr=3,r={48516,48521,48525}},
+        [48532]={t=9,c=3,mr=3,r={48532,48489,48491}, p={9,2}},
+        [48535]={t=9,c=3,mr=3,r={48535,48536,48537}, p={9,2}},
+        [48539]={t=9,c=1,mr=3,r={48539,48544,48545}},
+        [49377]={t=5,c=3,mr=1,r={49377}},
+        [50334]={t=11,c=2,mr=1,r={50334}},
+        [50516]={t=9,c=2,mr=1,r={50516}, p={7,2}},
+        [51179]={t=10,c=3,mr=5,r={51179,51180,51181,51182,51183}},
+        [57810]={t=1,c=3,mr=5,r={57810,57811,57812,57813,57814}},
+        [57849]={t=5,c=3,mr=3,r={57849,57850,57851}, p={5,2}},
+        [57865]={t=3,c=3,mr=1,r={57865}, p={2,2}},
+        [57873]={t=8,c=1,mr=3,r={57873,57876,57877}, p={7,2}},
+        [57878]={t=6,c=1,mr=3,r={57878,57880,57881}},
+        [61336]={t=3,c=2,mr=1,r={61336}},
+        [63410]={t=10,c=1,mr=2,r={63410,63411}},
+        [63503]={t=10,c=3,mr=1,r={63503}, p={10,2}},
+        [65139]={t=9,c=2,mr=1,r={65139}, p={8,2}},
+    },
+}
+WU_TALENT_DATA_EOF
+
+    print_success "Cross-class talent bridge staged (server side)."
+}
+
+# ============================================================
+#  stage_summons_module()   (added v1.3.0)
+#
+#  Multi-class SUMMONS C++ module (mod-multiclass-summons). Fixes
+#  Warlock/Mage/Death-Knight pet + mount conflicts for multiclass
+#  characters and lets eligible classes field multiple guardians at
+#  once. Playerbots are excluded at runtime (no compile-time bot dep).
+#
+#  Compiles into the worldserver on the rebuild step (AzerothCore
+#  auto-discovers modules/*/CMakeLists.txt). Spell-script rows are
+#  applied here AND auto-applied from the module base path on startup.
+#  Idempotent; overwrites only this module's own files.
+# ============================================================
+stage_summons_module() {
+    print_step "Staging the multi-class summons module (C++)..."
+
+    local MOD="$SERVER_DIR/modules/mod-multiclass-summons"
+    mkdir -p "$MOD/src" "$MOD/data/sql/db-world/base"
+
+    cat > "$MOD/CMakeLists.txt" <<'WU_SUMMONS_CMAKE_EOF'
+AC_ADD_SCRIPT("${CMAKE_CURRENT_SOURCE_DIR}/src/multiclass_pet_fix.cpp")
+AC_ADD_SCRIPT("${CMAKE_CURRENT_SOURCE_DIR}/src/mod_multiclass_summons_loader.cpp")
+WU_SUMMONS_CMAKE_EOF
+
+    cat > "$MOD/src/multiclass_pet_fix_loader.h" <<'WU_SUMMONS_LOADER_H_EOF'
+#ifndef MULTICLASS_PET_FIX_LOADER_H
+#define MULTICLASS_PET_FIX_LOADER_H
+
+void AddMulticlassPetFixScripts();
+
+#endif
+WU_SUMMONS_LOADER_H_EOF
+
+    cat > "$MOD/src/mod_multiclass_summons_loader.cpp" <<'WU_SUMMONS_LOADER_CPP_EOF'
+#include "Log.h"
+
+void AddMulticlassPetFixScripts();
+
+void Addmod_multiclass_summonsScripts()
+{
+    LOG_ERROR("module.multiclass_pet_fix", "SUMMONS MODULE - Addmod_multiclass_summonsScripts loader called!");
+    AddMulticlassPetFixScripts();
+}
+WU_SUMMONS_LOADER_CPP_EOF
+
+    cat > "$MOD/src/multiclass_pet_fix.cpp" <<'WU_SUMMONS_FIX_CPP_EOF'
+#include "ScriptMgr.h"
+#include "Player.h"
+#include "Pet.h"
+#include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "SpellScript.h"
+#include "SpellInfo.h"
+#include "SpellMgr.h"
+#include "CharmInfo.h"
+#include "DBCStores.h"
+#include "Map.h"
+#include "TemporarySummon.h"
+#include "WorldSession.h"
+#include <algorithm>
+#include <map>
+#include <numbers>
+#include <unordered_map>
+#include <vector>
+
+// mod-multiclass-summons — module-managed multi-summon system (pure guardian model).
+//
+// Every target summon (warlock demons, mage Water Elemental, DK ghoul) is created as a
+// controllable GUARDIAN that the module fully owns — never a real Pet, so nothing is
+// written to character_pet and the core's single-class pet checks / mount stash logic
+// are bypassed entirely (this avoids the real-pet mount/dismount crashes).
+//
+//   Primary   (cast while the pet slot is free): Category PET guardian -> claims the pet
+//             slot, so the client shows the pet action bar/frame and the player controls it.
+//   Secondary (slot already held): Category ALLY guardian -> side minion, no bar, follows,
+//             joins combat, auto-casts its attack.
+//
+// Guardians normally only know their creature-template spells, so we inject each summon's
+// real pet ability set (correct spell IDs + level-appropriate ranks, sourced from the
+// same PetLevelupSpell/PetDefaultSpells data the pet system uses) and default them to
+// REACT_DEFENSIVE. Summons are session-only. Playerbots are skipped (stock single pet).
+
+namespace
+{
+    // Summon spells this module intercepts. Keep in sync with
+    // data/sql/db-world/base/multiclass_summons.sql.
+    bool IsMulticlassSummonSpell(uint32 spellId)
+    {
+        switch (spellId)
+        {
+            case 688:   // Summon Imp
+            case 697:   // Summon Voidwalker
+            case 712:   // Summon Succubus
+            case 691:   // Summon Felhunter
+            case 30146: // Summon Felguard
+            case 70907: // Summon Water Elemental (Temp)
+            case 70908: // Summon Water Elemental (Perm)
+            case 46584: // Raise Dead (Temp Ghoul)
+            case 52150: // Raise Dead (Perm Ghoul)
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    template <typename T>
+    bool IsPlayerBotHelper(T const* player)
+    {
+        auto* session = player->GetSession();
+        if (!session)
+            return false;
+
+        if constexpr (requires { session->IsBot(); })
+        {
+            return session->IsBot();
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    bool IsPlayerBot(Player const* player)
+    {
+        return IsPlayerBotHelper(player);
+    }
+
+    SummonPropertiesEntry MakeProps(uint32 category, uint32 type)
+    {
+        SummonPropertiesEntry props{};
+        props.Id = 67;
+        props.Category = category;
+        props.Faction = 0;
+        props.Type = type;
+        props.Slot = 0;
+        props.Flags = 0;
+        return props;
+    }
+
+    // A follow angle (relative to the owner's facing) that spreads summons evenly around
+    // the owner instead of stacking them all on the default PET_FOLLOW_ANGLE.
+    float FollowAngleForIndex(std::size_t index)
+    {
+        constexpr float step = 2.0f * std::numbers::pi_v<float> / 8.0f;
+        return PET_FOLLOW_ANGLE + step * float(index % 8);
+    }
+
+    // Give a guardian the ability set the matching pet would have at the owner's level,
+    // by writing the spell ids into the creature's spell slots (read by
+    // CharmInfo::InitCharmCreateSpells, which runs later in Guardian::InitStats to build
+    // the action bar + autocast). Active abilities go first so they take the bar's
+    // castable slots; passives follow and are cast on init. Sourced from the same
+    // PetLevelupSpell (per family) + PetDefaultSpells data the real pet system uses, so
+    // ids and ranks are correct without hardcoding. No-op if no pet data exists for the
+    // creature (leaves its template spells intact).
+    void ApplyPetAbilities(Creature* guardian, uint8 level)
+    {
+        CreatureTemplate const* cinfo = guardian->GetCreatureTemplate();
+        if (!cinfo)
+            return;
+
+        // first-rank-in-chain -> { highest required level <= owner level, that rank's id }
+        std::map<uint32, std::pair<uint32, uint32>> best;
+
+        auto consider = [&](uint32 spellId, uint32 reqLevel)
+        {
+            if (!spellId || reqLevel > level || !sSpellMgr->GetSpellInfo(spellId))
+                return;
+
+            uint32 const first = sSpellMgr->GetFirstSpellInChain(spellId);
+            auto itr = best.find(first);
+            if (itr == best.end() || reqLevel >= itr->second.first)
+                best[first] = { reqLevel, spellId };
+        };
+
+        // 1) Keep the creature's own template spells (e.g. Water Elemental's Waterbolt +
+        //    Freeze, Ghoul's Claw/Gnaw/Leap/Huddle). reqLevel 0 = always eligible; a
+        //    proper pet-data rank below overrides them for shared spell chains.
+        for (uint8 i = 0; i < MAX_CREATURE_SPELLS; ++i)
+            consider(guardian->m_spells[i], 0);
+
+        // 2) Add the matching pet's family level-up spells (correct rank for this level)
+        //    — this is what fills in the warlock-demon kits the template doesn't carry.
+        if (cinfo->family)
+            if (PetLevelupSpellSet const* levelup = sSpellMgr->GetPetLevelupSpellList(cinfo->family))
+                for (auto const& entry : *levelup)
+                    consider(entry.second, entry.first);
+
+        int32 const petSpellsId = cinfo->PetSpellDataId ? -(int32)cinfo->PetSpellDataId : (int32)guardian->GetEntry();
+        if (PetDefaultSpellsEntry const* def = sSpellMgr->GetPetDefaultSpellsEntry(petSpellsId))
+            for (uint32 spellId : def->spellid)
+                if (SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId))
+                    consider(spellId, info->SpellLevel);
+
+        if (best.empty())
+            return;
+
+        uint8 slot = 0;
+        for (auto const& kv : best) // active abilities first
+        {
+            if (slot >= MAX_SPELL_CHARM)
+                break;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(kv.second.second);
+            if (info && !info->IsPassive())
+                guardian->m_spells[slot++] = kv.second.second;
+        }
+        for (auto const& kv : best) // then passives
+        {
+            if (slot >= MAX_SPELL_CHARM)
+                break;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(kv.second.second);
+            if (info && info->IsPassive())
+                guardian->m_spells[slot++] = kv.second.second;
+        }
+        for (; slot < MAX_SPELL_CHARM; ++slot)
+            guardian->m_spells[slot] = 0;
+    }
+
+    struct ActiveSummon
+    {
+        ObjectGuid guid;
+        uint32 entry;
+        uint32 spellId;
+        int32 duration;
+        bool primary;
+    };
+
+    struct PlayerSummons
+    {
+        std::vector<ActiveSummon> list;
+        uint32 reconcileTimer = 0;
+    };
+
+    // Owns every module summon for every (non-bot) player. World-thread only, so a plain
+    // map needs no locking.
+    class SummonManager
+    {
+    public:
+        static SummonManager& Instance()
+        {
+            static SummonManager instance;
+            return instance;
+        }
+
+        // A target summon spell was cast: create it as primary (pet slot free) or as a
+        // side guardian, one active summon per creature entry.
+        void HandleCast(Player* owner, uint32 spellId, uint32 entry, int32 duration)
+        {
+            // Re-casting the entry that already holds the pet slot: leave it in place
+            // (no duplicate). Covers recasting your current primary.
+            if (Creature* prim = ObjectAccessor::GetCreatureOrPetOrVehicle(*owner, owner->GetPetGUID()))
+                if (prim->GetEntry() == entry)
+                    return;
+
+            PlayerSummons& ps = _players[owner->GetGUID()];
+            RemoveEntry(owner, ps, entry);
+
+            bool const primary = owner->GetPetGUID().IsEmpty();
+            float const followAngle = FollowAngleForIndex(ps.list.size());
+
+            if (TempSummon* summon = CreateGuardian(owner, entry, spellId, duration, primary, followAngle))
+            {
+                ps.list.push_back({ summon->GetGUID(), entry, spellId, duration, primary });
+                LOG_INFO("module.multiclass_pet_fix", "Summon: {} entry {} (spell {}) as {} for {}",
+                    summon->GetGUID().ToString(), entry, spellId, primary ? "PRIMARY" : "guardian", owner->GetName());
+            }
+            else if (ps.list.empty())
+                _players.erase(owner->GetGUID());
+        }
+
+        // Throttled per-player reconcile: prune dead summons and promote a new primary if
+        // the slot frees up.
+        void Update(Player* owner, uint32 diff)
+        {
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            PlayerSummons& ps = it->second;
+            ps.reconcileTimer += diff;
+            if (ps.reconcileTimer < RECONCILE_INTERVAL)
+                return;
+            ps.reconcileTimer = 0;
+
+            Reconcile(owner, ps);
+
+            if (ps.list.empty())
+                _players.erase(it);
+        }
+
+        // Session-only: drop the registry (and despawn the summons) when the player leaves.
+        void Clear(Player* owner)
+        {
+            auto it = _players.find(owner->GetGUID());
+            if (it == _players.end())
+                return;
+
+            for (ActiveSummon const& summon : it->second.list)
+                Unsummon(owner, summon.guid);
+
+            _players.erase(it);
+        }
+
+    private:
+        static constexpr uint32 RECONCILE_INTERVAL = 1000;
+
+        std::unordered_map<ObjectGuid, PlayerSummons> _players;
+
+        TempSummon* CreateGuardian(Player* owner, uint32 entry, uint32 spellId, int32 duration, bool primary,
+            float followAngle)
+        {
+            static SummonPropertiesEntry const primaryProps = MakeProps(SUMMON_CATEGORY_PET, SUMMON_TYPE_PET);
+            static SummonPropertiesEntry const secondaryProps = MakeProps(SUMMON_CATEGORY_ALLY, SUMMON_TYPE_GUARDIAN);
+
+            // Spawn at the summon's follow position (out at pet range, at its own angle)
+            // so they appear spread out rather than on top of each other.
+            float x, y, z;
+            owner->GetClosePoint(x, y, z, owner->GetObjectSize(), PET_FOLLOW_DIST, followAngle);
+
+            TempSummon* summon = owner->GetMap()->SummonCreature(entry,
+                Position(x, y, z, owner->GetOrientation()),
+                primary ? &primaryProps : &secondaryProps,
+                duration, owner, spellId);
+            if (!summon)
+                return nullptr;
+
+            // Keep the summon following at its own angle around the owner.
+            static_cast<Minion*>(summon)->SetFollowAngle(followAngle);
+
+            if (std::string name = sObjectMgr->GeneratePetName(entry); !name.empty())
+                summon->SetName(name);
+
+            // Default to defensive: engage when the owner is attacked / attacks, rather
+            // than pulling on sight (Guardian::InitStats forces aggressive). Guardian
+            // also sent the pet bar (in InitSummon) with the old state, so for the
+            // primary re-send it now that the react state is defensive.
+            summon->SetReactState(REACT_DEFENSIVE);
+            if (primary)
+                owner->CharmSpellInitialize();
+
+            return summon;
+        }
+
+        void Unsummon(Player* owner, ObjectGuid guid)
+        {
+            if (Creature* creature = ObjectAccessor::GetCreature(*owner, guid))
+                if (TempSummon* summon = creature->ToTempSummon())
+                    summon->UnSummon();
+        }
+
+        void RemoveEntry(Player* owner, PlayerSummons& ps, uint32 entry)
+        {
+            for (ActiveSummon const& summon : ps.list)
+                if (summon.entry == entry)
+                    Unsummon(owner, summon.guid);
+
+            ps.list.erase(std::remove_if(ps.list.begin(), ps.list.end(),
+                [entry](ActiveSummon const& summon) { return summon.entry == entry; }),
+                ps.list.end());
+        }
+
+        void Reconcile(Player* owner, PlayerSummons& ps)
+        {
+            // Drop summons that have died or despawned.
+            ps.list.erase(std::remove_if(ps.list.begin(), ps.list.end(),
+                [owner](ActiveSummon const& summon)
+                {
+                    Creature* creature = ObjectAccessor::GetCreature(*owner, summon.guid);
+                    return !creature || !creature->IsAlive();
+                }),
+                ps.list.end());
+
+            if (ps.list.empty())
+                return;
+
+            // While mounted / in flight the pet slot can be transiently empty (the core
+            // stashes a real pet, or a guardian primary persists separately). Never
+            // promote in that window.
+            if (owner->IsMounted() || owner->GetTemporaryUnsummonedPetNumber())
+                return;
+
+            // If the pet slot is occupied there is nothing to promote.
+            if (!owner->GetPetGUID().IsEmpty())
+                return;
+
+            // Promote the oldest remaining summon to primary by re-spawning it as a
+            // pet-slot guardian.
+            ActiveSummon const promote = ps.list.front();
+            Unsummon(owner, promote.guid);
+            ps.list.erase(ps.list.begin());
+
+            float const followAngle = FollowAngleForIndex(ps.list.size());
+
+            if (TempSummon* summon = CreateGuardian(owner, promote.entry, promote.spellId, promote.duration,
+                true, followAngle))
+            {
+                ps.list.push_back({ summon->GetGUID(), promote.entry, promote.spellId, promote.duration, true });
+                LOG_INFO("module.multiclass_pet_fix", "Promoted entry {} (spell {}) to primary for {}",
+                    promote.entry, promote.spellId, owner->GetName());
+            }
+        }
+    };
+}
+
+class MulticlassPetFixPlayerScript : public PlayerScript
+{
+public:
+    MulticlassPetFixPlayerScript() : PlayerScript("MulticlassPetFixPlayerScript",
+    {
+        PLAYERHOOK_ON_BEFORE_LOAD_PET_FROM_DB,
+        PLAYERHOOK_ON_BEFORE_GUARDIAN_INIT_STATS_FOR_LEVEL,
+        PLAYERHOOK_ON_BEFORE_TEMP_SUMMON_INIT_STATS,
+        PLAYERHOOK_ON_PLAYER_IS_CLASS,
+        PLAYERHOOK_ON_UPDATE,
+        PLAYERHOOK_ON_LOGOUT
+    }) { }
+
+    // Real-pet support (hunter pets on multiclass characters): bypass the Death Knight
+    // pet exception for non-undead pets loaded from character_pet. Module summons are
+    // guardians and never travel this path.
+    void OnPlayerBeforeLoadPetFromDB(Player* player, uint32& /*petentry*/, uint32& petnumber, bool& current, bool& forceLoadFromDB) override
+    {
+        PetStable* petStable = player->GetPetStable();
+        if (!petStable)
+            return;
+
+        PetStable::PetInfo const* petInfo = nullptr;
+        if (petnumber)
+        {
+            if (petStable->CurrentPet && petStable->CurrentPet->PetNumber == petnumber)
+                petInfo = &petStable->CurrentPet.value();
+            else
+            {
+                for (auto const& info : petStable->UnslottedPets)
+                {
+                    if (info.PetNumber == petnumber)
+                    {
+                        petInfo = &info;
+                        break;
+                    }
+                }
+            }
+        }
+        else if (current)
+        {
+            if (petStable->CurrentPet)
+                petInfo = &petStable->CurrentPet.value();
+        }
+
+        if (petInfo)
+        {
+            CreatureTemplate const* creatureInfo = sObjectMgr->GetCreatureTemplate(petInfo->CreatureId);
+            if (creatureInfo && creatureInfo->type != CREATURE_TYPE_UNDEAD)
+            {
+                // Force load from DB to bypass the DK pet exception check for all non-DK pets.
+                forceLoadFromDB = true;
+            }
+        }
+    }
+
+    void OnPlayerBeforeGuardianInitStatsForLevel(Player* /*player*/, Guardian* guardian, CreatureTemplate const* /*cinfo*/, PetType& petType) override
+    {
+        if (guardian->IsPet())
+        {
+            if (petType == MAX_PET_TYPE)
+            {
+                petType = guardian->ToPet()->getPetType();
+            }
+        }
+    }
+
+    // Pet-context class identity for multiclass characters: if a character has learned
+    // another class's pet-summon spell, treat them as that class for PET-ONLY checks.
+    // Strictly gated on HasSpell + CLASS_CONTEXT_PET, so it never fires for a character
+    // that lacks the spell and defers to the real class everywhere else.
+    Optional<bool> OnPlayerIsClass(Player const* player, Classes playerClass, ClassContext context) override
+    {
+        if (context != CLASS_CONTEXT_PET)
+            return std::nullopt;
+
+        switch (playerClass)
+        {
+            case CLASS_WARLOCK:
+                if (player->HasSpell(688) || player->HasSpell(697) || player->HasSpell(712) ||
+                    player->HasSpell(691) || player->HasSpell(30146))
+                    return true;
+                break;
+            case CLASS_MAGE:
+                if (player->HasSpell(31687))
+                    return true;
+                break;
+            case CLASS_DEATH_KNIGHT:
+                if (player->HasSpell(46584))
+                    return true;
+                break;
+            case CLASS_HUNTER:
+                if (player->HasSpell(883))
+                    return true;
+                break;
+            default:
+                break;
+        }
+
+        return std::nullopt;
+    }
+
+    // Flag module summon guardians controllable and inject their pet ability set during
+    // InitStats (before AddToWorld -> AIM_Initialize and before Guardian::InitStats builds
+    // the action bar), so PetAI is selected and the abilities land on the bar + autocast.
+    void OnPlayerBeforeTempSummonInitStats(Player* player, TempSummon* tempSummon, uint32& /*duration*/) override
+    {
+        if (IsPlayerBot(player))
+            return;
+
+        if (!tempSummon->IsGuardian())
+            return;
+
+        Guardian* guardian = static_cast<Guardian*>(tempSummon);
+        if (!IsMulticlassSummonSpell(guardian->GetUInt32Value(UNIT_CREATED_BY_SPELL)))
+            return;
+
+        // NOTE: Do NOT call AIM_Initialize() here — AddToWorld() does it, and the mask
+        // below ensures PetAI is picked at that point.
+        guardian->AddUnitTypeMask(UNIT_MASK_CONTROLLABLE_GUARDIAN);
+        guardian->InitCharmInfo();
+        ApplyPetAbilities(guardian, player->GetLevel());
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 diff) override
+    {
+        if (IsPlayerBot(player))
+            return;
+
+        SummonManager::Instance().Update(player, diff);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        SummonManager::Instance().Clear(player);
+    }
+};
+
+class SpellSummonPetOverrideScript : public SpellScript
+{
+    PrepareSpellScript(SpellSummonPetOverrideScript);
+
+    void HandleSummon(SpellEffIndex effIndex)
+    {
+        Player* owner = GetCaster()->ToPlayer();
+        if (!owner)
+            return;
+
+        // Leave playerbots on stock single-pet behaviour (their AI relies on GetPet()).
+        if (IsPlayerBot(owner))
+            return;
+
+        uint32 const entry = GetSpellInfo()->Effects[effIndex].MiscValue;
+        if (!entry)
+            return;
+
+        // The module owns every one of these summons — never run the default (real-pet)
+        // effect, which would dismiss the active pet.
+        PreventHitDefaultEffect(effIndex);
+
+        int32 duration = GetSpellInfo()->GetDuration();
+        if (Player* modOwner = owner->GetSpellModOwner())
+            modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
+
+        SummonManager::Instance().HandleCast(owner, GetSpellInfo()->Id, entry, duration);
+    }
+
+    void Register() override
+    {
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_0, SPELL_EFFECT_SUMMON_PET);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_1, SPELL_EFFECT_SUMMON_PET);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_2, SPELL_EFFECT_SUMMON_PET);
+
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_0, SPELL_EFFECT_SUMMON);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_1, SPELL_EFFECT_SUMMON);
+        OnEffectHit += SpellEffectFn(SpellSummonPetOverrideScript::HandleSummon, EFFECT_2, SPELL_EFFECT_SUMMON);
+    }
+};
+
+class SpellSummonPetOverrideLoader : public SpellScriptLoader
+{
+public:
+    SpellSummonPetOverrideLoader() : SpellScriptLoader("spell_summon_pet_override") { }
+
+    SpellScript* GetSpellScript() const override
+    {
+        return new SpellSummonPetOverrideScript();
+    }
+};
+
+class MulticlassSummonWorldScript : public WorldScript
+{
+public:
+    MulticlassSummonWorldScript() : WorldScript("MulticlassSummonWorldScript") { }
+
+    // Allow these summons to be cast while another pet is already active. Without
+    // SPELL_ATTR1_DISMISS_PET_FIRST, Spell::CheckCast rejects a SUMMON_PET (or a
+    // pet-category SUMMON, e.g. the temporary Water Elemental) with ALREADY_HAVE_SUMMON
+    // when the caster has a pet, so the (often triggered) Water Elemental / permanent
+    // ghoul summon silently fails. We intercept the effect and spawn a side guardian, so
+    // the "dismiss first" semantics never actually run. Warlock demons already carry this
+    // attribute; setting it again is a no-op. Runs after spells are loaded.
+    void OnStartup() override
+    {
+        static constexpr uint32 spells[] = { 688, 697, 712, 691, 30146, 70907, 70908, 46584, 52150 };
+        for (uint32 id : spells)
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id))
+                const_cast<SpellInfo*>(info)->AttributesEx |= SPELL_ATTR1_DISMISS_PET_FIRST;
+    }
+};
+
+void AddMulticlassPetFixScripts()
+{
+    new MulticlassPetFixPlayerScript();
+    new SpellSummonPetOverrideLoader();
+    new MulticlassSummonWorldScript();
+
+    // NOTE: spell_script_names registration is handled by
+    // data/sql/db-world/base/multiclass_summons.sql, which the DBUpdater auto-applies
+    // during database loading at startup, BEFORE LoadSpellScriptNames().
+}
+WU_SUMMONS_FIX_CPP_EOF
+
+    cat > "$MOD/data/sql/db-world/base/multiclass_summons.sql" <<'WU_SUMMONS_SQL_EOF'
+-- mod-multiclass-summons: Register the summon-override spell script.
+--
+-- This file lives under modules/<module>/data/sql/db-world/, which is the only
+-- module SQL location AzerothCore's DBUpdater auto-applies (UpdateFetcher.cpp).
+-- It runs during database loading at startup, BEFORE the world calls
+-- LoadSpellScriptNames(), so these rows are present when the spell system caches
+-- the table. Do NOT register these from C++ at runtime: that executes AFTER
+-- LoadSpellScriptNames() and is only picked up on the next restart.
+
+DELETE FROM `spell_script_names` WHERE `ScriptName` = 'spell_summon_pet_override';
+INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
+(688, 'spell_summon_pet_override'),     -- Summon Imp
+(697, 'spell_summon_pet_override'),     -- Summon Voidwalker
+(712, 'spell_summon_pet_override'),     -- Summon Succubus
+(691, 'spell_summon_pet_override'),     -- Summon Felhunter
+(30146, 'spell_summon_pet_override'),   -- Summon Felguard
+(70907, 'spell_summon_pet_override'),   -- Summon Water Elemental (Temp)
+(70908, 'spell_summon_pet_override'),   -- Summon Water Elemental (Perm)
+(46584, 'spell_summon_pet_override'),   -- Raise Dead (Temp Ghoul)
+(52150, 'spell_summon_pet_override');   -- Raise Dead (Perm Ghoul)
+WU_SUMMONS_SQL_EOF
+
+    # Pre-apply the summon spell-script rows so the rebuilt worldserver
+    # registers them on its next startup (module base/ SQL also auto-applies).
+    # Non-fatal: auto-apply is the backstop.
+    if docker exec -i ac-database mysql -u root -ppassword acore_world \
+         < "$MOD/data/sql/db-world/base/multiclass_summons.sql" 2>/dev/null; then
+        print_success "Multi-class summons module staged + spell-scripts registered."
+    else
+        print_warning "Summons module staged; spell-script SQL will auto-apply on startup."
+    fi
+}
 
 stage_mod_ale() {
     print_step "Checking for the Eluna/ALE Lua engine module (mod-ale)..."
@@ -3073,6 +5058,36 @@ show_completion() {
     echo -e "     \"Buy ALL\"), with rank prerequisites enforced"
     echo -e "   ${CYAN}•${NC} Unlocked classes can train from, equip, and quest as that class too"
     echo ""
+    echo -e "${WHITE}${BOLD}NEW in v1.3.0 — Cross-class talents:${NC}"
+    echo -e "   ${CYAN}•${NC} Players can now spend talents in ANY unlocked class's trees,"
+    echo -e "     with real tier/prereq gating and a shared talent-point pool"
+    echo -e "     (respec supported) — all validated server-side."
+    echo -e "   ${CYAN}•${NC} This needs the CLIENT addons. Hand your players the pack:"
+    echo -e "     ${CYAN}WrathUnbound-Addons.zip${NC} — extract into"
+    echo -e "     ${CYAN}World of Warcraft/Interface/AddOns/${NC}, then /reload in-game."
+    echo ""
+    echo -e "${WHITE}${BOLD}NEW in v1.3.0 - Multi-class summons (server-side):${NC}"
+    echo -e "   ${CYAN}â¢${NC} Warlock/Mage/DK pets no longer conflict for multiclass"
+    echo -e "     characters, and eligible classes can field multiple guardians at"
+    echo -e "     once. Compiled into the worldserver during this rebuild."
+    echo ""
+    echo -e "${WHITE}${BOLD}NEW in v1.4.0 — Talent points:${NC}"
+    echo -e "   ${CYAN}•${NC} Respec now unlearns EVERY talent — the character's own class"
+    echo -e "     tree as well as every cross-class tree — and refunds all points."
+    echo -e "   ${CYAN}•${NC} The Mentor sells talent points at a flat 75g each (1, 5 or 10"
+    echo -e "     at a time). Bought points are permanent — they survive relog,"
+    echo -e "     level-up and respec."
+    echo -e "   ${CYAN}•${NC} Cross-class points spent are no longer handed back for free on"
+    echo -e "     relog or level-up (they used to be silently refunded)."
+    echo ""
+    echo -e "${WHITE}${BOLD}Re-hand out the client pack with this update:${NC}"
+    echo -e "   ${CYAN}•${NC} ${CYAN}WrathUnbound-Addons.zip${NC} was refreshed alongside this release"
+    echo -e "     (Multiclass Talents UI 2.9.27, Unbound Spellbook 0.3)."
+    echo -e "   ${CYAN}•${NC} The Unbound Spellbook was missing every ability that comes from a"
+    echo -e "     class QUEST rather than a trainer — warlock demons, the hunter pet"
+    echo -e "     commands, Death Gate, Runeforging, Taunt, Sunder Armor and more."
+    echo -e "     Players need the new pack to see them."
+    echo ""
     echo -e "${WHITE}${BOLD}A database backup was saved before any changes were made:${NC}"
     echo -e "   ${CYAN}$BACKUP_DIR${NC}"
     echo -e "${WHITE}Keep it somewhere safe in case you ever need to roll back.${NC}"
@@ -3111,6 +5126,8 @@ check_compatibility
 check_existing_install
 backup_database
 stage_module_files
+stage_talent_bridge
+stage_summons_module
 stage_mod_ale
 apply_sql_migrations
 apply_core_patches

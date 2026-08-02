@@ -19,6 +19,16 @@ local MENTOR_ENTRY      = 900001
 local MENTOR_STONE_ENTRY = 900100
 local PAGE_SIZE          = 10   -- spells shown per gossip page
 
+-- ── Talent points for sale ────────────────────────────────────────────────
+-- Flat price, no scaling with level or with how many you already own.
+local TALENT_POINT_COST    = 750000            -- 75g in copper
+local TALENT_POINT_BUNDLES = { 1, 5, 10 }      -- purchase sizes offered
+-- A bought point becomes a permanent bonus talent point: AddBonusTalent feeds
+-- Player::CalculateTalentsPoints(), and the running total is saved in
+-- characters.extraBonusTalentCount, so it survives relog, level-up and respec.
+-- AzerothCore reads that column back as a uint8, so the total must stay <= 255.
+local MAX_BONUS_TALENT_POINTS = 255
+
 -- Per-player timestamp (os.time seconds) of last Mentor Stone use.
 -- Used to enforce the 3-minute cooldown on the Lua side as a guard.
 local STONE_LAST_USE = {}
@@ -440,6 +450,42 @@ local function ShowBrowsePage(player, creature, classId, page)
 end
 
 -- ============================================================
+-- Talent point purchase
+-- ============================================================
+
+local function TalentPointMenuLabel(player)
+    return string.format("Buy talent points  [%s each]  (%d unspent)",
+        FormatCopper(TALENT_POINT_COST), player:GetFreeTalentPoints())
+end
+
+local function ShowTalentPointMenu(player, creature)
+    player:GossipClearMenu()
+
+    local purchased = player:GetBonusTalentCount()
+    player:GossipMenuAddItem(0, string.format(
+        "── %d unspent talent point(s), %d purchased ──",
+        player:GetFreeTalentPoints(), purchased), 0, 99, false)
+
+    local offered = 0
+    for _, amount in ipairs(TALENT_POINT_BUNDLES) do
+        if purchased + amount <= MAX_BONUS_TALENT_POINTS then
+            player:GossipMenuAddItem(0, string.format(
+                "Buy %d talent point%s  [%s]",
+                amount, amount == 1 and "" or "s",
+                FormatCopper(TALENT_POINT_COST * amount)), 31, amount, false)
+            offered = offered + 1
+        end
+    end
+    if offered == 0 then
+        player:GossipMenuAddItem(0,
+            "You have bought every talent point I can grant.", 0, 99, false)
+    end
+
+    player:GossipMenuAddItem(0, "← Back", 32, 0, false)
+    player:GossipSendMenu(100, creature)
+end
+
+-- ============================================================
 -- Gossip: Hello
 -- ============================================================
 
@@ -459,6 +505,7 @@ local function OnGossipHello(event, player, creature)
             player:GossipMenuAddItem(0, string.format(
                 "(Reach level %d to begin the Unbound path.)", lvl), 0, 99, false)
         end
+        player:GossipMenuAddItem(0, TalentPointMenuLabel(player), 30, 0, false)
         player:GossipMenuAddItem(0, "Farewell.", 99, 0, false)
         player:GossipSendMenu(100, creature)
         return
@@ -482,6 +529,7 @@ local function OnGossipHello(event, player, creature)
             "Browse " .. CLASS_NAMES[classId] .. " abilities", 2, classId, false)
     end
 
+    player:GossipMenuAddItem(0, TalentPointMenuLabel(player), 30, 0, false)
     player:GossipMenuAddItem(0, "Farewell.", 99, 0, false)
     player:GossipSendMenu(100, creature)
 end
@@ -494,6 +542,9 @@ end
 -- sender=24  → paginate (intid = classId*1000 + page)
 -- sender=25  → buy individual spell directly, then refresh Browse (intid = encoded classId+spellId)
 -- sender=27  → buy every currently-available spell for the class (intid = classId)
+-- sender=30  → open the talent point shop
+-- sender=31  → buy talent points (intid = how many)
+-- sender=32  → back to the main menu
 -- sender=99  → close
 -- ============================================================
 
@@ -695,6 +746,59 @@ local function OnGossipSelect(event, player, creature, sender, intid, code, menu
                 "|cff00ff00Learned %d %s abilities!|r", learned, CLASS_NAMES[classId]))
         end
         ShowBrowsePage(player, creature, classId, 0)
+        return
+    end
+
+    -- ---- sender=30: open the talent point shop ----
+    if sender == 30 then
+        ShowTalentPointMenu(player, creature)
+        return
+    end
+
+    -- ---- sender=31: buy talent points ----
+    if sender == 31 then
+        local amount = 0
+        for _, bundle in ipairs(TALENT_POINT_BUNDLES) do
+            if intid == bundle then amount = bundle end
+        end
+        if amount == 0 then
+            player:GossipComplete()
+            return
+        end
+
+        if player:GetBonusTalentCount() + amount > MAX_BONUS_TALENT_POINTS then
+            player:SendBroadcastMessage(
+                "You have bought every talent point I can grant.")
+            ShowTalentPointMenu(player, creature)
+            return
+        end
+
+        local cost = TALENT_POINT_COST * amount
+        if player:GetCoinage() < cost then
+            player:SendBroadcastMessage(string.format(
+                "You need %s for %d talent point%s.",
+                FormatCopper(cost), amount, amount == 1 and "" or "s"))
+            ShowTalentPointMenu(player, creature)
+            return
+        end
+
+        player:ModifyMoney(-cost)
+        -- AddBonusTalent makes the point permanent (saved in
+        -- characters.extraBonusTalentCount, re-added by CalculateTalentsPoints
+        -- on every login/level-up/respec); SetFreeTalentPoints makes it
+        -- spendable right now, without waiting for that recalculation.
+        player:AddBonusTalent(amount)
+        player:SetFreeTalentPoints(player:GetFreeTalentPoints() + amount)
+        player:SendBroadcastMessage(string.format(
+            "|cff00ff00Gained %d talent point%s for %s.|r",
+            amount, amount == 1 and "" or "s", FormatCopper(cost)))
+        ShowTalentPointMenu(player, creature)
+        return
+    end
+
+    -- ---- sender=32: back to the main menu ----
+    if sender == 32 then
+        OnGossipHello(event, player, creature)
         return
     end
 
