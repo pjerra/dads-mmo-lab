@@ -436,7 +436,30 @@
     <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {/if}
   {#if statusError}
-    <div class="error-card"><strong>Couldn't reach the DML backend.</strong><p>{statusError}</p></div>
+    <!--
+      A DEAD END UNTIL 2026-08-02. `games status` needs a live Docker engine,
+      so a stopped Docker Desktop -- the single most common state on a machine
+      that was just booted -- sent this branch, and this branch had no Start
+      button. Home became read-only in exactly the situation it exists for,
+      and Library was the only page that could start anything (it lists titles
+      from DISK, so it never depended on the engine answering).
+
+      Start is offered here because `games start` brings the engine up itself
+      before composing, through the same path Library's button takes: the
+      user's own terminal shows it -- "Docker engine is down. Starting Docker
+      Desktop... Docker Desktop engine is ready." A separate "start Docker"
+      affordance would be a second way to do what this button already does.
+    -->
+    <div class="error-card">
+      <strong>Couldn't reach the DML backend.</strong>
+      <p>{statusError}</p>
+      <div class="recover-row">
+        <p class="muted">
+          If Docker Desktop isn't running yet, Start will launch it and then start the server.
+        </p>
+        <button class="primary" disabled={busy} onclick={() => act("start")}>Start</button>
+      </div>
+    </div>
   {:else if containerState}
     <div class="card server-card">
       <div class="row">
