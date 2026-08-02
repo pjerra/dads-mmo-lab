@@ -590,7 +590,7 @@ impl BootLoopWatch {
         Self { baseline: None, reported: false }
     }
 
-    /// Feed one `.State.RestartCount` reading. `Some(new_restarts)` exactly
+    /// Feed one `.RestartCount` reading. `Some(new_restarts)` exactly
     /// once — on the reading that proves the loop — and `None` otherwise.
     pub fn observe(&mut self, reading: Option<u64>) -> Option<u64> {
         // `?`, not `unwrap_or(0)`: a missed reading falls straight out and

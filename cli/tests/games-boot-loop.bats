@@ -12,7 +12,7 @@
 # and is never refreshed by a CLI update -- so the detection lives in the CLI
 # (which IS updated) and watches the hook from the outside while it streams.
 # That is what these tests drive: a fake hook plus a docker stub whose
-# .State.RestartCount climbs.
+# .RestartCount climbs (TOP-LEVEL -- docker rejects .State.RestartCount).
 load helpers/env.bash
 
 setup() {
@@ -56,7 +56,7 @@ EOS
 }
 
 # How many times the watch actually asked docker for the restart count.
-_rc_probes() { grep -c 'inspect -f {{.State.RestartCount}}' "$FIXTURE/calls.log" || true; }
+_rc_probes() { grep -c 'inspect -f {{.RestartCount}}' "$FIXTURE/calls.log" || true; }
 
 @test "games restart names a boot loop while the start hook is still waiting" {
   _chatty_hook 8 1

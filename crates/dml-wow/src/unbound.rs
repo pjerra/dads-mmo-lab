@@ -1689,6 +1689,7 @@ impl<'a> Engine<'a> {
         let started = Instant::now();
         let deadline = started + self.opts.ready_timeout;
         let mut watch = lifecycle::BootLoopWatch::new();
+        let mut inspect_warned = false;
         let mut polls: u64 = 0;
 
         loop {
@@ -1713,6 +1714,22 @@ impl<'a> Engine<'a> {
                 let (started_at, reading) = if rc_outcome.is_ok() {
                     crate::install_native::parse_started_and_restarts(&rc_out)
                 } else {
+                    // Say it once. A failed inspect sends the log read to a
+                    // fixed tail, and this engine's marker
+                    // (`[UNBOUND] Prereq map built.`) prints ONCE, early --
+                    // 500 bots logging in push it out of the window in
+                    // seconds. Silence here cost a full readiness timeout on a
+                    // server that was already up (2026-08-03).
+                    if !inspect_warned {
+                        inspect_warned = true;
+                        self.line(
+                            "warn",
+                            format!(
+                                "could not read the container's start time ({}) -- falling back to a log tail, which can miss the ready marker on a busy boot.",
+                                rc_outcome.detail()
+                            ),
+                        );
+                    }
                     (None, None)
                 };
 
@@ -2117,6 +2134,7 @@ impl<'a> Engine<'a> {
         let started = Instant::now();
         let deadline = started + self.opts.ready_timeout;
         let mut watch = lifecycle::BootLoopWatch::new();
+        let mut inspect_warned = false;
 
         loop {
             let (ps_outcome, ps_out) = self.run_collect(&self.docker_probe(
@@ -2139,6 +2157,22 @@ impl<'a> Engine<'a> {
                 let (started_at, reading) = if rc_outcome.is_ok() {
                     crate::install_native::parse_started_and_restarts(&rc_out)
                 } else {
+                    // Say it once. A failed inspect sends the log read to a
+                    // fixed tail, and this engine's marker
+                    // (`[UNBOUND] Prereq map built.`) prints ONCE, early --
+                    // 500 bots logging in push it out of the window in
+                    // seconds. Silence here cost a full readiness timeout on a
+                    // server that was already up (2026-08-03).
+                    if !inspect_warned {
+                        inspect_warned = true;
+                        self.line(
+                            "warn",
+                            format!(
+                                "could not read the container's start time ({}) -- falling back to a log tail, which can miss the ready marker on a busy boot.",
+                                rc_outcome.detail()
+                            ),
+                        );
+                    }
                     (None, None)
                 };
                 let log_args = match started_at.as_deref() {

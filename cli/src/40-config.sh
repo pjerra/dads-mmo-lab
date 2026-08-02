@@ -701,7 +701,7 @@ _world_ready() {
 }
 
 # _boot_loop_note <new-restarts> [container]: the diagnosis line a readiness
-# wait emits once it has established (from a climbing .State.RestartCount) that
+# wait emits once it has established (from a climbing .RestartCount) that
 # the world is CRASH-RETRYING rather than slow-booting -- incident follow-up 2.
 # On the night of the 2026-07-21 incident the world retried on "Can't connect to
 # MySQL (110)" for ten minutes while the wait printed "still waiting ... bots
@@ -740,7 +740,7 @@ _boot_loop_note() {
 # `lifecycle::BootLoopWatch`.
 
 # How many restarts NEW SINCE THE WAIT BEGAN make it a boot loop rather than a
-# slow boot. WHY 3: docker's restart policy increments .State.RestartCount only
+# slow boot. WHY 3: docker's restart policy increments .RestartCount only
 # when it revives a container that DIED, so a healthy boot -- however slow,
 # however many bots it is creating -- never increments it at all and even ONE
 # is already abnormal. Three is about tolerating a ONE-OFF (a single OOM-kill
@@ -800,7 +800,7 @@ _boot_loop_check() {
     BOOT_LOOP_NOTE=""
     [[ -n "$c" ]] || return 1
     (( _BOOT_LOOP_NOTED == 0 )) || return 1
-    rc="$(timeout -k 5 10 docker inspect -f '{{.State.RestartCount}}' "$c" 2>/dev/null || true)"
+    rc="$(timeout -k 5 10 docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || true)"
     rc="${rc%%$'\n'*}"; rc="${rc//$'\r'/}"
     [[ "$rc" =~ ^[0-9]+$ ]] || return 1
     if [[ -z "$_BOOT_LOOP_BASE" ]]; then _BOOT_LOOP_BASE="$rc"; return 1; fi

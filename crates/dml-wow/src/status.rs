@@ -435,7 +435,7 @@ pub fn parse_restart_count(raw: &str) -> Option<u64> {
 /// the process simply stays up.
 pub fn container_restart_count(program: &OsStr, name: &str, timeout: Duration) -> Option<u64> {
     let mut cmd = Command::new(program);
-    cmd.args(["inspect", "-f", "{{.State.RestartCount}}", name]);
+    cmd.args(["inspect", "-f", "{{.RestartCount}}", name]);
     windows_no_window(&mut cmd);
     let out = output_bounded_draining(cmd, timeout)?;
     if !out.status.success() {

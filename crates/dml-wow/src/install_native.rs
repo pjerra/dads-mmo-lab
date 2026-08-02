@@ -980,7 +980,7 @@ pub fn stack_conflict_message(container: &str, owner: &str) -> String {
 /// Both are needed every poll — `StartedAt` scopes the log read (see
 /// [`Engine::do_ready`]) and `RestartCount` feeds the boot-loop watch — so asking
 /// once is one fewer subprocess per poll on a 30-minute wait.
-pub const READY_INSPECT_FORMAT: &str = "{{.State.StartedAt}}|{{.State.RestartCount}}";
+pub const READY_INSPECT_FORMAT: &str = "{{.State.StartedAt}}|{{.RestartCount}}";
 
 /// Split [`READY_INSPECT_FORMAT`]'s output into `(started_at, restart_count)`.
 ///
@@ -1885,6 +1885,7 @@ impl<'a> Engine<'a> {
         let started = Instant::now();
         let deadline = started + self.opts.ready_timeout;
         let mut watch = lifecycle::BootLoopWatch::new();
+        let mut inspect_warned = false;
 
         loop {
             let (ps_outcome, ps_out) = self.run_collect(&self.docker_probe(
@@ -1915,6 +1916,26 @@ impl<'a> Engine<'a> {
                 } else {
                     // A missed reading must fall straight out: collapsing it to
                     // zero either fabricates a loop or hides one.
+                    //
+                    // But it must also be SAID. This inspect failing sends the
+                    // log read to a fixed `--tail` window, and the marker
+                    // prints once -- a boot with playerbots logging in pushes
+                    // it out of that window in seconds, so the wait then runs
+                    // its full timeout on a server that is already up. That is
+                    // not hypothetical: it happened for weeks because the
+                    // format string asked for `.State.RestartCount`, which does
+                    // not exist (2026-08-03). Once per run, so a wedged docker
+                    // cannot spam the terminal.
+                    if !inspect_warned {
+                        inspect_warned = true;
+                        self.line(
+                            "warn",
+                            format!(
+                                "could not read the container's start time ({}) -- falling back to a log tail, which can miss the ready marker on a busy boot.",
+                                rc_outcome.detail()
+                            ),
+                        );
+                    }
                     (None, None)
                 };
 
@@ -2848,6 +2869,74 @@ mod tests {
         // POSIX paths keep their case: /srv/A and /srv/a really differ.
         assert_eq!(canon_path("/srv/Games/wow/"), "/srv/Games/wow");
         assert_ne!(canon_path("/srv/A"), canon_path("/srv/a"));
+    }
+
+    #[test]
+    fn the_readiness_inspect_asks_for_fields_docker_actually_has() {
+        // LIVE INCIDENT 2026-08-03. This constant said
+        // `{{.State.RestartCount}}`. Docker has no such field -- RestartCount
+        // is TOP-LEVEL -- so every inspect failed with "map has no entry for
+        // key", `started_at` came back None, and both ready loops fell through
+        // to `docker logs --tail <N>`.
+        //
+        // That fallback is precisely what `--since` was introduced to replace:
+        // the ready marker prints ONCE, early, and a boot with 500 playerbots
+        // logging in pushes it out of a fixed tail window within seconds. The
+        // wait then sat for its full timeout on a server that was up and had
+        // already printed the line.
+        //
+        // A pin, not a proof -- only docker can say which fields exist, which
+        // is what the live test below is for.
+        assert!(
+            READY_INSPECT_FORMAT.contains("{{.RestartCount}}"),
+            "RestartCount is top-level, not under .State: {READY_INSPECT_FORMAT}"
+        );
+        assert!(
+            !READY_INSPECT_FORMAT.contains(".State.RestartCount"),
+            "the field that does not exist is back: {READY_INSPECT_FORMAT}"
+        );
+        // StartedAt genuinely IS under .State.
+        assert!(READY_INSPECT_FORMAT.contains("{{.State.StartedAt}}"));
+        // And the two halves must stay `|`-separated, which is what
+        // parse_started_and_restarts splits on.
+        assert_eq!(READY_INSPECT_FORMAT.matches('|').count(), 1);
+    }
+
+    /// LIVE. Runs the real inspect against a real container and asserts BOTH
+    /// halves parse.
+    ///
+    /// This is the only test that can catch a bad template field: a fake
+    /// answers whatever it was told to, so the entire suite stayed green for
+    /// weeks against a format string docker rejected outright.
+    ///
+    /// ```text
+    /// cargo test -p dml-wow --lib install_native::tests::live_ -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a running container (set DML_LIVE_CONTAINER, default ac-worldserver)"]
+    fn live_the_readiness_inspect_format_is_accepted_by_docker() {
+        let container =
+            std::env::var("DML_LIVE_CONTAINER").unwrap_or_else(|_| "ac-worldserver".to_string());
+        let out = std::process::Command::new(dml_core::engine::docker_program())
+            .args(["inspect", "-f", READY_INSPECT_FORMAT, &container])
+            .output()
+            .expect("spawn docker");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        eprintln!("stdout: {stdout}\nstderr: {stderr}");
+        assert!(
+            out.status.success(),
+            "docker rejected the format string -- this is the 2026-08-03 bug: {stderr}"
+        );
+        // A template error can still exit 0 on some versions while printing the
+        // complaint, so parse the ANSWER rather than trusting the exit code.
+        let (started, restarts) = parse_started_and_restarts(&stdout);
+        assert!(started.is_some(), "no StartedAt parsed from {stdout:?}");
+        assert!(restarts.is_some(), "no RestartCount parsed from {stdout:?}");
+        assert!(
+            started.as_deref().unwrap_or("").contains('T'),
+            "StartedAt is not a timestamp: {started:?}"
+        );
     }
 
     #[test]

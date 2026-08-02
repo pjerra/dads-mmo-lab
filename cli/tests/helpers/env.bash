@@ -121,13 +121,23 @@ if [[ "${1:-}" == "inspect" ]]; then
     exit 0
   fi
   # Boot-loop detection (incident follow-up 2): `docker inspect -f
-  # '{{.State.RestartCount}}'`. DML_STUB_RESTART_COUNT_SEQ is a space-separated
+  # '{{.RestartCount}}'` -- TOP-LEVEL, not under .State. Docker rejects
+  # `.State.RestartCount` with "map has no entry for key", and this stub used
+  # to answer it anyway, which is exactly why a broken probe shipped (live
+  # incident 2026-08-03: every readiness inspect failed, both ready loops fell
+  # back to a fixed `logs --tail`, and the ready marker had already scrolled
+  # out of it). The stub now REFUSES the wrong spelling.
+  # DML_STUB_RESTART_COUNT_SEQ is a space-separated
   # list consumed one per call (sticky on the last; state file in
   # DML_STUB_RESTART_COUNT_SEQ_STATE -- same convention as DML_STUB_DB_ROWS_SEQ)
   # so a test can make the count CLIMB across readiness polls;
   # DML_STUB_RESTART_COUNT is the constant fallback. Set either to an empty or
   # non-numeric value to model docker failing to answer, which must never be
   # read as evidence of anything.
+  if [[ "$*" == *".State.RestartCount"* ]]; then
+    echo "stub: docker has no .State.RestartCount -- it is top-level .RestartCount: $*" >&2
+    exit 64
+  fi
   if [[ "$*" == *RestartCount* ]]; then
     if [[ -n "${DML_STUB_RESTART_COUNT_SEQ:-}" ]]; then
       st="${DML_STUB_RESTART_COUNT_SEQ_STATE:-${DML_STUB_STATE_DIR:?stub state dir unset -- call make_fixture}/rc_seq}"
