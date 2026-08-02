@@ -650,6 +650,36 @@ _stack_is_ac() {
     return 1
 }
 
+# One spelling for a directory path, so compose labels written by different
+# shells compare equal when they name the same place. The same directory
+# arrives as `C:\Users\x` (PowerShell), `C:/Users/x`, `/c/Users/x` (Git Bash
+# $PWD) and `/mnt/c/Users/x` (WSL) -- all four fold to `c:/users/x`. This is
+# what rescued the LIVE false refusal of 2026-08-02: the migrated server's
+# label said `C:\Users\perzi\dml-native\...` while Git Bash's $PWD said
+# `/c/Users/perzi/dml-native/...`, and a byte comparison read our own server
+# as a foreign stack. Drive-rooted results are lowercased (Windows filesystem
+# is case-insensitive); genuinely POSIX paths keep their case, because on
+# Linux /srv/A and /srv/a really are different directories. Deliberately NOT
+# realpath: Git Bash's realpath mangles `C:\` spellings into cwd-relative
+# nonsense, which is exactly the corruption this replaces.
+_canon_path() {
+    local p="${1//\\//}"
+    case "$p" in
+        "//?/"*) p="${p:4}" ;;
+    esac
+    case "$p" in
+        /mnt/[A-Za-z]/*) p="${p:5:1}:${p:6}" ;;
+        /mnt/[A-Za-z])   p="${p:5:1}:" ;;
+        /[A-Za-z]/*)     p="${p:1:1}:${p:2}" ;;
+        /[A-Za-z])       p="${p:1:1}:" ;;
+    esac
+    while [[ "$p" == */ && "${#p}" -gt 1 ]]; do p="${p%/}"; done
+    case "$p" in
+        [A-Za-z]:*) p="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')" ;;
+    esac
+    printf '%s' "$p"
+}
+
 # Detection only: returns 0 when a FOREIGN owner holds one of our names, with
 # the finding in _SC_NAME/_SC_OWNER. Presentation stays with the call sites,
 # because the JSON path must refuse as an ndjson error event and the text
@@ -662,12 +692,8 @@ _stack_conflict_check() {
     local out
     out="$(docker ps -a --format '{{.Names}}{{"\t"}}{{.Label "com.docker.compose.project"}}{{"\t"}}{{.Label "com.docker.compose.project.working_dir"}}' 2>/dev/null)" || return 1
     [[ -z "$out" ]] && return 1
-    # Normalize ours once; realpath may be absent on a minimal box, in which
-    # case the raw spelling still matches everything dml itself started (dml
-    # always cds to the same $GAMES_DIR path).
     local ours
-    ours="$(realpath -m "$compose_dir" 2>/dev/null || echo "$compose_dir")"
-    ours="${ours%/}"
+    ours="$(_canon_path "$compose_dir")"
     local name line cname rest project wdir
     while IFS= read -r name || [[ -n "$name" ]]; do
         [[ -z "$name" ]] && continue
@@ -681,11 +707,9 @@ _stack_conflict_check() {
             project="${rest%%$'\t'*}"
             wdir="${rest#*$'\t'}"; [[ "$wdir" == "$rest" ]] && wdir=""
             if [[ -n "$wdir" ]]; then
-                local w
-                w="$(realpath -m "$wdir" 2>/dev/null || echo "$wdir")"
                 # Our own stack's (possibly stopped) containers are never a
-                # conflict with starting ourselves.
-                [[ "${w%/}" == "$ours" ]] && continue
+                # conflict with starting ourselves -- in ANY spelling.
+                [[ "$(_canon_path "$wdir")" == "$ours" ]] && continue
             fi
             _SC_NAME="$name"; _SC_OWNER="$project"
             return 0

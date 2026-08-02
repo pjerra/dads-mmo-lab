@@ -527,7 +527,16 @@ impl InstallIo for ProcIo {
                 cmd.current_dir(dir);
             }
             dml_core::proc::windows_no_window(&mut cmd);
-            return match dml_core::proc::output_bounded(cmd, limit) {
+            // DRAINING, not `output_bounded` (review finding, 2026-08-02):
+            // the plain variant polls `try_wait` without reading the pipes,
+            // which its own doc scopes to callers whose output is small. The
+            // ready loop's `docker logs --since <StartedAt>` is the whole
+            // boot log — a first boot with playerbots logging in exceeds the
+            // pipe buffer easily, the child blocks mid-write, `try_wait`
+            // never answers, and every poll reads as CouldNotTell until the
+            // loop times out on a server that was READY. The draining runner
+            // has the identical Option contract.
+            return match dml_core::proc::output_bounded_draining(cmd, limit) {
                 Some(out) => {
                     for l in String::from_utf8_lossy(&out.stdout).lines() {
                         on_line(l);
@@ -791,15 +800,26 @@ pub fn images_argv() -> Vec<String> {
     vec!["compose".to_string(), "images".to_string(), "-q".to_string()]
 }
 
-/// Every container on this ENGINE with the compose project that owns it.
-/// Engine-wide on purpose: the question is precisely "does something outside
-/// this project already hold the `ac-*` names".
+/// Every container on this ENGINE with the compose project that owns it AND
+/// the directory that project was composed from. Engine-wide on purpose: the
+/// question is precisely "does something outside this project already hold
+/// the `ac-*` names".
+///
+/// TAB-separated because the working dir routinely contains spaces
+/// (`C:\Users\First Last\...`), and the working dir is carried at all because
+/// the project NAME is not ground truth (live incident, 2026-08-02): the
+/// user's migrated server runs under the project `dml-wow-native` — a name
+/// from the migration era that `composegen::project_name_for` can never
+/// derive — so a comparison against the derived name refused the user's OWN
+/// server as a foreign stack. The working-dir label says which directory the
+/// stack really came from, immune to every project-name override compose
+/// honours.
 pub fn stack_owner_argv() -> Vec<String> {
     vec![
         "ps".to_string(),
         "-a".to_string(),
         "--format".to_string(),
-        "{{.Names}} {{.Label \"com.docker.compose.project\"}}".to_string(),
+        "{{.Names}}{{\"\\t\"}}{{.Label \"com.docker.compose.project\"}}{{\"\\t\"}}{{.Label \"com.docker.compose.project.working_dir\"}}".to_string(),
     ]
 }
 
@@ -832,43 +852,112 @@ pub fn foreign_compose_file(title_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Parse `docker ps -a --format '{{.Names}} {{.Label "..."}}'` output into
-/// `name -> compose project`.
+/// One container's ownership facts, per [`stack_owner_argv`]'s format.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StackOwner {
+    pub project: String,
+    /// `com.docker.compose.project.working_dir` — empty for hand-run
+    /// containers and for rows produced by the old two-field format.
+    pub working_dir: String,
+}
+
+/// Parse [`stack_owner_argv`] output into `name -> owner facts`.
 ///
 /// A container with NO project label yields an EMPTY project rather than a
 /// missing entry — it still owns the name, and dropping it is how a hand-run
 /// `docker run --name ac-database` would sail past the guard.
-pub fn parse_stack_owners(out: &str) -> BTreeMap<String, String> {
+///
+/// Splits on TAB (the format's separator, because working dirs hold spaces);
+/// a line with no tab falls back to the old whitespace split so a stale
+/// caller's output still parses instead of reading as one giant name.
+pub fn parse_stack_owners(out: &str) -> BTreeMap<String, StackOwner> {
     let mut map = BTreeMap::new();
     for line in out.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let (name, project) = match line.split_once(char::is_whitespace) {
-            Some((n, p)) => (n.trim(), p.trim()),
-            None => (line, ""),
+        let (name, project, working_dir) = if line.contains('\t') {
+            let mut it = line.split('\t');
+            (
+                it.next().unwrap_or("").trim(),
+                it.next().unwrap_or("").trim(),
+                it.next().unwrap_or("").trim(),
+            )
+        } else {
+            match line.split_once(char::is_whitespace) {
+                Some((n, p)) => (n.trim(), p.trim(), ""),
+                None => (line, "", ""),
+            }
         };
         if name.is_empty() {
             continue;
         }
-        map.insert(name.to_string(), project.to_string());
+        map.insert(
+            name.to_string(),
+            StackOwner { project: project.to_string(), working_dir: working_dir.to_string() },
+        );
     }
     map
 }
 
-/// The first of [`OWNED_CONTAINERS`] held by someone other than `our_project`,
-/// as `(container, owning project)`. `None` = the names are free, or they are
-/// already ours (a resume).
+/// One spelling for a directory path, so labels written by different shells
+/// compare equal when they name the same place.
+///
+/// The same directory arrives in at least four spellings depending on who ran
+/// compose: `C:\Users\x` (PowerShell), `C:/Users/x`, `/c/Users/x` (Git Bash)
+/// and `/mnt/c/Users/x` (WSL). All four map to `c:/users/x`. Drive-rooted
+/// results are lowercased (the Windows filesystem is case-insensitive);
+/// genuinely POSIX paths keep their case, because on Linux `/srv/A` and
+/// `/srv/a` really are different directories.
+pub fn canon_path(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    if let Some(rest) = s.strip_prefix("//?/") {
+        s = rest.to_string();
+    }
+    let b = s.as_bytes();
+    if s.len() >= 6
+        && s.starts_with("/mnt/")
+        && b[5].is_ascii_alphabetic()
+        && (s.len() == 6 || b[6] == b'/')
+    {
+        s = format!("{}:{}", b[5] as char, &s[6..]);
+    } else if s.len() >= 2
+        && b[0] == b'/'
+        && b[1].is_ascii_alphabetic()
+        && (s.len() == 2 || b[2] == b'/')
+    {
+        s = format!("{}:{}", b[1] as char, &s[2..]);
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        s = s.to_lowercase();
+    }
+    s
+}
+
+/// The first of [`OWNED_CONTAINERS`] held by a genuinely FOREIGN stack, as
+/// `(container, owning project)`. `None` = the names are free or already ours.
+///
+/// "Ours" is true on EITHER signal: the project name matches what we derive,
+/// OR the working-dir label names the directory we are about to compose from.
+/// The second signal is the load-bearing one — see [`stack_owner_argv`] for
+/// the live incident where the derived name alone refused the user's own
+/// server (project `dml-wow-native`, a migration-era name).
 pub fn conflicting_owner(
-    owners: &BTreeMap<String, String>,
+    owners: &BTreeMap<String, StackOwner>,
     our_project: &str,
+    our_dir: &Path,
 ) -> Option<(String, String)> {
+    let ours = canon_path(&our_dir.display().to_string());
     OWNED_CONTAINERS.into_iter().find_map(|name| {
         owners
             .get(name)
-            .filter(|project| project.as_str() != our_project)
-            .map(|project| (name.to_string(), project.clone()))
+            .filter(|o| o.project != our_project)
+            .filter(|o| o.working_dir.is_empty() || canon_path(&o.working_dir) != ours)
+            .map(|o| (name.to_string(), o.project.clone()))
     })
 }
 
@@ -1448,7 +1537,8 @@ impl<'a> Engine<'a> {
             return Ok(());
         }
         let owners = parse_stack_owners(&out);
-        if let Some((container, owner)) = conflicting_owner(&owners, &self.project) {
+        if let Some((container, owner)) = conflicting_owner(&owners, &self.project, &self.title_dir)
+        {
             return Err(Fail::new(
                 CODE_STACK_CONFLICT,
                 stack_conflict_message(&container, &owner),
@@ -2690,20 +2780,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(&games);
     }
 
+    fn owner(project: &str, wdir: &str) -> StackOwner {
+        StackOwner { project: project.to_string(), working_dir: wdir.to_string() }
+    }
+
     #[test]
     fn conflicting_owner_reports_the_first_owned_container_a_stranger_holds() {
+        let here = Path::new("C:/games/wow");
         let mut owners = BTreeMap::new();
-        owners.insert("ac-worldserver".to_string(), "someone-elses".to_string());
+        owners.insert("ac-worldserver".to_string(), owner("someone-elses", "C:/theirs/wow"));
         assert_eq!(
-            conflicting_owner(&owners, "dml-wow-server-playerbots-1234abcd"),
+            conflicting_owner(&owners, "dml-wow-server-playerbots-1234abcd", here),
             Some(("ac-worldserver".to_string(), "someone-elses".to_string()))
         );
-        assert_eq!(conflicting_owner(&owners, "someone-elses"), None);
+        assert_eq!(conflicting_owner(&owners, "someone-elses", here), None);
 
         // A container with no compose project label still OWNS the name.
         let mut bare = BTreeMap::new();
-        bare.insert("ac-database".to_string(), String::new());
-        let hit = conflicting_owner(&bare, "dml-x").expect("an unlabelled ac-* container is still a conflict");
+        bare.insert("ac-database".to_string(), StackOwner::default());
+        let hit = conflicting_owner(&bare, "dml-x", here).expect("an unlabelled ac-* container is still a conflict");
         assert_eq!(hit.0, "ac-database");
         assert!(
             stack_conflict_message(&hit.0, &hit.1).contains("not managed by Docker Compose"),
@@ -2713,15 +2808,68 @@ mod tests {
     }
 
     #[test]
+    fn a_stack_composed_from_our_own_directory_is_ours_regardless_of_its_name() {
+        // The live incident (2026-08-02): project "dml-wow-native" on the
+        // user's own migrated server, underivable, refused as foreign. The
+        // working-dir label rescues it -- in every spelling a shell produces.
+        let here = Path::new("C:\\Users\\perzi\\dml-native\\wow-server-playerbots");
+        for spelling in [
+            "C:\\Users\\perzi\\dml-native\\wow-server-playerbots",
+            "/c/Users/perzi/dml-native/wow-server-playerbots",
+            "/mnt/c/Users/perzi/dml-native/wow-server-playerbots",
+            "c:/users/perzi/DML-NATIVE/wow-server-playerbots/",
+        ] {
+            let mut owners = BTreeMap::new();
+            owners.insert("ac-database".to_string(), owner("dml-wow-native", spelling));
+            assert_eq!(
+                conflicting_owner(&owners, "dml-wow-server-playerbots-5c541930", here),
+                None,
+                "spelling {spelling:?} was read as foreign"
+            );
+        }
+        // ...while a genuinely different directory still refuses.
+        let mut foreign = BTreeMap::new();
+        foreign.insert("ac-database".to_string(), owner("dml-wow-native", "C:/somewhere/else"));
+        assert!(conflicting_owner(&foreign, "dml-wow-server-playerbots-5c541930", here).is_some());
+    }
+
+    #[test]
+    fn canon_path_folds_every_shell_spelling_of_the_same_windows_dir() {
+        let want = "c:/users/first last/dml-native";
+        for s in [
+            "C:\\Users\\First Last\\dml-native",
+            "C:/Users/First Last/dml-native/",
+            "/c/Users/First Last/dml-native",
+            "/mnt/c/Users/First Last/dml-native",
+            "//?/C:/Users/First Last/dml-native",
+        ] {
+            assert_eq!(canon_path(s), want, "spelling {s:?}");
+        }
+        // POSIX paths keep their case: /srv/A and /srv/a really differ.
+        assert_eq!(canon_path("/srv/Games/wow/"), "/srv/Games/wow");
+        assert_ne!(canon_path("/srv/A"), canon_path("/srv/a"));
+    }
+
+    #[test]
     fn parse_stack_owners_reads_name_and_project_and_ignores_blank_lines() {
-        let owners = parse_stack_owners("ac-database proj-a\n\nac-worldserver proj-a\nother-thing proj-b\n");
-        assert_eq!(owners.get("ac-database").map(String::as_str), Some("proj-a"));
-        assert_eq!(owners.get("other-thing").map(String::as_str), Some("proj-b"));
+        // Tab-separated (the real format), with the space-separated fallback
+        // still parsing as name+project.
+        let owners = parse_stack_owners(
+            "ac-database\tproj-a\tC:/a b/wow\n\nac-worldserver proj-a\nother-thing\tproj-b\t\n",
+        );
+        assert_eq!(owners.get("ac-database").map(|o| o.project.as_str()), Some("proj-a"));
+        assert_eq!(
+            owners.get("ac-database").map(|o| o.working_dir.as_str()),
+            Some("C:/a b/wow"),
+            "a working dir containing a space must survive the parse"
+        );
+        assert_eq!(owners.get("ac-worldserver").map(|o| o.project.as_str()), Some("proj-a"));
+        assert_eq!(owners.get("other-thing").map(|o| o.project.as_str()), Some("proj-b"));
         assert_eq!(owners.len(), 3);
         // A container with no project label parses to an empty project, never
         // to a missing entry -- it still owns the name.
         let bare = parse_stack_owners("ac-database\n");
-        assert_eq!(bare.get("ac-database").map(String::as_str), Some(""));
+        assert_eq!(bare.get("ac-database"), Some(&StackOwner::default()));
     }
 
     // -- preflight gate ------------------------------------------------------

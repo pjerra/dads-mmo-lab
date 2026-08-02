@@ -157,3 +157,40 @@ EOS
   [ "$status" -eq 0 ]
   [[ "$output" == *'"event":"done"'* ]]
 }
+
+@test "own-stack exclusion holds across every path spelling a shell produces" {
+  # THE LIVE INCIDENT (2026-08-02): the migrated server's label said
+  # C:\Users\...\wow-server-playerbots while Git Bash's PWD said
+  # /c/Users/..., and the byte comparison refused the user's OWN server.
+  # The project name is dml-wow-native -- underivable -- so only the
+  # working-dir comparison can rescue it.
+  for spelling in \
+    "$DML_GAMES_DIR/wow" \
+    "$DML_GAMES_DIR/wow/" ; do
+    stub_docker "ac-worldserver"$'\t'"dml-wow-native"$'\t'"$spelling"
+    run bash "$DML" start wow
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Starting wow"* ]]
+  done
+}
+
+@test "a foreign stack WITH a working-dir label still refuses" {
+  # The exclusion must not decay into excluding everything that carries a
+  # label -- a different directory's stack is what the guard exists to catch.
+  stub_docker "ac-worldserver"$'\t'"dml-wow-native"$'\t'"/somewhere/else/wow"
+  run bash "$DML" start wow
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"dml-wow-native"* ]]
+}
+
+@test "_canon_path folds windows, msys and wsl spellings to one form" {
+  # Extract the function from the built CLI and drive it directly -- the
+  # spelling table is the contract.
+  eval "$(sed -n '/^_canon_path()/,/^}/p' "$DML")"
+  [ "$(_canon_path 'C:\Users\First Last\dml-native')" = "c:/users/first last/dml-native" ]
+  [ "$(_canon_path 'C:/Users/First Last/dml-native/')" = "c:/users/first last/dml-native" ]
+  [ "$(_canon_path '/c/Users/First Last/dml-native')" = "c:/users/first last/dml-native" ]
+  [ "$(_canon_path '/mnt/c/Users/First Last/dml-native')" = "c:/users/first last/dml-native" ]
+  # POSIX paths keep their case: /srv/A and /srv/a really differ on Linux.
+  [ "$(_canon_path '/srv/Games/wow/')" = "/srv/Games/wow" ]
+}

@@ -244,16 +244,25 @@ pub fn db_port_conflict_message(port_3306_in_use: bool, env_already_has_override
 /// / [`conflicting_owner`](crate::install_native::conflicting_owner)), so the
 /// install-time and start-time answers cannot disagree.
 ///
-/// `ps_output` is the raw `docker ps -a --format '{{.Names}} {{.Label ...}}'`
-/// text, or `None` when docker could not answer -- which is evidence of
-/// NOTHING and never refuses.
+/// `ps_output` is the raw [`crate::install_native::stack_owner_argv`] text,
+/// or `None` when docker could not answer -- which is evidence of NOTHING and
+/// never refuses.
+///
+/// `compose_dir` is the directory about to be composed from. It is the
+/// second, LOAD-BEARING "this is ours" signal: the user's migrated server
+/// runs under the project name `dml-wow-native`, which no derivation can
+/// produce, and comparing the derived name alone refused their own server as
+/// a foreign stack (live incident, 2026-08-02). The working-dir label is
+/// ground truth about which directory a stack came from.
 pub fn stack_conflict_refusal(
     ps_output: Option<&str>,
     our_project: &str,
+    compose_dir: &Path,
 ) -> Option<(String, String)> {
     let out = ps_output?;
     let owners = crate::install_native::parse_stack_owners(out);
-    let (container, owner) = crate::install_native::conflicting_owner(&owners, our_project)?;
+    let (container, owner) =
+        crate::install_native::conflicting_owner(&owners, our_project, compose_dir)?;
     Some((
         crate::install_native::stack_conflict_message(&container, &owner),
         "Stop the other server first (Home > Stop, or `docker compose down` in its folder), then start this one."
@@ -1142,7 +1151,8 @@ pub fn games_lifecycle_stream_with(
         // warnings and then refusing anyway buries the sentence that matters.
         let project = dml_wow_project_name(&compose_dir);
         let ps_out = stack_owner_ps(&docker_program);
-        if let Some((message, hint)) = lifecycle::stack_conflict_refusal(ps_out.as_deref(), &project)
+        if let Some((message, hint)) =
+            lifecycle::stack_conflict_refusal(ps_out.as_deref(), &project, &compose_dir)
         {
             emit(serde_json::json!({"event": "section_end", "name": mode, "status": "error"}));
             emit(gl_error("STACK_CONFLICT", message, &hint));
@@ -1457,13 +1467,20 @@ mod tests {
     // than adapted: they asserted the wrong question confidently.
 
     fn ps_line(name: &str, project: &str) -> String {
-        format!("{name} {project}\n")
+        ps_row(name, project, "")
+    }
+    /// The REAL (tab-separated) format, working dir included.
+    fn ps_row(name: &str, project: &str, wdir: &str) -> String {
+        format!("{name}\t{project}\t{wdir}\n")
+    }
+    fn dir(p: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(p)
     }
 
     #[test]
     fn another_stack_holding_our_container_names_refuses_the_start() {
         let out = ps_line("ac-worldserver", "some-other-stack");
-        let (message, hint) = stack_conflict_refusal(Some(&out), "ours").expect("must refuse");
+        let (message, hint) = stack_conflict_refusal(Some(&out), "ours", &dir("C:/games/wow")).expect("must refuse");
         assert!(message.contains("ac-worldserver"), "{message}");
         // Naming the OTHER stack is the whole point: "a conflict" the user
         // cannot locate is not actionable.
@@ -1477,13 +1494,13 @@ mod tests {
         // re-start after a partial stop. Refusing here would make the app
         // unable to start the very server it manages.
         let out = ps_line("ac-worldserver", "ours") + &ps_line("ac-database", "ours");
-        assert!(stack_conflict_refusal(Some(&out), "ours").is_none());
+        assert!(stack_conflict_refusal(Some(&out), "ours", &dir("C:/games/wow")).is_none());
     }
 
     #[test]
     fn an_unrelated_container_is_not_a_conflict() {
         let out = ps_line("nginx", "someone-else") + &ps_line("postgres", "another");
-        assert!(stack_conflict_refusal(Some(&out), "ours").is_none());
+        assert!(stack_conflict_refusal(Some(&out), "ours", &dir("C:/games/wow")).is_none());
     }
 
     /// TRI-STATE. Docker being slow, wedged or mid-restart is evidence of
@@ -1492,7 +1509,52 @@ mod tests {
     /// error we did not fabricate.
     #[test]
     fn a_docker_that_could_not_answer_never_refuses() {
-        assert!(stack_conflict_refusal(None, "ours").is_none());
+        assert!(stack_conflict_refusal(None, "ours", &dir("C:/games/wow")).is_none());
+    }
+
+    #[test]
+    fn a_stack_from_our_own_directory_is_ours_whatever_its_project_is_called() {
+        // THE LIVE INCIDENT (2026-08-02): the user's migrated server runs
+        // under the project name "dml-wow-native" -- a migration-era name no
+        // derivation produces -- and the guard refused their OWN server as a
+        // foreign stack. The working-dir label is the ground truth that must
+        // rescue this, across every spelling a shell can produce for the
+        // same directory.
+        for spelling in [
+            "C:\\Users\\perzi\\dml-native\\wow-server-playerbots",
+            "C:/Users/perzi/dml-native/wow-server-playerbots",
+            "/c/Users/perzi/dml-native/wow-server-playerbots",
+            "/mnt/c/Users/perzi/dml-native/wow-server-playerbots",
+            "c:/users/PERZI/dml-native/wow-server-playerbots/",
+        ] {
+            let out = ps_row("ac-database", "dml-wow-native", spelling);
+            assert!(
+                stack_conflict_refusal(
+                    Some(&out),
+                    "dml-wow-server-playerbots-5c541930",
+                    &dir("C:/Users/perzi/dml-native/wow-server-playerbots"),
+                )
+                .is_none(),
+                "refused our own server over the label spelling {spelling:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_directory_with_a_foreign_name_still_refuses() {
+        // The exclusion must not decay into "exclude everything that has a
+        // working_dir": a DIFFERENT directory's stack is exactly what the
+        // guard exists to catch.
+        let out = ps_row("ac-database", "dml-wow-native", "C:/Users/perzi/OTHER-server/wow");
+        assert!(
+            stack_conflict_refusal(
+                Some(&out),
+                "dml-wow-server-playerbots-5c541930",
+                &dir("C:/Users/perzi/dml-native/wow-server-playerbots"),
+            )
+            .is_some(),
+            "a foreign stack with a working_dir label must still refuse"
+        );
     }
 
     #[test]
@@ -1501,7 +1563,7 @@ mod tests {
         // compose stack does, and reports an EMPTY project label. Skipping the
         // unlabelled case is how that sails past the guard.
         let out = ps_line("ac-database", "");
-        let (message, _) = stack_conflict_refusal(Some(&out), "ours").expect("must refuse");
+        let (message, _) = stack_conflict_refusal(Some(&out), "ours", &dir("C:/games/wow")).expect("must refuse");
         assert!(message.contains("not managed by Docker Compose"), "{message}");
     }
 
@@ -1512,7 +1574,7 @@ mod tests {
         for name in crate::install_native::OWNED_CONTAINERS {
             let out = ps_line(name, "other");
             assert!(
-                stack_conflict_refusal(Some(&out), "ours").is_some(),
+                stack_conflict_refusal(Some(&out), "ours", &dir("C:/games/wow")).is_some(),
                 "{name} must be guarded"
             );
         }
