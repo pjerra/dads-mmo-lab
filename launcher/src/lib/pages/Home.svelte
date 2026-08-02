@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, wowSoapCredentials, type PlayerOnline, type NativeSetupStatus, type SoapCredentials } from "$lib/api";
+  import { gamesStatus, gamesStart, gamesStop, gamesRestart, wowPlayersOnline, wowWorldRestart, nativeSetupStatus, wowSoapCredentials, wowUnboundStatus, type PlayerOnline, type NativeSetupStatus, type SoapCredentials, type UnboundStatus } from "$lib/api";
   import { dockerRestartCardVisible } from "$lib/docker-restart";
   import { className } from "$lib/wow";
   import { applyEvent } from "$lib/terminal-state";
@@ -10,6 +10,7 @@
   import { chipStart, serverStatus, refreshServerStatus, statusLabel } from "$lib/server-status.svelte";
   import { restartState, clearApplyNeeded } from "$lib/restart-state.svelte";
   import { installProgress, installDetailText } from "$lib/install-progress.svelte";
+  import { unboundBadge } from "$lib/unbound-badge";
   import { bannerText, fastRestartBlockedReason } from "$lib/apply-needed";
   import { trayAction } from "$lib/tray-action.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
@@ -42,6 +43,13 @@
   let nativeStatus: NativeSetupStatus | null = $state(null);
 
   let containerState: "running" | "stopped" | null = $state(null);
+  // The add-on's on-disk state. Fetched on refresh rather than on every poll
+  // tick: it reads a state file plus six source files, and none of that
+  // changes between 3-second polls. A failure (WSL mode refuses outright)
+  // leaves it null, which the badge renders as SILENCE rather than as
+  // "not installed" -- a claim nothing checked.
+  let unbound: UnboundStatus | null = $state(null);
+  const unboundTag = $derived.by(() => unboundBadge(unbound));
   let statusError: string | null = $state(null);
   let refreshing = $state(false);
   let expanded = $state(false);
@@ -108,6 +116,13 @@
     try {
       containerState = (await gamesStatus(WOW_ID)).state;
       statusError = null;
+      // Deliberately after the status call and deliberately swallowed: the
+      // add-on badge is a nicety, and it must never be able to turn a healthy
+      // server card into an error card.
+      wowUnboundStatus().then(
+        (u) => (unbound = u),
+        () => (unbound = null),
+      );
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       statusError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -468,6 +483,11 @@
           <span class="dot" class:on={containerState === "running"} class:off={containerState !== "running"}></span>
           {WOW_ID}
         </button>
+        {#if unboundTag}
+          <span class="addon-tag" class:warn={unboundTag.tone === "warn"} title={unboundTag.detail}>
+            {unboundTag.text}
+          </span>
+        {/if}
         <div>
           {#if containerState === "running"}
             <button disabled={busy} onclick={() => act("stop")}>Stop</button>
@@ -626,6 +646,11 @@
   .expander { background: none; border: none; padding: 0; display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: inherit; color: inherit; cursor: pointer; }
   .chev { color: #8b949e; width: 12px; }
   .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+  /* The add-on tag sits with the server name, not in the actions: it is a
+     fact ABOUT this server, not something to click. */
+  .addon-tag { font-size: 11px; padding: 2px 7px; border-radius: 10px; border: 1px solid #2ea04326;
+               background: #2ea0431a; color: #3fb950; white-space: nowrap; }
+  .addon-tag.warn { border-color: #d2992240; background: #d299221a; color: #d29922; }
   .dot.on { background: #3fb950; }
   .dot.off { background: #6e7681; }
   .dot.mid { background: #d29922; }

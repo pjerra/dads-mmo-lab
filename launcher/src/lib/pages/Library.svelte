@@ -13,7 +13,8 @@
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { nativeInstallRunner } from "$lib/native-install";
-  import { gamesInstallNativeState } from "$lib/api";
+  import { gamesInstallNativeState, wowUnboundStatus, type UnboundStatus } from "$lib/api";
+  import { unboundBadge } from "$lib/unbound-badge";
   import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -51,6 +52,20 @@
   // cannot express, because its `installed` test is only "does the directory
   // exist" and the engine creates that directory in stage 3 of 8.
   const unfinished = $derived(new Set([...resumable].filter((id) => installedIds.has(id))));
+
+  // The Wrath Unbound add-on's state, for the one title that can carry it.
+  // Null on WSL (the command refuses) or on any failure, which the badge
+  // renders as silence rather than as a claim.
+  let unbound: UnboundStatus | null = $state(null);
+  const unboundTag = $derived.by(() => unboundBadge(unbound));
+  const UNBOUND_TITLE = "wow-server-playerbots";
+  async function refreshUnbound() {
+    try {
+      unbound = await wowUnboundStatus();
+    } catch {
+      unbound = null;
+    }
+  }
   let loadError: string | null = $state(null);
   let actionError: string | null = $state(null);
   let note: string | null = $state(null);
@@ -124,6 +139,10 @@
       // post-install refresh both update the labels. A resumable set that is
       // only ever computed once is stale the moment an install starts.
       if (backendMode === "native") await refreshResumable();
+      // Same reasoning as refreshResumable: recomputed on every refresh, so
+      // the Refresh button and a post-install refresh both update the badge.
+      // A value computed only at mount is stale the moment anything changes it.
+      if (backendMode === "native") await refreshUnbound();
     } catch (e) {
       const err = e as { message?: string; hint?: string };
       loadError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -376,6 +395,11 @@
             <span class="dot {unfinished.has(t.id) ? 'off' : t.running === 'running' ? 'on' : 'off'}"></span>
             {t.name}
             {#if unfinished.has(t.id)}<span class="badge-unfinished">unfinished install</span>{/if}
+            {#if t.id === UNBOUND_TITLE && unboundTag}
+              <span class="addon-tag" class:warn={unboundTag.tone === "warn"} title={unboundTag.detail}>
+                {unboundTag.text}
+              </span>
+            {/if}
           </div>
           <div class="card-actions">
             {#if unfinished.has(t.id)}
@@ -603,6 +627,24 @@
 </section>
 
 <style>
+  /* The add-on tag sits with the title name: it is a fact ABOUT this server,
+     not something to click. Same shape as .badge-unfinished beside it. */
+  .addon-tag {
+    margin-left: 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 600;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.35rem;
+    border: 1px solid #2ea04326;
+    background: #2ea0431a;
+    color: #3fb950;
+    white-space: nowrap;
+  }
+  .addon-tag.warn {
+    border-color: #d2992240;
+    background: #d299221a;
+    color: #d29922;
+  }
   .badge-unfinished {
     margin-left: 0.5rem;
     font-size: 0.72rem;
