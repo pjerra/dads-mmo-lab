@@ -288,6 +288,40 @@ fn soap_parity_when_reachable() {
         "setup: throwaway account {user} should be creatable or already exist, got {setup:?}"
     );
 
+    // WAIT FOR THE ACCOUNT TO BE VISIBLE TO A SECOND COMMAND.
+    //
+    // `account create` RETURNS before the new row is visible to the next
+    // command: the SOAP handler answers "Account created." while the write is
+    // still settling on the world thread. That makes the comparison below
+    // racy in a way that looks like a parity BUG (measured 2026-08-02: a
+    // whole-workspace run failed with Rust reporting Ok on the duplicate
+    // create while the CLI -- which pays a process spawn first, so it arrives
+    // hundreds of ms later -- correctly faulted "already exist"; the very
+    // next run passed). The flake only appears when SOAP is reachable, so it
+    // hides completely on a machine whose server is stopped.
+    //
+    // This waits for the PRECONDITION (the account exists as far as a second
+    // command is concerned), which is not the thing under test -- the thing
+    // under test is whether the two clients CLASSIFY the resulting fault
+    // identically. Bounded, and a timeout fails loudly rather than letting
+    // the racy comparison run anyway.
+    let mut visible = false;
+    for _ in 0..40 {
+        match exec(&cfg, &create_cmd) {
+            SoapOutcome::Fault(t) if t.to_lowercase().contains("already exist") => {
+                visible = true;
+                break;
+            }
+            // Still settling (an Ok here means the row was not yet visible);
+            // give the world thread a moment and ask again.
+            _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+    assert!(
+        visible,
+        "setup: throwaway account {user} never became visible to a second `account create` within 4s -- the duplicate-create parity check below has no precondition"
+    );
+
     // Duplicate create -> identical Fault + identical fault TEXT on both.
     let dup_ok = assert_parity(&cfg, &bash, &script, &games, &create_cmd);
     assert!(!dup_ok, "a duplicate account create should Fault on both clients, not Ok");
