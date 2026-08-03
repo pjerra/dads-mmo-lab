@@ -61,13 +61,17 @@ native IS the retirement path — there is no shortcut through the existing dist
 
 ---
 
-## 🔴 PHASE A — the three sharp edges (small, and they are ours)
+## 🟢 PHASE A — the three sharp edges — ✅ ALL THREE RESOLVED
 
 Deliberately first. Each is small, each is already understood, and each one
 undermines a gate we are about to lean on. Doing them first means Phase B is
 built on instruments we trust.
 
-### A1 — Resume after a generator fix silently reuses the stale file
+**Closed out 2026-08-03**: A1 fixed and pinned by three tests, A2 done
+2026-08-01, A3 not reproduced with its hazards closed. Nothing in this phase
+blocks anything.
+
+### A1 — Resume after a generator fix silently reuses the stale file — ✅ DONE
 
 Found live on 2026-07-31 and it cost real time. `generate-compose` had recorded
 itself done, so re-running the install after fixing the generator **reused the
@@ -78,6 +82,23 @@ A stranger hitting this gets a build that fails for a reason we already fixed,
 with no way to know that. Resume is a headline feature of the install engine;
 resume that silently serves stale generated output is worse than no resume,
 because it lies about what it did.
+
+**Fixed, and verified 2026-08-03 rather than assumed.** The architecture no
+longer has a "recorded, therefore skipped" path at all: `run_stage` runs every
+stage on every run and each one decides from ON-DISK EVIDENCE what work is left
+(`a_resume_skips_the_clones_and_the_build_when_the_disk_agrees`). So
+`do_generate` always calls `composegen::write_all_with`, whose `write_file`
+calls for the base and build overlays are unconditional — a template fix
+reaches an existing install by construction.
+
+The one file that is NOT unconditionally rewritten is
+`docker-compose.override.yml`, and that asymmetry is deliberate rather than a
+remnant: before `up` it is purely our output and gets refreshed, after `up` it
+is where `crate::config` keeps the user's bot counts, rates and SOAP settings,
+so regenerating it would eat them. Both halves are pinned —
+`a_resume_before_up_refreshes_every_generated_file` (asserting a planted
+`STALE-GENERATED-OUTPUT` marker is gone) and
+`a_resume_after_up_never_touches_the_users_settings`. All three green.
 
 ### A2 — Nothing caps build parallelism — ✅ DONE 2026-08-01
 
@@ -312,6 +333,17 @@ Leaning: **refuse for the three game ports, keep 3306 advisory** (it is the one
 with a real remedy), and never refuse on an unanswerable probe.
 
 ### B4b — Install the OTHER WoW titles by running their `.sh` in a WSL distro (user decision, 2026-08-01)
+
+> **Wrath Unbound no longer waits for this (2026-08-03 note).** The scope
+> section above says Unbound moves to v0.2 *behind this runner*; that premise
+> expired on 2026-08-02, when the 3124-line bash add-on installer was ported to
+> a native staged/resumable engine (`unbound.rs` + `unbound_payload.rs`, CLI
+> `dml-wow unbound install|uninstall|status`, Tools-card wiring, client add-ons
+> installed and exportable). It needs no distro and no `.sh` runner.
+>
+> This changes only what is POSSIBLE, not what ships: whether Unbound is in the
+> v0.1.0 cut is the user's scope call, unchanged and unmade. B4b is still
+> required for Vanilla and TBC, which have no native port.
 
 **Scope narrowed by the user: the launcher installs WoW servers only.** MapleStory,
 RuneScape and Mu Online are dropped from the install surface.
