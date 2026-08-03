@@ -139,11 +139,13 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
     // buffer that is dropped; they end when the grandchild does. Making the
     // caller wait for a process we have already decided to stop waiting for is
     // the bug, not the leak.
-    let stdout_buf = stdout_handle.join().unwrap_or_default();
-    let stderr_buf = stderr_handle.join().unwrap_or_default();
     if timed_out {
         return BoundedOutcome::TimedOut;
     }
+    // The normal path still joins, and here the original reasoning does hold:
+    // the child exited by itself, so its handles are closed.
+    let stdout_buf = stdout_handle.join().unwrap_or_default();
+    let stderr_buf = stderr_handle.join().unwrap_or_default();
     match status {
         Some(status) => BoundedOutcome::Ran(std::process::Output {
             status,
