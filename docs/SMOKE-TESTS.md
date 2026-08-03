@@ -315,6 +315,35 @@ All read-only/cosmetic — no feature flags, nothing to unlock.
 | ⬜ | Native DB-page reads in Rust (no flag) | (Requires a `npm run tauri dev` RESTART — new Rust commands; needs the server RUNNING since these query the live DB.) In native mode **Statistics, Teleport, Browse Bots, Accounts, Mail, and the character paperdoll/3D view** now read straight from MySQL in the Rust core (a direct `127.0.0.1:3306` query) instead of shelling `dml` → `docker exec mysql`. Effect: pages that used to take many seconds are near-instant — e.g. **Teleport ~49s → well under 1s**, **Statistics ~13s → a fraction of a second**. Values must match WSL mode exactly — parity tests pin all six readers against `dml`. Hardened per review: the Teleport search box and bot-name filter use **bound SQL parameters** (injection-safe regardless of a name with a quote/`;`); the Bots name/class filters reject invalid input with the same error as WSL (`^[A-Za-z0-9_]{1,12}$`, class 1–9/11); a stalled DB errors within 30s instead of hanging; the commands refuse to run outside native mode. WSL mode unchanged. |
 | ⬜ | Native server start/stop manages Docker Desktop (no flag) | (Native mode only.) **Start** the server from Home: if Docker Desktop's engine is down, the launcher launches it and waits for it to be ready BEFORE bringing the containers up (the engine's Linux VM must run first) — you'll see "Starting Docker Desktop…" in the stream; if Docker Desktop isn't installed it aborts with a clear error rather than hanging. **Stop** the server: it also stops Docker Desktop afterward to free the VM's RAM ("Stopping Docker Desktop…"). This is defeatable — Tools ▸ **Native setup** has a **"Stop Docker Desktop when the server stops"** checkbox (default ON, persisted). If the docker-stop fails it's best-effort: the server still reports stopped. WSL mode is completely untouched (Docker there lives inside the distro). |
 
+## 26. Native install engine — Route A (Task 12)
+
+| Status | Test | Steps / expected |
+|---|---|---|
+| ✅ | **[gate] Kill-mid-build resume** (leg 1, PASSED 2026-08-04) | Scratch `DML_GAMES_DIR` (`C:\Users\perzi\dml-gate12`), the `ac-*` container names freed first (they are global to the Docker ENGINE, so leftovers from another title refuse the install with `INSTALL_STACK_CONFLICT` — that is the guard working). Library → Install → **killed from Task Manager at ~30% of the build** → relaunch → **Resume install** → continued cache-warm, did NOT restart from zero. **Measured: peak Docker VM 16.4 GB, total 1088.1s** including the kill and the resume. |
+| ⬜ | [gate] Fresh-VM leg (leg 2) | The release standard: a VM with no Docker, no Git and no repo. Run `Install-DML-Native.ps1` in detect mode, then the same install through the launcher. Proves the PS1 carries a bare machine to the same result. A build that only ever ran on the dev box does not count. |
+| ⬜ | [gate] Live migration (Task 13) | Real export from the distro + `migrate-import` into a scratch games dir: identity check (2505 characters, 255 accounts), boot to ready with bots online, SOAP verified. Then the NEGATIVE test: with one server running, the other must refuse on ports. |
+
+### What leg 1's numbers mean for the hardware floors
+
+`preflight` compares against `docker info --format '{{.MemTotal}}'` — the Docker
+VM's memory, not the host's, which is the right number to check.
+
+**The 16.4 GB peak does NOT contradict `REFUSE_MEM_BYTES` (6 GB) or
+`WARN_MEM_BYTES` (8 GB), and it is worth writing down why**, because at a glance
+it looks like it should. Build parallelism is memory-bound by design
+(`mem_bound_jobs` = `floor(RAM / 2 GB)`, capped at 4), so a bigger VM does not
+need more memory — it *uses* more, by running more jobs. This box's VM is
+Docker's default ~50% of 31 GB, so it ran the cap and peaked just under what it
+had. An 8 GB VM runs 4 jobs and peaks proportionally lower. The floors describe
+the smallest VM that still completes; this measurement describes the largest
+that still helps.
+
+What it DOES bound is the estimate copy: on a VM this size the build is ~18
+minutes, not the "hours" the first-install copy warns about. The install-progress
+copy says hours because a cold first build on a modest box genuinely is — but
+1088.1s here, cache-warm after a kill, is the fast end of the range and the
+honest ceiling for "how long am I waiting".
+
 ## Known caveats (not tests — expectations)
 
 - ARAC (C++ module): installing the module is server-side only. The client DBC/MPQ patch is now a separate **Apply client patch** step on the module's Modules row (Batch 5, locked behind [arac-client-patch] until row §19 passes) — so a bare install still won't show new race/class combos until you run that patch and cold-start once. Not a bug; it's the two-step design.

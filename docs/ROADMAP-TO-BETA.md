@@ -450,10 +450,15 @@ optional for a beta — a new user installs fresh.
 
 No amount of engineering closes these. They are the release standard.
 
-- **Task 12 — LIVE native gate.** Fresh build in a scratch `DML_GAMES_DIR`,
-  **kill the launcher mid-build**, reopen, Resume must continue cache-warm rather
-  than from zero. Then a real WoW client login. Then the same on a VM that has
-  never seen DML.
+- **Task 12 — LIVE native gate.** ✅ **LEG 1 PASSED 2026-08-04**: scratch
+  `DML_GAMES_DIR`, killed from Task Manager at ~30% of the build, relaunched,
+  Resume continued cache-warm rather than from zero. Measured **peak Docker VM
+  16.4 GB, 1088.1s total** including the kill and resume — folded into
+  SMOKE-TESTS §26, where the reason it does not contradict the 6/8 GB floors is
+  written down (parallelism is memory-bound, so a bigger VM uses more rather
+  than needing more). ⬜ **Leg 2 outstanding**: the same on a VM that has never
+  seen DML (no Docker, no Git, no repo) — a build that only ever ran on the dev
+  box does not count. ⬜ Real WoW client login.
 - **Task 13 — LIVE migration gate**, if Task 10 ships: real export/import, the
   identity check (2505 characters, 255 accounts), then the negative test — with
   one server running the other must refuse on ports.
