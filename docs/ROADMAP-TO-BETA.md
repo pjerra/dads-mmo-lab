@@ -18,9 +18,17 @@ order.** If an item is not here, it is not blocking the beta.
 
 ## SCOPE, FIXED BY THE USER 2026-08-01
 
-**v0.1.0 ships WoW Playerbots on the native backend. Nothing else.**
+**v0.1.0 ships WoW Playerbots on the native backend, WITH the Wrath Unbound
+add-on. Vanilla and TBC move to v0.2.**
 
-Vanilla, TBC and Wrath Unbound move to **v0.2**. They need the
+> **AMENDED 2026-08-03 (user): Wrath Unbound is IN the v0.1.0 cut.** The
+> original deferral was justified by Unbound needing the `.sh`-in-a-distro
+> runner (B4b); it was ported to a native staged engine on 2026-08-02 and needs
+> neither. Its live gate is therefore part of the release standard now — Phase C
+> gains an Unbound install/uninstall run. Vanilla and TBC are unaffected and
+> still wait for B4b, which is what the rest of this section is about.
+
+Vanilla and TBC move to **v0.2**. They need the
 `.sh`-in-a-detected-distro runner (B4b), which is roughly a week: distro
 detection, streaming a Linux installer through the terminal, and an apt path for
 the two pacman-first scripts. Playerbots native is built and click-verified
@@ -452,6 +460,12 @@ No amount of engineering closes these. They are the release standard.
 - **The five outstanding live gates** already listed in SHIP-LIST Phase 1.
 - **The Desktop-icon check** — run the launcher installer: is there an icon, does
   the Start menu open the new app (not the retired tray)?
+- **Wrath Unbound live gate** (added 2026-08-03 with the scope amendment above).
+  Install from the Tools card on a native server, confirm the `[UNBOUND] Prereq
+  map built.` marker and the multi-class trainer in game, then uninstall and
+  confirm the world comes back ready with the marker absent. The engine leaves
+  the Mentor NPC spawn to the user by design (`.npc add 900001`), so that step
+  is part of the gate rather than a defect.
 - **Three tray-design answers** (these block the multi-server work, not the
   beta): where does a server's display name live; does the tray list every server
   or follow one active server; does Home follow the active server or stay
