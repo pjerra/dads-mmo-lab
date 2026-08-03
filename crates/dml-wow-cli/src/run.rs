@@ -788,6 +788,53 @@ pub fn dispatch(command: Cmd) -> i32 {
 
         Cmd::Install { id } => cmd_install(&id),
 
+        Cmd::MigrateStatus { id } => {
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            let games_dir = match dml_wow::migrate::games_dir() {
+                Ok(d) => d,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let opts =
+                dml_wow::migrate::MigrateOpts { id: id.clone(), games_dir, ..Default::default() };
+            emit_ok(serde_json::to_value(dml_wow::migrate::status(&opts)).unwrap_or_default())
+        }
+        Cmd::MigrateImport { id } => {
+            // Same guard, same reason as `install-native`: validate the id
+            // before anything joins it onto `DML_GAMES_DIR`.
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            // `games_dir_for_install`, never `games_dir_from_env`: the latter
+            // falls back to the process's cwd, and this command restores a
+            // database into whatever it finds there.
+            let games_dir = match dml_wow::migrate::games_dir() {
+                Ok(d) => d,
+                Err(e) => return emit_err(&e.code, &e.message, &e.hint),
+            };
+            let mut opts =
+                dml_wow::migrate::MigrateOpts { id: id.clone(), games_dir, ..Default::default() };
+            // The dump was taken with the source server's root password and the
+            // generated stack must run with the SAME one, or the restore
+            // authenticates against a database it cannot log into.
+            if let Ok(pw) = std::env::var("DB_ROOT_PASSWORD") {
+                if !pw.is_empty() {
+                    opts.db_password = pw;
+                }
+            }
+            // Exit code comes from the terminal-event tracker, not the engine's
+            // own i32 -- so a truncated stream can never read as success.
+            stream_dispatch(|emit| {
+                let _ = dml_wow::migrate::migrate_import_stream_with(
+                    &dml_wow::install_native::ProcIo::from_env(),
+                    &opts,
+                    emit,
+                );
+            })
+        }
         Cmd::InstallNative { id, allow_underspec } => {
             // GUARD, same as the lifecycle arms: the id before anything joins
             // it onto `DML_GAMES_DIR`. The engine carries its own STRICTER

@@ -382,6 +382,30 @@ pub enum Cmd {
         #[arg(long)]
         allow_underspec: bool,
     },
+    /// Import a WSL export into a native Docker Desktop stack.
+    ///
+    /// The other half of the migration: `export-from-wsl.sh` runs INSIDE the
+    /// distro and writes a payload into the target folder; this turns that
+    /// payload into a running native stack. Native-only, no bash mirror, same
+    /// reason as `install-native` -- this exists for the PC that has no distro.
+    ///
+    /// Restoring the dump writes character data, so it REFUSES a target that
+    /// already holds characters, and refuses equally when it could not find
+    /// out. There is no `--replace`: overwriting a server that is already
+    /// there is `wow backup restore`'s job, and that one takes a safety dump.
+    MigrateImport {
+        /// Title id -- ALSO the folder under `DML_GAMES_DIR` the export must
+        /// already be sitting in, because the folder NAME is the id every
+        /// other command looks the server up by.
+        #[arg(long, default_value = dml_wow::migrate::DEFAULT_TITLE_ID)]
+        id: String,
+    },
+    /// What a migration import would do, or got through: is the export
+    /// complete, what is missing, which stage a resume starts from.
+    MigrateStatus {
+        #[arg(long, default_value = dml_wow::migrate::DEFAULT_TITLE_ID)]
+        id: String,
+    },
     /// The Wrath Unbound multi-class add-on: layer it onto an EXISTING native
     /// WotLK Playerbots server, or take it back off. Both directions rebuild
     /// the worldserver (30-90 minutes, `pct` events during the compile) and

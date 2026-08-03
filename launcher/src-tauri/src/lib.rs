@@ -6430,6 +6430,83 @@ async fn wow_unbound_status(_state: State<'_, AppState>) -> Result<serde_json::V
     })
 }
 
+/// Import a WSL export into a native stack (Task 10).
+///
+/// Shares [`InstallSlot::Native`] with `games_install_native` rather than
+/// having a slot of its own, and that is deliberate: both drive the SAME
+/// docker engine towards the SAME engine-global `ac-*` container names, so
+/// running them at once is never something a user meant. One busy signal, one
+/// place for the UI to check.
+///
+/// Resume is not a parameter here either — rerunning the same id IS the
+/// resume, because the engine reads `.dml-migrate.json` from the title dir.
+#[tauri::command]
+async fn wow_migrate_import(
+    id: String,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    require_native_backend()?;
+    {
+        let mut guard = state.install.lock().unwrap();
+        if guard.is_some() {
+            return Err(CmdError {
+                code: "BUSY".into(),
+                message: "An install is already running".into(),
+                hint: "Finish or cancel it first.".into(),
+            });
+        }
+        *guard = Some(InstallSlot::Native);
+    }
+    let slot = state.install.clone();
+    let ch = on_event.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let opts = dml_wow::migrate::MigrateOpts {
+            id,
+            games_dir: dml_core::compose::games_dir_from_env(),
+            db_password: std::env::var("DB_ROOT_PASSWORD")
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "password".to_string()),
+            ..Default::default()
+        };
+        dml_wow::migrate::migrate_import_stream(&opts, |v| {
+            let _ = ch.send(v);
+        })
+    })
+    .await;
+    // Release the slot whatever happened, INCLUDING a panic inside the engine.
+    *slot.lock().unwrap() = None;
+    result.map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })?;
+    Ok(())
+}
+
+/// Is there an export in this title's folder, is it complete, and how far did a
+/// previous import get?
+///
+/// Read-only and cheap (it stats files and reads one small JSON), so the page
+/// can call it on mount. The point is that the button stops lying: an "Import"
+/// that would actually resume, or that is about to fail because the payload is
+/// half there, should say so BEFORE it is pressed.
+#[tauri::command]
+fn wow_migrate_status(id: String) -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    let opts = dml_wow::migrate::MigrateOpts {
+        id,
+        games_dir: dml_core::compose::games_dir_from_env(),
+        ..Default::default()
+    };
+    serde_json::to_value(dml_wow::migrate::status(&opts)).map_err(|e| CmdError {
+        code: "INTERNAL".into(),
+        message: e.to_string(),
+        hint: String::new(),
+    })
+}
+
 /// Is there a half-finished native install in this title's directory, and where
 /// did it get to?
 ///
@@ -7225,6 +7302,8 @@ pub fn run() {
             games_catalog,
             games_install,
             games_install_native,
+            wow_migrate_import,
+            wow_migrate_status,
             games_install_native_state,
             wow_unbound_install,
             wow_unbound_uninstall,

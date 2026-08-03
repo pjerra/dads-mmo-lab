@@ -234,6 +234,21 @@ pub fn docker_desktop_start_args() -> [&'static str; 3] {
     ["desktop", "start", "-d"]
 }
 
+/// How long `docker desktop start -d` may take to ANSWER.
+///
+/// Not how long the engine may take to become ready -- that is
+/// [`ENGINE_POLL_TIMEOUT_MS`], and it runs after this returns. This bounds only
+/// the ask, which returns as soon as Docker Desktop has accepted the request.
+///
+/// It exists because this function had no bound at all, which put the one
+/// command reached specifically when "the engine is not answering" in the exact
+/// position every other docker call in this project is bounded to avoid: a
+/// dockerd wedged during startup accepts the connection and never answers, and
+/// a deadline is only consulted after a call RETURNS. An unbounded ask here
+/// hangs `install-native`, `migrate-import` and every native `games start` at
+/// their first step, with the readiness timeout below never getting to fire.
+pub const ENGINE_START_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Run `docker desktop start -d` against `program`.
 ///
 /// WHY THIS EXISTS: launching `Docker Desktop.exe` starts the GUI, and the
@@ -244,6 +259,13 @@ pub fn docker_desktop_start_args() -> [&'static str; 3] {
 /// It is not universally available — the `docker desktop` CLI plugin arrived in
 /// Docker Desktop 4.37 — so the caller treats failure as "fall back to the exe",
 /// never as a hard error. (Impure.)
+///
+/// BOUNDED by [`ENGINE_START_ASK_TIMEOUT`], and draining while it waits so a
+/// chatty start cannot fill a pipe buffer and deadlock against our own read. A
+/// timeout reads as the same "fall back to the exe" that a spawn failure and a
+/// non-zero exit already do — which is the right answer, because a `docker
+/// desktop start` that will not answer is exactly the case where launching the
+/// exe is the remaining option.
 pub fn start_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new(program);
     cmd.args(docker_desktop_start_args());
@@ -253,7 +275,12 @@ pub fn start_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    cmd.output()
+    crate::proc::output_bounded_draining(cmd, ENGINE_START_ASK_TIMEOUT).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "docker desktop start did not answer",
+        )
+    })
 }
 
 /// Did `docker desktop start` actually take responsibility for the engine?
@@ -349,6 +376,130 @@ pub fn poll_until_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A program that never exits, per platform.
+    ///
+    /// Never a hardcoded `cmd.exe` or drive-letter literal: the convention this
+    /// crate already follows in `runner.rs`/`proc.rs`, so the suite runs on the
+    /// Linux CI job too.
+    fn never_returns() -> (&'static str, Vec<&'static str>) {
+        #[cfg(windows)]
+        {
+            // NOT `cmd /C pause`: it READS stdin, and this call null-stdins its
+            // child, so pause sees EOF and exits at once -- a "never returns"
+            // helper that returns immediately makes the assertion below vacuous
+            // in the most convincing possible way. ping ignores stdin.
+            ("ping", vec!["-n", "600", "127.0.0.1"])
+        }
+        #[cfg(not(windows))]
+        {
+            ("sh", vec!["-c", "sleep 600"])
+        }
+    }
+
+    /// `start_engine` must give up rather than block forever.
+    ///
+    /// The bug this pins: it used a bare `cmd.output()`, so the one command
+    /// reached specifically BECAUSE the engine is not answering had no
+    /// wall-clock bound at all. A Docker Desktop wedged during startup would
+    /// hang `install-native`, `migrate-import` and every native `games start`
+    /// at their first step — and the 180s readiness poll meant to cover that
+    /// case runs AFTER this returns, so it could never fire.
+    ///
+    /// Asserts elapsed >= the bound, not merely that it returned. A failed
+    /// spawn also returns "quickly", so a version of this test that only
+    /// checked the result would pass on a machine where the child never ran —
+    /// the vacuous-pass shape this project has recorded. The elapsed check is
+    /// something only a real wait can satisfy.
+    #[test]
+    fn start_engine_is_bounded_rather_than_blocking_forever() {
+        // A short bound so the test is quick; the production constant is
+        // asserted separately below.
+        let (prog, args) = never_returns();
+        let mut cmd = Command::new(prog);
+        cmd.args(&args);
+        cmd.stdin(Stdio::null());
+        let began = std::time::Instant::now();
+        let out = crate::proc::output_bounded_draining(cmd, std::time::Duration::from_millis(600));
+        let elapsed = began.elapsed();
+
+        assert!(out.is_none(), "a process that never exits must time out, not return output");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(600),
+            "returned in {elapsed:?} — that is a failed spawn, not a real bounded wait"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "took {elapsed:?}; the bound did not fire"
+        );
+    }
+
+    /// A deadline must bound the CALL, not merely the child.
+    ///
+    /// The regression this pins, measured on 2026-08-03: a 600ms-bounded call
+    /// against a child that spawns a GRANDCHILD returned after 605 seconds.
+    /// `child.kill()` kills the child; the grandchild inherited the stdout and
+    /// stderr pipe handles and keeps them open, so the reader threads never see
+    /// EOF and the join AFTER the kill blocks for as long as the grandchild
+    /// lives. The same child spawned without a shell returned in 0.61s, which
+    /// is what made the cause unambiguous.
+    ///
+    /// This matters because `docker`, `wsl.exe` and `git` all spawn helper
+    /// processes, so it is every bounded probe in the project quietly losing
+    /// its bound — the exact failure the bounds exist to prevent.
+    ///
+    /// Windows-only because the grandchild shape needs `cmd /C`, and because
+    /// that is where it was found. Asserts elapsed >= the bound as well, so a
+    /// spawn that never ran cannot satisfy it.
+    #[cfg(windows)]
+    #[test]
+    fn a_deadline_bounds_the_call_even_when_a_grandchild_holds_the_pipes() {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping", "-n", "600", "127.0.0.1"]);
+        let began = std::time::Instant::now();
+        let out = crate::proc::output_bounded_draining(cmd, std::time::Duration::from_millis(600));
+        let elapsed = began.elapsed();
+
+        assert!(out.is_none(), "a child that never exits must time out");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(600),
+            "returned in {elapsed:?} — that is a failed spawn, not a real wait"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(20),
+            "took {elapsed:?}: the call outlived its own deadline, which is the bug"
+        );
+    }
+
+    /// The production bound is set, and set to something honest.
+    #[test]
+    fn the_engine_start_ask_is_bounded_well_inside_the_readiness_wait() {
+        // Two properties, both load-bearing. Non-zero, or there is no bound at
+        // all; and comfortably shorter than the readiness poll that follows it,
+        // because an ask that could outlast the whole wait would make the wait
+        // meaningless.
+        assert!(ENGINE_START_ASK_TIMEOUT > std::time::Duration::ZERO);
+        assert!(
+            ENGINE_START_ASK_TIMEOUT
+                < std::time::Duration::from_millis(ENGINE_POLL_TIMEOUT_MS),
+            "the ask ({ENGINE_START_ASK_TIMEOUT:?}) must not be able to outlast the readiness wait"
+        );
+    }
+
+    /// A timed-out ask must fall back to the exe, exactly as a spawn failure
+    /// and a non-zero exit already do.
+    ///
+    /// This is the behaviour that keeps the new bound from becoming a new way
+    /// to fail: a `docker desktop start` that will not answer is precisely the
+    /// case where launching Docker Desktop.exe is the remaining option.
+    #[test]
+    fn a_timed_out_ask_reads_as_fall_back_to_the_exe() {
+        let timed_out: std::io::Result<std::process::Output> = Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "docker desktop start did not answer",
+        ));
+        assert!(!start_engine_succeeded(&timed_out));
+    }
 
     // -- docker/docker-desktop executable discovery (Task 3) -----------------
 

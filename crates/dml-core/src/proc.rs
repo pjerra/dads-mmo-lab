@@ -119,9 +119,26 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
             }
         }
     };
-    // Killing/waiting the child closes its end of both pipes, so the reader
-    // threads see EOF and finish promptly either way — this join is not
-    // itself an unbounded wait.
+    // RETURN BEFORE JOINING on the timeout path, and the reason is measured
+    // rather than assumed. This used to join both reader threads first and then
+    // discard their buffers, on the stated grounds that "killing the child
+    // closes its end of both pipes, so the reader threads see EOF and finish
+    // promptly". That holds only for a child which spawns nothing.
+    //
+    // `child.kill()` kills the CHILD. A GRANDCHILD that inherited the pipe
+    // handles keeps them open, so the readers never see EOF and this join
+    // blocks for as long as the grandchild lives. Measured 2026-08-03: a
+    // 600ms-bounded call against `cmd /C ping -n 600 127.0.0.1` returned after
+    // 605 SECONDS; the same child spawned without the shell returned in 0.61s.
+    // `docker`, `wsl.exe` and `git` all spawn helpers, so this is not exotic --
+    // it is every bounded probe in the project quietly losing its bound.
+    //
+    // Nothing is lost by returning here: `TimedOut` carries no output and never
+    // did, so on this path the joins bought nothing and cost everything. The
+    // reader threads are left to finish on their own, blocked on a read into a
+    // buffer that is dropped; they end when the grandchild does. Making the
+    // caller wait for a process we have already decided to stop waiting for is
+    // the bug, not the leak.
     let stdout_buf = stdout_handle.join().unwrap_or_default();
     let stderr_buf = stderr_handle.join().unwrap_or_default();
     if timed_out {

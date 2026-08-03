@@ -134,6 +134,31 @@ pub fn stream_restore(program: &OsStr, password: &str, gz_path: &Path) -> Result
     stream_into(program, &mysql_import_args(password), gz_path)
 }
 
+/// [`stream_restore`] against an EXPLICIT container rather than the bare name
+/// `ac-database`.
+///
+/// The migration engine ([`crate::migrate`]) resolves its database through its
+/// own compose project and must keep addressing it that way: a bare name
+/// answers for whichever project happens to own it, and that engine's whole
+/// guard step is about a machine that may have a second AzerothCore stack on
+/// it. Restoring a dump into the wrong database is not a recoverable mistake.
+pub fn stream_restore_into(
+    program: &OsStr,
+    container: &str,
+    password: &str,
+    gz_path: &Path,
+) -> Result<ImportResult, String> {
+    let mut args = mysql_import_args(password);
+    // `mysql_import_args` is `exec -i ac-database mysql ...`; swap the name in
+    // place so the two argv shapes cannot drift apart.
+    let at = args
+        .iter()
+        .position(|a| a == "ac-database")
+        .expect("mysql_import_args names the container");
+    args[at] = container.to_string();
+    stream_into(program, &args, gz_path)
+}
+
 /// The generic streaming-pipe engine behind [`stream_restore`], parameterized
 /// on the target program/args so it can be exercised in tests against a
 /// harmless real subprocess (e.g. a line-echo sink) instead of `docker exec …

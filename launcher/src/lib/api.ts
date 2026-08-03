@@ -1532,6 +1532,42 @@ export async function gamesInstallNativeState(id: string): Promise<NativeInstall
   return await invoke("games_install_native_state", { id });
 }
 
+// --- Migration import (Task 10) --------------------------------------------
+//
+// The second half of "bring my WSL server across": the export runs INSIDE the
+// distro (it reads a server that only exists there), this turns its payload
+// into a running native stack.
+//
+// Same contract notes as gamesInstallNative above, for the same reasons: no
+// `resume` flag (re-calling with the same id IS the resume, driven by
+// `.dml-migrate.json`), and the promise RESOLVES even when the import is
+// refused -- failure arrives as an `error` event, so callers must derive the
+// outcome from the terminal event and never from the promise settling.
+export const wowMigrateImport = (id: string, onEvent: (e: TermEvent) => void): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("wow_migrate_import", { id, onEvent: ch });
+};
+
+/** What is in a title folder, before anyone presses anything. */
+export interface MigrateStatus {
+  title_dir: string;
+  export_present: boolean;
+  /** Payload pieces that are absent, named the way a human would fix them. */
+  missing: string[];
+  state_present: boolean;
+  completed: string[];
+  next_stage: string | null;
+  last_error: string | null;
+}
+
+// Read-only and cheap. Exists so the button can stop lying twice over: an
+// "Import" that would actually RESUME, and an "Import" that is about to fail
+// because the payload is only half there, should both say so before the click.
+export async function wowMigrateStatus(id: string): Promise<MigrateStatus> {
+  return await invoke("wow_migrate_status", { id });
+}
+
 // --- Wrath Unbound add-on (native engine) ----------------------------------
 //
 // The native replacement for `toolInstall("unbound")`, which downloads the

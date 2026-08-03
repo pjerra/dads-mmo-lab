@@ -64,8 +64,8 @@ Rules:
 ## 2. NDJSON streams
 
 Long-running commands print an NDJSON event stream instead of one envelope: one compact JSON
-object per line, flushed per line. Exactly 15 subcommands stream (marked in the command table):
-`start`, `stop`, `restart`, `install-native`, `backup create`, `backup restore`, `docker-clean`,
+object per line, flushed per line. Exactly 16 subcommands stream (marked in the command table):
+`start`, `stop`, `restart`, `install-native`, `migrate-import`, `backup create`, `backup restore`, `docker-clean`,
 `bots-flush`, `games-remove`, `self-update`, `module install`, `module remove`, `module update`,
 `module rebuild`, `party preset-load`.
 
@@ -254,6 +254,8 @@ prints them.
 | `commands` | — | envelope | The in-game `.` commands cheat sheet (`NOT_FOUND` if the server is not installed) |
 | `install` | `[ID]` (positional, default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`) | passthrough | Interactively install a title — stdio passthrough, no envelope on success |
 | `install-native` | `[--id <ID>]` (default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`, else `BAD_ID`) `[--allow-underspec]` | stream | Install the WoW server natively on Docker Desktop, no WSL — resumable |
+| `migrate-import` | `[--id <ID>]` (default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`, else `BAD_ID`) | stream | Import a WSL export into a native stack — resumable; REFUSES a non-empty target |
+| `migrate-status` | `[--id <ID>]` | envelope | Is the export complete, what is missing, which stage a resume starts from |
 | `unbound install` | `[--id <ID>]` `--accept-data-changes` `[--repair]` | stream | Layer the Wrath Unbound add-on onto an existing server + rebuild — resumable |
 | `unbound uninstall` | `[--id <ID>]` `--accept-data-changes` `[--force]` | stream | Remove the add-on + rebuild; `done` names its residue |
 | `unbound status` | `[--id <ID>]` | envelope | Add-on install/uninstall progress from disk evidence only |
@@ -324,6 +326,88 @@ only on failure paths (exit 1): `BAD_ID` (before anything runs); `INSTALL_PREREQ
 `INSTALL_WAIT_FAILED` `the installer started but could not be waited on: {e}`. On success the
 process exits with the installer's own exit code (`status.code().unwrap_or(1)` — a signal-killed
 child maps to 1).
+
+### `migrate-import` (bring a WSL server across to native)
+
+`dml-wow migrate-import` turns a WSL export into a running native stack. It is the second half of
+the migration; the first is `poc/native-docker/migrate/export-from-wsl.sh`, which runs INSIDE the
+distro (it reads a server that only exists there) and writes its payload into the target folder.
+
+Native-only, no bash mirror — same reason as `install-native`: this exists for the PC that has no
+distro.
+
+**Where it runs.** In place, at `<DML_GAMES_DIR>/<id>`. The export must already be sitting there,
+because the FOLDER NAME is the id every other command looks the server up by (found live
+2026-07-24: a differently named folder makes `games list` and every `wow` feature miss the server).
+That is also why the payload is not copied anywhere — it is several GB.
+
+**What it replaces.** The bash POC asks the user to hand-author two compose files, then spends 200
+lines validating what they wrote, because every way of getting them wrong produces a server that
+starts, looks healthy, and is not theirs. That knowledge is now in a generator instead of a
+validator: the compose files are produced by `composegen` with the exported override's environment
+merged in.
+
+**Nine stages**, streamed as NDJSON; `preflight` and `guard` are never recorded, so a resume
+re-runs them:
+
+| stage | what it does |
+|---|---|
+| `preflight` | Is the export here and complete? Refuses a missing payload, a missing `conf/docker-compose.override.yml.orig`, and a `docker-compose.yml` this import did not write |
+| `guard` | Do the engine-global `ac-*` container names belong to someone else? |
+| `load-images` | `docker load` the four tarballs, then retag them out of upstream's namespace (`pct` per image) |
+| `generate-compose` | Stage `etc/` into `env/dist/etc`, write the base + override (**never** a build overlay) |
+| `client-data` | `compose up --no-start`, then unpack `client-data.tar` into the volume via a throwaway container |
+| `db-restore` | Start the database, prove the target is empty, stream the dump in, echo the counts |
+| `settings` | Carry `soap.env` across, stripping CRs |
+| `up` | `compose up -d` |
+| `ready` | Wait for the world server's own marker (carries `limit_secs`, no percentage — it is a wait) |
+
+**The MySQL write and its safety.** Restoring the dump writes `acore_*`, which puts this on the
+sanctioned-write list. Its safety is a REFUSAL, not a consent prompt — consent cannot tell you
+whether the database you are about to write into has someone's characters in it. The engine asks
+directly, in three states:
+
+* no `acore_characters.characters` table, or one with no rows → proceed;
+* rows present → `MIGRATE_TARGET_NOT_EMPTY`;
+* **the database did not answer → `MIGRATE_TARGET_UNKNOWN`**, also a refusal. A probe that could
+  not answer is evidence of nothing, and reading it as "empty" would turn a wedged database into a
+  licence to overwrite it.
+
+There is deliberately no `--replace`. Overwriting a server that is already there is
+`wow backup restore`'s job, and that one takes a safety dump first.
+
+The question is asked through `information_schema` rather than `SELECT COUNT(*) FROM
+acore_characters.characters`, because the latter ERRORS on a genuinely fresh database — the case
+that most needs a "yes, proceed" — and that error is indistinguishable from "the server did not
+answer".
+
+**Resume.** `.dml-migrate.json` in the title dir, bound to it by `composegen::install_id`, so a
+state file copied in from elsewhere is refused. `db-restore` is the ONE stage whose skip is driven
+by that file rather than by the disk, and the reason is specific: a successful restore makes the
+target look exactly like the thing the guard refuses, so the recorded state is the only thing that
+can tell "we put those rows there" from "somebody else's server is here".
+
+**Image tags.** The tarballs load as `acore/ac-wotlk-<svc>:master` and are retagged to
+`dml.local/ac-wotlk-<svc>:migrated`, which is what the generated compose names. `dml.local/` is
+served by no registry, so a missing image is a loud `pull access denied` instead of a silent
+upstream substitution — the fix for the 2026-08-02 incident where an ordinary `docker compose up`
+pulled a fresher `:master` and replaced a custom playerbots build with stock AzerothCore.
+
+No build overlay is written at all. The images were loaded, never built, and a
+`docker-compose.build.yml` here would let an ordinary `docker compose build` replace the user's own
+worldserver with a fresh source build — the same silent substitution from the other direction.
+
+**Snapshot semantics**, stated in the `done` event: the source server keeps running and keeps
+diverging, and nothing syncs back.
+
+**Error codes:** `MIGRATE_NO_EXPORT`, `MIGRATE_INCOMPLETE_EXPORT`, `MIGRATE_NO_OVERRIDE`,
+`MIGRATE_COMPOSE_EXISTS`, `MIGRATE_STACK_CONFLICT`, `MIGRATE_ENGINE_DOWN`, `MIGRATE_LOAD_FAILED`,
+`MIGRATE_RETAG_FAILED`, `MIGRATE_GENERATE_FAILED`, `MIGRATE_VOLUME_FAILED`, `MIGRATE_DB_UNHEALTHY`,
+`MIGRATE_TARGET_NOT_EMPTY`, `MIGRATE_TARGET_UNKNOWN`, `MIGRATE_RESTORE_FAILED`, `MIGRATE_UP_FAILED`,
+`MIGRATE_READY_TIMEOUT`.
+
+**Env:** `DML_GAMES_DIR` (required — refuses rather than defaulting to the cwd), `DB_ROOT_PASSWORD`
+(must match the password the dump was taken with).
 
 ### `install-native` (the native Route A install)
 

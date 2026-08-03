@@ -26,6 +26,8 @@ pub mod iteminfo;
 pub mod lan;
 pub mod lanip;
 pub mod lifecycle;
+/// Import a WSL export into a native Docker Desktop stack (Task 10).
+pub mod migrate;
 pub mod logsnap;
 pub mod maint;
 pub mod modmgr;

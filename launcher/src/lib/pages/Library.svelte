@@ -13,7 +13,9 @@
   import Terminal from "$lib/Terminal.svelte";
   import InstallTerminal from "$lib/InstallTerminal.svelte";
   import { nativeInstallRunner } from "$lib/native-install";
-  import { gamesInstallNativeState, wowUnboundStatus, type UnboundStatus } from "$lib/api";
+  import { gamesInstallNativeState, wowUnboundStatus, wowMigrateStatus, type UnboundStatus, type MigrateStatus } from "$lib/api";
+  import { migrateCard, migrateErrorHint } from "$lib/migrate-card";
+  import { migrateRunner } from "$lib/migrate-run";
   import { unboundBadge } from "$lib/unbound-badge";
   import { resolveBackendMode } from "$lib/page-cache.svelte";
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
@@ -59,6 +61,43 @@
   let unbound: UnboundStatus | null = $state(null);
   const unboundTag = $derived.by(() => unboundBadge(unbound));
   const UNBOUND_TITLE = "wow-server-playerbots";
+
+  // --- Migration import (Task 10) -----------------------------------------
+  //
+  // Native only. On WSL there is nothing to migrate TO -- the distro IS the
+  // source -- and the command refuses, so the card would be an offer the app
+  // cannot keep.
+  let migrate: MigrateStatus | null = $state(null);
+  const migrateUi = $derived.by(() => migrateCard(migrate));
+  async function refreshMigrate() {
+    if (backendMode !== "native") {
+      migrate = null;
+      return;
+    }
+    try {
+      migrate = await wowMigrateStatus(UNBOUND_TITLE);
+    } catch {
+      // Null, which the card renders as "couldn't check" -- never as "no
+      // export found". Those are different facts, and claiming the second
+      // sends someone to redo a 40-minute export they already have.
+      migrate = null;
+    }
+  }
+  // Deliberately does NOT call beginRun(): the migration streams through
+  // InstallTerminal, which owns both the transcript and the taskbar cue. A
+  // beginRun here would open the library's OTHER terminal panel, which would
+  // then sit empty for the whole import — and taskbar-pairing.test.ts read it
+  // as a streaming call site missing its cue, which is exactly the confusion
+  // the two panels are meant to avoid. Same shape as startInstall above.
+  function startMigrate() {
+    installStore.id = `migrate:${UNBOUND_TITLE}`;
+    installStore.nonce += 1;
+    installStore.running = true;
+    installStore.exitCode = null;
+    installStore.text = "";
+    actionError = null;
+    note = null;
+  }
   async function refreshUnbound() {
     try {
       unbound = await wowUnboundStatus();
@@ -203,6 +242,7 @@
       }),
     );
     resumable = found;
+    void refreshMigrate();
   }
 
   function showActionErr(e: unknown) {
@@ -596,9 +636,40 @@
     {/if}
   </div>
 
+  {#if backendMode === "native"}
+    <h3>Bring a server across</h3>
+    <div class="cards">
+      <div class="card">
+        <div class="card-row">
+          <div class="card-title"><strong>Import from WSL</strong></div>
+          <button
+            class="primary"
+            disabled={migrateUi.disabled || installStore.id !== null}
+            onclick={startMigrate}
+          >
+            {migrateUi.label}
+          </button>
+        </div>
+        <p class="muted">{migrateUi.body}</p>
+        {#if migrateUi.detail}<p class="muted small">{migrateUi.detail}</p>{/if}
+      </div>
+    </div>
+  {/if}
+
   {#if installStore.id && !installStore.id.startsWith("tool:")}
     {#key installStore.nonce}
-      {#if installStore.id.startsWith("url:")}
+      {#if installStore.id.startsWith("migrate:")}
+        <!-- The migration engine speaks the same NDJSON vocabulary as the
+             native install, but its `done` carries the verification counts and
+             the snapshot warning, so it needs its own translating runner (see
+             migrate-run.ts). -->
+        <InstallTerminal
+          id={installStore.id}
+          runner={migrateRunner()}
+          interactive={false}
+          onExit={onInstallExit}
+        />
+      {:else if installStore.id.startsWith("url:")}
         <InstallTerminal
           id={installStore.id}
           runner={(id, onEvent) => urlInstall(id.slice("url:".length), onEvent)}
@@ -627,6 +698,7 @@
 </section>
 
 <style>
+  .small { font-size: 12px; }
   /* The add-on tag sits with the title name: it is a fact ABOUT this server,
      not something to click. Same shape as .badge-unfinished beside it. */
   .addon-tag {

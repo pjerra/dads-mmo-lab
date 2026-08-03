@@ -26,9 +26,27 @@ const SOURCES = import.meta.glob("./**/*.svelte", {
 // nested callbacks are part of their owner's body, not regions of their own.
 const FN_START = /^[ \t]{0,2}(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm;
 
+/**
+ * Strip comments before scanning.
+ *
+ * The repo rule, and this suite needed it: a function whose comment EXPLAINS
+ * why it deliberately does not call `beginRun(` was read as a call site that
+ * does, and reported as missing its cue. That is a red test on correct code,
+ * which is how a guard like this gets deleted instead of fixed — and it is the
+ * third time this project has been bitten by a raw scan reading an explanation
+ * as the thing it explains.
+ *
+ * Line comments only inside the script block, plus block comments. Kept simple
+ * on purpose; the non-vacuity floors below are what catch it if this ever
+ * over-strips.
+ */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
 /** Split a component's <script> into one text region per top-level function. */
 function functionRegions(source: string): { name: string; body: string }[] {
-  const script = /<script[^>]*>([\s\S]*)<\/script>/.exec(source)?.[1] ?? "";
+  const script = stripComments(/<script[^>]*>([\s\S]*)<\/script>/.exec(source)?.[1] ?? "");
   const starts: { name: string; at: number }[] = [];
   FN_START.lastIndex = 0;
   for (let m = FN_START.exec(script); m !== null; m = FN_START.exec(script)) {
@@ -66,6 +84,18 @@ const streamingFns = Object.entries(SOURCES)
   );
 
 describe("taskbar cue pairing", () => {
+  it("strips comments rather than scanning raw source", () => {
+    // Non-vacuity for the stripper itself, and a direct pin on the case that
+    // caused it: prose naming a marker is not a call site.
+    expect(stripComments("// calls beginRun( here\nconst a = 1;")).not.toContain("beginRun(");
+    expect(stripComments("/* claimInstallInvoke( */\nconst a = 1;")).not.toContain(
+      "claimInstallInvoke(",
+    );
+    // ...and real code survives, including a protocol-relative URL.
+    expect(stripComments("beginRun('library');")).toContain("beginRun(");
+    expect(stripComments("const u = 'https://x/y';")).toContain("https://x/y");
+  });
+
   it("finds the streamed-op call sites to check", () => {
     // Guards against the scan silently matching nothing (a rename of
     // beginRun, or a formatting change that breaks the region split, would

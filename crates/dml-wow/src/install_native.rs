@@ -612,12 +612,28 @@ impl InstallState {
     }
 
     pub fn is_done(&self, stage: Stage) -> bool {
-        self.completed.iter().any(|s| s == stage.name())
+        self.is_done_named(stage.name())
     }
 
     pub fn mark(&mut self, stage: Stage) {
-        if !self.is_done(stage) {
-            self.completed.push(stage.name().to_string());
+        self.mark_named(stage.name());
+    }
+
+    /// The same two questions by stage NAME.
+    ///
+    /// The state file already stores names rather than ordinals — so that
+    /// reordering an enum cannot re-interpret recorded progress — which makes
+    /// this struct usable by any staged engine. [`crate::migrate`] is the
+    /// second one, and sharing the type means the identity binding, the
+    /// version check and the "recorded only after it really finished" rule are
+    /// written once instead of being re-derived per engine.
+    pub fn is_done_named(&self, stage: &str) -> bool {
+        self.completed.iter().any(|s| s == stage)
+    }
+
+    pub fn mark_named(&mut self, stage: &str) {
+        if !self.is_done_named(stage) {
+            self.completed.push(stage.to_string());
         }
     }
 }
