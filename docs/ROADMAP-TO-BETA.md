@@ -458,7 +458,10 @@ No amount of engineering closes these. They are the release standard.
   written down (parallelism is memory-bound, so a bigger VM uses more rather
   than needing more). ⬜ **Leg 2 outstanding**: the same on a VM that has never
   seen DML (no Docker, no Git, no repo) — a build that only ever ran on the dev
-  box does not count. ⬜ Real WoW client login.
+  box does not count. ✅ **Real WoW client login PASSED 2026-08-04** — a new
+  character created and entered the world on the RESUMED server. That is the
+  part a status probe cannot stand in for: `verdict: online` says the stack
+  answers, not that a player can play on it.
 - **Task 13 — LIVE migration gate**, if Task 10 ships: real export/import, the
   identity check (2505 characters, 255 accounts), then the negative test — with
   one server running the other must refuse on ports.
