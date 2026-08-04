@@ -182,20 +182,28 @@ Assert-True ($src -match '\$InstallGit') 'installing Git is behind an explicit s
 # have to look at. But the property that actually matters was never the COUNT,
 # it was that each one is opted into: the old rule said nothing whatsoever
 # about a second call beyond forbidding it.
-$wingetCalls = ([regex]::Matches($src, 'winget install')).Count
-Assert-True ($wingetCalls -ge 1) 'the installer can install at least one prerequisite (non-vacuity)'
+# Counted from the AST rather than by grepping 'winget install': Start-Process
+# spells the subcommand as a separate argument, so the string never appears.
+$wingetCalls = $null  # set below, once the AST scan has run
 
 # Asked of the AST rather than by regex over text: the token-joined $src
 # normalises whitespace, so a source-shaped pattern like `elseif ($InstallDocker)`
 # fails on formatting rather than on meaning -- a test that goes red when
 # someone reindents is a test people learn to ignore.
+# Every command that INSTALLS via winget, however it is spelled. winget used to
+# be the command itself; it is now an argument to Start-Process (see the
+# installer for why), so matching on the command NAME would have silently
+# stopped finding anything -- a scan that finds nothing passes every assertion
+# built on it.
 $wingetAsts = @($ast.FindAll({
     param($n)
     $n -is [System.Management.Automation.Language.CommandAst] -and
-    $n.GetCommandName() -eq 'winget'
+    ($n.GetCommandName() -eq 'winget' -or
+     ($n.GetCommandName() -eq 'Start-Process' -and $n.Extent.Text -match 'winget'))
 }, $true))
-Assert-True ($wingetAsts.Count -eq $wingetCalls) `
-    "every winget install is a real command, not a string (found $($wingetAsts.Count) of $wingetCalls)"
+$wingetCalls = $wingetAsts.Count
+Assert-True ($wingetCalls -ge 2) `
+    "the installer installs its prerequisites via winget (found $wingetCalls; expected Docker + Git)"
 
 foreach ($wingetAst in $wingetAsts) {
     if ($wingetAst) {
@@ -238,12 +246,16 @@ Assert-True ($src -match 'personal use') 'the licence position is stated to the 
 # and a 600 MB download looked frozen (reported live, 2026-08-04). Out-Host
 # writes to the console directly, past the Out-Null.
 foreach ($w in $wingetAsts) {
-    # The PARENT pipeline, not the command: a CommandAst's extent ends at the
-    # command itself, so `| Out-Host` lives in the enclosing PipelineAst. Asking
-    # the CommandAst produced two confident failures against correct code.
+    # The invariant is "winget's progress REACHES the user", not "uses Out-Host".
+    # Two spellings satisfy it: piping to Out-Host (past the caller's Out-Null),
+    # or Start-Process -NoNewWindow, which hands the child this console and has
+    # no pipeline at all. A bare piped call satisfies neither and is the bug
+    # this exists to catch -- a 600 MB download that looks frozen.
     $pipe = $w.Parent
-    Assert-True ($null -ne $pipe -and $pipe.Extent.Text -match 'Out-Host') `
-        "the winget call at line $($w.Extent.StartLineNumber) pipes to Out-Host so its progress is not swallowed"
+    $viaOutHost = ($null -ne $pipe -and $pipe.Extent.Text -match 'Out-Host')
+    $viaConsole = ($w.Extent.Text -match 'NoNewWindow')
+    Assert-True ($viaOutHost -or $viaConsole) `
+        "the winget install at line $($w.Extent.StartLineNumber) shows its progress (Out-Host or -NoNewWindow)"
 }
 
 # And its exit code must be read. Unchecked, a failed or cancelled install fell

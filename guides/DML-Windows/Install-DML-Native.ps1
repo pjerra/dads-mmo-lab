@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -543,12 +543,22 @@ if ($docker) {
         Fail 'winget not available'
     } else {
         Invoke-Change 'install Docker Desktop via winget' {
-            Say '    Docker Desktop is ~600 MB. winget shows its own progress below.' 'DarkGray'
-            # Out-Host, NOT the pipeline: the caller's `| Out-Null` would
-            # otherwise discard winget's progress bar along with the return
-            # value, which is what made this look frozen for the whole download.
-            winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements | Out-Host
-            $script:DockerWingetOk = Test-WingetOk $LASTEXITCODE 'Docker Desktop'
+            Say '    Docker Desktop is ~600 MB, and the install itself takes 5-15 minutes' 'DarkGray'
+            Say '    in a VM. winget shows its own progress below.' 'DarkGray'
+            # Start-Process, NOT a pipeline. Two reasons, and the second is
+            # measured rather than theoretical:
+            #
+            # 1. -NoNewWindow lets the child inherit THIS console, so winget
+            #    renders its own progress natively. (The bug this replaces was
+            #    `| Out-Null` swallowing it entirely.)
+            # 2. `winget ... | Out-Host` aborted with E_ABORT on a real VM while
+            #    the identical command run bare on the same machine succeeded.
+            #    One sample, so not proof -- but the pipeline was the only
+            #    difference, and there is nothing to gain by keeping it.
+            $proc = Start-Process -FilePath 'winget' -NoNewWindow -Wait -PassThru `
+                -ArgumentList @('install', '--id', 'Docker.DockerDesktop',
+                                '--accept-package-agreements', '--accept-source-agreements')
+            $script:DockerWingetOk = Test-WingetOk $proc.ExitCode 'Docker Desktop'
         } | Out-Null
         if (-not $DryRun -and -not $script:DockerWingetOk) {
             $problems.Add('Docker Desktop failed to install via winget.')
@@ -577,8 +587,10 @@ if (Test-CommandExists 'git') {
     } else {
         Invoke-Change 'install Git for Windows via winget' {
             Say '    Git for Windows is ~60 MB. winget shows its own progress below.' 'DarkGray'
-            winget install --id Git.Git --accept-package-agreements --accept-source-agreements | Out-Host
-            $script:GitWingetOk = Test-WingetOk $LASTEXITCODE 'Git for Windows'
+            $proc = Start-Process -FilePath 'winget' -NoNewWindow -Wait -PassThru `
+                -ArgumentList @('install', '--id', 'Git.Git',
+                                '--accept-package-agreements', '--accept-source-agreements')
+            $script:GitWingetOk = Test-WingetOk $proc.ExitCode 'Git for Windows'
         } | Out-Null
         if (-not $DryRun -and -not $script:GitWingetOk) {
             $problems.Add('Git for Windows failed to install via winget.')
