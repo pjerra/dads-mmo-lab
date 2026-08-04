@@ -22,7 +22,37 @@ pub const CATALOG_NAME: &str = "archlinux";
 /// resume rests on BuildKit's cache. Without it the build falls back to the
 /// legacy builder, the progress bar goes silent and resume degrades — a
 /// failure that presents as a hang rather than as a missing package.
-pub const PACKAGES: [&str; 4] = ["docker", "docker-compose", "docker-buildx", "git"];
+///
+/// `sudo` is REQUIRED too, and not for granting anyone new privilege — the
+/// `sudoers` first-boot step writes a NOPASSWD drop-in FOR it. `sudo` is not
+/// part of Arch's `base` group (verified live against a real `dml-arch`:
+/// `pacman -Qi sudo` reports `Required By: base-devel`, not `base`), so a
+/// fresh `wsl --install archlinux` image plausibly does not have it, and the
+/// drop-in at `/etc/sudoers.d/99-dml` would be inert — the binary that reads
+/// it is not there. The failure would surface later, downstream, as a bare
+/// "sudo: command not found", and nothing in this module's tests can catch
+/// that, because none of them execute anything. `--needed` on the
+/// `pacman-sync` step makes this a no-op on the (checked-for) case where the
+/// image already ships it.
+pub const PACKAGES: [&str; 5] = ["docker", "docker-compose", "docker-buildx", "git", "sudo"];
+
+/// Linux user-name charset this module accepts: lowercase alphanumeric,
+/// underscore and hyphen, never starting with a hyphen (a name beginning `-`
+/// reads as a flag to some programs). This is deliberately narrower than
+/// `useradd`'s own grammar — it is the set that is also safe to splice,
+/// UNESCAPED, inside a `sh -c` string. The `wsl-conf` and `sudoers`
+/// first-boot steps do exactly that (the `--exec` crossing means `wsl.exe`
+/// itself does no shell parsing, but `sh -c` is invoked explicitly as the
+/// program, so that string genuinely is shell script): a name containing a
+/// single quote would close the quote early and run whatever follows it as
+/// root. `useradd`/`usermod` pass `user` as a discrete argv element to a real
+/// program and are already safe on their own, but the guard belongs on the
+/// input, not on one use of it.
+pub fn valid_distro_user(user: &str) -> bool {
+    !user.is_empty()
+        && !user.starts_with('-')
+        && user.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'))
+}
 
 /// `wsl --install archlinux --name <name> --no-launch`.
 ///
@@ -80,10 +110,22 @@ pub struct FirstBootStep {
 /// Order is the contract: the sudoers drop-in cannot be written for a user that
 /// does not exist, and `usermod -aG docker` cannot add a group member before
 /// the `docker` package has created the group.
-pub fn first_boot_steps(user: &str) -> Vec<FirstBootStep> {
+///
+/// Refuses rather than emitting a poisoned step: `user` is spliced unescaped
+/// into a `sh -c` string for the `wsl-conf`/`sudoers` steps, so a `user`
+/// containing a shell metacharacter would otherwise run as root. Silently
+/// sanitizing the name instead of refusing it is not an option — a caller
+/// that typed `d'ml` would end up with an account named `dml` that nobody
+/// asked for.
+pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
+    if !valid_distro_user(user) {
+        return Err(format!(
+            "{user:?} is not a valid distro user name (lowercase letters, digits, '_' and '-' only, must not start with '-')"
+        ));
+    }
     let root = |id: &'static str, argv: Vec<String>| FirstBootStep { id, as_root: true, argv };
     let s = |v: &str| v.to_string();
-    vec![
+    Ok(vec![
         // `printf %s` rather than a heredoc: this argv crosses `--exec`, so
         // there is no shell to interpret one, and `printf` writes the exact
         // bytes with no trailing surprise.
@@ -116,7 +158,7 @@ pub fn first_boot_steps(user: &str) -> Vec<FirstBootStep> {
         ),
         root("docker-group", vec![s("usermod"), s("-aG"), s("docker"), user.to_string()]),
         root("docker-enable", vec![s("systemctl"), s("enable"), s("--now"), s("docker")]),
-    ]
+    ])
 }
 
 #[cfg(test)]
@@ -167,9 +209,18 @@ mod tests {
         assert!(PACKAGES.contains(&"git"));
     }
 
+    /// `sudo` is not part of Arch's `base` group (verified live: `pacman -Qi
+    /// sudo` on a real `dml-arch` reports `Required By: base-devel`, not
+    /// `base`), so without this package the `sudoers` first-boot step's
+    /// NOPASSWD drop-in is inert — the binary that reads it is not installed.
+    #[test]
+    fn sudo_itself_is_installed_or_the_sudoers_dropin_is_inert() {
+        assert!(PACKAGES.contains(&"sudo"), "PACKAGES: {PACKAGES:?}");
+    }
+
     #[test]
     fn first_boot_order_creates_the_user_before_it_needs_one() {
-        let ids: Vec<&str> = first_boot_steps("dml").iter().map(|s| s.id).collect();
+        let ids: Vec<&str> = first_boot_steps("dml").unwrap().iter().map(|s| s.id).collect();
         assert_eq!(
             ids,
             vec!["wsl-conf", "useradd", "sudoers", "pacman-sync", "docker-group", "docker-enable"]
@@ -181,13 +232,18 @@ mod tests {
     /// would prompt for a password on a console nobody is attached to. That is
     /// the invariant — not the tautology that a hardcoded `root(...)` helper
     /// returns `as_root: true`.
+    ///
+    /// Checked on argv[0] (the actual invoked program), not "any element",
+    /// because `pacman-sync`'s argv legitimately contains the STRING "sudo" —
+    /// it is one of the packages `pacman` is told to install.
     #[test]
     fn no_first_boot_step_reaches_for_a_sudo_that_does_not_exist_yet() {
-        for step in first_boot_steps("dml") {
+        for step in first_boot_steps("dml").unwrap() {
             assert!(step.as_root, "{} must run as root", step.id);
-            assert!(
-                !step.argv.iter().any(|a| a == "sudo"),
-                "{} invokes sudo, but the sudoers drop-in is step 3 of this very list: {:?}",
+            assert_ne!(
+                step.argv.first().map(String::as_str),
+                Some("sudo"),
+                "{} invokes sudo as its program, but the sudoers drop-in is step 3 of this very list: {:?}",
                 step.id,
                 step.argv
             );
@@ -196,7 +252,7 @@ mod tests {
 
     #[test]
     fn the_sudoers_rule_is_nopasswd_and_scoped_to_the_user() {
-        let step = first_boot_steps("dml").into_iter().find(|s| s.id == "sudoers").unwrap();
+        let step = first_boot_steps("dml").unwrap().into_iter().find(|s| s.id == "sudoers").unwrap();
         let joined = step.argv.join(" ");
         assert!(joined.contains("dml ALL=(ALL) NOPASSWD: ALL"), "got {joined}");
         assert!(
@@ -207,8 +263,29 @@ mod tests {
 
     #[test]
     fn pacman_never_waits_for_a_confirmation_nobody_can_give() {
-        let step = first_boot_steps("dml").into_iter().find(|s| s.id == "pacman-sync").unwrap();
+        let step = first_boot_steps("dml").unwrap().into_iter().find(|s| s.id == "pacman-sync").unwrap();
         assert!(step.argv.iter().any(|a| a == "--noconfirm"), "got {:?}", step.argv);
+    }
+
+    #[test]
+    fn ordinary_distro_user_names_are_accepted() {
+        assert!(first_boot_steps("dml").is_ok());
+        assert!(first_boot_steps("dml-arch-test").is_ok());
+        assert!(valid_distro_user("dml"));
+        assert!(valid_distro_user("dml_2"));
+    }
+
+    /// `user` is spliced UNESCAPED into a `sh -c` string for the `wsl-conf`
+    /// and `sudoers` steps. The `--exec` crossing means `wsl.exe` itself does
+    /// no shell parsing, but `sh -c` is invoked explicitly as the program, so
+    /// that string genuinely is shell script: a name containing a single
+    /// quote would close the quote early and run whatever follows as root.
+    #[test]
+    fn a_hostile_user_name_is_refused_not_smuggled_into_a_root_shell_string() {
+        for bad in ["d'ml", "d$ml", "d\\ml", "d ml"] {
+            assert!(!valid_distro_user(bad), "{bad:?} should be rejected by valid_distro_user");
+            assert!(first_boot_steps(bad).is_err(), "{bad:?} should be refused by first_boot_steps");
+        }
     }
 
     #[test]
