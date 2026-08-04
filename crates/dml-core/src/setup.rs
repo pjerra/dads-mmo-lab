@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::engine::{systemd_is_active_argv, SYSTEMCTL_PROGRAM};
 use crate::envelope::{decode_wsl_output, parse_envelope};
 use crate::proc::{run_bounded_outcome, windows_no_window, BoundedOutcome};
 
@@ -841,6 +842,169 @@ pub fn derive_native(f: NativeFacts) -> BackendStatus {
         Some(0) => at(SetupState::NoTitles, None),
         Some(_) => at(SetupState::Ready, None),
     }
+}
+
+/// What the ARCH chain needs to know, in chain order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchFacts {
+    pub wsl: Tri,
+    pub distro: Tri,
+    /// Is the in-distro `dockerd` unit active? `Unknown` when the question
+    /// itself went unanswered.
+    pub dockerd: Tri,
+    /// Is the Rust `dml-wow` binary present and runnable inside the distro?
+    pub cli: Tri,
+    pub cli_version: Option<String>,
+    pub titles: Option<usize>,
+    /// The verbatim words of whichever probe went dark.
+    pub detail: Option<String>,
+}
+
+/// The Arch chain: WSL → distro → dockerd → `dml-wow` → a title.
+///
+/// Same discipline as [`derive`] and [`derive_native`]: the first unanswered or
+/// missing link wins, so the consumer always has exactly one next step, and
+/// `Unknown` is never read as absence. A dockerd that is merely stopped has a
+/// repair (start the unit); a dockerd that did not answer has only a retry, and
+/// putting the repair button in front of the second case is the exact mistake
+/// the tri-state exists to prevent.
+///
+/// Reuses [`SetupState::DockerStopped`] and [`SetupStep::Engine`] rather than
+/// minting Arch-specific twins: the user-facing sentence ("the container engine
+/// is not running") and the repair ("start it") are the same on both backends,
+/// and a second pair of states would mean every consumer grows a branch that
+/// says the same thing twice.
+pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
+    let probes = Probes {
+        wsl: f.wsl,
+        distro: f.distro,
+        cli: f.cli,
+        cli_version: f.cli_version.clone(),
+        titles: f.titles,
+        detail: f.detail.clone(),
+    };
+    let unknown_at = |step: SetupStep| BackendStatus {
+        state: SetupState::Unknown,
+        blocked_at: Some(step),
+        detail: f.detail.clone(),
+        distro: distro.to_string(),
+        expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
+        probes: probes.clone(),
+    };
+    let settled = |state: SetupState| BackendStatus {
+        state,
+        blocked_at: None,
+        detail: None,
+        distro: distro.to_string(),
+        expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
+        probes: probes.clone(),
+    };
+
+    match f.wsl {
+        Tri::Unknown => return unknown_at(SetupStep::Wsl),
+        Tri::No => return settled(SetupState::NoWsl),
+        Tri::Yes => {}
+    }
+    match f.distro {
+        Tri::Unknown => return unknown_at(SetupStep::Distro),
+        Tri::No => return settled(SetupState::NoDistro),
+        Tri::Yes => {}
+    }
+    match f.dockerd {
+        Tri::Unknown => return unknown_at(SetupStep::Engine),
+        Tri::No => return settled(SetupState::DockerStopped),
+        Tri::Yes => {}
+    }
+    match f.cli {
+        Tri::Unknown => return unknown_at(SetupStep::Cli),
+        Tri::No => return settled(SetupState::NoCli),
+        Tri::Yes => {}
+    }
+    match f.cli_version.as_deref() {
+        // A `Yes` with no version means a classifier broke its own contract.
+        None => return unknown_at(SetupStep::Cli),
+        Some(v) if !cli_version_matches(v) => return settled(SetupState::CliOutdated),
+        Some(_) => {}
+    }
+    match f.titles {
+        None => unknown_at(SetupStep::Titles),
+        Some(0) => settled(SetupState::NoTitles),
+        Some(_) => settled(SetupState::Ready),
+    }
+}
+
+/// Run the Arch chain against an injected runner. SHORT-CIRCUITS: each link is
+/// asked only when the one before it said `Yes`. "Is `dml-wow` installed inside
+/// `dml-arch`" has no honest answer when there is no `dml-arch`, and every
+/// skipped spawn is one fewer timeout a user with a sick machine sits through.
+///
+/// Every in-distro call uses `--exec`. The bare `--` form runs a shell inside
+/// the distro, which splits on `;`, expands `$HOME` and globs (verified
+/// 2026-07-28).
+pub fn probe_arch_with(
+    distro: &str,
+    user: &str,
+    mut run: impl FnMut(&[&str], ProbeBudget) -> ProbeOutcome,
+) -> BackendStatus {
+    let wsl = classify_wsl_list(&run(&["--list", "--quiet"], ProbeBudget::Warm), distro);
+    let mut facts = ArchFacts {
+        wsl: wsl.wsl,
+        distro: wsl.distro,
+        dockerd: Tri::Unknown,
+        cli: Tri::Unknown,
+        cli_version: None,
+        titles: None,
+        detail: wsl.detail,
+    };
+
+    if facts.distro == Tri::Yes {
+        // THE cold-start call: the first thing to run inside the distro, so it
+        // pays for booting the WSL2 VM and systemd.
+        let mut argv: Vec<&str> = vec!["-d", distro, "-u", user, "--exec", SYSTEMCTL_PROGRAM];
+        argv.extend(systemd_is_active_argv());
+        let out = run(&argv, ProbeBudget::ColdStart);
+        facts.dockerd = match &out {
+            ProbeOutcome::ProgramMissing => Tri::No,
+            ProbeOutcome::CouldNotTell => Tri::Unknown,
+            ProbeOutcome::Ran { code, .. } => {
+                if *code == Some(0) {
+                    Tri::Yes
+                } else {
+                    Tri::No
+                }
+            }
+        };
+        if facts.dockerd == Tri::Unknown {
+            facts.detail = out.detail();
+        }
+    }
+
+    if facts.dockerd == Tri::Yes {
+        let cli = classify_cli_version(&run(
+            &["-d", distro, "-u", user, "--exec", "dml-wow", "version", "--json"],
+            ProbeBudget::Warm,
+        ));
+        facts.cli = cli.cli;
+        facts.cli_version = cli.version;
+        if cli.detail.is_some() {
+            facts.detail = cli.detail;
+        }
+
+        let usable =
+            facts.cli == Tri::Yes && facts.cli_version.as_deref().is_some_and(cli_version_matches);
+        if usable {
+            let out = run(
+                &["-d", distro, "-u", user, "--exec", "dml-wow", "games", "list", "--json"],
+                ProbeBudget::Warm,
+            );
+            facts.titles = classify_titles(&out);
+            if facts.titles.is_none() {
+                facts.detail = out.detail();
+            }
+        }
+    }
+
+    derive_arch(distro, facts)
 }
 
 /// JUST the first link: is the distro registered?
@@ -2018,6 +2182,104 @@ dml v2.6.0
         );
         assert_eq!(st.state, SetupState::CliOutdated, "an old CLI must offer the upgrade, not a shrug");
         assert_eq!(st.blocked_at, None, "a known-old CLI is not a could-not-tell");
+    }
+
+    // -- the ARCH chain -------------------------------------------------------
+
+    fn arch_ok() -> ArchFacts {
+        ArchFacts {
+            wsl: Tri::Yes,
+            distro: Tri::Yes,
+            dockerd: Tri::Yes,
+            cli: Tri::Yes,
+            cli_version: Some(EXPECTED_CLI_VERSION.to_string()),
+            titles: Some(1),
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn arch_all_green_is_ready() {
+        assert_eq!(derive_arch(DISTRO, arch_ok()).state, SetupState::Ready);
+    }
+
+    #[test]
+    fn arch_chain_stops_at_the_first_missing_link() {
+        let no_wsl = ArchFacts { wsl: Tri::No, ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, no_wsl).state, SetupState::NoWsl);
+
+        let no_distro = ArchFacts { distro: Tri::No, ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, no_distro).state, SetupState::NoDistro);
+
+        let no_dockerd = ArchFacts { dockerd: Tri::No, ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, no_dockerd).state, SetupState::DockerStopped);
+
+        let no_cli = ArchFacts { cli: Tri::No, ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, no_cli).state, SetupState::NoCli);
+
+        let old_cli = ArchFacts { cli_version: Some("2.6.0".to_string()), ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, old_cli).state, SetupState::CliOutdated);
+
+        let no_titles = ArchFacts { titles: Some(0), ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, no_titles).state, SetupState::NoTitles);
+    }
+
+    /// Tri-state discipline: each unanswered link must name ITSELF, so the
+    /// screen can say which question went dark instead of "something failed".
+    #[test]
+    fn an_unanswered_link_blocks_at_that_link() {
+        for (facts, step) in [
+            (ArchFacts { wsl: Tri::Unknown, ..arch_ok() }, SetupStep::Wsl),
+            (ArchFacts { distro: Tri::Unknown, ..arch_ok() }, SetupStep::Distro),
+            (ArchFacts { dockerd: Tri::Unknown, ..arch_ok() }, SetupStep::Engine),
+            (ArchFacts { cli: Tri::Unknown, ..arch_ok() }, SetupStep::Cli),
+            (ArchFacts { titles: None, ..arch_ok() }, SetupStep::Titles),
+        ] {
+            let got = derive_arch(DISTRO, facts);
+            assert_eq!(got.state, SetupState::Unknown, "{step:?}");
+            assert_eq!(got.blocked_at, Some(step));
+        }
+    }
+
+    /// A dockerd that is merely stopped is REPAIRABLE (start the unit); a
+    /// question that went unanswered is not. Collapsing them would put a
+    /// "start docker" button in front of a machine that never answered.
+    #[test]
+    fn a_dockerd_that_did_not_answer_is_not_a_stopped_dockerd() {
+        let quiet = ArchFacts { dockerd: Tri::Unknown, ..arch_ok() };
+        assert_ne!(derive_arch(DISTRO, quiet).state, SetupState::DockerStopped);
+    }
+
+    #[test]
+    fn arch_probe_short_circuits_and_never_asks_a_question_it_cannot_answer() {
+        // No distro: nothing may be asked INSIDE it.
+        let mut asked: Vec<String> = Vec::new();
+        let got = probe_arch_with(DISTRO, USER, |args, _| {
+            asked.push(args.join(" "));
+            ran(0, "Ubuntu\n")
+        });
+        assert_eq!(got.state, SetupState::NoDistro);
+        assert_eq!(asked.len(), 1, "asked {asked:?}");
+    }
+
+    /// The in-distro probes must cross the boundary with --exec. The bare --
+    /// form runs a shell there (verified 2026-07-28).
+    #[test]
+    fn every_in_distro_probe_uses_exec() {
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let _ = probe_arch_with(DISTRO, USER, |args, _| {
+            asked.push(args.iter().map(|s| s.to_string()).collect());
+            match args {
+                a if a.contains(&"--list") => ran(0, "dml-arch\n"),
+                a if a.contains(&"is-active") => ran(0, ""),
+                a if a.contains(&"version") => ran(0, &format!("{{\"ok\":true,\"data\":{{\"version\":\"{EXPECTED_CLI_VERSION}\"}}}}")),
+                _ => ran(0, "{\"ok\":true,\"data\":{\"games\":[]}}"),
+            }
+        });
+        for argv in asked.iter().filter(|a| a.contains(&"-d".to_string())) {
+            assert!(argv.iter().any(|a| a == "--exec"), "shell form in {argv:?}");
+            assert!(!argv.iter().any(|a| a == "--"), "shell form in {argv:?}");
+        }
     }
 
 }
