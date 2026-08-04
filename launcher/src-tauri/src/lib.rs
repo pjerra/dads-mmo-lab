@@ -7849,6 +7849,7 @@ mod tests {
             present: dml_core::setup::Tri::No,
             dir: Some("C:/somewhere".into()),
             missing: vec![crate::payload::CLI_SCRIPT.to_string()],
+            dml_wow_bin_present: false,
         };
         let report = backend_status_report(
             dml_core::setup::derive("dml-arch", probes_ready()),

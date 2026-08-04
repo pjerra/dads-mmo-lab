@@ -54,6 +54,10 @@ pub const LUA_GM_DIR: &str = "cli/lua/gm";
 /// Title installers → `/usr/local/share/dml/installers/` (`_installers_dir`
 /// in `cli/src/80-titles.sh`).
 pub const INSTALLERS_DIR: &str = "installers";
+/// The Linux `dml-wow` binary, built by CI's ubuntu job. An ubuntu-built glibc
+/// binary runs on Arch (older glibc build, newer host), so one artifact serves
+/// both. This is the ONLY thing that carries the Arch backend onto a fresh PC.
+pub const DML_WOW_BIN: &str = "backend/dml-wow";
 
 /// Exactly the six scripts `cli/src/80-titles.sh`'s `_title_registry` names,
 /// which is exactly the six `cli/dev-install.ps1` installs.
@@ -75,6 +79,7 @@ pub struct PayloadPaths {
     pub lua_gm_dir: PathBuf,
     /// The six installers, in registry order.
     pub installers: Vec<PathBuf>,
+    pub dml_wow_bin: PathBuf,
 }
 
 /// Whether the bundled payload actually arrived.
@@ -91,6 +96,7 @@ pub struct PayloadStatus {
     pub dir: Option<String>,
     /// Resource-relative paths that are missing. Empty unless `present` is `No`.
     pub missing: Vec<String>,
+    pub dml_wow_bin_present: bool,
 }
 
 /// Join `rel` (always written with forward slashes, which behave on both
@@ -113,6 +119,7 @@ pub fn paths(resource_dir: &Path) -> PayloadPaths {
             .iter()
             .map(|s| under(resource_dir, &format!("{INSTALLERS_DIR}/{s}")))
             .collect(),
+        dml_wow_bin: under(resource_dir, DML_WOW_BIN),
     }
 }
 
@@ -154,6 +161,7 @@ pub fn resolve(resource_dir: &Path) -> PayloadStatus {
         present: if missing.is_empty() { Tri::Yes } else { Tri::No },
         dir: Some(resource_dir.to_string_lossy().into_owned()),
         missing,
+        dml_wow_bin_present: p.dml_wow_bin.is_file(),
     }
 }
 
@@ -162,7 +170,12 @@ pub fn resolve_opt(resource_dir: Option<&Path>) -> PayloadStatus {
     match resource_dir {
         Some(d) => resolve(d),
         // Could not tell — never "missing".
-        None => PayloadStatus { present: Tri::Unknown, dir: None, missing: Vec::new() },
+        None => PayloadStatus {
+            present: Tri::Unknown,
+            dir: None,
+            missing: Vec::new(),
+            dml_wow_bin_present: false,
+        },
     }
 }
 
@@ -263,6 +276,25 @@ mod tests {
         assert_eq!(got.present, Tri::No);
         assert_eq!(got.missing, vec![LUA_GM_DIR.to_string()]);
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// The Arch backend cannot work without the Linux binary in the installer.
+    /// This manifest is the only thing that carries it, and `resolve` reporting
+    /// a present payload without it would be a lie the first run pays for.
+    #[test]
+    fn the_manifest_carries_the_linux_binary() {
+        let dir = tmp_dir("payload-dml-wow");
+        let p = paths(&dir);
+        assert!(
+            p.dml_wow_bin.ends_with("dml-wow"),
+            "expected a dml-wow path, got {:?}",
+            p.dml_wow_bin
+        );
+        assert_eq!(resolve(&dir).dml_wow_bin_present, false, "nothing written yet");
+
+        std::fs::create_dir_all(p.dml_wow_bin.parent().unwrap()).unwrap();
+        std::fs::write(&p.dml_wow_bin, b"#!/bin/true\n").unwrap();
+        assert!(resolve(&dir).dml_wow_bin_present);
     }
 
     #[test]

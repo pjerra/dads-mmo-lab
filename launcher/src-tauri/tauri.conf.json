@@ -35,7 +35,8 @@
       "../../guides/wow-tbc/install-wow-tbc.sh": "installers/install-wow-tbc.sh",
       "../../guides/Maplestory/install-maplestory.sh": "installers/install-maplestory.sh",
       "../../guides/runescape/install-runescape.sh": "installers/install-runescape.sh",
-      "../../guides/Mu-online/install-muonline.sh": "installers/install-muonline.sh"
+      "../../guides/Mu-online/install-muonline.sh": "installers/install-muonline.sh",
+      "backend/dml-wow": "backend/dml-wow"
     },
     "icon": [
       "icons/32x32.png",

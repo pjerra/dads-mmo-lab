@@ -1325,12 +1325,14 @@ mod tests {
             present: Tri::Yes,
             dir: Some("C:/x".into()),
             missing: Vec::new(),
+            dml_wow_bin_present: false,
         })
         .is_none());
         let (code, msg, _) = payload_refusal(&PayloadStatus {
             present: Tri::No,
             dir: Some("C:/x".into()),
             missing: vec![payload::CLI_SCRIPT.to_string()],
+            dml_wow_bin_present: false,
         })
         .expect("a refusal");
         assert_eq!(code, "PAYLOAD_MISSING");

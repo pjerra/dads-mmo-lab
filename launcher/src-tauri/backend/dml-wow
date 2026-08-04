@@ -1,0 +1,15 @@
+#!/bin/sh
+# PLACEHOLDER — not a real binary.
+#
+# tauri-build's resource walk (tauri_build::build(), invoked from build.rs on
+# every `cargo build`/`cargo test` of the launcher crate) hard-fails if a
+# bundle.resources source path does not exist on disk. The real dml-wow is a
+# Linux ELF built by CI's ubuntu job (.github/workflows/rust.yml,
+# `dml-wow-linux-x86_64` artifact) and cannot be produced on a Windows dev
+# machine, so this file exists purely to keep normal dev/CI builds green.
+#
+# Before a REAL release `npm run tauri build`, this file MUST be replaced with
+# the actual downloaded artifact. Nothing in this repo does that automatically
+# yet — see payload::DML_WOW_BIN and the Task 8 report in
+# .superpowers/sdd/2026-08-04-arch-wsl-backend/task-8-report.md.
+exit 1

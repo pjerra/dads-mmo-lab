@@ -29,3 +29,12 @@ jobs:
       # from one that ran. The skip lines are the only evidence of which suites
       # this job actually exercises.
       - run: cargo test -p dml-core -p dml-wow -p dml-wow-cli --locked -- --nocapture
+      # The shipped artifact. The Windows installer bundles this binary and
+      # provision.rs deploys it into the distro, so this job is no longer
+      # advisory — a red linux job means there is nothing to ship.
+      - run: cargo build -p dml-wow-cli --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dml-wow-linux-x86_64
+          path: target/release/dml-wow
+          if-no-files-found: error
