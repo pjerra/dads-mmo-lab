@@ -2,6 +2,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::proc::windows_no_window;
+
 /// Environment override for the docker executable, so a boxed/portable install
 /// or CI can point at an arbitrary `docker.exe` without patching discovery.
 pub const DOCKER_ENV: &str = "DML_DOCKER";
@@ -118,6 +120,90 @@ pub fn docker_desktop_program() -> Option<OsString> {
         &candidate_docker_desktop_paths(),
         |p| p.exists(),
     )
+}
+
+/// How the container engine is started and stopped. This is the ONLY part of
+/// engine control that differs by backend: `docker_program()` already falls
+/// through to a bare `docker` inside the distro (its Windows candidates come
+/// from `LOCALAPPDATA`/`ProgramFiles`, which do not exist on Linux), and
+/// `docker info` answers against a local socket exactly as it does against
+/// Docker Desktop's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineKind {
+    /// `docker desktop start|stop` on the Windows host.
+    Desktop,
+    /// `dockerd` as a systemd unit inside the distro.
+    Systemd,
+}
+
+impl EngineKind {
+    pub fn for_backend(b: crate::backend::Backend) -> Self {
+        match b {
+            crate::backend::Backend::Arch | crate::backend::Backend::Wsl => EngineKind::Systemd,
+            crate::backend::Backend::Native => EngineKind::Desktop,
+        }
+    }
+}
+
+pub const SYSTEMCTL_PROGRAM: &str = "systemctl";
+pub const SUDO_PROGRAM: &str = "sudo";
+
+/// `systemctl is-active --quiet docker` — exit 0 means the unit is running.
+/// Pure, for tests.
+pub fn systemd_is_active_argv() -> [&'static str; 3] {
+    ["is-active", "--quiet", "docker"]
+}
+
+/// `sudo -n systemctl start docker`. Pure, for tests.
+///
+/// `-n` is load-bearing. Without it, a distro whose NOPASSWD sudoers rule is
+/// missing does not fail — `sudo` blocks on a password prompt that no button in
+/// the launcher can answer, and the caller sees a bare timeout with no cause.
+/// With `-n` the same machine fails immediately and says so.
+pub fn systemd_start_argv() -> [&'static str; 4] {
+    ["-n", "systemctl", "start", "docker"]
+}
+
+/// Start the in-distro daemon. Bounded by the same [`ENGINE_START_ASK_TIMEOUT`]
+/// as the Desktop ask, and returns the same shape so
+/// [`start_engine_succeeded`] classifies both identically.
+pub fn start_engine_systemd() -> std::io::Result<std::process::Output> {
+    let mut cmd = std::process::Command::new(SUDO_PROGRAM);
+    cmd.args(systemd_start_argv());
+    windows_no_window(&mut cmd);
+    match crate::proc::run_bounded_outcome(cmd, ENGINE_START_ASK_TIMEOUT) {
+        crate::proc::BoundedOutcome::Ran(out) => Ok(out),
+        crate::proc::BoundedOutcome::SpawnFailed(e) => Err(e),
+        crate::proc::BoundedOutcome::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "systemctl start docker did not answer",
+        )),
+    }
+}
+
+/// Is the engine up, as a [`Tri`]?
+///
+/// [`engine_running`] returns `bool` and so cannot distinguish "docker is not
+/// installed" (a definitive no, with a repair) from "the probe fell over"
+/// (evidence of nothing, with only a retry). The setup chain needs both apart.
+pub fn engine_running_tri(program: &OsStr) -> crate::setup::Tri {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(docker_info_args());
+    windows_no_window(&mut cmd);
+    match crate::setup::ProbeOutcome::from_bounded(crate::proc::run_bounded_outcome(
+        cmd,
+        crate::setup::DEFAULT_PROBE_TIMEOUT,
+    )) {
+        crate::setup::ProbeOutcome::ProgramMissing => crate::setup::Tri::No,
+        crate::setup::ProbeOutcome::CouldNotTell => crate::setup::Tri::Unknown,
+        crate::setup::ProbeOutcome::Ran { code, .. } => {
+            if code == Some(0) {
+                crate::setup::Tri::Yes
+            } else {
+                crate::setup::Tri::No
+            }
+        }
+    }
 }
 
 /// Collapse `ps` rows to the one-word stack state the UI shows. Any container
@@ -757,6 +843,40 @@ mod tests {
         let out = poll_until_ready(3_000, 0, || false, |_| sleeps += 1);
         assert_eq!(out, PollOutcome::Timeout { waited_ms: 0 });
         assert_eq!(sleeps, 0);
+    }
+
+    // --- EngineKind / systemd (Task 4) --------------------------------------
+
+    #[test]
+    fn engine_kind_follows_the_backend() {
+        use crate::backend::Backend;
+        assert_eq!(EngineKind::for_backend(Backend::Arch), EngineKind::Systemd);
+        assert_eq!(EngineKind::for_backend(Backend::Wsl), EngineKind::Systemd);
+        assert_eq!(EngineKind::for_backend(Backend::Native), EngineKind::Desktop);
+    }
+
+    #[test]
+    fn systemd_probe_argv_is_quiet_and_names_the_unit() {
+        assert_eq!(systemd_is_active_argv(), ["is-active", "--quiet", "docker"]);
+    }
+
+    /// `sudo -n` is the whole point. Without it a distro whose NOPASSWD rule is
+    /// missing does not fail — it BLOCKS on a password prompt that no button
+    /// can answer, and the caller sees a timeout whose cause is invisible.
+    #[test]
+    fn the_systemd_start_refuses_rather_than_prompting_for_a_password() {
+        let argv = systemd_start_argv();
+        assert_eq!(argv, ["-n", "systemctl", "start", "docker"]);
+        assert_eq!(SUDO_PROGRAM, "sudo");
+    }
+
+    /// A missing docker binary and a stopped engine are different repairs.
+    /// `engine_running -> bool` collapses them; this one must not.
+    #[test]
+    fn engine_running_tri_reports_a_missing_program_as_no_not_unknown() {
+        use std::ffi::OsString;
+        let got = engine_running_tri(&OsString::from("definitely-not-docker-9f2.exe"));
+        assert_eq!(got, crate::setup::Tri::No, "a program that is not installed is a definitive no");
     }
 }
 
