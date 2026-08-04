@@ -54,6 +54,24 @@ was taken by the user with the cost stated (see [Cost and schedule](#cost-and-sc
 
 ## Decisions taken (user, 2026-08-04)
 
+> **AMENDMENT (user, 2026-08-04, later the same day): decisions 1 and 2 are
+> SUPERSEDED on timing, not on intent.** They were taken before anyone had
+> enumerated the launcher's call sites. The whole-branch review then found that
+> the launcher speaks the bash CLI's vocabulary — `games list`, `games status
+> <id>`, `wow server-detail`, plus an unconditional `--json` — none of which
+> `dml-wow-cli` understands, so making `Arch` the default would have given every
+> existing user "unrecognized subcommand 'games'" instead of a status card.
+> Asked directly, the user chose to **defer the default flip to the change that
+> ports the vocabulary**, keeping `Backend::Arch` fully built and reachable by
+> explicit opt-in (`DML_BACKEND=arch` or `launcher.json`). `DML_BACKEND=wsl`
+> therefore still resolves to `Wsl` and still drives the bash CLI, which is the
+> reverse of decision 2's wording.
+>
+> Arch remains the intended default. Nothing below is abandoned; the ordering
+> changed once the cost of the vocabulary gap was known. Do not cite decisions 1
+> or 2 as authority for flipping the default without the vocabulary port.
+
+
 | # | Question | Decision |
 |---|---|---|
 | 1 | Scope | **Full `Backend::Arch`, shipped.** Detection, launcher picker, provisioning, lifecycle. Not a spike. |
