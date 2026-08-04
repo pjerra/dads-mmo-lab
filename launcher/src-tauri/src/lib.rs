@@ -1466,8 +1466,20 @@ async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value
 fn backend_mode() -> &'static str {
     match dml_wow::backend::selected() {
         dml_wow::backend::Backend::Native => "native",
-        // Arch and Wsl name the same distro and the same daemon; Task 3 is
-        // what makes this differ.
+        // DELIBERATE, AND LOCAL TO THIS FUNCTION. The value here feeds a
+        // frontend union with exactly two members (`"wsl" | "native"`, see
+        // `first-run.ts`), and both Arch and Wsl route through the same distro
+        // and the same daemon, so the frontend's question has one answer for
+        // both. Task 3 is what makes this differ.
+        //
+        // DO NOT copy this collapse to `startup.rs::backend_env_value`. That
+        // one answers a different question — which string to write into
+        // `DML_BACKEND` — and collapsing Arch onto "wsl" THERE makes the whole
+        // `launcher.json` opt-in silently inert, with no error and no red test
+        // until `every_backend_round_trips_through_the_value_we_export` was
+        // added. This comment used to read "Arch and Wsl name the same distro
+        // and the same daemon", which is true and was read as a licence to
+        // dedup the two sites.
         dml_wow::backend::Backend::Arch | dml_wow::backend::Backend::Wsl => "wsl",
     }
 }

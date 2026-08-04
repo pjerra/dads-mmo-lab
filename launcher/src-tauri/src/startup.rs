@@ -47,6 +47,32 @@ pub fn default_games_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("dml-native"))
 }
 
+/// The `DML_BACKEND` string that reads back as this backend.
+///
+/// THIS IS THE WHOLE ARCH OPT-IN. Whatever `resolve_and_export` writes here is
+/// what `backend::selected()` parses back when `AppState` builds its runner, so
+/// the arms must round-trip through [`from_override`](dml_core::backend::from_override)
+/// — collapsing `Arch` onto `"wsl"` would mean a user who opted in via
+/// `launcher.json` silently got the bash runner, with no error and nothing to
+/// see. That is not hypothetical: it is the exact bug FIX 1 removed, and the
+/// final gate then proved it could be reintroduced invisibly (both Rust suites
+/// stayed fully green with this arm collapsed). Hence
+/// `every_backend_round_trips_through_the_value_we_export`.
+///
+/// NOT to be conflated with `lib.rs`'s `backend_mode()`, which deliberately
+/// answers `"wsl"` for BOTH `Arch` and `Wsl` — that one feeds a frontend union
+/// with only two members and is a different question. See the comment there.
+///
+/// A `match`, so adding a `Backend` variant is a compile error here rather than
+/// a variant that quietly exports nothing.
+fn backend_env_value(b: dml_core::backend::Backend) -> &'static str {
+    match b {
+        dml_core::backend::Backend::Native => "native",
+        dml_core::backend::Backend::Arch => "arch",
+        dml_core::backend::Backend::Wsl => "wsl",
+    }
+}
+
 /// Whether `backend::detect`'s answer for this machine can actually change
 /// depending on what the distro probe says.
 ///
@@ -143,17 +169,10 @@ pub fn resolve_and_export() {
         docker_present,
         distro_usable,
     );
-    // Round-trips through `from_override`: whatever we export here is what
-    // `backend::selected()` reads back when `AppState` builds its runner. Arch
-    // must therefore export "arch" and NOT "wsl" — collapsing them would mean a
-    // user who opted in via `launcher.json` silently got the bash runner, i.e.
-    // the file setting would be inert. (`detect` never returns Arch, so this
-    // arm is only ever reached from an explicit env or file value.)
-    let backend_str = match backend {
-        dml_core::backend::Backend::Native => "native",
-        dml_core::backend::Backend::Arch => "arch",
-        dml_core::backend::Backend::Wsl => "wsl",
-    };
+    // Round-trips through `from_override` — see `backend_env_value`. (`detect`
+    // never returns Arch, so that arm is only ever reached from an explicit env
+    // or file value.)
+    let backend_str = backend_env_value(backend);
 
     // --- yq: default to the path the one-click installer downloads to -----
     let yq: Option<String> = cfg
@@ -236,6 +255,54 @@ mod tests {
         // stay honest ("not found") instead of pointing at an invented path.
         assert_eq!(value_to_export(None, None), None);
         assert_eq!(value_to_export(Some(""), None), None);
+    }
+
+    /// THE assertion that makes the Arch opt-in reachable, and the one the
+    /// final gate proved was missing: with `Backend::Arch => "arch"` collapsed
+    /// to `"wsl"`, all 202 launcher tests and all 285 dml-core tests stayed
+    /// green (mutation log, FIX 1 §1.4). A `launcher.json` saying
+    /// `{"backend":"arch"}` would then silently drive the bash runner.
+    ///
+    /// A ROUND TRIP rather than three literal comparisons: the property that
+    /// actually matters is that what we WRITE to `DML_BACKEND` is what
+    /// `backend::selected()` READS BACK, and restating the match arms as
+    /// literals would pass just as happily if both sides were collapsed
+    /// together.
+    #[test]
+    fn every_backend_round_trips_through_the_value_we_export() {
+        use dml_core::backend::{from_override, Backend};
+
+        // `backend_env_value` is a `match`, so a new `Backend` variant is a
+        // compile error there — it cannot reach the export unnamed. This list
+        // is what makes it reach the ASSERTION; keep them in step.
+        let all = [Backend::Native, Backend::Arch, Backend::Wsl];
+
+        for b in all {
+            assert_eq!(
+                from_override(Some(backend_env_value(b))),
+                b,
+                "we export {:?} as {:?}, but `backend::selected()` reads that back as {:?} — \
+                 a user who asked for {:?} would silently get the other backend",
+                b,
+                backend_env_value(b),
+                from_override(Some(backend_env_value(b))),
+                b,
+            );
+        }
+
+        // The round trip alone is satisfiable by a collapse on BOTH sides at
+        // once; distinctness is not. Two backends sharing one env string means
+        // one of them is unreachable by name.
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(
+                    backend_env_value(*a),
+                    backend_env_value(*b),
+                    "{a:?} and {b:?} export the same DML_BACKEND value, so one of them \
+                     can never be selected"
+                );
+            }
+        }
     }
 
     #[test]
