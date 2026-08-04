@@ -20,10 +20,9 @@ fn every_dml_wow_translation_parses_under_the_real_clap_tree() {
 
     // NON-VACUITY. A table that lost its rows, or a filter that matched
     // nothing, must fail here rather than pass an empty loop.
-    // (Raised to 70 when `games-list`/`games-status` land.)
     assert!(
-        rows.len() >= 68,
-        "expected >=68 dml-wow rows to check, got {} — the table or the filter is broken",
+        rows.len() >= 70,
+        "expected >=70 dml-wow rows to check, got {} — the table or the filter is broken",
         rows.len()
     );
 

@@ -847,7 +847,7 @@ fn auto_backup_before_stop(
 /// down/absent docker engine degrades the same way (`output_bounded_draining`
 /// returning `None`, or an empty/failed `ps` -> zero running ids -> stopped).
 pub fn games_status(id: &str, games_dir: &std::path::Path) -> Result<serde_json::Value, CmdError> {
-    use crate::{lifecycle, native, status};
+    use crate::lifecycle;
 
     let title_dir = games_dir.join(id);
     if !title_dir.is_dir() {
@@ -858,23 +858,102 @@ pub fn games_status(id: &str, games_dir: &std::path::Path) -> Result<serde_json:
         });
     }
 
-    let mut state = "stopped";
-    if let Some(compose_dir) = lifecycle::resolve_compose_dir(&title_dir) {
-        if let Some(name) = lifecycle::compose_file_name(&compose_dir) {
-            let program = native::docker_program();
-            let mut cmd = std::process::Command::new(&program);
-            cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
-            cmd.args(["ps", "--status", "running", "-q"]);
-            status::windows_no_window(&mut cmd);
-            if let Some(out) = status::output_bounded_draining(cmd, std::time::Duration::from_secs(5)) {
-                let text = String::from_utf8_lossy(&out.stdout);
-                if lifecycle::count_running_ids(&text) > 0 {
-                    state = "running";
+    let running = lifecycle::resolve_compose_dir(&title_dir)
+        .is_some_and(|d| compose_dir_running(&d));
+    Ok(serde_json::json!({ "id": id, "state": if running { "running" } else { "stopped" } }))
+}
+
+/// `_compose_running` (`90-main.sh:17-24`): does this compose project have at
+/// least one container in a running state?
+///
+/// A directory with no resolvable compose FILE answers false without ever
+/// invoking docker (the oracle's own short-circuit), and a down or absent
+/// engine degrades the same way — `output_bounded_draining` returning `None`,
+/// or an empty/failed `ps`, both mean zero running ids.
+pub fn compose_dir_running(compose_dir: &std::path::Path) -> bool {
+    use crate::{lifecycle, native, status};
+    let Some(name) = lifecycle::compose_file_name(compose_dir) else { return false };
+    let program = native::docker_program();
+    let mut cmd = std::process::Command::new(&program);
+    cmd.arg("compose").arg("-f").arg(compose_dir.join(name));
+    cmd.args(["ps", "--status", "running", "-q"]);
+    status::windows_no_window(&mut cmd);
+    match status::output_bounded_draining(cmd, std::time::Duration::from_secs(5)) {
+        Some(out) => lifecycle::count_running_ids(&String::from_utf8_lossy(&out.stdout)) > 0,
+        None => false,
+    }
+}
+
+/// `games list` — every installed title under `games_dir`, with the compose
+/// directory that answers for it and whether it is up.
+///
+/// A CROSS-TITLE verb on a per-title CLI, deliberately. `dml-wow` already has
+/// `games-remove <id>` and `install-native --id`, and this asks a FILESYSTEM
+/// question — "what is in the games directory" — not a title-management one.
+/// The deferred multi-title work (per-install container names, port allocation,
+/// two stacks at once) is none of this.
+///
+/// The scan order is `_scan_games`' (`90-main.sh:28-53`) and the order matters:
+/// a title dir carrying a compose file wins, THEN one carrying `install.sh`
+/// (reported with an EMPTY path — that is what `path` means for an
+/// installer-only title), and only if neither is present does it descend one
+/// level. Reproducing that is the point; `resolve_compose_dir` alone would
+/// report a subdir's compose file for a title bash calls unbuilt.
+pub fn games_list(games_dir: &std::path::Path) -> serde_json::Value {
+    use dml_core::compose::has_compose;
+
+    let mut games: Vec<serde_json::Value> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(games_dir) else {
+        return serde_json::json!({ "games": games });
+    };
+    // `read_dir` order is filesystem-defined; sort so two runs on one machine
+    // agree. NB list ORDER is not contractual across the bash/Rust pair — bash
+    // `sort(1)` collates per locale — so nothing may compare positions.
+    let mut dirs: Vec<std::path::PathBuf> =
+        entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+
+    for dir in dirs {
+        let Some(id) = dir.file_name().and_then(|s| s.to_str()) else { continue };
+        let compose_dir: Option<std::path::PathBuf> = if has_compose(&dir) {
+            Some(dir.clone())
+        } else if dir.join("install.sh").is_file() {
+            None // installer-only: present, but no compose dir to name
+        } else {
+            let mut found = None;
+            let mut subs: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            subs.sort();
+            let mut installer_only = false;
+            for sub in subs {
+                if has_compose(&sub) {
+                    found = Some(sub);
+                    break;
+                }
+                if sub.join("install.sh").is_file() {
+                    installer_only = true;
+                    break;
                 }
             }
-        }
+            if found.is_none() && !installer_only {
+                continue; // neither compose nor installer anywhere: not a title
+            }
+            found
+        };
+
+        let running = compose_dir.as_deref().is_some_and(compose_dir_running);
+        games.push(serde_json::json!({
+            "id": id,
+            "path": compose_dir.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+            "running": running,
+        }));
     }
-    Ok(serde_json::json!({ "id": id, "state": state }))
+    serde_json::json!({ "games": games })
 }
 
 /// Every container on this engine and the compose project that owns it, or
@@ -1300,6 +1379,95 @@ pub fn games_lifecycle_stream_with(
                 "Check logs: docker compose logs, or dml doctor",
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod games_list_tests {
+    use super::games_list;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("dml-games-list-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(p: &std::path::Path) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x").unwrap();
+    }
+
+    /// `_scan_games`' three cases, in its order. `running` is false throughout
+    /// because none of these fixtures has a real compose project — the point
+    /// under test is WHICH directory is reported as `path`, which is what the
+    /// `api.ts` `Game` type declares and what a caller would join onto.
+    #[test]
+    fn the_scan_reproduces_the_bash_rules_for_path() {
+        let root = tmp("rules");
+        // 1. compose at the title level -> the title dir itself
+        touch(&root.join("a-compose/docker-compose.yml"));
+        // 2. installer only -> present, with an EMPTY path
+        touch(&root.join("b-installer/install.sh"));
+        // 3. neither at the title level -> descend ONE level
+        touch(&root.join("c-nested/inner/compose.yaml"));
+        // ...and a directory that is neither is not a title at all
+        std::fs::create_dir_all(root.join("d-junk/whatever")).unwrap();
+
+        let v = games_list(&root);
+        let games = v["games"].as_array().unwrap();
+        let ids: Vec<&str> = games.iter().map(|g| g["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["a-compose", "b-installer", "c-nested"], "got {games:?}");
+
+        assert_eq!(games[0]["path"].as_str().unwrap(), root.join("a-compose").to_string_lossy());
+        assert_eq!(games[1]["path"].as_str().unwrap(), "", "an installer-only title has no compose dir");
+        assert_eq!(
+            games[2]["path"].as_str().unwrap(),
+            root.join("c-nested").join("inner").to_string_lossy()
+        );
+        for g in games {
+            assert_eq!(g["running"], false);
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The ORDER bash checks in, which `resolve_compose_dir` alone cannot
+    /// express: a title dir holding an `install.sh` reports an empty path even
+    /// when a subdirectory does have a compose file.
+    #[test]
+    fn a_title_level_installer_wins_over_a_subdirectorys_compose_file() {
+        let root = tmp("order");
+        touch(&root.join("t/install.sh"));
+        touch(&root.join("t/inner/docker-compose.yml"));
+        let v = games_list(&root);
+        assert_eq!(v["games"][0]["id"], "t");
+        assert_eq!(
+            v["games"][0]["path"], "",
+            "bash checks the title dir's install.sh BEFORE descending"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A games directory that does not exist is an empty list, not an error —
+    /// the shape `api.ts` declares. (A missing directory is what a fresh
+    /// machine has.)
+    #[test]
+    fn a_missing_games_directory_is_an_empty_list() {
+        let v = games_list(std::path::Path::new("C:/definitely/not/here-9f2"));
+        assert_eq!(v["games"].as_array().unwrap().len(), 0);
+    }
+
+    /// Every object carries all three fields `api.ts`'s `Game` type declares.
+    /// `path` in particular must not be dropped: the wrapper would then lie.
+    #[test]
+    fn every_row_carries_the_three_declared_fields() {
+        let root = tmp("shape");
+        touch(&root.join("g/docker-compose.yml"));
+        let v = games_list(&root);
+        let g = &v["games"][0];
+        assert!(g["id"].is_string() && g["path"].is_string() && g["running"].is_boolean(), "{g:?}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 

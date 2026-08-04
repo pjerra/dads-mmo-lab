@@ -566,11 +566,32 @@ pub static TABLE: &[Row] = &[
         &["games-remove"],
         &["games", "remove", "wow-server-playerbots", "--yes", "--keep-data", "--remove-images"]
     ),
-    // `games list` / `games status` have no `dml-wow` arm YET — both are
-    // filesystem questions about `$HOME/games` that `dml_wow::lifecycle` can
-    // already answer. They ride the bash fallback until those arms land.
-    bash!(&["games", "list"], &["games", "list"]),
-    bash!(&["games", "status"], &["games", "status", "wow-server-playerbots"]),
+    // Both are filesystem questions about the games directory, answered by
+    // `dml_wow::lifecycle`. `games status` is Home's status card; `games list`
+    // has no frontend caller today but its `api.ts` type declares `path`, so
+    // the arm returns it rather than quietly making the wrapper lie.
+    row!(
+        &["games", "list"],
+        Target::DmlWow,
+        false,
+        "Cmd::GamesList",
+        &["games-list"],
+        NONE,
+        NONE,
+        Tail::Keep,
+        &["games", "list"]
+    ),
+    row!(
+        &["games", "status"],
+        Target::DmlWow,
+        false,
+        "Cmd::GamesStatus",
+        &["games-status"],
+        NONE,
+        NONE,
+        Tail::IdFlag,
+        &["games", "status", "wow-server-playerbots"]
+    ),
     // -- group C: no `dml-wow` arm — the bash `dml` in the SAME distro ------
     //
     // Each of these is a verb `Backend::Wsl` drives today against the same
@@ -834,6 +855,11 @@ mod tests {
             tr(&["games", "restart", "wow-server-playerbots", "--no-saveall"]).argv,
             vec!["restart", "--id", "wow-server-playerbots", "--no-saveall"]
         );
+        assert_eq!(
+            tr(&["games", "status", "wow-server-playerbots"]).argv,
+            vec!["games-status", "--id", "wow-server-playerbots"]
+        );
+        assert_eq!(tr(&["games", "list"]).argv, vec!["games-list"]);
     }
 
     /// `games remove` keeps its id POSITIONAL — `dml-wow games-remove` requires
@@ -932,8 +958,7 @@ mod tests {
     fn the_table_covers_the_launchers_surface() {
         let wow = TABLE.iter().filter(|r| r.target == Target::DmlWow).count();
         let bash = TABLE.iter().filter(|r| r.target == Target::Bash).count();
-        // Raised to 70 when `games-list`/`games-status` land.
-        assert!(wow >= 68, "expected >=68 dml-wow rows, got {wow}");
+        assert!(wow >= 70, "expected >=70 dml-wow rows, got {wow}");
         assert!(bash >= 30, "expected >=30 bash rows, got {bash}");
         assert!(
             TABLE.iter().filter(|r| r.target == Target::DmlWow && r.streams).count() >= 12,
