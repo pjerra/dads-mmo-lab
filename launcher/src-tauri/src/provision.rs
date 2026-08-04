@@ -1224,22 +1224,45 @@ mod tests {
     }
 
     /// TOCTOU defence, not redundancy with `payload::resolve`'s earlier check.
-    /// That check (step 2 of the flow) proves the bundle is a real ELF at an
-    /// EARLIER moment; this proves the file is re-verified immediately before
-    /// the actual `install -m 0755` spawn -- the point at which the next thing
+    /// That check (flow step 2) proves the bundle is a real ELF at an EARLIER
+    /// moment; this proves the file is re-verified immediately before the
+    /// actual `install -m 0755` spawn -- the point at which the next thing
     /// that happens to it is a chmod and, moments later, a real exec inside
-    /// the distro. Corrupt the file on disk AFTER `complete_payload` staged a
-    /// good one (simulating it changing mid-flight) and confirm the flow
-    /// refuses instead of deploying it anyway.
+    /// the distro.
+    ///
+    /// Fix round 1 (vacuous-pass trap caught by mutation review): corrupting
+    /// the file BEFORE the run starts makes the EARLIER gate (step 2) refuse
+    /// for the identical reason and the same visible outcome
+    /// (`PAYLOAD_MISSING`, nothing installed to `/usr/local/bin/dml-wow`) --
+    /// so the pre-exec recheck this test exists to prove never gets a turn.
+    /// Disabling the recheck entirely left the naive version of this test
+    /// green. To actually exercise it, the file must still be a GOOD ELF when
+    /// the earlier gate reads it, and go bad only afterwards: this `run`
+    /// wrapper corrupts the binary right after the FOURTH copy spawn (CLI,
+    /// party-lua, gm-lua, installers -- identified by the installers step's
+    /// own destination arg, the last thing installed before dml-wow), so the
+    /// recheck is the ONLY thing standing between the now-corrupted file and
+    /// the fifth spawn (`install -m 0755 ... /usr/local/bin/dml-wow`).
     #[test]
     fn the_binary_is_re_checked_for_elf_magic_immediately_before_the_chmod() {
         let d = tmp_dir("flow-toctou");
         complete_payload(&d);
-        std::fs::write(d.join(payload::DML_WOW_BIN), b"not an elf any more").unwrap();
+        let bin_path = d.join(payload::DML_WOW_BIN);
 
         let fake = Fake::new(happy_replies());
         let ev = Events::default();
-        provision_with(&ProvisionCfg::new(DISTRO, USER), Some(&d), |a| fake.run(a), |v| ev.push(v));
+        provision_with(
+            &ProvisionCfg::new(DISTRO, USER),
+            Some(&d),
+            |a| {
+                let out = fake.run(a);
+                if a.iter().any(|arg| *arg == DEST_INSTALLERS) {
+                    std::fs::write(&bin_path, b"not an elf any more").unwrap();
+                }
+                out
+            },
+            |v| ev.push(v),
+        );
 
         let err = ev.error().expect("an error event");
         assert_eq!(err["error"]["code"], "PAYLOAD_MISSING");
@@ -1247,6 +1270,8 @@ mod tests {
             err["error"]["message"].as_str().unwrap().contains(payload::DML_WOW_BIN),
             "{err}"
         );
+        // The half that makes this about the recheck rather than about error
+        // plumbing: the corrupted file must never reach the copy/chmod spawn.
         assert!(
             !fake.install_calls().iter().any(|c| c.iter().any(|a| a == DEST_DML_WOW)),
             "a corrupted binary must never reach an install/chmod spawn: {:?}",
