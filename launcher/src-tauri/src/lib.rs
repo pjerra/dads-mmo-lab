@@ -1771,7 +1771,12 @@ fn launcher_config_read() -> Result<serde_json::Value, CmdError> {
     // resolved value into DML_BACKEND, so reading the env here would report
     // EVERY session as env-locked and leave the dropdown permanently
     // read-only — defeating the whole setting.
-    let env_backend = if startup::backend_was_user_set() {
+    // `backend_pinned_by_env`, not "was set": `DML_BACKEND=auto` asks us to
+    // detect, so it must NOT report as an env lock. Reporting it as one greyed
+    // out the dropdown AND named a backend the user never chose — after the
+    // export fix, `std::env::var` here would read back our own resolved
+    // "native"/"wsl" and attribute it to them.
+    let env_backend = if startup::backend_pinned_by_env() {
         std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty())
     } else {
         None

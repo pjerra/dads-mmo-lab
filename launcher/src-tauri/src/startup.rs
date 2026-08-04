@@ -18,19 +18,35 @@
 
 use std::path::PathBuf;
 
-/// Whether the USER set `DML_BACKEND` before launch, captured before we
+/// Whether the inherited `DML_BACKEND` PINNED a backend, captured before we
 /// export our own resolved value over the top of that emptiness.
 ///
 /// Without this the Settings dropdown is permanently read-only: we always
 /// export `DML_BACKEND`, so a later `std::env::var` can never distinguish
 /// "the user pinned it" from "we resolved it", and the UI would report every
 /// session as env-locked.
-static BACKEND_WAS_USER_SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+static BACKEND_PINNED_BY_ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// True only when `DML_BACKEND` was already set in the environment we
-/// inherited. Defaults to false if `resolve_and_export` never ran.
-pub fn backend_was_user_set() -> bool {
-    *BACKEND_WAS_USER_SET.get().unwrap_or(&false)
+/// True only when the `DML_BACKEND` we inherited named a concrete backend.
+/// Defaults to false if `resolve_and_export` never ran.
+///
+/// `auto` is NOT a pin — see [`backend_env_pins`].
+pub fn backend_pinned_by_env() -> bool {
+    *BACKEND_PINNED_BY_ENV.get().unwrap_or(&false)
+}
+
+/// Whether a `DML_BACKEND` value names a concrete backend, as opposed to
+/// asking us to detect one.
+///
+/// `auto` is an INSTRUCTION, not a choice — the word `launcher.json` documents
+/// and the Settings dropdown labels "Detect automatically" — so a user who
+/// exports `DML_BACKEND=auto` is asking for detection, not pinning `Wsl`.
+/// This is the same rule [`dml_core::backend::resolve`] applies to its own env
+/// argument; stated once here so the export and the UI cannot drift from it.
+pub fn backend_env_pins(env_value: Option<&str>) -> bool {
+    env_value
+        .map(str::trim)
+        .is_some_and(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
 }
 
 /// Pure: what to write for one variable, or `None` to leave it alone.
@@ -39,6 +55,30 @@ pub fn value_to_export(env_value: Option<&str>, resolved: Option<&str>) -> Optio
         return None; // the user set it; never overwrite
     }
     resolved.map(str::to_string)
+}
+
+/// The whole `DML_BACKEND` composition in one place production actually calls:
+/// what [`dml_core::backend::resolve`] decided, turned into the string
+/// [`dml_core::backend::selected`] will read back.
+///
+/// WHY THIS IS NOT JUST `value_to_export`. `value_to_export`'s rule is "an env
+/// value the user set is never overwritten", which is right for the three PATH
+/// variables and WRONG for the one value that can mean "work it out for me".
+/// `DML_BACKEND=auto` composed the two correct halves into a broken whole:
+/// `resolve` answered `Native` on a fresh Docker Desktop PC, the export
+/// declined to write it because the env was non-empty, `selected()` then read
+/// the surviving `auto`, and `from_override` maps every unrecognised string to
+/// `Wsl` — so the launcher drove a distro that does not exist, while Settings
+/// reported the dropdown locked by an env var and refused to let the user
+/// repair it. Both halves had tests; the composition had none.
+///
+/// Pinned by `an_auto_env_value_still_means_detect_after_the_export`.
+pub fn backend_value_to_export(
+    env_value: Option<&str>,
+    resolved: dml_core::backend::Backend,
+) -> Option<String> {
+    let pin = env_value.filter(|v| backend_env_pins(Some(v)));
+    value_to_export(pin, Some(backend_env_value(resolved)))
 }
 
 /// The conventional native install location, used when neither the
@@ -103,11 +143,16 @@ pub fn resolve_and_export() {
     };
     let cfg = dml_core::launcher_config::load(&home);
 
-    // Capture user-set-ness BEFORE any export, or it is unrecoverable.
+    // Capture pinned-ness BEFORE any export, or it is unrecoverable.
+    //
+    // `auto` deliberately does NOT count (see `backend_env_pins`). It used to,
+    // and the two halves disagreed about one word: the FILE arm below already
+    // reads `auto` as "detect" (`launcher_config_read`'s `source`), while the
+    // ENV arm read it as a lock — so `DML_BACKEND=auto` greyed the dropdown out
+    // and told the user it was locked by an environment variable, on the exact
+    // path where they had asked us to choose for them.
     let env_backend_raw = std::env::var("DML_BACKEND").ok();
-    let _ = BACKEND_WAS_USER_SET.set(
-        env_backend_raw.as_deref().map(str::trim).is_some_and(|v| !v.is_empty()),
-    );
+    let _ = BACKEND_PINNED_BY_ENV.set(backend_env_pins(env_backend_raw.as_deref()));
 
     // --- games dir -------------------------------------------------------
     // Env FIRST. It is not merely an override to pass through: the probe
@@ -171,8 +216,9 @@ pub fn resolve_and_export() {
     );
     // Round-trips through `from_override` — see `backend_env_value`. (`detect`
     // never returns Arch, so that arm is only ever reached from an explicit env
-    // or file value.)
-    let backend_str = backend_env_value(backend);
+    // or file value.) The `auto` case is why this goes through
+    // `backend_value_to_export` rather than `value_to_export` directly.
+    let backend_export = backend_value_to_export(env_backend_raw.as_deref(), backend);
 
     // --- yq: default to the path the one-click installer downloads to -----
     let yq: Option<String> = cfg
@@ -204,7 +250,7 @@ pub fn resolve_and_export() {
         .or_else(bundled_cli_script);
 
     let exports: Vec<(&str, Option<String>)> = vec![
-        ("DML_BACKEND", value_to_export(env_backend_raw.as_deref(), Some(backend_str))),
+        ("DML_BACKEND", backend_export),
         (
             "DML_GAMES_DIR",
             value_to_export(
@@ -303,6 +349,147 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// What `backend::selected()` answers AFTER `resolve_and_export` has run
+    /// with this environment. The composition of both sites, with the process
+    /// environment modelled rather than mutated — `set_var` in a test would
+    /// race every other test in this binary.
+    ///
+    /// `exported.or(env_value)` is exactly what the real process holds
+    /// afterwards: our export when we made one, otherwise whatever the user
+    /// already had.
+    fn selected_after_export(
+        env_value: Option<&str>,
+        file_value: Option<&str>,
+        native_dir_exists: bool,
+        docker_present: bool,
+        distro_usable: dml_core::setup::Tri,
+    ) -> dml_core::backend::Backend {
+        let resolved = dml_core::backend::resolve(
+            env_value,
+            file_value,
+            native_dir_exists,
+            docker_present,
+            distro_usable,
+        );
+        let exported = backend_value_to_export(env_value, resolved);
+        dml_core::backend::from_override(exported.as_deref().or(env_value))
+    }
+
+    /// THE COMPOSITION TEST. `backend::resolve` honouring `auto` and the
+    /// export refusing to overwrite a non-empty env var are each correct and
+    /// each tested; together they discarded the answer. The gate proved it:
+    /// deleting `resolve`'s env-`auto` arm reddened exactly ONE dml-core test
+    /// and ZERO launcher tests — the signature of an invariant pinned on a
+    /// pure function production never composes.
+    ///
+    /// The concrete user: a fresh PC with Docker Desktop, no distro, and
+    /// `DML_BACKEND=auto` exported by hand (the word `launcher.json`
+    /// documents and the dropdown labels "Detect automatically"). `resolve`
+    /// answered `Native`; `selected()` read the surviving `auto` and, via
+    /// `from_override`'s catch-all, drove `Wsl` against a distro that does not
+    /// exist — with Settings reporting the dropdown env-locked so it could not
+    /// be repaired in the UI.
+    #[test]
+    fn an_auto_env_value_still_means_detect_after_the_export() {
+        use dml_core::backend::Backend;
+        use dml_core::setup::Tri;
+
+        // Docker present, no native dir, distro provably absent -> Native.
+        assert_eq!(
+            selected_after_export(Some("auto"), None, false, true, Tri::No),
+            Backend::Native,
+            "DML_BACKEND=auto on a Docker-Desktop PC with no distro must DETECT Native, \
+             not fall through from_override's catch-all to Wsl"
+        );
+        // A native server already installed -> Native, same reasoning.
+        assert_eq!(
+            selected_after_export(Some("auto"), None, true, true, Tri::Yes),
+            Backend::Native,
+        );
+        // And auto must still be able to detect Wsl — this is detection, not a
+        // second way of spelling "native".
+        assert_eq!(
+            selected_after_export(Some("auto"), None, false, false, Tri::Yes),
+            Backend::Wsl,
+        );
+        // Spelling does not matter, exactly as `resolve` treats it.
+        assert_eq!(
+            selected_after_export(Some("  AUTO "), None, false, true, Tri::No),
+            Backend::Native,
+        );
+        // `auto` in the env must not shadow an explicit FILE choice's
+        // detection either: file `auto` + env `auto` is still detection.
+        assert_eq!(
+            selected_after_export(Some("auto"), Some("auto"), false, true, Tri::No),
+            Backend::Native,
+        );
+    }
+
+    /// The general invariant the case above is one instance of: whatever
+    /// `resolve` decided is what `selected()` reads back. Anything else means
+    /// the launcher drives a backend nobody chose.
+    #[test]
+    fn the_backend_resolve_picked_is_the_backend_selected_reads_back() {
+        use dml_core::setup::Tri;
+
+        let envs = [None, Some(""), Some("   "), Some("auto"), Some("AUTO"), Some("native"),
+                    Some("docker"), Some("wsl"), Some("arch"), Some("natve")];
+        let files = [None, Some("auto"), Some("native"), Some("wsl"), Some("arch"), Some("natve")];
+
+        for env_value in envs {
+            for file_value in files {
+                for native_dir in [true, false] {
+                    for docker in [true, false] {
+                        for distro in [Tri::Yes, Tri::No, Tri::Unknown] {
+                            let resolved = dml_core::backend::resolve(
+                                env_value, file_value, native_dir, docker, distro,
+                            );
+                            assert_eq!(
+                                selected_after_export(
+                                    env_value, file_value, native_dir, docker, distro,
+                                ),
+                                resolved,
+                                "env={env_value:?} file={file_value:?} dir={native_dir} \
+                                 docker={docker} distro={distro:?}: resolve chose {resolved:?} \
+                                 but the exported value reads back as something else"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A pinned env value is still never overwritten — the precedence the
+    /// parity, bats and CLI-integration suites all depend on as an override
+    /// seam. Narrowing `auto` out of "pinned" must not widen into these.
+    #[test]
+    fn a_pinned_env_backend_is_never_overwritten() {
+        use dml_core::backend::Backend;
+
+        assert!(backend_env_pins(Some("wsl")));
+        assert!(backend_env_pins(Some("native")));
+        assert!(backend_env_pins(Some("arch")));
+        assert!(backend_env_pins(Some("natve")), "a typo still PINS — it just resolves to Wsl");
+
+        assert!(!backend_env_pins(None));
+        assert!(!backend_env_pins(Some("")));
+        assert!(!backend_env_pins(Some("   ")));
+        assert!(!backend_env_pins(Some("auto")));
+        assert!(!backend_env_pins(Some("  AuTo  ")));
+
+        // The export leaves a pin alone, whatever we resolved.
+        assert_eq!(backend_value_to_export(Some("wsl"), Backend::Native), None);
+        assert_eq!(backend_value_to_export(Some("native"), Backend::Wsl), None);
+        // ...and fills in for every non-pin.
+        assert_eq!(
+            backend_value_to_export(Some("auto"), Backend::Native),
+            Some("native".to_string())
+        );
+        assert_eq!(backend_value_to_export(None, Backend::Arch), Some("arch".to_string()));
+        assert_eq!(backend_value_to_export(Some(""), Backend::Wsl), Some("wsl".to_string()));
     }
 
     #[test]
