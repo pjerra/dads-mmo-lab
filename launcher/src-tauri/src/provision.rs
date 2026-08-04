@@ -322,6 +322,8 @@ fn step_name(step: SetupStep) -> &'static str {
         // a `_`, so the next step added still forces a decision.
         SetupStep::Docker => "Docker Desktop",
         SetupStep::Engine => "the Docker engine",
+        // Arch-chain step, likewise unreachable from this module today.
+        SetupStep::Prepared => "the distro's own setup",
     }
 }
 
@@ -358,6 +360,18 @@ pub fn refusal(status: &BackendStatus) -> Option<(&'static str, String, String)>
         // Native-chain states. This command provisions the WSL distro, so
         // reaching it in native mode means the caller routed wrongly -- refuse
         // and say which backend it belongs to rather than half-running.
+        // Arch chain: the distro is registered but its provisioning never
+        // finished, so there is no `dml` user for THIS command's `install`
+        // spawns to run as and nothing it copies would be reachable. Refuse
+        // with the repair that actually applies, rather than half-running.
+        SetupState::DistroUnprepared => Some((
+            "DISTRO_UNPREPARED",
+            format!(
+                "'{}' is registered, but the setup that installs Docker and creates its user never finished.",
+                status.distro
+            ),
+            HINT_ELEVATED.to_string(),
+        )),
         SetupState::NoDocker | SetupState::DockerStopped => Some((
             "WRONG_BACKEND",
             "This sets up the WSL distro, and this PC is running in native Docker mode.".to_string(),
@@ -474,6 +488,7 @@ pub fn verify_failure(after: &BackendStatus) -> Option<(&'static str, String, St
         // one thing this function must never do.
         SetupState::NoWsl
         | SetupState::NoDistro
+        | SetupState::DistroUnprepared
         | SetupState::NoDocker
         | SetupState::DockerStopped => Some((
             "VERIFY_UNKNOWN",
@@ -1505,7 +1520,7 @@ mod tests {
     }
 
     #[test]
-    fn refusal_covers_exactly_the_three_states_this_command_cannot_fix() {
+    fn refusal_covers_exactly_the_states_this_command_cannot_fix() {
         // BOTH directions in one test on purpose: a `refusal` that always
         // answered `None` would satisfy a standalone "these states are allowed"
         // test while silently letting the command try to provision a PC with no
@@ -1513,6 +1528,11 @@ mod tests {
         for (state, code) in [
             (SetupState::NoWsl, "NO_WSL"),
             (SetupState::NoDistro, "NO_DISTRO"),
+            // Arch chain: registered but never provisioned. This command's
+            // `install` spawns run as a user that does not exist there yet,
+            // so it must refuse with the repair that applies rather than
+            // half-run -- and NOT with "start the container engine".
+            (SetupState::DistroUnprepared, "DISTRO_UNPREPARED"),
             (SetupState::Unknown, "PROBE_FAILED"),
         ] {
             let (got_code, msg, hint) = refusal(&status_in(state)).expect("a refusal");
