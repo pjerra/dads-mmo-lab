@@ -87,6 +87,19 @@ impl Abandonable for std::process::Child {
     }
 }
 
+/// The one thing the poll loop needs on top of [`Abandonable`]: "has it exited
+/// yet?". Same reason as that trait — it is a test seam, not an abstraction for
+/// its own sake. See `bounded_outcome_after_spawn`.
+pub trait Pollable: Abandonable {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+}
+
+impl Pollable for std::process::Child {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        std::process::Child::try_wait(self)
+    }
+}
+
 /// Abandon a child we have stopped waiting for: ask it to stop, then reap it on
 /// a thread nobody joins, and RETURN IMMEDIATELY.
 ///
@@ -178,9 +191,43 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    let stdout_reader = BoundedReader::spawn(stdout);
-    let stderr_reader = BoundedReader::spawn(stderr);
+    bounded_outcome_after_spawn(
+        child,
+        BoundedReader::spawn(stdout),
+        BoundedReader::spawn(stderr),
+        timeout,
+    )
+}
 
+/// Everything [`run_bounded_outcome`] does after the spawn: poll for exit
+/// against ONE wall clock, then drain both pipes against THAT SAME clock.
+///
+/// WHY THIS IS A SEPARATE FUNCTION. The bound is not a property of the poll
+/// loop or of [`BoundedReader::collect_by`] — each of those is correct in
+/// isolation and each already has tests. The bound is a property of the WIRING
+/// between them, and the final gate proved that wiring unpinned: replacing both
+/// `collect_by(deadline)` arguments with a fabricated `Instant::now() + 3600s`
+/// left all 154 `proc::`/`setup::`/`engine::` tests green, and so would a full
+/// revert to an unbounded drain. The natural typo is worse than either, because
+/// it looks right: `collect_by(Instant::now() + timeout)` re-derives the clock
+/// AFTER the poll loop has already spent part of it, silently doubling the
+/// bound.
+///
+/// Generic over the child for the same reason [`Abandonable`] is: a fake that
+/// exits at once, paired with two readers that never reach EOF, reproduces
+/// "child gone, grandchild still holding the pipes" deterministically — where a
+/// real grandchild is a wall-clock race that passes with the bug reinstated.
+/// Pinned by `the_drain_is_bounded_by_the_same_clock_the_poll_loop_used`, which
+/// brackets the elapsed time from BOTH sides: shorter than the bound means the
+/// drain got an already-expired deadline, longer means it got a fabricated one.
+fn bounded_outcome_after_spawn<C: Pollable>(
+    mut child: C,
+    stdout_reader: BoundedReader,
+    stderr_reader: BoundedReader,
+    timeout: Duration,
+) -> BoundedOutcome {
+    // THE one clock. Both the loop below and the drain at the bottom read this
+    // binding; nothing between them may re-derive it from `timeout`.
     let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
     let status = loop {
@@ -658,6 +705,223 @@ mod tests {
             .collect_by(std::time::Instant::now() + Duration::from_secs(5))
             .expect("a finished reader has bytes");
         assert_eq!(got, b"hello pipe".to_vec());
+    }
+
+    // -- the WIRING between the poll loop and the drain -------------------------
+
+    /// An exit status, built per-platform because `ExitStatus` has no portable
+    /// constructor. (Test-portability rule: a `#[cfg]` helper, never a literal
+    /// that only compiles on one OS.)
+    #[cfg(windows)]
+    fn exited_ok() -> std::process::ExitStatus {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(0)
+    }
+    #[cfg(unix)]
+    fn exited_ok() -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(0)
+    }
+
+    /// A child that is already gone the first time we ask — the shape that made
+    /// the old `join()` look safe ("it exited, so its handles are closed").
+    struct ExitsAtOnce;
+    impl Abandonable for ExitsAtOnce {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn wait(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Pollable for ExitsAtOnce {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Ok(Some(exited_ok()))
+        }
+    }
+
+    /// A child that stays alive until `at`, then exits — so the poll loop spends
+    /// a KNOWN fraction of the bound before the drain begins. That fraction is
+    /// the only thing that distinguishes the real deadline from one re-derived
+    /// at drain time.
+    struct ExitsAfter(std::time::Instant);
+    impl Abandonable for ExitsAfter {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn wait(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Pollable for ExitsAfter {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Ok((std::time::Instant::now() >= self.0).then(exited_ok))
+        }
+    }
+
+    /// Run `f` on its own thread and refuse to wait for it longer than `patience`.
+    ///
+    /// The point is the failure MODE. Every mutation this test exists to catch
+    /// turns the drain into a long block (an hour, or forever), and a test that
+    /// simply called the function inline would HANG rather than fail — the exact
+    /// signature that let FIX 4's production half go missing without a red
+    /// (`cargo test` never completes, so nobody sees a result at all). Off-thread
+    /// with a `recv_timeout`, the same defect is a fast, ordinary assertion
+    /// failure. The stranded thread is deliberate and harmless: `NeverEnds`
+    /// already leaks one per test in this module.
+    fn within<T: Send + 'static>(
+        patience: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(patience).ok()
+    }
+
+    /// THE WIRING PIN, and the gap the final gate measured: the poll loop and
+    /// the drain each honour a deadline correctly, but nothing checked they
+    /// honour the SAME one. Both `collect_by(deadline)` arguments replaced with
+    /// a fabricated `Instant::now() + 3600s` left 154 tests green.
+    ///
+    /// Brackets the elapsed time from both sides, which is what makes it a pin
+    /// on the wiring rather than on the drain:
+    ///   * `>= timeout` — a drain handed an already-expired or freshly-shortened
+    ///     deadline would return early;
+    ///   * `< patience` — a drain handed a fabricated or re-derived (doubled)
+    ///     deadline, or no bound at all, would return late or never.
+    /// Only the deadline the bound was computed from satisfies both.
+    #[test]
+    fn the_drain_is_bounded_by_the_same_clock_the_poll_loop_used() {
+        let timeout = Duration::from_millis(300);
+        let began = std::time::Instant::now();
+        let outcome = within(Duration::from_secs(10), move || {
+            // Child already exited; BOTH pipes still held open by a "grandchild".
+            bounded_outcome_after_spawn(
+                ExitsAtOnce,
+                BoundedReader::spawn(NeverEnds),
+                BoundedReader::spawn(NeverEnds),
+                timeout,
+            )
+        });
+        let elapsed = began.elapsed();
+
+        let outcome = outcome.unwrap_or_else(|| {
+            panic!(
+                "the success-path drain did not return within 10s for a {timeout:?} bound — \
+                 it is not using the deadline the poll loop enforced"
+            )
+        });
+        assert!(
+            matches!(outcome, BoundedOutcome::TimedOut),
+            "a drain that never finished must not be reported as a completed run: {outcome:?}"
+        );
+        assert!(
+            elapsed >= timeout,
+            "returned after {elapsed:?}, before its own {timeout:?} bound — the drain was \
+             handed a deadline SHORTER than the one the bound was computed from"
+        );
+    }
+
+    /// THE "LOOKS RIGHT" TYPO, which neither test above can see:
+    /// `collect_by(Instant::now() + timeout)`. `timeout` is in scope at the
+    /// drain, so re-deriving the clock there reads as obviously correct — and it
+    /// silently MULTIPLIES the bound, because the poll loop has already spent
+    /// part of it and the two pipes are then collected in SEQUENCE, each buying
+    /// itself a fresh full timeout. Against a child that exits at once the two
+    /// spellings are indistinguishable (the loop spends nothing), which is why
+    /// this test buys a real gap: the child lives for 90% of the bound.
+    ///
+    /// Measured, not predicted: honest 1.00s, typo 2.93s (0.9 poll + 1.0 + 1.0).
+    ///
+    /// The 500ms slack is the deliberate trade. It sits between the two outcomes
+    /// — 500ms of headroom for the correct code, 1.4s of overshoot for the typo
+    /// — rather than hugging either, because a tight bracket on a wall-clock
+    /// test is how this repo has produced flakes before, and a test that goes
+    /// red under load teaches people to ignore it.
+    #[test]
+    fn the_drain_does_not_re_derive_the_clock_the_poll_loop_already_spent() {
+        let timeout = Duration::from_millis(1000);
+        let poll_time = Duration::from_millis(900);
+        let began = std::time::Instant::now();
+        let outcome = within(Duration::from_secs(20), move || {
+            bounded_outcome_after_spawn(
+                ExitsAfter(std::time::Instant::now() + poll_time),
+                BoundedReader::spawn(NeverEnds),
+                BoundedReader::spawn(NeverEnds),
+                timeout,
+            )
+        });
+        let elapsed = began.elapsed();
+
+        assert!(
+            matches!(outcome, Some(BoundedOutcome::TimedOut)),
+            "expected TimedOut, got {outcome:?}"
+        );
+        assert!(
+            elapsed < timeout + Duration::from_millis(500),
+            "took {elapsed:?} for a {timeout:?} bound after the poll loop had already spent \
+             {poll_time:?} of it — the drain re-derived the deadline from `timeout` instead of \
+             using the one the loop enforced, which multiplies the bound"
+        );
+    }
+
+    /// …and the same wiring still hands back a real answer. A "fix" that always
+    /// returned `TimedOut` would satisfy the test above and silently blind every
+    /// probe in the project.
+    #[test]
+    fn the_wiring_still_returns_the_bytes_when_both_pipes_finish() {
+        let outcome = within(Duration::from_secs(10), || {
+            bounded_outcome_after_spawn(
+                ExitsAtOnce,
+                BoundedReader::spawn(std::io::Cursor::new(b"out".to_vec())),
+                BoundedReader::spawn(std::io::Cursor::new(b"err".to_vec())),
+                Duration::from_secs(5),
+            )
+        })
+        .expect("a finished drain must not need 10s");
+        match outcome {
+            BoundedOutcome::Ran(out) => {
+                assert_eq!(out.stdout, b"out".to_vec());
+                assert_eq!(out.stderr, b"err".to_vec());
+                assert!(out.status.success());
+            }
+            other => panic!("expected Ran, got {other:?}"),
+        }
+    }
+
+    /// ONE slow pipe is enough. The drain collects stdout and stderr in
+    /// sequence, so a bound applied to only the first of them still lets the
+    /// second run unbounded — and stderr is the one a wedged helper usually
+    /// holds.
+    #[test]
+    fn a_single_unfinished_pipe_still_ends_at_the_deadline() {
+        for (label, stdout_ends, stderr_ends) in
+            [("stdout hangs", false, true), ("stderr hangs", true, false)]
+        {
+            let timeout = Duration::from_millis(300);
+            let outcome = within(Duration::from_secs(10), move || {
+                let mk = |ends: bool| {
+                    if ends {
+                        BoundedReader::spawn(Box::new(std::io::Cursor::new(b"done".to_vec()))
+                            as Box<dyn std::io::Read + Send>)
+                    } else {
+                        BoundedReader::spawn(Box::new(NeverEnds) as Box<dyn std::io::Read + Send>)
+                    }
+                };
+                bounded_outcome_after_spawn(
+                    ExitsAtOnce,
+                    mk(stdout_ends),
+                    mk(stderr_ends),
+                    timeout,
+                )
+            });
+            assert!(
+                matches!(outcome, Some(BoundedOutcome::TimedOut)),
+                "{label}: expected TimedOut within 10s, got {outcome:?}"
+            );
+        }
     }
 
     /// An ALREADY-PAST deadline is not a panic and not an infinite wait — it

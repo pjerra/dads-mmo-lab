@@ -1466,8 +1466,20 @@ async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value
 fn backend_mode() -> &'static str {
     match dml_wow::backend::selected() {
         dml_wow::backend::Backend::Native => "native",
-        // Arch and Wsl name the same distro and the same daemon; Task 3 is
-        // what makes this differ.
+        // DELIBERATE, AND LOCAL TO THIS FUNCTION. The value here feeds a
+        // frontend union with exactly two members (`"wsl" | "native"`, see
+        // `first-run.ts`), and both Arch and Wsl route through the same distro
+        // and the same daemon, so the frontend's question has one answer for
+        // both. Task 3 is what makes this differ.
+        //
+        // DO NOT copy this collapse to `startup.rs::backend_env_value`. That
+        // one answers a different question — which string to write into
+        // `DML_BACKEND` — and collapsing Arch onto "wsl" THERE makes the whole
+        // `launcher.json` opt-in silently inert, with no error and no red test
+        // until `every_backend_round_trips_through_the_value_we_export` was
+        // added. This comment used to read "Arch and Wsl name the same distro
+        // and the same daemon", which is true and was read as a licence to
+        // dedup the two sites.
         dml_wow::backend::Backend::Arch | dml_wow::backend::Backend::Wsl => "wsl",
     }
 }
@@ -1759,7 +1771,12 @@ fn launcher_config_read() -> Result<serde_json::Value, CmdError> {
     // resolved value into DML_BACKEND, so reading the env here would report
     // EVERY session as env-locked and leave the dropdown permanently
     // read-only — defeating the whole setting.
-    let env_backend = if startup::backend_was_user_set() {
+    // `backend_pinned_by_env`, not "was set": `DML_BACKEND=auto` asks us to
+    // detect, so it must NOT report as an env lock. Reporting it as one greyed
+    // out the dropdown AND named a backend the user never chose — after the
+    // export fix, `std::env::var` here would read back our own resolved
+    // "native"/"wsl" and attribute it to them.
+    let env_backend = if startup::backend_pinned_by_env() {
         std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty())
     } else {
         None

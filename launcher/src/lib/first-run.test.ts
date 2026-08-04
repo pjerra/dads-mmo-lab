@@ -7,6 +7,7 @@ import {
   PROJECT_URL,
   type BackendStatusReport,
   type FirstRunState,
+  type SetupState,
 } from "./first-run";
 
 // SHIP-LIST 4.4. A stranger who installs the launcher lands on Home and sees a
@@ -562,16 +563,76 @@ describe("firstRunButton", () => {
 });
 
 describe("firstRunState — every screen is renderable", () => {
+  // ONE REPORT PER STATE, as a Record rather than the hand-written array this
+  // replaces.
+  //
+  // That array was THREE states behind its own union and nothing said so:
+  // `distro_unprepared` (added for the Arch chain), `no_docker` and
+  // `docker_stopped` appeared nowhere in this file, so gutting the
+  // distro_unprepared screen to `title: "Setup failed"` / `body: ""` passed all
+  // 752 tests (final gate, 2026-08-04). Neither the "title, one sentence, one
+  // labelled button" rule nor the "no screen shouts an error word" rule ever
+  // reached it.
+  //
+  // A `Record<SetupState, …>` cannot fall behind: adding a member to the union
+  // without adding it here is a type error — the same enforcement svelte-check
+  // already applies to the switch in first-run.ts itself (TS2366 when an arm is
+  // deleted). The count assertion below is the belt for the runner that does
+  // NOT typecheck.
+  const perState: Record<SetupState, BackendStatusReport> = {
+    no_wsl: report({ state: "no_wsl", blocked_at: "wsl" }),
+    no_distro: report({ state: "no_distro", blocked_at: "distro" }),
+    // The Arch chain's half-built distro: registered, but provisioning never
+    // finished. Reachable only via the Arch chain, which reports backend_mode
+    // "wsl" (backend_mode() collapses Arch|Wsl).
+    distro_unprepared: report({
+      state: "distro_unprepared",
+      blocked_at: "prepared",
+      probes: { wsl: "yes", distro: "yes", cli: "unknown", cli_version: null, titles: null },
+    }),
+    no_docker: report({ state: "no_docker", blocked_at: "docker", backend_mode: "native" }),
+    docker_stopped: report({ state: "docker_stopped", blocked_at: "engine", backend_mode: "native" }),
+    no_cli: report({ state: "no_cli" }),
+    cli_outdated: report({ state: "cli_outdated", probes: { wsl: "yes", distro: "yes", cli: "yes", cli_version: "2.6.0", titles: null } }),
+    no_titles: report({ state: "no_titles", probes: { wsl: "yes", distro: "yes", cli: "yes", cli_version: "3.0.0", titles: 0 } }),
+    ready: report({ state: "ready" }),
+    unknown: report({ state: "unknown", blocked_at: "wsl" }),
+  };
+
+  // The states that deliberately render NOTHING, each for a reason recorded in
+  // first-run.ts. Listing them is not an escape hatch: every one is asserted to
+  // really render null below, so moving a state in here to dodge the screen
+  // rules fails instead of passing.
+  const NO_SCREEN: SetupState[] = [
+    "ready", // nothing is missing
+    "docker_stopped", // repairs itself on the next click; `games start` boots the engine
+  ];
+
+  const screenStates = (Object.keys(perState) as SetupState[]).filter(
+    (s) => !NO_SCREEN.includes(s),
+  );
+
   const cases: BackendStatusReport[] = [
-    report({ state: "no_wsl" }),
-    report({ state: "no_distro" }),
-    report({ state: "no_cli" }),
-    report({ state: "cli_outdated", probes: { wsl: "yes", distro: "yes", cli: "yes", cli_version: "2.6.0", titles: null } }),
-    report({ state: "no_titles", probes: { wsl: "yes", distro: "yes", cli: "yes", cli_version: "3.0.0", titles: 0 } }),
-    report({ state: "unknown", blocked_at: "wsl" }),
+    ...screenStates.map((s) => perState[s]),
+    // Not states — payload variants of one. They change the setup screen's body
+    // and its button, so they earn their own rows.
     report({ state: "no_cli", payload: { present: "no", dir: "C:\\app", missing: ["cli/dml"] } }),
     report({ state: "no_cli", payload: { present: "unknown", dir: null, missing: [] } }),
   ];
+
+  it("inspects every state the union declares", () => {
+    // vitest transpiles without typechecking, so the Record's exhaustiveness is
+    // enforced by `npm run check`, not by this file running. This is the belt
+    // for a run where only vitest happens: a state added to the union and to
+    // `perState` but silently dropped from both lists still fails here.
+    const declared = Object.keys(perState).length;
+    expect(declared).toBeGreaterThanOrEqual(10);
+    expect(screenStates.length + NO_SCREEN.length).toBe(declared);
+  });
+
+  it.each(NO_SCREEN)("renders no screen for %s, deliberately", (s) => {
+    expect(firstRunState({ report: perState[s], everReady: false })).toBeNull();
+  });
 
   it.each(cases)("gives $state a title, one sentence and one labelled button", (r) => {
     const s = shown({ report: r, everReady: false });
