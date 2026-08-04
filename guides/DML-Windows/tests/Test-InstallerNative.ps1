@@ -60,9 +60,71 @@ Say "`n== The WSL era must not leak back in ==" 'White'
 # This script exists BECAUSE the WSL route is being retired. A reviewer adding
 # "just one" wsl step here would quietly recreate the thing it replaces, and
 # nothing else in the repo would notice.
-foreach ($banned in @('wsl --install', 'wsl --set-default', 'pacman', 'systemctl', 'usermod', 'DML-Launcher.exe', 'dml-arch')) {
+foreach ($banned in @('wsl --set-default', 'pacman', 'systemctl', 'usermod', 'DML-Launcher.exe', 'dml-arch')) {
     Assert-True (-not ($src -match [regex]::Escape($banned))) "no '$banned' anywhere in the native installer"
 }
+
+# `wsl --install` is NOT on that list any more, and the distinction is the whole
+# point of this block rather than a loosening of it.
+#
+# What is being retired is the WSL *distro* route -- an Arch distro, pacman,
+# systemctl, a bash CLI living inside it. Native mode still runs Docker Desktop,
+# and Docker Desktop's engine runs ON WSL2. Banning the Windows FEATURE along
+# with the distro meant the installer could not enable the thing its own Docker
+# requires, which is exactly what produced "Docker Desktop - WSL not installed"
+# on a bare VM (2026-08-04).
+#
+# Two rules replace the blanket ban, and both are asked of the AST rather than
+# of text. The old string scan matched an `Info` line that TELLS the user to run
+# the command -- comments are stripped from $src, user-facing strings are not,
+# so advice was indistinguishable from action.
+$wslAsts = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -in @('wsl', 'wsl.exe')
+}, $true))
+
+foreach ($w in $wslAsts) {
+    $text = $w.Extent.Text
+    if ($text -match '--install') {
+        # RULE 1: never a distro. `wsl --install` with no flag installs Ubuntu,
+        # which is the retired route arriving through the back door -- plus tens
+        # of GB and a first-run account prompt no script can answer.
+        Assert-True ($text -match '--no-distribution') `
+            "the wsl --install at line $($w.Extent.StartLineNumber) is --no-distribution (never a distro)"
+
+        # RULE 2: opted into. Same membership logic as the winget guard: the
+        # call must fall inside the BODY of a clause whose condition names an
+        # -Install* switch, so it cannot be reached by someone who only asked
+        # this script to CHECK their machine.
+        $guarded = $false
+        $node = $w.Parent
+        while ($null -ne $node) {
+            if ($node -is [System.Management.Automation.Language.IfStatementAst]) {
+                foreach ($clause in $node.Clauses) {
+                    if ($clause.Item1.Extent.Text -match '\$Install\w+') {
+                        $b = $clause.Item2.Extent
+                        if ($w.Extent.StartOffset -ge $b.StartOffset -and
+                            $w.Extent.EndOffset -le $b.EndOffset) { $guarded = $true }
+                    }
+                }
+            }
+            $node = $node.Parent
+        }
+        Assert-True $guarded `
+            "the wsl --install at line $($w.Extent.StartLineNumber) is inside the BODY of an -Install* branch"
+    }
+}
+
+# And a reboot must not be swallowed. `wsl --install` requires a restart, so a
+# run that performs one cannot end by telling the user they are Ready.
+# The flag must be ASSIGNED, not merely mentioned. The first version of this
+# matched 'RebootRequired' anywhere in the file, so deleting the assignment left
+# it green -- the closing summary still READS the flag. A mutation proved it.
+Assert-True ($src -match 'RebootRequired\s*=\s*\$true') `
+    'a WSL enable SETS the reboot-required flag (not just references it)'
+Assert-True ($src -match 'if\s*\(\s*\$script:RebootRequired') `
+    'the closing summary reads the reboot-required flag'
 # The C# tray is the specific thing that produced two indistinguishable
 # launchers on one machine (SHIP-LIST 4.0b).
 Assert-True (-not ($src -match 'C:\\DML-tray')) 'no C# tray install path'

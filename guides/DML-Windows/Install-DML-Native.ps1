@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -112,6 +112,33 @@ function Invoke-Change([string]$What, [scriptblock]$Action) {
 # --------------------------------------------------------------------------
 # Detection
 # --------------------------------------------------------------------------
+
+function Test-IsElevated {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+# Is WSL actually usable? THREE answers, never two.
+#
+# $true  - wsl reported its status cleanly.
+# $false - wsl.exe is present (it ships with Windows) but the feature is not
+#          installed, which is what Docker Desktop reports as "WSL not
+#          installed".
+# $null  - we could not tell. wsl.exe absent entirely, or the call blew up.
+#          Treated as "say nothing", never as "not installed": claiming a
+#          missing feature on a machine that has one sends the user to enable
+#          something twice and reboot for no reason.
+function Get-WslState {
+    if (-not (Test-CommandExists 'wsl')) { return $null }
+    try {
+        # --status is read-only and works unelevated. Output is discarded; the
+        # exit code is the answer.
+        $null = & wsl.exe --status 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $null
+    }
+}
 
 function Test-CommandExists([string]$Name) {
     $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
@@ -326,6 +353,111 @@ if ($docker) {
     $problems.Add('Docker Desktop is not installed.')
 }
 
+Step 'Checking CPU virtualization'
+# A script CAN enable Windows features (wsl --install turns on both WSL and
+# VirtualMachinePlatform). It CANNOT enable VT-x / AMD-V: that lives in the
+# firmware and needs a human in the BIOS. It is also the single most common
+# reason Docker Desktop will not start on a real machine, so naming it here --
+# in one sentence, before anything long-running -- beats letting it surface as
+# a Docker error three layers down.
+#
+# BOTH signals are needed and neither is sufficient alone. HypervisorPresent is
+# true when something is ALREADY virtualizing, which proves the firmware bit is
+# on; but VirtualizationFirmwareEnabled reports FALSE once Hyper-V has claimed
+# the CPU, so reading that one by itself would tell a perfectly working machine
+# its BIOS setting is off.
+$virtOk = $null
+try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop
+    if ($cs.HypervisorPresent) {
+        $virtOk = $true
+    } else {
+        $cpu = @(Get-CimInstance Win32_Processor -ErrorAction Stop)[0]
+        $virtOk = [bool]$cpu.VirtualizationFirmwareEnabled
+    }
+} catch {
+    # Could not ask. Say nothing rather than guess -- a false "virtualization is
+    # off" sends someone into their BIOS for no reason.
+    $virtOk = $null
+}
+if ($virtOk -eq $true) {
+    Ok 'CPU virtualization is enabled'
+} elseif ($null -eq $virtOk) {
+    Info 'Could not read the CPU virtualization state; Docker Desktop will report it if it is off.'
+} else {
+    Fail 'CPU virtualization (VT-x / AMD-V) is disabled in firmware'
+    Info 'No script can turn this on -- it is a BIOS/UEFI setting. Reboot into firmware setup and'
+    Info 'enable Intel VT-x / AMD-V (sometimes "SVM Mode" or "Virtualization Technology"), then re-run.'
+    Info 'Docker Desktop cannot run without it, so nothing further here would work.'
+    $problems.Add('CPU virtualization is disabled in BIOS/UEFI.')
+}
+
+Step 'Checking WSL2 (Docker Desktop''s engine)'
+$wsl = Get-WslState
+if ($wsl -eq $true) {
+    Ok 'WSL is installed'
+} elseif ($null -eq $wsl) {
+    # Could not tell. Say so and move on -- this is not a refusal.
+    Info 'Could not determine whether WSL is installed; Docker Desktop will say so on first run.'
+} else {
+    # WSL is genuinely missing.
+    #
+    # We only ACT when -InstallDocker was used, and the distinction is the whole
+    # point. A user who installed Docker Desktop themselves ran its interactive
+    # setup, which enables WSL -- that is why this script deliberately does not
+    # switch Windows features. But `-InstallDocker` runs winget silently, which
+    # SKIPS that setup, so Docker arrives on a machine with no WSL and stops
+    # (observed on a bare VM, 2026-08-04). Having bypassed Docker's own setup,
+    # we owe the user the step it would have taken.
+    # The POSITIVE case leads, and each arm's condition states its own
+    # precondition. An earlier version put the install in a bare `else` --
+    # logically guarded, but Test-InstallerNative rejected it, correctly: that
+    # guard refuses to reason about logic precisely because reasoning about
+    # logic is what once let a call slip into the unguarded else of the very
+    # statement being checked.
+    if ($InstallDocker -and (Test-IsElevated)) {
+        Invoke-Change 'enable WSL (wsl --install --no-distribution)' {
+            # --no-distribution: Docker Desktop supplies its own docker-desktop
+            # distro. Installing Ubuntu here would add tens of GB nobody asked
+            # for and a first-run account prompt this script cannot answer.
+            wsl.exe --install --no-distribution | Out-Host
+            $script:WslInstallCode = $LASTEXITCODE
+        } | Out-Null
+        if (-not $DryRun) {
+            if ($script:WslInstallCode -eq 0) {
+                Ok 'WSL enabled'
+                # A REBOOT IS REQUIRED, so this run must not end in "Ready."
+                # A machine that needs restarting is not ready, and a script
+                # that says otherwise sends the user to open a launcher that
+                # cannot work.
+                $script:RebootRequired = $true
+                $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+            } else {
+                Fail "WSL could not be enabled (exit $script:WslInstallCode)"
+                $problems.Add('WSL could not be enabled automatically; run "wsl --install --no-distribution" as Administrator.')
+            }
+        }
+    } elseif ($InstallDocker) {
+        # We installed Docker but cannot enable the feature it needs. This
+        # script is designed to run WITHOUT Administrator, so a missing
+        # privilege is REPORTED with the exact command, never a crash and never
+        # a silent skip.
+        Fail 'WSL is not installed, and enabling it needs Administrator'
+        Info 'Run this in an ADMIN PowerShell, reboot, then re-run this script:'
+        Info '    wsl --install --no-distribution'
+        Info '(--no-distribution on purpose: Docker Desktop brings its own distro; an extra Ubuntu is tens of GB of nothing.)'
+        $problems.Add('WSL is not installed; run "wsl --install --no-distribution" as Administrator and reboot.')
+    } else {
+        # We did NOT install Docker, so its own interactive setup will enable
+        # WSL -- which is why this script deliberately does not switch Windows
+        # features on the default path.
+        Warn 'WSL is not installed -- Docker Desktop needs it for its engine.'
+        Info 'Docker Desktop enables it during its own setup; run Docker Desktop once and let it finish.'
+        Info 'Or enable it yourself in an ADMIN PowerShell: wsl --install --no-distribution'
+        $problems.Add('WSL is not installed (Docker Desktop cannot run without it).')
+    }
+}
+
 Step 'Checking Git for Windows'
 if (Test-CommandExists 'git') {
     Ok 'git found'
@@ -411,7 +543,14 @@ if ($problems.Count -gt 0) {
     Say '  Not ready yet:' 'Yellow'
     foreach ($p in $problems) { Say "    - $p" 'Yellow' }
     Say ''
-    Say '  Fix those, then run this script again.' 'Yellow'
+    if ($script:RebootRequired) {
+        # Stated separately and last, because it is an ACTION rather than a
+        # complaint, and because "fix those and re-run" reads as optional
+        # advice next to a restart that is not.
+        Say '  RESTART THIS PC, then run this script again.' 'Yellow'
+    } else {
+        Say '  Fix those, then run this script again.' 'Yellow'
+    }
     exit 1
 }
 
