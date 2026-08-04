@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -35,17 +35,29 @@
 .PARAMETER InstallDocker
     Install Docker Desktop via winget instead of only checking for it. Opt-in.
 
+.PARAMETER InstallGit
+    Install Git for Windows via winget instead of only checking for it. Opt-in,
+    like -InstallDocker, but for a different reason: Docker Desktop is detect-only
+    by DEFAULT because its licence is the user's decision to make. Git is GPL with
+    no such threshold, so this switch exists purely so an unattended run on a bare
+    machine can complete -- which is what the native gate tests.
+
 .PARAMETER DryRun
     Report every action without performing any of them. Nothing is downloaded,
     written, or installed.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\Install-DML-Native.ps1 -DryRun
+
+.EXAMPLE
+    # A bare machine, unattended: this is the combination the native gate runs.
+    powershell -ExecutionPolicy Bypass -File .\Install-DML-Native.ps1 -InstallDocker -InstallGit
 #>
 [CmdletBinding()]
 param(
     [string]$GamesDir = (Join-Path $env:USERPROFILE 'dml-native'),
     [switch]$InstallDocker,
+    [switch]$InstallGit,
     [switch]$DryRun
 )
 
@@ -281,12 +293,38 @@ if ($docker) {
 Step 'Checking Git for Windows'
 if (Test-CommandExists 'git') {
     Ok 'git found'
+} elseif ($InstallGit) {
+    if (-not (Test-CommandExists 'winget')) {
+        $problems.Add('Git is missing and winget is not available to install it. Install Git for Windows from https://git-scm.com/download/win and re-run.')
+        Fail 'winget not available'
+    } else {
+        Invoke-Change 'install Git for Windows via winget' {
+            winget install --id Git.Git --accept-package-agreements --accept-source-agreements
+        } | Out-Null
+        # winget writes the MACHINE PATH; this process keeps the environment it
+        # was started with. Without this refresh the very next check still says
+        # "git is not installed" -- a successful install that reports as a
+        # failure, which is worse than not installing at all.
+        if (-not $DryRun) {
+            $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
+                        [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (Test-CommandExists 'git') {
+                Ok 'git installed and on PATH'
+            } else {
+                # Do NOT claim success we cannot see. Some winget packages need a
+                # new shell before their shims resolve.
+                Info 'Git was installed but is not on this shell''s PATH yet -- open a new PowerShell and re-run this script to confirm.'
+                $problems.Add('Git installed, but not visible on PATH in this session.')
+            }
+        }
+    }
 } else {
     # Native mode HARD-REQUIRES git: the install engine clones AzerothCore and
     # mod-playerbots with it, and `games list`/`games catalog` still shell bash
     # (Git Bash) today.
     Fail 'git is not installed'
     Info 'Get it from https://git-scm.com/download/win -- native mode needs it to download the server source.'
+    Info 'Or re-run this script with -InstallGit to install it via winget.'
     $problems.Add('Git for Windows is not installed.')
 }
 

@@ -1,4 +1,4 @@
-# Test-InstallerNative.ps1 -- covers Install-DML-Native.ps1.
+﻿# Test-InstallerNative.ps1 -- covers Install-DML-Native.ps1.
 #
 # Same no-framework style as Test-InstallerDefender.ps1: a plain PS 5.1 script
 # that parses the installer, lifts functions out of the AST and runs them
@@ -108,20 +108,34 @@ Say "`n== Docker Desktop is instructed, not installed ==" 'White'
 # It is a separate product with its own licence terms. Installing it silently
 # makes the user's licensing decision for them.
 Assert-True ($src -match '\$InstallDocker') 'installing Docker Desktop is behind an explicit switch'
+Assert-True ($src -match '\$InstallGit') 'installing Git is behind an explicit switch'
+
+# EVERY winget install must sit inside the BODY of a clause whose condition
+# names an opt-in switch.
+#
+# This replaces an "at most one winget install call" cap. That cap was a
+# faithful proxy while Docker was the only installable prerequisite, and it
+# fired correctly when -InstallGit was added -- the installer growing the list
+# of things it puts on someone's machine is exactly the change a human should
+# have to look at. But the property that actually matters was never the COUNT,
+# it was that each one is opted into: the old rule said nothing whatsoever
+# about a second call beyond forbidding it.
 $wingetCalls = ([regex]::Matches($src, 'winget install')).Count
-Assert-True ($wingetCalls -le 1) 'at most one winget install call'
-if ($wingetCalls -eq 1) {
-    # The single call must sit inside the opt-in branch. Asked of the AST
-    # rather than by regex over text: the token-joined $src normalises
-    # whitespace, so a source-shaped pattern like `elseif ($InstallDocker)`
-    # fails on formatting rather than on meaning -- a test that goes red when
-    # someone reindents is a test people learn to ignore.
-    $wingetAst = $ast.FindAll({
-        param($n)
-        $n -is [System.Management.Automation.Language.CommandAst] -and
-        $n.GetCommandName() -eq 'winget'
-    }, $true) | Select-Object -First 1
-    Assert-True ($null -ne $wingetAst) 'the winget call is a real command, not a string'
+Assert-True ($wingetCalls -ge 1) 'the installer can install at least one prerequisite (non-vacuity)'
+
+# Asked of the AST rather than by regex over text: the token-joined $src
+# normalises whitespace, so a source-shaped pattern like `elseif ($InstallDocker)`
+# fails on formatting rather than on meaning -- a test that goes red when
+# someone reindents is a test people learn to ignore.
+$wingetAsts = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'winget'
+}, $true))
+Assert-True ($wingetAsts.Count -eq $wingetCalls) `
+    "every winget install is a real command, not a string (found $($wingetAsts.Count) of $wingetCalls)"
+
+foreach ($wingetAst in $wingetAsts) {
     if ($wingetAst) {
         # MEMBERSHIP, not ancestry. The first version walked ancestor
         # if-statements and asked whether ANY of their conditions mentioned
@@ -136,7 +150,10 @@ if ($wingetCalls -eq 1) {
         while ($null -ne $node) {
             if ($node -is [System.Management.Automation.Language.IfStatementAst]) {
                 foreach ($clause in $node.Clauses) {
-                    if ($clause.Item1.Extent.Text -match 'InstallDocker') {
+                    # Any opt-in switch, not one hardcoded name: the rule is
+                    # "opted into", and naming Docker alone would silently stop
+                    # covering the next prerequisite someone adds.
+                    if ($clause.Item1.Extent.Text -match '\$Install\w+') {
                         $b = $clause.Item2.Extent
                         $w = $wingetAst.Extent
                         if ($w.StartOffset -ge $b.StartOffset -and $w.EndOffset -le $b.EndOffset) {
@@ -147,7 +164,8 @@ if ($wingetCalls -eq 1) {
             }
             $node = $node.Parent
         }
-        Assert-True $guarded 'the winget call is inside the BODY of the -InstallDocker branch'
+        Assert-True $guarded `
+            "the winget call at line $($wingetAst.Extent.StartLineNumber) is inside the BODY of an -Install* branch"
     }
 }
 Assert-True ($src -match 'personal use') 'the licence position is stated to the user'
