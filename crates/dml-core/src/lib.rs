@@ -14,3 +14,4 @@ pub mod proc;
 pub mod runner;
 pub mod setup;
 pub mod util;
+pub mod vocab;
