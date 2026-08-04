@@ -91,18 +91,43 @@ pub fn set_default_user_argv(name: &str, user: &str) -> Vec<String> {
     ]
 }
 
-/// One first-boot step, run inside the distro.
+/// What a first-boot step actually does.
+///
+/// AN ENUM, NOT A `restart_after: bool`, and the difference is the whole
+/// point. A bool is a field a consumer can simply not read: the next plan's
+/// executor is told to iterate this Vec faithfully, and "faithfully" has to
+/// mean something the compiler enforces. To get at an `InDistro` step's argv
+/// you must match on this type, and a match that does not handle
+/// [`Self::RestartDistro`] does not compile. A restart that is skipped is not
+/// a cosmetic loss — see [`first_boot_steps`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirstBootAction {
+    /// Run a command INSIDE the distro.
+    InDistro {
+        /// Whether this step needs `-u root`. Every in-distro step here does:
+        /// they all run before the unprivileged user has sudo rights, or they
+        /// configure sudo itself.
+        as_root: bool,
+        /// argv AFTER `wsl.exe -d <name> -u <who> --exec`.
+        argv: Vec<String>,
+    },
+    /// Shut the distro down on the HOST and let the next step boot it afresh.
+    /// Carries the complete `wsl.exe` argv ([`terminate_argv`]) rather than
+    /// making the executor rebuild it, so this Vec really is an executable
+    /// description of the sequence and not a description with a footnote.
+    RestartDistro {
+        /// argv for `wsl.exe` itself — NOT prefixed with `-d <name> --exec`.
+        argv: Vec<String>,
+    },
+}
+
+/// One first-boot step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FirstBootStep {
     /// Stable id — the wire name in the streamed NDJSON and the key the
     /// ordering test asserts on.
     pub id: &'static str,
-    /// Whether this step needs `-u root`. Every step here does: they all run
-    /// before the unprivileged user has sudo rights, or they configure sudo
-    /// itself.
-    pub as_root: bool,
-    /// argv AFTER `wsl.exe -d <name> -u <who> --exec`.
-    pub argv: Vec<String>,
+    pub action: FirstBootAction,
 }
 
 /// The ordered first-boot sequence, root-only by construction.
@@ -111,6 +136,14 @@ pub struct FirstBootStep {
 /// failure on a genuinely fresh `wsl --install archlinux` image (Task 10's
 /// live gate, 2026-08-04) — none of these constraints are hypothetical:
 ///
+/// - `wsl-conf` then a RESTART, before anything that needs systemd:
+///   `/etc/wsl.conf`'s `[boot] systemd=true` only takes effect on the NEXT
+///   boot of the distro, so `docker-enable`'s `systemctl enable --now docker`
+///   cannot work in the boot that wrote it. The live gate (2026-08-04) hit
+///   exactly this and the operator had to insert `wsl --terminate
+///   dml-arch-test` by hand between the steps — see the gate log's Step 3,
+///   row (b), "Applies the systemd setting." That restart is now a step of
+///   this sequence rather than knowledge someone has to already have.
 /// - `useradd` before `sudoers`: the drop-in names a user that must already
 ///   exist.
 /// - `pacman-key` before `pacman-sync` (before ANY package install): a fresh
@@ -137,13 +170,16 @@ pub struct FirstBootStep {
 /// sanitizing the name instead of refusing it is not an option — a caller
 /// that typed `d'ml` would end up with an account named `dml` that nobody
 /// asked for.
-pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
+pub fn first_boot_steps(distro: &str, user: &str) -> Result<Vec<FirstBootStep>, String> {
     if !valid_distro_user(user) {
         return Err(format!(
             "{user:?} is not a valid distro user name (lowercase letters, digits, '_' and '-' only, must not start with '-')"
         ));
     }
-    let root = |id: &'static str, argv: Vec<String>| FirstBootStep { id, as_root: true, argv };
+    let root = |id: &'static str, argv: Vec<String>| FirstBootStep {
+        id,
+        action: FirstBootAction::InDistro { as_root: true, argv },
+    };
     let s = |v: &str| v.to_string();
     Ok(vec![
         // `printf %s` rather than a heredoc: this argv crosses `--exec`, so
@@ -157,6 +193,14 @@ pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
                 format!("printf %s '{WSL_CONF}' > /etc/wsl.conf"),
             ],
         ),
+        // THE BOUNDARY. Everything after this line runs in a distro where
+        // systemd is PID 1; everything before it does not. Placed immediately
+        // after the write, exactly where the live gate operator had to put it
+        // by hand.
+        FirstBootStep {
+            id: "restart",
+            action: FirstBootAction::RestartDistro { argv: terminate_argv(distro) },
+        },
         root("useradd", vec![s("useradd"), s("-m"), s("-G"), s("wheel"), user.to_string()]),
         // One step, not two: `--init` and `--populate` are inherently
         // sequential (the second is meaningless without the first) and a
@@ -195,6 +239,26 @@ pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DISTRO: &str = "dml-arch";
+
+    /// The steps, with the ids in order. Most assertions below are about
+    /// ORDER, and order is the contract.
+    fn ids(user: &str) -> Vec<&'static str> {
+        first_boot_steps(DISTRO, user).unwrap().iter().map(|s| s.id).collect()
+    }
+
+    /// The argv of an in-distro step, or `None` for the restart boundary.
+    fn in_distro_argv(step: &FirstBootStep) -> Option<&[String]> {
+        match &step.action {
+            FirstBootAction::InDistro { argv, .. } => Some(argv),
+            FirstBootAction::RestartDistro { .. } => None,
+        }
+    }
+
+    fn step(user: &str, id: &str) -> FirstBootStep {
+        first_boot_steps(DISTRO, user).unwrap().into_iter().find(|s| s.id == id).unwrap()
+    }
 
     #[test]
     fn the_install_comes_from_the_official_catalog_and_does_not_launch_a_shell() {
@@ -251,11 +315,70 @@ mod tests {
 
     #[test]
     fn first_boot_order_creates_the_user_before_it_needs_one() {
-        let ids: Vec<&str> = first_boot_steps("dml").unwrap().iter().map(|s| s.id).collect();
         assert_eq!(
-            ids,
-            vec!["wsl-conf", "useradd", "pacman-key", "pacman-sync", "sudoers", "docker-group", "docker-enable"]
+            ids("dml"),
+            vec![
+                "wsl-conf",
+                "restart",
+                "useradd",
+                "pacman-key",
+                "pacman-sync",
+                "sudoers",
+                "docker-group",
+                "docker-enable"
+            ]
         );
+    }
+
+    /// THE LIVE-GATE FINDING (2026-08-04). `/etc/wsl.conf`'s
+    /// `[boot] systemd=true` only takes effect on the NEXT boot of the distro,
+    /// so `docker-enable`'s `systemctl enable --now docker` cannot work in the
+    /// boot that wrote the file. The gate operator had to insert
+    /// `wsl --terminate dml-arch-test` by hand between the steps -- gate log
+    /// Step 3, row (b): "Applies the systemd setting."
+    ///
+    /// The next plan's executor is instructed to iterate this Vec faithfully,
+    /// so a Vec with no restart in it GUARANTEES that failure. This asserts the
+    /// boundary as a RELATION, not a second copy of the whole list: it holds
+    /// however many steps are inserted or renamed around it.
+    #[test]
+    fn a_restart_boundary_sits_between_wsl_conf_and_docker_enable() {
+        let ids = ids("dml");
+        let conf = ids.iter().position(|i| *i == "wsl-conf").expect("wsl-conf");
+        let restart = ids.iter().position(|i| *i == "restart").expect(
+            "no restart boundary: systemd only becomes PID 1 on the NEXT boot after wsl.conf is \
+             written, so docker-enable fails without one (live gate, 2026-08-04)",
+        );
+        let enable = ids.iter().position(|i| *i == "docker-enable").expect("docker-enable");
+        assert!(conf < restart, "the restart must FOLLOW the write it applies: {ids:?}");
+        assert!(restart < enable, "systemd must be PID 1 before `systemctl enable --now`: {ids:?}");
+    }
+
+    /// ...and it is a real, runnable command, not a marker the executor has to
+    /// know how to interpret. `terminate_argv` existed with no caller; this is
+    /// the caller, so the Vec is a complete executable description.
+    #[test]
+    fn the_restart_step_carries_the_host_command_that_performs_it() {
+        let restart = step("dml", "restart");
+        match &restart.action {
+            FirstBootAction::RestartDistro { argv } => {
+                assert_eq!(argv, &terminate_argv(DISTRO));
+                assert!(argv.iter().any(|a| a == "--terminate"), "{argv:?}");
+                assert!(argv.iter().any(|a| a == DISTRO), "must name the distro: {argv:?}");
+            }
+            other => panic!("the restart step must be a RestartDistro action, got {other:?}"),
+        }
+    }
+
+    /// The restart runs on the HOST, so it is not an in-distro step and must
+    /// never be handed to `wsl.exe -d <name> -u <who> --exec`. This is the
+    /// property a `restart_after: bool` could not express at all.
+    #[test]
+    fn the_restart_is_not_an_in_distro_command() {
+        assert!(in_distro_argv(&step("dml", "restart")).is_none());
+        for id in ["wsl-conf", "useradd", "pacman-sync", "docker-enable"] {
+            assert!(in_distro_argv(&step("dml", id)).is_some(), "{id} runs inside the distro");
+        }
     }
 
     /// A fresh Arch WSL rootfs has no initialized pacman keyring — the FIRST
@@ -266,7 +389,7 @@ mod tests {
     /// these two.
     #[test]
     fn pacman_key_step_precedes_pacman_sync() {
-        let steps = first_boot_steps("dml").unwrap();
+        let steps = first_boot_steps(DISTRO, "dml").unwrap();
         let key_ix = steps.iter().position(|s| s.id == "pacman-key").unwrap();
         let sync_ix = steps.iter().position(|s| s.id == "pacman-sync").unwrap();
         assert!(key_ix < sync_ix, "pacman-key ({key_ix}) must precede pacman-sync ({sync_ix})");
@@ -278,7 +401,7 @@ mod tests {
     /// A real ordering relation, not a restatement of the whole list.
     #[test]
     fn sudoers_follows_pacman_sync() {
-        let steps = first_boot_steps("dml").unwrap();
+        let steps = first_boot_steps(DISTRO, "dml").unwrap();
         let sync_ix = steps.iter().position(|s| s.id == "pacman-sync").unwrap();
         let sudoers_ix = steps.iter().position(|s| s.id == "sudoers").unwrap();
         assert!(sync_ix < sudoers_ix, "pacman-sync ({sync_ix}) must precede sudoers ({sudoers_ix})");
@@ -301,18 +424,21 @@ mod tests {
     /// not an invocation.
     #[test]
     fn no_first_boot_step_reaches_for_a_sudo_that_does_not_exist_yet() {
-        for step in first_boot_steps("dml").unwrap() {
-            assert!(step.as_root, "{} must run as root", step.id);
+        for step in first_boot_steps(DISTRO, "dml").unwrap() {
+            // The restart is a HOST command; there is no user to run it as.
+            let FirstBootAction::InDistro { as_root, argv } = &step.action else {
+                continue;
+            };
+            assert!(as_root, "{} must run as root", step.id);
             if step.id == "pacman-sync" {
                 continue;
             }
-            for arg in &step.argv {
+            for arg in argv {
                 assert!(
                     !arg.split_whitespace().any(|w| w == "sudo"),
                     "{} invokes sudo (found in {arg:?}), but the sudoers drop-in requires it to \
-                     already exist: {:?}",
+                     already exist: {argv:?}",
                     step.id,
-                    step.argv
                 );
             }
         }
@@ -320,8 +446,8 @@ mod tests {
 
     #[test]
     fn the_sudoers_rule_is_nopasswd_and_scoped_to_the_user() {
-        let step = first_boot_steps("dml").unwrap().into_iter().find(|s| s.id == "sudoers").unwrap();
-        let joined = step.argv.join(" ");
+        let sudoers = step("dml", "sudoers");
+        let joined = in_distro_argv(&sudoers).expect("sudoers runs in the distro").join(" ");
         assert!(joined.contains("dml ALL=(ALL) NOPASSWD: ALL"), "got {joined}");
         assert!(
             joined.contains("/etc/sudoers.d/"),
@@ -331,14 +457,15 @@ mod tests {
 
     #[test]
     fn pacman_never_waits_for_a_confirmation_nobody_can_give() {
-        let step = first_boot_steps("dml").unwrap().into_iter().find(|s| s.id == "pacman-sync").unwrap();
-        assert!(step.argv.iter().any(|a| a == "--noconfirm"), "got {:?}", step.argv);
+        let sync = step("dml", "pacman-sync");
+        let argv = in_distro_argv(&sync).expect("pacman-sync runs in the distro");
+        assert!(argv.iter().any(|a| a == "--noconfirm"), "got {argv:?}");
     }
 
     #[test]
     fn ordinary_distro_user_names_are_accepted() {
-        assert!(first_boot_steps("dml").is_ok());
-        assert!(first_boot_steps("dml-arch-test").is_ok());
+        assert!(first_boot_steps(DISTRO, "dml").is_ok());
+        assert!(first_boot_steps(DISTRO, "dml-arch-test").is_ok());
         assert!(valid_distro_user("dml"));
         assert!(valid_distro_user("dml_2"));
     }
@@ -352,7 +479,10 @@ mod tests {
     fn a_hostile_user_name_is_refused_not_smuggled_into_a_root_shell_string() {
         for bad in ["d'ml", "d$ml", "d\\ml", "d ml"] {
             assert!(!valid_distro_user(bad), "{bad:?} should be rejected by valid_distro_user");
-            assert!(first_boot_steps(bad).is_err(), "{bad:?} should be refused by first_boot_steps");
+            assert!(
+                first_boot_steps(DISTRO, bad).is_err(),
+                "{bad:?} should be refused by first_boot_steps"
+            );
         }
     }
 
