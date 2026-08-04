@@ -44,6 +44,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::compose::COMPOSE_FILE_CANDIDATES;
 use crate::engine::{systemd_is_active_argv, SYSTEMCTL_PROGRAM};
 use crate::envelope::{decode_wsl_output, parse_envelope};
 use crate::proc::{run_bounded_outcome, windows_no_window, BoundedOutcome};
@@ -844,6 +845,82 @@ pub fn derive_native(f: NativeFacts) -> BackendStatus {
     }
 }
 
+/// The JSON contract marker `dml-wow-cli`'s envelope reports
+/// (`{"ok":true,"data":{"contract":"dml-json-v3",...}}`).
+///
+/// NOT the same axis as [`EXPECTED_CLI_VERSION`]. That constant is the BASH
+/// CLI's own version string (`cli/src/00-head.sh`'s `VERSION`) and has no
+/// relationship whatsoever to `dml-wow-cli`'s crate version (`Cargo.toml`
+/// currently says `0.1.0`) — comparing the Arch binary against
+/// `EXPECTED_CLI_VERSION` would either reject a perfectly good binary forever
+/// or require hand-syncing two numbers that answer different questions,
+/// which is a permanent trap. The binary carries its own wire-contract marker
+/// instead, so THAT is what gets compared.
+pub const EXPECTED_ARCH_CLI_CONTRACT: &str = "dml-json-v3";
+
+/// Probe 3's answer on the ARCH chain. Distinct from [`CliProbe`] /
+/// [`classify_cli_version`], which belong to the bash chain and read a
+/// `version` field under a DIFFERENT env var contract; conflating the two
+/// would corrupt whichever chain isn't being tested at the moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchCliProbe {
+    pub cli: Tri,
+    /// The contract string the binary reported, whatever it was — including a
+    /// MISMATCHED one, so [`derive_arch`] can settle on `CliOutdated` (an
+    /// honest, actionable state) instead of a bare could-not-tell.
+    pub contract: Option<String>,
+    /// Set only alongside `Tri::Unknown`: what the distro actually said.
+    pub detail: Option<String>,
+}
+
+/// Classify `dml-wow version` (no `--json` — the binary's clap parser rejects
+/// an argument it does not define, and its envelope is unconditional either
+/// way; verified live 2026-08-04).
+///
+/// `ProgramMissing` is the one definitive negative: the binary is not on this
+/// machine, and "install `dml-wow`" is a real repair. Everything else that
+/// could not be read (a spawn failure, unparseable stdout, `ok:false`) is a
+/// shrug, same tri-state discipline as [`classify_cli_version`] — an
+/// `ok:true` envelope with NO `contract` field is included in that shrug,
+/// because a `dml-wow` old enough to omit the field entirely is a machine
+/// state this classifier cannot honestly describe as "outdated" (it does not
+/// know what contract, if any, that binary speaks) or "fine".
+pub fn classify_arch_cli(outcome: &ProbeOutcome) -> ArchCliProbe {
+    let (stdout, stderr) = match outcome {
+        ProbeOutcome::ProgramMissing => {
+            return ArchCliProbe { cli: Tri::No, contract: None, detail: None }
+        }
+        ProbeOutcome::CouldNotTell => {
+            return ArchCliProbe { cli: Tri::Unknown, contract: None, detail: None }
+        }
+        ProbeOutcome::Ran { stdout, stderr, .. } => (stdout, stderr),
+    };
+    if let Ok(env) = parse_envelope(stdout) {
+        if env.ok {
+            if let Some(c) = env.data.get("contract").and_then(|v| v.as_str()) {
+                let c = c.trim();
+                if !c.is_empty() {
+                    return ArchCliProbe { cli: Tri::Yes, contract: Some(c.to_string()), detail: None };
+                }
+            }
+        }
+    }
+    // Unparseable, `ok:false`, or an `ok:true` envelope with no readable
+    // `contract` — none of these prove the binary is ABSENT.
+    ArchCliProbe { cli: Tri::Unknown, contract: None, detail: first_diagnostic_line(stdout, stderr) }
+}
+
+/// Classify the titles-count probe: a bare non-negative integer on stdout at
+/// exit 0, nothing else. `None` (could-not-tell) covers a killed/failed spawn
+/// AND stdout that is not a clean number — [`derive_arch`] turns that into
+/// `Unknown` at [`SetupStep::Titles`], never into "zero titles".
+pub fn classify_arch_titles(outcome: &ProbeOutcome) -> Option<usize> {
+    match outcome {
+        ProbeOutcome::Ran { code, stdout, .. } if *code == Some(0) => stdout.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 /// What the ARCH chain needs to know, in chain order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArchFacts {
@@ -854,7 +931,10 @@ pub struct ArchFacts {
     pub dockerd: Tri,
     /// Is the Rust `dml-wow` binary present and runnable inside the distro?
     pub cli: Tri,
-    pub cli_version: Option<String>,
+    /// The wire contract the binary reported — see [`EXPECTED_ARCH_CLI_CONTRACT`].
+    /// Despite the name overlap with the bash chain's `cli_version`, this is
+    /// never a semver string.
+    pub cli_contract: Option<String>,
     pub titles: Option<usize>,
     /// The verbatim words of whichever probe went dark.
     pub detail: Option<String>,
@@ -879,7 +959,10 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
         wsl: f.wsl,
         distro: f.distro,
         cli: f.cli,
-        cli_version: f.cli_version.clone(),
+        // `Probes` is the one shared diagnostics shape across all three
+        // chains; on THIS chain the string it carries is a wire-contract
+        // marker, never a semver.
+        cli_version: f.cli_contract.clone(),
         titles: f.titles,
         detail: f.detail.clone(),
     };
@@ -920,10 +1003,10 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
         Tri::No => return settled(SetupState::NoCli),
         Tri::Yes => {}
     }
-    match f.cli_version.as_deref() {
-        // A `Yes` with no version means a classifier broke its own contract.
+    match f.cli_contract.as_deref() {
+        // A `Yes` with no contract means a classifier broke its own contract.
         None => return unknown_at(SetupStep::Cli),
-        Some(v) if !cli_version_matches(v) => return settled(SetupState::CliOutdated),
+        Some(c) if c != EXPECTED_ARCH_CLI_CONTRACT => return settled(SetupState::CliOutdated),
         Some(_) => {}
     }
     match f.titles {
@@ -941,6 +1024,44 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
 /// Every in-distro call uses `--exec`. The bare `--` form runs a shell inside
 /// the distro, which splits on `;`, expands `$HOME` and globs (verified
 /// 2026-07-28).
+/// Shell one-liner for the titles probe: count subdirectories of `$HOME/games`
+/// that carry one of the four canonical compose filenames — the same test
+/// [`crate::compose`]'s own title-resolution uses, via [`COMPOSE_FILE_CANDIDATES`]
+/// (never retyped here).
+///
+/// `dml-wow` is a per-title CLI fixed to one already-installed title BY
+/// DESIGN — there is no `games list` subcommand and there will not be one in
+/// this shape (ruled 2026-08-04) — so "how many titles are installed" has no
+/// CLI question to ask at all. The games directory itself is the only source
+/// of truth left, and this reads it the same way a human would: is there a
+/// compose file in there.
+///
+/// Uses `$HOME`, NOT `~`. This script is handed to `sh -c` explicitly as the
+/// invoked PROGRAM (see [`crate::distro`]'s first-boot steps for the same
+/// pattern) — `--exec` itself does no shell parsing, so a bare `~` in an argv
+/// element that never reaches a shell would not expand at all. Once `sh -c`
+/// is the thing being invoked, tilde expansion becomes a real shell feature
+/// again, but `$HOME` is used anyway: it is unambiguous in every quoting
+/// context this string passes through, whereas `~` only expands unquoted and
+/// only at the start of a word, which is one extra way to get this wrong for
+/// free.
+///
+/// A missing/empty `~/games` is not an error case that needs handling: the
+/// glob simply matches nothing (POSIX `sh` leaves an unmatched glob as a
+/// literal string, which then fails every `-f` test), so the loop body never
+/// runs and the count is honestly `0` — no titles installed, not a probe
+/// failure.
+fn titles_count_script() -> String {
+    let checks = COMPOSE_FILE_CANDIDATES
+        .iter()
+        .map(|name| format!(r#"[ -f "${{d}}{name}" ]"#))
+        .collect::<Vec<_>>()
+        .join(" || ");
+    format!(
+        "n=0; for d in \"$HOME\"/games/*/; do if {checks}; then n=$((n+1)); fi; done; echo \"$n\""
+    )
+}
+
 pub fn probe_arch_with(
     distro: &str,
     user: &str,
@@ -952,7 +1073,7 @@ pub fn probe_arch_with(
         distro: wsl.distro,
         dockerd: Tri::Unknown,
         cli: Tri::Unknown,
-        cli_version: None,
+        cli_contract: None,
         titles: None,
         detail: wsl.detail,
     };
@@ -964,7 +1085,13 @@ pub fn probe_arch_with(
         argv.extend(systemd_is_active_argv());
         let out = run(&argv, ProbeBudget::ColdStart);
         facts.dockerd = match &out {
-            ProbeOutcome::ProgramMissing => Tri::No,
+            // wsl.exe itself failing to spawn a SECOND time (Windows Update
+            // replacing it mid-session, AV interference, anything that made
+            // the very first `--list --quiet` call answer but this one not)
+            // says nothing about dockerd. Reading it as "stopped" would offer
+            // a "start the container engine" repair that predictably does
+            // nothing on a machine where the real problem is wsl.exe.
+            ProbeOutcome::ProgramMissing => Tri::Unknown,
             ProbeOutcome::CouldNotTell => Tri::Unknown,
             ProbeOutcome::Ran { code, .. } => {
                 if *code == Some(0) {
@@ -980,24 +1107,31 @@ pub fn probe_arch_with(
     }
 
     if facts.dockerd == Tri::Yes {
-        let cli = classify_cli_version(&run(
-            &["-d", distro, "-u", user, "--exec", "dml-wow", "version", "--json"],
+        // No `--json`: `dml-wow version` takes no such flag (clap rejects an
+        // argument it does not define) and emits its envelope unconditionally
+        // either way — verified live against the real binary, 2026-08-04.
+        let cli = classify_arch_cli(&run(
+            &["-d", distro, "-u", user, "--exec", "dml-wow", "version"],
             ProbeBudget::Warm,
         ));
         facts.cli = cli.cli;
-        facts.cli_version = cli.version;
+        facts.cli_contract = cli.contract;
         if cli.detail.is_some() {
             facts.detail = cli.detail;
         }
 
-        let usable =
-            facts.cli == Tri::Yes && facts.cli_version.as_deref().is_some_and(cli_version_matches);
+        // Only ask a binary we can actually speak to. A binary reporting a
+        // DIFFERENT contract is already a settled CliOutdated — asking it for
+        // titles risks parsing output in a shape this launcher does not know.
+        let usable = facts.cli == Tri::Yes
+            && facts.cli_contract.as_deref() == Some(EXPECTED_ARCH_CLI_CONTRACT);
         if usable {
+            let script = titles_count_script();
             let out = run(
-                &["-d", distro, "-u", user, "--exec", "dml-wow", "games", "list", "--json"],
+                &["-d", distro, "-u", user, "--exec", "sh", "-c", &script],
                 ProbeBudget::Warm,
             );
-            facts.titles = classify_titles(&out);
+            facts.titles = classify_arch_titles(&out);
             if facts.titles.is_none() {
                 facts.detail = out.detail();
             }
@@ -2192,9 +2326,27 @@ dml v2.6.0
             distro: Tri::Yes,
             dockerd: Tri::Yes,
             cli: Tri::Yes,
-            cli_version: Some(EXPECTED_CLI_VERSION.to_string()),
+            cli_contract: Some(EXPECTED_ARCH_CLI_CONTRACT.to_string()),
             titles: Some(1),
             detail: None,
+        }
+    }
+
+    /// A fake reply for `probe_arch_with` that answers every real probe of
+    /// the chain correctly, keyed on distinguishing argv elements. `titles`
+    /// controls the titles-probe (`sh -c ...`) reply.
+    fn arch_happy_run(titles: usize) -> impl FnMut(&[&str], ProbeBudget) -> ProbeOutcome {
+        move |args, _| {
+            if args.first().copied() == Some("--list") {
+                ran(0, "dml-arch\n")
+            } else if args.iter().any(|a| *a == "is-active") {
+                ran(0, "")
+            } else if args.iter().any(|a| *a == "version") {
+                ran(0, &format!(r#"{{"ok":true,"data":{{"contract":"{EXPECTED_ARCH_CLI_CONTRACT}"}}}}"#))
+            } else {
+                // the titles probe: `sh -c '<script>'`
+                ran(0, &format!("{titles}\n"))
+            }
         }
     }
 
@@ -2217,7 +2369,7 @@ dml v2.6.0
         let no_cli = ArchFacts { cli: Tri::No, ..arch_ok() };
         assert_eq!(derive_arch(DISTRO, no_cli).state, SetupState::NoCli);
 
-        let old_cli = ArchFacts { cli_version: Some("2.6.0".to_string()), ..arch_ok() };
+        let old_cli = ArchFacts { cli_contract: Some("dml-json-v2".to_string()), ..arch_ok() };
         assert_eq!(derive_arch(DISTRO, old_cli).state, SetupState::CliOutdated);
 
         let no_titles = ArchFacts { titles: Some(0), ..arch_ok() };
@@ -2269,17 +2421,192 @@ dml v2.6.0
         let mut asked: Vec<Vec<String>> = Vec::new();
         let _ = probe_arch_with(DISTRO, USER, |args, _| {
             asked.push(args.iter().map(|s| s.to_string()).collect());
-            match args {
-                a if a.contains(&"--list") => ran(0, "dml-arch\n"),
-                a if a.contains(&"is-active") => ran(0, ""),
-                a if a.contains(&"version") => ran(0, &format!("{{\"ok\":true,\"data\":{{\"version\":\"{EXPECTED_CLI_VERSION}\"}}}}")),
-                _ => ran(0, "{\"ok\":true,\"data\":{\"games\":[]}}"),
-            }
+            arch_happy_run(0)(args, ProbeBudget::Warm)
         });
         for argv in asked.iter().filter(|a| a.contains(&"-d".to_string())) {
             assert!(argv.iter().any(|a| a == "--exec"), "shell form in {argv:?}");
             assert!(!argv.iter().any(|a| a == "--"), "shell form in {argv:?}");
         }
+        // The titles probe specifically: `sh -c` invoked EXPLICITLY as the
+        // program (distro.rs's first-boot-step pattern), not a bare script
+        // handed to --exec (which would try to exec a multi-word string as a
+        // single binary name and fail).
+        let titles_call = asked.iter().find(|a| a.iter().any(|e| e == "sh")).expect("titles probe never ran");
+        assert_eq!(titles_call[4], "--exec", "{titles_call:?}");
+        assert_eq!(titles_call[5], "sh", "{titles_call:?}");
+        assert_eq!(titles_call[6], "-c", "{titles_call:?}");
+    }
+
+    /// CRITICAL 1 (fix round 1). `dml-wow version` takes no `--json` — clap
+    /// rejects an argument it does not define, and the binary emits its
+    /// envelope unconditionally either way (verified live 2026-08-04:
+    /// `dml-wow.exe version --json` -> `error: unexpected argument '--json'
+    /// found`). Passing it would make the version probe read that clap error
+    /// as CouldNotTell forever, on every machine, however healthy.
+    #[test]
+    fn the_version_probe_passes_no_json_flag_the_binary_rejects() {
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let _ = probe_arch_with(DISTRO, USER, |args, budget| {
+            asked.push(args.iter().map(|s| s.to_string()).collect());
+            arch_happy_run(1)(args, budget)
+        });
+        let version_call = asked
+            .iter()
+            .find(|a| a.iter().any(|e| e == "version"))
+            .expect("version probe never ran");
+        assert_eq!(
+            version_call,
+            &vec!["-d", DISTRO, "-u", USER, "--exec", "dml-wow", "version"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            "must not carry --json: {version_call:?}"
+        );
+    }
+
+    // -- classify_arch_cli ----------------------------------------------------
+
+    #[test]
+    fn arch_cli_matching_contract_is_yes() {
+        let got = classify_arch_cli(&ran(
+            0,
+            &format!(r#"{{"ok":true,"data":{{"contract":"{EXPECTED_ARCH_CLI_CONTRACT}","version":"0.1.0"}}}}"#),
+        ));
+        assert_eq!(
+            got,
+            ArchCliProbe {
+                cli: Tri::Yes,
+                contract: Some(EXPECTED_ARCH_CLI_CONTRACT.to_string()),
+                detail: None,
+            }
+        );
+    }
+
+    /// CRITICAL 2 (fix round 1). A binary speaking a DIFFERENT contract is a
+    /// real, actionable answer -- `Yes` with that contract, so `derive_arch`
+    /// settles on `CliOutdated` rather than a bare could-not-tell. This is
+    /// deliberately its OWN classifier: `classify_cli_version` belongs to the
+    /// bash chain's `version`-field contract and must keep working for it.
+    #[test]
+    fn arch_cli_mismatched_contract_is_yes_with_that_contract() {
+        let got = classify_arch_cli(&ran(0, r#"{"ok":true,"data":{"contract":"dml-json-v2"}}"#));
+        assert_eq!(
+            got,
+            ArchCliProbe { cli: Tri::Yes, contract: Some("dml-json-v2".to_string()), detail: None }
+        );
+    }
+
+    #[test]
+    fn arch_cli_program_missing_is_a_definitive_no() {
+        // The one genuine negative: "install dml-wow" is a real repair here.
+        assert_eq!(
+            classify_arch_cli(&ProbeOutcome::ProgramMissing),
+            ArchCliProbe { cli: Tri::No, contract: None, detail: None }
+        );
+    }
+
+    #[test]
+    fn arch_cli_unreadable_answers_are_unknown_not_no() {
+        for outcome in [
+            ProbeOutcome::CouldNotTell,
+            ran(1, r#"{"ok":false,"error":{"code":"X","message":"y"}}"#),
+            ran(0, "not json at all"),
+            // ok:true but no contract field -- a shape this classifier does
+            // not recognise, not proof of absence.
+            ran(0, r#"{"ok":true,"data":{"version":"0.1.0"}}"#),
+        ] {
+            let got = classify_arch_cli(&outcome);
+            assert_eq!(got.cli, Tri::Unknown, "{outcome:?}");
+            assert_eq!(got.contract, None, "{outcome:?}");
+        }
+    }
+
+    // -- classify_arch_titles --------------------------------------------------
+
+    #[test]
+    fn arch_titles_counted_from_a_bare_stdout_number() {
+        assert_eq!(classify_arch_titles(&ran(0, "3\n")), Some(3));
+        assert_eq!(classify_arch_titles(&ran(0, "0\n")), Some(0));
+        assert_eq!(classify_arch_titles(&ran(0, "0")), Some(0));
+    }
+
+    #[test]
+    fn arch_titles_could_not_tell_stays_none() {
+        assert_eq!(classify_arch_titles(&ProbeOutcome::CouldNotTell), None);
+        assert_eq!(classify_arch_titles(&ProbeOutcome::ProgramMissing), None);
+        assert_eq!(classify_arch_titles(&ran(0, "not a number")), None);
+        assert_eq!(classify_arch_titles(&ran(1, "0")), None);
+    }
+
+    /// CRITICAL 3 (fix round 1). There is no `games list` on `dml-wow` -- it
+    /// is a per-title CLI by design. Titles are counted by a bounded shell
+    /// probe reading `$HOME/games` inside the distro, reusing
+    /// `COMPOSE_FILE_CANDIDATES` rather than retyping the four names.
+    #[test]
+    fn chain_counts_titles_via_a_bounded_shell_probe_reusing_the_compose_candidate_list() {
+        let mut titles_script: Option<String> = None;
+        let st = probe_arch_with(DISTRO, USER, |args, budget| {
+            if args.first().copied() == Some("--list") {
+                return ran(0, "dml-arch\n");
+            }
+            if args.iter().any(|a| *a == "is-active") {
+                return ran(0, "");
+            }
+            if args.iter().any(|a| *a == "version") {
+                return ran(0, &format!(r#"{{"ok":true,"data":{{"contract":"{EXPECTED_ARCH_CLI_CONTRACT}"}}}}"#));
+            }
+            // The titles probe.
+            titles_script = Some(args[7].to_string());
+            arch_happy_run(2)(args, budget)
+        });
+        assert_eq!(st.state, SetupState::Ready);
+        assert_eq!(st.probes.titles, Some(2));
+
+        let script = titles_script.expect("titles probe never ran");
+        for name in COMPOSE_FILE_CANDIDATES {
+            assert!(script.contains(name), "script missing {name}: {script}");
+        }
+        // `$HOME`, never a bare `~`: `sh -c` is invoked explicitly as the
+        // program (a real shell), but `~` only expands unquoted at the start
+        // of a word, which is one more way to get this wrong for free.
+        assert!(script.contains("$HOME"), "script must resolve the games dir via $HOME: {script}");
+        assert!(!script.contains('~'), "script must not rely on tilde expansion: {script}");
+    }
+
+    #[test]
+    fn a_binary_speaking_a_different_contract_settles_as_outdated_not_unknown() {
+        let st = probe_arch_with(DISTRO, USER, |args, _| {
+            if args.first().copied() == Some("--list") {
+                ran(0, "dml-arch\n")
+            } else if args.iter().any(|a| *a == "is-active") {
+                ran(0, "")
+            } else if args.iter().any(|a| *a == "version") {
+                ran(0, r#"{"ok":true,"data":{"contract":"dml-json-v2"}}"#)
+            } else {
+                ran(0, "0\n")
+            }
+        });
+        assert_eq!(st.state, SetupState::CliOutdated);
+        assert_eq!(st.probes.cli_version.as_deref(), Some("dml-json-v2"));
+    }
+
+    /// IMPORTANT 4 (fix round 1). `ProbeOutcome::ProgramMissing` on the
+    /// dockerd call means `wsl.exe` itself failed to spawn a second time
+    /// (Windows Update replacing it mid-session, AV interference) -- NOT that
+    /// dockerd is stopped. Reading it as `DockerStopped` offers a "start the
+    /// container engine" repair that predictably does nothing on a machine
+    /// where the real problem is wsl.exe.
+    #[test]
+    fn wsl_exe_vanishing_between_calls_is_unknown_not_a_stopped_dockerd() {
+        let st = probe_arch_with(DISTRO, USER, |args, _| {
+            if args.first().copied() == Some("--list") {
+                ran(0, "dml-arch\n")
+            } else {
+                ProbeOutcome::ProgramMissing
+            }
+        });
+        assert_eq!(st.state, SetupState::Unknown);
+        assert_eq!(st.blocked_at, Some(SetupStep::Engine));
     }
 
 }

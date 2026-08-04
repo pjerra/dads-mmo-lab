@@ -75,7 +75,13 @@ pub fn title_dir_for_id(id: &str) -> PathBuf {
 /// The four canonical compose filenames, in the fixed scan order both
 /// `_has_compose` (`90-main.sh:9-15`) and `_compose_running`
 /// (`90-main.sh:17-24`) use.
-const COMPOSE_FILE_CANDIDATES: [&str; 4] =
+///
+/// `pub(crate)`: the Arch setup chain's titles probe (`setup.rs`) counts
+/// installed titles by the same "does this directory carry one of these four
+/// names" test, run over `~/games` INSIDE the distro (there is no `games
+/// list` on `dml-wow` — it is a per-title CLI). One list, reused, so the two
+/// checks cannot silently drift apart.
+pub(crate) const COMPOSE_FILE_CANDIDATES: [&str; 4] =
     ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
 
 fn has_compose(dir: &Path) -> bool {
