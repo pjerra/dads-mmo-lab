@@ -888,6 +888,43 @@ only bounds a single run; that family check is what bounds the total, and
 without it an exported `DML_SOAP_USER`/`PASS` pair (which outranks the file the
 feature writes) turned every launcher start into one more GM3 account.
 
+## Round 5.5 — MULTI-TITLE, and Turtle WoW (user, 2026-08-04)
+
+Filed the day it was asked, per the standing rule that an approved ask living
+only in a conversation is invisible to git, to the roadmap, and to any audit.
+Both items came up while deciding how the Arch backend's setup chain should ask
+"is a title installed?" — the answer depends on these, so they are recorded
+rather than remembered.
+
+* **Every WoW server installed at once, start whichever you want.** Today the
+  Rust `dml-wow` binary is deliberately a PER-TITLE CLI, "fixed to one already
+  installed title" — it has `games-remove` but no `games list`, and no notion of
+  switching between titles. The bash CLI's `games` namespace is the only
+  multi-title surface that exists. Making several servers co-resident needs
+  three things that do not exist yet:
+  - a cross-title lister and selector in the Rust surface (its home is an open
+    question — `dml-wow` is per-title by design, so wedging it in there is
+    probably wrong);
+  - per-install container names. The `ac-*` `container_name`s are global to the
+    docker ENGINE, which is why `INSTALL_STACK_CONFLICT` exists and why exactly
+    one stack can run per PC today. This is already a recorded follow-up from
+    `install_native.rs`; multi-title makes it a REQUIREMENT rather than a
+    nicety.
+  - port allocation. 3724 / 8085 / 7878 are refused when taken (`stack_port_refusal`),
+    so co-resident stacks need distinct published ports or a "only one runs at a
+    time" rule made explicit in the UI.
+* **Turtle WoW** as a title. In production upstream as of 2026-08-04. Not
+  AzerothCore — it is its own server core with its own client, so it does not
+  reuse the WotLK installer, the playerbots module, or the AC-shaped compose
+  trio. Treat it as a new title with its own installer and its own capability
+  matrix, in the same family as the Vanilla/TBC work waiting on the
+  `.sh`-in-a-distro runner (B4b) — which the Arch backend solves, since that
+  backend IS an Arch box with systemd and passwordless sudo.
+
+Neither item is in the v0.1.0 cut. Both are why the Arch setup chain answers the
+"is a title installed?" question by looking at the games directory rather than by
+calling a `games list` that would have to be invented in the wrong place.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
