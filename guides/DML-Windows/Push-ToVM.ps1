@@ -29,6 +29,13 @@
     Release this is the only way to get it onto a clean machine. Skipped silently
     when not supplied.
 
+.PARAMETER LauncherUrl
+    Download the launcher installer from here instead of copying a local file.
+    Exists because the VM host and the machine that BUILDS the launcher are
+    routinely different computers, and moving 7 MB between them by hand is the
+    silliest possible reason for a gate run to stall. Point it at a GitHub
+    Release asset once one exists.
+
 .PARAMETER Branch
     Repo branch to fetch from. Defaults to rust-main, the integration line.
 
@@ -46,6 +53,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$VMName,
     [string]$LauncherSetup,
+    [string]$LauncherUrl,
     [string]$Branch = 'rust-main',
     [string]$DestDir = 'C:\dml'
 )
@@ -132,7 +140,18 @@ $files = @(
     @{ Src = $installer; Name = 'Install-DML-Native.ps1' },
     @{ Src = $runner;    Name = 'Run-Gate.ps1' }
 )
-if ($LauncherSetup) {
+if ($LauncherUrl) {
+    #Downloaded HERE, on the host, then pushed over the VM bus -- so the guest
+    #needs no network of its own and the file never has to touch a third
+    #machine.
+    Step "Downloading the launcher"
+    $lname = [IO.Path]::GetFileName(([Uri]$LauncherUrl).AbsolutePath)
+    if (-not $lname) { $lname = 'DML-Launcher-Setup.exe' }
+    $lpath = Join-Path $staging $lname
+    Invoke-WebRequest -Uri $LauncherUrl -OutFile $lpath -UseBasicParsing
+    Say ("  {0:N0} bytes" -f (Get-Item $lpath).Length) 'Green'
+    $files += @{ Src = $lpath; Name = $lname }
+} elseif ($LauncherSetup) {
     if (-not (Test-Path -LiteralPath $LauncherSetup)) { throw "LauncherSetup not found: $LauncherSetup" }
     $files += @{ Src = $LauncherSetup; Name = Split-Path $LauncherSetup -Leaf }
 }
@@ -152,7 +171,7 @@ Write-Host ''
 Say '  Done. In the VM, open PowerShell as Administrator and run:' 'Green'
 Say "      $DestDir\Run-Gate.ps1" 'White'
 Write-Host ''
-if (-not $LauncherSetup) {
+if (-not $LauncherSetup -and -not $LauncherUrl) {
     #Stated every time, because it is the step that ends the gate one short of a
     #server and there is no release to point at yet.
     Say '  NOTE: the launcher itself was NOT pushed. Install-DML-Native.ps1 prepares' 'Yellow'
