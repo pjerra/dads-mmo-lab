@@ -452,26 +452,13 @@ mod tests {
     /// that is where it was found. Asserts elapsed >= the bound as well, so a
     /// spawn that never ran cannot satisfy it.
     ///
-    /// IGNORED, and the reason is a result rather than a convenience: this test
-    /// is FLAKY, which means the fix above is incomplete. It passed twice
-    /// standalone (0.63s) and then took 605s inside a full `cargo test
-    /// --workspace` — same binary, same machine, under parallel load.
-    ///
-    /// What that rules out matters. `out.is_none()` PASSED in the slow run, so
-    /// the deadline did fire and the function did return `TimedOut`; the 605s
-    /// was therefore spent BEFORE the early return this fix added, not in the
-    /// join it skips. That points at `child.kill()` / `child.wait()` inside the
-    /// poll loop — a kill whose result is discarded (`let _ =`) followed by a
-    /// wait that then blocks until `cmd.exe` ends on its own, which is when the
-    /// grandchild finishes.
-    ///
-    /// So: the join was A cause and is fixed; it was not the only one. Left
-    /// here rather than deleted because it is the only executable statement of
-    /// the problem — run it with `--ignored` when picking this up. Not left
-    /// enabled because a 10-minute flaky failure in the default suite is worse
-    /// than no test: it trains people to ignore red.
+    /// Enabled 2026-08-04. The original fix returned early instead of joining
+    /// the reader threads, which was A cause; the remaining one was the
+    /// `child.kill()` / `child.wait()` pair inside the poll loop — a kill whose
+    /// result is discarded followed by a wait that blocks until `cmd.exe` ends
+    /// on its own. The reap now happens on a detached thread, so the caller's
+    /// deadline is the caller's deadline.
     #[cfg(windows)]
-    #[ignore = "flaky: the bound is still not fully enforced — see the doc comment"]
     #[test]
     fn a_deadline_bounds_the_call_even_when_a_grandchild_holds_the_pipes() {
         let mut cmd = Command::new("cmd");
