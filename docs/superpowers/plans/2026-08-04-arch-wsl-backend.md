@@ -1873,7 +1873,25 @@ riskiest minute of a stranger's first run.
 
 - [ ] **Step 3: Run the first-boot sequence**
 
-Run each `distro::first_boot_steps("dml")` entry in order, as root:
+Run each `distro::first_boot_steps("dml-arch-test", "dml")` entry in order, as
+root.
+
+**CORRECTED 2026-08-04 from the gate log** — the original listing here was wrong
+in three ways and the operator had to fix all three live. Every correction below
+is a real failure with a real message, not a tidy-up:
+
+* `pacman-key --init` / `--populate archlinux` were MISSING. A fresh Arch WSL
+  rootfs has no initialized keyring, so the first `pacman -Syu` of any kind
+  fails: `warning: Public keyring not found; have you run 'pacman-key --init'?`
+  / `error: required key missing from keyring`.
+* `sudo` was missing from the package list, and the sudoers write came BEFORE
+  the package install. `/etc/sudoers.d` does not exist on a fresh image until
+  the `sudo` package creates it (`sudo` is `Required By: base-devel`, not
+  `base`), so the write died with `sh: line 1: /etc/sudoers.d/99-dml: No such
+  file or directory`.
+* The restart after `/etc/wsl.conf` is a real step of the sequence, not an
+  aside — systemd only becomes PID 1 on the NEXT boot, so `systemctl enable
+  --now docker` cannot work in the boot that wrote the file.
 
 ```
 wsl -d dml-arch-test -u root --exec sh -c "printf %s '[boot]
@@ -1881,9 +1899,10 @@ systemd=true
 ' > /etc/wsl.conf"
 wsl --terminate dml-arch-test
 wsl -d dml-arch-test -u root --exec useradd -m -G wheel dml
-wsl -d dml-arch-test -u root --exec sh -c "printf %s 'dml ALL=(ALL) NOPASSWD: ALL
+wsl -d dml-arch-test -u root --exec sh -c "pacman-key --init && pacman-key --populate archlinux"
+wsl -d dml-arch-test -u root --exec pacman -Syu --noconfirm --needed docker docker-compose docker-buildx git sudo
+wsl -d dml-arch-test -u root --exec sh -c "mkdir -p /etc/sudoers.d && printf %s 'dml ALL=(ALL) NOPASSWD: ALL
 ' > /etc/sudoers.d/99-dml && chmod 0440 /etc/sudoers.d/99-dml"
-wsl -d dml-arch-test -u root --exec pacman -Syu --noconfirm --needed docker docker-compose docker-buildx git
 wsl -d dml-arch-test -u root --exec usermod -aG docker dml
 wsl -d dml-arch-test -u root --exec systemctl enable --now docker
 wsl --manage dml-arch-test --set-default-user dml
@@ -1911,15 +1930,31 @@ recording it is how that risk stays visible.
 
 - [ ] **Step 5: Deploy the binary and round-trip the chain**
 
+**CORRECTED 2026-08-04 from the gate log** — two more things the original
+listing got wrong:
+
+* **`--json` does not exist on `dml-wow`.** Its clap parser rejects an argument
+  it does not define (`error: unexpected argument '--json' found`), and the
+  binary emits its envelope unconditionally anyway.
+* **There is no `games list` subcommand.** `dml-wow` is a per-title CLI fixed to
+  one already-installed title by design (ruled 2026-08-04), so the titles count
+  comes from a shell probe of `$HOME/games` — the same one
+  `setup::titles_count_script` builds.
+
+A third correction is environmental, not a code bug: run these **from
+PowerShell**, or set `MSYS_NO_PATHCONV=1` first. Git Bash rewrites the `/mnt/c/...`
+argument into a Windows path before `wsl.exe` ever sees it, and the install
+fails with `install: cannot stat 'C:/Program Files/Git/mnt/c/...'`.
+
 ```
 wsl -d dml-arch-test -u root --exec install -m 0755 /mnt/c/Users/perzi/dads-mmo-lab/target/release/dml-wow /usr/local/bin/dml-wow
-wsl -d dml-arch-test -u dml --exec dml-wow version --json
-wsl -d dml-arch-test -u dml --exec dml-wow games list --json
+wsl -d dml-arch-test -u dml --exec dml-wow version
+wsl -d dml-arch-test -u dml --exec sh -c 'n=0; for d in "$HOME"/games/*/; do if [ -f "${d}docker-compose.yml" ] || [ -f "${d}docker-compose.yaml" ] || [ -f "${d}compose.yml" ] || [ -f "${d}compose.yaml" ]; then n=$((n+1)); fi; done; echo "$n"'
 ```
 
-Expected: two JSON envelopes. `games list` must report zero titles without
-erroring — that is `SetupState::NoTitles`, the correct end state for a
-provisioned distro with no server yet.
+Expected: a `dml-json-v3` envelope from `version`, and a bare `0` from the
+titles probe. That combination is `SetupState::NoTitles`, the correct end state
+for a provisioned distro with no server yet.
 
 - [ ] **Step 6: Write the run log and commit it**
 

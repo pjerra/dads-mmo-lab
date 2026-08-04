@@ -67,6 +67,34 @@ The user also wants `dml-arch` **retired**. Docker Desktop's own distro cannot
 host the title installers (Alpine, no sudo, no systemd, rebuilt on upgrade), so
 native IS the retirement path — there is no shortcut through the existing distro.
 
+> **AMENDED 2026-08-04 (user): the distro is the FOUNDATION again, not the thing
+> being retired.** Branch `feat/arch-wsl-backend` moves the launcher off Docker
+> Desktop and onto `dockerd` running inside a `dml-arch` WSL distro the launcher
+> creates itself, with the Rust `dml-wow` binary running INSIDE that distro. That
+> reverses the retirement above: `dml-arch` stops being legacy and becomes the
+> supported backend, and Docker Desktop becomes the kept-working fallback for a
+> user who already has a server there.
+>
+> **Status, stated honestly.** Nine tasks landed and each passed its own review;
+> `crates/dml-core`'s `distro`, `setup` (Arch chain), `backend::Arch` and
+> `DmlRunner::arch()` all exist and are tested, and Task 10's live gate
+> provisioned a genuinely fresh `dml-arch-test` from nothing in ≈3m43s
+> (`docs/superpowers/plans/2026-08-04-arch-wsl-backend-gate.md`).
+> **The launcher wiring is NOT done.** Nothing in `launcher/` calls
+> `probe_arch_with`, and the call sites still speak the bash CLI's vocabulary
+> (`games list`, `wow server-detail`, an unconditional `--json`), none of which
+> `dml-wow-cli` defines.
+>
+> **So the default deliberately still points at the old backend.** `DML_BACKEND`
+> unset, empty or unrecognised resolves to `Wsl` (the bash CLI in the distro),
+> auto-detection can never choose `Arch`, and `arch` is an explicit opt-in only.
+> Flipping it before the call sites are ported would replace a working user's
+> status card with "unrecognized subcommand 'games'". The flip happens in the
+> next plan, in the same change that teaches the launcher that vocabulary.
+>
+> This does not move any Phase B item: native stays the v0.1.0 backend for the
+> beta. The Arch backend is the road after it.
+
 ---
 
 ## 🟢 PHASE A — the three sharp edges — ✅ ALL THREE RESOLVED
