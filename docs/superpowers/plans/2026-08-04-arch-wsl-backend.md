@@ -812,56 +812,91 @@ server wherever the process happened to start.
 - Test: `crates/dml-core/src/compose.rs` `mod tests`
 
 **Interfaces:**
-- Consumes: `dml_core::util` (the existing `~/.dml` home resolution).
-- Produces: `games_dir_from_env() -> PathBuf` — unchanged signature, new
-  fallback. `DML_GAMES_DIR` remains the override seam every test suite uses.
+- Consumes: nothing from earlier tasks.
+- Produces: `compose::games_dir_from(env_value: Option<OsString>, home:
+  Option<OsString>) -> PathBuf` (new, pure); `games_dir_from_env() -> PathBuf`
+  keeps its signature and becomes a thin reader that calls it. `DML_GAMES_DIR`
+  remains the override seam every test suite uses.
 
-- [ ] **Step 1: Write the failing test**
+**Why a pure core:** the decision is worth testing on both platforms, and the
+only alternative is `std::env::set_var` inside a test — which mutates
+process-global state that every other test in the same binary shares. Cargo
+runs tests in parallel by default, so that shape is a flake generator, and it
+would flake in the one direction that looks like a real failure.
+
+- [ ] **Step 1: Write the failing tests**
 
 Add to `mod tests` in `crates/dml-core/src/compose.rs`:
 
 ```rust
+    use std::ffi::OsString;
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
     /// The override seam every parity/bats/integration suite injects.
     #[test]
-    fn the_env_var_still_wins() {
+    fn the_env_var_wins_over_everything() {
         // Forward slashes work on BOTH platforms; a backslash literal would be
         // Windows-only (test-portability rule).
-        std::env::set_var("DML_GAMES_DIR", "/tmp/dml-games-test");
-        assert_eq!(games_dir_from_env(), PathBuf::from("/tmp/dml-games-test"));
-        std::env::remove_var("DML_GAMES_DIR");
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), os("/home/dml")),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+    }
+
+    /// Empty is not a value. `:-`-style "empty means unset" has bitten this
+    /// repo before (the tailscale stub, 2026-07-29), so pin the direction.
+    #[test]
+    fn an_empty_env_var_falls_through_rather_than_resolving_to_nothing() {
+        assert_eq!(games_dir_from(os(""), os("/home/dml")), PathBuf::from("/home/dml/games"));
     }
 
     /// Inside the distro nothing exports DML_GAMES_DIR, so the fallback IS the
     /// answer. `.` would put a server wherever the process happened to start.
-    #[cfg(unix)]
     #[test]
-    fn the_unix_fallback_is_the_home_games_dir_not_the_cwd() {
-        std::env::remove_var("DML_GAMES_DIR");
-        let got = games_dir_from_env();
-        assert!(got.is_absolute(), "must not be cwd-relative, got {got:?}");
-        assert!(
-            got.ends_with("games"),
-            "the spec fixes the server directory at ~/games, got {got:?}"
-        );
+    fn the_fallback_is_the_home_games_dir_not_the_cwd() {
+        let got = games_dir_from(None, os("/home/dml"));
+        assert_eq!(got, PathBuf::from("/home/dml/games"));
+        assert_ne!(got, PathBuf::from("."), "a cwd-relative default is the bug this fixes");
+    }
+
+    /// No env var and no home is the one case with nothing to go on. `.` is
+    /// the honest answer there — inventing a path would be worse.
+    #[test]
+    fn no_home_and_no_override_is_still_the_cwd() {
+        assert_eq!(games_dir_from(None, None), PathBuf::from("."));
+        assert_eq!(games_dir_from(None, os("")), PathBuf::from("."));
     }
 ```
 
-- [ ] **Step 2: Run the test to confirm it fails**
+- [ ] **Step 2: Run the tests to confirm they fail**
 
 ```
 cargo test -p dml-core --lib compose::
 ```
 
-Expected on Linux: FAIL — `must not be cwd-relative, got "."`. On Windows the
-`#[cfg(unix)]` test does not compile in; run Step 5 to check it.
+Expected: FAIL to compile — `cannot find function 'games_dir_from'`.
 
 - [ ] **Step 3: Implement**
 
 Replace `crates/dml-core/src/compose.rs:16-21` with:
 
 ```rust
-pub fn games_dir_from_env() -> PathBuf {
-    if let Some(dir) = std::env::var_os("DML_GAMES_DIR").filter(|s| !s.is_empty()) {
+/// The pure decision behind [`games_dir_from_env`].
+///
+/// Split out so both branches are testable on both platforms without
+/// `std::env::set_var`, which mutates process-global state every other test in
+/// the binary shares — and cargo runs them in parallel.
+///
+/// Empty is NOT a value: an empty `DML_GAMES_DIR` falls through to the home
+/// default rather than resolving to nothing. Treating empty as set is the
+/// `${VAR:-default}` trap this repo hit on 2026-07-29, where a test that set a
+/// stub's value empty to mean "printed nothing" silently got the default back
+/// and proved nothing.
+pub fn games_dir_from(env_value: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = env_value.filter(|s| !s.is_empty()) {
         return PathBuf::from(dir);
     }
     // Inside the distro nothing exports DML_GAMES_DIR — the binary is spawned
@@ -870,11 +905,17 @@ pub fn games_dir_from_env() -> PathBuf {
     // start. The spec fixes the server directory at ~/games (Linux ext4, not
     // /mnt/c: the AzerothCore compile is thousands of small-file writes and
     // drvfs is far slower for that).
-    #[cfg(unix)]
-    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+    if let Some(home) = home.filter(|s| !s.is_empty()) {
         return PathBuf::from(home).join("games");
     }
     PathBuf::from(".")
+}
+
+pub fn games_dir_from_env() -> PathBuf {
+    // `HOME` is the distro's own variable. On Windows it is usually absent,
+    // which is correct: there the launcher exports DML_GAMES_DIR and the home
+    // branch must not fire.
+    games_dir_from(std::env::var_os("DML_GAMES_DIR"), std::env::var_os("HOME"))
 }
 ```
 
@@ -884,17 +925,17 @@ pub fn games_dir_from_env() -> PathBuf {
 cargo test -p dml-core --lib compose::
 ```
 
-Expected: PASS on both platforms (the unix test is compiled out on Windows).
+Expected: PASS on both platforms — all four tests are platform-independent,
+which is the point of the pure split.
 
-- [ ] **Step 5: Verify on Linux, where it matters**
+- [ ] **Step 5: Confirm no caller regressed**
 
 ```
-wsl -d dml-arch -u dml --exec sh -c "cd /mnt/c/Users/perzi/dads-mmo-lab && ~/.cargo/bin/cargo test -p dml-core --lib compose:: -- --nocapture"
+cargo test --workspace
 ```
 
-If cargo is not installed in the distro yet, defer this step to Task 10's live
-gate and note it. Do not mark the task done on the Windows result alone — the
-new branch only compiles on unix.
+Expected: PASS. `games_dir_from_env` kept its signature, so this is checking
+that no test anywhere depended on the old `"."` fallback.
 
 - [ ] **Step 6: Commit**
 
@@ -995,12 +1036,21 @@ mod tests {
         );
     }
 
-    /// Every step before the user exists must run as root, and every step that
-    /// only touches the user's own state must not.
+    /// First boot runs as root and CANNOT use sudo: the sudoers drop-in is
+    /// itself one of these steps, so anything invoking `sudo` before it lands
+    /// would prompt for a password on a console nobody is attached to. That is
+    /// the invariant — not the tautology that a hardcoded `root(...)` helper
+    /// returns `as_root: true`.
     #[test]
-    fn the_privileged_steps_are_exactly_the_ones_that_need_privilege() {
+    fn no_first_boot_step_reaches_for_a_sudo_that_does_not_exist_yet() {
         for step in first_boot_steps("dml") {
             assert!(step.as_root, "{} must run as root", step.id);
+            assert!(
+                !step.argv.iter().any(|a| a == "sudo"),
+                "{} invokes sudo, but the sudoers drop-in is step 3 of this very list: {:?}",
+                step.id,
+                step.argv
+            );
         }
     }
 
