@@ -50,20 +50,22 @@ pub fn default_games_dir() -> Option<PathBuf> {
 /// Whether `backend::detect`'s answer for this machine can actually change
 /// depending on what the distro probe says.
 ///
-/// Given `detect`'s three-row table (`distro_usable == Yes` -> `Arch`;
-/// else `native_dir_exists && docker_present` -> `Native`; else -> `Arch`),
-/// the probe's answer only matters when BOTH a native server directory
-/// already exists AND Docker is present: that is the one combination where
-/// `distro_usable == Tri::Yes` overrides what would otherwise be `Native`
-/// ("a user with BOTH a usable distro and a native server gets Arch"). Every
-/// other combination returns `Arch` regardless of whether the probe answers
-/// Yes, No or Unknown, so skipping the probe there costs nothing and saves a
+/// Given `detect`'s table, the probe's answer only matters when Docker is
+/// present AND no native server directory exists yet: that is the one
+/// combination where `Tri::No` ("this PC provably has no distro") picks Native
+/// while `Yes`/`Unknown` keep the WSL default. Without Docker the answer is
+/// always `Wsl`, and with a native server already installed it is always
+/// `Native` — so skipping the probe in those rows costs nothing and saves a
 /// `wsl.exe` spawn before the window is shown.
 ///
 /// Extracted as a pure function so this claim is directly testable without
-/// spawning `wsl.exe` or reaching into `resolve_and_export`.
+/// spawning `wsl.exe` or reaching into `resolve_and_export`, and cross-checked
+/// against `detect` itself by
+/// `distro_probe_matters_agrees_with_detect_itself` — which is what caught the
+/// inversion when the default flipped, and caught it again when it flipped
+/// back (2026-08-04).
 fn distro_probe_matters(native_dir_exists: bool, docker_present: bool) -> bool {
-    native_dir_exists && docker_present
+    docker_present && !native_dir_exists
 }
 
 /// Resolve the backend and the three paths, then export whatever the user has
@@ -121,10 +123,10 @@ pub fn resolve_and_export() {
     //
     // Only asked when it can change `detect`'s answer (see
     // `distro_probe_matters`): in every OTHER combination of
-    // native_dir_exists/docker_present, `detect` returns `Arch` whether the
-    // probe says Yes, No or Unknown, so spawning `wsl.exe` for it would just
-    // be startup latency for a value nothing reads. This runs before the
-    // window is shown, so that matters.
+    // native_dir_exists/docker_present, `detect` settles on one backend
+    // whether the probe says Yes, No or Unknown, so spawning `wsl.exe` for it
+    // would just be startup latency for a value nothing reads. This runs
+    // before the window is shown, so that matters.
     let distro_usable = if distro_probe_matters(native_dir_exists, docker_present) {
         dml_core::setup::distro_registered(&dml_core::setup::SetupProbeEnv::new(
             dml_core::runner::DISTRO,
@@ -141,11 +143,16 @@ pub fn resolve_and_export() {
         docker_present,
         distro_usable,
     );
+    // Round-trips through `from_override`: whatever we export here is what
+    // `backend::selected()` reads back when `AppState` builds its runner. Arch
+    // must therefore export "arch" and NOT "wsl" — collapsing them would mean a
+    // user who opted in via `launcher.json` silently got the bash runner, i.e.
+    // the file setting would be inert. (`detect` never returns Arch, so this
+    // arm is only ever reached from an explicit env or file value.)
     let backend_str = match backend {
         dml_core::backend::Backend::Native => "native",
-        // Arch and Wsl name the same distro and the same daemon; Task 3 is
-        // what makes the exported value differ.
-        dml_core::backend::Backend::Arch | dml_core::backend::Backend::Wsl => "wsl",
+        dml_core::backend::Backend::Arch => "arch",
+        dml_core::backend::Backend::Wsl => "wsl",
     };
 
     // --- yq: default to the path the one-click installer downloads to -----
@@ -232,13 +239,15 @@ mod tests {
     }
 
     #[test]
-    fn distro_probe_matters_only_when_a_native_server_and_docker_are_both_present() {
-        // This is the combination `backend::detect` checks BEFORE falling
-        // through to Arch -- the one row where `distro_usable == Tri::Yes`
-        // overrides what would otherwise be `Native`.
-        assert!(distro_probe_matters(true, true));
+    fn distro_probe_matters_only_when_docker_is_here_and_no_native_server_is() {
+        // The one row where the probe changes `backend::detect`'s answer:
+        // `Tri::No` picks Native (the fresh-PC fix), `Yes`/`Unknown` keep the
+        // WSL default. Direction reversed 2026-08-04 together with `detect`
+        // itself — see `distro_probe_matters_agrees_with_detect_itself`, which
+        // is the assertion that actually holds this honest.
+        assert!(distro_probe_matters(false, true));
+        assert!(!distro_probe_matters(true, true));
         assert!(!distro_probe_matters(true, false));
-        assert!(!distro_probe_matters(false, true));
         assert!(!distro_probe_matters(false, false));
     }
 

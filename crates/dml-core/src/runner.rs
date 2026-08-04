@@ -36,6 +36,12 @@ pub const USER: &str = "dml";
 /// distro's own PATH resolves it.
 pub const ARCH_BINARY: &str = "dml-wow";
 
+/// The BASH CLI's program name inside the distro (`/usr/local/bin/dml`). Named
+/// rather than retyped so `the_arch_runner_is_not_a_drop_in_for_the_bash_cli`
+/// is comparing against the same string [`DmlRunner::default`] spawns, not a
+/// literal that could drift away from it.
+pub const BASH_PROGRAM: &str = "dml";
+
 pub struct DmlRunner {
     pub program: OsString,
     pub prefix_args: Vec<String>,
@@ -57,7 +63,7 @@ impl Default for DmlRunner {
     fn default() -> Self {
         DmlRunner {
             program: "wsl.exe".into(),
-            prefix_args: ["-d", DISTRO, "-u", USER, "--", "dml"]
+            prefix_args: ["-d", DISTRO, "-u", USER, "--", BASH_PROGRAM]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -162,13 +168,20 @@ impl DmlRunner {
 
     /// Construct the runner for the selected backend.
     ///
-    /// `Wsl` routes here too: it is retired as a runtime path, and it named the
-    /// same distro and the same daemon this runner talks to. Nothing routes to
-    /// the bash CLI any more — `cli/dml` survives only as the oracle the parity
-    /// suites diff against.
+    /// `Wsl` routes to [`Self::default`] — the bash `dml` CLI inside the same
+    /// distro — and NOT to [`Self::arch`], even though both name the same
+    /// distro and the same daemon. The two speak different command vocabularies:
+    /// every live call site in the launcher sends `games list`,
+    /// `games status <id>`, `wow server-detail` or `games <action> <id>`, and
+    /// [`Self::command`] appends `--json` unconditionally, none of which
+    /// `dml-wow-cli` defines. Routing `Wsl` here would turn a healthy server's
+    /// status card into "unrecognized subcommand 'games'". See
+    /// `the_arch_runner_is_not_a_drop_in_for_the_bash_cli` below, and
+    /// [`crate::backend`]'s module doc for the ruling that deferred the flip.
     pub fn for_backend(b: Backend) -> Self {
         match b {
-            Backend::Arch | Backend::Wsl => Self::arch(),
+            Backend::Arch => Self::arch(),
+            Backend::Wsl => Self::default(),
             Backend::Native => Self::native(),
         }
     }
@@ -587,14 +600,79 @@ mod tests {
     }
 
     #[test]
-    fn for_backend_routes_arch_and_wsl_to_the_rust_binary() {
-        // Backend::Wsl is retired as a runtime path — nothing may route to the
-        // bash CLI any more.
-        for b in [Backend::Arch, Backend::Wsl] {
-            let r = DmlRunner::for_backend(b);
-            assert_eq!(r.host_label, "arch", "{b:?} must use the Arch runner");
-            assert!(r.prefix_args.iter().any(|a| a == ARCH_BINARY));
-        }
+    fn for_backend_routes_only_an_explicit_arch_to_the_rust_binary() {
+        // Was `for_backend_routes_arch_and_wsl_to_the_rust_binary`. Same two
+        // inputs, and Wsl's direction is REVERSED (user ruling 2026-08-04):
+        // the launcher's call sites still speak the bash CLI's vocabulary, so
+        // routing Wsl at the Rust binary breaks every one of them. See
+        // `the_arch_runner_is_not_a_drop_in_for_the_bash_cli`.
+        let arch = DmlRunner::for_backend(Backend::Arch);
+        assert_eq!(arch.host_label, "arch");
+        assert!(arch.prefix_args.iter().any(|a| a == ARCH_BINARY));
+
+        let wsl = DmlRunner::for_backend(Backend::Wsl);
+        assert_eq!(wsl.host_label, "wsl");
+        assert!(wsl.prefix_args.iter().any(|a| a == BASH_PROGRAM));
+    }
+
+    /// Does this runner accept the command vocabulary the launcher's live call
+    /// sites actually send? That is not a style question: `lib.rs` sends
+    /// `games list`, `games status <id>`, `wow server-detail` and
+    /// `games <action> <id>`, all through [`DmlRunner::command`], which appends
+    /// `--json`. Only the bash `dml` defines any of that.
+    fn speaks_the_bash_cli_vocabulary(r: &DmlRunner) -> bool {
+        r.prefix_args.last().map(String::as_str) == Some(BASH_PROGRAM)
+    }
+
+    /// THE COMPOSITION TEST — the whole-branch review finding, pinned.
+    ///
+    /// Nine tasks each passed their own review and the pieces still did not
+    /// compose: `for_backend(Backend::Wsl)` returned `arch()`, so every live
+    /// call site (`games list`, `games status <id>`, `wow server-detail`,
+    /// `games <action> <id>`) became a `BAD_ARGS` against a binary that defines
+    /// neither those namespaces nor a global `--json`. An existing WSL user
+    /// updating the launcher would have got "unrecognized subcommand 'games'"
+    /// instead of a status card, with Start/Stop/Restart, Library and the
+    /// auto-shutdown watcher all failing against a perfectly healthy server.
+    ///
+    /// This fails the moment `Wsl` is routed at `arch()` again WITHOUT the
+    /// vocabulary being addressed first — and it stays honest afterwards,
+    /// because the day `arch()` really is a drop-in is the day its prefix
+    /// stops being the thing this test measures.
+    #[test]
+    fn the_arch_runner_is_not_a_drop_in_for_the_bash_cli() {
+        let arch = DmlRunner::arch();
+        assert!(
+            !speaks_the_bash_cli_vocabulary(&arch),
+            "arch() invokes {ARCH_BINARY}, which has no games/wow namespace and no global --json: {:?}",
+            arch.prefix_args
+        );
+
+        // The unconditional `--json` is half the incompatibility on its own,
+        // and it is invisible at the call site — so read it off a real
+        // `Command` rather than trusting the source to still do it.
+        let argv: Vec<String> = arch
+            .command(&["games", "list"])
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("--json"),
+            "command() appends --json unconditionally; dml-wow-cli defines no such flag: {argv:?}"
+        );
+        assert!(
+            argv.iter().any(|a| a == "games"),
+            "the launcher really does send a `games` subcommand: {argv:?}"
+        );
+
+        // Therefore the backend the launcher DEFAULTS to must be driven by a
+        // runner that accepts all of that.
+        assert!(
+            speaks_the_bash_cli_vocabulary(&DmlRunner::for_backend(Backend::Wsl)),
+            "Backend::Wsl must resolve to a runner that speaks `games`/`wow`/`--json`; \
+             flipping it to the Arch binary is only safe once the call sites are ported"
+        );
     }
 
     #[test]
