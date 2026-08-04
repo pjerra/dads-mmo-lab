@@ -1,0 +1,6 @@
+# Measurement output from scripts/Measure-BackendFootprint.ps1.
+# Results are machine- and sitting-specific: they are not source, and they
+# must not be committed. The directory itself is kept so the default
+# -ResultsDir path exists.
+*
+!.gitignore
