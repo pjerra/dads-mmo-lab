@@ -127,6 +127,10 @@ pub enum SetupStep {
     Docker,
     /// Native chain: is its engine actually up?
     Engine,
+    /// ARCH chain: is the registered distro actually PREPARED — packages
+    /// installed, the `dml` user created, sudoers written? Sits between
+    /// `Distro` and `Engine`; see [`SetupState::DistroUnprepared`].
+    Prepared,
 }
 
 /// The single value a consumer switches on. Ordered by the chain: the first
@@ -140,6 +144,20 @@ pub enum SetupState {
     /// WSL works, but the `dml-arch` distro is not registered. Also the
     /// elevated installer's job.
     NoDistro,
+    /// ARCH chain only: the distro is REGISTERED but was never finished —
+    /// no docker, and (usually) no `dml` user either.
+    ///
+    /// This state exists because provisioning is eight steps and can die in
+    /// the middle of them: a dead mirror on `pacman -Syu`, a reboot, a closed
+    /// lid. The distro is created at step 2, so what is left afterwards is a
+    /// registered name and nothing else. Without this state the chain went
+    /// straight from `Distro` to the dockerd probe, which ran
+    /// `systemctl is-active` as a user that does not exist yet, got a non-zero
+    /// exit for a reason that had nothing to do with docker, and offered
+    /// "start the container engine" on a distro that HAS no container engine.
+    /// `NoDistro` could never be reached to say otherwise — the distro really
+    /// is registered. The repair is to run provisioning again.
+    DistroUnprepared,
     /// The distro is there but has no `dml`. THIS the launcher fixes, from
     /// its own bundled resources.
     NoCli,
@@ -910,6 +928,70 @@ pub fn classify_arch_cli(outcome: &ProbeOutcome) -> ArchCliProbe {
     ArchCliProbe { cli: Tri::Unknown, contract: None, detail: first_diagnostic_line(stdout, stderr) }
 }
 
+/// The in-distro question that separates "registered" from "prepared".
+///
+/// `command -v docker` is chosen over `test -f /etc/sudoers.d/99-dml` because
+/// it is the thing the NEXT link actually needs: a distro whose sudoers
+/// drop-in landed but whose `pacman -Syu` did not has no dockerd to ask about,
+/// and `docker-group`/`docker-enable` are the last two first-boot steps, so
+/// docker's presence is also the closest cheap proxy for "the sequence ran to
+/// the end". It is one `sh -c` and no package database read.
+pub const PREPARED_PROBE_SCRIPT: &str = "command -v docker";
+
+/// Classify [`PREPARED_PROBE_SCRIPT`]'s answer.
+///
+/// Follows [`classify_wsl_list`]'s doctrine: read what the output SAID before
+/// consulting the exit code. `command -v` prints the resolved path, so a
+/// non-empty stdout at exit 0 is positive evidence; an exit 0 with nothing on
+/// stdout is a shell that did not do what we asked, which is a shrug and not a
+/// yes.
+///
+/// A NON-ZERO exit here is a definitive `No`, and that is deliberate even
+/// though it also covers `wsl.exe` refusing to enter the distro as user `dml`
+/// ("the user name or password is incorrect"). That is not a misreading — a
+/// distro we cannot enter as the user provisioning creates IS unprepared, and
+/// it is the exact half-built state this link exists to name. The
+/// alternative, `Unknown`, offers a retry forever on a machine whose real
+/// answer is "run setup again".
+///
+/// `ProgramMissing` stays `Unknown`: `wsl.exe` disappearing between two calls
+/// says nothing about the distro.
+pub fn classify_arch_prepared(outcome: &ProbeOutcome) -> Tri {
+    match outcome {
+        ProbeOutcome::ProgramMissing | ProbeOutcome::CouldNotTell => Tri::Unknown,
+        ProbeOutcome::Ran { code, stdout, .. } => match code {
+            Some(0) if !stdout.trim().is_empty() => Tri::Yes,
+            Some(0) => Tri::Unknown,
+            _ => Tri::No,
+        },
+    }
+}
+
+/// Classify `systemctl is-active --quiet docker`.
+///
+/// EXIT CODE 3 IS THE ONLY DEFINITIVE NO. It is systemd's (and LSB's)
+/// documented "program is not running", and it is the answer a healthy distro
+/// with a stopped unit gives. Every other non-zero code crosses a different
+/// failure domain — `wsl.exe` not reaching the distro, the user not existing,
+/// systemd not being PID 1, `systemctl` itself absent — and none of those are
+/// repaired by "start the container engine". Reading them as `No` is what put
+/// that button in front of a distro that has no docker at all; they are
+/// `Unknown`, which offers a retry and carries the machine's own words.
+pub fn classify_arch_dockerd(outcome: &ProbeOutcome) -> Tri {
+    match outcome {
+        // wsl.exe itself failing to spawn a SECOND time (Windows Update
+        // replacing it mid-session, AV interference, anything that made the
+        // very first `--list --quiet` call answer but this one not) says
+        // nothing about dockerd.
+        ProbeOutcome::ProgramMissing | ProbeOutcome::CouldNotTell => Tri::Unknown,
+        ProbeOutcome::Ran { code, .. } => match code {
+            Some(0) => Tri::Yes,
+            Some(3) => Tri::No,
+            _ => Tri::Unknown,
+        },
+    }
+}
+
 /// Classify the titles-count probe: a bare non-negative integer on stdout at
 /// exit 0, nothing else. `None` (could-not-tell) covers a killed/failed spawn
 /// AND stdout that is not a clean number — [`derive_arch`] turns that into
@@ -926,6 +1008,11 @@ pub fn classify_arch_titles(outcome: &ProbeOutcome) -> Option<usize> {
 pub struct ArchFacts {
     pub wsl: Tri,
     pub distro: Tri,
+    /// Has the registered distro actually been PREPARED (packages, user,
+    /// sudoers)? See [`SetupState::DistroUnprepared`] — this link exists
+    /// because a provisioning run that dies at step 2 of 8 leaves a distro
+    /// that is registered and nothing else.
+    pub prepared: Tri,
     /// Is the in-distro `dockerd` unit active? `Unknown` when the question
     /// itself went unanswered.
     pub dockerd: Tri,
@@ -940,7 +1027,7 @@ pub struct ArchFacts {
     pub detail: Option<String>,
 }
 
-/// The Arch chain: WSL → distro → dockerd → `dml-wow` → a title.
+/// The Arch chain: WSL → distro → PREPARED → dockerd → `dml-wow` → a title.
 ///
 /// Same discipline as [`derive`] and [`derive_native`]: the first unanswered or
 /// missing link wins, so the consumer always has exactly one next step, and
@@ -966,12 +1053,20 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
         titles: f.titles,
         detail: f.detail.clone(),
     };
+    // THE CONTRACT THIS CHAIN COMPARES, not the bash CLI's version string.
+    // `derive_arch` settles `CliOutdated` by comparing against
+    // EXPECTED_ARCH_CLI_CONTRACT ("dml-json-v3"), and this field is rendered
+    // verbatim by the UI -- stamping EXPECTED_CLI_VERSION ("3.0.0", the BASH
+    // CLI's own version, an entirely different axis; see that constant's doc)
+    // produced one sentence built out of two: "dml-arch has DML backend
+    // dml-json-v2 in it and this launcher speaks 3.0.0". Whatever a screen
+    // says the launcher expects must be the thing the code actually checked.
     let unknown_at = |step: SetupStep| BackendStatus {
         state: SetupState::Unknown,
         blocked_at: Some(step),
         detail: f.detail.clone(),
         distro: distro.to_string(),
-        expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
+        expected_cli_version: EXPECTED_ARCH_CLI_CONTRACT.to_string(),
         probes: probes.clone(),
     };
     let settled = |state: SetupState| BackendStatus {
@@ -979,7 +1074,7 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
         blocked_at: None,
         detail: None,
         distro: distro.to_string(),
-        expected_cli_version: EXPECTED_CLI_VERSION.to_string(),
+        expected_cli_version: EXPECTED_ARCH_CLI_CONTRACT.to_string(),
         probes: probes.clone(),
     };
 
@@ -991,6 +1086,15 @@ pub fn derive_arch(distro: &str, f: ArchFacts) -> BackendStatus {
     match f.distro {
         Tri::Unknown => return unknown_at(SetupStep::Distro),
         Tri::No => return settled(SetupState::NoDistro),
+        Tri::Yes => {}
+    }
+    // BETWEEN `Distro` AND `Engine`, and that position is the whole point:
+    // asking "is dockerd up" first crosses three failure domains at once
+    // (wsl.exe reaching the distro, the `dml` user existing, systemd/the
+    // unit), and collapsed all of them into "the engine is stopped".
+    match f.prepared {
+        Tri::Unknown => return unknown_at(SetupStep::Prepared),
+        Tri::No => return settled(SetupState::DistroUnprepared),
         Tri::Yes => {}
     }
     match f.dockerd {
@@ -1071,6 +1175,7 @@ pub fn probe_arch_with(
     let mut facts = ArchFacts {
         wsl: wsl.wsl,
         distro: wsl.distro,
+        prepared: Tri::Unknown,
         dockerd: Tri::Unknown,
         cli: Tri::Unknown,
         cli_contract: None,
@@ -1079,28 +1184,28 @@ pub fn probe_arch_with(
     };
 
     if facts.distro == Tri::Yes {
-        // THE cold-start call: the first thing to run inside the distro, so it
-        // pays for booting the WSL2 VM and systemd.
+        // THE cold-start call is now THIS one — the first thing to run inside
+        // the distro, so it is the one that pays for booting the WSL2 VM and
+        // systemd.
+        let out = run(
+            &["-d", distro, "-u", user, "--exec", "sh", "-c", PREPARED_PROBE_SCRIPT],
+            ProbeBudget::ColdStart,
+        );
+        facts.prepared = classify_arch_prepared(&out);
+        if facts.prepared != Tri::Yes {
+            // A `No` carries words too here: "the user name or password is
+            // incorrect" is the single most useful line on this screen, and
+            // the state it settles on is one the user can act on.
+            facts.detail = out.detail();
+        }
+    }
+
+    if facts.prepared == Tri::Yes {
+        // Warm by construction: the distro has just answered.
         let mut argv: Vec<&str> = vec!["-d", distro, "-u", user, "--exec", SYSTEMCTL_PROGRAM];
         argv.extend(systemd_is_active_argv());
-        let out = run(&argv, ProbeBudget::ColdStart);
-        facts.dockerd = match &out {
-            // wsl.exe itself failing to spawn a SECOND time (Windows Update
-            // replacing it mid-session, AV interference, anything that made
-            // the very first `--list --quiet` call answer but this one not)
-            // says nothing about dockerd. Reading it as "stopped" would offer
-            // a "start the container engine" repair that predictably does
-            // nothing on a machine where the real problem is wsl.exe.
-            ProbeOutcome::ProgramMissing => Tri::Unknown,
-            ProbeOutcome::CouldNotTell => Tri::Unknown,
-            ProbeOutcome::Ran { code, .. } => {
-                if *code == Some(0) {
-                    Tri::Yes
-                } else {
-                    Tri::No
-                }
-            }
-        };
+        let out = run(&argv, ProbeBudget::Warm);
+        facts.dockerd = classify_arch_dockerd(&out);
         if facts.dockerd == Tri::Unknown {
             facts.detail = out.detail();
         }
@@ -2324,6 +2429,7 @@ dml v2.6.0
         ArchFacts {
             wsl: Tri::Yes,
             distro: Tri::Yes,
+            prepared: Tri::Yes,
             dockerd: Tri::Yes,
             cli: Tri::Yes,
             cli_contract: Some(EXPECTED_ARCH_CLI_CONTRACT.to_string()),
@@ -2339,6 +2445,9 @@ dml v2.6.0
         move |args, _| {
             if args.first().copied() == Some("--list") {
                 ran(0, "dml-arch\n")
+            } else if args.iter().any(|a| *a == PREPARED_PROBE_SCRIPT) {
+                // `command -v docker` prints the resolved path.
+                ran(0, "/usr/bin/docker")
             } else if args.iter().any(|a| *a == "is-active") {
                 ran(0, "")
             } else if args.iter().any(|a| *a == "version") {
@@ -2363,6 +2472,9 @@ dml v2.6.0
         let no_distro = ArchFacts { distro: Tri::No, ..arch_ok() };
         assert_eq!(derive_arch(DISTRO, no_distro).state, SetupState::NoDistro);
 
+        let unprepared = ArchFacts { prepared: Tri::No, ..arch_ok() };
+        assert_eq!(derive_arch(DISTRO, unprepared).state, SetupState::DistroUnprepared);
+
         let no_dockerd = ArchFacts { dockerd: Tri::No, ..arch_ok() };
         assert_eq!(derive_arch(DISTRO, no_dockerd).state, SetupState::DockerStopped);
 
@@ -2383,6 +2495,7 @@ dml v2.6.0
         for (facts, step) in [
             (ArchFacts { wsl: Tri::Unknown, ..arch_ok() }, SetupStep::Wsl),
             (ArchFacts { distro: Tri::Unknown, ..arch_ok() }, SetupStep::Distro),
+            (ArchFacts { prepared: Tri::Unknown, ..arch_ok() }, SetupStep::Prepared),
             (ArchFacts { dockerd: Tri::Unknown, ..arch_ok() }, SetupStep::Engine),
             (ArchFacts { cli: Tri::Unknown, ..arch_ok() }, SetupStep::Cli),
             (ArchFacts { titles: None, ..arch_ok() }, SetupStep::Titles),
@@ -2431,7 +2544,10 @@ dml v2.6.0
         // program (distro.rs's first-boot-step pattern), not a bare script
         // handed to --exec (which would try to exec a multi-word string as a
         // single binary name and fail).
-        let titles_call = asked.iter().find(|a| a.iter().any(|e| e == "sh")).expect("titles probe never ran");
+        let titles_call = asked
+            .iter()
+            .find(|a| a.iter().any(|e| e == "sh") && !a.iter().any(|e| e == PREPARED_PROBE_SCRIPT))
+            .expect("titles probe never ran");
         assert_eq!(titles_call[4], "--exec", "{titles_call:?}");
         assert_eq!(titles_call[5], "sh", "{titles_call:?}");
         assert_eq!(titles_call[6], "-c", "{titles_call:?}");
@@ -2549,6 +2665,9 @@ dml v2.6.0
             if args.first().copied() == Some("--list") {
                 return ran(0, "dml-arch\n");
             }
+            if args.iter().any(|a| *a == PREPARED_PROBE_SCRIPT) {
+                return ran(0, "/usr/bin/docker");
+            }
             if args.iter().any(|a| *a == "is-active") {
                 return ran(0, "");
             }
@@ -2578,6 +2697,8 @@ dml v2.6.0
         let st = probe_arch_with(DISTRO, USER, |args, _| {
             if args.first().copied() == Some("--list") {
                 ran(0, "dml-arch\n")
+            } else if args.iter().any(|a| *a == PREPARED_PROBE_SCRIPT) {
+                ran(0, "/usr/bin/docker")
             } else if args.iter().any(|a| *a == "is-active") {
                 ran(0, "")
             } else if args.iter().any(|a| *a == "version") {
@@ -2601,6 +2722,10 @@ dml v2.6.0
         let st = probe_arch_with(DISTRO, USER, |args, _| {
             if args.first().copied() == Some("--list") {
                 ran(0, "dml-arch\n")
+            } else if args.iter().any(|a| *a == PREPARED_PROBE_SCRIPT) {
+                // The distro IS prepared, so the only thing left for a
+                // vanishing wsl.exe to be evidence about is dockerd.
+                ran(0, "/usr/bin/docker")
             } else {
                 ProbeOutcome::ProgramMissing
             }
@@ -2609,4 +2734,188 @@ dml v2.6.0
         assert_eq!(st.blocked_at, Some(SetupStep::Engine));
     }
 
+    // -- the "registered but unprepared" link ---------------------------------
+
+    /// THE FAILURE SCENARIO this state exists for, end to end.
+    ///
+    /// Provisioning is eight steps and creates the distro at step 2. If it then
+    /// dies — dead mirror, reboot, closed lid — the machine is left with a
+    /// REGISTERED `dml-arch` and nothing in it: no packages, no `dml` user.
+    /// The next start used to go straight from `Distro` to the dockerd probe,
+    /// which runs `systemctl is-active` as a user that does not exist, took the
+    /// non-zero exit as "the engine is stopped", and offered "start the
+    /// container engine" on a distro that has no container engine. `NoDistro`
+    /// could never be reached to say otherwise — the distro really IS
+    /// registered — so no state in the enum sent the user back to provisioning.
+    #[test]
+    fn a_registered_but_unprovisioned_distro_is_not_a_stopped_engine() {
+        let st = probe_arch_with(DISTRO, USER, |args, _| {
+            if args.first().copied() == Some("--list") {
+                return ran(0, "dml-arch");
+            }
+            // What wsl.exe really says when `-u dml` names nobody.
+            ran_err(1, "wsl: The user name or password is incorrect.")
+        });
+        assert_eq!(st.state, SetupState::DistroUnprepared);
+        assert_ne!(st.state, SetupState::DockerStopped);
+        assert_eq!(st.blocked_at, None, "this is a settled state with a repair, not a shrug");
+    }
+
+    /// ...and it stops there: a distro we cannot even enter must not be asked
+    /// three more questions it has no way to answer.
+    #[test]
+    fn an_unprepared_distro_is_asked_nothing_further() {
+        let mut asked: Vec<String> = Vec::new();
+        let st = probe_arch_with(DISTRO, USER, |args, _| {
+            asked.push(args.join(" "));
+            if args.first().copied() == Some("--list") {
+                return ran(0, "dml-arch");
+            }
+            ran_err(1, "wsl: The user name or password is incorrect.")
+        });
+        assert_eq!(st.state, SetupState::DistroUnprepared);
+        assert_eq!(asked.len(), 2, "asked {asked:?}");
+    }
+
+    /// The prepared probe is the one that pays for the cold start now — it is
+    /// the FIRST call into the distro, so it is the call that boots the WSL2 VM
+    /// and systemd. Giving it the warm budget would time it out on exactly the
+    /// machine it is meant to describe (a PC that has just booted).
+    #[test]
+    fn the_prepared_probe_gets_the_cold_start_budget_and_the_rest_do_not() {
+        let mut budgets: Vec<(String, ProbeBudget)> = Vec::new();
+        let _ = probe_arch_with(DISTRO, USER, |args, budget| {
+            budgets.push((args.join(" "), budget));
+            arch_happy_run(1)(args, budget)
+        });
+        let cold: Vec<&String> = budgets
+            .iter()
+            .filter(|(_, b)| *b == ProbeBudget::ColdStart)
+            .map(|(a, _)| a)
+            .collect();
+        assert_eq!(cold.len(), 1, "exactly one call may pay for a cold start: {cold:?}");
+        assert!(
+            cold[0].contains(PREPARED_PROBE_SCRIPT),
+            "the cold budget must belong to the FIRST in-distro call: {}",
+            cold[0]
+        );
+    }
+
+    #[test]
+    fn the_prepared_probe_crosses_the_boundary_as_an_explicit_shell_program() {
+        let mut asked: Vec<Vec<String>> = Vec::new();
+        let _ = probe_arch_with(DISTRO, USER, |args, budget| {
+            asked.push(args.iter().map(|s| s.to_string()).collect());
+            arch_happy_run(1)(args, budget)
+        });
+        let call = asked
+            .iter()
+            .find(|a| a.iter().any(|e| e == PREPARED_PROBE_SCRIPT))
+            .expect("prepared probe never ran");
+        assert_eq!(
+            call,
+            &vec!["-d", DISTRO, "-u", USER, "--exec", "sh", "-c", PREPARED_PROBE_SCRIPT]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // -- classify_arch_prepared ------------------------------------------------
+
+    #[test]
+    fn prepared_reads_the_resolved_path_before_the_exit_code() {
+        assert_eq!(classify_arch_prepared(&ran(0, "/usr/bin/docker")), Tri::Yes);
+        // Exit 0 with nothing said is a shell that did not do what we asked —
+        // a shrug, not a yes.
+        assert_eq!(classify_arch_prepared(&ran(0, "   ")), Tri::Unknown);
+    }
+
+    #[test]
+    fn prepared_treats_a_distro_it_cannot_enter_as_unprepared_not_unknown() {
+        // `command -v` exits 1 when the command is not there, and wsl.exe
+        // exits non-zero when `-u dml` names nobody. BOTH are honestly "this
+        // distro was never finished", and both have the same repair. Calling
+        // them Unknown would offer a retry forever on a machine whose real
+        // answer is "run setup again".
+        assert_eq!(classify_arch_prepared(&ran(1, "")), Tri::No);
+        assert_eq!(
+            classify_arch_prepared(&ran_err(1, "wsl: The user name or password is incorrect.")),
+            Tri::No
+        );
+    }
+
+    #[test]
+    fn prepared_says_nothing_when_wsl_exe_itself_could_not_answer() {
+        assert_eq!(classify_arch_prepared(&ProbeOutcome::ProgramMissing), Tri::Unknown);
+        assert_eq!(classify_arch_prepared(&ProbeOutcome::CouldNotTell), Tri::Unknown);
+    }
+
+    // -- classify_arch_dockerd -------------------------------------------------
+
+    /// The old classifier read EVERY non-zero exit as "the engine is stopped",
+    /// which crossed three failure domains in one call. Exit 3 is systemd's
+    /// (and LSB's) documented "program is not running" and is the only one that
+    /// means what the repair button says.
+    #[test]
+    fn only_systemds_documented_not_running_code_is_a_stopped_engine() {
+        assert_eq!(classify_arch_dockerd(&ran(0, "")), Tri::Yes);
+        assert_eq!(classify_arch_dockerd(&ran(3, "")), Tri::No);
+        for code in [1, 4, 5, 127, 255] {
+            assert_eq!(
+                classify_arch_dockerd(&ran(code, "")),
+                Tri::Unknown,
+                "exit {code} is not systemd saying the unit is stopped"
+            );
+        }
+        assert_eq!(classify_arch_dockerd(&ProbeOutcome::ProgramMissing), Tri::Unknown);
+        assert_eq!(classify_arch_dockerd(&ProbeOutcome::CouldNotTell), Tri::Unknown);
+    }
+
+    // -- the stamped contract (whole-branch review, Important 6) --------------
+
+    /// `derive_arch` compares against [`EXPECTED_ARCH_CLI_CONTRACT`] but used to
+    /// stamp [`EXPECTED_CLI_VERSION`] — the BASH CLI's own version string, an
+    /// entirely different axis — into the struct the UI renders verbatim. On
+    /// screen that reads as one sentence built out of two: "dml-arch has DML
+    /// backend dml-json-v2 in it and this launcher speaks 3.0.0". Whatever a
+    /// screen says the launcher expects must be the thing the code checked.
+    #[test]
+    fn the_arch_chain_reports_the_contract_it_actually_compares() {
+        let old_cli = ArchFacts { cli_contract: Some("dml-json-v2".to_string()), ..arch_ok() };
+        let got = derive_arch(DISTRO, old_cli);
+        assert_eq!(got.state, SetupState::CliOutdated);
+        assert_eq!(got.expected_cli_version, EXPECTED_ARCH_CLI_CONTRACT);
+        assert_ne!(
+            got.expected_cli_version, EXPECTED_CLI_VERSION,
+            "the bash CLI's version has no meaning on this chain"
+        );
+        // Every arm, not just the interesting one: `unknown_at` stamps it too.
+        assert_eq!(
+            derive_arch(DISTRO, arch_ok()).expected_cli_version,
+            EXPECTED_ARCH_CLI_CONTRACT
+        );
+        assert_eq!(
+            derive_arch(DISTRO, ArchFacts { wsl: Tri::Unknown, ..arch_ok() }).expected_cli_version,
+            EXPECTED_ARCH_CLI_CONTRACT
+        );
+    }
+
+    /// The bash chain is untouched by that fix: it really does compare a
+    /// semver, and its screen must keep saying so.
+    #[test]
+    fn the_bash_chain_still_reports_the_bash_cli_version() {
+        let bash = derive(
+            DISTRO,
+            Probes {
+                wsl: Tri::Yes,
+                distro: Tri::Yes,
+                cli: Tri::No,
+                cli_version: None,
+                titles: None,
+                detail: None,
+            },
+        );
+        assert_eq!(bash.expected_cli_version, EXPECTED_CLI_VERSION);
+    }
 }

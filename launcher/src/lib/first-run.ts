@@ -49,9 +49,23 @@ export type SetupState =
   // Native chain only (dml_core::setup::derive_native). Mirrors the Rust enum;
   // adding one there without adding it here is a silent fall-through.
   | "no_docker"
-  | "docker_stopped";
+  | "docker_stopped"
+  // ARCH chain only (dml_core::setup::derive_arch), and NOT reachable yet:
+  // nothing in the launcher calls that chain — the wiring is the next plan.
+  // Listed here anyway because this file's rule is that the Rust enum and this
+  // union stay in step, and a state added on one side only falls silently
+  // through the switch below.
+  | "distro_unprepared";
 
-export type SetupStep = "wsl" | "distro" | "cli" | "titles" | "docker" | "engine";
+export type SetupStep =
+  | "wsl"
+  | "distro"
+  | "cli"
+  | "titles"
+  | "docker"
+  | "engine"
+  // Arch chain: between `distro` and `engine`.
+  | "prepared";
 
 export interface BackendProbes {
   wsl: Tri;
@@ -379,6 +393,22 @@ export function firstRunState(o: {
         kind: "no-wsl",
         title: "Windows Subsystem for Linux isn't set up on this PC yet",
         body: "Your server runs inside WSL2, and creating it takes one elevated run of Install-DML.ps1 from the Dad's MMO Lab project — the launcher deliberately doesn't switch Windows features on for you.",
+        action: { kind: "link", label: "Where to get Install-DML.ps1 ↗", url: PROJECT_URL },
+        detail: "",
+      };
+
+    case "distro_unprepared":
+      // The Arch chain's half-built distro: registered, but provisioning never
+      // finished (a dead mirror on `pacman -Syu`, a reboot, a closed lid), so
+      // there is no docker in there and usually no `dml` user either. The
+      // repair is to run provisioning again -- which is exactly what
+      // Install-DML.ps1 does today, and what the launcher itself will do when
+      // the Arch backend is wired. Deliberately NOT the "start the container
+      // engine" screen: this distro has no container engine to start.
+      return {
+        kind: "no-distro",
+        title: `The ${r.distro} environment was never finished`,
+        body: `${r.distro} is registered on this PC, but the setup that installs Docker and creates its user didn't run all the way through — so there's nothing in there to start yet. Running Install-DML.ps1 again picks up where it left off.`,
         action: { kind: "link", label: "Where to get Install-DML.ps1 ↗", url: PROJECT_URL },
         detail: "",
       };
