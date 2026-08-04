@@ -933,17 +933,39 @@ live. `cli_integration.rs`'s
 **12+ minutes against a 30-second `PROBE_TIMEOUT`** — the docker-reachability
 probe in `install_native.rs` / `preflight.rs` does not honour its own bound.
 
-What makes this worth its own roadmap entry rather than a footnote: **it wedges
-`cargo test --workspace`, and both CI jobs run a suite containing it.** So CI
-cannot currently validate this repo end to end on either platform, and the
-`dml-wow` Linux artifact step added for the Arch backend has never run to
-completion in CI. A green CI badge here means "the job was cancelled", not "the
-tests passed".
+**FIXED 2026-08-05, and the diagnosis above was WRONG — recorded rather than
+quietly edited, because the wrong guess is instructive.**
 
-The fix shape is known from the earlier incident: a deadline that is enforced by
-the CALL, not merely requested of the child, and a reap that never blocks the
-caller. `dml_core::proc`'s `Abandonable`/`abandon` seam already exists for it.
-User approved the fix 2026-08-04.
+It was never the probe. Both probe paths already went through the fixed
+`run_bounded_outcome` and returned in milliseconds against an unspawnable
+program. The real cause was the **tri-state collapse, for the third time on this
+branch**: `ensure_decision` took a plain `engine_up: bool`, so
+`ProbeOutcome::ProgramMissing` — "the one genuinely definitive negative" — arrived
+flattened into `Tri::No`, produced `Launch`, **launched the Docker Desktop GUI
+from a unit test**, and then polled `docker info` through the CLI that does not
+exist, 61 times, for an answer false by construction. Forcing the launch to fail
+dropped the test to 4.43 s before a line of production code changed. Separately,
+`engine_running` was a bare `cmd.status()` with **no bound at all** — and it is
+the predicate that poll calls 61 times.
+
+Measured: the test 184.48 s → 4.41 s; `cargo test --workspace` 261.91 s → 109 s,
+1726 passed, 0 failed.
+
+**The CI claim in the original entry did not reproduce and should not be
+repeated.** At base the suite FINISHED, in 262 s, with zero failures — it was
+slow, not hung, so "a green badge means the job was cancelled" was not
+established. The slow path is gated on `docker_desktop_program()` being `Some`,
+which is `None` on Linux by construction (its candidates come from
+`LOCALAPPDATA`/`ProgramFiles`), so this was probably never what affected the
+ubuntu job or its artifact step. **If CI is in fact blind, the cause is still
+unfound and wants chasing against a real CI run.** On `windows-latest` it depends
+on whether `Docker Desktop.exe` sits at one of the three candidate paths, which
+cannot be verified from here.
+
+The likeliest route to the originally-reported 12+ minutes: a unit test was
+starting Docker Desktop, and on a cold box its WSL2 VM with it — inherently
+non-deterministic, which is exactly why the timing would not reproduce. Now
+`launches == 0`.
 
 ## Round 6 — Merge + housekeeping
 
