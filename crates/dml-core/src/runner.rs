@@ -31,6 +31,11 @@ impl std::fmt::Display for RunnerError {
 pub const DISTRO: &str = "dml-arch";
 pub const USER: &str = "dml";
 
+/// The Rust CLI's program name inside the distro. Deployed to
+/// `/usr/local/bin/dml-wow` by `provision.rs`; invoked as a bare name so the
+/// distro's own PATH resolves it.
+pub const ARCH_BINARY: &str = "dml-wow";
+
 pub struct DmlRunner {
     pub program: OsString,
     pub prefix_args: Vec<String>,
@@ -117,6 +122,29 @@ fn prepend_path(dir: &OsStr, current: Option<OsString>) -> Option<OsString> {
 }
 
 impl DmlRunner {
+    /// THE supported backend: the Rust CLI running INSIDE `dml-arch`, against
+    /// that distro's own `dockerd`. No Docker Desktop, no bash middleman.
+    ///
+    /// `--exec` rather than `--` is load-bearing rather than stylistic: the
+    /// bare form runs a shell inside the distro, which splits on `;`, expands
+    /// `$HOME` and globs `*` against the cwd (verified 2026-07-28). Title ids
+    /// and paths cross this boundary.
+    ///
+    /// `path_prepend` stays `None`: the distro has its own PATH, and a Windows
+    /// directory prepended to it would be meaningless.
+    pub fn arch() -> Self {
+        DmlRunner {
+            program: "wsl.exe".into(),
+            prefix_args: ["-d", DISTRO, "-u", USER, "--exec", ARCH_BINARY]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            path_prepend: None,
+            host_label: "arch",
+            host_hint: "Check the distro: wsl -d dml-arch -u dml --exec dml-wow version",
+        }
+    }
+
     /// Native (Docker Desktop) backend: run the `dml` bash script under Git Bash
     /// on Windows, with the Docker Desktop bin dir on PATH so its `docker` calls
     /// reach the engine. No `dml-arch` distro, no bash middleman inside WSL — the
@@ -134,12 +162,13 @@ impl DmlRunner {
 
     /// Construct the runner for the selected backend.
     ///
-    /// `Arch` and `Wsl` route identically here — they name the same distro and
-    /// the same daemon. Task 3 is what makes the binary differ; until then this
-    /// is deliberately a routing no-op.
+    /// `Wsl` routes here too: it is retired as a runtime path, and it named the
+    /// same distro and the same daemon this runner talks to. Nothing routes to
+    /// the bash CLI any more — `cli/dml` survives only as the oracle the parity
+    /// suites diff against.
     pub fn for_backend(b: Backend) -> Self {
         match b {
-            Backend::Arch | Backend::Wsl => Self::default(),
+            Backend::Arch | Backend::Wsl => Self::arch(),
             Backend::Native => Self::native(),
         }
     }
@@ -513,10 +542,59 @@ mod tests {
     }
 
     #[test]
-    fn for_backend_wsl_is_the_default_wsl_runner() {
-        let r = DmlRunner::for_backend(Backend::Wsl);
+    fn the_arch_runner_spawns_the_rust_binary_through_exec() {
+        let r = DmlRunner::arch();
         assert_eq!(r.program, OsString::from("wsl.exe"));
+        assert_eq!(
+            r.prefix_args,
+            vec![
+                "-d".to_string(),
+                DISTRO.to_string(),
+                "-u".to_string(),
+                USER.to_string(),
+                "--exec".to_string(),
+                ARCH_BINARY.to_string(),
+            ]
+        );
+    }
+
+    /// `--exec` is not a style preference. Verified 2026-07-28: `wsl -- `
+    /// runs a shell, which splits on `;`, expands `$HOME` and globs `*`
+    /// against the cwd. Title ids and paths cross this boundary.
+    #[test]
+    fn the_arch_runner_never_uses_the_shell_form() {
+        let r = DmlRunner::arch();
+        assert!(
+            !r.prefix_args.iter().any(|a| a == "--"),
+            "the bare -- form runs a shell; use --exec: {:?}",
+            r.prefix_args
+        );
+        assert!(r.prefix_args.iter().any(|a| a == "--exec"));
+    }
+
+    #[test]
+    fn the_arch_runner_inherits_path_and_blames_the_distro() {
+        let r = DmlRunner::arch();
+        // The distro has its own PATH; prepending a Windows dir would be
+        // meaningless inside it.
         assert!(r.path_prepend.is_none());
+        assert_eq!(r.host_label, "arch");
+        assert!(
+            r.host_hint.contains("dml-arch"),
+            "a diagnostic must name the distro it is about: {}",
+            r.host_hint
+        );
+    }
+
+    #[test]
+    fn for_backend_routes_arch_and_wsl_to_the_rust_binary() {
+        // Backend::Wsl is retired as a runtime path — nothing may route to the
+        // bash CLI any more.
+        for b in [Backend::Arch, Backend::Wsl] {
+            let r = DmlRunner::for_backend(b);
+            assert_eq!(r.host_label, "arch", "{b:?} must use the Arch runner");
+            assert!(r.prefix_args.iter().any(|a| a == ARCH_BINARY));
+        }
     }
 
     #[test]
