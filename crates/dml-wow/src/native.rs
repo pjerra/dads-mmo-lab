@@ -575,18 +575,22 @@ mod engine_section_tests {
         use dml_core::engine::EnginePresence;
         let run = run_engine(&[EnginePresence::CliMissing], true, true);
 
+        // THE COUNTERS COME FIRST, and the order is deliberate. These are the
+        // invariant; the error code below is only how it is reported. Asserting
+        // the code first would let a future "fix" that merely renamed the
+        // timeout satisfy this test while the 180-second wait stayed exactly
+        // where it was -- pinning the symptom instead of the bug.
+        assert_eq!(run.sleeps, 0, "the readiness wait must never be ENTERED: it cannot succeed behind a CLI that does not exist");
+        assert_eq!(run.launches, 0, "nothing may be launched to satisfy an engine we cannot then talk to");
+        assert_eq!(run.starts, 0, "`docker desktop start` runs through the same absent CLI");
+        assert_eq!(run.probes, 1, "asked exactly once, never polled");
+
         let err = run.result.expect("a missing docker CLI must be a refusal, not a success");
         assert_eq!(
             err.code,
             super::CODE_DOCKER_CLI_MISSING,
             "a missing CLI is its own repair -- not a readiness timeout, not a missing GUI"
         );
-
-        // The three facts that make this a bound rather than a message change.
-        assert_eq!(run.sleeps, 0, "the readiness wait must never be ENTERED: it cannot succeed behind a CLI that does not exist");
-        assert_eq!(run.launches, 0, "nothing may be launched to satisfy an engine we cannot then talk to");
-        assert_eq!(run.starts, 0, "`docker desktop start` runs through the same absent CLI");
-        assert_eq!(run.probes, 1, "asked exactly once, never polled");
 
         // The refusal is a terminal error event, so the UI ends the section
         // instead of spinning -- and it names the CLI, not the GUI.
