@@ -9,10 +9,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// `GAMES_DIR` base -- same env var + fallback as `ConfigReader::
-/// title_dir_from_env()`, but generalized to an arbitrary title `id` rather
-/// than hardcoding `wow-server-playerbots` (mirrors `_games_resolve_or_fail`'s
-/// `dir="$GAMES_DIR/$gid"`, which works for any installed title).
 /// The pure decision behind [`games_dir_from_env`].
 ///
 /// Split out so both branches are testable on both platforms without
@@ -40,11 +36,35 @@ pub fn games_dir_from(env_value: Option<std::ffi::OsString>, home: Option<std::f
     PathBuf::from(".")
 }
 
+/// Whether the `HOME` fallback applies on this platform.
+///
+/// Off Windows, `HOME` is the distro's own variable and is exactly what we
+/// want. ON Windows it must be ignored: **Git for Windows sets `HOME`**, and
+/// this repo's own documented workflow runs Git Bash (it drives `wslpath`
+/// translation and the bats suite) — so honouring it would silently resolve
+/// the games directory to `C:\Users\<name>\games` for any invocation that
+/// does not go through the launcher (before `resolve_and_export()` has run,
+/// from a shell, or from a future entry point). That is a THIRD location,
+/// distinct from both the old `.` fallback and the native default
+/// `%USERPROFILE%\dml-native`. On Windows the launcher exports
+/// `DML_GAMES_DIR` before anything else runs, so there is no gap the
+/// fallback needs to cover there. `is_windows` is a plain argument (rather
+/// than an inline `cfg!(windows)`) so both branches are testable on either
+/// build platform.
+pub fn home_fallback(is_windows: bool, home: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    if is_windows {
+        None
+    } else {
+        home
+    }
+}
+
+/// `GAMES_DIR` base -- same env var + fallback as `ConfigReader::
+/// title_dir_from_env()`, but generalized to an arbitrary title `id` rather
+/// than hardcoding `wow-server-playerbots` (mirrors `_games_resolve_or_fail`'s
+/// `dir="$GAMES_DIR/$gid"`, which works for any installed title).
 pub fn games_dir_from_env() -> PathBuf {
-    // `HOME` is the distro's own variable. On Windows it is usually absent,
-    // which is correct: there the launcher exports DML_GAMES_DIR and the home
-    // branch must not fire.
-    games_dir_from(std::env::var_os("DML_GAMES_DIR"), std::env::var_os("HOME"))
+    games_dir_from(std::env::var_os("DML_GAMES_DIR"), home_fallback(cfg!(windows), std::env::var_os("HOME")))
 }
 
 /// `$GAMES_DIR/$gid` (`90-main.sh:174`).
@@ -209,6 +229,42 @@ mod tests {
     fn no_home_and_no_override_is_still_the_cwd() {
         assert_eq!(games_dir_from(None, None), PathBuf::from("."));
         assert_eq!(games_dir_from(None, os("")), PathBuf::from("."));
+    }
+
+    // -- the platform gate on HOME -------------------------------------------
+    //
+    // Git for Windows sets HOME, so a Windows build must never honour it as
+    // the games-dir fallback -- it would silently resolve to
+    // `C:\Users\<name>\games`, a third location distinct from both the old
+    // `.` fallback and the native default `%USERPROFILE%\dml-native`.
+
+    /// On Windows, a set HOME must be ignored -- Git for Windows sets it, and
+    /// honouring it is the exact bug this gate exists to prevent.
+    #[test]
+    fn windows_ignores_a_set_home() {
+        assert_eq!(home_fallback(true, os("/home/dml")), None);
+    }
+
+    /// Off Windows, HOME is the distro's own variable and is exactly what we
+    /// want -- honour it unchanged.
+    #[test]
+    fn non_windows_honours_home() {
+        assert_eq!(home_fallback(false, os("/home/dml")), os("/home/dml"));
+    }
+
+    /// DML_GAMES_DIR still wins over the home fallback on both platforms --
+    /// this exercises the gate feeding into the full decision, not just the
+    /// gate in isolation.
+    #[test]
+    fn env_var_wins_regardless_of_platform() {
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), home_fallback(true, os("C:/Users/dml"))),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), home_fallback(false, os("/home/dml"))),
+            PathBuf::from("/tmp/dml-games-test")
+        );
     }
 
     // -- title/compose-dir resolution --------------------------------------
