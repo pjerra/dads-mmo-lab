@@ -170,6 +170,36 @@ foreach ($wingetAst in $wingetAsts) {
 }
 Assert-True ($src -match 'personal use') 'the licence position is stated to the user'
 
+# Progress must REACH the user. `Invoke-Change { ... } | Out-Null` discards the
+# scriptblock's pipeline output as well as the return value, and a native
+# command's stdout goes into that pipeline -- so winget's progress bar vanished
+# and a 600 MB download looked frozen (reported live, 2026-08-04). Out-Host
+# writes to the console directly, past the Out-Null.
+foreach ($w in $wingetAsts) {
+    # The PARENT pipeline, not the command: a CommandAst's extent ends at the
+    # command itself, so `| Out-Host` lives in the enclosing PipelineAst. Asking
+    # the CommandAst produced two confident failures against correct code.
+    $pipe = $w.Parent
+    Assert-True ($null -ne $pipe -and $pipe.Extent.Text -match 'Out-Host') `
+        "the winget call at line $($w.Extent.StartLineNumber) pipes to Out-Host so its progress is not swallowed"
+}
+
+# And its exit code must be read. Unchecked, a failed or cancelled install fell
+# through as success and the script went on to print "Ready." -- the user ends
+# up with a launcher that cannot work and nothing saying why.
+# COUNTED, not merely present. The first version of this asserted
+# `$src -match 'LASTEXITCODE'` over the whole file -- so deleting the check from
+# the Docker arm left it green, because the Git arm still had one. A mutation
+# proved it: "ignore the exit code" survived. One check per winget call is the
+# property that actually holds.
+$okChecks = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Test-WingetOk'
+}, $true)).Count
+Assert-True ($okChecks -eq $wingetCalls) `
+    "every winget install has its exit code checked ($okChecks checks for $wingetCalls installs)"
+
 # --------------------------------------------------------------------------
 Say "`n== Defender exclusions are DIRECTORY-scoped ==" 'White'
 # Excluding a compiler BINARY leaves it unscanned machine-wide -- a much larger

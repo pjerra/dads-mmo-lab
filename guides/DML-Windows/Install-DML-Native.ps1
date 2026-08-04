@@ -162,6 +162,21 @@ function Test-WebView2Installed {
 # Steps
 # --------------------------------------------------------------------------
 
+# How to read winget's exit code. Interpretation only: the `winget install`
+# call itself deliberately stays inline in each opt-in branch, because
+# Test-InstallerNative requires it to sit lexically inside the body of an
+# -Install* clause and a call hidden in a helper would satisfy that guard only
+# indirectly. See this file's git history for the attempt that went red.
+#
+# 0 is success. -1978335189 (0x8A15002B) is winget's "no applicable
+# upgrade / already installed", which is not a failure for our purposes.
+function Test-WingetOk([int]$Code, [string]$Label) {
+    if ($Code -eq 0) { Ok "$Label installed"; return $true }
+    if ($Code -eq -1978335189) { Ok "$Label was already installed"; return $true }
+    Fail "$Label did not install (winget exit $Code)"
+    return $false
+}
+
 function Install-YqPinned([string]$ToolsDir) {
     $target = Join-Path $ToolsDir 'yq.exe'
     if (Test-Path -LiteralPath $target) {
@@ -172,7 +187,20 @@ function Install-YqPinned([string]$ToolsDir) {
     $tmp = "$target.download"
     $done = Invoke-Change "download yq $YqVersion" {
         New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
-        Invoke-WebRequest -Uri $YqUrl -OutFile $tmp -UseBasicParsing
+        # Set explicitly rather than assumed: a caller who set
+        # ProgressPreference to SilentlyContinue (common in CI wrappers) would
+        # otherwise get a silent minute with no way to tell a slow link from a
+        # hung one. Restored in `finally` so we do not change the caller's shell.
+        $prev = $ProgressPreference
+        $ProgressPreference = 'Continue'
+        try {
+            Invoke-WebRequest -Uri $YqUrl -OutFile $tmp -UseBasicParsing
+        } finally {
+            $ProgressPreference = $prev
+        }
+        if (Test-Path -LiteralPath $tmp) {
+            Say ("    downloaded {0:N1} MB" -f ((Get-Item -LiteralPath $tmp).Length / 1MB)) 'DarkGray'
+        }
     }
     if (-not $done) { return }
 
@@ -276,8 +304,16 @@ if ($docker) {
         Fail 'winget not available'
     } else {
         Invoke-Change 'install Docker Desktop via winget' {
-            winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements
+            Say '    Docker Desktop is ~600 MB. winget shows its own progress below.' 'DarkGray'
+            # Out-Host, NOT the pipeline: the caller's `| Out-Null` would
+            # otherwise discard winget's progress bar along with the return
+            # value, which is what made this look frozen for the whole download.
+            winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements | Out-Host
+            $script:DockerWingetOk = Test-WingetOk $LASTEXITCODE 'Docker Desktop'
         } | Out-Null
+        if (-not $DryRun -and -not $script:DockerWingetOk) {
+            $problems.Add('Docker Desktop failed to install via winget.')
+        }
     }
 } else {
     # Instruct, do not install. Docker Desktop's licence is free for personal
@@ -299,8 +335,13 @@ if (Test-CommandExists 'git') {
         Fail 'winget not available'
     } else {
         Invoke-Change 'install Git for Windows via winget' {
-            winget install --id Git.Git --accept-package-agreements --accept-source-agreements
+            Say '    Git for Windows is ~60 MB. winget shows its own progress below.' 'DarkGray'
+            winget install --id Git.Git --accept-package-agreements --accept-source-agreements | Out-Host
+            $script:GitWingetOk = Test-WingetOk $LASTEXITCODE 'Git for Windows'
         } | Out-Null
+        if (-not $DryRun -and -not $script:GitWingetOk) {
+            $problems.Add('Git for Windows failed to install via winget.')
+        }
         # winget writes the MACHINE PATH; this process keeps the environment it
         # was started with. Without this refresh the very next check still says
         # "git is not installed" -- a successful install that reports as a
