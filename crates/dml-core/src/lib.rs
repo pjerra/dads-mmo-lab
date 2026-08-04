@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod compose;
 pub mod dashboard;
+pub mod distro;
 pub mod conf;
 pub mod engine;
 pub mod envelope;
