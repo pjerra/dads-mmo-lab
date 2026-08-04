@@ -107,9 +107,29 @@ pub struct FirstBootStep {
 
 /// The ordered first-boot sequence, root-only by construction.
 ///
-/// Order is the contract: the sudoers drop-in cannot be written for a user that
-/// does not exist, and `usermod -aG docker` cannot add a group member before
-/// the `docker` package has created the group.
+/// Order is the contract, and every edge in it was learned from a real
+/// failure on a genuinely fresh `wsl --install archlinux` image (Task 10's
+/// live gate, 2026-08-04) — none of these constraints are hypothetical:
+///
+/// - `useradd` before `sudoers`: the drop-in names a user that must already
+///   exist.
+/// - `pacman-key` before `pacman-sync` (before ANY package install): a fresh
+///   Arch WSL rootfs ships with NO initialized pacman keyring. The very
+///   first `pacman -S`/`-Syu` of any kind fails outright —
+///   `error: required key missing from keyring` — until `pacman-key --init`
+///   and `pacman-key --populate archlinux` have both run.
+/// - `pacman-sync` before `sudoers`: `sudo` is not part of Arch's `base`
+///   group (`Required By: base-devel`, verified live), so `/etc/sudoers.d`
+///   itself does not exist on a fresh image until the `sudo` package has
+///   been installed. Writing the drop-in earlier — the ORIGINAL order this
+///   module shipped with — hit exactly that on the live gate: `sh: line 1:
+///   /etc/sudoers.d/99-dml: No such file or directory`. The `sudoers` step
+///   below also `mkdir -p`s the directory itself as a second, independent
+///   safeguard — belt AND braces, not belt INSTEAD of braces, because a
+///   guard that only prevents this class of failure if some other step
+///   stays correctly ordered is not much of a guard.
+/// - `pacman-sync` before `docker-group`: `usermod -aG docker` cannot add a
+///   group member before the `docker` package has created the group.
 ///
 /// Refuses rather than emitting a poisoned step: `user` is spliced unescaped
 /// into a `sh -c` string for the `wsl-conf`/`sudoers` steps, so a `user`
@@ -138,15 +158,16 @@ pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
             ],
         ),
         root("useradd", vec![s("useradd"), s("-m"), s("-G"), s("wheel"), user.to_string()]),
+        // One step, not two: `--init` and `--populate` are inherently
+        // sequential (the second is meaningless without the first) and a
+        // keyring that is initialized but not populated is exactly as
+        // useless to `pacman-sync` as one that is neither — there is no
+        // real recoverability gained by giving them separate ids, and it
+        // keeps the NDJSON stream to one section for what is really one
+        // operation: preparing the keyring.
         root(
-            "sudoers",
-            vec![
-                s("sh"),
-                s("-c"),
-                format!(
-                    "printf %s '{user} ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/99-dml && chmod 0440 /etc/sudoers.d/99-dml"
-                ),
-            ],
+            "pacman-key",
+            vec![s("sh"), s("-c"), s("pacman-key --init && pacman-key --populate archlinux")],
         ),
         root(
             "pacman-sync",
@@ -155,6 +176,16 @@ pub fn first_boot_steps(user: &str) -> Result<Vec<FirstBootStep>, String> {
                 v.extend(PACKAGES.iter().map(|p| p.to_string()));
                 v
             },
+        ),
+        root(
+            "sudoers",
+            vec![
+                s("sh"),
+                s("-c"),
+                format!(
+                    "mkdir -p /etc/sudoers.d && printf %s '{user} ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/99-dml && chmod 0440 /etc/sudoers.d/99-dml"
+                ),
+            ],
         ),
         root("docker-group", vec![s("usermod"), s("-aG"), s("docker"), user.to_string()]),
         root("docker-enable", vec![s("systemctl"), s("enable"), s("--now"), s("docker")]),
@@ -223,30 +254,67 @@ mod tests {
         let ids: Vec<&str> = first_boot_steps("dml").unwrap().iter().map(|s| s.id).collect();
         assert_eq!(
             ids,
-            vec!["wsl-conf", "useradd", "sudoers", "pacman-sync", "docker-group", "docker-enable"]
+            vec!["wsl-conf", "useradd", "pacman-key", "pacman-sync", "sudoers", "docker-group", "docker-enable"]
         );
+    }
+
+    /// A fresh Arch WSL rootfs has no initialized pacman keyring — the FIRST
+    /// package install of any kind fails with `required key missing from
+    /// keyring` until `pacman-key --init`/`--populate` have both run. This is
+    /// a real ordering RELATION, not a second copy of the whole-list
+    /// assertion above: it holds even if steps are inserted or renamed around
+    /// these two.
+    #[test]
+    fn pacman_key_step_precedes_pacman_sync() {
+        let steps = first_boot_steps("dml").unwrap();
+        let key_ix = steps.iter().position(|s| s.id == "pacman-key").unwrap();
+        let sync_ix = steps.iter().position(|s| s.id == "pacman-sync").unwrap();
+        assert!(key_ix < sync_ix, "pacman-key ({key_ix}) must precede pacman-sync ({sync_ix})");
+    }
+
+    /// `/etc/sudoers.d` does not exist on a fresh image until the `sudo`
+    /// package (installed by `pacman-sync`) creates it — writing the drop-in
+    /// earlier failed on the live gate with "No such file or directory".
+    /// A real ordering relation, not a restatement of the whole list.
+    #[test]
+    fn sudoers_follows_pacman_sync() {
+        let steps = first_boot_steps("dml").unwrap();
+        let sync_ix = steps.iter().position(|s| s.id == "pacman-sync").unwrap();
+        let sudoers_ix = steps.iter().position(|s| s.id == "sudoers").unwrap();
+        assert!(sync_ix < sudoers_ix, "pacman-sync ({sync_ix}) must precede sudoers ({sudoers_ix})");
     }
 
     /// First boot runs as root and CANNOT use sudo: the sudoers drop-in is
     /// itself one of these steps, so anything invoking `sudo` before it lands
     /// would prompt for a password on a console nobody is attached to. That is
     /// the invariant — not the tautology that a hardcoded `root(...)` helper
-    /// returns `as_root: true`.
+    /// returns `as_root: true`. With `sudoers` now moved AFTER `pacman-sync`,
+    /// the window where `sudo` is absent is longer than it used to be, which
+    /// makes this check more important, not less.
     ///
-    /// Checked on argv[0] (the actual invoked program), not "any element",
-    /// because `pacman-sync`'s argv legitimately contains the STRING "sudo" —
-    /// it is one of the packages `pacman` is told to install.
+    /// Checked as a whitespace-delimited WORD anywhere in argv, not just
+    /// `argv[0]`: three steps (`wsl-conf`, `pacman-key`, `sudoers`) run their
+    /// real command as the BODY of an `sh -c` script rather than as argv[0],
+    /// so a program-position-only check would miss `sudo` invoked inside one
+    /// of those bodies. `pacman-sync` is skipped by id because its argv
+    /// legitimately contains the literal "sudo" as a PACKAGE NAME, which is
+    /// not an invocation.
     #[test]
     fn no_first_boot_step_reaches_for_a_sudo_that_does_not_exist_yet() {
         for step in first_boot_steps("dml").unwrap() {
             assert!(step.as_root, "{} must run as root", step.id);
-            assert_ne!(
-                step.argv.first().map(String::as_str),
-                Some("sudo"),
-                "{} invokes sudo as its program, but the sudoers drop-in is step 3 of this very list: {:?}",
-                step.id,
-                step.argv
-            );
+            if step.id == "pacman-sync" {
+                continue;
+            }
+            for arg in &step.argv {
+                assert!(
+                    !arg.split_whitespace().any(|w| w == "sudo"),
+                    "{} invokes sudo (found in {arg:?}), but the sudoers drop-in requires it to \
+                     already exist: {:?}",
+                    step.id,
+                    step.argv
+                );
+            }
         }
     }
 
