@@ -33,9 +33,10 @@ use dml_core::error::CmdError;
 /// `lib.rs`/`maint.rs` keeps compiling unchanged.
 pub use dml_core::engine::{
     docker_desktop_program, docker_desktop_start_args, docker_desktop_stop_args, docker_info_args,
-    docker_program, engine_running, ensure_decision, game_state, launch_detached, parse_ps_json,
-    poll_until_ready, start_engine, start_engine_succeeded, stop_engine, stop_engine_enabled,
-    EnsureDecision, PollOutcome, PsRow, ENGINE_POLL_INTERVAL_MS, ENGINE_POLL_TIMEOUT_MS,
+    docker_program, engine_presence, engine_running, ensure_decision, game_state, launch_detached,
+    parse_ps_json, poll_until_ready, start_engine, start_engine_succeeded, stop_engine,
+    stop_engine_enabled, EnginePresence, EnsureDecision, PollOutcome, PsRow,
+    ENGINE_POLL_INTERVAL_MS, ENGINE_POLL_TIMEOUT_MS,
 };
 
 /// PATH for the docker child: the docker executable's own directory (which
@@ -202,10 +203,79 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
     use crate::native;
     let program = native::docker_program();
     let desktop = native::docker_desktop_program();
-    match native::ensure_decision(native::engine_running(&program), desktop.is_some()) {
+    let probe_program = program.clone();
+    let start_program = program.clone();
+    let exe = desktop.clone();
+    ensure_engine_up_stream_with(
+        || native::engine_presence(&probe_program),
+        desktop.is_some(),
+        || native::start_engine_succeeded(&native::start_engine(&start_program)),
+        || {
+            // Only ever reached on the `Launch` arm, which implies a resolved
+            // exe -- the same invariant (and the same message) the inline
+            // version carried.
+            let e = exe.as_ref().expect("Launch decision implies a resolved desktop exe");
+            native::launch_detached(e)
+        },
+        |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        emit,
+    )
+}
+
+/// The code for "there is no docker CLI on this machine", which is a DIFFERENT
+/// repair from [`DOCKER_DESKTOP_MISSING`](ensure_engine_up_stream) and from a
+/// readiness timeout, and must not be reported as either.
+pub const CODE_DOCKER_CLI_MISSING: &str = "DOCKER_CLI_MISSING";
+
+/// The injectable half of [`ensure_engine_up_stream`], so the WIRING is
+/// testable and not merely the pure decision table underneath it.
+///
+/// Every impure thing this flow does is a parameter: what the CLI says
+/// (`presence`), whether a GUI exe was found (`desktop_found`), asking the CLI
+/// to start the engine (`start_via_cli`), launching the GUI (`launch_exe`), and
+/// the wait between readiness checks (`sleep`).
+///
+/// WHY A SEAM AND NOT A WALL-CLOCK TEST. The invariant worth protecting here is
+/// "the readiness wait is never ENTERED when it cannot succeed", and a test
+/// that measured elapsed time would be asserting the wrong thing — it would
+/// pass on a fast machine for reasons unrelated to the guard, and this repo has
+/// already recorded a wall-clock pin that stayed green with its bug deliberately
+/// reinstated. With `sleep` injected, "did we poll?" is a COUNTER: exact, and
+/// red the instant the guard is removed. Same shape, and same reason, as
+/// `stop_engine_stream_with` below.
+#[allow(clippy::too_many_arguments)]
+pub fn ensure_engine_up_stream_with(
+    mut presence: impl FnMut() -> dml_core::engine::EnginePresence,
+    desktop_found: bool,
+    mut start_via_cli: impl FnMut() -> bool,
+    mut launch_exe: impl FnMut() -> std::io::Result<()>,
+    mut sleep: impl FnMut(u64),
+    emit: impl Fn(serde_json::Value),
+) -> Result<(), CmdError> {
+    use crate::native;
+    use dml_core::engine::EnginePresence;
+    match native::ensure_decision(presence(), desktop_found) {
         native::EnsureDecision::AlreadyUp => {
             engine_line(&emit, "info", "Docker Desktop engine already running.");
             Ok(())
+        }
+        // NOTHING IS LAUNCHED AND NOTHING IS WAITED FOR. The readiness probe
+        // runs through the docker CLI, so with no CLI the 180-second wait below
+        // is dead time by construction: 61 checks, every one false because the
+        // program cannot be spawned, then the same refusal that was available
+        // before the first tick. Measured on the offending CI test: 184s, of
+        // which 180 were spent here. See `ensure_decision`.
+        native::EnsureDecision::NoDockerCli => {
+            let msg = "The docker command was not found, so the Docker engine cannot be started.";
+            let hint = "Install Docker Desktop, or set DML_DOCKER to the full path of docker.exe.";
+            emit(serde_json::json!({"event": "error", "error": {
+                "code": CODE_DOCKER_CLI_MISSING, "message": msg, "hint": hint,
+            }}));
+            Err(CmdError {
+                code: CODE_DOCKER_CLI_MISSING.into(),
+                message: msg.into(),
+                hint: hint.into(),
+            })
         }
         native::EnsureDecision::NoDesktop => {
             let msg = "Docker engine is down and Docker Desktop.exe was not found; \
@@ -217,8 +287,6 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
             Err(CmdError { code: "DOCKER_DESKTOP_MISSING".into(), message: msg.into(), hint: hint.into() })
         }
         native::EnsureDecision::Launch => {
-            // desktop is Some here (decision returned Launch).
-            let exe = desktop.expect("Launch decision implies a resolved desktop exe");
             engine_line(&emit, "info", "Docker engine is down. Starting Docker Desktop...");
             // Ask the CLI for the ENGINE first: launching the GUI exe pops the
             // Docker dashboard window over whatever the user was doing, every
@@ -227,9 +295,8 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
             // window. The `docker desktop` plugin only exists from Docker
             // Desktop 4.37, so a failure is NOT an error -- it falls back to the
             // exe, which is exactly the behaviour that shipped before this.
-            let cli = native::start_engine(&program);
-            if !native::start_engine_succeeded(&cli) {
-                if let Err(e) = native::launch_detached(&exe) {
+            if !start_via_cli() {
+                if let Err(e) = launch_exe() {
                     let msg = format!("Failed to launch Docker Desktop: {e}");
                     emit(serde_json::json!({"event": "error", "error": {
                         "code": "DOCKER_DESKTOP_LAUNCH", "message": msg, "hint": "",
@@ -240,10 +307,10 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
             let outcome = native::poll_until_ready(
                 native::ENGINE_POLL_INTERVAL_MS,
                 native::ENGINE_POLL_TIMEOUT_MS,
-                || native::engine_running(&program),
+                || presence() == EnginePresence::Up,
                 |ms| {
                     engine_line(&emit, "info", "Waiting for Docker Desktop to be ready...");
-                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    sleep(ms);
                 },
             );
             match outcome {
@@ -421,5 +488,162 @@ mod engine_section_tests {
             events.iter().any(|e| e["level"] == "warn"),
             "expected the missing-binary warn line: {events:?}"
         );
+    }
+
+    // -- the 180-second dead wait (CI blocker, 2026-08-05) --------------------
+
+    /// One run of [`ensure_engine_up_stream_with`] against fakes, with every
+    /// impure step COUNTED. The counters are the whole point: "did we enter the
+    /// readiness wait?" is then an exact integer, not an elapsed time.
+    struct EngineRun {
+        result: Result<dml_core::error::CmdError, ()>,
+        probes: u32,
+        starts: u32,
+        launches: u32,
+        sleeps: u32,
+        events: Vec<serde_json::Value>,
+    }
+
+    /// Drive the flow with a scripted sequence of presence answers. The LAST
+    /// entry is repeated forever, so a test that expects the wait to run out
+    /// does not have to script 61 identical replies.
+    fn run_engine(script: &[dml_core::engine::EnginePresence], desktop_found: bool, cli_starts: bool) -> EngineRun {
+        use std::cell::{Cell, RefCell};
+        let probes = Cell::new(0u32);
+        let starts = Cell::new(0u32);
+        let launches = Cell::new(0u32);
+        let sleeps = Cell::new(0u32);
+        let events = RefCell::new(Vec::new());
+
+        let result = super::ensure_engine_up_stream_with(
+            || {
+                let n = probes.get();
+                probes.set(n + 1);
+                script[(n as usize).min(script.len() - 1)]
+            },
+            desktop_found,
+            || {
+                starts.set(starts.get() + 1);
+                cli_starts
+            },
+            || {
+                launches.set(launches.get() + 1);
+                Ok(())
+            },
+            |_ms| sleeps.set(sleeps.get() + 1),
+            |v| events.borrow_mut().push(v),
+        );
+
+        EngineRun {
+            result: match result {
+                Ok(()) => Err(()),
+                Err(e) => Ok(e),
+            },
+            probes: probes.get(),
+            starts: starts.get(),
+            launches: launches.get(),
+            sleeps: sleeps.get(),
+            events: events.into_inner(),
+        }
+    }
+
+    /// THE CI BLOCKER, pinned deterministically.
+    ///
+    /// `install-native`'s preflight refusal took 184 SECONDS, of which 180 were
+    /// spent here: the docker CLI could not be spawned at all, that arrived at
+    /// `ensure_decision` as a plain "engine is down", and the flow launched the
+    /// Docker Desktop GUI and then polled `docker info` — through the CLI that
+    /// does not exist — 61 times, 3 seconds apart, for an answer that was false
+    /// by construction on every tick. It then refused with exactly the message
+    /// that was available before the first tick. That single test wedged
+    /// `cargo test --workspace`, and with it both CI jobs.
+    ///
+    /// `desktop_found: true` is the load-bearing part of the setup, not
+    /// incidental: it is the real machine's shape (Docker Desktop installed,
+    /// the docker CLI unreachable), and it is what makes this a test of
+    /// `CliMissing` OUTRANKING a present GUI rather than a restatement of the
+    /// pre-existing `NoDesktop` arm.
+    ///
+    /// NOT a wall-clock test, deliberately. This repo has already recorded a
+    /// timing pin that stayed green with its bug reinstated
+    /// (`a_deadline_bounds_the_call_even_when_a_grandchild_holds_the_pipes`),
+    /// because the failure it chased needed a race nothing could force. Here
+    /// the sleep is injected, so "we never waited" is `sleeps == 0` — exact,
+    /// instant, and red the moment the guard is removed.
+    #[test]
+    fn a_missing_docker_cli_is_refused_without_entering_the_readiness_wait() {
+        use dml_core::engine::EnginePresence;
+        let run = run_engine(&[EnginePresence::CliMissing], true, true);
+
+        // THE COUNTERS COME FIRST, and the order is deliberate. These are the
+        // invariant; the error code below is only how it is reported. Asserting
+        // the code first would let a future "fix" that merely renamed the
+        // timeout satisfy this test while the 180-second wait stayed exactly
+        // where it was -- pinning the symptom instead of the bug.
+        assert_eq!(run.sleeps, 0, "the readiness wait must never be ENTERED: it cannot succeed behind a CLI that does not exist");
+        assert_eq!(run.launches, 0, "nothing may be launched to satisfy an engine we cannot then talk to");
+        assert_eq!(run.starts, 0, "`docker desktop start` runs through the same absent CLI");
+        assert_eq!(run.probes, 1, "asked exactly once, never polled");
+
+        let err = run.result.expect("a missing docker CLI must be a refusal, not a success");
+        assert_eq!(
+            err.code,
+            super::CODE_DOCKER_CLI_MISSING,
+            "a missing CLI is its own repair -- not a readiness timeout, not a missing GUI"
+        );
+
+        // The refusal is a terminal error event, so the UI ends the section
+        // instead of spinning -- and it names the CLI, not the GUI.
+        let last = run.events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error");
+        assert_eq!(last["error"]["code"], super::CODE_DOCKER_CLI_MISSING);
+        assert!(
+            last["error"]["hint"].as_str().unwrap_or("").contains("DML_DOCKER"),
+            "the hint must point at the CLI override: {last}"
+        );
+    }
+
+    /// The other half, and the reason the guard cannot be "fixed" by simply
+    /// never waiting: an engine that is merely DOWN must still be started and
+    /// still be waited for.
+    ///
+    /// Without this, deleting the readiness poll outright would leave the test
+    /// above green while breaking the feature it guards — the over-fix that the
+    /// counter shape above makes so easy to reach for.
+    #[test]
+    fn an_engine_that_is_merely_down_is_still_started_and_waited_for() {
+        use dml_core::engine::EnginePresence;
+        // Down at the decision, down on the first readiness check, up on the
+        // second -- one sleep, then ready.
+        let run = run_engine(
+            &[EnginePresence::Down, EnginePresence::Down, EnginePresence::Up],
+            true,
+            false, // the CLI plugin is absent (pre-4.37), so the exe is launched
+        );
+
+        assert!(run.result.is_err(), "a reachable engine that came up is a success: {:?}", run.result);
+        assert_eq!(run.starts, 1, "the CLI is still asked for the engine first");
+        assert_eq!(run.launches, 1, "a failed CLI ask still falls back to the GUI exe");
+        assert_eq!(run.sleeps, 1, "it really waited -- the poll is intact");
+        assert!(
+            run.events.iter().any(|e| e["text"].as_str().unwrap_or("").contains("ready")),
+            "the ready line must still be emitted: {:?}", run.events
+        );
+    }
+
+    /// A `CouldNotTell` probe must NOT be promoted to the definitive negative.
+    /// An engine that is slow to answer is the case the wait exists for, and
+    /// refusing it would be a worse bug than the one being fixed here — so the
+    /// guard is asserted to be narrow, at the real call site.
+    #[test]
+    fn a_docker_that_merely_did_not_answer_is_still_waited_for() {
+        use dml_core::engine::EnginePresence;
+        // `engine_presence` maps a timed-out probe to `Down`, so this is the
+        // shape a wedged dockerd arrives in.
+        let run = run_engine(&[EnginePresence::Down], true, true);
+
+        let err = run.result.expect("never ready means a refusal");
+        assert_eq!(err.code, "DOCKER_ENGINE_TIMEOUT", "a slow engine times out; it is not a missing CLI");
+        assert!(run.sleeps > 0, "the wait must actually run for an engine that might still come up");
     }
 }
