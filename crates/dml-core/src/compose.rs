@@ -13,11 +13,38 @@ use std::path::{Path, PathBuf};
 /// title_dir_from_env()`, but generalized to an arbitrary title `id` rather
 /// than hardcoding `wow-server-playerbots` (mirrors `_games_resolve_or_fail`'s
 /// `dir="$GAMES_DIR/$gid"`, which works for any installed title).
+/// The pure decision behind [`games_dir_from_env`].
+///
+/// Split out so both branches are testable on both platforms without
+/// `std::env::set_var`, which mutates process-global state every other test in
+/// the binary shares — and cargo runs them in parallel.
+///
+/// Empty is NOT a value: an empty `DML_GAMES_DIR` falls through to the home
+/// default rather than resolving to nothing. Treating empty as set is the
+/// `${VAR:-default}` trap this repo hit on 2026-07-29, where a test that set a
+/// stub's value empty to mean "printed nothing" silently got the default back
+/// and proved nothing.
+pub fn games_dir_from(env_value: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = env_value.filter(|s| !s.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    // Inside the distro nothing exports DML_GAMES_DIR — the binary is spawned
+    // directly by the launcher — so this fallback IS the answer, and a
+    // cwd-relative "." would put a server wherever the process happened to
+    // start. The spec fixes the server directory at ~/games (Linux ext4, not
+    // /mnt/c: the AzerothCore compile is thousands of small-file writes and
+    // drvfs is far slower for that).
+    if let Some(home) = home.filter(|s| !s.is_empty()) {
+        return PathBuf::from(home).join("games");
+    }
+    PathBuf::from(".")
+}
+
 pub fn games_dir_from_env() -> PathBuf {
-    std::env::var_os("DML_GAMES_DIR")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    // `HOME` is the distro's own variable. On Windows it is usually absent,
+    // which is correct: there the launcher exports DML_GAMES_DIR and the home
+    // branch must not fire.
+    games_dir_from(std::env::var_os("DML_GAMES_DIR"), std::env::var_os("HOME"))
 }
 
 /// `$GAMES_DIR/$gid` (`90-main.sh:174`).
@@ -143,6 +170,46 @@ pub fn compose_sequence_for_mode(mode: &str) -> Vec<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    /// The override seam every parity/bats/integration suite injects.
+    #[test]
+    fn the_env_var_wins_over_everything() {
+        // Forward slashes work on BOTH platforms; a backslash literal would be
+        // Windows-only (test-portability rule).
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), os("/home/dml")),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+    }
+
+    /// Empty is not a value. `:-`-style "empty means unset" has bitten this
+    /// repo before (the tailscale stub, 2026-07-29), so pin the direction.
+    #[test]
+    fn an_empty_env_var_falls_through_rather_than_resolving_to_nothing() {
+        assert_eq!(games_dir_from(os(""), os("/home/dml")), PathBuf::from("/home/dml/games"));
+    }
+
+    /// Inside the distro nothing exports DML_GAMES_DIR, so the fallback IS the
+    /// answer. `.` would put a server wherever the process happened to start.
+    #[test]
+    fn the_fallback_is_the_home_games_dir_not_the_cwd() {
+        let got = games_dir_from(None, os("/home/dml"));
+        assert_eq!(got, PathBuf::from("/home/dml/games"));
+        assert_ne!(got, PathBuf::from("."), "a cwd-relative default is the bug this fixes");
+    }
+
+    /// No env var and no home is the one case with nothing to go on. `.` is
+    /// the honest answer there — inventing a path would be worse.
+    #[test]
+    fn no_home_and_no_override_is_still_the_cwd() {
+        assert_eq!(games_dir_from(None, None), PathBuf::from("."));
+        assert_eq!(games_dir_from(None, os("")), PathBuf::from("."));
+    }
 
     // -- title/compose-dir resolution --------------------------------------
     //
