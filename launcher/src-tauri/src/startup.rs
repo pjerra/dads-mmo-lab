@@ -126,7 +126,9 @@ pub fn resolve_and_export() {
     );
     let backend_str = match backend {
         dml_core::backend::Backend::Native => "native",
-        dml_core::backend::Backend::Wsl => "wsl",
+        // Arch and Wsl name the same distro and the same daemon; Task 3 is
+        // what makes the exported value differ.
+        dml_core::backend::Backend::Arch | dml_core::backend::Backend::Wsl => "wsl",
     };
 
     // --- yq: default to the path the one-click installer downloads to -----

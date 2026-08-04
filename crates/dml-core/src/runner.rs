@@ -132,11 +132,14 @@ impl DmlRunner {
         }
     }
 
-    /// Construct the runner for the selected backend. Default stays WSL, so the
-    /// app is unchanged until `DML_BACKEND=native` is set.
+    /// Construct the runner for the selected backend.
+    ///
+    /// `Arch` and `Wsl` route identically here — they name the same distro and
+    /// the same daemon. Task 3 is what makes the binary differ; until then this
+    /// is deliberately a routing no-op.
     pub fn for_backend(b: Backend) -> Self {
         match b {
-            Backend::Wsl => Self::default(),
+            Backend::Arch | Backend::Wsl => Self::default(),
             Backend::Native => Self::native(),
         }
     }

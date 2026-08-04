@@ -1466,7 +1466,9 @@ async fn wow_config_list(state: State<'_, AppState>) -> Result<serde_json::Value
 fn backend_mode() -> &'static str {
     match dml_wow::backend::selected() {
         dml_wow::backend::Backend::Native => "native",
-        dml_wow::backend::Backend::Wsl => "wsl",
+        // Arch and Wsl name the same distro and the same daemon; Task 3 is
+        // what makes this differ.
+        dml_wow::backend::Backend::Arch | dml_wow::backend::Backend::Wsl => "wsl",
     }
 }
 
