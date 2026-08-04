@@ -166,6 +166,65 @@ function Register-Resume {
     }
 }
 
+# Seconds before the automatic restart. Long enough to notice and reach the
+# keyboard on a machine that may still be scrolling installer output.
+$RestartCountdownSeconds = 60
+
+# Count down, then restart -- unless a key is pressed.
+#
+# Returns $true if it restarted (in practice it never returns then), $false if
+# the user cancelled or a restart was not attempted.
+#
+# THE CANCEL IS NOT A COURTESY, IT IS THE FEATURE. Where a keypress cannot be
+# read -- redirected stdin, a non-interactive host, ISE -- there is no way to
+# stop the countdown, and an unstoppable automatic restart is a different and
+# much worse thing than the one asked for. So an unreadable console means no
+# restart at all, and the user is told to do it themselves.
+function Invoke-RestartCountdown {
+    # Can we actually offer the escape hatch? Asked BEFORE anything counts
+    # down, so we never start a clock we cannot stop.
+    $canCancel = $false
+    try {
+        if ([Environment]::UserInteractive) {
+            $null = [Console]::KeyAvailable   # throws on hosts without a real console
+            $canCancel = $true
+        }
+    } catch {
+        $canCancel = $false
+    }
+
+    if (-not $canCancel) {
+        Say ''
+        Say '  This session cannot read a keypress, so the PC will NOT restart itself.' 'Yellow'
+        Say '  Restart it yourself; this script continues automatically afterwards.' 'Yellow'
+        return $false
+    }
+
+    # Drain anything already buffered, so a stray keystroke typed minutes ago
+    # does not instantly "cancel" a countdown the user never saw.
+    while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+
+    Say ''
+    $left = $RestartCountdownSeconds
+    while ($left -gt 0) {
+        Write-Host ("`r  Restarting in {0,3}s -- press any key to cancel and restart later. " -f $left) `
+                   -NoNewline -ForegroundColor Yellow
+        if ([Console]::KeyAvailable) {
+            $null = [Console]::ReadKey($true)
+            Write-Host ''
+            Say '  Cancelled -- restart this PC yourself when you are ready.' 'Yellow'
+            Say '  This script continues automatically after the restart.' 'DarkGray'
+            return $false
+        }
+        Start-Sleep -Seconds 1
+        $left--
+    }
+    Write-Host ''
+    Say '  Restarting now...' 'Yellow'
+    Restart-Computer -Force
+    return $true
+}
+
 function Test-IsElevated {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -672,6 +731,12 @@ if ($problems.Count -gt 0) {
             Say '  RESTART THIS PC. This script then continues automatically.' 'Yellow'
         } else {
             Say '  RESTART THIS PC, then run this script again.' 'Yellow'
+        }
+        # NEVER under -DryRun. The test harness runs this script with -DryRun on
+        # a developer's machine; without this guard the suite would hang for a
+        # minute and then reboot the box running it.
+        if (-not $DryRun) {
+            $null = Invoke-RestartCountdown
         }
     } else {
         Say '  Fix those, then run this script again.' 'Yellow'

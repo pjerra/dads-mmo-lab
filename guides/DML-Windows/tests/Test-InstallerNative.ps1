@@ -342,6 +342,88 @@ if ($reg) {
 }
 
 # --------------------------------------------------------------------------
+Say "`n== The automatic restart cannot fire by accident ==" 'White'
+# This is the only thing in the repo that reboots a machine, and the test
+# harness itself runs the installer with -DryRun on a developer's box. A wrong
+# guard here does not produce a red test -- it restarts whoever ran the suite.
+
+$restartAsts = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Restart-Computer'
+}, $true))
+Assert-True ($restartAsts.Count -eq 1) `
+    "exactly one Restart-Computer call (found $($restartAsts.Count))"
+
+# GUARD 1: it lives inside Invoke-RestartCountdown, never inline in the flow.
+$cd = Get-FunctionAst $ast 'Invoke-RestartCountdown'
+Assert-True ($null -ne $cd) 'Invoke-RestartCountdown exists'
+if ($cd -and $restartAsts.Count -eq 1) {
+    $r = $restartAsts[0].Extent
+    Assert-True ($r.StartOffset -ge $cd.Extent.StartOffset -and $r.EndOffset -le $cd.Extent.EndOffset) `
+        'the Restart-Computer call is inside Invoke-RestartCountdown'
+}
+
+# GUARD 2: the countdown is only ever CALLED behind -DryRun.
+$cdCalls = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Invoke-RestartCountdown'
+}, $true))
+Assert-True ($cdCalls.Count -ge 1) 'Invoke-RestartCountdown is actually called'
+foreach ($c in $cdCalls) {
+    $guard = $null
+    $node = $c.Parent
+    while ($null -ne $node -and $null -eq $guard) {
+        if ($node -is [System.Management.Automation.Language.IfStatementAst]) {
+            foreach ($clause in $node.Clauses) {
+                $b = $clause.Item2.Extent
+                if ($c.Extent.StartOffset -ge $b.StartOffset -and
+                    $c.Extent.EndOffset -le $b.EndOffset -and
+                    $clause.Item1.Extent.Text -match 'DryRun') { $guard = $clause.Item1.Extent.Text }
+            }
+        }
+        $node = $node.Parent
+    }
+    Assert-True ($null -ne $guard) `
+        "the countdown at line $($c.Extent.StartLineNumber) is guarded by -DryRun"
+}
+
+# GUARD 3: the cancel is not a courtesy, it IS the feature. Where a keypress
+# cannot be read, an unstoppable restart is a different and much worse thing
+# than the one that was asked for -- so the function must consult both
+# UserInteractive and KeyAvailable, and must be able to return without
+# restarting.
+if ($cd) {
+    $body = $cd.Extent.Text
+    Assert-True ($body -match 'UserInteractive') 'the countdown checks the session is interactive'
+    Assert-True ($body -match 'KeyAvailable') 'the countdown checks for a keypress'
+
+    # REACHABILITY, not presence. An earlier version only asserted these strings
+    # appeared, so a mutation that replaced the whole guard with `if ($false)`
+    # left them in place and passed -- the third time in two days that counting
+    # a construct proved it was written rather than that it runs. What must hold
+    # is that some branch INSIDE this function is conditioned on whether a
+    # cancel is possible.
+    $condHasCanCancel = $false
+    foreach ($ifAst in $cd.FindAll({
+        param($n) $n -is [System.Management.Automation.Language.IfStatementAst]
+    }, $true)) {
+        foreach ($clause in $ifAst.Clauses) {
+            if ($clause.Item1.Extent.Text -match 'canCancel') { $condHasCanCancel = $true }
+        }
+    }
+    Assert-True $condHasCanCancel `
+        'a branch is conditioned on whether a cancel can actually be offered'
+    Assert-True ($body -match 'ReadKey') 'a keypress is consumed, so it registers as a cancel'
+    # The restart must come AFTER the cancel loop, never before it.
+    $keyIdx = $body.IndexOf('KeyAvailable')
+    $rebootIdx = $body.IndexOf('Restart-Computer')
+    Assert-True ($keyIdx -ge 0 -and $rebootIdx -gt $keyIdx) `
+        'the cancel check precedes the restart'
+}
+
+# --------------------------------------------------------------------------
 Say "`n== Defender exclusions are DIRECTORY-scoped ==" 'White'
 # Excluding a compiler BINARY leaves it unscanned machine-wide -- a much larger
 # hole than skipping one build tree.
