@@ -1,22 +1,27 @@
-//! Which orchestration backend the launcher drives (spike:
-//! `spike/docker-desktop-native`).
+//! Which orchestration backend the launcher drives.
 //!
-//! Today the app is hard-wired to [`Wsl`](Backend::Wsl): every feature shells
-//! `wsl.exe -d dml-arch -u dml -- dml … --json`. The native path
-//! ([`Backend::Native`], see [`super::native`]) drives `docker compose`
-//! directly on the Windows host.
+//! Three arms, and [`Backend::Arch`] is the default: the `dml-arch` WSL
+//! distro hosting its own `dockerd`, with the Rust `dml-wow` binary running
+//! INSIDE it. [`Backend::Wsl`] is retired as a runtime path but still parses
+//! — an existing `launcher.json` or a hand-written `DML_BACKEND=wsl` resolves
+//! to `Arch`, since they name the same distro and the same daemon.
+//! [`Backend::Native`] ([`super::native`]) drives `docker compose` directly
+//! against Docker Desktop on the Windows host; it is kept working as a
+//! fallback — never extended — for a user who already has a server there and
+//! no distro to move it to.
 //!
 //! This selector is the SINGLE wiring point for the switch. It exists and is
 //! tested now so the migration is a routing change at call sites, not a
 //! search-and-replace: a `games_*` command asks [`Backend::selected`] and, when
 //! it is `Native`, routes to the [`NativeDocker`](super::native::NativeDocker)
-//! lifecycle instead of the WSL runner. Default stays `Wsl`, so nothing changes
-//! until `DML_BACKEND=native` is set — the spike ships dormant.
+//! lifecycle instead of the WSL/Arch runner.
 
 #![allow(dead_code)] // selector wired at call sites during the port, not yet
 
-/// Environment variable that overrides the backend. `native` selects the
-/// Docker-Desktop path; anything else (or unset) stays on WSL.
+/// Environment variable that overrides the backend. `native` (or `docker`)
+/// selects Docker Desktop; anything else — unset, empty, `wsl`, `arch`, or a
+/// typo — resolves to [`Backend::Arch`], because Arch is the backend the
+/// launcher can provision from nothing. See [`from_override`].
 pub const BACKEND_ENV: &str = "DML_BACKEND";
 
 use crate::setup::Tri;

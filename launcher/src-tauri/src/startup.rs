@@ -47,6 +47,25 @@ pub fn default_games_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("dml-native"))
 }
 
+/// Whether `backend::detect`'s answer for this machine can actually change
+/// depending on what the distro probe says.
+///
+/// Given `detect`'s three-row table (`distro_usable == Yes` -> `Arch`;
+/// else `native_dir_exists && docker_present` -> `Native`; else -> `Arch`),
+/// the probe's answer only matters when BOTH a native server directory
+/// already exists AND Docker is present: that is the one combination where
+/// `distro_usable == Tri::Yes` overrides what would otherwise be `Native`
+/// ("a user with BOTH a usable distro and a native server gets Arch"). Every
+/// other combination returns `Arch` regardless of whether the probe answers
+/// Yes, No or Unknown, so skipping the probe there costs nothing and saves a
+/// `wsl.exe` spawn before the window is shown.
+///
+/// Extracted as a pure function so this claim is directly testable without
+/// spawning `wsl.exe` or reaching into `resolve_and_export`.
+fn distro_probe_matters(native_dir_exists: bool, docker_present: bool) -> bool {
+    native_dir_exists && docker_present
+}
+
 /// Resolve the backend and the three paths, then export whatever the user has
 /// not already set. Call FIRST in `run()`.
 pub fn resolve_and_export() {
@@ -98,17 +117,15 @@ pub fn resolve_and_export() {
     // `docker_desktop_program` has NO bare-name fallback, so `Some` means a
     // real Docker Desktop executable was found on disk.
     let docker_present = dml_core::engine::docker_desktop_program().is_some();
-    // "Could the WSL backend work at all here?" Without this, detection could
-    // never select Native on a fresh machine: its other signal is "a native
-    // server directory exists", which only becomes true AFTER a native install
-    // — and installing requires being in native mode already.
+    // "Is `dml-arch` registered?" -- the third input to `backend::detect`.
     //
-    // Only asked when it can change the answer. When Docker is absent the
-    // result is Wsl regardless, and when a native server dir is already there
-    // the result is Native regardless; spawning `wsl.exe` in either case would
-    // add startup latency for a value nothing reads. This runs before the
+    // Only asked when it can change `detect`'s answer (see
+    // `distro_probe_matters`): in every OTHER combination of
+    // native_dir_exists/docker_present, `detect` returns `Arch` whether the
+    // probe says Yes, No or Unknown, so spawning `wsl.exe` for it would just
+    // be startup latency for a value nothing reads. This runs before the
     // window is shown, so that matters.
-    let wsl_usable = if docker_present && !native_dir_exists {
+    let distro_usable = if distro_probe_matters(native_dir_exists, docker_present) {
         dml_core::setup::distro_registered(&dml_core::setup::SetupProbeEnv::new(
             dml_core::runner::DISTRO,
             dml_core::runner::USER,
@@ -122,7 +139,7 @@ pub fn resolve_and_export() {
         cfg.backend.as_deref(),
         native_dir_exists,
         docker_present,
-        wsl_usable,
+        distro_usable,
     );
     let backend_str = match backend {
         dml_core::backend::Backend::Native => "native",
@@ -212,5 +229,46 @@ mod tests {
         // stay honest ("not found") instead of pointing at an invented path.
         assert_eq!(value_to_export(None, None), None);
         assert_eq!(value_to_export(Some(""), None), None);
+    }
+
+    #[test]
+    fn distro_probe_matters_only_when_a_native_server_and_docker_are_both_present() {
+        // This is the combination `backend::detect` checks BEFORE falling
+        // through to Arch -- the one row where `distro_usable == Tri::Yes`
+        // overrides what would otherwise be `Native`.
+        assert!(distro_probe_matters(true, true));
+        assert!(!distro_probe_matters(true, false));
+        assert!(!distro_probe_matters(false, true));
+        assert!(!distro_probe_matters(false, false));
+    }
+
+    #[test]
+    fn distro_probe_matters_agrees_with_detect_itself() {
+        // Cross-checks the predicate against `backend::detect` directly, so
+        // this test is not just re-stating the predicate's own formula: for
+        // every combination of (native_dir_exists, docker_present), the probe
+        // is worth asking IFF `detect` actually gives a different answer for
+        // `Tri::Yes` than for `Tri::No`/`Tri::Unknown`. This is the exact
+        // check that would have caught Finding 1 (the skip condition was
+        // inverted relative to the new three-row `detect`).
+        for native_dir_exists in [true, false] {
+            for docker_present in [true, false] {
+                let with_yes =
+                    dml_core::backend::detect(native_dir_exists, docker_present, dml_core::setup::Tri::Yes);
+                let with_no =
+                    dml_core::backend::detect(native_dir_exists, docker_present, dml_core::setup::Tri::No);
+                let with_unknown = dml_core::backend::detect(
+                    native_dir_exists,
+                    docker_present,
+                    dml_core::setup::Tri::Unknown,
+                );
+                let probe_actually_changes_the_answer = with_yes != with_no || with_yes != with_unknown;
+                assert_eq!(
+                    distro_probe_matters(native_dir_exists, docker_present),
+                    probe_actually_changes_the_answer,
+                    "native_dir_exists={native_dir_exists} docker_present={docker_present}"
+                );
+            }
+        }
     }
 }
