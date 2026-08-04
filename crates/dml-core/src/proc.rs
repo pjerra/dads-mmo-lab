@@ -740,6 +740,25 @@ mod tests {
         }
     }
 
+    /// A child that stays alive until `at`, then exits — so the poll loop spends
+    /// a KNOWN fraction of the bound before the drain begins. That fraction is
+    /// the only thing that distinguishes the real deadline from one re-derived
+    /// at drain time.
+    struct ExitsAfter(std::time::Instant);
+    impl Abandonable for ExitsAfter {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn wait(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Pollable for ExitsAfter {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            Ok((std::time::Instant::now() >= self.0).then(exited_ok))
+        }
+    }
+
     /// Run `f` on its own thread and refuse to wait for it longer than `patience`.
     ///
     /// The point is the failure MODE. Every mutation this test exists to catch
@@ -802,6 +821,49 @@ mod tests {
             elapsed >= timeout,
             "returned after {elapsed:?}, before its own {timeout:?} bound — the drain was \
              handed a deadline SHORTER than the one the bound was computed from"
+        );
+    }
+
+    /// THE "LOOKS RIGHT" TYPO, which neither test above can see:
+    /// `collect_by(Instant::now() + timeout)`. `timeout` is in scope at the
+    /// drain, so re-deriving the clock there reads as obviously correct — and it
+    /// silently MULTIPLIES the bound, because the poll loop has already spent
+    /// part of it and the two pipes are then collected in SEQUENCE, each buying
+    /// itself a fresh full timeout. Against a child that exits at once the two
+    /// spellings are indistinguishable (the loop spends nothing), which is why
+    /// this test buys a real gap: the child lives for 90% of the bound.
+    ///
+    /// Measured, not predicted: honest 1.00s, typo 2.93s (0.9 poll + 1.0 + 1.0).
+    ///
+    /// The 500ms slack is the deliberate trade. It sits between the two outcomes
+    /// — 500ms of headroom for the correct code, 1.4s of overshoot for the typo
+    /// — rather than hugging either, because a tight bracket on a wall-clock
+    /// test is how this repo has produced flakes before, and a test that goes
+    /// red under load teaches people to ignore it.
+    #[test]
+    fn the_drain_does_not_re_derive_the_clock_the_poll_loop_already_spent() {
+        let timeout = Duration::from_millis(1000);
+        let poll_time = Duration::from_millis(900);
+        let began = std::time::Instant::now();
+        let outcome = within(Duration::from_secs(20), move || {
+            bounded_outcome_after_spawn(
+                ExitsAfter(std::time::Instant::now() + poll_time),
+                BoundedReader::spawn(NeverEnds),
+                BoundedReader::spawn(NeverEnds),
+                timeout,
+            )
+        });
+        let elapsed = began.elapsed();
+
+        assert!(
+            matches!(outcome, Some(BoundedOutcome::TimedOut)),
+            "expected TimedOut, got {outcome:?}"
+        );
+        assert!(
+            elapsed < timeout + Duration::from_millis(500),
+            "took {elapsed:?} for a {timeout:?} bound after the poll loop had already spent \
+             {poll_time:?} of it — the drain re-derived the deadline from `timeout` instead of \
+             using the one the loop enforced, which multiplies the bound"
         );
     }
 
