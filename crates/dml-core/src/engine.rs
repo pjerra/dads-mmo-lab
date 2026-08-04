@@ -188,21 +188,80 @@ pub fn docker_info_args() -> [&'static str; 3] {
     ["info", "--format", "{{.ServerVersion}}"]
 }
 
+/// What the docker CLI said when asked whether the engine is up.
+///
+/// THREE states, because two of them are not the same repair and collapsing
+/// them cost three silent minutes on every run that met it. [`engine_running`]
+/// answers `bool`, which cannot tell
+///
+/// * "docker.exe is not on this machine" — nothing can start behind a CLI that
+///   does not exist, and no amount of waiting changes that; from
+/// * "docker.exe is here and the engine is down" — start it, then wait.
+///
+/// [`ensure_decision`] is where that distinction is spent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnginePresence {
+    /// `docker info` answered cleanly: the engine is up.
+    Up,
+    /// The CLI could be spawned but the engine did not answer — or the probe
+    /// blew its own deadline. Worth starting, and worth waiting for.
+    Down,
+    /// The docker CLI is not on this machine (`ErrorKind::NotFound` at spawn).
+    /// The one genuinely definitive negative.
+    CliMissing,
+}
+
+/// Ask the docker CLI whether the engine is up, keeping "there is no docker
+/// CLI" apart from "the engine is down". BOUNDED — see below.
+///
+/// THE BOUND MATTERS HERE MORE THAN ALMOST ANYWHERE. This is the readiness
+/// predicate [`poll_until_ready`] calls up to 61 times, and it used to be a
+/// bare `cmd.status()` with no wall-clock bound at all. A `docker info` against
+/// a dockerd wedged during startup — precisely the state the readiness wait
+/// exists for — connects and then never answers, so the FIRST call never
+/// returns, the 180s budget never advances, and the "bounded" wait is
+/// unbounded. A deadline is only ever consulted after a call RETURNS.
+///
+/// `CouldNotTell` deliberately reads as [`EnginePresence::Down`], never as
+/// `CliMissing`: a probe that blew its deadline is evidence of NOTHING, and
+/// promoting it to the definitive negative would refuse to start an engine
+/// that was merely slow. Only the definitive negative changes behaviour.
+pub fn engine_presence(program: &OsStr) -> EnginePresence {
+    let mut cmd = Command::new(program);
+    cmd.args(docker_info_args());
+    windows_no_window(&mut cmd);
+    engine_presence_of(crate::setup::ProbeOutcome::from_bounded(
+        crate::proc::run_bounded_outcome(cmd, crate::setup::DEFAULT_PROBE_TIMEOUT),
+    ))
+}
+
+/// The pure half of [`engine_presence`]: which probe outcome means what. Split
+/// out so the mapping is asserted without a spawn AND cannot drift from the
+/// spawn that feeds it — there is exactly one classifier, not one in the
+/// function and another in a test's idea of it.
+pub fn engine_presence_of(outcome: crate::setup::ProbeOutcome) -> EnginePresence {
+    match outcome {
+        crate::setup::ProbeOutcome::ProgramMissing => EnginePresence::CliMissing,
+        crate::setup::ProbeOutcome::CouldNotTell => EnginePresence::Down,
+        crate::setup::ProbeOutcome::Ran { code, .. } => {
+            if code == Some(0) {
+                EnginePresence::Up
+            } else {
+                EnginePresence::Down
+            }
+        }
+    }
+}
+
 /// Whether `docker info` succeeds against `program` — the definition of "the
 /// Docker Desktop engine is running". A missing docker.exe, a down engine, or
 /// any non-zero exit all read as not-running. (Impure: real spawn.)
+///
+/// Expressed in terms of [`engine_presence`] so this shorthand inherits its
+/// bound; the two must never drift into two different `docker info` spawns with
+/// two different deadlines.
 pub fn engine_running(program: &OsStr) -> bool {
-    let mut cmd = Command::new(program);
-    cmd.args(docker_info_args());
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    matches!(cmd.status(), Ok(s) if s.success())
+    engine_presence(program) == EnginePresence::Up
 }
 
 /// The `docker desktop stop` argv — stops the Docker Desktop engine AND its
@@ -308,8 +367,9 @@ pub fn launch_detached(program: &OsStr) -> std::io::Result<()> {
 }
 
 /// What to do to satisfy the "engine must be up" prerequisite, decided from two
-/// facts: is the engine already up, and did we find a Docker Desktop.exe to
-/// launch. Pure, so the branch table is unit-tested without spawns.
+/// facts: what the docker CLI said about itself and the engine, and whether we
+/// found a Docker Desktop.exe to launch. Pure, so the branch table is
+/// unit-tested without spawns.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnsureDecision {
     /// Engine already running — nothing to do.
@@ -317,18 +377,36 @@ pub enum EnsureDecision {
     /// Engine down and no Docker Desktop.exe found — abort (do not compose
     /// against a dead engine, and there is nothing to start).
     NoDesktop,
+    /// There is no docker CLI on this machine — abort WITHOUT launching
+    /// anything and WITHOUT waiting. See [`ensure_decision`] for why this
+    /// outranks a Docker Desktop.exe that was found.
+    NoDockerCli,
     /// Engine down but Docker Desktop.exe found — launch it and poll.
     Launch,
 }
 
 /// Decide how to satisfy the engine prerequisite. See [`EnsureDecision`].
-pub fn ensure_decision(engine_up: bool, desktop_found: bool) -> EnsureDecision {
-    if engine_up {
-        EnsureDecision::AlreadyUp
-    } else if !desktop_found {
-        EnsureDecision::NoDesktop
-    } else {
-        EnsureDecision::Launch
+///
+/// THE RULE THAT WAS MISSING, and the three minutes it cost. This took a plain
+/// `engine_up: bool`, so "docker.exe could not even be spawned" arrived here
+/// indistinguishable from "the engine is down" and produced `Launch`: launch
+/// the Docker Desktop GUI, then poll `docker info` — through the very CLI that
+/// does not exist — every 3 seconds for the full 180-second budget, an answer
+/// that is `false` by construction on every single tick. Then refuse, with the
+/// same refusal that was already available at t=0.
+///
+/// `CliMissing` therefore OUTRANKS `desktop_found` deliberately. A machine can
+/// easily have `Docker Desktop.exe` on disk while the CLI we were told to use
+/// is absent (a broken install, or a `DML_DOCKER` pointing at nothing), and
+/// that combination is exactly the one that used to launch a GUI and then wait
+/// out the clock. The readiness probe runs through the CLI, so a present GUI
+/// cannot rescue a missing CLI.
+pub fn ensure_decision(presence: EnginePresence, desktop_found: bool) -> EnsureDecision {
+    match presence {
+        EnginePresence::Up => EnsureDecision::AlreadyUp,
+        EnginePresence::CliMissing => EnsureDecision::NoDockerCli,
+        EnginePresence::Down if !desktop_found => EnsureDecision::NoDesktop,
+        EnginePresence::Down => EnsureDecision::Launch,
     }
 }
 
@@ -684,20 +762,89 @@ mod tests {
     #[test]
     fn ensure_decision_already_up_when_engine_running() {
         // Engine up wins regardless of whether a desktop exe was found.
-        assert_eq!(ensure_decision(true, false), EnsureDecision::AlreadyUp);
-        assert_eq!(ensure_decision(true, true), EnsureDecision::AlreadyUp);
+        assert_eq!(ensure_decision(EnginePresence::Up, false), EnsureDecision::AlreadyUp);
+        assert_eq!(ensure_decision(EnginePresence::Up, true), EnsureDecision::AlreadyUp);
     }
 
     #[test]
     fn ensure_decision_no_desktop_aborts() {
         // Engine down and nothing to launch -> abort, never compose against a
         // dead engine.
-        assert_eq!(ensure_decision(false, false), EnsureDecision::NoDesktop);
+        assert_eq!(ensure_decision(EnginePresence::Down, false), EnsureDecision::NoDesktop);
     }
 
     #[test]
     fn ensure_decision_launch_when_down_but_installed() {
-        assert_eq!(ensure_decision(false, true), EnsureDecision::Launch);
+        assert_eq!(ensure_decision(EnginePresence::Down, true), EnsureDecision::Launch);
+    }
+
+    /// The rule this enum gained a third state for: a missing docker CLI is
+    /// never a `Launch`, EVEN WHEN a Docker Desktop.exe was found.
+    ///
+    /// That pairing is not hypothetical — it is the exact shape of the machine
+    /// this was found on (Docker Desktop installed, `DML_DOCKER` pointing at a
+    /// path that does not exist) and it produced a launched GUI followed by a
+    /// 180-second poll whose answer was false by construction.
+    #[test]
+    fn ensure_decision_never_waits_behind_a_docker_cli_that_is_not_there() {
+        assert_eq!(
+            ensure_decision(EnginePresence::CliMissing, true),
+            EnsureDecision::NoDockerCli,
+            "a present GUI cannot rescue an absent CLI -- the readiness probe runs through the CLI"
+        );
+        assert_eq!(
+            ensure_decision(EnginePresence::CliMissing, false),
+            EnsureDecision::NoDockerCli
+        );
+    }
+
+    /// A probe that could not tell must keep TODAY's behaviour. Promoting a
+    /// timed-out `docker info` to the definitive negative would refuse to start
+    /// an engine that was merely slow — the mirror-image failure, and a much
+    /// worse one than the wait it replaces.
+    #[test]
+    fn a_probe_that_could_not_tell_is_still_worth_starting_and_waiting_for() {
+        assert_eq!(ensure_decision(EnginePresence::Down, true), EnsureDecision::Launch);
+        assert_eq!(
+            engine_presence_of(crate::setup::ProbeOutcome::CouldNotTell),
+            EnginePresence::Down
+        );
+    }
+
+    /// A missing program is the ONE definitive negative; everything else is a
+    /// shrug that keeps the old behaviour. Asserted against the same classifier
+    /// `engine_presence` uses, so the mapping cannot drift from the spawn.
+    #[test]
+    fn only_a_missing_program_reads_as_cli_missing() {
+        use crate::setup::ProbeOutcome;
+        assert_eq!(
+            engine_presence_of(ProbeOutcome::ProgramMissing),
+            EnginePresence::CliMissing
+        );
+        assert_eq!(
+            engine_presence_of(ProbeOutcome::Ran {
+                code: Some(0),
+                stdout: "27.0.3".into(),
+                stderr: String::new()
+            }),
+            EnginePresence::Up
+        );
+        assert_eq!(
+            engine_presence_of(ProbeOutcome::Ran {
+                code: Some(1),
+                stdout: String::new(),
+                stderr: "cannot connect to the Docker daemon".into()
+            }),
+            EnginePresence::Down
+        );
+    }
+
+    /// The real spawn agrees with the classifier: a program that is not
+    /// installed is `CliMissing`, not a shrug.
+    #[test]
+    fn engine_presence_reports_an_absent_cli_as_cli_missing() {
+        let got = engine_presence(&OsString::from("definitely-not-docker-9f2.exe"));
+        assert_eq!(got, EnginePresence::CliMissing);
     }
 
     #[test]
