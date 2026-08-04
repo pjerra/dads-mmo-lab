@@ -67,6 +67,10 @@ pub const DEST_CLI: &str = "/usr/local/bin/dml";
 pub const DEST_LUA_PARTY: &str = "/usr/local/share/dml/lua/party";
 pub const DEST_LUA_GM: &str = "/usr/local/share/dml/lua/gm";
 pub const DEST_INSTALLERS: &str = "/usr/local/share/dml/installers";
+/// The Arch backend's whole runtime. `/usr/local/bin` is on the distro's
+/// default PATH, which is why `DmlRunner::arch()` (crates/dml-core/src/runner.rs)
+/// can invoke a bare `dml-wow` rather than an absolute path.
+pub const DEST_DML_WOW: &str = "/usr/local/bin/dml-wow";
 
 /// Executable payload (the CLI, the title installers).
 pub const MODE_EXEC: &str = "0755";
@@ -227,6 +231,16 @@ pub fn plan(resource_dir: &Path) -> Result<Vec<InstallStep>, PlanError> {
             mode: MODE_EXEC,
             dest: Dest::Dir(DEST_INSTALLERS),
             sources: INSTALLER_SCRIPTS.iter().map(|s| format!("{INSTALLERS_DIR}/{s}")).collect(),
+        },
+        InstallStep {
+            label: "Installing the Arch backend",
+            // A 0644 binary is not executable, and the failure -- `Permission
+            // denied` from `--exec` -- reads like a missing binary rather than
+            // a wrong mode, so the mode is part of the diagnosis, not just the
+            // function.
+            mode: MODE_EXEC,
+            dest: Dest::File(DEST_DML_WOW),
+            sources: vec![payload::DML_WOW_BIN.to_string()],
         },
     ])
 }
@@ -577,6 +591,31 @@ pub fn provision_with(
     //    whole flow is idempotent by construction.
     let mut files = 0usize;
     for step in &steps {
+        // TOCTOU defence for the Arch backend binary specifically. Step 2's
+        // `payload::resolve` proved the bundle was a real ELF at an EARLIER
+        // moment; between then and this exact spawn the file on disk could
+        // have changed underneath us (AV quarantine-and-replace, a
+        // half-finished re-stage, ...), and the very next thing that happens
+        // to it is `install -m 0755` -- chmod executable, ready for the
+        // distro's PATH to find and run. Re-read the magic bytes immediately
+        // before that spawn and refuse rather than deploy-and-hope; this is
+        // NOT redundant with the earlier check, it closes the gap between it
+        // and the actual copy.
+        if step.dest.path() == DEST_DML_WOW {
+            let bin_path = payload::paths(dir).dml_wow_bin;
+            if !payload::is_elf(&bin_path) {
+                fail(
+                    &emit,
+                    "PAYLOAD_MISSING",
+                    format!(
+                        "The Arch backend binary at {} is no longer a valid Linux executable.",
+                        payload::DML_WOW_BIN
+                    ),
+                    "This copy of the launcher's files changed on disk during setup. Reinstall the launcher and try again.",
+                );
+                return;
+            }
+        }
         emit(line_event("info", format!("{}...", step.label)));
         let argv = install_argv(&cfg.distro, step, &wsl_dir);
         let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
@@ -660,12 +699,13 @@ pub fn provision(env: &ProvisionEnv, resource_dir: Option<&Path>, emit: impl Fn(
 
 /// Every destination the plan writes to, in order. Used by the drift guard
 /// against `cli/dev-install.ps1`.
-pub fn destinations() -> [(&'static str, &'static str); 4] {
+pub fn destinations() -> [(&'static str, &'static str); 5] {
     [
         (DEST_CLI, MODE_EXEC),
         (DEST_LUA_PARTY, MODE_DATA),
         (DEST_LUA_GM, MODE_DATA),
         (DEST_INSTALLERS, MODE_EXEC),
+        (DEST_DML_WOW, MODE_EXEC),
     ]
 }
 
@@ -812,11 +852,42 @@ mod tests {
                 (DEST_LUA_PARTY, MODE_DATA),
                 (DEST_LUA_GM, MODE_DATA),
                 (DEST_INSTALLERS, MODE_EXEC),
+                (DEST_DML_WOW, MODE_EXEC),
             ]
         );
         assert_eq!(steps[0].dest, Dest::File(DEST_CLI), "the CLI is one exact file, not a dir drop");
         assert_eq!(steps[0].sources, vec![payload::CLI_SCRIPT.to_string()]);
         assert_eq!(steps[3].sources.len(), 6, "all six title installers");
+        assert_eq!(steps[4].dest, Dest::File(DEST_DML_WOW), "the Arch binary is one exact file, not a dir drop");
+        assert_eq!(steps[4].sources, vec![payload::DML_WOW_BIN.to_string()]);
+        assert_eq!(steps[4].mode, MODE_EXEC, "a 0644 binary cannot run");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_binary_is_deployed_executable_to_a_path_on_the_distro_path() {
+        // /usr/local/bin is on the distro's default PATH, which is why
+        // `DmlRunner::arch()` can invoke a bare `dml-wow` rather than an
+        // absolute path.
+        let found = destinations()
+            .into_iter()
+            .find(|(dest, _)| *dest == DEST_DML_WOW)
+            .expect("the Linux binary must be a provisioning destination");
+        assert_eq!(found.0, "/usr/local/bin/dml-wow");
+        assert_eq!(found.1, MODE_EXEC);
+    }
+
+    #[test]
+    fn the_binary_step_is_mode_0755_because_a_0644_binary_cannot_run() {
+        let d = tmp_dir("provision-plan-bin");
+        complete_payload(&d);
+        let steps = plan(&d).expect("plan");
+        let step = steps
+            .iter()
+            .find(|s| s.dest.path() == DEST_DML_WOW)
+            .expect("binary step");
+        assert_eq!(step.mode, "0755");
+        assert_eq!(step.sources, vec![payload::DML_WOW_BIN.to_string()]);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -865,7 +936,7 @@ mod tests {
         let steps = plan(&d).unwrap();
         // Non-vacuity: an empty plan or an empty argv would satisfy every
         // "must not contain" assertion below without proving anything.
-        assert_eq!(steps.len(), 4, "the plan must have steps to check");
+        assert_eq!(steps.len(), 5, "the plan must have steps to check");
         for step in &steps {
             let argv = install_argv(DISTRO, step, "/mnt/c/Program Files/DML Launcher");
             assert!(argv.len() >= 6, "argv must be a real command: {argv:?}");
@@ -1120,7 +1191,7 @@ mod tests {
         complete_payload(&d);
         let mut replies = probe_no_cli();
         replies.push(ran(0, "/mnt/c/app\n"));
-        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend((0..5).map(|_| ran(0, "")));
         // Verify probe: a `dml` that is there but is the wrong build.
         replies.push(ran(0, "dml-arch\r\n"));
         replies.push(ran(0, r#"{"ok":true,"data":{"version":"2.6.0"}}"#));
@@ -1142,7 +1213,7 @@ mod tests {
         complete_payload(&d);
         let mut replies = probe_no_cli();
         replies.push(ran(0, "/mnt/c/app\n"));
-        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend((0..5).map(|_| ran(0, "")));
         replies.push(ran(0, "dml-arch\r\n"));
         replies.push(ran_err(127, "bash: dml: command not found"));
         let fake = Fake::new(replies);
@@ -1152,13 +1223,46 @@ mod tests {
         std::fs::remove_dir_all(&d).unwrap();
     }
 
+    /// TOCTOU defence, not redundancy with `payload::resolve`'s earlier check.
+    /// That check (step 2 of the flow) proves the bundle is a real ELF at an
+    /// EARLIER moment; this proves the file is re-verified immediately before
+    /// the actual `install -m 0755` spawn -- the point at which the next thing
+    /// that happens to it is a chmod and, moments later, a real exec inside
+    /// the distro. Corrupt the file on disk AFTER `complete_payload` staged a
+    /// good one (simulating it changing mid-flight) and confirm the flow
+    /// refuses instead of deploying it anyway.
+    #[test]
+    fn the_binary_is_re_checked_for_elf_magic_immediately_before_the_chmod() {
+        let d = tmp_dir("flow-toctou");
+        complete_payload(&d);
+        std::fs::write(d.join(payload::DML_WOW_BIN), b"not an elf any more").unwrap();
+
+        let fake = Fake::new(happy_replies());
+        let ev = Events::default();
+        provision_with(&ProvisionCfg::new(DISTRO, USER), Some(&d), |a| fake.run(a), |v| ev.push(v));
+
+        let err = ev.error().expect("an error event");
+        assert_eq!(err["error"]["code"], "PAYLOAD_MISSING");
+        assert!(
+            err["error"]["message"].as_str().unwrap().contains(payload::DML_WOW_BIN),
+            "{err}"
+        );
+        assert!(
+            !fake.install_calls().iter().any(|c| c.iter().any(|a| a == DEST_DML_WOW)),
+            "a corrupted binary must never reach an install/chmod spawn: {:?}",
+            fake.install_calls()
+        );
+        assert!(ev.done().is_none(), "a refused deploy is never a success");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     // -- the flow: success ---------------------------------------------------
 
     /// Replies for a full, clean provisioning run from a distro with no CLI.
     fn happy_replies() -> Vec<ProbeOutcome> {
         let mut replies = probe_no_cli();
         replies.push(ran(0, "/mnt/c/Program Files/DML Launcher\n"));
-        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend((0..5).map(|_| ran(0, "")));
         replies.extend(probe_ready());
         replies
     }
@@ -1173,8 +1277,8 @@ mod tests {
 
         assert!(ev.error().is_none(), "unexpected error: {:?}", ev.error());
         let done = ev.done().expect("a done event");
-        // 1 CLI + 2 party lua + 1 gm lua + 6 installers.
-        assert_eq!(done["data"]["files"], 10);
+        // 1 CLI + 2 party lua + 1 gm lua + 6 installers + 1 dml-wow binary.
+        assert_eq!(done["data"]["files"], 11);
         assert_eq!(done["data"]["reinstalled"], false);
         assert!(done["data"]["previous_cli_version"].is_null());
         // The post-probe rides along so a first-run screen needs no second
@@ -1185,7 +1289,7 @@ mod tests {
         assert_eq!(kinds.first().map(String::as_str), Some("section_start"));
         assert_eq!(kinds.iter().filter(|k| *k == "section_end").count(), 1);
         assert_eq!(kinds.last().map(String::as_str), Some("done"));
-        assert_eq!(fake.install_calls().len(), 4);
+        assert_eq!(fake.install_calls().len(), 5);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1242,7 +1346,7 @@ mod tests {
         complete_payload(&d);
         let mut replies = probe_ready();
         replies.push(ran(0, "/mnt/c/app\n"));
-        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend((0..5).map(|_| ran(0, "")));
         replies.extend(probe_ready());
         let fake = Fake::new(replies);
         let ev = Events::default();
@@ -1257,7 +1361,7 @@ mod tests {
             "the log must say what it found: {}",
             ev.lines()
         );
-        assert_eq!(fake.install_calls().len(), 4, "a repair run still replaces every file");
+        assert_eq!(fake.install_calls().len(), 5, "a repair run still replaces every file");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -1268,7 +1372,7 @@ mod tests {
         let mut replies =
             vec![ran(0, "dml-arch\r\n"), ran(0, r#"{"ok":true,"data":{"version":"2.6.0"}}"#)];
         replies.push(ran(0, "/mnt/c/app\n"));
-        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend((0..5).map(|_| ran(0, "")));
         replies.extend(probe_ready());
         let fake = Fake::new(replies);
         let ev = Events::default();
@@ -1429,8 +1533,18 @@ mod tests {
         // machine (or vice versa), and the difference would only show up as a
         // "works on my box" bug.
         let script = include_str!("../../../cli/dev-install.ps1");
-        assert_eq!(destinations().len(), 4, "the destination list must be the real one");
+        assert_eq!(destinations().len(), 5, "the destination list must be the real one");
         for (dest, mode) in destinations() {
+            // dev-install.ps1 is a Windows PowerShell dev script; it can never
+            // build or cross-compile the Linux dml-wow ELF (no such toolchain
+            // is assumed on a dev machine). That binary comes from CI and is
+            // staged into the installer by the release process (payload.rs /
+            // `npm run tauri build`), never by this script -- so it is exempt
+            // from the drift check that applies to everything the script DOES
+            // own.
+            if dest == DEST_DML_WOW {
+                continue;
+            }
             assert!(
                 script.contains(dest),
                 "cli/dev-install.ps1 does not install to {dest}"
@@ -1510,6 +1624,14 @@ mod tests {
     /// It installs the same files `cli/dev-install.ps1` installs, from
     /// `target/debug` (which `tauri-build` populates from `bundle.resources`
     /// on every build), so running it is equivalent to a dev-install.
+    ///
+    /// NEW precondition since Task 9: `target/debug/backend/dml-wow` must be a
+    /// REAL Linux ELF, not `build.rs`'s inert placeholder stub -- an ordinary
+    /// dev build never has one (see `payload::tests::the_real_build_lays_the_
+    /// payload_out_where_paths_looks_for_it`), and `provision_with` now
+    /// refuses at the payload-resolve gate (`PAYLOAD_MISSING`) before this
+    /// test's copy phase ever runs without it. Stage a real
+    /// `dml-wow-linux-x86_64` build at that path by hand before running this.
     #[test]
     #[ignore = "writes to the real dml-arch distro; run by hand with --ignored"]
     fn live_provisioning_a_real_distro_installs_and_verifies() {
@@ -1526,8 +1648,8 @@ mod tests {
 
         assert!(ev.error().is_none(), "live provisioning failed: {:?}", ev.error());
         let done = ev.done().expect("a done event");
-        // 1 CLI + 4 party lua + 2 gm lua + 6 installers.
-        assert_eq!(done["data"]["files"], 13);
+        // 1 CLI + 4 party lua + 2 gm lua + 6 installers + 1 dml-wow binary.
+        assert_eq!(done["data"]["files"], 14);
         // The verification probe is the proof that matters: the CLI we just
         // copied really runs inside the distro and really answers with the
         // contract version.

@@ -143,7 +143,7 @@ pub fn paths(resource_dir: &Path) -> PayloadPaths {
 /// bytes distinguishes a staged Linux binary from the placeholder without
 /// caring what the placeholder's text says, so the check does not need to
 /// change in lockstep with the stub's wording.
-fn is_elf(path: &Path) -> bool {
+pub(crate) fn is_elf(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
         return false;
