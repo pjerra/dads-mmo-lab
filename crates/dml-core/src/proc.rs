@@ -69,6 +69,17 @@ pub enum BoundedOutcome {
     Ran(std::process::Output),
 }
 
+/// Kill a child we have stopped waiting for and reap it on a thread nobody
+/// joins. Blocking on `wait()` here is how a bounded call loses its bound: the
+/// kill may fail, and the wait is then INFINITE against a process that outlives
+/// the deadline by design. See `run_bounded_outcome`'s timeout path.
+fn reap_detached(mut child: std::process::Child) {
+    let _ = child.kill();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 /// [`output_bounded_draining`] with the failure reason preserved. Same
 /// draining semantics (both pipes drained on background threads while the
 /// main thread polls for exit), same kill-and-reap on the deadline — the only
@@ -104,42 +115,36 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     timed_out = true;
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
                 timed_out = true;
                 break None;
             }
         }
     };
-    // RETURN BEFORE JOINING on the timeout path, and the reason is measured
-    // rather than assumed. This used to join both reader threads first and then
-    // discard their buffers, on the stated grounds that "killing the child
-    // closes its end of both pipes, so the reader threads see EOF and finish
-    // promptly". That holds only for a child which spawns nothing.
+    // THE TIMEOUT PATH TOUCHES NOTHING BLOCKING. Two separate traps live here,
+    // and each one on its own is enough to make a bound fictional.
     //
-    // `child.kill()` kills the CHILD. A GRANDCHILD that inherited the pipe
-    // handles keeps them open, so the readers never see EOF and this join
-    // blocks for as long as the grandchild lives. Measured 2026-08-03: a
-    // 600ms-bounded call against `cmd /C ping -n 600 127.0.0.1` returned after
-    // 605 SECONDS; the same child spawned without the shell returned in 0.61s.
-    // `docker`, `wsl.exe` and `git` all spawn helpers, so this is not exotic --
-    // it is every bounded probe in the project quietly losing its bound.
+    // 1. Joining the reader threads. `child.kill()` kills the CHILD; a
+    //    GRANDCHILD that inherited the pipe handles keeps them open, so the
+    //    readers never see EOF. Nothing is lost by skipping the join —
+    //    `TimedOut` carries no output and never did.
     //
-    // Nothing is lost by returning here: `TimedOut` carries no output and never
-    // did, so on this path the joins bought nothing and cost everything. The
-    // reader threads are left to finish on their own, blocked on a read into a
-    // buffer that is dropped; they end when the grandchild does. Making the
-    // caller wait for a process we have already decided to stop waiting for is
-    // the bug, not the leak.
+    // 2. `child.wait()` after the kill. `kill()` can fail, and its result was
+    //    discarded; `wait()` then blocks INFINITE for a process we have
+    //    already decided to stop waiting for. Measured 2026-08-03: a
+    //    600ms-bounded call against `cmd /C ping -n 600` returned after 605
+    //    SECONDS, and the deadline had fired correctly — the time was spent
+    //    here. The reap still happens, on a thread nobody waits for.
     if timed_out {
+        let _ = child.kill();
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         return BoundedOutcome::TimedOut;
     }
     // The normal path still joins, and here the original reasoning does hold:
@@ -430,15 +435,13 @@ pub fn output_bounded(mut cmd: std::process::Command, timeout: std::time::Durati
             Ok(Some(_)) => break,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait(); // reap so it never zombies
+                    reap_detached(child);
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                reap_detached(child);
                 return None;
             }
         }
