@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -374,41 +374,17 @@ if ($DryRun) { Say '  DRY RUN -- nothing will be changed.' 'Yellow' }
 
 $problems = New-Object System.Collections.Generic.List[string]
 
+# Initialised UP FRONT because Set-StrictMode -Version Latest makes reading an
+# unassigned variable a hard error, and the Docker step now READS
+# RebootRequired to decide whether to defer -- a read that happens before any
+# assignment on the happy path where WSL was already present.
+$script:RebootRequired = $false
+$script:ResumeQueued   = $false
+$script:WslInstallCode = 0
+
 # Before anything: a queued resume from a previous run is now redundant -- we
 # ARE the run it was queued for, or the user started one by hand.
 if (-not $DryRun) { Clear-QueuedResume }
-
-Step 'Checking Docker Desktop'
-$docker = Get-DockerDesktopPath
-if ($docker) {
-    Ok "found at $docker"
-} elseif ($InstallDocker) {
-    if (-not (Test-CommandExists 'winget')) {
-        $problems.Add('Docker Desktop is missing and winget is not available to install it. Install Docker Desktop from https://www.docker.com/products/docker-desktop/ and re-run.')
-        Fail 'winget not available'
-    } else {
-        Invoke-Change 'install Docker Desktop via winget' {
-            Say '    Docker Desktop is ~600 MB. winget shows its own progress below.' 'DarkGray'
-            # Out-Host, NOT the pipeline: the caller's `| Out-Null` would
-            # otherwise discard winget's progress bar along with the return
-            # value, which is what made this look frozen for the whole download.
-            winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements | Out-Host
-            $script:DockerWingetOk = Test-WingetOk $LASTEXITCODE 'Docker Desktop'
-        } | Out-Null
-        if (-not $DryRun -and -not $script:DockerWingetOk) {
-            $problems.Add('Docker Desktop failed to install via winget.')
-        }
-    }
-} else {
-    # Instruct, do not install. Docker Desktop's licence is free for personal
-    # use and paid above a size threshold; that is the user's decision, and a
-    # script that installs it silently makes it for them.
-    Fail 'Docker Desktop is not installed'
-    Info 'Get it from https://www.docker.com/products/docker-desktop/ (free for personal use).'
-    Info 'It sets up WSL2 itself -- this script does not touch Windows features.'
-    Info 'Or re-run this script with -InstallDocker to install it via winget.'
-    $problems.Add('Docker Desktop is not installed.')
-}
 
 Step 'Checking CPU virtualization'
 # A script CAN enable Windows features (wsl --install turns on both WSL and
@@ -453,8 +429,31 @@ Step 'Checking WSL2 (Docker Desktop''s engine)'
 $wsl = Get-WslState
 if ($wsl -eq $true) {
     Ok 'WSL is installed'
+} elseif ($null -eq $wsl -and $InstallDocker -and (Test-IsElevated)) {
+    # Could not tell, and we are about to install something that RUNS on it.
+    #
+    # A shrug is the right default -- a probe that cannot answer is evidence of
+    # nothing -- but not here: `wsl --install --no-distribution` is idempotent
+    # and harmless on a machine that already has WSL, so trying it settles the
+    # question in the one way a probe could not. Observed on a real VM
+    # (2026-08-04): the state read as unknown and Docker's install then aborted.
+    Info 'Could not read the WSL state; enabling it anyway (harmless if already present).'
+    Invoke-Change 'enable WSL (wsl --install --no-distribution)' {
+        wsl.exe --install --no-distribution | Out-Host
+        $script:WslInstallCode = $LASTEXITCODE
+    } | Out-Null
+    if (-not $DryRun -and $script:WslInstallCode -eq 0) {
+        Ok 'WSL enabled'
+        $script:RebootRequired = $true
+        $script:ResumeQueued = Register-Resume
+        if ($script:ResumeQueued) {
+            $problems.Add('WSL was just enabled -- RESTART; this script continues by itself afterwards.')
+        } else {
+            $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+        }
+    }
 } elseif ($null -eq $wsl) {
-    # Could not tell. Say so and move on -- this is not a refusal.
+    # Could not tell, and nothing here depends on the answer yet.
     Info 'Could not determine whether WSL is installed; Docker Desktop will say so on first run.'
 } else {
     # WSL is genuinely missing.
@@ -522,6 +521,50 @@ if ($wsl -eq $true) {
         Info 'Or enable it yourself in an ADMIN PowerShell: wsl --install --no-distribution'
         $problems.Add('WSL is not installed (Docker Desktop cannot run without it).')
     }
+}
+
+Step 'Checking Docker Desktop'
+# Deliberately AFTER virtualization and WSL. Docker Desktop runs on WSL2, so
+# installing it before its platform exists is backwards -- and it puts the one
+# unfixable check (VT-x in firmware) behind a ~600 MB download, so a user whose
+# BIOS setting is off pays for the download to be told so.
+#
+# A pending reboot also means the platform is not ready YET: installing Docker
+# now would run its setup against half-enabled WSL. The resumed run does it.
+if ($script:RebootRequired) {
+    Info 'Skipping the Docker step until after the restart -- WSL is not active yet.'
+} else {
+$docker = Get-DockerDesktopPath
+if ($docker) {
+    Ok "found at $docker"
+} elseif ($InstallDocker) {
+    if (-not (Test-CommandExists 'winget')) {
+        $problems.Add('Docker Desktop is missing and winget is not available to install it. Install Docker Desktop from https://www.docker.com/products/docker-desktop/ and re-run.')
+        Fail 'winget not available'
+    } else {
+        Invoke-Change 'install Docker Desktop via winget' {
+            Say '    Docker Desktop is ~600 MB. winget shows its own progress below.' 'DarkGray'
+            # Out-Host, NOT the pipeline: the caller's `| Out-Null` would
+            # otherwise discard winget's progress bar along with the return
+            # value, which is what made this look frozen for the whole download.
+            winget install --id Docker.DockerDesktop --accept-package-agreements --accept-source-agreements | Out-Host
+            $script:DockerWingetOk = Test-WingetOk $LASTEXITCODE 'Docker Desktop'
+        } | Out-Null
+        if (-not $DryRun -and -not $script:DockerWingetOk) {
+            $problems.Add('Docker Desktop failed to install via winget.')
+        }
+    }
+} else {
+    # Instruct, do not install. Docker Desktop's licence is free for personal
+    # use and paid above a size threshold; that is the user's decision, and a
+    # script that installs it silently makes it for them.
+    Fail 'Docker Desktop is not installed'
+    Info 'Get it from https://www.docker.com/products/docker-desktop/ (free for personal use).'
+    Info 'It sets up WSL2 itself -- this script does not touch Windows features.'
+    Info 'Or re-run this script with -InstallDocker to install it via winget.'
+    $problems.Add('Docker Desktop is not installed.')
+}
+
 }
 
 Step 'Checking Git for Windows'
