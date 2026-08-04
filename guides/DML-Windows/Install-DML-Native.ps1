@@ -113,6 +113,59 @@ function Invoke-Change([string]$What, [scriptblock]$Action) {
 # Detection
 # --------------------------------------------------------------------------
 
+# Where a queued resume lives. HKCU RunOnce, ONE value, one name.
+$RunOnceKey  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce'
+$RunOnceName = 'DMLNativeSetup'
+
+# Clear any queued resume. Called at the START of every run: a user who re-runs
+# this script by hand before rebooting would otherwise leave an entry that fires
+# later for no reason, and surprise execution is worse than no automation.
+function Clear-QueuedResume {
+    try {
+        $existing = Get-ItemProperty -Path $RunOnceKey -Name $RunOnceName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Remove-ItemProperty -Path $RunOnceKey -Name $RunOnceName -ErrorAction Stop
+            Info 'Cleared a queued auto-resume from a previous run.'
+        }
+    } catch {
+        # Never fatal. A stale entry is untidy; failing the install over it is worse.
+        Warn 'Could not clear the queued auto-resume entry.'
+    }
+}
+
+# Queue this script to run again after the reboot, with the SAME switches.
+#
+# Windows removes a RunOnce value before it executes it, so this cleans itself
+# up -- no "delete the auto-run afterwards" step that could be skipped by the
+# very failure it would be cleaning up after.
+#
+# -NoExit on purpose: an auto-started window that closes the instant it finishes
+# shows the user nothing, and the whole point of resuming is to report what
+# happened.
+function Register-Resume {
+    $psExe = Join-Path $PSHOME 'powershell.exe'
+    $argList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    if ($InstallDocker) { $argList += '-InstallDocker' }
+    if ($InstallGit)    { $argList += '-InstallGit' }
+    # Only when it differs from the default, so the queued command stays as
+    # close to what the user actually typed as possible.
+    if ($GamesDir -ne (Join-Path $env:USERPROFILE 'dml-native')) {
+        $argList += @('-GamesDir', ('"{0}"' -f $GamesDir))
+    }
+    $cmd = '"{0}" {1}' -f $psExe, ($argList -join ' ')
+    try {
+        if (-not (Test-Path $RunOnceKey)) { New-Item -Path $RunOnceKey -Force | Out-Null }
+        New-ItemProperty -Path $RunOnceKey -Name $RunOnceName -Value $cmd `
+                         -PropertyType String -Force -ErrorAction Stop | Out-Null
+        Ok 'This script will run again automatically after you restart.'
+        Info 'It removes that entry itself -- Windows deletes a RunOnce value before running it.'
+        return $true
+    } catch {
+        Warn 'Could not queue the auto-resume; run this script again yourself after the restart.'
+        return $false
+    }
+}
+
 function Test-IsElevated {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
     ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -321,6 +374,10 @@ if ($DryRun) { Say '  DRY RUN -- nothing will be changed.' 'Yellow' }
 
 $problems = New-Object System.Collections.Generic.List[string]
 
+# Before anything: a queued resume from a previous run is now redundant -- we
+# ARE the run it was queued for, or the user started one by hand.
+if (-not $DryRun) { Clear-QueuedResume }
+
 Step 'Checking Docker Desktop'
 $docker = Get-DockerDesktopPath
 if ($docker) {
@@ -431,7 +488,16 @@ if ($wsl -eq $true) {
                 # that says otherwise sends the user to open a launcher that
                 # cannot work.
                 $script:RebootRequired = $true
-                $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+                # Queue ourselves so the user does not have to remember. The
+                # message below adapts to whether this actually worked -- a
+                # promise of automation that silently failed is worse than
+                # telling someone to re-run it.
+                $script:ResumeQueued = Register-Resume
+                if ($script:ResumeQueued) {
+                    $problems.Add('WSL was just enabled -- RESTART; this script continues by itself afterwards.')
+                } else {
+                    $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+                }
             } else {
                 Fail "WSL could not be enabled (exit $script:WslInstallCode)"
                 $problems.Add('WSL could not be enabled automatically; run "wsl --install --no-distribution" as Administrator.')
@@ -547,7 +613,11 @@ if ($problems.Count -gt 0) {
         # Stated separately and last, because it is an ACTION rather than a
         # complaint, and because "fix those and re-run" reads as optional
         # advice next to a restart that is not.
-        Say '  RESTART THIS PC, then run this script again.' 'Yellow'
+        if ($script:ResumeQueued) {
+            Say '  RESTART THIS PC. This script then continues automatically.' 'Yellow'
+        } else {
+            Say '  RESTART THIS PC, then run this script again.' 'Yellow'
+        }
     } else {
         Say '  Fix those, then run this script again.' 'Yellow'
     }

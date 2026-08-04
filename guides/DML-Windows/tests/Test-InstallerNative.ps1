@@ -263,6 +263,73 @@ Assert-True ($okChecks -eq $wingetCalls) `
     "every winget install has its exit code checked ($okChecks checks for $wingetCalls installs)"
 
 # --------------------------------------------------------------------------
+Say "`n== The auto-resume cleans up after itself ==" 'White'
+# The script's own header calls the reboot-and-resume dance "the single largest
+# source of 'it stopped halfway' reports". It now does one anyway -- enabling
+# WSL forces a reboot -- so the residue rules matter more here than anywhere.
+
+# RunOnce, not Run. Windows DELETES a RunOnce value before executing it, which
+# is what makes "remove the auto-run afterwards" a property of the mechanism
+# rather than code that could be skipped by the failure it cleans up after. A
+# plain Run key would re-launch this script at EVERY logon, forever.
+Assert-True ($src -match [regex]::Escape('CurrentVersion\RunOnce')) 'the resume is queued under RunOnce'
+# A plain Run key would re-launch this script at EVERY logon, forever. The
+# trailing quote pins the KEY name, so `RunOnce` does not satisfy it.
+Assert-True (-not ($src -match [regex]::Escape("CurrentVersion\Run'"))) 'never the persistent Run key'
+
+# Queued ONLY where a reboot is actually required.
+$regAsts = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Register-Resume'
+}, $true))
+Assert-True ($regAsts.Count -ge 1) 'the resume is queued somewhere (non-vacuity)'
+
+# And cleared at the start of every run, so a manual re-run cannot leave an
+# entry that fires later for no reason.
+Assert-True ($src -match 'Clear-QueuedResume') 'a queued resume is cleared on every run'
+$clearAsts = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Clear-QueuedResume'
+}, $true))
+Assert-True ($clearAsts.Count -ge 1) 'Clear-QueuedResume is actually called, not merely defined'
+
+# REACHABILITY, not existence. Counting the call survived a mutation that
+# wrapped it in `if ($false)` -- the node is still there, it just never runs.
+# The only condition allowed to guard this cleanup is the -DryRun check;
+# anything else has made it conditional on something it must not depend on.
+foreach ($c in $clearAsts) {
+    $guardCond = $null
+    $node = $c.Parent
+    while ($null -ne $node -and $null -eq $guardCond) {
+        if ($node -is [System.Management.Automation.Language.IfStatementAst]) {
+            foreach ($clause in $node.Clauses) {
+                $b = $clause.Item2.Extent
+                if ($c.Extent.StartOffset -ge $b.StartOffset -and
+                    $c.Extent.EndOffset -le $b.EndOffset) {
+                    $guardCond = $clause.Item1.Extent.Text
+                }
+            }
+        }
+        $node = $node.Parent
+    }
+    Assert-True ($null -eq $guardCond -or $guardCond -match 'DryRun') `
+        "the Clear-QueuedResume at line $($c.Extent.StartLineNumber) is guarded only by -DryRun (found: $guardCond)"
+}
+
+# The queued command must carry the switches forward, or the resumed run
+# silently does less than the first one asked for.
+$reg = Get-FunctionAst $ast 'Register-Resume'
+Assert-True ($null -ne $reg) 'Register-Resume exists'
+if ($reg) {
+    $body = $reg.Extent.Text
+    Assert-True ($body -match 'InstallDocker') 'the queued command carries -InstallDocker'
+    Assert-True ($body -match 'InstallGit') 'the queued command carries -InstallGit'
+    Assert-True ($body -match 'GamesDir') 'the queued command carries -GamesDir'
+}
+
+# --------------------------------------------------------------------------
 Say "`n== Defender exclusions are DIRECTORY-scoped ==" 'White'
 # Excluding a compiler BINARY leaves it unscanned machine-wide -- a much larger
 # hole than skipping one build tree.
