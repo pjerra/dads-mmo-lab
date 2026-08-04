@@ -376,6 +376,13 @@ pub fn refusal(status: &BackendStatus) -> Option<(&'static str, String, String)>
 /// the CI-built Linux binary before running `npm run tauri build`. Telling a
 /// user to "reinstall" fixes nothing there — every copy of that build has the
 /// same placeholder, so the actionable line has to name what actually broke.
+///
+/// NB that `dml-wow` branch is currently unreachable from real data:
+/// `payload::resolve` no longer folds the binary into `missing` (see the long
+/// comment there), so nothing puts `DML_WOW_BIN` in this list. It is kept —
+/// and kept tested against a hand-built status — because the gate comes back
+/// the moment a release step stages the artifact and the Arch backend is
+/// wired, and the wording is the part that took the thinking.
 pub fn payload_refusal(payload: &PayloadStatus) -> Option<(&'static str, String, String)> {
     match payload.present {
         Tri::Yes => None,
@@ -604,16 +611,40 @@ pub fn provision_with(
         if step.dest.path() == DEST_DML_WOW {
             let bin_path = payload::paths(dir).dml_wow_bin;
             if !payload::is_elf(&bin_path) {
-                fail(
-                    &emit,
-                    "PAYLOAD_MISSING",
+                // TWO different situations, and only one of them is a fault.
+                //
+                // If step 2 saw a real ELF and it is not one NOW, the file
+                // changed under us — refuse (the TOCTOU case above).
+                //
+                // If step 2 never saw one either, this build simply does not
+                // carry the Arch backend: nothing stages the CI artifact on an
+                // ordinary build, so `backend/dml-wow` is `build.rs`'s inert
+                // placeholder. That is not a reason to fail a run whose other
+                // four steps install the backend the launcher actually drives
+                // today (whole-branch review, Critical 2 — the same reasoning
+                // that took this file out of `payload::resolve`'s `missing`).
+                // Skip it, say so, and let the rest finish.
+                if payload_status.dml_wow_bin_present {
+                    fail(
+                        &emit,
+                        "PAYLOAD_MISSING",
+                        format!(
+                            "The Arch backend binary at {} is no longer a valid Linux executable.",
+                            payload::DML_WOW_BIN
+                        ),
+                        "This copy of the launcher's files changed on disk during setup. Reinstall the launcher and try again.",
+                    );
+                    return;
+                }
+                emit(line_event(
+                    "warn",
                     format!(
-                        "The Arch backend binary at {} is no longer a valid Linux executable.",
+                        "Skipping the Arch backend: this build did not bundle a Linux {} binary. \
+                         Everything else is installed and the launcher works without it.",
                         payload::DML_WOW_BIN
                     ),
-                    "This copy of the launcher's files changed on disk during setup. Reinstall the launcher and try again.",
-                );
-                return;
+                ));
+                continue;
             }
         }
         emit(line_event("info", format!("{}...", step.label)));
@@ -1315,6 +1346,55 @@ mod tests {
         assert_eq!(kinds.iter().filter(|k| *k == "section_end").count(), 1);
         assert_eq!(kinds.last().map(String::as_str), Some("done"));
         assert_eq!(fake.install_calls().len(), 5);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    /// THE CRITICAL-2 CASE, end to end: an ORDINARY build, where nothing ever
+    /// staged the CI-built Linux artifact and `backend/dml-wow` is `build.rs`'s
+    /// inert placeholder. That is every copy of every build today, and it used
+    /// to refuse the whole run with `PAYLOAD_MISSING` — so the bash CLI, the
+    /// lua bridges and the six title installers, the backend the launcher
+    /// actually drives, were all withheld over a file for a backend that is not
+    /// wired up. Now the four working steps land, the fifth is skipped with a
+    /// line that says why, and the run finishes.
+    #[test]
+    fn a_build_without_the_linux_binary_still_installs_everything_else() {
+        let d = tmp_dir("flow-placeholder");
+        complete_payload(&d);
+        // Exactly what `build.rs`'s `ensure_dml_wow_stub` leaves behind.
+        std::fs::write(
+            d.join(payload::DML_WOW_BIN),
+            "#!/bin/sh\necho \"dml-wow: placeholder, no real Arch backend was bundled\" >&2\nexit 1\n",
+        )
+        .unwrap();
+
+        // FOUR install spawns, not five — the reply list has to match, or the
+        // post-probe would read the leftover copy reply and this test would
+        // pass for the wrong reason.
+        let mut replies = probe_no_cli();
+        replies.push(ran(0, "/mnt/c/Program Files/DML Launcher\n"));
+        replies.extend((0..4).map(|_| ran(0, "")));
+        replies.extend(probe_ready());
+        let fake = Fake::new(replies);
+        let ev = Events::default();
+        provision_with(&ProvisionCfg::new(DISTRO, USER), Some(&d), |a| fake.run(a), |v| ev.push(v));
+
+        assert!(ev.error().is_none(), "unexpected error: {:?}", ev.error());
+        let done = ev.done().expect("a done event");
+        // 1 CLI + 2 party lua + 1 gm lua + 6 installers, and NOT the binary.
+        assert_eq!(done["data"]["files"], 10);
+        assert_eq!(fake.install_calls().len(), 4);
+        assert!(
+            !fake.install_calls().iter().any(|c| c.iter().any(|a| a == DEST_DML_WOW)),
+            "a placeholder must never be chmod'd executable into the distro: {:?}",
+            fake.install_calls()
+        );
+        // Skipped, never silently: the one thing that did not happen is named.
+        let said = ev.lines();
+        assert!(
+            said.contains(payload::DML_WOW_BIN),
+            "the skipped step must say what it skipped: {said}"
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

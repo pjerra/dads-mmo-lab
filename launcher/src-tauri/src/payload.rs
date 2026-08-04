@@ -188,10 +188,31 @@ pub fn resolve(resource_dir: &Path) -> PayloadStatus {
             missing.push(format!("{INSTALLERS_DIR}/{script}"));
         }
     }
+    // REPORTED, NOT GATED — deliberately, and temporarily.
+    //
+    // The content check below is right and was hard-won: `build.rs` writes an
+    // inert placeholder stub at this exact path so `cargo build`/`cargo test`
+    // stay green without the CI-built Linux artifact, and `is_file()` would
+    // read `true` for that stub forever. What was premature is folding the
+    // answer into `missing`/`present`, because NOTHING stages the real ELF on
+    // an ordinary build — CI uploads the artifact and no script consumes it —
+    // so `present` was `Tri::No` on every single copy of every ordinary build.
+    // Two things then broke, both for a backend that is not wired up yet:
+    // `provision_with` refused with PAYLOAD_MISSING and stopped deploying the
+    // WORKING backend (the bash CLI, the lua bridges, the title installers),
+    // and `first-run.ts` withdrew the "Set up backend" button in favour of
+    // advice to re-run the installer — false for every copy of that build, and
+    // a dead end whose only remaining control re-runs the same failing read.
+    //
+    // PUT IT BACK when BOTH of these are true, not either:
+    //   1. a release step actually stages `dml-wow-linux-x86_64` at
+    //      `launcher/src-tauri/backend/dml-wow` before `npm run tauri build`
+    //      (today nothing does), and
+    //   2. the Arch backend is wired at the launcher's call sites, i.e.
+    //      `dml_core::backend::detect`/`from_override` can reach
+    //      `Backend::Arch` without an explicit opt-in.
+    // Until then the binary is a fact on the status payload and nothing more.
     let dml_wow_bin_present = is_elf(&p.dml_wow_bin);
-    if !dml_wow_bin_present {
-        missing.push(DML_WOW_BIN.to_string());
-    }
 
     PayloadStatus {
         present: if missing.is_empty() { Tri::Yes } else { Tri::No },
@@ -293,7 +314,12 @@ mod tests {
             "{:?}",
             got.missing
         );
-        assert!(got.missing.contains(&DML_WOW_BIN.to_string()), "{:?}", got.missing);
+        // `DML_WOW_BIN` is deliberately NOT here: it is reported as a fact and
+        // does not gate the payload until the Arch backend is wired (see
+        // `resolve`). The empty dir still has no binary, and `resolve` still
+        // says so on its own field.
+        assert!(!got.missing.contains(&DML_WOW_BIN.to_string()), "{:?}", got.missing);
+        assert!(!got.dml_wow_bin_present);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -346,15 +372,21 @@ mod tests {
         assert!(resolve(&dir).dml_wow_bin_present);
     }
 
-    /// THE bug this fix round exists for: `build.rs` writes an inert
+    /// The content check, still doing its job: `build.rs` writes an inert
     /// placeholder stub at `DML_WOW_BIN`'s target whenever nothing staged the
     /// real CI-built binary there, and that stub is a REAL FILE -- an
-    /// `is_file()` check would call it present forever. A payload holding
-    /// only the placeholder must resolve as MISSING, the same treatment
-    /// `cli_script`/the lua dirs/the installers already get, so
-    /// `payload_refusal` can actually refuse on it.
+    /// `is_file()` check would call it present forever. `dml_wow_bin_present`
+    /// must read `false` for it.
+    ///
+    /// What CHANGED (whole-branch review, Critical 2): the placeholder no
+    /// longer withdraws the whole payload. Nothing stages the real ELF on an
+    /// ordinary build, so gating on it made `present` `Tri::No` on every copy
+    /// of every build -- which stopped `provision_with` deploying the WORKING
+    /// backend and replaced the first-run "Set up backend" button with advice
+    /// that was false for everyone. The fact stays; the gate comes back with
+    /// the release step and the Arch wiring (see `resolve`).
     #[test]
-    fn a_placeholder_binary_is_reported_missing_not_present() {
+    fn a_placeholder_binary_is_reported_absent_but_does_not_withdraw_the_payload() {
         let d = tmp_dir("dml-wow-placeholder");
         complete_payload(&d);
         // Overwrite the real fixture with exactly what build.rs's stub looks
@@ -366,9 +398,14 @@ mod tests {
         .unwrap();
 
         let got = resolve(&d);
-        assert_eq!(got.present, Tri::No, "a placeholder must not read as a complete payload");
-        assert!(!got.dml_wow_bin_present);
-        assert_eq!(got.missing, vec![DML_WOW_BIN.to_string()], "{:?}", got.missing);
+        assert!(!got.dml_wow_bin_present, "a placeholder is not a Linux binary");
+        assert_eq!(
+            got.present,
+            Tri::Yes,
+            "the rest of the payload is here and installable: {:?}",
+            got.missing
+        );
+        assert!(got.missing.is_empty(), "{:?}", got.missing);
         std::fs::remove_dir_all(&d).unwrap();
     }
 
@@ -436,34 +473,46 @@ mod tests {
         // so the directory is always freshly populated -- and before
         // `bundle.resources` was added, `target/debug` had no `cli/` at all.
         //
-        // `dml_wow_bin` is a deliberate exception to "everything present":
-        // this is an ordinary dev/test build, which never has the real
-        // CI-built Linux ELF staged over `backend/dml-wow` -- only
-        // `build.rs`'s inert placeholder stub (`ensure_dml_wow_stub`) lands
-        // here, and `resolve()` is correct to call that MISSING (see
-        // `a_placeholder_binary_is_reported_missing_not_present`). Asserting
-        // `Tri::Yes` here would mean this test could only pass on a machine
-        // that had manually staged the real binary -- exactly the silent
-        // "worked on my machine, ships broken everywhere else" trap this
-        // whole fix round exists to close.
+        // ASSERT THE SHAPE, NOT ONE MACHINE'S STATE (whole-branch review,
+        // Important 3). This test used to demand
+        // `missing == [DML_WOW_BIN]`, `present == No` and
+        // `!dml_wow_bin_present` -- which meant that on the ONE machine where
+        // the payload is fully correct, the release machine with the real
+        // CI-built ELF staged at `backend/dml-wow`, `cargo test -p launcher`
+        // failed all three. A test written to avoid "worked on my machine"
+        // had produced its exact inverse: the correct state was the failing
+        // state. So: every OTHER payload entry must be present (that is the
+        // manifest claim worth pinning), and the binary is allowed to be
+        // either -- a placeholder on a dev build, a real ELF on a staged one.
         let exe = std::env::current_exe().expect("test exe path");
         let target_dir = exe
             .parent()
             .and_then(Path::parent)
             .expect("target/debug/deps/<exe> has two parents");
         let got = resolve(target_dir);
-        assert_eq!(
-            got.missing,
-            vec![DML_WOW_BIN.to_string()],
+        assert!(
+            got.missing.is_empty(),
             "bundle.resources did not produce the expected layout in {}: missing {:?}",
             target_dir.display(),
             got.missing
         );
-        assert_eq!(got.present, Tri::No);
+        assert_eq!(got.present, Tri::Yes, "missing: {:?}", got.missing);
+        // Still a real check, in both directions: whichever file is at that
+        // path, `dml_wow_bin_present` must agree with reading its magic bytes.
+        // A genuinely ABSENT binary (no build.rs stub, no staged ELF) fails
+        // here rather than passing as "either is fine".
+        let bin = paths(target_dir).dml_wow_bin;
         assert!(
-            !got.dml_wow_bin_present,
-            "an ordinary dev/test build should never carry a real ELF at {}",
-            paths(target_dir).dml_wow_bin.display()
+            bin.is_file(),
+            "the build must lay something down at {} -- build.rs's placeholder \
+             stub on a dev build, the real Linux ELF on a staged release build",
+            bin.display()
+        );
+        assert_eq!(
+            got.dml_wow_bin_present,
+            is_elf(&bin),
+            "dml_wow_bin_present must report what is actually at {}",
+            bin.display()
         );
 
         // And the copy must be byte-faithful: bash inside WSL chokes on CRLF,
