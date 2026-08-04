@@ -101,10 +101,70 @@ pub fn abandon<C: Abandonable>(mut child: C) {
     });
 }
 
+/// One pipe-draining thread, whose result can be collected WITH A DEADLINE.
+///
+/// The point is [`BoundedReader::collect_by`]: a plain `JoinHandle::join()` is
+/// unbounded, and on this exact pipe it can be unbounded for a reason that has
+/// nothing to do with the child. See that method for the failure it exists to
+/// stop, and for why the thread is never joined afterwards.
+pub struct BoundedReader {
+    rx: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+impl BoundedReader {
+    /// Start draining `r` to EOF on its own thread.
+    ///
+    /// Generic over [`std::io::Read`] rather than taking a `ChildStdout`
+    /// specifically, because that genericity is the test seam: the hang this
+    /// type defends against needs a reader that never returns, and a fake
+    /// whose `read` blocks produces that on demand, where a wall-clock race
+    /// against a real grandchild does not (Task 1 proved that shape passes
+    /// with the bug deliberately reinstated).
+    pub fn spawn<R: std::io::Read + Send + 'static>(mut r: R) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+            // The receiver may be long gone (the deadline fired); that is not
+            // an error, it is the whole design.
+            let _ = tx.send(buf);
+        });
+        BoundedReader { rx }
+    }
+
+    /// The drained bytes, or `None` if the reader had not finished by
+    /// `deadline`.
+    ///
+    /// THE BUG THIS EXISTS FOR. `run_bounded_outcome`'s success path used to
+    /// `join()` these threads outright, on the stated grounds that "the child
+    /// exited by itself, so its handles are closed". That reasoning does not
+    /// hold, and the timeout path fifteen lines below already says so: a
+    /// GRANDCHILD that inherited the pipe handles keeps them open regardless
+    /// of how the child ended, so the reader never sees EOF. `docker`,
+    /// `wsl.exe` and `git` all spawn helpers, and the Arch backend puts a
+    /// `wsl.exe` spawn on every single command — a child that exits at 0.1s
+    /// while a helper holds the pipe blocked that join FOREVER, past the
+    /// deadline, and the function still returned `Ran`, so the caller could
+    /// not even tell the bound had been violated.
+    ///
+    /// The thread is deliberately NOT joined afterwards. It is blocked on a
+    /// handle we do not control; abandoning it costs one stack until the
+    /// writer finally closes it, and waiting for it costs the caller the
+    /// entire bound it asked for. Same trade as [`abandon`], one layer up.
+    pub fn collect_by(&self, deadline: std::time::Instant) -> Option<Vec<u8>> {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        self.rx.recv_timeout(remaining).ok()
+    }
+}
+
 /// [`output_bounded_draining`] with the failure reason preserved. Same
 /// draining semantics (both pipes drained on background threads while the
 /// main thread polls for exit), same kill-and-reap on the deadline — the only
 /// difference is that the caller learns WHY there is no output.
+///
+/// THE BOUND IS A REAL WALL CLOCK ON BOTH PATHS. The child exiting is not the
+/// end of the story: see [`BoundedReader::collect_by`] for why the drain that
+/// follows can outlast the deadline on its own.
 pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcome {
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -115,19 +175,11 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
         // io::Error so the caller can read its `kind()`.
         Err(e) => return BoundedOutcome::SpawnFailed(e),
     };
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
 
-    let stdout_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stdout, &mut buf);
-        buf
-    });
-    let stderr_handle = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = std::io::Read::read_to_end(&mut stderr, &mut buf);
-        buf
-    });
+    let stdout_reader = BoundedReader::spawn(stdout);
+    let stderr_reader = BoundedReader::spawn(stderr);
 
     let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
@@ -167,10 +219,26 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
         abandon(child);
         return BoundedOutcome::TimedOut;
     }
-    // The normal path still joins, and here the original reasoning does hold:
-    // the child exited by itself, so its handles are closed.
-    let stdout_buf = stdout_handle.join().unwrap_or_default();
-    let stderr_buf = stderr_handle.join().unwrap_or_default();
+    // THE SUCCESS PATH IS BOUNDED TOO, and the original reasoning for why it
+    // did not need to be ("the child exited by itself, so its handles are
+    // closed") is the same reasoning the timeout path above rejects. A
+    // grandchild holding the pipes keeps them open however the child ended.
+    //
+    // WHAT WE RETURN when the child exited cleanly but the drain overran, and
+    // why it is `TimedOut` rather than a `Ran` carrying whatever arrived:
+    // `Ran` is the shape every caller reads as "here is the answer". A
+    // truncated stdout under `Ran { code: Some(0) }` is not a smaller answer,
+    // it is a WRONG one — `classify_wsl_list` would read a half-read distro
+    // list as a complete list, and settle. `TimedOut` reaches the probe layer
+    // as `ProbeOutcome::CouldNotTell`, which is exactly what happened: we ran
+    // out of the time we were given before we had the whole answer. The one
+    // thing that must never happen is telling the caller the bound held when
+    // it did not, and only one of these two options can do that.
+    let (Some(stdout_buf), Some(stderr_buf)) =
+        (stdout_reader.collect_by(deadline), stderr_reader.collect_by(deadline))
+    else {
+        return BoundedOutcome::TimedOut;
+    };
     match status {
         Some(status) => BoundedOutcome::Ran(std::process::Output {
             status,
@@ -539,6 +607,70 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(reaped.load(Ordering::SeqCst), "the child must still be reaped, just not inline");
+    }
+
+    // -- BoundedReader ---------------------------------------------------------
+    // The success path's drain is bounded too. A wall-clock grandchild test
+    // cannot pin this (Task 1 proved that shape passes with the bug
+    // reinstated), so the reader itself is the seam and the fake blocks on
+    // demand.
+
+    /// A pipe nobody will ever close: `read` blocks until the process ends.
+    /// This is a real grandchild holding an inherited handle, made
+    /// deterministic.
+    struct NeverEnds;
+    impl std::io::Read for NeverEnds {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                std::thread::sleep(Duration::from_secs(3600));
+            }
+        }
+    }
+
+    /// THE deterministic pin for the success path. `join()` here was unbounded:
+    /// a child that exits at 0.1s while a helper still holds the pipe blocked
+    /// it forever, past the deadline, and `run_bounded_outcome` then returned
+    /// `Ran` — telling the caller the bound had held when it had not.
+    #[test]
+    fn a_reader_that_never_reaches_eof_does_not_outlast_the_deadline() {
+        let reader = BoundedReader::spawn(NeverEnds);
+        let began = std::time::Instant::now();
+        let got = reader.collect_by(began + Duration::from_millis(200));
+        let elapsed = began.elapsed();
+        assert!(got.is_none(), "a reader that never finished must not report bytes");
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "must actually wait out the deadline, not give up early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "collect_by blocked for {elapsed:?}; the drain must not outlive the bound"
+        );
+    }
+
+    /// ...and the ordinary case still hands back every byte. A "fix" that
+    /// simply stopped collecting would satisfy the test above and silently
+    /// empty every probe's stdout.
+    #[test]
+    fn a_reader_that_finishes_hands_back_all_of_it() {
+        let reader = BoundedReader::spawn(std::io::Cursor::new(b"hello pipe".to_vec()));
+        let got = reader
+            .collect_by(std::time::Instant::now() + Duration::from_secs(5))
+            .expect("a finished reader has bytes");
+        assert_eq!(got, b"hello pipe".to_vec());
+    }
+
+    /// An ALREADY-PAST deadline is not a panic and not an infinite wait — it
+    /// is the honest "no time left". `Instant` subtraction is the one arithmetic
+    /// in this file that panics on underflow, and by the time the success path
+    /// collects, the deadline has often only just been checked.
+    #[test]
+    fn collecting_after_the_deadline_has_passed_returns_at_once() {
+        let reader = BoundedReader::spawn(NeverEnds);
+        let began = std::time::Instant::now();
+        let got = reader.collect_by(began - Duration::from_secs(30));
+        assert!(got.is_none());
+        assert!(began.elapsed() < Duration::from_secs(1), "{:?}", began.elapsed());
     }
 
     // -- run_bounded_outcome ---------------------------------------------------
