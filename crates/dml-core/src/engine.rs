@@ -452,13 +452,26 @@ mod tests {
     /// that is where it was found. Asserts elapsed >= the bound as well, so a
     /// spawn that never ran cannot satisfy it.
     ///
-    /// Enabled 2026-08-04. The original fix returned early instead of joining
-    /// the reader threads, which was A cause; the remaining one was the
-    /// `child.kill()` / `child.wait()` pair inside the poll loop — a kill whose
-    /// result is discarded followed by a wait that blocks until `cmd.exe` ends
-    /// on its own. The reap now happens on a detached thread, so the caller's
-    /// deadline is the caller's deadline.
+    /// IGNORED again, and this time for a reason a wall-clock test cannot
+    /// fix: the 605s hang requires `child.kill()` to FAIL, and this test has
+    /// no way to force that. Verified 2026-08-04 — it reported `ok` on ten
+    /// consecutive runs, including three where the fix's `abandon()` had the
+    /// blocking `child.wait()` deliberately reinstated inline. When `kill()`
+    /// succeeds (the common case), `wait()` on the already-dead child returns
+    /// almost instantly regardless of the grandchild, so this test is green
+    /// whether the bug is present or not — it cannot distinguish the fixed
+    /// code from the broken code it was written to catch.
+    ///
+    /// Kept, not deleted, because it is still the truest executable
+    /// description of the original incident (a real 605s hang against a real
+    /// `cmd /C ping` grandchild, measured 2026-08-03). Run it by hand with
+    /// `--ignored` to see that shape again. The invariant this file exists to
+    /// protect is now pinned deterministically instead, by
+    /// `abandon_never_blocks_the_caller_on_the_reap` in `proc.rs`, which
+    /// injects a fake child whose `wait()` blocks and asserts the CALLER is
+    /// never blocked by it — no race, no dependence on `kill()`'s outcome.
     #[cfg(windows)]
+    #[ignore = "flaky by construction: needs kill() to fail, which nothing can force. See abandon_never_blocks_the_caller_on_the_reap in proc.rs for the deterministic pin."]
     #[test]
     fn a_deadline_bounds_the_call_even_when_a_grandchild_holds_the_pipes() {
         let mut cmd = Command::new("cmd");

@@ -69,11 +69,32 @@ pub enum BoundedOutcome {
     Ran(std::process::Output),
 }
 
-/// Kill a child we have stopped waiting for and reap it on a thread nobody
-/// joins. Blocking on `wait()` here is how a bounded call loses its bound: the
-/// kill may fail, and the wait is then INFINITE against a process that outlives
-/// the deadline by design. See `run_bounded_outcome`'s timeout path.
-fn reap_detached(mut child: std::process::Child) {
+/// The two operations the timeout path needs from a child, behind a trait so
+/// the "never block the caller on wait" invariant can be asserted against a
+/// fake. A wall-clock test cannot assert it: the production hang requires
+/// `kill()` to FAIL, and a test cannot force that.
+pub trait Abandonable: Send + 'static {
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<()>;
+}
+
+impl Abandonable for std::process::Child {
+    fn kill(&mut self) -> std::io::Result<()> {
+        std::process::Child::kill(self)
+    }
+    fn wait(&mut self) -> std::io::Result<()> {
+        std::process::Child::wait(self).map(|_| ())
+    }
+}
+
+/// Abandon a child we have stopped waiting for: ask it to stop, then reap it on
+/// a thread nobody joins, and RETURN IMMEDIATELY.
+///
+/// The reap must not happen on the caller's thread. `kill()` can fail, and the
+/// `wait()` that followed it was then INFINITE against a process whose whole
+/// problem is that it outlives the deadline. Measured 2026-08-03: a
+/// 600ms-bounded call returned after 605 SECONDS.
+pub fn abandon<C: Abandonable>(mut child: C) {
     let _ = child.kill();
     std::thread::spawn(move || {
         let _ = child.wait();
@@ -139,12 +160,11 @@ pub fn run_bounded_outcome(mut cmd: Command, timeout: Duration) -> BoundedOutcom
     //    already decided to stop waiting for. Measured 2026-08-03: a
     //    600ms-bounded call against `cmd /C ping -n 600` returned after 605
     //    SECONDS, and the deadline had fired correctly — the time was spent
-    //    here. The reap still happens, on a thread nobody waits for.
+    //    here. The reap still happens, on a thread nobody waits for — see
+    //    `abandon`, which owns this step and is what `abandon_never_blocks_
+    //    the_caller_on_the_reap` actually pins.
     if timed_out {
-        let _ = child.kill();
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
+        abandon(child);
         return BoundedOutcome::TimedOut;
     }
     // The normal path still joins, and here the original reasoning does hold:
@@ -435,13 +455,13 @@ pub fn output_bounded(mut cmd: std::process::Command, timeout: std::time::Durati
             Ok(Some(_)) => break,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
-                    reap_detached(child);
+                    abandon(child);
                     return None;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             Err(_) => {
-                reap_detached(child);
+                abandon(child);
                 return None;
             }
         }
@@ -458,6 +478,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // -- abandon -----------------------------------------------------------
+
+    /// THE deterministic pin. A wall-clock grandchild test cannot do this job:
+    /// the production hang needs `kill()` to fail, which a test cannot force,
+    /// so that test passes whether the bug is present or not (verified
+    /// 2026-08-04 — it reported ok on ten consecutive runs, including with the
+    /// blocking wait deliberately reinstated). This one fails deterministically
+    /// the moment the reap moves back onto the caller's thread.
+    #[test]
+    fn abandon_never_blocks_the_caller_on_the_reap() {
+        struct SlowToReap;
+        impl Abandonable for SlowToReap {
+            fn kill(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn wait(&mut self) -> std::io::Result<()> {
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            }
+        }
+        let began = std::time::Instant::now();
+        abandon(SlowToReap);
+        let elapsed = began.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "abandon blocked the caller for {elapsed:?}; the reap belongs on a thread nobody joins"
+        );
+    }
+
+    /// …and the reap still HAPPENS. A fix that simply dropped the wait would
+    /// satisfy the test above while leaking a zombie on every timeout.
+    #[test]
+    fn abandon_still_kills_and_still_reaps() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        struct Recording {
+            killed: Arc<AtomicBool>,
+            reaped: Arc<AtomicBool>,
+        }
+        impl Abandonable for Recording {
+            fn kill(&mut self) -> std::io::Result<()> {
+                self.killed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            fn wait(&mut self) -> std::io::Result<()> {
+                self.reaped.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let killed = Arc::new(AtomicBool::new(false));
+        let reaped = Arc::new(AtomicBool::new(false));
+        abandon(Recording { killed: killed.clone(), reaped: reaped.clone() });
+        assert!(killed.load(Ordering::SeqCst), "the child must still be killed");
+        // The reap is on another thread, so poll rather than assuming ordering.
+        let began = std::time::Instant::now();
+        while !reaped.load(Ordering::SeqCst) && began.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(reaped.load(Ordering::SeqCst), "the child must still be reaped, just not inline");
     }
 
     // -- run_bounded_outcome ---------------------------------------------------
