@@ -35,9 +35,51 @@
 // rather than letting the stale script ship into a distro in silence.
 const WATCH_DIRS: [&str; 2] = ["../../cli/lua/party", "../../cli/lua/gm"];
 
+/// Resource-relative path of the Linux `dml-wow` binary `bundle.resources`
+/// carries. Duplicated from `payload::DML_WOW_BIN` (build.rs cannot depend on
+/// the crate it is building) and pinned equal to it by
+/// `payload::tests::tauri_conf_bundles_every_payload_target`, which reads the
+/// same string out of `tauri.conf.json`.
+const DML_WOW_STUB: &str = "backend/dml-wow";
+
 fn main() {
     for dir in WATCH_DIRS {
         println!("cargo:rerun-if-changed={dir}");
     }
+    // `tauri_build::build()` (below) hard-fails if a `bundle.resources`
+    // source is missing from disk, and the real Linux `dml-wow` ELF (CI's
+    // ubuntu job, ../../.github/workflows/rust.yml) can never be produced on
+    // this Windows checkout. Ensure SOME file exists at that path before the
+    // resource walk runs, so an ordinary `cargo build`/`cargo test` stays
+    // green with no manual staging step.
+    //
+    // Deliberately NOT a tracked file: `payload::is_elf` reads this stub as
+    // MISSING (right -- it is not a real binary), but a git-tracked
+    // placeholder would let `git checkout .` / `git clean -fd` / a fresh
+    // clone silently revert a correctly-staged real binary back to the stub
+    // with no error anywhere, the same silent-failure shape one layer
+    // earlier. Instead this only ever writes when the path is ABSENT, so a
+    // release process that has staged the real ELF here is never touched,
+    // and `.gitignore` keeps the path out of the index entirely.
+    ensure_dml_wow_stub();
     tauri_build::build()
+}
+
+fn ensure_dml_wow_stub() {
+    let path = std::path::Path::new(DML_WOW_STUB);
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create backend/ for the dml-wow stub");
+    }
+    // A breadcrumb, not a silent `exit 1`: `payload::is_elf`/`resolve()` are
+    // meant to catch this before it is ever reached, but if something did
+    // exec it, a bare `exit 1` gives zero signal that this was the inert
+    // placeholder rather than a crashing real binary.
+    std::fs::write(
+        path,
+        "#!/bin/sh\necho \"dml-wow: placeholder, no real Arch backend was bundled\" >&2\nexit 1\n",
+    )
+    .expect("write the dml-wow placeholder stub");
 }

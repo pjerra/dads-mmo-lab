@@ -354,19 +354,39 @@ pub fn refusal(status: &BackendStatus) -> Option<(&'static str, String, String)>
 }
 
 /// The refusal for a payload that did not ship with this build, or `None`.
+///
+/// The `dml-wow` entry gets its own hint. Every other entry missing means the
+/// same thing (a user's install is incomplete or was moved — "reinstall the
+/// launcher" is the right advice), but `dml-wow` missing/a placeholder is a
+/// RELEASE-PROCESS gap: the maintainer building the installer forgot to stage
+/// the CI-built Linux binary before running `npm run tauri build`. Telling a
+/// user to "reinstall" fixes nothing there — every copy of that build has the
+/// same placeholder, so the actionable line has to name what actually broke.
 pub fn payload_refusal(payload: &PayloadStatus) -> Option<(&'static str, String, String)> {
     match payload.present {
         Tri::Yes => None,
-        Tri::No => Some((
-            "PAYLOAD_MISSING",
-            format!(
-                "This copy of the launcher is missing {} of the backend files it installs: {}.",
-                payload.missing.len(),
-                payload.missing.join(", ")
-            ),
-            "The install is incomplete or was moved. Reinstall the launcher and try again."
-                .to_string(),
-        )),
+        Tri::No => {
+            let dml_wow_missing = payload.missing.iter().any(|m| m == payload::DML_WOW_BIN);
+            Some((
+                "PAYLOAD_MISSING",
+                format!(
+                    "This copy of the launcher is missing {} of the backend files it installs: {}.",
+                    payload.missing.len(),
+                    payload.missing.join(", ")
+                ),
+                if dml_wow_missing {
+                    "The Linux backend binary was not bundled into this build. This is a release \
+                     mistake, not a broken install: whoever built this installer needs to stage the \
+                     real dml-wow binary (CI's dml-wow-linux-x86_64 artifact) at \
+                     launcher/src-tauri/backend/dml-wow before running `npm run tauri build`, then \
+                     rebuild and re-ship it."
+                        .to_string()
+                } else {
+                    "The install is incomplete or was moved. Reinstall the launcher and try again."
+                        .to_string()
+                },
+            ))
+        }
         Tri::Unknown => Some((
             "PAYLOAD_UNKNOWN",
             "Could not locate the launcher's own program folder, so the backend files it installs could not be found.".to_string(),
@@ -670,6 +690,10 @@ mod tests {
         d
     }
 
+    /// A minimal, valid ELF header prefix -- just enough for `payload::is_elf`
+    /// to read it as a real binary. Mirrors `payload::tests::FAKE_ELF`.
+    const FAKE_ELF: &[u8] = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     /// A complete fake resource dir, the shape `bundle.resources` produces.
     fn complete_payload(root: &Path) {
         std::fs::create_dir_all(root.join("cli")).unwrap();
@@ -684,6 +708,8 @@ mod tests {
         for s in INSTALLER_SCRIPTS {
             std::fs::write(root.join(INSTALLERS_DIR).join(s), "#!/usr/bin/env bash\n").unwrap();
         }
+        std::fs::create_dir_all(root.join("backend")).unwrap();
+        std::fs::write(root.join(payload::DML_WOW_BIN), FAKE_ELF).unwrap();
     }
 
     fn ran(code: i32, stdout: &str) -> ProbeOutcome {
@@ -1341,6 +1367,43 @@ mod tests {
             payload_refusal(&payload::resolve_opt(None)).map(|r| r.0),
             Some("PAYLOAD_UNKNOWN")
         );
+    }
+
+    /// A missing/placeholder `dml-wow` is a maintainer's release mistake, not
+    /// a user's broken install -- "reinstall the launcher" fixes nothing
+    /// there, because every copy of that build carries the same placeholder.
+    /// The hint must say so distinctly from the generic missing-file case.
+    #[test]
+    fn payload_refusal_names_a_missing_dml_wow_as_a_release_mistake_not_a_broken_install() {
+        let (code, msg, hint) = payload_refusal(&PayloadStatus {
+            present: Tri::No,
+            dir: Some("C:/x".into()),
+            missing: vec![payload::DML_WOW_BIN.to_string()],
+            dml_wow_bin_present: false,
+        })
+        .expect("a refusal");
+        assert_eq!(code, "PAYLOAD_MISSING");
+        assert!(msg.contains(payload::DML_WOW_BIN), "{msg}");
+        assert!(
+            hint.to_lowercase().contains("linux") || hint.to_lowercase().contains("dml-wow"),
+            "hint does not name the actual cause: {hint}"
+        );
+        assert!(
+            !hint.to_lowercase().contains("reinstall"),
+            "the generic 'reinstall the launcher' advice fixes nothing here -- every copy of this \
+             build has the same placeholder: {hint}"
+        );
+
+        // The generic case must be untouched: a missing file that is NOT
+        // dml-wow keeps the original "reinstall" hint.
+        let (_, _, other_hint) = payload_refusal(&PayloadStatus {
+            present: Tri::No,
+            dir: Some("C:/x".into()),
+            missing: vec![payload::CLI_SCRIPT.to_string()],
+            dml_wow_bin_present: true,
+        })
+        .expect("a refusal");
+        assert!(other_hint.to_lowercase().contains("reinstall"), "{other_hint}");
     }
 
     #[test]

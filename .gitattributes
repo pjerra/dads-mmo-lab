@@ -30,11 +30,6 @@ cli/lua/**/*.lua text eol=lf
 # Extensionless built CLI artifact (bash script, no .sh suffix) — see note above.
 cli/dml text eol=lf
 
-# Extensionless placeholder for the CI-built Linux dml-wow binary (real
-# releases overwrite it with an ELF; keep the placeholder's own #!/bin/sh
-# header LF so a stray direct run under WSL bash doesn't choke on CRLF).
-launcher/src-tauri/backend/dml-wow text eol=lf
-
 # Test fixtures parsed byte-for-byte by CLI code (e.g. the server-info SOAP
 # parser splits on LF): a CRLF-injected checkout on an autocrlf=true box
 # would corrupt these and break the tests they feed.
