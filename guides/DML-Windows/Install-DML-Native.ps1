@@ -42,6 +42,15 @@
     no such threshold, so this switch exists purely so an unattended run on a bare
     machine can complete -- which is what the native gate tests.
 
+.PARAMETER NoLauncher
+    Skip installing the DML Launcher. It is installed BY DEFAULT, unlike Docker
+    and Git: those are third-party products whose licences are the user's
+    decision, while the launcher is this project. A setup script that refuses to
+    install the thing it is setting up leaves the user at a dead end.
+
+.PARAMETER LauncherTag
+    Install a specific release tag (e.g. v0.1.0-rc1) instead of the newest.
+
 .PARAMETER DryRun
     Report every action without performing any of them. Nothing is downloaded,
     written, or installed.
@@ -58,6 +67,8 @@ param(
     [string]$GamesDir = (Join-Path $env:USERPROFILE 'dml-native'),
     [switch]$InstallDocker,
     [switch]$InstallGit,
+    [switch]$NoLauncher,
+    [string]$LauncherTag,
     [switch]$DryRun
 )
 
@@ -83,6 +94,17 @@ $YqUrl     = "https://github.com/mikefarah/yq/releases/download/$YqVersion/yq_wi
 $YqSha256  = 'D509D51E6DB30EBB7C9363B7CA8714224F93A456A421D7A7819AB564B868ACC7'
 
 $LauncherConfigPath = Join-Path $env:USERPROFILE '.dml\launcher.json'
+
+#Where the launcher itself comes from.
+#
+#Resolved from the GitHub API rather than a pinned URL. A pin would need editing
+#on every release, and a STALE pin silently installs an old launcher onto a
+#fresh machine -- worse than no pin, because nothing looks wrong.
+#
+#/releases/latest is deliberately NOT used: it excludes pre-releases, and the
+#only release today is one.
+$LauncherRepo = 'pjerra/dads-mmo-lab'
+$LauncherAssetPattern = '-setup.exe'
 
 # --------------------------------------------------------------------------
 # Output helpers
@@ -223,6 +245,45 @@ function Invoke-RestartCountdown {
     Say '  Restarting now...' 'Yellow'
     Restart-Computer -Force
     return $true
+}
+
+#Find the newest release asset, or $null if we cannot.
+function Resolve-LauncherAsset([string]$Tag) {
+    $api = if ($Tag) {
+        "https://api.github.com/repos/$LauncherRepo/releases/tags/$Tag"
+    } else {
+        "https://api.github.com/repos/$LauncherRepo/releases"
+    }
+    try {
+        $resp = Invoke-RestMethod -Uri $api -UseBasicParsing -Headers @{ 'User-Agent' = 'dml-installer' }
+    } catch {
+        return $null
+    }
+    #The list endpoint returns newest-first; the tag endpoint returns one object.
+    $rel = if ($Tag) { $resp } else { @($resp)[0] }
+    if (-not $rel) { return $null }
+    $asset = @($rel.assets) | Where-Object { $_.name -like "*$LauncherAssetPattern" } | Select-Object -First 1
+    if (-not $asset) { return $null }
+    [pscustomobject]@{
+        Tag  = $rel.tag_name
+        Name = $asset.name
+        Url  = $asset.browser_download_url
+        Size = $asset.size
+    }
+}
+
+#Is the launcher already on this machine? Checked before downloading 7 MB.
+function Get-InstalledLauncher {
+    foreach ($root in @($env:LOCALAPPDATA, ${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
+        if (-not $root) { continue }
+        $dir = Join-Path $root 'DML Launcher'
+        if (Test-Path -LiteralPath $dir) {
+            $exe = Get-ChildItem -LiteralPath $dir -Filter *.exe -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if ($exe) { return $exe.FullName }
+        }
+    }
+    return $null
 }
 
 function Test-IsElevated {
@@ -713,6 +774,57 @@ try {
     $problems.Add('yq could not be installed.')
 }
 
+Step 'Installing the DML Launcher'
+if ($NoLauncher) {
+    Info 'Skipped (-NoLauncher). Get it from https://github.com/pjerra/dads-mmo-lab/releases'
+} else {
+    $have = Get-InstalledLauncher
+    if ($have) {
+        Ok "already installed at $have"
+    } else {
+        $asset = Resolve-LauncherAsset $LauncherTag
+        if (-not $asset) {
+            #Never fatal. Everything else on this machine is now correct, and a
+            #user who can read one URL is not blocked -- whereas failing the
+            #whole run over a download would throw away a working setup.
+            Warn 'Could not find a launcher release to download.'
+            Info 'Get it by hand: https://github.com/pjerra/dads-mmo-lab/releases'
+            $problems.Add('The DML Launcher was not installed (release lookup failed).')
+        } else {
+            $tmp = Join-Path $env:TEMP $asset.Name
+            $done = Invoke-Change "download and install the DML Launcher ($($asset.Tag))" {
+                Say ("    {0} -- {1:N1} MB" -f $asset.Name, ($asset.Size / 1MB)) 'DarkGray'
+                $prev = $ProgressPreference
+                $ProgressPreference = 'Continue'
+                try {
+                    Invoke-WebRequest -Uri $asset.Url -OutFile $tmp -UseBasicParsing
+                } finally {
+                    $ProgressPreference = $prev
+                }
+                #/S is NSIS silent. The whole point of doing this here is that
+                #the user never sees a wizard to click through.
+                Say '    installing silently...' 'DarkGray'
+                $p = Start-Process -FilePath $tmp -ArgumentList '/S' -Wait -PassThru
+                $script:LauncherExit = $p.ExitCode
+            }
+            if ($done) {
+                #VERIFY. A silent installer that fails silently is the worst
+                #combination there is, so the exe has to be on disk before this
+                #claims anything.
+                $now = Get-InstalledLauncher
+                if ($now) {
+                    Ok "installed at $now"
+                } else {
+                    Fail "the launcher installer exited $script:LauncherExit but no launcher is on disk"
+                    Info 'Install it by hand: https://github.com/pjerra/dads-mmo-lab/releases'
+                    $problems.Add('The DML Launcher did not install.')
+                }
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
 Step 'Writing launcher settings'
 Write-LauncherConfig $LauncherConfigPath $GamesDir (Join-Path $tools 'yq.exe')
 Ok "backend=native, games_dir=$GamesDir"
@@ -757,13 +869,14 @@ Say '  It starts Docker Desktop itself if the engine is down -- you do not' 'Dar
 Say '  need to start it first. The first install builds from source and' 'DarkGray'
 Say '  takes hours.' 'DarkGray'
 Say ''
-# This script installs the PREREQUISITES, not the launcher, and saying so is
-# the point: a user who reaches "Ready." with no launcher and no statement of
-# where to get one has been left at a dead end by a script that told them it
-# was ready.
-Say '  You still need the launcher itself -- this script only prepares the PC:' 'Yellow'
-Say '    https://github.com/pjerra/dads-mmo-lab/releases' 'Yellow'
-Say '  (Download the DML Launcher installer and run it.)' 'DarkGray'
+#The launcher is now installed by this script, so the old "go and find it
+#yourself" paragraph is gone. It only speaks up when the user opted out.
+if ($NoLauncher) {
+    Say '  You skipped the launcher (-NoLauncher). Get it from:' 'Yellow'
+    Say '    https://github.com/pjerra/dads-mmo-lab/releases' 'Yellow'
+} else {
+    Say '  The DML Launcher is installed -- open it from the Start menu.' 'Gray'
+}
 if ($DryRun) { Say '' ; Say '  (Dry run -- nothing was actually changed.)' 'Yellow' }
 exit 0
 

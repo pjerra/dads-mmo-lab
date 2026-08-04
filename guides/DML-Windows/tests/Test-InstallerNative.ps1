@@ -424,6 +424,40 @@ if ($cd) {
 }
 
 # --------------------------------------------------------------------------
+Say "`n== The launcher is installed, and proven installed ==" 'White'
+#The recorded beta blocker was that this script prepared a PC and then left the
+#user to go and find the product. It now installs it.
+
+#DEFAULT ON, opted OUT -- the opposite of Docker and Git, deliberately. Those
+#are third-party products whose licences are the user's decision; the launcher
+#is this project, and a setup script that refuses to install the thing it is
+#setting up is the dead end being fixed.
+Assert-True ($src -match 'NoLauncher') 'the launcher opt-OUT switch exists'
+Assert-True (-not ($src -match '\$InstallLauncher')) 'the launcher is NOT opt-in (that would restore the dead end)'
+
+#Silent: the entire point is that no wizard appears.
+Assert-True ($src -match "'/S'") 'the launcher installer runs silently'
+
+#VERIFIED AFTER. A silent installer that fails silently is the worst possible
+#combination, so the exe must be found on disk before success is claimed.
+$li = Get-FunctionAst $ast 'Get-InstalledLauncher'
+Assert-True ($null -ne $li) 'Get-InstalledLauncher exists'
+$liCalls = @($ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.CommandAst] -and
+    $n.GetCommandName() -eq 'Get-InstalledLauncher'
+}, $true))
+#At least twice: once to skip a download we do not need, once to PROVE the
+#install worked. One call means one of those is missing.
+Assert-True ($liCalls.Count -ge 2) `
+    "the launcher presence is checked before AND after installing (found $($liCalls.Count) calls)"
+
+#Resolved from the API rather than a pinned URL, and NOT from /releases/latest,
+#which excludes pre-releases -- the only release today is one.
+Assert-True ($src -match 'api\.github\.com') 'the release asset is resolved from the API'
+Assert-True (-not ($src -match 'releases/latest')) 'never /releases/latest (it hides pre-releases)'
+
+#--------------------------------------------------------------------------
 Say "`n== Defender exclusions are DIRECTORY-scoped ==" 'White'
 # Excluding a compiler BINARY leaves it unscanned machine-wide -- a much larger
 # hole than skipping one build tree.

@@ -481,7 +481,29 @@ No amount of engineering closes these. They are the release standard.
 
 ---
 
-## 🔴 THE DISTRIBUTION HOLE — found 2026-08-04, and it blocks the beta
+## ✅ THE DISTRIBUTION HOLE — found AND closed 2026-08-04
+
+**Closed the same day.** `v0.1.0-rc1` is published as a GitHub pre-release with
+both installers (NSIS 7.2 MB, MSI 10.3 MB), and `Install-DML-Native.ps1` now
+**installs the launcher itself**, silently, resolving the newest release from the
+GitHub API. A user runs one script and ends with a working product — no wizard,
+no releases page, no manual step.
+
+Two rules worth keeping. The launcher is installed BY DEFAULT (`-NoLauncher`
+opts out), unlike Docker and Git which stay opt-in: those are third-party
+products whose licences are the user's decision, while the launcher is this
+project — and a setup script that refuses to install the thing it is setting up
+was the dead end being fixed. And the asset is resolved from `/releases` rather
+than `/releases/latest`, because the latter excludes pre-releases and the only
+release today is one.
+
+Leg 2 can now test the path a stranger actually takes: download the PS1, run it,
+end with a launcher.
+
+The original finding is kept below, because the reasoning is what stops it
+reopening.
+
+### The original finding
 
 **`Install-DML-Native.ps1` does not install the launcher, and no built launcher
 installer exists anywhere.** It sets up Docker, Git, WebView2, yq and
