@@ -199,6 +199,137 @@ fn engine_line(emit: &impl Fn(serde_json::Value), level: &str, text: impl Into<S
 /// of composing against a dead engine. Blocking (real spawns + sleeps) — run
 /// under `spawn_blocking`.
 pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
+    match dml_core::engine::EngineKind::for_this_host() {
+        dml_core::engine::EngineKind::Systemd => ensure_engine_up_systemd(emit),
+        dml_core::engine::EngineKind::Desktop => ensure_engine_up_desktop(emit),
+    }
+}
+
+/// THE FIX FOR "start refuses inside the distro" (R1).
+///
+/// `Cmd::Start` calls the function above unconditionally, and before this it
+/// went straight to the Docker Desktop branch: `docker_desktop_program()` finds
+/// nothing on Linux, `ensure_decision` returns `NoDesktop`, and the arm emitted
+/// a terminal `DOCKER_DESKTOP_MISSING` and ABORTED BEFORE COMPOSE. With the
+/// distro's `dockerd` down — the one situation the prerequisite exists for —
+/// the single operation the whole product is about failed, and the error named
+/// a product that has no business being on that machine.
+///
+/// Inside `dml-arch` the engine is a systemd unit and the correct action is
+/// `sudo -n systemctl start docker`.
+fn ensure_engine_up_systemd(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
+    use dml_core::engine as eng;
+    ensure_engine_up_systemd_with(
+        &crate::native::docker_program(),
+        eng::start_engine_systemd,
+        eng::ENGINE_POLL_INTERVAL_MS,
+        eng::ENGINE_POLL_TIMEOUT_MS,
+        emit,
+    )
+}
+
+/// The injectable half. The same reasoning as [`stop_engine_stream_with`], and
+/// the same file's own recorded lesson: a test that called the real thing here
+/// would shell `sudo -n systemctl start docker` on the developer's machine, and
+/// "just don't run it" is not a safeguard. It also lets the 180-second poll be
+/// driven to its timeout in a millisecond.
+fn ensure_engine_up_systemd_with(
+    program: &std::ffi::OsStr,
+    start: impl FnOnce() -> std::io::Result<std::process::Output>,
+    interval_ms: u64,
+    timeout_ms: u64,
+    emit: impl Fn(serde_json::Value),
+) -> Result<(), CmdError> {
+    use dml_core::engine as eng;
+    use dml_core::setup::Tri;
+
+    // TRI-STATE, NOT A BOOL, and the difference is kept where it means
+    // something. `engine_running` (bool) reads a probe that fell over as "not
+    // running"; `engine_running_tri` keeps "docker answered no" apart from
+    // "docker did not answer".
+    match eng::engine_running_tri(program) {
+        Tri::Yes => {
+            engine_line(&emit, "info", "Docker engine already running.");
+            return Ok(());
+        }
+        Tri::No => {
+            engine_line(&emit, "info", "Docker engine is down. Starting docker.service...");
+        }
+        Tri::Unknown => {
+            // Evidence of nothing. Refusing here would block a start because a
+            // probe was slow; claiming it is up would compose against a dead
+            // engine. `systemctl start` on an already-active unit is a no-op,
+            // so asking is the safe move — but the operator is TOLD which of
+            // the two situations this is, rather than being shown the same
+            // line for both.
+            engine_line(
+                &emit,
+                "warn",
+                "Could not determine whether the Docker engine is running; \
+                 asking systemd to start it anyway (harmless if it already is).",
+            );
+        }
+    }
+
+    // A FAILED START IS REPORTED, not discarded. The Tailscale round taught
+    // this one on real hardware: a sudo refusal, a missing unit, a dying daemon
+    // and a merely-slow one all produced the same useless message. `sudo -n`
+    // means a distro without a NOPASSWD rule fails IMMEDIATELY and says so,
+    // instead of blocking on a password prompt no button can answer.
+    let started = start();
+    let mut cause = String::new();
+    if !eng::start_engine_succeeded(&started) {
+        cause = match &started {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    format!("sudo -n systemctl start docker exited {}", out.status.code().unwrap_or(-1))
+                } else {
+                    stderr.to_string()
+                }
+            }
+            Err(e) => format!("could not run sudo -n systemctl start docker: {e}"),
+        };
+        engine_line(&emit, "warn", format!("Could not start docker.service: {cause}"));
+    }
+
+    // Poll regardless: the start may have failed only because the unit was
+    // already active, or because another process won the race.
+    let outcome = eng::poll_until_ready(
+        interval_ms,
+        timeout_ms,
+        || eng::engine_running(program),
+        |ms| {
+            engine_line(&emit, "info", "Waiting for the Docker engine to be ready...");
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        },
+    );
+    match outcome {
+        eng::PollOutcome::Ready { .. } => {
+            engine_line(&emit, "info", "Docker engine is ready.");
+            Ok(())
+        }
+        eng::PollOutcome::Timeout { waited_ms } => {
+            let msg = format!("The Docker engine did not become ready within {}s.", waited_ms / 1000);
+            // The start failure, if there was one, is carried INTO the timeout:
+            // the cause was known 3 minutes ago and must not be lost by the
+            // time the user reads the error.
+            let hint = if cause.is_empty() {
+                "Check the daemon inside the distro: wsl -d dml-arch -u dml --exec sudo systemctl status docker".to_string()
+            } else {
+                format!("The start command failed first: {cause}")
+            };
+            emit(serde_json::json!({"event": "error", "error": {
+                "code": "DOCKER_ENGINE_TIMEOUT", "message": msg, "hint": hint,
+            }}));
+            Err(CmdError { code: "DOCKER_ENGINE_TIMEOUT".into(), message: msg, hint })
+        }
+    }
+}
+
+/// The Docker Desktop branch, exactly as it always was.
+fn ensure_engine_up_desktop(emit: impl Fn(serde_json::Value)) -> Result<(), CmdError> {
     use crate::native;
     let program = native::docker_program();
     let desktop = native::docker_desktop_program();
@@ -271,7 +402,42 @@ pub fn ensure_engine_up_stream(emit: impl Fn(serde_json::Value)) -> Result<(), C
 /// its docker-desktop WSL VM to free RAM. A failure emits a warning `line` but
 /// never fails the server-stop. Blocking — run under `spawn_blocking`.
 pub fn stop_engine_stream(emit: impl Fn(serde_json::Value)) {
-    stop_engine_stream_with(&crate::native::docker_program(), emit)
+    stop_engine_stream_with_kind(
+        dml_core::engine::EngineKind::for_this_host(),
+        &crate::native::docker_program(),
+        emit,
+    )
+}
+
+/// R2's other half, closed at the root rather than only in the translation.
+///
+/// Stopping "the engine" after a server stop is a Docker Desktop idea: it frees
+/// the docker-desktop WSL VM's RAM. Inside `dml-arch` the daemon is the
+/// distro's own shared `dockerd` — nothing else reclaims RAM by stopping it,
+/// and anything else using that engine loses it. Today `docker desktop stop`
+/// merely fails there with a warning; the day that plugin resolves on Linux it
+/// would take the distro's daemon down behind the user's back.
+///
+/// The launcher's Arch translation also appends `--no-stop-engine`, so this is
+/// the belt to that braces — it covers `dml-wow stop` typed by hand in the
+/// distro, which no translation sees.
+pub fn stop_engine_stream_with_kind(
+    kind: dml_core::engine::EngineKind,
+    program: &std::ffi::OsStr,
+    emit: impl Fn(serde_json::Value),
+) {
+    if kind == dml_core::engine::EngineKind::Systemd {
+        emit(serde_json::json!({"event": "section_start", "name": ENGINE_SECTION}));
+        engine_line(
+            &emit,
+            "info",
+            "Leaving the Docker engine running: inside the distro it is a shared \
+             system daemon, not a per-server VM.",
+        );
+        emit(serde_json::json!({"event": "section_end", "name": ENGINE_SECTION, "status": "ok"}));
+        return;
+    }
+    stop_engine_stream_with(program, emit)
 }
 
 /// The injectable half, so a test can exercise the event shape WITHOUT stopping
@@ -420,6 +586,178 @@ mod engine_section_tests {
         assert!(
             events.iter().any(|e| e["level"] == "warn"),
             "expected the missing-binary warn line: {events:?}"
+        );
+    }
+
+    /// R2 at the root: inside the distro the daemon is a SHARED system service,
+    /// so a server stop must leave it alone. Driven through the kind-taking
+    /// seam, so it asserts the Systemd behaviour on a Windows build too — the
+    /// bug it guards against is one only a Linux host can actually suffer.
+    #[test]
+    fn a_systemd_engine_is_never_stopped_by_a_server_stop() {
+        let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        // A program that WOULD succeed if it were ever called. If the guard
+        // regressed, the events below would carry a stop attempt instead.
+        let docker = std::ffi::OsString::from("docker");
+        super::stop_engine_stream_with_kind(
+            dml_core::engine::EngineKind::Systemd,
+            &docker,
+            move |v| sink.lock().unwrap().push(v),
+        );
+        let events = seen.lock().unwrap().clone();
+        assert_eq!(events.first().unwrap()["event"], "section_start");
+        assert_eq!(events.last().unwrap()["event"], "section_end");
+        assert_eq!(events.last().unwrap()["status"], "ok");
+        let text: String = events.iter().filter_map(|e| e["text"].as_str()).collect();
+        assert!(
+            text.contains("Leaving the Docker engine running"),
+            "the stop must SAY it is deliberately leaving the daemon up: {text:?}"
+        );
+        assert!(
+            !text.contains("Stopping Docker Desktop"),
+            "a systemd host must never take the Desktop stop path: {text:?}"
+        );
+    }
+
+    /// The Desktop branch still reaches its stop attempt — so the test above is
+    /// measuring the guard, not a function that stopped doing anything.
+    #[test]
+    fn a_desktop_engine_still_takes_the_stop_path() {
+        let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let fake = std::ffi::OsString::from("dml-no-such-docker-binary-ever.exe");
+        super::stop_engine_stream_with_kind(
+            dml_core::engine::EngineKind::Desktop,
+            &fake,
+            move |v| sink.lock().unwrap().push(v),
+        );
+        let events = seen.lock().unwrap().clone();
+        let text: String = events.iter().filter_map(|e| e["text"].as_str()).collect();
+        assert!(text.contains("Stopping Docker Desktop"), "{text:?}");
+    }
+}
+
+#[cfg(test)]
+mod engine_kind_tests {
+    /// THE R1 REGRESSION GUARD.
+    ///
+    /// `dml-wow start` calls `ensure_engine_up_stream` unconditionally. Before
+    /// the fix that went straight to Docker Desktop, which does not exist on
+    /// Linux — so inside `dml-arch`, with the distro's dockerd down, `start`
+    /// aborted with `DOCKER_DESKTOP_MISSING` before compose ever ran.
+    ///
+    /// Asserted for BOTH platforms from either, because the failure is on the
+    /// platform CI mostly is not.
+    #[test]
+    fn a_linux_host_controls_the_engine_with_systemd_not_docker_desktop() {
+        use dml_core::engine::EngineKind;
+        assert_eq!(
+            EngineKind::for_host(false),
+            EngineKind::Systemd,
+            "inside dml-arch the engine is docker.service; resolving Docker Desktop \
+             there is what made `start` refuse on the one path the product exists for"
+        );
+        assert_eq!(EngineKind::for_host(true), EngineKind::Desktop);
+        // ...and the built-for-this-platform helper agrees with the platform.
+        assert_eq!(EngineKind::for_this_host(), EngineKind::for_host(cfg!(windows)));
+    }
+
+    /// The argv actually sent, read off the pure builders rather than trusted.
+    /// `-n` is load-bearing: without it a distro missing its NOPASSWD rule
+    /// blocks on a password prompt no button in the launcher can answer.
+    #[test]
+    fn the_systemd_start_is_non_interactive() {
+        let argv = dml_core::engine::systemd_start_argv();
+        assert_eq!(argv, ["-n", "systemctl", "start", "docker"]);
+        assert_eq!(argv[0], "-n", "a sudo prompt is unanswerable from the launcher");
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    fn drive_systemd(
+        start: std::io::Result<std::process::Output>,
+    ) -> (Result<(), dml_core::error::CmdError>, Vec<serde_json::Value>) {
+        let seen: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        // A docker that does not exist, so the probe says No and the poll never
+        // becomes ready; timeout 0 drives the whole path in a millisecond.
+        let r = super::ensure_engine_up_systemd_with(
+            std::ffi::OsStr::new("dml-no-such-docker-binary-ever.exe"),
+            move || start,
+            1,
+            0,
+            move |v| sink.lock().unwrap().push(v),
+        );
+        let events = seen.lock().unwrap().clone();
+        (r, events)
+    }
+
+    fn failed_output() -> std::io::Result<std::process::Output> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "sudo: a password is required",
+        ))
+    }
+
+    /// THE FIX, driven rather than asserted. Inside the distro with the engine
+    /// down, `start` used to abort with `DOCKER_DESKTOP_MISSING` before compose
+    /// ran — an error naming a product that has no business on that machine.
+    /// The systemd path must never produce it.
+    #[test]
+    fn the_systemd_path_never_blames_docker_desktop() {
+        let (r, events) = drive_systemd(failed_output());
+        let blob = serde_json::to_string(&events).unwrap();
+        assert!(
+            !blob.contains("DOCKER_DESKTOP_MISSING"),
+            "the in-distro engine path must never mention Docker Desktop: {blob}"
+        );
+        // It still FAILS honestly (nothing came up) — this is not passing
+        // because the function did nothing.
+        let err = r.expect_err("a dead engine must still refuse");
+        assert_eq!(err.code, "DOCKER_ENGINE_TIMEOUT");
+    }
+
+    /// The Tailscale lesson, applied: a sudo refusal must be NAMED, both when
+    /// it happens and in the failure the user finally reads three minutes
+    /// later. Previously a refusal, a missing unit and a slow daemon all
+    /// produced the same useless message.
+    #[test]
+    fn a_sudo_refusal_is_reported_and_carried_into_the_timeout() {
+        let (r, events) = drive_systemd(failed_output());
+        let warn: String = events
+            .iter()
+            .filter(|e| e["level"] == "warn")
+            .filter_map(|e| e["text"].as_str())
+            .collect();
+        assert!(
+            warn.contains("a password is required"),
+            "the start failure's cause must be reported when it happens: {warn:?}"
+        );
+        let err = r.unwrap_err();
+        assert!(
+            err.hint.contains("a password is required"),
+            "the cause was known three minutes earlier and must not be lost: {:?}",
+            err.hint
+        );
+    }
+
+    /// ...and when the start SUCCEEDED, the timeout must not invent a start
+    /// failure that never happened.
+    #[test]
+    fn a_timeout_after_a_clean_start_points_at_the_daemon_not_at_sudo() {
+        let ok = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+            .args(if cfg!(windows) { ["/C", "exit 0"] } else { ["-c", "exit 0"] })
+            .output();
+        let (r, events) = drive_systemd(ok);
+        let warn_count = events.iter().filter(|e| e["level"] == "warn").count();
+        // The `Unknown`/`No` probe line is info; a clean start adds no warn.
+        assert_eq!(warn_count, 0, "a clean start must not warn: {events:?}");
+        let err = r.unwrap_err();
+        assert!(
+            err.hint.contains("systemctl status docker"),
+            "point at the daemon when the start itself was fine: {:?}",
+            err.hint
         );
     }
 }
