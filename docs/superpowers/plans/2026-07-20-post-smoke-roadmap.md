@@ -925,6 +925,26 @@ Neither item is in the v0.1.0 cut. Both are why the Arch setup chain answers the
 "is a title installed?" question by looking at the games directory rather than by
 calling a `games list` that would have to be invented in the wrong place.
 
+## Round 5.6 — THE SECOND UNBOUNDED CALL (found 2026-08-04, fix approved)
+
+A sibling of the `run_bounded_outcome` incident, in a different module and still
+live. `cli_integration.rs`'s
+`install_native_refuses_an_unreachable_docker_before_it_creates_anything` runs
+**12+ minutes against a 30-second `PROBE_TIMEOUT`** — the docker-reachability
+probe in `install_native.rs` / `preflight.rs` does not honour its own bound.
+
+What makes this worth its own roadmap entry rather than a footnote: **it wedges
+`cargo test --workspace`, and both CI jobs run a suite containing it.** So CI
+cannot currently validate this repo end to end on either platform, and the
+`dml-wow` Linux artifact step added for the Arch backend has never run to
+completion in CI. A green CI badge here means "the job was cancelled", not "the
+tests passed".
+
+The fix shape is known from the earlier incident: a deadline that is enforced by
+the CALL, not merely requested of the child, and a reap that never blocks the
+caller. `dml_core::proc`'s `Abandonable`/`abandon` seam already exists for it.
+User approved the fix 2026-08-04.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
