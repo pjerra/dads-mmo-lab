@@ -42,9 +42,32 @@ pub const ARCH_BINARY: &str = "dml-wow";
 /// literal that could drift away from it.
 pub const BASH_PROGRAM: &str = "dml";
 
+/// Which command vocabulary this runner's argv is written in.
+///
+/// The launcher's ~100 call sites all speak [`Vocabulary::Bash`] and always
+/// will — porting them was rejected as the worst option available (108 edits in
+/// the file that has already broken once, and it would still need a per-backend
+/// renderer afterwards). The translation happens HERE instead, in one place,
+/// and only for [`Vocabulary::Arch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Vocabulary {
+    /// argv reaches the program untouched and `command()` appends `--json`.
+    /// What `Backend::Wsl` and `Backend::Native` have always done.
+    #[default]
+    Bash,
+    /// argv goes through [`crate::vocab::translate_for_arch`], which also picks
+    /// the program: `dml-wow` for a translated verb, the bash `dml` in the same
+    /// distro for everything else.
+    Arch,
+}
+
 pub struct DmlRunner {
     pub program: OsString,
     pub prefix_args: Vec<String>,
+    /// See [`Vocabulary`]. Only [`DmlRunner::arch`] sets `Arch`; every other
+    /// constructor leaves this `Bash`, which is why a bug in the translation
+    /// table CANNOT reach the WSL or native argv.
+    pub vocabulary: Vocabulary,
     /// A directory to prepend to the child's PATH, or None to inherit PATH
     /// unchanged. Set for the native (Docker Desktop) backend so the child
     /// `dml` finds `docker.exe` and its credential helpers, which live in the
@@ -67,6 +90,7 @@ impl Default for DmlRunner {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            vocabulary: Vocabulary::Bash,
             path_prepend: None,
             host_label: "wsl",
             host_hint: "Check WSL: wsl -d dml-arch",
@@ -145,6 +169,7 @@ impl DmlRunner {
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
+            vocabulary: Vocabulary::Arch,
             path_prepend: None,
             host_label: "arch",
             host_hint: "Check the distro: wsl -d dml-arch -u dml --exec dml-wow version",
@@ -160,6 +185,7 @@ impl DmlRunner {
         DmlRunner {
             program: find_bash(),
             prefix_args: vec![find_dml_script()],
+            vocabulary: Vocabulary::Bash,
             path_prepend: docker_bin_dir().map(|p| p.into_os_string()),
             host_label: "bash",
             host_hint: "Native mode: check Git Bash and Docker Desktop are installed and the engine is running",
@@ -204,9 +230,52 @@ impl DmlRunner {
         }
     }
 
+    /// THE ONE PLACE the backend's vocabulary is applied: returns the prefix to
+    /// spawn with, the argv to send, and whether the target is the BASH CLI
+    /// (the only thing that takes `--json`).
+    ///
+    /// The [`Vocabulary::Bash`] arm clones `prefix_args` and passes `args`
+    /// through untouched, so `Backend::Wsl` and `Backend::Native` produce byte
+    /// for byte what they produced before this seam existed — and, more to the
+    /// point, there is NO CODE PATH from them into the translation table. That
+    /// property is structural rather than a promise to remember: this branch
+    /// already broke `Wsl` once by changing what it routed to.
+    fn resolve(&self, args: &[&str]) -> (Vec<String>, Vec<String>, bool) {
+        match self.vocabulary {
+            Vocabulary::Bash => (
+                self.prefix_args.clone(),
+                args.iter().map(|s| s.to_string()).collect(),
+                true,
+            ),
+            Vocabulary::Arch => {
+                let t = crate::vocab::translate_for_arch(args);
+                let mut prefix = self.prefix_args.clone();
+                // The Arch prefix is `[-d, dml-arch, -u, dml, --exec, <program>]`
+                // and the program is its LAST element — the only thing that
+                // changes. `expect` rather than a silent push: a malformed Arch
+                // runner would otherwise spawn `wsl.exe -d … --exec status`,
+                // which is a wrong command that looks like a right one.
+                *prefix.last_mut().expect("an Arch prefix ends in the program name") =
+                    match t.target {
+                        crate::vocab::Target::DmlWow => ARCH_BINARY,
+                        crate::vocab::Target::Bash => BASH_PROGRAM,
+                    }
+                    .to_string();
+                (prefix, t.argv, matches!(t.target, crate::vocab::Target::Bash))
+            }
+        }
+    }
+
     fn command(&self, args: &[&str]) -> Command {
+        let (prefix, argv, is_bash) = self.resolve(args);
         let mut cmd = Command::new(&self.program);
-        cmd.args(&self.prefix_args).args(args).arg("--json");
+        cmd.args(&prefix).args(&argv);
+        // `--json` iff the target is the bash CLI. `dml-wow` has no such flag
+        // and rejects it outright ("unexpected argument '--json' found"), so
+        // this condition is half the incompatibility retired on its own.
+        if is_bash {
+            cmd.arg("--json");
+        }
         self.apply_env(&mut cmd);
         #[cfg(windows)]
         {
@@ -218,8 +287,9 @@ impl DmlRunner {
     }
 
     fn command_raw(&self, args: &[&str]) -> Command {
+        let (prefix, argv, _) = self.resolve(args);
         let mut cmd = Command::new(&self.program);
-        cmd.args(&self.prefix_args).args(args);
+        cmd.args(&prefix).args(&argv);
         self.apply_env(&mut cmd);
         #[cfg(windows)]
         {
@@ -394,6 +464,7 @@ mod tests {
         DmlRunner {
             program: "cmd.exe".into(),
             prefix_args: vec!["/C".into()],
+            vocabulary: Vocabulary::Bash,
             path_prepend: None,
             host_label: "wsl",
             host_hint: "Check WSL: wsl -d dml-arch",
@@ -404,6 +475,7 @@ mod tests {
         DmlRunner {
             program: "sh".into(),
             prefix_args: vec![],
+            vocabulary: Vocabulary::Bash,
             path_prepend: None,
             host_label: "wsl",
             host_hint: "Check WSL: wsl -d dml-arch",
@@ -465,7 +537,7 @@ mod tests {
 
     #[test]
     fn run_json_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None, host_label: "wsl", host_hint: "" };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], vocabulary: Vocabulary::Bash, path_prepend: None, host_label: "wsl", host_hint: "" };
         assert!(matches!(r.run_json(&["x"]), Err(RunnerError::Spawn(_))));
     }
 
@@ -538,7 +610,7 @@ mod tests {
 
     #[test]
     fn run_captured_missing_program_is_spawn_error() {
-        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], path_prepend: None, host_label: "wsl", host_hint: "" };
+        let r = DmlRunner { program: "definitely-not-a-real-exe-9f2.exe".into(), prefix_args: vec![], vocabulary: Vocabulary::Bash, path_prepend: None, host_label: "wsl", host_hint: "" };
         assert!(matches!(r.run_captured(&["x"]), Err(RunnerError::Spawn(_))));
     }
 
@@ -624,54 +696,131 @@ mod tests {
         r.prefix_args.last().map(String::as_str) == Some(BASH_PROGRAM)
     }
 
+    /// Read a real `Command`'s argv back, so these tests measure what would be
+    /// SPAWNED rather than what the source appears to say.
+    fn argv_of(cmd: Command) -> Vec<String> {
+        cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect()
+    }
+
     /// THE COMPOSITION TEST — the whole-branch review finding, pinned.
     ///
     /// Nine tasks each passed their own review and the pieces still did not
     /// compose: `for_backend(Backend::Wsl)` returned `arch()`, so every live
     /// call site (`games list`, `games status <id>`, `wow server-detail`,
     /// `games <action> <id>`) became a `BAD_ARGS` against a binary that defines
-    /// neither those namespaces nor a global `--json`. An existing WSL user
-    /// updating the launcher would have got "unrecognized subcommand 'games'"
-    /// instead of a status card, with Start/Stop/Restart, Library and the
-    /// auto-shutdown watcher all failing against a perfectly healthy server.
+    /// neither those namespaces nor a global `--json`.
     ///
-    /// This fails the moment `Wsl` is routed at `arch()` again WITHOUT the
-    /// vocabulary being addressed first — and it stays honest afterwards,
-    /// because the day `arch()` really is a drop-in is the day its prefix
-    /// stops being the thing this test measures.
+    /// It has now done its job, so it asserts the OPPOSITE property: the Arch
+    /// runner speaks `dml-wow`'s vocabulary, and stops sending it a `--json` it
+    /// has no flag for. What has NOT changed is the `Backend::Wsl` half — that
+    /// half is the one that broke a real user, and it stays exactly as it was.
     #[test]
-    fn the_arch_runner_is_not_a_drop_in_for_the_bash_cli() {
+    fn the_arch_runner_now_speaks_dml_wows_vocabulary() {
         let arch = DmlRunner::arch();
-        assert!(
-            !speaks_the_bash_cli_vocabulary(&arch),
-            "arch() invokes {ARCH_BINARY}, which has no games/wow namespace and no global --json: {:?}",
-            arch.prefix_args
-        );
 
-        // The unconditional `--json` is half the incompatibility on its own,
-        // and it is invisible at the call site — so read it off a real
-        // `Command` rather than trusting the source to still do it.
-        let argv: Vec<String> = arch
-            .command(&["games", "list"])
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
+        // `games list` is unclassified as a dml-wow verb today, so use a verb
+        // that IS: the launcher's status poll.
+        let argv = argv_of(arch.command(&["wow", "server-detail"]));
         assert_eq!(
-            argv.last().map(String::as_str),
-            Some("--json"),
-            "command() appends --json unconditionally; dml-wow-cli defines no such flag: {argv:?}"
+            argv,
+            vec!["-d", DISTRO, "-u", USER, "--exec", ARCH_BINARY, "status"],
+            "the Arch runner must translate the verb AND drop --json"
         );
         assert!(
-            argv.iter().any(|a| a == "games"),
-            "the launcher really does send a `games` subcommand: {argv:?}"
+            !argv.iter().any(|a| a == "--json"),
+            "dml-wow defines no --json and rejects it outright: {argv:?}"
         );
 
-        // Therefore the backend the launcher DEFAULTS to must be driven by a
-        // runner that accepts all of that.
+        // The bash half of the same runner: an unclassified verb keeps its
+        // argv, gets its `--json` back, and swaps to the bash program — in the
+        // SAME distro, which is what makes the fallback free.
+        let fallback = argv_of(arch.command(&["wow", "doctor-ish-unclassified"]));
+        assert_eq!(
+            fallback,
+            vec!["-d", DISTRO, "-u", USER, "--exec", BASH_PROGRAM, "wow", "doctor-ish-unclassified", "--json"]
+        );
+
+        // And the backend the launcher DEFAULTS to is still driven by a runner
+        // that speaks the bash vocabulary, unchanged.
         assert!(
             speaks_the_bash_cli_vocabulary(&DmlRunner::for_backend(Backend::Wsl)),
-            "Backend::Wsl must resolve to a runner that speaks `games`/`wow`/`--json`; \
-             flipping it to the Arch binary is only safe once the call sites are ported"
+            "Backend::Wsl must keep resolving to the bash CLI"
+        );
+    }
+
+    /// BYTE-IDENTITY, read off real `Command`s rather than promised in prose.
+    ///
+    /// `Backend::Wsl` is the backend existing users are on. This branch already
+    /// broke it once (fixed in 6222634) and it had to be reverted, so the
+    /// literal argv is spelled out here for the three shapes that reach a
+    /// child: an envelope verb, a `games` lifecycle verb, and a captured-text
+    /// verb (which takes no `--json`).
+    #[test]
+    fn the_wsl_backend_argv_is_unchanged_by_the_translation_seam() {
+        let r = DmlRunner::for_backend(Backend::Wsl);
+        assert_eq!(
+            argv_of(r.command(&["wow", "server-detail"])),
+            vec!["-d", "dml-arch", "-u", "dml", "--", "dml", "wow", "server-detail", "--json"]
+        );
+        assert_eq!(
+            argv_of(r.command(&["games", "start", "wow-server-playerbots"])),
+            vec!["-d", "dml-arch", "-u", "dml", "--", "dml", "games", "start", "wow-server-playerbots", "--json"]
+        );
+        // run_captured's shape: no --json, ever.
+        assert_eq!(
+            argv_of(r.command_raw(&["doctor"])),
+            vec!["-d", "dml-arch", "-u", "dml", "--", "dml", "doctor"]
+        );
+    }
+
+    #[test]
+    fn the_native_backend_argv_is_unchanged_by_the_translation_seam() {
+        std::env::set_var("DML_BASH", r"C:\fake\bash.exe");
+        std::env::set_var("DML_SCRIPT", "C:/repo/cli/dml");
+        let r = DmlRunner::for_backend(Backend::Native);
+        std::env::remove_var("DML_BASH");
+        std::env::remove_var("DML_SCRIPT");
+        assert_eq!(r.vocabulary, Vocabulary::Bash);
+        assert_eq!(
+            argv_of(r.command(&["games", "status", "wow-server-playerbots"])),
+            vec!["C:/repo/cli/dml", "games", "status", "wow-server-playerbots", "--json"]
+        );
+        assert_eq!(
+            argv_of(r.command_raw(&["lan", "wow-server-playerbots", "status"])),
+            vec!["C:/repo/cli/dml", "lan", "wow-server-playerbots", "status"]
+        );
+    }
+
+    /// Only `arch()` carries the Arch vocabulary. If this ever stops being
+    /// true, the table can reach argv it was never meant to touch.
+    #[test]
+    fn no_constructor_but_arch_opts_into_the_translation_table() {
+        assert_eq!(DmlRunner::default().vocabulary, Vocabulary::Bash);
+        assert_eq!(DmlRunner::arch().vocabulary, Vocabulary::Arch);
+        assert_eq!(DmlRunner::for_backend(Backend::Wsl).vocabulary, Vocabulary::Bash);
+        assert_eq!(DmlRunner::for_backend(Backend::Arch).vocabulary, Vocabulary::Arch);
+    }
+
+    /// The two safety additions ride the translation, so they are present no
+    /// matter which call site sent the verb — including `run_captured`, which
+    /// takes the `command_raw` path and would otherwise skip them.
+    #[test]
+    fn the_arch_stop_carries_no_stop_engine_on_the_raw_path_too() {
+        let arch = DmlRunner::arch();
+        assert_eq!(
+            argv_of(arch.command_raw(&["games", "stop", "wow-server-playerbots"])),
+            vec!["-d", DISTRO, "-u", USER, "--exec", ARCH_BINARY, "stop", "--id", "wow-server-playerbots", "--no-stop-engine"]
+        );
+    }
+
+    /// A text-mode bash verb on Arch: program swapped, argv untouched, and
+    /// still NO `--json` (command_raw never appended one).
+    #[test]
+    fn the_arch_runner_routes_a_text_verb_to_bash_without_json() {
+        let arch = DmlRunner::arch();
+        assert_eq!(
+            argv_of(arch.command_raw(&["doctor"])),
+            vec!["-d", DISTRO, "-u", USER, "--exec", BASH_PROGRAM, "doctor"]
         );
     }
 
