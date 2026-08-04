@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -417,8 +417,24 @@ if ($problems.Count -gt 0) {
 
 Say '  Ready.' 'Green'
 Say ''
-Say '  Next: start Docker Desktop, open the DML Launcher, and install a server' 'Gray'
-Say '  from the Library. The first install builds from source and takes hours.' 'Gray'
+# DELIBERATELY does not say "start Docker Desktop". The launcher starts the
+# engine itself before it composes anything (dml_wow::native::ensure_engine_up_stream,
+# called first by both `games start` and the native install), so telling the user
+# to do it by hand describes a step the product does not need -- and it is the
+# same wrong advice that used to occupy a whole first-run screen until it was
+# removed on 2026-08-03.
+Say '  Next: open the DML Launcher and install a server from the Library.' 'Gray'
+Say '  It starts Docker Desktop itself if the engine is down -- you do not' 'DarkGray'
+Say '  need to start it first. The first install builds from source and' 'DarkGray'
+Say '  takes hours.' 'DarkGray'
+Say ''
+# This script installs the PREREQUISITES, not the launcher, and saying so is
+# the point: a user who reaches "Ready." with no launcher and no statement of
+# where to get one has been left at a dead end by a script that told them it
+# was ready.
+Say '  You still need the launcher itself -- this script only prepares the PC:' 'Yellow'
+Say '    https://github.com/pjerra/dads-mmo-lab/releases' 'Yellow'
+Say '  (Download the DML Launcher installer and run it.)' 'DarkGray'
 if ($DryRun) { Say '' ; Say '  (Dry run -- nothing was actually changed.)' 'Yellow' }
 exit 0
 

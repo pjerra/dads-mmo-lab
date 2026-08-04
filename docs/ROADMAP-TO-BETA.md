@@ -481,6 +481,40 @@ No amount of engineering closes these. They are the release standard.
 
 ---
 
+## 🔴 THE DISTRIBUTION HOLE — found 2026-08-04, and it blocks the beta
+
+**`Install-DML-Native.ps1` does not install the launcher, and no built launcher
+installer exists anywhere.** It sets up Docker, Git, WebView2, yq and
+`launcher.json`, prints "Ready.", and then told the user to "open the DML
+Launcher" — which is not on their machine, and which nothing they have access to
+can put there.
+
+Found by the user while preparing the Task 12 leg-2 VM, and the question that
+exposed it is the one a stranger asks first: *where is the launcher?*
+
+This is not a documentation bug. The launcher ships as an NSIS/MSI bundle from
+`npm run tauri build`, which needs the repo, Rust and Node — everything the
+native route exists to avoid. So today the ONLY way onto a clean machine is to
+build it on a dirty one and copy the file across, which is not a distribution
+story.
+
+What closes it, in order:
+
+1. **Build the bundle** (`npm run tauri build` → `target/release/bundle/`). The
+   tree was empty when this was found on 2026-08-04.
+2. **Attach it to a GitHub Release**, so the URL the installer now prints
+   resolves to something. Phase D already calls for this; it is now a
+   PREREQUISITE for leg 2 rather than a release-day step, because leg 2 cannot
+   honestly pass without it.
+3. The closing message now states plainly that the script prepares the PC but
+   does not install the launcher, and names the releases page (fixed same day).
+
+Until (2) lands, leg 2 can only be run by side-loading the installer onto the
+VM — which tests the launcher but NOT the path a stranger takes. A gate that
+skips the distribution step proves less than it appears to.
+
+---
+
 ## 🟢 PHASE D — release
 
 From SHIP-LIST Phase 5, unchanged and still correct:
