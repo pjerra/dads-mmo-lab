@@ -594,7 +594,14 @@ fields ARE the envelope's three fields, and the CLI never invents a code for a f
 library already described. Examples that surface on the wire this way: `DB_UNREACHABLE` (via
 `dml_wow::db::db_err_to_cmd`, the same mapper the launcher uses) and `DOCKER_DESKTOP_MISSING`
 (from `start`'s engine-ensure, hint
-`Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.`). Streaming commands' domain
+`Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.`). Its sibling
+`DOCKER_CLI_MISSING` comes from the same engine-ensure and is a DIFFERENT repair: the docker
+CLI itself could not be spawned (`Install Docker Desktop, or set DML_DOCKER to the full path of
+docker.exe.`). It is reported immediately, without launching Docker Desktop and without
+entering the readiness wait — that wait polls `docker info` through the very CLI that is
+missing, so it can only ever run out its full 180s and then refuse with the answer it already
+had. A `docker info` that merely times out is NOT this code: it stays `DOCKER_ENGINE_TIMEOUT`,
+because an engine that is slow to answer is exactly what the wait exists for. Streaming commands' domain
 errors (module family allowlist, not-installed, party invalid-name/not-online, ...) arrive as
 in-stream `error` events emitted by the `dml-wow` library.
 
@@ -625,7 +632,7 @@ settings: `DML_GAMES_DIR` whenever the process cwd is not the games directory; `
 | `DML_SOAP_PASS` | `admin` | SOAP password. Same precedence. Wrong creds surface as `SOAP_AUTH`. |
 | `DML_BASH` | Git Bash discovery | Override taken **verbatim** when set non-empty (no existence check); else `C:\Program Files\Git\bin\bash.exe`, then `C:\Program Files\Git\usr\bin\bash.exe` (existence-checked), else bare `bash` off PATH. In this CLI consumed only by `install`. |
 | `DML_SCRIPT` | bare `dml` | Path to the bash `dml` script. `install` requires the resolved value to be an existing file (else `INSTALL_PREREQS`) — effectively **required** for `install` (repo `cli/dml` in dev). Second consumer: the Eluna bridge lua source root is `<parent of DML_SCRIPT>/lua` (launcher-wired only on this branch). |
-| `DML_DOCKER` | docker.exe discovery | Override used verbatim when set non-empty (even if nonexistent — intentional); else first existing of `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin\docker.exe`, `%ProgramFiles%\Docker\Docker\resources\bin\docker.exe`, `%ProgramFiles(x86)%\...`; else bare `docker` off PATH. Used by essentially every engine-touching arm. |
+| `DML_DOCKER` | docker.exe discovery | Override used verbatim when set non-empty (even if nonexistent — intentional); else first existing of `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin\docker.exe`, `%ProgramFiles%\Docker\Docker\resources\bin\docker.exe`, `%ProgramFiles(x86)%\...`; else bare `docker` off PATH. Used by essentially every engine-touching arm. A value that cannot be spawned is the definitive negative `DOCKER_CLI_MISSING` and is refused at once — never launched-and-waited-for, since the readiness probe runs through this same program. |
 | `DML_DOCKER_DESKTOP` | Docker Desktop.exe discovery | Override verbatim; else the three standard `Docker Desktop.exe` locations; **no bare-name fallback**. Engine down + exe not found → `DOCKER_DESKTOP_MISSING` with hint `Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.` |
 | `DML_BACKEND` | (unset → Wsl) | **Launcher-only switch** on this branch: `native`/`docker` (case-insensitive, trimmed) → Native, else Wsl. `dml-wow` does not read it — its `version` envelope hardcodes `"backend":"native"`. |
 | `DML_READY_TIMEOUT_SECS` | 1800 | World-ready wait timeout (seconds); unparseable → 1800. Bounds the world-ready waits in the launcher-invoked world-restart stream **and** in `dml-wow bots-flush`, which restarts auth+world twice. The world-restart wait can also end EARLY, well inside this budget: if `ac-worldserver` is observed not running on 5 consecutive 2s polls it fails fast with the arm's existing `RESTART_FAILED` code (`The world server exited instead of coming back up`) instead of waiting out the timeout. The wait is also ADVISORY about boot loops: if `ac-worldserver`'s `.State.RestartCount` climbs by 3 since the wait began it emits one extra `warn` line (`boot loop detected: …`) naming the likely cause and the Restart Docker action — a diagnosis only, the outcome and exit code are unchanged. The SAME diagnosis is armed for `games start`/`restart` (the path Home's primary buttons take) — see `DML_BOOT_LOOP_POLL_SECS`. |
