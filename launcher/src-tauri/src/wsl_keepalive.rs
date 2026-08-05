@@ -200,6 +200,12 @@ pub struct Keepalive {
     /// one. Cleared by a release.
     ever_held: bool,
     gave_up: bool,
+    /// Has the CURRENT give-up already been announced? Lives here, next to
+    /// `gave_up`, because "we stopped trying" is news exactly once and the only
+    /// thing that knows whether it has been said is the state that latched it.
+    /// Cleared with the rest of the budget, so a give-up after a fresh ask is
+    /// news again.
+    gave_up_announced: bool,
     last_error: Option<String>,
 }
 
@@ -217,21 +223,46 @@ impl Keepalive {
             attempts: 0,
             ever_held: false,
             gave_up: false,
+            gave_up_announced: false,
             last_error: None,
         }
     }
 
-    /// The user (or the launcher, on their behalf) asked for the server to be
-    /// running. Idempotent: re-asserting `Run` while already holding must not
-    /// clear the failure bound, or a UI that re-asserts on every poll would
-    /// turn the bound into an infinite retry loop.
+    /// THE USER ASKED for the server to be running — an ACT, not an
+    /// observation, and the distinction is the whole of this method.
+    ///
+    /// A fresh ask gets a fresh budget even when the intent is ALREADY `Run`.
+    /// That case is not exotic, it is the normal one: `games_start` calls
+    /// `server_should_run()` unconditionally, so by the time a user presses
+    /// Start after a failure the intent has not changed and never will. Gating
+    /// the clear on an intent CHANGE therefore meant it never fired — five
+    /// transient `wsl.exe` failures latched `gave_up`, `reconcile` returned
+    /// `GaveUp` without going near the spawner, and Start silently did nothing
+    /// for the rest of the session.
+    ///
+    /// Re-asserting while a holder is ALIVE remains a no-op: neither the intent
+    /// changed nor did we give up, so nothing is touched and no second holder
+    /// is spawned.
+    ///
+    /// The infinite-retry hazard the old doc comment named is real and is still
+    /// closed — by [`Self::observed_status`], which adopts through its own path
+    /// and never reopens a give-up. A 7-second poll is not a user asking again.
     pub fn want_running(&mut self) {
-        if self.intent != Intent::Run {
-            self.intent = Intent::Run;
-            // A fresh intent gets a fresh budget: whatever went wrong last time
-            // the user wanted a server, they are asking again now.
+        self.assert_run(true);
+    }
+
+    /// Assert `Intent::Run`. `fresh_ask` distinguishes a human's act from a
+    /// poll's observation: only the former may reopen a closed budget.
+    fn assert_run(&mut self, fresh_ask: bool) {
+        let changed = self.intent != Intent::Run;
+        self.intent = Intent::Run;
+        if changed || (fresh_ask && self.gave_up) {
+            // A fresh intent — or a fresh ask after we stopped trying — gets a
+            // fresh budget: whatever went wrong last time the user wanted a
+            // server, they are asking again now.
             self.attempts = 0;
             self.gave_up = false;
+            self.gave_up_announced = false;
             self.last_error = None;
             self.ever_held = false;
         }
@@ -263,9 +294,15 @@ impl Keepalive {
     /// So the only routes to "meant to be down" are an explicit stop, a backend
     /// change, and launcher exit — all three of which release. That is what
     /// keeps an orphaned holder from pinning ~1.4 GB of VM forever.
+    ///
+    /// ADOPTION IS NOT AN ASK, which is why this does not simply call
+    /// [`Self::want_running`]. `tray_set_status` pushes a verdict every 7
+    /// seconds; a poll that reopened a closed budget would turn [`MAX_ATTEMPTS`]
+    /// into a 7-second retry loop with extra steps, and the bound would exist
+    /// only in the tests.
     pub fn observed_status(&mut self, verdict: &str) {
         if verdict_means_running(verdict) {
-            self.want_running();
+            self.assert_run(false);
         }
     }
 
@@ -278,6 +315,7 @@ impl Keepalive {
             self.attempts = 0;
             self.ever_held = false;
             self.gave_up = false;
+            self.gave_up_announced = false;
             self.last_error = None;
             return match held {
                 Some(mut h) => {
@@ -341,6 +379,34 @@ impl Keepalive {
                 self.last_error = Some(e.clone());
                 Step::Failed(e)
             }
+        }
+    }
+
+    /// What, if anything, to tell the user about this step — `(kind, message)`.
+    ///
+    /// `&mut self` rather than a pure function of [`Step`] for one reason: "we
+    /// gave up" is news EXACTLY ONCE, and only the state that latched it knows
+    /// whether it has already been said. The obvious pure version — `gave_up &&
+    /// attempts >= MAX_ATTEMPTS`, read off the report — looks like it fires on
+    /// the flipping tick and does not: once latched, `reconcile` returns at the
+    /// `gave_up` arm without touching `attempts`, so both halves stay true on
+    /// every subsequent 5-second tick, forever. That storm was bounded only by
+    /// the frontend happening to re-read the report and compare strings, which
+    /// is an accident in another file rather than a property of this one.
+    ///
+    /// `Failed` is deliberately NOT latched: each failed attempt is a distinct
+    /// event, and there are at most [`MAX_ATTEMPTS`] of them.
+    fn announcement(&mut self, step: &Step) -> Option<(&'static str, String)> {
+        match step {
+            Step::Failed(e) => Some(("failed", e.clone())),
+            Step::GaveUp if !self.gave_up_announced => {
+                self.gave_up_announced = true;
+                Some((
+                    "gave_up",
+                    self.last_error.clone().unwrap_or_else(|| HOLDER_KEEPS_DYING.to_string()),
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -616,36 +682,26 @@ pub fn install(app: &tauri::AppHandle, backend: Backend) {
 /// [`Keepalive::reconcile`] so the decision stays free of Tauri.
 fn tick(spawner: &mut dyn Spawner) {
     let Some(m) = state() else { return };
-    let (step, report) = {
+    // The announcement is decided INSIDE the lock, because deciding it mutates
+    // the latch that makes a give-up news exactly once.
+    let payload = {
         let Ok(mut k) = m.lock() else { return };
         let step = k.reconcile(spawner);
-        (step, report_from(&k, true))
+        k.announcement(&step)
     };
-    announce(&step, &report);
+    announce(payload);
 }
 
 /// Tell the user when the holder is in trouble. Silence is the failure mode
 /// that made this bug invisible in the first place — a server that is about to
 /// stop in 15 seconds and says nothing.
 ///
-/// Emitted on the FAILING steps only, and `GaveUp` latches inside
-/// [`Keepalive`], so this cannot become a 5-second event storm. The frontend
-/// also re-reads [`keepalive_report`] on mount, so a webview reload does not
-/// lose the news.
-fn announce(step: &Step, report: &KeepaliveReport) {
-    let payload = match step {
-        Step::Failed(e) => Some(("failed", e.clone())),
-        Step::GaveUp if report.gave_up && report.attempts >= MAX_ATTEMPTS => Some((
-            "gave_up",
-            report.last_error.clone().unwrap_or_else(|| "unknown reason".to_string()),
-        )),
-        _ => None,
-    };
+/// A pure emitter: WHETHER to speak is [`Keepalive::announcement`]'s decision,
+/// and it has to be, because "we gave up" is news once and only the state knows
+/// whether it has been said. The frontend also re-reads [`keepalive_report`] on
+/// mount, so a webview reload does not lose the news.
+fn announce(payload: Option<(&'static str, String)>) {
     let Some((kind, message)) = payload else { return };
-    // Only the tick that FLIPPED into gave_up announces it: once latched,
-    // `reconcile` returns `GaveUp` without going near the spawner, and
-    // `attempts` stops climbing, so the guard above fires exactly once per
-    // give-up.
     if let Some(app) = APP.get() {
         use tauri::Emitter;
         let _ = app.emit(
@@ -671,13 +727,13 @@ fn report_from(k: &Keepalive, applies: bool) -> KeepaliveReport {
 fn apply(change: impl FnOnce(&mut Keepalive)) {
     let Some(m) = state() else { return };
     let mut spawner = WslSpawner;
-    let (step, report) = {
+    let payload = {
         let Ok(mut k) = m.lock() else { return };
         change(&mut k);
         let step = k.reconcile(&mut spawner);
-        (step, report_from(&k, true))
+        k.announcement(&step)
     };
-    announce(&step, &report);
+    announce(payload);
 }
 
 /// The server is meant to be running. Call at the START of a start/restart, so
@@ -996,6 +1052,72 @@ mod tests {
         assert!(!k.gave_up());
     }
 
+    /// PRESSING START AFTER A GIVE-UP MUST RECOVER — and this is the case the
+    /// Stop-then-Start test below cannot see.
+    ///
+    /// `games_start` calls `server_should_run()` UNCONDITIONALLY, so by the time
+    /// a user presses Start after a failure the intent is already `Run`. A clear
+    /// that only fires on an intent CHANGE therefore never fires: `gave_up`
+    /// survives, `reconcile` returns `GaveUp` without going near the spawner,
+    /// and the button does nothing. Five transient `wsl.exe` failures latch it;
+    /// the server then starts, dies 15 s later, `restart: unless-stopped` heals
+    /// it on the next touch, the user presses Start again — same loop, forever,
+    /// with a banner that names no way out.
+    #[test]
+    fn pressing_start_again_after_a_give_up_reaches_the_spawner() {
+        let mut k = Keepalive::new();
+        let mut s = FakeSpawner::always_failing("wsl.exe not found");
+        k.want_running();
+        for _ in 0..=MAX_ATTEMPTS {
+            k.reconcile(&mut s);
+        }
+        assert!(k.gave_up());
+
+        // The user presses Start. NO want_stopped in between — that is the
+        // whole point; nothing in the product makes them stop first.
+        let mut good = FakeSpawner::new();
+        k.want_running();
+        assert!(
+            !k.gave_up(),
+            "a fresh ask must reopen the budget even though the intent was already Run"
+        );
+        assert_eq!(k.reconcile(&mut good), Step::Established);
+        // Evidence, not a label: the Start press really reached the spawner and
+        // the holder it produced is alive.
+        assert_eq!(good.spawns, 1, "the Start button never reached the spawner");
+        assert!(!good.last().has_exited());
+        assert_eq!(k.last_error(), None, "the stale reason must not outlive the give-up");
+    }
+
+    /// ...but a POLL must not, and that asymmetry is what keeps the bound real.
+    ///
+    /// `tray_set_status` pushes a verdict every 7 seconds. If adoption cleared
+    /// the give-up, `MAX_ATTEMPTS` would be a 7-second retry loop with extra
+    /// steps — the bound would exist only in the tests. This is exactly the
+    /// hazard `want_running`'s doc comment warns about, kept intact by routing
+    /// adoption through its own path rather than through the user's ask.
+    #[test]
+    fn a_status_poll_never_reopens_a_give_up() {
+        let mut k = Keepalive::new();
+        let mut s = FakeSpawner::always_failing("nope");
+        k.want_running();
+        for _ in 0..=MAX_ATTEMPTS {
+            k.reconcile(&mut s);
+        }
+        assert!(k.gave_up());
+        let at_give_up = s.spawns;
+
+        for _ in 0..20 {
+            k.observed_status("online");
+            assert_eq!(k.reconcile(&mut s), Step::GaveUp);
+        }
+        assert!(k.gave_up(), "a 7s poll must not clear the give-up");
+        assert_eq!(
+            s.spawns, at_give_up,
+            "20 polls reopened the budget: MAX_ATTEMPTS is not a bound, it is a 7s retry loop"
+        );
+    }
+
     /// A user who asks again gets a fresh budget — a give-up must not make the
     /// Start button permanently useless.
     #[test]
@@ -1141,6 +1263,105 @@ mod tests {
         assert!(r.gave_up);
         assert_eq!(r.attempts, MAX_ATTEMPTS);
         assert_eq!(r.last_error.as_deref(), Some("the distro is not registered"));
+    }
+
+    // -- what the user is told, and how often --------------------------------
+
+    /// A GIVE-UP IS NEWS EXACTLY ONCE, which is what the emitter's comment has
+    /// always claimed and what it did not do.
+    ///
+    /// The old guard was `gave_up && attempts >= MAX_ATTEMPTS` read off the
+    /// report. Once latched, `reconcile` returns at the `gave_up` arm without
+    /// touching `attempts`, so both halves stay true on EVERY subsequent
+    /// 5-second tick: twenty latched ticks, twenty `wsl-keepalive` events,
+    /// forever. It was bounded only by the frontend happening to re-read the
+    /// report and compare strings — an accident in another file, in another
+    /// language, that nothing pinned.
+    #[test]
+    fn a_latched_give_up_is_announced_once_and_then_goes_quiet() {
+        let mut k = Keepalive::new();
+        let mut s = FakeSpawner::always_failing("wsl.exe not found");
+        k.want_running();
+
+        let mut said: Vec<(&'static str, String)> = Vec::new();
+        // Far past the give-up: every one of these ticks used to emit.
+        for _ in 0..(MAX_ATTEMPTS + 20) {
+            let step = k.reconcile(&mut s);
+            if let Some(a) = k.announcement(&step) {
+                said.push(a);
+            }
+        }
+
+        assert_eq!(
+            said.iter().filter(|(kind, _)| *kind == "gave_up").count(),
+            1,
+            "20 latched ticks produced {} give-up events; the storm is the bug",
+            said.iter().filter(|(kind, _)| *kind == "gave_up").count()
+        );
+        // NON-VACUITY: an emitter that answers None to everything would satisfy
+        // the count above. The attempts that failed are still reported.
+        assert_eq!(
+            said.iter().filter(|(kind, _)| *kind == "failed").count(),
+            MAX_ATTEMPTS as usize,
+            "the failing attempts before the give-up must still be announced"
+        );
+        // ...and the give-up carries the reason, not an empty banner.
+        let (_, why) = said.iter().find(|(kind, _)| *kind == "gave_up").expect("no give-up event");
+        assert_eq!(why, "wsl.exe not found");
+    }
+
+    /// ...and a SECOND give-up, after the user asked again, is news again.
+    /// "Announced once" must mean once per give-up, not once per process — a
+    /// latch that never reopens is the contentless "already told you" this repo
+    /// has already been burned by.
+    #[test]
+    fn a_give_up_after_a_fresh_ask_is_announced_again() {
+        let mut k = Keepalive::new();
+        let mut s = FakeSpawner::always_failing("nope");
+
+        let mut give_ups = 0usize;
+        for _ in 0..2 {
+            k.want_running();
+            for _ in 0..(MAX_ATTEMPTS + 5) {
+                let step = k.reconcile(&mut s);
+                if let Some((kind, _)) = k.announcement(&step) {
+                    if kind == "gave_up" {
+                        give_ups += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(give_ups, 2, "the second give-up must be told, not swallowed by a latch");
+    }
+
+    /// A give-up whose spawns all SUCCEEDED has no OS error to quote, and the
+    /// announcement must still name the shape rather than "unknown reason". A
+    /// banner that says nothing is the silence this whole module removes.
+    #[test]
+    fn an_announcement_never_carries_an_empty_reason() {
+        let mut k = Keepalive::new();
+        let mut s = FakeSpawner::new();
+        k.want_running();
+
+        let mut said: Option<(&'static str, String)> = None;
+        for _ in 0..(MAX_ATTEMPTS + 5) {
+            let step = k.reconcile(&mut s);
+            if let Some(a) = k.announcement(&step) {
+                if a.0 == "gave_up" {
+                    assert!(said.is_none(), "announced twice");
+                    said = Some(a);
+                }
+                continue;
+            }
+            // Every spawn succeeds and then dies before the next tick: the
+            // "holder that will not stay up" shape, where `spawn()` never
+            // returned an error to quote.
+            s.last().exited.store(true, Ordering::SeqCst);
+        }
+
+        let (_, why) = said.expect("a give-up with no OS error must still be announced");
+        assert_eq!(why, HOLDER_KEEPS_DYING);
+        assert_eq!(k.last_error(), Some(HOLDER_KEEPS_DYING));
     }
 
     #[test]
