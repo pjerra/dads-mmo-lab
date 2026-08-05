@@ -9326,7 +9326,12 @@ pub(crate) mod vocab_coverage_tests {
     /// A test module is not a call site. Cutting here also stops the extractor
     /// finding its OWN shape strings (`"run_json_cmd("` et al) and reporting
     /// them as unclassifiable sites.
-    fn production_half(src: &str) -> String {
+    ///
+    /// `pub(crate)` so `keepalive_wiring_tests` reads the same production text
+    /// this does — two definitions of "the production half" would drift, and
+    /// both scans exist precisely because a comment or a test must never read
+    /// as a production call site.
+    pub(crate) fn production_half(src: &str) -> String {
         let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
         strip_comments(&src[..cut])
     }
@@ -9509,6 +9514,246 @@ fn url() { let _ = "https://example.invalid/x"; }
         assert!(
             strip_comments(src).contains("https://example.invalid/x"),
             "the // inside a string literal must not be treated as a comment"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The WSL keep-alive's PRODUCTION WIRING
+// ---------------------------------------------------------------------------
+
+/// THE KEEP-ALIVE IS ACTUALLY WIRED IN, AND IN THE DOCUMENTED ORDER.
+///
+/// `wsl_keepalive`'s own unit tests drive [`wsl_keepalive::Keepalive`] through a
+/// fake spawner and prove the decision thoroughly. They prove NOTHING about this
+/// file, and the gap is total rather than partial: delete
+/// `wsl_keepalive::install(...)` and `STATE` is never set, so `state()` answers
+/// `None`, every `apply()` returns at its first line, no holder is ever spawned
+/// — and all eighteen still pass, because each builds its own `Keepalive`.
+/// Measured: with `install` no-op'd and the other four call sites deleted, this
+/// crate reported 234 passed / 0 failed. The feature can be removed from
+/// production with a green suite, SILENTLY, which is the exact failure mode the
+/// module exists to end.
+///
+/// Same shape as `every_command_that_saves_soap_credentials_also_publishes_them_to_the_cli`
+/// above: wiring a unit test cannot see is pinned by reading the source, with
+/// comments stripped first because this file's prose names every one of these
+/// functions repeatedly.
+#[cfg(test)]
+mod keepalive_wiring_tests {
+    use crate::vocab_coverage_tests::production_half;
+
+    /// The calls that make a lifecycle command take TIME. Each one either
+    /// spawns `wsl.exe`/`docker` or awaits something that does, so each is a
+    /// moment at which the distro must already be held — or, for a stop, must
+    /// still be held.
+    const WORK: &[&str] = &[
+        "ensure_engine_up(",
+        "run_games_lifecycle_native(",
+        "stream_action(",
+        "stream_args(",
+        "stop_engine_best_effort(",
+    ];
+
+    /// Every glue entry point in `wsl_keepalive`, and the function that must
+    /// call it. A `pub fn` in the production-glue half with no caller here is a
+    /// feature that exists only in its own tests.
+    const WIRING: &[(&str, &str)] = &[
+        // Arms STATE and the watchdog thread. Without this ONE call every other
+        // entry point below is a no-op at its first line.
+        ("wsl_keepalive::install(", "run"),
+        ("wsl_keepalive::server_should_run()", "games_start"),
+        ("wsl_keepalive::server_should_run()", "games_restart"),
+        ("wsl_keepalive::server_should_stop()", "games_stop"),
+        // Adoption: a server started by a PREVIOUS launcher session is running
+        // with nobody holding its distro.
+        ("wsl_keepalive::observed_status(", "tray_set_status"),
+        // The polite release. Without it an orphaned holder pins ~1.4 GB of VM.
+        ("wsl_keepalive::shutdown()", "run"),
+    ];
+
+    fn src() -> String {
+        production_half(include_str!("lib.rs"))
+    }
+
+    /// The brace-matched body of `fn <name>(`.
+    ///
+    /// String- and char-literal aware, so a `{` inside an argv literal cannot
+    /// unbalance the match. Comments are already gone — `production_half`
+    /// strips them — which is what makes this safe at all: the prose around
+    /// these very functions is dense with braces and with their own names.
+    ///
+    /// The first `{` after the signature opens the body: a Rust parameter list
+    /// and return type carry parens and angle brackets, never braces.
+    fn fn_body(code: &str, name: &str) -> String {
+        let needle = format!("fn {name}(");
+        let at = code.find(&needle).unwrap_or_else(|| {
+            panic!(
+                "no `{needle}` in the production half of lib.rs — the keep-alive's host \
+                 function has been renamed, deleted, or moved below a #[cfg(test)] module"
+            )
+        });
+        let b: Vec<char> = code[at..].chars().collect();
+        let mut i = 0usize;
+        while i < b.len() && b[i] != '{' {
+            i += 1;
+        }
+        assert!(i < b.len(), "`{needle}` has no body");
+        let start = i;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                // A char literal, distinguished from a lifetime (`&'a str`) by
+                // the closing quote two chars along, or by an escape.
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return b[start..=i].iter().collect();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces scanning `{needle}`");
+    }
+
+    /// EVERY glue entry point has a production caller.
+    ///
+    /// This is the one that goes red on the reviewer's mutation, and it is
+    /// deliberately per-call-site rather than a count: the failure is per
+    /// command, so a total that stayed at six while `games_restart` lost its
+    /// declaration would be satisfied by a seventh call somewhere harmless.
+    #[test]
+    fn every_wsl_keepalive_entry_point_has_a_production_call_site() {
+        let code = src();
+        for (call, host) in WIRING {
+            let body = fn_body(&code, host);
+            assert!(
+                body.contains(call),
+                "`{host}` does not call `{call}`. On Backend::Arch that is not a missing \
+                 nicety: WSL powers the distro off ~15s after the last session into it \
+                 exits, so an unwired keep-alive means the server goes down a quarter of \
+                 a minute later and `restart: unless-stopped` hides it by healing on the \
+                 next touch. wsl_keepalive's own unit tests cannot see this — they build \
+                 their own Keepalive and pass either way."
+            );
+        }
+        // NON-VACUITY. A `fn_body` that returned something trivially containing
+        // everything (say the whole file) would satisfy the loop above, so pin
+        // the negatives too.
+        let stop = fn_body(&code, "games_stop");
+        assert!(
+            !stop.contains("wsl_keepalive::server_should_run()"),
+            "fn_body is not isolating one function — games_stop cannot declare Run"
+        );
+        assert!(
+            !fn_body(&code, "games_start").contains("wsl_keepalive::shutdown()"),
+            "fn_body is not isolating one function — games_start is not the exit handler"
+        );
+    }
+
+    /// ARMING IS SINGULAR. Two `install` calls would be harmless today (the
+    /// second `OnceLock::set` fails and returns), but the reason it is harmless
+    /// is a detail of `install`, not a property of the call sites — and a
+    /// second watchdog thread is exactly the duplicate-poller shape this repo
+    /// already refused for the tray status.
+    #[test]
+    fn the_keep_alive_is_armed_exactly_once() {
+        let code = src();
+        assert_eq!(
+            code.matches("wsl_keepalive::install(").count(),
+            1,
+            "expected exactly one wsl_keepalive::install call in production"
+        );
+    }
+
+    /// THE ORDERING, which is load-bearing rather than tidy.
+    ///
+    /// A lifecycle command is ITSELF a `wsl.exe` session into the distro, so
+    /// the 15 s clock starts when the command exits. Declaring Run after the
+    /// work leaves the window this module exists to close: the server starts,
+    /// the command's own session ends, and 15 s later the distro — and the
+    /// stack inside it — is gone. Declaring Stop before the work is the mirror
+    /// image: the hold is dropped while `compose down` is still stopping
+    /// containers, so the distro can power off mid-shutdown.
+    ///
+    /// Asserted against the REAL work calls in the real body, not a restated
+    /// list of steps: the recorded `lifecycle_steps_for_mode` lesson is that an
+    /// ordering pinned on a pure list production never reads is not pinned.
+    #[test]
+    fn the_intent_is_declared_before_a_start_and_after_a_stop() {
+        let code = src();
+
+        for host in ["games_start", "games_restart"] {
+            let body = fn_body(&code, host);
+            let at = body
+                .find("wsl_keepalive::server_should_run()")
+                .unwrap_or_else(|| panic!("{host} never declares the keep-alive intent"));
+            let first_work = WORK
+                .iter()
+                .filter_map(|w| body.find(w))
+                .min()
+                .unwrap_or_else(|| panic!("{host}: found none of the work calls {WORK:?}"));
+            // NON-VACUITY: an `at < first_work` that holds because the scan
+            // found only one late call proves nothing about the rest.
+            assert!(
+                WORK.iter().filter(|w| body.contains(*w)).count() >= 2,
+                "{host}: fewer than two work calls found — the scan is broken, not the command"
+            );
+            assert!(
+                at < first_work,
+                "{host} declares the keep-alive intent AFTER it starts working. The hold \
+                 must exist before this command's own wsl.exe session ends, or the server \
+                 it just started dies ~15s later."
+            );
+        }
+
+        let body = fn_body(&code, "games_stop");
+        let at = body
+            .find("wsl_keepalive::server_should_stop()")
+            .expect("games_stop never releases the keep-alive intent");
+        let last_work = WORK
+            .iter()
+            .filter_map(|w| body.rfind(w))
+            .max()
+            .expect("games_stop: found none of the work calls");
+        assert!(
+            WORK.iter().filter(|w| body.contains(*w)).count() >= 2,
+            "games_stop: fewer than two work calls found — the scan is broken"
+        );
+        assert!(
+            at > last_work,
+            "games_stop releases the hold BEFORE the stop has finished. That starts the \
+             distro's 15s clock while compose is still shutting containers down — the \
+             ungraceful stop this backend already struggles with."
         );
     }
 }
