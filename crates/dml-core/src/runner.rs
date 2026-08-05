@@ -561,12 +561,26 @@ mod tests {
         assert_eq!(seen[3]["data"]["state"], "running");
     }
 
+    /// NB THE RETURN IS `Ok`, and that is deliberate — `run_stream` reports the
+    /// exit code, it does not judge it. Callers that need "did this work?" MUST
+    /// read the code (or the stream), never `Result::is_ok`.
+    ///
+    /// Recorded here because a launcher fix round got it wrong in exactly this
+    /// spot (C1, 2026-08-05): `exit_stop_and_close` branched on
+    /// `after_stop(result.is_ok())`, which is `true` for this very run, so a
+    /// confirmed stop that failed still closed the launcher and released the
+    /// WSL holder. Same shape as the repo's older recorded lesson about
+    /// streaming promises resolving on an NDJSON error event.
     #[test]
     fn run_stream_synthesizes_error_on_silent_crash() {
         let mut seen: Vec<serde_json::Value> = vec![];
-        let code = fixture_runner()
-            .run_stream(&[&fixture("stream_crash")], |v| seen.push(v))
-            .unwrap();
+        let result = fixture_runner().run_stream(&[&fixture("stream_crash")], |v| seen.push(v));
+        assert!(
+            result.is_ok(),
+            "run_stream reports a non-zero exit as Ok(code); a caller reading is_ok() sees \
+             success. If this ever becomes Err, every such caller changes meaning."
+        );
+        let code = result.unwrap();
         assert_eq!(code, 3);
         let last = seen.last().unwrap();
         assert_eq!(last["event"], "error");

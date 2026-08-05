@@ -3103,24 +3103,80 @@ fn save_text_file(app: tauri::AppHandle, default_name: String, content: String) 
     }
 }
 
+/// Did a streamed lifecycle run actually FAIL? — FIX ROUND 3 (2026-08-05), C1.
+///
+/// `exit_stop_and_close` used to decide with `after_stop(result.is_ok())`, and
+/// that expression is `true` for every failure it exists to catch:
+/// [`DmlRunner::run_stream`] returns `Ok(code)` for EVERY exit code (it
+/// synthesizes an `error` event for a non-zero one and still returns `Ok` —
+/// `crates/dml-core/src/runner.rs:449`), and `stream_action` then threw the
+/// code away with `.map(|_exit| ())`. So `AfterStop::ReportFailure` was
+/// unreachable, a confirmed stop that failed still closed the launcher, the
+/// holder was still released, and the distro still powered off ~15s later on
+/// top of whatever a failed `compose down` left running. That is the original
+/// incident, unchanged by the fix that was supposed to close it.
+///
+/// THE SIGNAL IS THE EVENT, not the exit code, because the event is the only
+/// one BOTH backends produce. The native path
+/// (`dml_wow::lifecycle::games_lifecycle_stream` via
+/// [`run_games_lifecycle_native`]) reports domain failures purely in the
+/// stream and its wrapper resolves `Ok(())` by design — its doc comment says
+/// so. This is the repo's own recorded rule ("UI outcome must be derived from
+/// done/error events, not promise rejection") finally applied on the Rust
+/// side, where the close decision is actually made. The exit code is kept as a
+/// second signal because a CLI that dies before emitting anything at all
+/// (`CLI_CRASH`) has no event to read.
+///
+/// Scoped DELIBERATELY to the exit path. Making `stream_action` itself return
+/// `Err` on a non-zero exit would change what Home's Start/Stop/Restart
+/// buttons see, which is a product change nobody asked for; every other caller
+/// keeps today's contract by passing [`StreamOutcome::default`] and ignoring
+/// it.
+#[derive(Clone, Default)]
+struct StreamOutcome(Arc<AtomicBool>);
+
+impl StreamOutcome {
+    /// Every event on its way to the frontend passes through here.
+    fn observe(&self, v: &serde_json::Value) {
+        if v.get("event").and_then(serde_json::Value::as_str) == Some("error") {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The second signal: a CLI that exited non-zero without ever emitting an
+    /// `error` event (killed, or dead before its first line).
+    fn note_exit_code(&self, code: i32) {
+        if code != 0 {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 async fn stream_action(
     action: &'static str,
     id: String,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
+    watch: StreamOutcome,
 ) -> Result<(), CmdError> {
     if !validate_game_id(&id) {
         return Err(bad_id(&id));
     }
     let runner = state.runner.clone();
+    let seen = watch.clone();
     tauri::async_runtime::spawn_blocking(move || {
         runner.run_stream(&["games", action, &id], |v| {
+            seen.observe(&v);
             let _ = on_event.send(v);
         })
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
-    .map(|_exit| ())
+    .map(|exit| watch.note_exit_code(exit))
     .map_err(CmdError::from)
 }
 
@@ -7249,17 +7305,36 @@ async fn games_start(
         // Chunk 3b: native mode replaces the inner `dml` shell-out with
         // direct compose orchestration (see `games_lifecycle_stream`
         // below) -- the engine-ensure-up wrapping just above is unchanged.
-        return run_games_lifecycle_native("start", id, false, on_event).await;
+        return run_games_lifecycle_native("start", id, false, on_event, StreamOutcome::default())
+            .await;
     }
-    stream_action("start", id, on_event, state).await
+    stream_action("start", id, on_event, state, StreamOutcome::default()).await
 }
 
+/// The IPC surface. A PURE DELEGATE: every line of the stop — and in
+/// particular the `server_should_stop()` ordering — lives in
+/// [`games_stop_watched`], which is also what [`exit_stop_and_close`] calls, so
+/// the two callers cannot drift and the ordering scan has one body to read.
+/// Pinned by `the_stop_command_is_a_pure_delegate`.
 #[tauri::command]
 async fn games_stop(
     id: String,
     manage_docker: Option<bool>,
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    games_stop_watched(id, manage_docker, on_event, state, StreamOutcome::default()).await
+}
+
+/// The stop itself. `watch` is how [`exit_stop_and_close`] learns whether the
+/// stop actually worked — see [`StreamOutcome`]; ordinary callers pass a
+/// default and ignore it.
+async fn games_stop_watched(
+    id: String,
+    manage_docker: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+    watch: StreamOutcome,
 ) -> Result<(), CmdError> {
     if !validate_game_id(&id) {
         return Err(bad_id(&id));
@@ -7276,9 +7351,9 @@ async fn games_stop(
     // the inner `dml` shell-out with direct compose orchestration -- the
     // engine-stop wrapping below is unchanged either way.
     let result = if is_native_backend() {
-        run_games_lifecycle_native("stop", id, false, on_event.clone()).await
+        run_games_lifecycle_native("stop", id, false, on_event.clone(), watch).await
     } else {
-        stream_action("stop", id, on_event.clone(), state).await
+        stream_action("stop", id, on_event.clone(), state, watch).await
     };
     // Then free the VM's RAM by stopping the engine. Best-effort: this runs
     // even if the server-stop reported an error (the containers die with the
@@ -7317,7 +7392,8 @@ async fn games_restart(
     // today's WSL sibling: a restart assumes the server -- and so the
     // engine -- is already up; only cold `start` brings Docker Desktop up).
     if is_native_backend() {
-        return run_games_lifecycle_native("restart", id, skip, on_event).await;
+        return run_games_lifecycle_native("restart", id, skip, on_event, StreamOutcome::default())
+            .await;
     }
     // --no-saveall = the GUI's "faster restart" option (skip the redundant
     // pre-stop saveall; the graceful stop still saves on shutdown).
@@ -7342,10 +7418,15 @@ async fn run_games_lifecycle_native(
     id: String,
     skip_saveall: bool,
     on_event: Channel<serde_json::Value>,
+    watch: StreamOutcome,
 ) -> Result<(), CmdError> {
     let ch = on_event.clone();
     tauri::async_runtime::spawn_blocking(move || {
         dml_wow::lifecycle::games_lifecycle_stream(mode, id, skip_saveall, |v| {
+            // C1: this wrapper resolves Ok(()) BY DESIGN (see the doc comment
+            // above) — the stream is the only place a native domain failure is
+            // reported, so it is the only place it can be observed.
+            watch.observe(&v);
             let _ = ch.send(v);
         });
     })
@@ -7590,8 +7671,16 @@ async fn exit_stop_and_close(
     on_event: Channel<serde_json::Value>,
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
-    let result = games_stop(id, manage_docker, on_event, state).await;
-    match after_stop(result.is_ok()) {
+    // FIX ROUND 3 (2026-08-05) — C1. `result.is_ok()` ALONE IS NOT AN ANSWER:
+    // `run_stream` returns `Ok(code)` for every exit code and the native
+    // wrapper resolves `Ok(())` by design, so the old `after_stop(result
+    // .is_ok())` could never be false and `ReportFailure` was unreachable for
+    // exactly the failure it exists to catch. The stream is where a lifecycle
+    // failure is actually reported — see `StreamOutcome`.
+    let watch = StreamOutcome::default();
+    let result = games_stop_watched(id, manage_docker, on_event, state, watch.clone()).await;
+    let stop_ok = result.is_ok() && !watch.failed();
+    match after_stop(stop_ok) {
         AfterStop::CloseNow => {
             EXIT_CONFIRMED.store(true, Ordering::SeqCst);
             app.exit(0);
@@ -9593,6 +9682,82 @@ mod tests {
              closing anyway tells them nothing while the holder is already released"
         );
     }
+
+    // -- FIX ROUND 3, C1: what `stop_ok` is actually made of -----------------
+
+    /// THE PREMISE THE FIX ROUND 2 SHAPE GOT WRONG, stated as a test.
+    ///
+    /// `after_stop` was fed `result.is_ok()`, which reads as a branch and is a
+    /// constant. A lifecycle failure travels in the STREAM: bash's `dml`
+    /// emits `{"event":"error", …}` and exits non-zero, and
+    /// `dml_wow::lifecycle::games_lifecycle_stream` (the native path) emits
+    /// the same event and reports nothing else at all. So the observer is what
+    /// the decision has to rest on.
+    #[test]
+    fn an_error_event_marks_the_stream_failed() {
+        let w = StreamOutcome::default();
+        assert!(!w.failed(), "a stream that has said nothing has not failed");
+        w.observe(&serde_json::json!({"event": "section_start", "name": "stop"}));
+        w.observe(&serde_json::json!({"event": "line", "text": "Stopping ac-worldserver"}));
+        assert!(!w.failed(), "ordinary progress is not a failure");
+        w.observe(&serde_json::json!({
+            "event": "error",
+            "error": {"code": "COMPOSE_FAILED", "message": "down failed", "hint": ""}
+        }));
+        assert!(w.failed(), "an error event is the failure signal on BOTH backends");
+    }
+
+    /// A `done` event is not a failure, and the check is on the EVENT NAME
+    /// rather than on the presence of an `error` key — a `done` payload that
+    /// happens to carry a nested `error` field must not be read as a failure.
+    #[test]
+    fn a_done_event_is_not_a_failure() {
+        let w = StreamOutcome::default();
+        w.observe(&serde_json::json!({"event": "done", "data": {"id": "wow", "error": null}}));
+        assert!(!w.failed(), "the stop finished — that is the success shape");
+    }
+
+    /// THE SECOND SIGNAL. A CLI that dies before emitting anything has no
+    /// event to read, and `run_stream` still hands back `Ok(code)` — the exact
+    /// return that made `result.is_ok()` a constant.
+    #[test]
+    fn a_nonzero_exit_code_marks_the_stream_failed() {
+        let w = StreamOutcome::default();
+        w.note_exit_code(0);
+        assert!(!w.failed(), "exit 0 is success");
+        w.note_exit_code(3);
+        assert!(w.failed(), "a non-zero exit with no error event is still a failed stop");
+    }
+
+    /// The two signals share one flag, and NEITHER can clear the other. A
+    /// failure observed mid-stream must survive the `Ok(0)` that a CLI which
+    /// reported an error and then exited cleanly would hand back.
+    #[test]
+    fn a_clean_exit_code_cannot_clear_an_observed_failure() {
+        let w = StreamOutcome::default();
+        w.observe(&serde_json::json!({"event": "error", "error": {"code": "X"}}));
+        w.note_exit_code(0);
+        assert!(
+            w.failed(),
+            "the stop reported an error and then exited 0 — that is a FAILED stop, and \
+             letting the exit code overwrite it rebuilds C1 from the other side"
+        );
+    }
+
+    /// The observer is shared by clone (production hands one copy to the
+    /// streaming closure and keeps another), so a failure seen by the closure
+    /// has to be visible to the caller that decides whether to close.
+    #[test]
+    fn the_observer_is_shared_across_clones() {
+        let w = StreamOutcome::default();
+        let in_closure = w.clone();
+        in_closure.observe(&serde_json::json!({"event": "error", "error": {"code": "X"}}));
+        assert!(
+            w.failed(),
+            "the clone the streaming closure holds does not share state with the one \
+             exit_stop_and_close reads — the failure would be observed and then dropped"
+        );
+    }
 }
 
 /// T2 — IS EVERY CALL SITE IN THIS FILE CLASSIFIED?
@@ -10382,7 +10547,13 @@ mod keepalive_wiring_tests {
         ("wsl_keepalive::install(", "run"),
         ("wsl_keepalive::server_should_run()", "games_start"),
         ("wsl_keepalive::server_should_run()", "games_restart"),
-        ("wsl_keepalive::server_should_stop()", "games_stop"),
+        // `games_stop_watched`, not `games_stop`: fix round 3 (C1) made the
+        // `#[tauri::command]` a pure delegate so `exit_stop_and_close` can pass
+        // a `StreamOutcome` and learn whether the stop actually worked. The
+        // body — and so the ordering this table pins — moved with it. See
+        // `the_stop_command_is_a_pure_delegate`, which is what stops the work
+        // from drifting back into the command where this scan would not see it.
+        ("wsl_keepalive::server_should_stop()", "games_stop_watched"),
         // Adoption: a server started by a PREVIOUS launcher session is running
         // with nobody holding its distro.
         ("wsl_keepalive::observed_status(", "tray_set_status"),
@@ -10487,10 +10658,10 @@ mod keepalive_wiring_tests {
         // NON-VACUITY. A `fn_body` that returned something trivially containing
         // everything (say the whole file) would satisfy the loop above, so pin
         // the negatives too.
-        let stop = fn_body(&code, "games_stop");
+        let stop = fn_body(&code, "games_stop_watched");
         assert!(
             !stop.contains("wsl_keepalive::server_should_run()"),
-            "fn_body is not isolating one function — games_stop cannot declare Run"
+            "fn_body is not isolating one function — games_stop_watched cannot declare Run"
         );
         assert!(
             !fn_body(&code, "games_start").contains("wsl_keepalive::shutdown()"),
@@ -10554,24 +10725,55 @@ mod keepalive_wiring_tests {
             );
         }
 
-        let body = fn_body(&code, "games_stop");
+        let body = fn_body(&code, "games_stop_watched");
         let at = body
             .find("wsl_keepalive::server_should_stop()")
-            .expect("games_stop never releases the keep-alive intent");
+            .expect("games_stop_watched never releases the keep-alive intent");
         let last_work = WORK
             .iter()
             .filter_map(|w| body.rfind(w))
             .max()
-            .expect("games_stop: found none of the work calls");
+            .expect("games_stop_watched: found none of the work calls");
         assert!(
             WORK.iter().filter(|w| body.contains(*w)).count() >= 2,
-            "games_stop: fewer than two work calls found — the scan is broken"
+            "games_stop_watched: fewer than two work calls found — the scan is broken"
         );
         assert!(
             at > last_work,
-            "games_stop releases the hold BEFORE the stop has finished. That starts the \
-             distro's 15s clock while compose is still shutting containers down — the \
+            "games_stop_watched releases the hold BEFORE the stop has finished. That starts \
+             the distro's 15s clock while compose is still shutting containers down — the \
              ungraceful stop this backend already struggles with."
+        );
+    }
+
+    /// C1's structural half: the ordering scan above reads
+    /// `games_stop_watched`, so nothing may quietly reappear in the
+    /// `#[tauri::command]` that wraps it. A stop step added to `games_stop`
+    /// would run for the Home button and NOT for the exit dialog (which calls
+    /// the inner function directly) — two stops that differ, with the divergent
+    /// one on the path where the distro is about to power off — and the
+    /// ordering scan would never see it.
+    #[test]
+    fn the_stop_command_is_a_pure_delegate() {
+        let code = src();
+        let body = fn_body(&code, "games_stop");
+        assert!(
+            body.contains("games_stop_watched("),
+            "games_stop no longer delegates to games_stop_watched — the ordering scan and \
+             exit_stop_and_close are now reading different stops"
+        );
+        for call in WORK {
+            assert!(
+                !body.contains(call),
+                "games_stop does work of its own (`{call}`). Everything the stop does must \
+                 live in games_stop_watched, which is what exit_stop_and_close calls and \
+                 what the keep-alive ordering scan reads."
+            );
+        }
+        assert!(
+            !body.contains("wsl_keepalive::"),
+            "games_stop declares keep-alive intent of its own — that belongs in \
+             games_stop_watched, next to the work whose ordering it is about"
         );
     }
 
@@ -10787,9 +10989,30 @@ mod keepalive_wiring_tests {
         let body = fn_body(&code, "exit_stop_and_close");
 
         assert!(
-            body.contains("after_stop(result.is_ok())"),
+            body.contains("after_stop(stop_ok)"),
             "exit_stop_and_close no longer branches on the stop's outcome at all — a stop \
              that failed closes the launcher and tells the user nothing (F3)"
+        );
+
+        // C1: AND WHAT `stop_ok` IS MADE OF. `after_stop(result.is_ok())` — the
+        // fix round 2 shape — reads as a branch and is a constant: `run_stream`
+        // returns `Ok(code)` for every exit code and the native wrapper
+        // resolves `Ok(())` by design, so `ReportFailure` was unreachable for
+        // the one failure it exists to catch. Pinning the CALL alone let that
+        // ship; the composition is the invariant.
+        assert!(
+            body.contains("result.is_ok() && !watch.failed()"),
+            "exit_stop_and_close decides on the IPC result alone. That expression is TRUE \
+             for a stop that failed — run_stream returns Ok(code) for every exit code \
+             (crates/dml-core/src/runner.rs) and run_games_lifecycle_native resolves \
+             Ok(()) by design — so the launcher closes, the holder is released, and the \
+             distro powers off ~15s later on top of whatever a failed compose down left \
+             running. The stream is the only place the failure is reported (C1)."
+        );
+        assert!(
+            body.contains("games_stop_watched("),
+            "exit_stop_and_close no longer calls games_stop_watched, so nothing observes \
+             the stream and `watch` can only ever say the stop succeeded (C1)"
         );
 
         let close_arm = body
