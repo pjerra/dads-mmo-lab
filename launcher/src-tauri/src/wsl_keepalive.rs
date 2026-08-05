@@ -115,21 +115,19 @@ pub const HOLDER_KEEPS_DYING: &str =
 /// a backend that silently inherits "no keep-alive" — the failure mode of this
 /// whole module is silence.
 ///
-/// * `Arch` — yes. This is the backend the fix is for.
+/// * `Arch` and `Wsl` — yes, both. They drive the SAME `dml-arch` distro
+///   through the same [`dml_core::runner::DISTRO`] constant, so both hit the
+///   identical 15 s termination described at the top of this module. `Wsl` is
+///   also the default and the only backend the Settings dropdown currently
+///   offers, so it is the backend the user's real server actually runs on.
 /// * `Native` — no, and it must not exist there at all: Docker Desktop's
 ///   `com.docker.backend` already holds `docker-desktop` for exactly this
 ///   reason, which is why that distro never showed the behaviour in the same
 ///   sitting. Spawning a holder would be a stray `wsl.exe` for no reason.
-/// * `Wsl` — **deliberately left alone.** It has the identical 15 s problem
-///   today (same distro, same mechanism), so this is not an Arch-specific bug.
-///   Turning it on there changes the behaviour of the backend the user's real
-///   server has been running under, which is a bigger call than this change
-///   should make on its own; it is recorded rather than quietly bundled in.
 pub fn applies_to(backend: Backend) -> bool {
     match backend {
-        Backend::Arch => true,
+        Backend::Arch | Backend::Wsl => true,
         Backend::Native => false,
-        Backend::Wsl => false,
     }
 }
 
@@ -868,19 +866,24 @@ mod tests {
 
     // -- who gets a keep-alive at all ---------------------------------------
 
+    /// THE POINT OF THIS CHANGE. `Backend::Wsl` drives the SAME `dml-arch`
+    /// distro as `Arch` (both go through `runner::DISTRO`), so it has the
+    /// identical 15-second termination — measured n=8, 14.7-14.9s, spread 0.2s.
+    /// It is also the DEFAULT and the only backend the Settings dropdown
+    /// offers, so before this change the fix protected a backend nobody could
+    /// select, while the one the user's real server runs on stayed exposed.
     #[test]
-    fn only_the_arch_backend_holds_a_session() {
-        assert!(applies_to(Backend::Arch));
-        assert!(
-            !applies_to(Backend::Native),
-            "Docker Desktop's own backend already holds docker-desktop; a holder here \
-             would be a stray wsl.exe for no reason"
-        );
-        assert!(
-            !applies_to(Backend::Wsl),
-            "Wsl has the same 15s bug, but changing that backend's behaviour is a \
-             separate decision — see applies_to's doc comment"
-        );
+    fn every_distro_backend_holds_its_distro_open() {
+        assert!(applies_to(Backend::Arch), "Arch drives dml-arch");
+        assert!(applies_to(Backend::Wsl), "Wsl drives the SAME dml-arch");
+    }
+
+    /// Docker Desktop keeps its own utility VM alive for its containers, so
+    /// there is no distro to hold and a holder would be a stray `wsl.exe` for
+    /// no reason.
+    #[test]
+    fn docker_desktop_never_holds_a_distro() {
+        assert!(!applies_to(Backend::Native));
     }
 
     // -- holding -------------------------------------------------------------
