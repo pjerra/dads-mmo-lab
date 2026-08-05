@@ -7461,9 +7461,11 @@ async fn exit_stop_and_close(
 /// The fix: the window is NEVER destroyed by a close click, full stop --
 /// `on_window_event` below now calls `api.prevent_close()` unconditionally,
 /// before even reading `closeToTray`, so this function only ever chooses
-/// between hiding and asking `app.exit(0)` to close the process the ordinary
-/// way (`RunEvent::ExitRequested`, which CAN be prevented and answered,
-/// unlike a window destroy). Pure and built from pieces that already exist —
+/// between hiding (to tray), staying visible to prompt (see `PromptVisible`'s
+/// own doc comment — TASK 4 FIX ROUND 1 changed this arm from hiding to
+/// surfacing), or asking `app.exit(0)` to close the process the ordinary way
+/// (`RunEvent::ExitRequested`, which CAN be prevented and answered, unlike a
+/// window destroy). Pure and built from pieces that already exist —
 /// `should_prompt_on_exit` (which itself checks `EXIT_CONFIRMED`) rather than
 /// a second decision — so a confirmed exit still closes even if this is the
 /// event that carries it, and the two exit surfaces cannot drift apart.
@@ -7477,10 +7479,20 @@ enum WindowCloseAction {
     /// already confirmed): finish what the user asked for.
     ExitNow,
     /// `closeToTray` is off, but a server is running or its state is unknown,
-    /// and the exit is not yet confirmed: hide rather than destroy — the
-    /// destroy is what orphaned the process — and ask, exactly like the tray
-    /// path already does.
-    HideAndPrompt,
+    /// and the exit is not yet confirmed: SURFACE the window (never hide it)
+    /// and ask, exactly like the tray path already does.
+    ///
+    /// TASK 4 FIX ROUND 1 (2026-08-05). This variant used to hide first, like
+    /// `HideToTray` — wrong for a different reason than the destroy bug
+    /// documented above: a hidden window has nowhere to show the dialog the
+    /// emit asks the frontend to render, so the user's X click produced no
+    /// visible change at all. "I clicked X and nothing happened" is exactly
+    /// how someone reaches for Task Manager, which skips the clean shutdown
+    /// entirely — the same hard WSL cut this whole plan exists to prevent.
+    /// The user pressed X expecting SOMETHING to change, and only a visible
+    /// window can host a confirmation, so this now surfaces instead — see
+    /// `every_exit_requested_emit_is_preceded_by_a_window_surface`.
+    PromptVisible,
 }
 
 fn window_close_action(hide_to_tray: bool, action: wsl_keepalive::ExitAction) -> WindowCloseAction {
@@ -7488,7 +7500,7 @@ fn window_close_action(hide_to_tray: bool, action: wsl_keepalive::ExitAction) ->
         return WindowCloseAction::HideToTray;
     }
     if should_prompt_on_exit(action) {
-        WindowCloseAction::HideAndPrompt
+        WindowCloseAction::PromptVisible
     } else {
         WindowCloseAction::ExitNow
     }
@@ -7608,8 +7620,18 @@ pub fn run() {
                         // kill both.
                         let _ = window.hide();
                     }
-                    WindowCloseAction::HideAndPrompt => {
-                        let _ = window.hide();
+                    WindowCloseAction::PromptVisible => {
+                        // SURFACE, never hide (TASK 4 FIX ROUND 1). The user
+                        // just clicked X on a visible window; hiding it here
+                        // and then asking a question of the hidden result is
+                        // exactly the bug this round fixes. show_main_window
+                        // also unminimizes/focuses, which additionally
+                        // covers a minimized window, not only the
+                        // already-visible common case. Every
+                        // "exit-requested" emit site does this immediately
+                        // before emitting -- see
+                        // every_exit_requested_emit_is_preceded_by_a_window_surface.
+                        tray::show_main_window(window.app_handle());
                         let _ = window.app_handle().emit("exit-requested", exit_action_wire(action));
                     }
                     WindowCloseAction::ExitNow => {
@@ -7909,6 +7931,19 @@ pub fn run() {
                 let action = current_exit_action();
                 if should_prompt_on_exit(action) {
                     api.prevent_exit();
+                    // SURFACE before asking (TASK 4 FIX ROUND 1, 2026-08-05).
+                    // Tray Quit (tray.rs:90) is the only production caller
+                    // that reaches this arm with a real prompt, and
+                    // `closeToTray` defaults ON -- so "close the window
+                    // (hides to tray, no prompt -- correct), then Quit from
+                    // the tray icon" is the DEFAULT path through this whole
+                    // feature, not an edge case. It used to leave the window
+                    // hidden while the frontend dutifully opened a dialog
+                    // nobody could see: a tray icon that ignores a click.
+                    // Same show_main_window the sibling tray_open/
+                    // tray_start/tray_stop branches already use
+                    // (tray.rs:76,83).
+                    tray::show_main_window(app);
                     let _ = app.emit("exit-requested", exit_action_wire(action));
                 }
             }
@@ -9147,7 +9182,7 @@ mod tests {
         assert_eq!(exit_action_wire(ExitAction::PromptUnknown), "prompt_unknown");
     }
 
-    // -- window close (Fix round 1): never destroy, only hide or exit ------
+    // -- window close (Fix round 1): never destroy, hide only for tray -----
     //
     // `window_close_action` calls `should_prompt_on_exit`, which reads
     // `EXIT_CONFIRMED` -- so every test here takes `EXIT_CONFIRMED_TEST_LOCK`
@@ -9177,18 +9212,22 @@ mod tests {
         assert_eq!(window_close_action(false, ExitAction::ExitNow), WindowCloseAction::ExitNow);
     }
 
-    /// THE REGRESSION THIS FIXES. `closeToTray` OFF with a server running or
-    /// its state unknown must hide, NEVER destroy — a destroyed window can
+    /// THE REGRESSION TASK 3 FIXED. `closeToTray` OFF with a server running
+    /// or its state unknown must never destroy — a destroyed window can
     /// never come back (`get_webview_window` returns `None`), which is what
     /// made the process unclosable except via Task Manager, which skips
     /// `RunEvent::Exit` and hands the server the exact hard WSL cut this plan
-    /// exists to prevent.
+    /// exists to prevent. Renamed from
+    /// `close_to_tray_off_with_a_server_hides_and_asks_instead_of_destroying`
+    /// in TASK 4 FIX ROUND 1: this branch no longer hides at all (see
+    /// `PromptVisible`'s doc comment) — it stays visible and asks, instead
+    /// of destroying.
     #[test]
-    fn close_to_tray_off_with_a_server_hides_and_asks_instead_of_destroying() {
+    fn close_to_tray_off_with_a_server_prompts_visibly_instead_of_destroying() {
         let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXIT_CONFIRMED.store(false, Ordering::SeqCst);
         for action in [ExitAction::PromptRunning, ExitAction::PromptUnknown] {
-            assert_eq!(window_close_action(false, action), WindowCloseAction::HideAndPrompt);
+            assert_eq!(window_close_action(false, action), WindowCloseAction::PromptVisible);
         }
     }
 
@@ -10233,5 +10272,75 @@ mod keepalive_wiring_tests {
              the exit-requested dialog and cannot be recreated by tray Open — that is the \
              regression this test pins."
         );
+    }
+
+    /// EVERY `exit-requested` EMIT IS PRECEDED, WITHIN ITS OWN ARM, BY A
+    /// WINDOW SURFACE. TASK 4 FIX ROUND 1 (2026-08-05).
+    ///
+    /// `closeToTray` defaults ON, so "close the window (hides to tray -- no
+    /// prompt, correct), then Quit from the tray icon" is the DEFAULT path
+    /// through this whole feature, not an edge case. Before this fix neither
+    /// emit site called `tray::show_main_window`: the window stayed hidden
+    /// (or, on the window-close path, was actively hidden by this very arm),
+    /// the webview -- alive per `the_window_close_handler_never_lets_a_destroy_through_unprotected`
+    /// above -- dutifully set `exitGuard.open = true` on the frontend, and
+    /// nothing on screen ever changed. A tray icon that ignores a click reads
+    /// as broken, and the natural next move is Task Manager, which bypasses
+    /// the clean shutdown entirely and reproduces the exact hard WSL cut this
+    /// whole plan exists to prevent.
+    ///
+    /// Bounded PER ARM (not "anywhere earlier in `run`'s body") on purpose:
+    /// an unbounded search for the nearest preceding `show_main_window(`
+    /// would credit the window-close arm's own call to the unrelated
+    /// `RunEvent::ExitRequested` arm simply because it appears earlier in the
+    /// file -- passing even with THAT arm's own call deleted, which is
+    /// exactly the false pass the Step-5-style mutation below is run to
+    /// catch. Each arm is isolated by slicing to the next arm's own unique
+    /// anchor before searching -- same "read the real source, not a restated
+    /// list" shape as `the_window_close_handler_never_lets_a_destroy_through_unprotected`.
+    #[test]
+    fn every_exit_requested_emit_is_preceded_by_a_window_surface() {
+        let code = src();
+        let body = fn_body(&code, "run");
+
+        let window_close_arm_start = body
+            .find("WindowCloseAction::PromptVisible => {")
+            .expect("the window-close handler's prompt arm was renamed or removed");
+        let window_close_arm_end = body[window_close_arm_start..]
+            .find("WindowCloseAction::ExitNow => {")
+            .map(|rel| window_close_arm_start + rel)
+            .expect("WindowCloseAction::ExitNow arm not found after the prompt arm");
+        let window_close_arm = &body[window_close_arm_start..window_close_arm_end];
+
+        let tray_quit_arm_start = body
+            .find("tauri::RunEvent::ExitRequested { api, .. } => {")
+            .expect("the RunEvent::ExitRequested arm was renamed or removed");
+        let tray_quit_arm_end = body[tray_quit_arm_start..]
+            .find("tauri::RunEvent::Exit =>")
+            .map(|rel| tray_quit_arm_start + rel)
+            .expect("RunEvent::Exit arm not found after RunEvent::ExitRequested");
+        let tray_quit_arm = &body[tray_quit_arm_start..tray_quit_arm_end];
+
+        for (name, arm) in [
+            ("the window-close handler's prompt arm", window_close_arm),
+            ("the RunEvent::ExitRequested arm", tray_quit_arm),
+        ] {
+            let emit_at = arm
+                .find("emit(\"exit-requested\"")
+                .unwrap_or_else(|| panic!("{name} no longer emits \"exit-requested\" at all"));
+            let surface_at = arm.find("show_main_window(").unwrap_or_else(|| {
+                panic!(
+                    "{name} emits \"exit-requested\" with no show_main_window(...) call \
+                     anywhere in the same arm -- a hidden or minimized window cannot host the \
+                     dialog this emit asks the frontend to show, and the user's click \
+                     produces no visible change at all (see TASK 4 FIX ROUND 1)."
+                )
+            });
+            assert!(
+                surface_at < emit_at,
+                "{name}: show_main_window(...) must run BEFORE the \"exit-requested\" emit, \
+                 not merely appear somewhere in the same arm."
+            );
+        }
     }
 }
