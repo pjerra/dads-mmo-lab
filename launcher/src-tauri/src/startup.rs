@@ -159,9 +159,22 @@ pub fn resolve_and_export() {
     // below uses this path, so ignoring a user's DML_GAMES_DIR would detect
     // against the wrong directory and could land them on the very "offline
     // while the server runs" bug this module exists to fix.
-    let games_dir: Option<PathBuf> = std::env::var("DML_GAMES_DIR")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    //
+    // Read ONCE and reused by the export below. `resolve_and_export` is the
+    // one production site outside `dml_core::compose::games_dir_override` that
+    // may read this variable, because it is the DECIDER: it must see the raw
+    // env before anything is exported in order to honour "env outranks
+    // launcher.json outranks auto-detect", and it is what makes the variable
+    // set for every reader downstream. `games_dir_reader_scan_tests` (below)
+    // pins that there are exactly these two, and that this one reads once.
+    //
+    // The `trim` here is deliberately stricter than the core override's plain
+    // emptiness test: a whitespace-only value is a user typo in a settings
+    // field, and the question being answered here is "did they pin one?".
+    let env_games_dir: Option<String> =
+        std::env::var("DML_GAMES_DIR").ok().filter(|s| !s.trim().is_empty());
+    let games_dir: Option<PathBuf> = env_games_dir
+        .clone()
         .map(PathBuf::from)
         .or_else(|| {
             cfg.games_dir
@@ -254,7 +267,7 @@ pub fn resolve_and_export() {
         (
             "DML_GAMES_DIR",
             value_to_export(
-                std::env::var("DML_GAMES_DIR").ok().as_deref(),
+                env_games_dir.as_deref(),
                 games_dir.as_ref().map(|g| g.to_string_lossy().into_owned()).as_deref(),
             ),
         ),
@@ -533,5 +546,345 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// THE RECURRENCE GUARD: one games-dir resolver, not two
+// ---------------------------------------------------------------------------
+
+/// Pins the invariant that `DML_GAMES_DIR` is read from the process
+/// environment in exactly TWO production places, by scanning the workspace's
+/// own Rust source.
+///
+/// # Why a source scan, and why here
+///
+/// The bug this guards against is not a wrong value — it is a SECOND resolver
+/// that disagrees with the first. `dml_wow::config::ConfigReader::
+/// title_dir_from_env` carried its own copy of the lookup whose fallback was
+/// the current working directory, and because a missing title dir makes every
+/// file-backed read fall through to registry DEFAULTS, the whole Config page
+/// answered `ok:true` with numbers that were not the server's (1x XP on a 3x
+/// server, 500 bots on a 2000-bot server). No behavioural test catches that
+/// class, because with `DML_GAMES_DIR` SET — which is what every parity, bats
+/// and CLI-integration suite does, since they use it as their override seam —
+/// the two resolvers agree perfectly. The divergence lives entirely in the
+/// FALLBACK, on a machine no test harness configures. What IS checkable is the
+/// structural fact: how many places read the variable at all.
+///
+/// It lives in the launcher because the launcher is the only crate that may
+/// look at all the others. `dml-core` is the game-agnostic bottom layer and
+/// must not know that `dml-wow` or `launcher/src` exist (the settled ruling
+/// recorded on `vocab_coverage_tests`), and a path walk reaching upward would
+/// red `cargo test -p dml-core` on ubuntu CI. CONSEQUENCE, stated rather than
+/// discovered: like `vocab_coverage_tests`, this runs on the WINDOWS CI job
+/// only, because the ubuntu job builds the three crates and not the launcher.
+/// Do not read a green ubuntu run as coverage for it.
+#[cfg(test)]
+mod games_dir_reader_scan_tests {
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+
+    /// The variable's name, as data rather than as text in this file.
+    const VAR: &str = "DML_GAMES_DIR";
+
+    /// Every production site allowed to read `DML_GAMES_DIR` from the process
+    /// environment, with the number of reads each may perform.
+    ///
+    /// Both entries are load-bearing and neither is a rubber stamp:
+    ///
+    ///  * `compose.rs` — `games_dir_override()`, THE resolver. Everything that
+    ///    wants to know where games live goes through it, directly or through
+    ///    `games_dir_from_env` / `title_dir_for_id`.
+    ///  * `startup.rs` — `resolve_and_export()`, the DECIDER. It must see the
+    ///    raw env before anything is exported in order to honour "env outranks
+    ///    `~/.dml/launcher.json` outranks auto-detect", and it is what makes
+    ///    the variable set for every reader downstream. It reads ONCE and
+    ///    reuses the value for the export decision.
+    ///
+    /// Asserted as an EXACT map, so this fails on an addition (a third reader)
+    /// AND on a removal (an entry that has quietly gone stale). Adding a row
+    /// here is a deliberate act: say why, in the same breath.
+    const ALLOWED: &[(&str, usize)] = &[
+        ("crates/dml-core/src/compose.rs", 1),
+        ("launcher/src-tauri/src/startup.rs", 1),
+    ];
+
+    /// `<repo>` — `CARGO_MANIFEST_DIR` is `<repo>/launcher/src-tauri`.
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("launcher/src-tauri always has two ancestors")
+            .to_path_buf()
+    }
+
+    /// Every `.rs` file under a `src/` tree in the workspace, walked at RUNTIME
+    /// rather than listed with `include_str!`. A hardcoded file list is the
+    /// obvious way to write this and the wrong one: a second resolver would
+    /// most likely arrive in a NEW file, which a fixed list cannot see, and the
+    /// test would stay green through exactly the change it exists to catch.
+    ///
+    /// `src/` only: `crates/*/tests/` sets the variable as a deliberate
+    /// override seam, which is the supported use, not a resolver.
+    fn production_sources(root: &Path) -> Vec<PathBuf> {
+        let mut roots = vec![root.join("launcher").join("src-tauri").join("src")];
+        if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
+            let mut crate_dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+            crate_dirs.sort();
+            for c in crate_dirs {
+                let src = c.join("src");
+                if src.is_dir() {
+                    roots.push(src);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for r in &roots {
+            walk(r, &mut out);
+        }
+        out.sort();
+        out
+    }
+
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    /// Repo-relative, forward-slashed, so `ALLOWED` reads the same on Windows
+    /// and Linux.
+    fn rel(root: &Path, p: &Path) -> String {
+        p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
+    }
+
+    /// Source with every `#[cfg(test)]` item removed, brace-matched.
+    ///
+    /// Deliberately NOT "cut at the first `#[cfg(test)]`", which is what the
+    /// launcher's other scan does: several files here carry TWO test modules
+    /// (`dml-core/src/engine.rs`, `lib.rs`) with production code between them,
+    /// and truncating at the first would silently stop scanning it — a hole in
+    /// exactly the direction that makes a guard useless. An item whose
+    /// attribute is followed by a `;` before any `{` (`#[cfg(test)] use …;`) is
+    /// cut at the semicolon instead.
+    ///
+    /// Input must already be comment-stripped, so a `{` inside prose cannot
+    /// unbalance the match.
+    fn strip_cfg_test(code: &str) -> String {
+        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
+        let b: Vec<char> = code.chars().collect();
+        let mut out = String::with_capacity(code.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i..].starts_with(&attr[..]) {
+                i = end_of_cfg_test_item(&b, i + attr.len());
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// One past the end of the item the attribute ending at `from` decorates.
+    fn end_of_cfg_test_item(b: &[char], from: usize) -> usize {
+        let mut i = from;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                // String and char literals may hold braces and semicolons.
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                ';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        b.len()
+    }
+
+    /// Reads of `DML_GAMES_DIR` from the process environment in `code`.
+    ///
+    /// A REAL CALL SHAPE is required — `var("…")` or `var_os("…")` — never a
+    /// bare mention of the name. This repo has been bitten TWICE by scans that
+    /// read prose as a call site (`feature-keys.test.ts`,
+    /// `Test-InstallerNative.ps1`), and the workspace is full of doc comments
+    /// and hint strings naming this variable. Comments are stripped by the
+    /// caller; requiring the call shape is the second, independent guard.
+    fn env_read_count(code: &str) -> usize {
+        [format!("var(\"{VAR}\")"), format!("var_os(\"{VAR}\")")]
+            .iter()
+            .map(|shape| code.matches(shape.as_str()).count())
+            .sum()
+    }
+
+    /// Bare mentions of the name, call shape or not — the signal that the
+    /// read/strip pipeline is still producing text at all.
+    fn mention_count(code: &str) -> usize {
+        code.matches(VAR).count()
+    }
+
+    struct Scan {
+        files: usize,
+        mentions: usize,
+        reads: BTreeMap<String, usize>,
+    }
+
+    fn scan() -> Scan {
+        let root = repo_root();
+        let mut s = Scan { files: 0, mentions: 0, reads: BTreeMap::new() };
+        for path in production_sources(&root) {
+            let Ok(src) = std::fs::read_to_string(&path) else { continue };
+            let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+            s.files += 1;
+            s.mentions += mention_count(&code);
+            let n = env_read_count(&code);
+            if n > 0 {
+                s.reads.insert(rel(&root, &path), n);
+            }
+        }
+        s
+    }
+
+    // -- the extractor's own tests (known positives and known negatives) -----
+    //
+    // An extractor that finds nothing passes THE TEST below trivially, so the
+    // floors there are not enough on their own.
+
+    #[test]
+    fn the_extractor_finds_a_real_call_shape() {
+        let src = format!("fn f() {{ std::env::var_os(\"{VAR}\").unwrap(); }}");
+        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        assert_eq!(env_read_count(&code), 1, "a real call site must be counted: {code}");
+    }
+
+    #[test]
+    fn the_extractor_ignores_the_name_in_prose_and_in_comments() {
+        let src = format!(
+            "/// Resolves from {VAR} and falls back.\n\
+             // let x = std::env::var(\"{VAR}\");\n\
+             /* std::env::var_os(\"{VAR}\") */\n\
+             fn f() {{ let hint = \"Set {VAR} to the folder your servers live in\"; }}"
+        );
+        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        assert_eq!(
+            env_read_count(&code),
+            0,
+            "a commented-out call and a hint string are not call sites: {code}"
+        );
+        // ... but the pipeline still SAW text: the surviving hint string keeps
+        // the name, so a stripper that deleted everything cannot hide here.
+        assert!(mention_count(&code) >= 1, "the stripper ate the whole file: {code}");
+    }
+
+    #[test]
+    fn the_extractor_ignores_call_sites_inside_a_test_module() {
+        let src = format!(
+            "fn prod() {{ std::env::var_os(\"{VAR}\"); }}\n\
+             #[cfg(test)]\n\
+             mod tests {{\n\
+                 fn t() {{ std::env::var(\"{VAR}\"); let s = \"}}\"; }}\n\
+             }}\n\
+             fn after() {{ std::env::var(\"{VAR}\"); }}"
+        );
+        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        assert_eq!(
+            env_read_count(&code),
+            2,
+            "the test module's read must be dropped and BOTH production reads kept \
+             (a truncating stripper would lose `after`): {code}"
+        );
+    }
+
+    #[test]
+    fn the_extractor_cuts_a_cfg_test_use_at_its_semicolon() {
+        let src =
+            format!("#[cfg(test)]\nuse std::env::var;\nfn prod() {{ std::env::var(\"{VAR}\"); }}");
+        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        assert_eq!(env_read_count(&code), 1, "an attributed `use` must not eat the file: {code}");
+    }
+
+    // -- THE TEST ------------------------------------------------------------
+
+    /// Exactly two production readers of `DML_GAMES_DIR`, in exactly the two
+    /// places that are allowed one.
+    ///
+    /// If this is red because you added a resolver: don't add one. Call
+    /// `dml_core::compose::games_dir_override()` (raw override, `None` when
+    /// unpinned), `games_dir_from_env()` (override + fallback), or
+    /// `title_dir_for_id(id)` (`games_dir_from_env().join(id)`). If you truly
+    /// need a third reader, add it to `ALLOWED` with the reason written out —
+    /// the point is that it becomes a decision someone made, not a duplication
+    /// nobody noticed for a month.
+    #[test]
+    fn only_one_place_resolves_the_games_dir() {
+        let s = scan();
+
+        // NON-VACUITY (a): the walk really found the workspace.
+        assert!(
+            s.files >= 40,
+            "only {} source file(s) scanned — the walk is broken, not the workspace",
+            s.files
+        );
+        // NON-VACUITY (b): the read+strip pipeline really produced text that
+        // still mentions the variable. An extractor returning empty strings
+        // would otherwise satisfy the equality below by finding nothing.
+        assert!(
+            s.mentions >= 5,
+            "only {} mention(s) of the variable across {} files — the stripper ate the source",
+            s.mentions,
+            s.files
+        );
+
+        let expected: BTreeMap<String, usize> =
+            ALLOWED.iter().map(|(f, n)| ((*f).to_string(), *n)).collect();
+        assert_eq!(
+            s.reads, expected,
+            "\nthe set of production sites reading {VAR} changed.\n\
+             found:    {:?}\n\
+             expected: {:?}\n\
+             A second games-dir resolver is how the Config page came to report 1x rates on a \
+             3x server (2026-08-04): with the variable SET the two agree, so only the FALLBACK \
+             diverges, and no behavioural suite configures that machine.",
+            s.reads, expected
+        );
     }
 }

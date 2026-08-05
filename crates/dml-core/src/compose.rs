@@ -59,12 +59,39 @@ pub fn home_fallback(is_windows: bool, home: Option<std::ffi::OsString>) -> Opti
     }
 }
 
-/// `GAMES_DIR` base -- same env var + fallback as `ConfigReader::
-/// title_dir_from_env()`, but generalized to an arbitrary title `id` rather
-/// than hardcoding `wow-server-playerbots` (mirrors `_games_resolve_or_fail`'s
-/// `dir="$GAMES_DIR/$gid"`, which works for any installed title).
+/// THE ONE READ of `DML_GAMES_DIR` from the process environment.
+///
+/// `Some` only when the variable is set AND non-empty (the `${VAR-default}` vs
+/// `${VAR:-default}` distinction this repo was bitten by on 2026-07-29); `None`
+/// means "the user pinned nothing", which each caller answers in its own way:
+///
+///   * [`games_dir_from_env`] falls back (home, then `.`) — reads may miss;
+///   * `dml_wow::install_native::games_dir_for_install` REFUSES — a command
+///     that clones gigabytes must never guess;
+///   * the launcher's `startup::resolve_and_export` moves on to
+///     `~/.dml/launcher.json` and then to auto-detection, and exports the
+///     answer so every child process sees a pinned value.
+///
+/// It exists as a named function, rather than three `var_os` calls that happen
+/// to agree, because they DIDN'T agree: `ConfigReader::title_dir_from_env`
+/// carried a second copy of this resolution whose fallback was the CURRENT
+/// WORKING DIRECTORY, so inside the distro — where nothing exports
+/// `DML_GAMES_DIR`, and a Windows-side value does not cross `wsl.exe` — every
+/// file-backed read answered `ok:true` off a title dir that does not exist.
+/// The Config page showed 1x rates on a server running 3x, with no error to
+/// notice (live differential smoke, 2026-08-04). A test pins the count of
+/// production readers; see `startup.rs`'s `games_dir_reader_scan_tests`.
+pub fn games_dir_override() -> Option<std::ffi::OsString> {
+    std::env::var_os("DML_GAMES_DIR").filter(|s| !s.is_empty())
+}
+
+/// `GAMES_DIR` base -- the resolution `dml_wow::config::ConfigReader::
+/// title_dir_from_env()` now defers to, generalized to an arbitrary title `id`
+/// rather than hardcoding `wow-server-playerbots` (mirrors
+/// `_games_resolve_or_fail`'s `dir="$GAMES_DIR/$gid"`, which works for any
+/// installed title).
 pub fn games_dir_from_env() -> PathBuf {
-    games_dir_from(std::env::var_os("DML_GAMES_DIR"), home_fallback(cfg!(windows), std::env::var_os("HOME")))
+    games_dir_from(games_dir_override(), home_fallback(cfg!(windows), std::env::var_os("HOME")))
 }
 
 /// `$GAMES_DIR/$gid` (`90-main.sh:174`).

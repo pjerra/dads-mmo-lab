@@ -699,21 +699,30 @@ fn now_unix() -> u64 {
 
 /// Where an install may write, or a refusal naming what to set.
 ///
-/// This exists because [`dml_core::compose::games_dir_from_env`] falls back to
-/// `PathBuf::from(".")`, which is a fine default for the READING commands that
-/// have always used it — an unset games dir just makes them miss — and a bad one
-/// here. `install-native` is the first consumer that CREATES a directory and
-/// clones gigabytes into it, so the same fallback means "install into whatever
-/// directory the shell happened to be in": the repo root, the user's home, or
-/// `C:\Windows\System32`. Worse, [`composegen::install_id`] hashes the ABSOLUTE
-/// path, so the same command run from two places yields two compose projects and
-/// two sets of volumes for what the user thinks is one server.
+/// This is the ONE caller of [`dml_core::compose::games_dir_override`] that
+/// answers `None` with a refusal instead of a fallback, and the reason is that
+/// `install-native` CREATES a directory and clones gigabytes into it. Any
+/// invented default means "install into whatever directory the shell happened
+/// to be in" (the repo root, the user's home, `C:\Windows\System32`), and
+/// [`composegen::install_id`] hashes the ABSOLUTE path, so the same command run
+/// from two places yields two compose projects and two sets of volumes for what
+/// the user thinks is one server. All four reviewers flagged it (2026-07-29).
 ///
-/// All four reviewers flagged it (2026-07-29). The rule lives in the library
-/// rather than in the CLI arm so that the launcher — which will call this engine
-/// once Task 6 lands — cannot reintroduce the same default.
+/// RE-EXAMINED 2026-08-04, when [`dml_core::compose::games_dir_from_env`] grew a
+/// real `$HOME/games` fallback for the in-distro case: should this defer to it
+/// now that the fallback names a sensible directory? No, on three counts. That
+/// fallback is `None` on WINDOWS by construction (`home_fallback` ignores `HOME`
+/// there, because Git for Windows sets it), leaving `PathBuf::from(".")` — and
+/// Windows is precisely where `install-native` runs, so deferring would restore
+/// the cwd clone on the only platform that reaches this code. The `install_id`
+/// hash makes an inferred directory a silent double-install rather than a
+/// visible mistake. And a refusal cannot be a silently wrong answer, which is
+/// the failure class this whole resolver was single-sourced to end.
+///
+/// The rule lives in the library rather than in the CLI arm so that the launcher
+/// cannot reintroduce the same default.
 pub fn games_dir_for_install() -> Result<PathBuf, CmdError> {
-    match std::env::var_os("DML_GAMES_DIR").filter(|v| !v.is_empty()) {
+    match dml_core::compose::games_dir_override() {
         Some(v) => Ok(PathBuf::from(v)),
         None => Err(CmdError {
             code: CODE_NO_GAMES_DIR.to_string(),

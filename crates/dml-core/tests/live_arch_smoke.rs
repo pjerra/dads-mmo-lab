@@ -330,27 +330,39 @@ fn live_backup_list_agrees_across_backends() {
     );
 }
 
+// -- 5b. the cwd-dependent verbs -------------------------------------------
+//
+// # THE BUG THIS GROUP EXISTS FOR (found by this suite, fixed 2026-08-04)
+//
+// `dml_wow::config::ConfigReader::title_dir_from_env` used to resolve the title
+// dir itself, falling back to `"."` — the CURRENT WORKING DIRECTORY — while the
+// bash CLI falls back to `$HOME/games` (`cli/src/00-head.sh:9`) and
+// `dml_core::compose::games_dir_from_env` (which `games list`/`status` use)
+// falls back to `$HOME/games` too. `DML_GAMES_DIR` is UNSET inside the distro,
+// and a Windows-side value does NOT cross the wsl.exe boundary (there is no
+// `WSLENV` entry for it), so the fallback is what runs — and the launcher's cwd
+// is never the games dir.
+//
+// Roughly twenty call sites route through that one helper, so the blast radius
+// was the whole file-backed and DB-backed surface, in three shapes:
+//
+//   1. honest `NOT_FOUND` refusals (`config files`, `commands`, `accountwide`);
+//   2. SILENTLY WRONG `ok:true` payloads (`config list`, `tuning list`,
+//      `module list`) — registry defaults rendered as the server's settings;
+//   3. DB verbs dialling 3306 instead of the port in the title's own `.env`.
+//
+// One test per shape below, plus `config list`. Shape 2 is why this group is
+// worth its runtime: nothing about those answers looks broken. The fix made
+// `title_dir_from_env` a delegation to `dml_core::compose::title_dir_for_id`,
+// and `startup.rs`'s `games_dir_reader_scan_tests` pins that there is no
+// second resolver to disagree with it again.
+
 /// `wow config list` → `dml-wow config list`. The Config page's entire content.
 ///
-/// # THIS TEST FAILS TODAY, AND THAT FAILURE IS THE POINT
-///
-/// `dml_wow::config::ConfigReader::title_dir_from_env` resolves the title dir
-/// as `DML_GAMES_DIR` — falling back to `"."`, the CURRENT WORKING DIRECTORY —
-/// while the bash CLI falls back to `$HOME/games` (`cli/src/00-head.sh:9`) and
-/// `dml_core::compose::games_dir_from_env` (which `games list`/`status` use)
-/// falls back to `$HOME/games` too. `DML_GAMES_DIR` is UNSET inside the distro,
-/// and a Windows-side `DML_GAMES_DIR` does NOT cross the wsl.exe boundary
-/// (there is no `WSLENV` entry for it), so the fallback is what runs.
-///
-/// The launcher's cwd is never the games dir, so on the Arch backend this verb
-/// reads a title dir that does not exist and answers `ok:true` with REGISTRY
-/// DEFAULTS. Measured on the live server: bash reports the 3x XP/gold rates the
-/// user actually runs, `dml-wow` reports 1x. There is no error, no warning and
-/// no empty result to notice — the shape is right and the numbers are wrong.
-///
-/// Fix shape: `title_dir_from_env` should defer to
-/// `dml_core::compose::games_dir_from_env().join(TITLE)` so there is ONE
-/// games-dir resolver in the workspace instead of two that disagree.
+/// SHAPE 2. Measured before the fix: bash reported the 3x XP/gold rates the
+/// user actually runs and `dml-wow` reported 1x; `bots.population` 2000 vs 500;
+/// `ahbot.character` 2501 vs 0 — eleven settings wrong, with no error, no
+/// warning and no empty result to notice.
 #[test]
 #[ignore = "spawns into the real dml-arch distro; run with --ignored"]
 fn live_config_list_agrees_across_backends() {
@@ -385,10 +397,256 @@ fn live_config_list_agrees_across_backends() {
     assert!(
         drift.is_empty(),
         "the Config page would show {} setting(s) that are NOT what the server runs \
-         (see this test's doc comment: title_dir_from_env falls back to the cwd):\n  {}",
+         (see the group comment above: a second games-dir resolver):\n  {}",
         drift.len(),
         drift.join("\n  ")
     );
+}
+
+/// `wow config tuning-list` → `dml-wow tuning list`. The Modules page's
+/// Lua-script knobs.
+///
+/// SHAPE 2, and a DIFFERENT field from `config list`: what diverged here was
+/// `installed` — four `learnspells.*` rows that bash reported as installed and
+/// `dml-wow` reported as absent, because the file it looks for lives under the
+/// title dir. A page that greys out the controls for a module the server is
+/// actually running is the same silent lie in a different costume.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_tuning_list_agrees_across_backends() {
+    let argv = &["wow", "config", "tuning-list"];
+    let p = differential(argv);
+    ok(&p.bash, "bash", argv);
+    ok(&p.arch, "arch", argv);
+
+    let rows = |v: &Value| -> Vec<(String, String, bool)> {
+        v["settings"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|s| {
+                (
+                    s["key"].as_str().unwrap_or("").to_string(),
+                    s["value"].as_str().unwrap_or("").to_string(),
+                    s["installed"].as_bool().unwrap_or(false),
+                )
+            })
+            .collect()
+    };
+    let (b, a) = (rows(&p.bash.data), rows(&p.arch.data));
+    assert!(!b.is_empty(), "an empty tuning list would make this vacuous");
+
+    let drift: Vec<String> = b
+        .iter()
+        .zip(a.iter())
+        .filter(|(x, y)| x != y)
+        .map(|(x, y)| format!("{} bash=({:?},{}) arch=({:?},{})", x.0, x.1, x.2, y.1, y.2))
+        .collect();
+    assert!(
+        drift.is_empty(),
+        "the Modules page would show {} tuning row(s) that are NOT the server's:\n  {}",
+        drift.len(),
+        drift.join("\n  ")
+    );
+    // The zip above stops at the shorter list, so a truncated answer would slip
+    // through as "no drift".
+    assert_eq!(b.len(), a.len(), "the two backends disagree about how many tuning rows exist");
+}
+
+/// `wow module list` → `dml-wow module list`. The Modules page's inventory.
+///
+/// SHAPE 2, and the widest of the three: before the fix `ale_ready` read
+/// `false` on a server whose ALE is installed and working, seventeen cpp fields
+/// disagreed (`conf` state, `head`, `head_date`), and the two backends did not
+/// even agree on how many cpp modules EXIST — bash found 20 and `dml-wow` 19,
+/// because a user-added custom module is discovered by looking in the title
+/// dir. `rebuild_pending` is compared too: it is what the page uses to decide
+/// whether to nag about a rebuild.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_module_list_agrees_across_backends() {
+    let argv = &["wow", "module", "list"];
+    let p = differential(argv);
+    ok(&p.bash, "bash", argv);
+    ok(&p.arch, "arch", argv);
+
+    assert_eq!(
+        p.bash.data["ale_ready"], p.arch.data["ale_ready"],
+        "ale_ready decides whether the Lua-module half of the page is usable at all"
+    );
+    assert_eq!(
+        p.bash.data["rebuild_pending"], p.arch.data["rebuild_pending"],
+        "rebuild_pending must agree"
+    );
+
+    // Compared per family and per row so a failure NAMES the module. `installed`
+    // / `conf` / `head` are the title-dir-derived fields; `name`/`desc`/`url`
+    // come from the embedded registry and could not diverge.
+    let mut checked = 0usize;
+    for family in ["cpp", "lua", "sql"] {
+        let pick = |v: &Value| -> Vec<Value> {
+            v["families"][family].as_array().cloned().unwrap_or_default()
+        };
+        let (b, a) = (pick(&p.bash.data), pick(&p.arch.data));
+        let keys = |rows: &[Value]| -> Vec<String> {
+            rows.iter().map(|r| r["key"].as_str().unwrap_or("").to_string()).collect()
+        };
+        assert_eq!(
+            keys(&b),
+            keys(&a),
+            "the {family} module inventory itself differs (a custom module is found by \
+             looking in the title dir, so a wrong title dir loses it)"
+        );
+        for (x, y) in b.iter().zip(a.iter()) {
+            let key = x["key"].as_str().unwrap_or("");
+            for field in ["installed", "conf", "head", "head_date", "pending_rebuild", "custom",
+                          "cloned", "deployed", "has_sql", "warn"] {
+                if x.get(field).is_none() && y.get(field).is_none() {
+                    continue; // field belongs to another family's row shape
+                }
+                assert_eq!(
+                    x.get(field),
+                    y.get(field),
+                    "{family}/{key}.{field} disagrees: bash={:?} arch={:?}",
+                    x.get(field),
+                    y.get(field)
+                );
+                checked += 1;
+            }
+        }
+    }
+    // Non-vacuity: a comparison loop that ran zero times proves nothing, and
+    // `families` renaming a key would make every `pick` above return empty.
+    assert!(checked >= 50, "only {checked} module field(s) compared — the picker is broken");
+}
+
+/// `wow config files` → `dml-wow config files`. The Modules page's raw editor.
+///
+/// SHAPE 1, the honest half of the bug: before the fix this refused with
+/// `NOT_FOUND` / "WoW Playerbots server not installed" while bash listed the
+/// files. A refusal is a far better failure than shape 2 — the user sees that
+/// something is wrong — but it is still wrong, and it is the same one line.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_config_files_agrees_across_backends() {
+    let argv = &["wow", "config", "files"];
+    let p = differential(argv);
+    ok(&p.bash, "bash", argv);
+    ok(&p.arch, "arch", argv);
+
+    let rows = |v: &Value| -> Vec<(String, bool, bool, bool)> {
+        v["files"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|f| {
+                (
+                    f["name"].as_str().unwrap_or("").to_string(),
+                    f["exists"].as_bool().unwrap_or(false),
+                    f["dist"].as_bool().unwrap_or(false),
+                    f["readonly"].as_bool().unwrap_or(false),
+                )
+            })
+            .collect()
+    };
+    let (b, a) = (rows(&p.bash.data), rows(&p.arch.data));
+    assert!(!b.is_empty(), "an empty file list would make this vacuous");
+    assert_eq!(b, a, "the raw-editor file list must agree in name, exists, dist and readonly");
+    // `exists` is the field the title dir decides; all-false would mean the
+    // comparison agreed about a directory neither backend can see.
+    assert!(
+        b.iter().any(|f| f.1),
+        "no config file reported as existing — both backends are looking at the wrong place"
+    );
+}
+
+/// `wow stats` → `dml-wow stats`. SHAPE 3: the DB verbs, and the whole
+/// Dashboard / Item DB / Characters / Bots surface behind them.
+///
+/// `dml-wow` reads MySQL over TCP and takes host, port and password from the
+/// title dir's own `.env` (`db::DbConfig::from_env` → `dotenv_path` →
+/// `ConfigReader::title_dir_from_env`). With the title dir unresolved that file
+/// is unreadable, so every value fell back to the compose default and the
+/// launcher dialled **3306** — while this server publishes MySQL on the port
+/// its `.env` names. Nothing else in this suite would have caught it: the
+/// verdict is `DB_UNREACHABLE` either way.
+///
+/// So the assertion is on the ADDRESS, which `dml-wow` puts in its own error
+/// message, against the port read out of the title's `.env`. That works whether
+/// the server is up or down — this suite may not start it. When the server IS
+/// up the two backends must simply agree that the DB is reachable.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_stats_dials_the_db_port_from_the_title_dir() {
+    let id = title_id();
+    // Ground truth, discovered rather than hardcoded. `--exec` runs no shell, so
+    // `sh -c` is explicit; the id arrives as `$1` rather than spliced into the
+    // script, so it cannot break out even though `games list` already validated
+    // it.
+    let (dotenv, _) = raw(&[
+        "sh",
+        "-c",
+        "cat \"$HOME/games/$1/.env\" 2>/dev/null || true",
+        "sh",
+        id.as_str(),
+    ]);
+    let port = dotenv
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("DOCKER_DB_EXTERNAL_PORT="))
+        .or_else(|| {
+            dotenv
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with('#'))
+                .find_map(|l| l.strip_prefix("DB_EXTERNAL_PORT="))
+        })
+        .map(|v| v.trim().trim_matches('"').trim_matches('\'').to_string())
+        .unwrap_or_default();
+
+    // NON-VACUITY, and the reason this is an assertion rather than a skip: if
+    // the title's `.env` does not remap the port, the resolved answer and the
+    // hardcoded default are the same number and this test cannot tell them
+    // apart. Saying so out loud beats passing on a machine where it proves
+    // nothing.
+    assert!(
+        !port.is_empty() && port != "3306",
+        "this test needs a title `.env` that remaps the DB port away from the 3306 default; \
+         found {port:?}. Without that, 'dialled the resolved port' and 'dialled the compiled \
+         default' are indistinguishable."
+    );
+
+    let argv = &["wow", "stats"];
+    let p = differential(argv);
+
+    match (&p.bash.error, &p.arch.error) {
+        // Server up: both must simply be able to read it.
+        (None, None) => {
+            assert!(p.bash.ok && p.arch.ok, "both backends answered without an error object");
+        }
+        // Server down (this suite may not start it): the verdict must agree,
+        // and the address `dml-wow` tried must be the one the title configures.
+        _ => {
+            let bcode = p.bash.error.as_ref().map(|e| e.code.as_str()).unwrap_or("");
+            let acode = p.arch.error.as_ref().map(|e| e.code.as_str()).unwrap_or("");
+            assert_eq!(bcode, acode, "the two backends disagree about WHY stats failed");
+            assert_eq!(acode, "DB_UNREACHABLE", "unexpected failure mode: {:?}", p.arch.error);
+            let msg = p.arch.error.as_ref().map(|e| e.message.clone()).unwrap_or_default();
+            assert!(
+                msg.contains(&format!("127.0.0.1:{port}")),
+                "dml-wow dialled the wrong address. The title's .env says port {port}, but the \
+                 error names: {msg}"
+            );
+            assert!(
+                !msg.contains("127.0.0.1:3306"),
+                "dml-wow fell back to the compiled 3306 default — the title dir is unresolved \
+                 again: {msg}"
+            );
+        }
+    }
 }
 
 // -- 6. the bash fallback --------------------------------------------------
