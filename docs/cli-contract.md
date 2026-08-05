@@ -243,6 +243,8 @@ prints them.
 | `bots-flush` | `--yes --ack flush` (`--ack` must be exactly `flush`; defaults to `""`, so omission is a `CONFIRM_REQUIRED` refusal/exit 1, not exit 2) | stream, guarded | Delete every random playerbot and rebuild the population. **DESTRUCTIVE** |
 | `games-remove` | `<ID>` (**required** positional, never defaulted — typing it is part of the confirmation) `[--keep-data]` (keep the ~6 GB client-data volume) `[--remove-images]` (also delete the AzerothCore/MySQL images, ~3–5 GB) `--yes` | stream, guarded | Uninstall a title: its containers, its directory and its launcher. **DESTRUCTIVE** |
 | `self-update` | `[--backup \| --no-backup]` (neither → fail-closed `BAD_ARG` "Pick --backup or --no-backup") | stream | Update AzerothCore + mod-playerbots from git |
+| `games-list` | — | envelope | Every installed title under the games directory: `{games:[{id,path,running}]}`. `path` is the compose dir, or `""` for an installer-only title |
+| `games-status` | `[--id <ID>]` (default `wow-server-playerbots`; validated `[A-Za-z0-9._-]+`, else `BAD_ID`) | envelope | `{id, state:"running"\|"stopped"}`; `NOT_FOUND` when the title dir does not exist |
 | `lan` | `<on\|off\|status\|refresh>` (allowlist owned by the library; unknown = `BAD_ARG`/exit 1) `[IP]` (required for on/refresh; ignored for off/status) `[--internet]` (only honored when action is `on`) `[--local <LAN-IP>]` (private/loopback IPv4 only — `BAD_ARG` otherwise; honored on `on`, ignored by `status`/`refresh`, and always forced to `127.0.0.1` by `off`) | envelope | LAN address control for this CLI's fixed AC title |
 | `cache status` | — | envelope | Wowhead item-info cache size |
 | `cache clean` | — | envelope | Wipe the wowhead item-info cache |
@@ -554,12 +556,19 @@ actions are exactly `on|off|status|refresh`.
 inside the `dml-arch` WSL distro via `sudo -n systemctl restart docker`. It has **no** `dml-wow`
 twin, and that asymmetry is the design, not a gap:
 
-- `dml-wow` is the **native Windows** binary. It runs on the Windows host against Docker
-  Desktop and never runs inside `dml-arch`. There is no systemd, no `sudo`, and no
-  `docker.service` unit on that side, so there is nothing for a twin to call.
-- A twin that shelled `wsl.exe -d dml-arch -u dml -- dml wow docker-restart` would be a
-  re-entrant wrapper around the bash arm and would make the native CLI depend on the very
-  distro it exists to avoid.
+- **CORRECTED (2026-08-05, the Arch backend).** This section used to say `dml-wow` "is the
+  **native Windows** binary … and never runs inside `dml-arch`". That is now false:
+  `Backend::Arch` runs this very binary INSIDE the distro
+  (`wsl.exe -d dml-arch -u dml --exec dml-wow …`), where systemd, `sudo` and a
+  `docker.service` unit all exist. The conclusion survives the correction, but on a
+  different footing — see the next two bullets.
+- A twin would be **redundant**, not impossible. On the Arch backend `wow docker-restart` is
+  one of the verbs `dml_core::vocab` routes to the bash `dml` in the same distro, which is
+  where the working implementation already lives; and a twin that shelled
+  `wsl.exe -d dml-arch -u dml -- dml wow docker-restart` from the Windows host would be a
+  re-entrant wrapper around that same bash arm.
+- On the NATIVE backend the original reasoning still holds exactly: there is no systemd, no
+  `sudo` and no `docker.service` on the Windows host, so there is nothing for a twin to call.
 - The native equivalent of the same user problem ("the engine is wedged/down") is already a
   different action with different machinery: launching Docker Desktop, wired as the launcher's
   `start_docker_desktop` command. Two problems that look alike, two mechanisms.

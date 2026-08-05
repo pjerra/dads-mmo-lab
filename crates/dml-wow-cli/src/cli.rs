@@ -288,6 +288,23 @@ pub enum Cmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Every installed title under the games directory: its id, the compose
+    /// directory that answers for it, and whether it is up.
+    ///
+    /// CROSS-TITLE on a per-title CLI, and deliberately so: this binary already
+    /// has `games-remove <id>` and `install-native --id`, and the question here
+    /// is a FILESYSTEM one — what is in the games directory — not title
+    /// management. The deferred multi-title work (per-install container names,
+    /// port allocation, two stacks at once) is none of this.
+    GamesList,
+    /// Is one title's stack running? `{id, state: "running"|"stopped"}`.
+    ///
+    /// Same filesystem-question rationale as `games-list`. `--id` rather than a
+    /// positional, matching `start`/`stop`/`restart`.
+    GamesStatus {
+        #[arg(long, default_value = dml_wow::config::TITLE)]
+        id: String,
+    },
     /// Update AzerothCore + mod-playerbots from git — STREAMS NDJSON events.
     SelfUpdate {
         #[command(flatten)]

@@ -143,6 +143,38 @@ impl EngineKind {
             crate::backend::Backend::Native => EngineKind::Desktop,
         }
     }
+
+    /// Which engine control applies to the process ASKING — decided by the
+    /// platform it is running on, not by [`crate::backend::selected`].
+    ///
+    /// The two questions are different and only one of them can be answered
+    /// here. `for_backend` is the LAUNCHER's, out-of-process: "which backend am
+    /// I about to drive". This is `dml-wow`'s own, in-process: "where am I".
+    /// `DML_BACKEND` cannot answer it — the launcher exports that into its OWN
+    /// environment and a `wsl.exe --exec` child inherits none of it (no
+    /// `WSLENV` anywhere in this repo), so an in-distro `dml-wow` reading it
+    /// gets the default, `Wsl`, whatever the user actually chose.
+    ///
+    /// The platform IS the answer, with no third case: `dml-wow` on Windows is
+    /// the native backend against Docker Desktop, and `dml-wow` on Linux is
+    /// inside `dml-arch` against that distro's `dockerd`. Routed through
+    /// `for_backend` rather than matching on the platform directly so the two
+    /// stay one mapping.
+    ///
+    /// `is_windows` is a plain argument (the convention `compose::home_fallback`
+    /// set) so both branches are testable on either build platform.
+    pub fn for_host(is_windows: bool) -> Self {
+        Self::for_backend(if is_windows {
+            crate::backend::Backend::Native
+        } else {
+            crate::backend::Backend::Arch
+        })
+    }
+
+    /// [`Self::for_host`] for the platform this binary was built for.
+    pub fn for_this_host() -> Self {
+        Self::for_host(cfg!(windows))
+    }
 }
 
 pub const SYSTEMCTL_PROGRAM: &str = "systemctl";

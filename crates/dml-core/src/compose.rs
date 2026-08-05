@@ -84,7 +84,13 @@ pub fn title_dir_for_id(id: &str) -> PathBuf {
 pub(crate) const COMPOSE_FILE_CANDIDATES: [&str; 4] =
     ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
 
-fn has_compose(dir: &Path) -> bool {
+/// Does this directory itself carry one of the four canonical compose files?
+///
+/// `pub` because `games list`'s scan needs the question separately from
+/// [`resolve_compose_dir`]: bash's `_scan_games` checks the title dir for a
+/// compose file, THEN for an `install.sh`, and only descends into subdirs when
+/// neither is there — an order `resolve_compose_dir` alone cannot express.
+pub fn has_compose(dir: &Path) -> bool {
     COMPOSE_FILE_CANDIDATES.iter().any(|name| dir.join(name).is_file())
 }
 

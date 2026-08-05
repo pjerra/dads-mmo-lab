@@ -14,3 +14,9 @@ clap = { version = "4", features = ["derive"] }
 [[bin]]
 name = "dml-wow"
 path = "src/main.rs"
+
+# The arg surface as a library, so `tests/vocab_surface.rs` can parse
+# dml_core::vocab's translations against the real clap derive. See src/lib.rs.
+[lib]
+name = "dml_wow_cli"
+path = "src/lib.rs"

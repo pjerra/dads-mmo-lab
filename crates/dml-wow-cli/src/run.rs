@@ -656,6 +656,26 @@ pub fn dispatch(command: Cmd) -> i32 {
             })
         }
 
+        // Read-only filesystem scans of the games directory. No `--yes` gate,
+        // nothing mutated; the docker call is the same bounded `ps` probe the
+        // rest of the status surface uses.
+        Cmd::GamesList => emit_ok(dml_wow::lifecycle::games_list(
+            &dml_core::compose::games_dir_from_env(),
+        )),
+
+        Cmd::GamesStatus { id } => {
+            // GUARD, before the id is joined onto DML_GAMES_DIR — the same
+            // order `Start`/`Stop`/`Restart` use.
+            if !valid_game_id(&id) {
+                let e = bad_id(&id);
+                return emit_err(&e.code, &e.message, &e.hint);
+            }
+            emit_result(dml_wow::lifecycle::games_status(
+                &id,
+                &dml_core::compose::games_dir_from_env(),
+            ))
+        }
+
         Cmd::Backup { cmd } => dispatch_backup(cmd),
 
         Cmd::DockerClean { level, yes } => {

@@ -483,10 +483,16 @@ impl InstallIo for ProcIo {
         if engine::engine_running(&self.docker) {
             return false; // nothing to start, nothing to re-probe for
         }
-        if engine::docker_desktop_program().is_none() {
-            // Nothing to start it WITH. The preflight refusal that follows
-            // already says the right thing; a second message here would only
-            // be noise in front of it.
+        // Nothing to start it WITH — but only a DESKTOP host answers that
+        // question with `docker_desktop_program()`. On a systemd host the
+        // starter is `sudo systemctl start docker`, which is present whether or
+        // not a Docker Desktop exe is (it never is), so short-circuiting on
+        // that fact there would decline to start an engine we can start.
+        // The preflight refusal that follows already says the right thing; a
+        // second message here would only be noise in front of it.
+        if engine::EngineKind::for_this_host() == engine::EngineKind::Desktop
+            && engine::docker_desktop_program().is_none()
+        {
             return false;
         }
         // `ensure_engine_up_stream` takes an `Fn`, so the lines are collected

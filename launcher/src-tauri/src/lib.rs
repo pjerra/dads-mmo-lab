@@ -8718,3 +8718,553 @@ mod tests {
     // -- native ahbot-repair: event-shape builders (Chunk 2 task C2c item 8) --
 
 }
+
+/// T2 — IS EVERY CALL SITE IN THIS FILE CLASSIFIED?
+///
+/// The vocabulary bug shipped because nothing on either side compared the
+/// launcher's verbs with `dml-wow`'s. T1 (in `dml-wow-cli`) pins the CLI end to
+/// the clap derive; this pins the LAUNCHER end to the launcher's own source. The
+/// hand-written `dml_core::vocab::TABLE` sits between them and is red the moment
+/// either end moves without it.
+///
+/// It cannot live in `dml-core` — that crate is the game-agnostic bottom layer
+/// and must not know the launcher's source tree exists (a settled ruling, see
+/// the `CLI_BAD_OUTPUT` hint in `error.rs`); an `include_str!` reaching up into
+/// `launcher/src` would red `cargo test -p dml-core`, ubuntu CI included.
+/// CONSEQUENCE, stated rather than discovered: this test runs on the WINDOWS CI
+/// job only, because the ubuntu job builds the three crates and not the
+/// launcher. Do not later read a green ubuntu run as coverage for it.
+#[cfg(test)]
+mod vocab_coverage_tests {
+    /// Rust source with comments removed. MANDATORY, and this repo has been
+    /// bitten TWICE by skipping it: `feature-keys.test.ts` read a comment as a
+    /// call site, and `Test-InstallerNative.ps1` read the installer's own
+    /// explanation of what it does NOT do as evidence that it does. This very
+    /// file is dense with prose naming `games list` and `wow server-detail`.
+    ///
+    /// String and char literals are preserved (the argv literals ARE the data);
+    /// raw strings and escapes are tracked so a `//` inside one is not mistaken
+    /// for a comment.
+    fn strip_comments(src: &str) -> String {
+        let b = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0usize;
+        let (mut in_str, mut in_raw, mut in_ch) = (false, false, false);
+        while i < b.len() {
+            let c = b[i] as char;
+            let n = if i + 1 < b.len() { b[i + 1] as char } else { '\0' };
+            if in_str {
+                if c == '\\' && !in_raw {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    in_str = false;
+                    in_raw = false;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if in_ch {
+                if c == '\\' {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '\'' {
+                    in_ch = false;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '/' && n == '/' {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && n == '*' {
+                i += 2;
+                let mut depth = 1usize;
+                while i < b.len() && depth > 0 {
+                    if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(' ');
+                continue;
+            }
+            if c == 'r' && (n == '"' || n == '#') {
+                let mut j = i + 1;
+                while j < b.len() && b[j] == b'#' {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'"' {
+                    in_str = true;
+                    in_raw = true;
+                    for k in i..=j {
+                        out.push(b[k] as char);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if c == '"' {
+                in_str = true;
+                in_raw = false;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            // A lifetime (`'a`) is not a char literal.
+            if c == '\'' {
+                let closes = (i + 2 < b.len() && b[i + 2] == b'\'')
+                    || (n == '\\' && i + 3 < b.len() && b[i + 3] == b'\'');
+                if closes {
+                    in_ch = true;
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
+    fn skip_ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && (b[i] as char).is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// The leading run of STRING LITERALS from `from` — the verb. Stops at the
+    /// first token that is not one (a variable, a `format!`, a closing bracket)
+    /// or at a `-`-prefixed literal, which is a flag rather than a verb token.
+    fn leading_literals(code: &str, from: usize) -> Vec<String> {
+        let b = code.as_bytes();
+        let mut i = from;
+        let mut out: Vec<String> = Vec::new();
+        loop {
+            i = skip_ws(b, i);
+            if i >= b.len() {
+                break;
+            }
+            let c = b[i] as char;
+            if c == ',' || c == '&' {
+                i += 1;
+                continue;
+            }
+            if c != '"' {
+                break;
+            }
+            i += 1;
+            let start = i;
+            while i < b.len() && b[i] != b'"' {
+                if b[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            let lit = code[start..i.min(code.len())].to_string();
+            i += 1;
+            // Skip any method chain on the literal (`.to_string()`, `.into()`)
+            // by MATCHING PARENS. Scanning to the next comma instead reads
+            // `.into()`'s own `)` as the end of the argv list, which silently
+            // truncated every verb to its first token.
+            loop {
+                let mut j = skip_ws(b, i);
+                if j >= b.len() || b[j] != b'.' {
+                    break;
+                }
+                j += 1;
+                while j < b.len() && ((b[j] as char).is_alphanumeric() || b[j] == b'_') {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'(' {
+                    let mut d = 1i32;
+                    j += 1;
+                    while j < b.len() && d > 0 {
+                        match b[j] {
+                            b'(' => d += 1,
+                            b')' => d -= 1,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                }
+                i = j;
+            }
+            if lit.starts_with('-') {
+                break;
+            }
+            out.push(lit);
+        }
+        out
+    }
+
+    fn ident_at(code: &str, i: usize) -> Option<(String, usize)> {
+        let b = code.as_bytes();
+        let mut j = i;
+        while j < b.len() && ((b[j] as char).is_alphanumeric() || b[j] == b'_') {
+            j += 1;
+        }
+        if j == i {
+            None
+        } else {
+            Some((code[i..j].to_string(), j))
+        }
+    }
+
+    /// The three helpers that WRAP a runner method. A call inside one of these
+    /// is not a call site — its argv comes from the caller, and every caller is
+    /// enumerated separately.
+    const HELPERS: [&str; 3] = ["run_json_cmd", "stream_args", "stream_action"];
+
+    /// `(start offset, name)` of the item-level `fn` containing `at`.
+    ///
+    /// LOAD-BEARING, and its absence was a real bug: without it the backward
+    /// search for `let args = vec![…]` walked out of the function and into a
+    /// DIFFERENT one, so `stream_args`' own body resolved to some unrelated
+    /// caller's argv and reported a verb that call site never sends.
+    fn enclosing_fn(code: &str, at: usize) -> Option<(usize, String)> {
+        let mut best: Option<(usize, String)> = None;
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find("fn ") {
+            let m = from + rel;
+            from = m + 3;
+            if m >= at {
+                break;
+            }
+            let line_start = code[..m].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let prefix = code[line_start..m].trim();
+            let is_item = matches!(
+                prefix,
+                "" | "pub" | "async" | "pub async" | "unsafe" | "pub unsafe" | "pub(crate)" | "pub(crate) async"
+            );
+            if !is_item {
+                continue;
+            }
+            if let Some((name, _)) = ident_at(code, m + 3) {
+                best = Some((line_start, name));
+            }
+        }
+        best
+    }
+
+    /// Most call sites pass a `Vec` the caller built (`let mut args = vec![…]`
+    /// then `run_json_cmd(state, args)`), so an identifier argument is resolved
+    /// back to its binding — searching ONLY within the enclosing function.
+    /// Two hops, because some sites go through `let refs: Vec<&str> = args.iter()…`.
+    ///
+    /// Returns the chain that was walked, so an UNRESOLVABLE site gets a label
+    /// that survives the lines around it moving.
+    fn resolve_binding(code: &str, ident: &str, before: usize) -> (Option<Vec<String>>, String) {
+        let scope = enclosing_fn(code, before).map(|(s, _)| s).unwrap_or(0);
+        let mut chain = ident.to_string();
+        let mut name = ident.to_string();
+        for _ in 0..3 {
+            let hay = &code[scope..before];
+            let mut rhs: Option<usize> = None;
+            let mut from = 0usize;
+            while let Some(rel) = hay[from..].find("let ") {
+                let at = from + rel + 4;
+                from = at;
+                let abs = scope + at;
+                let b = code.as_bytes();
+                let mut k = skip_ws(b, abs);
+                if code[k..].starts_with("mut ") {
+                    k = skip_ws(b, k + 4);
+                }
+                let Some((got, after)) = ident_at(code, k) else { continue };
+                if got != name {
+                    continue;
+                }
+                let mut m = skip_ws(b, after);
+                if m < b.len() && b[m] == b':' {
+                    while m < b.len() && b[m] != b'=' {
+                        m += 1;
+                    }
+                }
+                m = skip_ws(b, m);
+                if m >= b.len() || b[m] != b'=' {
+                    continue;
+                }
+                rhs = Some(skip_ws(b, m + 1)); // nearest preceding wins
+            }
+            let Some(p) = rhs else { return (None, chain) };
+            if code[p..].starts_with("vec![") {
+                return (Some(leading_literals(code, p + 5)), chain);
+            }
+            let Some((next, _)) = ident_at(code, p) else { return (None, chain) };
+            chain.push_str("->");
+            chain.push_str(&next);
+            name = next;
+        }
+        (None, chain)
+    }
+
+    /// Every argv literal that reaches a `DmlRunner` method, a label for each
+    /// site whose verb could NOT be read off the source, and how many calls sat
+    /// inside one of the three [`HELPERS`].
+    fn extract(code: &str) -> (Vec<Vec<String>>, Vec<String>, usize) {
+        let b = code.as_bytes();
+        let mut found: Vec<Vec<String>> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+        let mut helper_bodies = 0usize;
+        // (call token, leading args to skip before the argv argument).
+        // These are the SHAPES, not bare verb greps: a site must literally be a
+        // call to one of the runner methods (or to the two helpers that wrap
+        // them) to be read at all.
+        let shapes: [(&str, usize); 7] = [
+            ("run_json_cmd(", 1),
+            ("stream_args(", 0),
+            (".run_json(", 0),
+            ("run_json_with_stdin(", 0),
+            (".run_captured(", 0),
+            (".run_stream(", 0),
+            ("spawn_interactive(", 0),
+        ];
+        for (call, skip_args) in shapes {
+            let mut from = 0usize;
+            while let Some(rel) = code[from..].find(call) {
+                let at = from + rel + call.len();
+                from = at;
+                // A DEFINITION (`fn name(`), not a call.
+                if code[..at - call.len()].trim_end().ends_with("fn") {
+                    continue;
+                }
+                // Inside one of the wrappers: not a call site, its callers are.
+                if enclosing_fn(code, at).is_some_and(|(_, n)| HELPERS.contains(&n.as_str())) {
+                    helper_bodies += 1;
+                    continue;
+                }
+                let mut i = at;
+                for _ in 0..skip_args {
+                    let mut d = 0i32;
+                    while i < b.len() {
+                        match b[i] {
+                            b'(' | b'[' => d += 1,
+                            b')' | b']' => {
+                                if d == 0 {
+                                    break;
+                                }
+                                d -= 1;
+                            }
+                            b',' if d == 0 => break,
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                i = skip_ws(b, i);
+                let start = if code[i..].starts_with("vec![") {
+                    Some(i + 5)
+                } else if code[i..].starts_with("&[") {
+                    Some(i + 2)
+                } else if code[i..].starts_with('[') {
+                    Some(i + 1)
+                } else {
+                    None
+                };
+                match start {
+                    Some(p) => {
+                        let v = leading_literals(code, p);
+                        if v.is_empty() {
+                            unresolved.push(format!("{call}<non-literal argv>"));
+                        } else {
+                            found.push(v);
+                        }
+                    }
+                    None => {
+                        let j = if i < b.len() && b[i] == b'&' { i + 1 } else { i };
+                        let Some((name, _)) = ident_at(code, j) else {
+                            unresolved.push(format!("{call}<unparseable>"));
+                            continue;
+                        };
+                        match resolve_binding(code, &name, at) {
+                            (Some(v), _) if !v.is_empty() => found.push(v),
+                            (_, chain) => unresolved.push(format!("{call}{chain}")),
+                        }
+                    }
+                }
+            }
+        }
+        // `stream_action(action, …)` builds `["games", action, &id]` itself, so
+        // its literal is the ACTION and the verb is `games <action>`.
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find("stream_action(") {
+            let at = from + rel + "stream_action(".len();
+            from = at;
+            if code[..at - "stream_action(".len()].trim_end().ends_with("fn") {
+                continue;
+            }
+            let v = leading_literals(code, at);
+            if v.is_empty() {
+                unresolved.push("stream_action(<non-literal action>".to_string());
+            } else {
+                found.push(vec!["games".to_string(), v[0].clone()]);
+            }
+        }
+        (found, unresolved, helper_bodies)
+    }
+
+    /// A test module is not a call site. Cutting here also stops the extractor
+    /// finding its OWN shape strings (`"run_json_cmd("` et al) and reporting
+    /// them as unclassifiable sites.
+    fn production_half(src: &str) -> String {
+        let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
+        strip_comments(&src[..cut])
+    }
+
+    fn all_sites() -> (Vec<Vec<String>>, Vec<String>, usize) {
+        let mut found = Vec::new();
+        let mut unresolved = Vec::new();
+        let mut helpers = 0usize;
+        for src in [include_str!("lib.rs"), include_str!("realmlist.rs")] {
+            let (f, u, h) = extract(&production_half(src));
+            found.extend(f);
+            unresolved.extend(u);
+            helpers += h;
+        }
+        (found, unresolved, helpers)
+    }
+
+    /// THE TEST. Every verb this launcher sends must have an EXPLICIT row in
+    /// `dml_core::vocab::TABLE` — not merely a working destination, which the
+    /// bash fallback gives everything. The runtime falls back silently; this
+    /// does not.
+    #[test]
+    fn every_launcher_call_site_is_classified() {
+        let (found, _, _) = all_sites();
+
+        // NON-VACUITY (a): an extractor that silently stopped matching must
+        // fail, not pass an empty loop.
+        assert!(
+            found.len() >= 100,
+            "only {} call sites extracted — the extractor is broken, not the launcher",
+            found.len()
+        );
+        // NON-VACUITY (b): two verbs known to be in this file, so an extractor
+        // that lost ONE of the shapes is caught even while the floor holds.
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        for probe in ["games list", "wow server-detail", "games start", "wow backup create"] {
+            assert!(
+                flat.iter().any(|v| v == probe),
+                "extractor never found the known call site {probe:?}"
+            );
+        }
+
+        let mut missing: Vec<String> = Vec::new();
+        for verb in &found {
+            let refs: Vec<&str> = verb.iter().map(String::as_str).collect();
+            if !dml_core::vocab::is_classified(&refs) {
+                let s = verb.join(" ");
+                if !missing.contains(&s) {
+                    missing.push(s);
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "these launcher call sites have no dml_core::vocab::TABLE row: {missing:?}\n\
+             Add one to crates/dml-core/src/vocab.rs and decide whether it is \
+             Target::DmlWow or Target::Bash. (Leaving it out does NOT break the \
+             app — it falls back to bash — which is exactly why this test exists.)"
+        );
+    }
+
+    /// The sites whose verb is a runtime value, each named with what it is and
+    /// where its verbs are classified instead. Keyed on the call shape rather
+    /// than a line number, so it survives the file moving around — and a NEW
+    /// unresolvable site fails rather than joining the list silently.
+    #[test]
+    fn the_only_unreadable_call_site_is_the_one_we_know_about() {
+        let (_, unresolved, helper_bodies) = all_sites();
+        let mut got: Vec<String> = unresolved.clone();
+        got.sort();
+        got.dedup();
+        assert_eq!(
+            got,
+            vec![
+                // `tool_install`: the whole argv IS the tool name, a runtime
+                // value from the closed TOOL_NAMES allowlist. Those names are
+                // read out of the source and checked below.
+                "spawn_interactive(<non-literal argv>".to_string()
+            ],
+            "the set of call sites whose verb cannot be read off the source has \
+             changed. A new one must be understood and named here, never appended \
+             quietly: an unreadable site is a verb nothing checks."
+        );
+        // The three wrappers each hold exactly one runner call. If a wrapper is
+        // rewired — or a fourth appears — that is a change to the seam every
+        // other assertion here depends on, so it must be seen.
+        assert_eq!(
+            helper_bodies, 3,
+            "expected one runner call inside each of {HELPERS:?}, found {helper_bodies}"
+        );
+    }
+
+    /// `tool_install`'s argv is a runtime value, so the extractor cannot read
+    /// it — but the values come from a closed allowlist IN THIS FILE. Read that
+    /// allowlist and require every entry to be classified, so adding a third
+    /// tool goes red here instead of shipping an unclassified verb.
+    #[test]
+    fn every_tool_install_name_is_classified() {
+        let src = production_half(include_str!("lib.rs"));
+        let at = src
+            .find("const TOOL_NAMES")
+            .expect("TOOL_NAMES moved; tool_install's verbs are no longer pinned");
+        let eq = src[at..].find('=').expect("TOOL_NAMES has no initializer") + at;
+        let open = src[eq..].find('[').expect("TOOL_NAMES is not an array") + eq;
+        let names = leading_literals(&src, open + 1);
+        assert!(
+            names.len() >= 2,
+            "read {names:?} out of TOOL_NAMES — the extractor lost the array"
+        );
+        for n in &names {
+            assert!(
+                dml_core::vocab::is_classified(&[n.as_str()]),
+                "tool_install can send {n:?}, which has no vocab::TABLE row"
+            );
+        }
+    }
+
+    /// Comment stripping, proven on the exact shape that has burned this repo
+    /// twice — prose that mentions a call, and a `//` inside a string literal
+    /// (which must SURVIVE, or real argv would be eaten).
+    #[test]
+    fn comments_are_stripped_but_string_literals_are_not() {
+        let src = r#"
+// run_json_cmd(state, vec!["wow".into(), "invented-by-a-comment".into()])
+/* run_json_cmd(state, vec!["wow".into(), "invented-by-a-block".into()]) */
+fn real() { run_json_cmd(state, vec!["wow".into(), "real-one".into()]); }
+fn url() { let _ = "https://example.invalid/x"; }
+"#;
+        let (found, _, _) = extract(&strip_comments(src));
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        assert_eq!(flat, vec!["wow real-one".to_string()], "got {flat:?}");
+        assert!(
+            strip_comments(src).contains("https://example.invalid/x"),
+            "the // inside a string literal must not be treated as a comment"
+        );
+    }
+}
