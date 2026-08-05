@@ -10187,4 +10187,51 @@ mod keepalive_wiring_tests {
              ungraceful stop this backend already struggles with."
         );
     }
+
+    /// THE WINDOW IS NEVER DESTROYED BY A CLOSE CLICK. Fix round 1
+    /// (2026-08-05).
+    ///
+    /// Before this fix, `on_window_event` only called `api.prevent_close()`
+    /// INSIDE `if hide { … }`, so with `closeToTray` off a close click let
+    /// Tauri destroy the window — and destroying the LAST window makes
+    /// tauri-runtime-wry fire `RunEvent::ExitRequested` itself, landing in
+    /// the `ExitRequested` arm with no window left to show a dialog in:
+    /// unclosable except via Task Manager, which skips `RunEvent::Exit` and
+    /// hands the server the exact hard WSL cut this plan exists to prevent.
+    ///
+    /// `window_close_action`'s own tests (in `mod tests`) prove the PURE
+    /// decision is right in isolation, but they call it directly and cannot
+    /// see whether `on_window_event` actually reaches it before letting a
+    /// close proceed — reverting only the wiring, leaving
+    /// `window_close_action` itself untouched, would leave every one of
+    /// those tests green. Same shape as
+    /// `every_wsl_keepalive_entry_point_has_a_production_call_site` above:
+    /// an ordering read from the real source, not a restated list.
+    #[test]
+    fn the_window_close_handler_never_lets_a_destroy_through_unprotected() {
+        let code = src();
+        let body = fn_body(&code, "run");
+        let prevent_at = body
+            .find("api.prevent_close();")
+            .expect("on_window_event no longer calls api.prevent_close() at all");
+        let close_to_tray_read_at = body
+            .find("close_to_tray")
+            .expect("on_window_event no longer reads the close_to_tray preference");
+        // NON-VACUITY: both anchors must actually be found (the `.expect`s
+        // above already guarantee that) AND be the real call sites, not an
+        // incidental match — `window_close_action(` must also appear, or
+        // `api.prevent_close()` could be a leftover from anywhere.
+        assert!(
+            body.contains("window_close_action("),
+            "on_window_event no longer routes through window_close_action — the pure \
+             decision and the production wiring have drifted apart"
+        );
+        assert!(
+            prevent_at < close_to_tray_read_at,
+            "api.prevent_close() must run BEFORE close_to_tray is even read, so the window \
+             is never destroyed regardless of the setting. A destroyed window cannot show \
+             the exit-requested dialog and cannot be recreated by tray Open — that is the \
+             regression this test pins."
+        );
+    }
 }
