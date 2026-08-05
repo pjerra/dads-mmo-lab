@@ -78,6 +78,11 @@ function skipString(src: string, i: number): number {
  * know about comments.
  */
 export function blockAfter(src: string, from: number): string {
+  // A caller that passed `indexOf(...)` straight through hands us -1 on a
+  // miss, and reading that as "start at the top of the file" turns a missing
+  // anchor into a block that exists but is the wrong one — a scan that answers
+  // confidently about something it never found.
+  if (from < 0) throw new Error("blockAfter: negative start — the anchor was never found");
   let open = -1;
   for (let i = from; i < src.length; i++) {
     const c = src[i];

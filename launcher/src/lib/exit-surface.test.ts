@@ -89,6 +89,8 @@ describe("the source scanners themselves", () => {
   it("throws rather than returning empty when the anchor is gone", () => {
     expect(() => blockOf("function g() {}", "function f(")).toThrow(/anchor not found/);
     expect(() => find("routes/nope.svelte")).toThrow(/the glob is wrong/);
+    // The -1-means-top-of-file trap, closed at the source.
+    expect(() => blockAfter("function f() { a; }", -1)).toThrow(/never found/);
   });
 
   it("matches code, not the prose about the code", () => {
@@ -121,7 +123,18 @@ describe("the shell hears the exit request", () => {
     ).toContain("exit-requested");
   });
 
-  const handler = () => blockAfter(shell(), shell().indexOf('"exit-requested"'));
+  /**
+   * The handler body, anchored on the literal itself.
+   *
+   * `blockOf` THROWS when the anchor is gone. The first version of this used
+   * `blockAfter(src, src.indexOf(...))` and `indexOf` returns -1 on a miss,
+   * which `blockAfter` read as "start at the top of the file" — so under the
+   * renamed-literal mutation these three assertions went red against
+   * `onMount`'s body instead of against the handler, i.e. red for a reason
+   * that had nothing to do with what they test. Right verdict, wrong evidence,
+   * and one plausible source edit away from the wrong verdict.
+   */
+  const handler = () => blockOf(shell(), '"exit-requested"');
 
   it("opens the dialog when it fires", () => {
     // Registering a listener that writes nothing is the same product failure
