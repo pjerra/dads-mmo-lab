@@ -203,7 +203,7 @@ fn soap_env_path() -> Option<std::path::PathBuf> {
 /// lines and blank lines are ignored, and any line that isn't `KEY=VALUE` is
 /// ignored. Unrecognized keys are ignored too (this is not a general shell
 /// parser). Last occurrence of a key wins, matching shell re-assignment.
-fn parse_soap_env(contents: &str) -> (Option<String>, Option<String>, Option<String>) {
+pub(crate) fn parse_soap_env(contents: &str) -> (Option<String>, Option<String>, Option<String>) {
     let mut url = None;
     let mut user = None;
     let mut pass = None;
@@ -216,17 +216,26 @@ fn parse_soap_env(contents: &str) -> (Option<String>, Option<String>, Option<Str
             continue;
         };
         let key = key.trim();
-        let mut value = value.trim();
-        let quoted = value.len() >= 2
-            && ((value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\'')));
-        if quoted {
-            value = &value[1..value.len() - 1];
-        }
+        let value = value.trim();
+        let single = value.len() >= 2 && value.starts_with('\'') && value.ends_with('\'');
+        let double = value.len() >= 2 && value.starts_with('"') && value.ends_with('"');
+        let value: String = if single {
+            // Undo `soap_bootstrap::sh_single_quote`, which is what WRITES this
+            // file: a literal `'` cannot live inside single quotes, so it is
+            // closed, escaped and reopened as `'\''`. A reader that stripped
+            // the outer quotes and stopped would hand the world a password with
+            // four stray characters in it — and report the result as an
+            // authentication failure, with nothing pointing at this line.
+            value[1..value.len() - 1].replace(r"'\''", "'")
+        } else if double {
+            value[1..value.len() - 1].to_string()
+        } else {
+            value.to_string()
+        };
         match key {
-            "DML_SOAP_URL" => url = Some(value.to_string()),
-            "DML_SOAP_USER" => user = Some(value.to_string()),
-            "DML_SOAP_PASS" => pass = Some(value.to_string()),
+            "DML_SOAP_URL" => url = Some(value),
+            "DML_SOAP_USER" => user = Some(value),
+            "DML_SOAP_PASS" => pass = Some(value),
             _ => {}
         }
     }
@@ -395,6 +404,30 @@ not a valid line
         assert_eq!(url, Some("http://10.0.0.5:7878/".to_string()));
         assert_eq!(user, Some("gm3".to_string()));
         assert_eq!(pass, Some("hunter2".to_string()));
+    }
+
+    /// The reader undoes what `soap_bootstrap::sh_single_quote` writes.
+    ///
+    /// That writer single-quotes every value, because bash `.`-sources this
+    /// file and an unquoted value is shell SOURCE. A literal `'` cannot live
+    /// inside single quotes, so it is written `'\''` — and a reader that only
+    /// stripped the outer pair would hand the world a password four characters
+    /// longer than the one the user set, then report the result as an
+    /// authentication failure with nothing pointing at this line.
+    #[test]
+    fn parse_soap_env_undoes_the_single_quote_escape_the_writer_uses() {
+        let contents = "DML_SOAP_URL='http://h/it'\\''s'\nDML_SOAP_PASS='hunter2'\n";
+        let (url, _, pass) = parse_soap_env(contents);
+        assert_eq!(url.as_deref(), Some("http://h/it's"));
+        assert_eq!(pass.as_deref(), Some("hunter2"));
+    }
+
+    /// ...and a quoted value that WOULD have been code arrives as data, which
+    /// is the whole reason the writer quotes.
+    #[test]
+    fn a_quoted_expansion_is_read_back_verbatim() {
+        let (url, _, _) = parse_soap_env("DML_SOAP_URL='http://h/$(id)`whoami`'\n");
+        assert_eq!(url.as_deref(), Some("http://h/$(id)`whoami`"));
     }
 
     #[test]

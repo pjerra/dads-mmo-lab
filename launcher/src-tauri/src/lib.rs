@@ -1647,8 +1647,20 @@ fn native_facts() -> dml_core::setup::NativeFacts {
 /// folder" are different screens, and conflating them would offer a fresh
 /// install to someone whose existing server is merely unreadable.
 fn native_title_count() -> Option<usize> {
-    let dir = dml_core::compose::games_dir_from_env();
-    let entries = match std::fs::read_dir(&dir) {
+    native_title_count_in(&dml_core::compose::games_dir_from_env())
+}
+
+/// [`native_title_count`]'s answer for a games directory handed in.
+///
+/// THE DIRECTORY IS AN ARGUMENT, and that is not tidiness. The test for the
+/// absent-directory case used to `set_var("DML_GAMES_DIR", …)` — a
+/// PROCESS-GLOBAL mutation inside a test binary whose threads run in parallel,
+/// while `native_title_count` and `native_facts` read that same variable in the
+/// same binary. It is the flake generator an earlier task already removed from
+/// `games_dir_from`, reintroduced one function along. A pure function taking the
+/// value cannot race anything.
+fn native_title_count_in(dir: &std::path::Path) -> Option<usize> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(it) => it,
         // A GAMES DIR THAT IS NOT THERE HOLDS ZERO TITLES. That is a definite
         // answer, not a shrug, and collapsing it into `None` broke the fresh
@@ -7795,19 +7807,40 @@ mod tests {
     /// again" button that re-ran the identical failing read forever. The
     /// `no_titles` -> "Open Library" arm was unreachable for exactly the user it
     /// was built for.
+    ///
+    /// Takes the directory as an ARGUMENT rather than exporting
+    /// `DML_GAMES_DIR`. The env version mutated process-global state inside a
+    /// test binary whose threads run in parallel, while `native_title_count`
+    /// and `native_facts` read that same variable in the same binary — the
+    /// flake generator an earlier task removed from `games_dir_from`, one
+    /// function along. Nothing here can now race anything.
     #[test]
     fn an_absent_games_dir_holds_zero_titles_not_an_unknown_number() {
         let missing = std::env::temp_dir().join(format!("dml-absent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&missing);
         assert!(!missing.exists());
-        let prev = std::env::var_os("DML_GAMES_DIR");
-        unsafe { std::env::set_var("DML_GAMES_DIR", &missing) };
-        let got = native_title_count();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("DML_GAMES_DIR", v) },
-            None => unsafe { std::env::remove_var("DML_GAMES_DIR") },
-        }
-        assert_eq!(got, Some(0), "a games dir that is not there holds zero titles");
+        assert_eq!(
+            native_title_count_in(&missing),
+            Some(0),
+            "a games dir that is not there holds zero titles"
+        );
+    }
+
+    /// The other half: a directory we CANNOT read is a genuine "could not
+    /// tell", and must stay `None`. Asserted through the same seam, so the two
+    /// answers are shown to differ rather than assumed to.
+    #[test]
+    fn a_games_dir_that_is_a_file_is_unknown_not_zero() {
+        // A path that exists but is not a directory: `read_dir` fails with a
+        // kind that is NOT NotFound, which is the branch that must answer None.
+        let f = std::env::temp_dir().join(format!("dml-notadir-{}", std::process::id()));
+        std::fs::write(&f, b"not a directory").unwrap();
+        let got = native_title_count_in(&f);
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(
+            got, None,
+            "a games dir we could not read is 'we could not tell', never 'you have no titles'"
+        );
     }
 
     #[test]
@@ -9044,6 +9077,88 @@ pub(crate) mod vocab_coverage_tests {
         out
     }
 
+    /// Source with every `#[cfg(test)]` item removed, brace-matched.
+    ///
+    /// Deliberately NOT "cut at the first `#[cfg(test)]`", which is what
+    /// [`production_half`] used to do: this file carries THREE test modules with
+    /// production code above them, and `dml-core/src/engine.rs` has two with
+    /// production code BETWEEN them. Truncating at the first silently stops
+    /// scanning everything below — a hole in the one direction that makes a
+    /// guard useless, because it makes coverage depend on where in the file you
+    /// happen to type. An item whose attribute is followed by a `;` before any
+    /// `{` (`#[cfg(test)] use …;`) is cut at the semicolon instead.
+    ///
+    /// Input must already be comment-stripped, so a `{` inside prose cannot
+    /// unbalance the match.
+    ///
+    /// `pub(crate)` and living HERE, beside [`strip_comments`], because it was
+    /// implemented 700 lines away in `startup.rs` while `production_half` did
+    /// the wrong thing — two answers to one question, in one crate, is how the
+    /// hole survived. One home, both scans.
+    pub(crate) fn strip_cfg_test(code: &str) -> String {
+        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
+        let b: Vec<char> = code.chars().collect();
+        let mut out = String::with_capacity(code.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i..].starts_with(&attr[..]) {
+                i = end_of_cfg_test_item(&b, i + attr.len());
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// One past the end of the item the attribute ending at `from` decorates.
+    fn end_of_cfg_test_item(b: &[char], from: usize) -> usize {
+        let mut i = from;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                // String and char literals may hold braces and semicolons.
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                ';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        b.len()
+    }
+
     fn skip_ws(b: &[u8], mut i: usize) -> usize {
         while i < b.len() && (b[i] as char).is_whitespace() {
             i += 1;
@@ -9323,17 +9438,27 @@ pub(crate) mod vocab_coverage_tests {
         (found, unresolved, helper_bodies)
     }
 
-    /// A test module is not a call site. Cutting here also stops the extractor
+    /// A test module is not a call site. Removing them also stops the extractor
     /// finding its OWN shape strings (`"run_json_cmd("` et al) and reporting
     /// them as unclassifiable sites.
+    ///
+    /// REMOVES rather than TRUNCATES, and the difference is the whole point.
+    /// This used to be `src.find("#[cfg(test)]")` and a cut, so nothing below
+    /// the first test module was ever scanned — everything past line 7765 of
+    /// this file. Harmless on the day it was found (no production
+    /// `#[tauri::command]` lived down there) and latent in the worst possible
+    /// direction: a real call site APPENDED to the end of the file would sail
+    /// through the classification guard, while the identical function moved
+    /// 2000 lines up would fail it loudly. A guard whose coverage depends on
+    /// where in the file you type is not a guard. `strip_cfg_test`, 700 lines
+    /// away in `startup.rs`, already did this correctly.
     ///
     /// `pub(crate)` so `keepalive_wiring_tests` reads the same production text
     /// this does — two definitions of "the production half" would drift, and
     /// both scans exist precisely because a comment or a test must never read
     /// as a production call site.
     pub(crate) fn production_half(src: &str) -> String {
-        let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
-        strip_comments(&src[..cut])
+        strip_cfg_test(&strip_comments(src))
     }
 
     fn all_sites() -> (Vec<Vec<String>>, Vec<String>, usize) {
@@ -9495,6 +9620,48 @@ pub(crate) mod vocab_coverage_tests {
                  CLI, so on Backend::Arch/Wsl every SOAP verb keeps returning SOAP_AUTH: {name}"
             );
         }
+    }
+
+    /// `production_half` REMOVES test modules; it does not stop at the first.
+    ///
+    /// The truncating version scanned nothing below line 7765 of this file, so
+    /// a genuine call site appended to the END would have passed the
+    /// classification guard while the same function 2000 lines higher up failed
+    /// it. Both test modules' calls must vanish AND the production call between
+    /// them must survive — one assertion cannot show both.
+    #[test]
+    fn production_half_removes_test_modules_rather_than_truncating_at_the_first() {
+        let src = r#"
+fn early() { run_json_cmd(state, vec!["wow".into(), "before".into()]); }
+#[cfg(test)]
+mod a { fn t() { run_json_cmd(state, vec!["wow".into(), "invented-by-test-a".into()]); } }
+fn late() { run_json_cmd(state, vec!["wow".into(), "after".into()]); }
+#[cfg(test)]
+mod b { fn t() { run_json_cmd(state, vec!["wow".into(), "invented-by-test-b".into()]); } }
+"#;
+        let (found, _, _) = extract(&production_half(src));
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        assert_eq!(
+            flat,
+            vec!["wow before".to_string(), "wow after".to_string()],
+            "got {flat:?} — `wow after` missing means the scan still truncates; an \
+             `invented-by-test-*` present means a test module is being read as production"
+        );
+    }
+
+    /// ...and the `#[cfg(test)] use …;` form is cut at the semicolon, not at a
+    /// brace it does not have — otherwise it would swallow the next item whole,
+    /// which is the same hole in a smaller package.
+    #[test]
+    fn a_cfg_test_use_statement_is_cut_at_its_semicolon() {
+        let src = r#"
+#[cfg(test)]
+use something::else_;
+fn real() { run_json_cmd(state, vec!["wow".into(), "survivor".into()]); }
+"#;
+        let (found, _, _) = extract(&production_half(src));
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        assert_eq!(flat, vec!["wow survivor".to_string()], "got {flat:?}");
     }
 
     /// Comment stripping, proven on the exact shape that has burned this repo

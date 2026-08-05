@@ -665,82 +665,6 @@ mod games_dir_reader_scan_tests {
         p.strip_prefix(root).unwrap_or(p).to_string_lossy().replace('\\', "/")
     }
 
-    /// Source with every `#[cfg(test)]` item removed, brace-matched.
-    ///
-    /// Deliberately NOT "cut at the first `#[cfg(test)]`", which is what the
-    /// launcher's other scan does: several files here carry TWO test modules
-    /// (`dml-core/src/engine.rs`, `lib.rs`) with production code between them,
-    /// and truncating at the first would silently stop scanning it — a hole in
-    /// exactly the direction that makes a guard useless. An item whose
-    /// attribute is followed by a `;` before any `{` (`#[cfg(test)] use …;`) is
-    /// cut at the semicolon instead.
-    ///
-    /// Input must already be comment-stripped, so a `{` inside prose cannot
-    /// unbalance the match.
-    fn strip_cfg_test(code: &str) -> String {
-        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
-        let b: Vec<char> = code.chars().collect();
-        let mut out = String::with_capacity(code.len());
-        let mut i = 0usize;
-        while i < b.len() {
-            if b[i..].starts_with(&attr[..]) {
-                i = end_of_cfg_test_item(&b, i + attr.len());
-                continue;
-            }
-            out.push(b[i]);
-            i += 1;
-        }
-        out
-    }
-
-    /// One past the end of the item the attribute ending at `from` decorates.
-    fn end_of_cfg_test_item(b: &[char], from: usize) -> usize {
-        let mut i = from;
-        let mut depth = 0usize;
-        while i < b.len() {
-            match b[i] {
-                // String and char literals may hold braces and semicolons.
-                '"' => {
-                    i += 1;
-                    while i < b.len() {
-                        if b[i] == '\\' {
-                            i += 2;
-                            continue;
-                        }
-                        if b[i] == '"' {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
-                    i += 1;
-                    while i < b.len() {
-                        if b[i] == '\\' {
-                            i += 2;
-                            continue;
-                        }
-                        if b[i] == '\'' {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                '{' => depth += 1,
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return i + 1;
-                    }
-                }
-                ';' if depth == 0 => return i + 1,
-                _ => {}
-            }
-            i += 1;
-        }
-        b.len()
-    }
-
     /// Reads of `DML_GAMES_DIR` from the process environment in `code`.
     ///
     /// A REAL CALL SHAPE is required — `var("…")` or `var_os("…")` — never a
@@ -773,7 +697,7 @@ mod games_dir_reader_scan_tests {
         let mut s = Scan { files: 0, mentions: 0, reads: BTreeMap::new() };
         for path in production_sources(&root) {
             let Ok(src) = std::fs::read_to_string(&path) else { continue };
-            let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+            let code = crate::vocab_coverage_tests::strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
             s.files += 1;
             s.mentions += mention_count(&code);
             let n = env_read_count(&code);
@@ -792,7 +716,7 @@ mod games_dir_reader_scan_tests {
     #[test]
     fn the_extractor_finds_a_real_call_shape() {
         let src = format!("fn f() {{ std::env::var_os(\"{VAR}\").unwrap(); }}");
-        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        let code = crate::vocab_coverage_tests::strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
         assert_eq!(env_read_count(&code), 1, "a real call site must be counted: {code}");
     }
 
@@ -804,7 +728,7 @@ mod games_dir_reader_scan_tests {
              /* std::env::var_os(\"{VAR}\") */\n\
              fn f() {{ let hint = \"Set {VAR} to the folder your servers live in\"; }}"
         );
-        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        let code = crate::vocab_coverage_tests::strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
         assert_eq!(
             env_read_count(&code),
             0,
@@ -825,7 +749,7 @@ mod games_dir_reader_scan_tests {
              }}\n\
              fn after() {{ std::env::var(\"{VAR}\"); }}"
         );
-        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        let code = crate::vocab_coverage_tests::strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
         assert_eq!(
             env_read_count(&code),
             2,
@@ -838,7 +762,7 @@ mod games_dir_reader_scan_tests {
     fn the_extractor_cuts_a_cfg_test_use_at_its_semicolon() {
         let src =
             format!("#[cfg(test)]\nuse std::env::var;\nfn prod() {{ std::env::var(\"{VAR}\"); }}");
-        let code = strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
+        let code = crate::vocab_coverage_tests::strip_cfg_test(&crate::vocab_coverage_tests::strip_comments(&src));
         assert_eq!(env_read_count(&code), 1, "an attributed `use` must not eat the file: {code}");
     }
 
