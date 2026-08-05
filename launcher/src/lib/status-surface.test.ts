@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { code, sourceFinder } from "./source-scan";
 
 /**
  * One verdict-to-appearance mapping, used by everything that shows it.
@@ -25,27 +26,17 @@ const SOURCES = import.meta.glob(
   { query: "?raw", import: "default", eager: true },
 ) as Record<string, string>;
 
-function find(suffix: string): string {
-  const hit = Object.entries(SOURCES).find(([f]) => f.endsWith(suffix));
-  if (!hit) throw new Error(`no source for ${suffix} — the glob is wrong`);
-  return hit[1];
-}
-
 /**
- * Strip comments before matching.
+ * `find` throws on a miss, `code` strips comments first — both from
+ * source-scan.ts, shared with soap-surface and exit-surface.
  *
  * The repo rule, learned twice on 2026-08-01 and then AGAIN here: this very
  * file's subject is documented in a long HTML comment that names the removed
  * `class:warn={!restartState.restarting && d.verdict === ...}` shape verbatim,
  * so a raw scan would read the explanation as the thing and fail on correct
- * code. Shared shape with soap-surface.test.ts's `code()`.
+ * code.
  */
-function code(src: string): string {
-  return src
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
+const find = sourceFinder(SOURCES);
 
 /** Argument lists of every `statusLabel(...)` call, split at top-level commas. */
 function statusLabelCalls(src: string): string[][] {

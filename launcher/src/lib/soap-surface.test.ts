@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { code, sourceFinder } from "./source-scan";
 
 // Sources come in via import.meta.glob(?raw), the same technique
 // feature-keys.test.ts uses (the app has no @types/node).
@@ -7,27 +8,12 @@ const SOURCES = import.meta.glob(
   { query: "?raw", import: "default", eager: true },
 ) as Record<string, string>;
 
-function find(suffix: string): string {
-  const hit = Object.entries(SOURCES).find(([f]) => f.endsWith(suffix));
-  if (!hit) throw new Error(`no source for ${suffix} — the glob is wrong`);
-  return hit[1];
-}
-
-/**
- * Strip comments before matching.
- *
- * This repo was bitten TWICE on 2026-08-01 by source scans that read an
- * explanation of a thing as the thing itself. Library.svelte is dense with
- * `// … soap …` prose about why the step worked the way it did, and a raw grep
- * would report the surface as still present after it was removed — a red test
- * on correct code, which is how a scan like this gets deleted.
- */
-function code(src: string): string {
-  return src
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
-}
+// `find` throws on a miss and `code` strips comments before matching — both
+// live in source-scan.ts now, shared with status-surface and exit-surface.
+// The reasoning that produced them (a scan must never read prose about a
+// surface as the surface, and must never pass on an empty match set) is
+// documented there.
+const find = sourceFinder(SOURCES);
 
 describe("the SOAP account step is a shell surface, not a Library one", () => {
   it("strips comments rather than grepping raw source", () => {
