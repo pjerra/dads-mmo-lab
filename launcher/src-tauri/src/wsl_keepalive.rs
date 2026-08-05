@@ -131,6 +131,65 @@ pub fn applies_to(backend: Backend) -> bool {
     }
 }
 
+/// What we believe the server is doing, at the moment the user asked to close.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerPresence {
+    Running,
+    Stopped,
+    /// We could not tell. NOT a synonym for `Stopped` — see [`exit_decision`].
+    Unknown,
+}
+
+/// What closing the launcher should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitAction {
+    /// Close immediately. No dialog, no delay.
+    ExitNow,
+    /// Ask first: a server is running and closing will stop it.
+    PromptRunning,
+    /// Ask first, and say honestly that we could not confirm.
+    PromptUnknown,
+}
+
+/// Should closing the launcher ask the user first?
+///
+/// On `Native` never: Docker Desktop keeps its own containers running, so
+/// closing the launcher is harmless there. On a distro backend it is not —
+/// WSL powers the distro off ~15s after the last session exits, and on a loaded
+/// server the 10s grace expires before systemd can stop the containers, so the
+/// sequence ends in `reboot(RB_POWER_OFF)`: a hard cut of MySQL mid-write.
+///
+/// `Unknown` prompts. A probe that could not answer is evidence of nothing, and
+/// the asymmetry decides it: a needless dialog costs one click, a missed one
+/// costs the database.
+pub fn exit_decision(backend: Backend, presence: ServerPresence) -> ExitAction {
+    if !applies_to(backend) {
+        return ExitAction::ExitNow;
+    }
+    match presence {
+        ServerPresence::Running => ExitAction::PromptRunning,
+        ServerPresence::Unknown => ExitAction::PromptUnknown,
+        ServerPresence::Stopped => ExitAction::ExitNow,
+    }
+}
+
+/// Derive presence from what the launcher already knows, so exiting never has
+/// to run a fresh probe — a probe at exit time can hang, and a launcher that
+/// will not close is worse than the bug this guards.
+///
+/// `holding` wins: it is set by an ACT (Start pressed, or a poll adopting a
+/// stack that was already up) rather than by a reading that may be stale.
+pub fn presence_from(holding: bool, last_verdict: Option<&str>) -> ServerPresence {
+    if holding {
+        return ServerPresence::Running;
+    }
+    match last_verdict.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) if verdict_means_running(v) => ServerPresence::Running,
+        Some(_) => ServerPresence::Stopped,
+        None => ServerPresence::Unknown,
+    }
+}
+
 /// What the server is *meant* to be doing — not what a status probe last said.
 ///
 /// This is the distinction the module turns on. "Meant to be running" is set by
@@ -205,6 +264,12 @@ pub struct Keepalive {
     /// news again.
     gave_up_announced: bool,
     last_error: Option<String>,
+    /// The most recent verdict a status poll reported, verbatim, regardless of
+    /// whether it adopted. Unlike `last_error` this is never cleared by an
+    /// intent change or a release — it is a plain record of the last thing we
+    /// were told, so presence at exit can be read back without a fresh probe.
+    /// See [`presence_from`].
+    last_verdict: Option<String>,
 }
 
 impl Default for Keepalive {
@@ -223,6 +288,7 @@ impl Keepalive {
             gave_up: false,
             gave_up_announced: false,
             last_error: None,
+            last_verdict: None,
         }
     }
 
@@ -298,7 +364,12 @@ impl Keepalive {
     /// seconds; a poll that reopened a closed budget would turn [`MAX_ATTEMPTS`]
     /// into a 7-second retry loop with extra steps, and the bound would exist
     /// only in the tests.
+    ///
+    /// The raw string is also retained verbatim in `last_verdict`, whether or
+    /// not it adopts — a separate, additive concern from the adoption decision
+    /// above, and storing it must not (and does not) change that decision.
     pub fn observed_status(&mut self, verdict: &str) {
+        self.last_verdict = Some(verdict.to_string());
         if verdict_means_running(verdict) {
             self.assert_run(false);
         }
@@ -424,6 +495,11 @@ impl Keepalive {
     }
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+    /// The most recent verdict observed via [`Self::observed_status`],
+    /// regardless of whether it adopted. `None` if a poll has never arrived.
+    pub fn last_verdict(&self) -> Option<&str> {
+        self.last_verdict.as_deref()
     }
 }
 
@@ -642,7 +718,7 @@ fn state() -> Option<&'static Mutex<Keepalive>> {
 /// failed.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct KeepaliveReport {
-    /// False on Native/Wsl: there is nothing to report because there is nothing
+    /// False on Native: there is nothing to report because there is nothing
     /// running. The UI must not render a "keep-alive is fine" reassurance from
     /// a backend that has no keep-alive.
     pub applies: bool,
@@ -651,6 +727,11 @@ pub struct KeepaliveReport {
     pub gave_up: bool,
     pub attempts: u32,
     pub last_error: Option<String>,
+    /// The most recent status-poll verdict observed, whatever it was. `None`
+    /// if no poll has landed yet. Lets the exit decision derive presence from
+    /// what is already known — see [`presence_from`] — instead of running a
+    /// fresh probe when the user asks to close.
+    pub last_verdict: Option<String>,
 }
 
 /// Arm the keep-alive for this backend. No-op unless [`applies_to`].
@@ -717,6 +798,7 @@ fn report_from(k: &Keepalive, applies: bool) -> KeepaliveReport {
         gave_up: k.gave_up(),
         attempts: k.attempts(),
         last_error: k.last_error().map(str::to_string),
+        last_verdict: k.last_verdict().map(str::to_string),
     }
 }
 
@@ -773,6 +855,7 @@ pub fn keepalive_report() -> KeepaliveReport {
             gave_up: false,
             attempts: 0,
             last_error: None,
+            last_verdict: None,
         },
     }
 }
@@ -1416,6 +1499,67 @@ mod tests {
             "the distro has ~15s from the holder's death; detection plus respawn must fit"
         );
         assert!(WATCHDOG_TICK >= Duration::from_secs(1), "a busy-loop is not a watchdog");
+    }
+
+    // -- the exit decision ----------------------------------------------------
+
+    /// Nine combinations, all of them. The matrix IS the contract.
+    #[test]
+    fn docker_desktop_never_prompts_on_exit() {
+        for p in [ServerPresence::Running, ServerPresence::Stopped, ServerPresence::Unknown] {
+            assert_eq!(
+                exit_decision(Backend::Native, p),
+                ExitAction::ExitNow,
+                "Desktop keeps its containers running; closing the launcher is harmless: {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_running_server_on_a_distro_backend_prompts() {
+        for b in [Backend::Arch, Backend::Wsl] {
+            assert_eq!(exit_decision(b, ServerPresence::Running), ExitAction::PromptRunning, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn a_stopped_server_exits_without_friction() {
+        for b in [Backend::Arch, Backend::Wsl] {
+            assert_eq!(exit_decision(b, ServerPresence::Stopped), ExitAction::ExitNow, "{b:?}");
+        }
+    }
+
+    /// Tri-state discipline. A status we could not read is NOT a stopped
+    /// server. A needless dialog costs one click; a missed one costs a database
+    /// killed mid-write, because WSL's 10s grace expires before systemd can
+    /// stop ~2000 bots and the sequence ends in reboot(RB_POWER_OFF).
+    #[test]
+    fn an_unknown_status_prompts_rather_than_risking_the_cut() {
+        for b in [Backend::Arch, Backend::Wsl] {
+            assert_eq!(exit_decision(b, ServerPresence::Unknown), ExitAction::PromptUnknown, "{b:?}");
+        }
+    }
+
+    /// The holder is the strongest signal we have: it is set by an ACT (the
+    /// user pressed Start, or a poll adopted a stack that was already up), not
+    /// by a probe that might be stale.
+    #[test]
+    fn presence_trusts_the_holder_over_a_stale_verdict() {
+        assert_eq!(presence_from(true, Some("stopped")), ServerPresence::Running);
+        assert_eq!(presence_from(true, None), ServerPresence::Running);
+    }
+
+    #[test]
+    fn presence_falls_back_to_the_last_verdict_when_not_holding() {
+        assert_eq!(presence_from(false, Some("online")), ServerPresence::Running);
+        assert_eq!(presence_from(false, Some("stopped")), ServerPresence::Stopped);
+    }
+
+    /// Never polled = we do not know. Not "stopped".
+    #[test]
+    fn presence_with_no_verdict_at_all_is_unknown() {
+        assert_eq!(presence_from(false, None), ServerPresence::Unknown);
+        assert_eq!(presence_from(false, Some("")), ServerPresence::Unknown);
     }
 
     // -----------------------------------------------------------------------
