@@ -7439,6 +7439,61 @@ async fn exit_stop_and_close(
     result
 }
 
+/// What `WindowEvent::CloseRequested` on the main window should do.
+///
+/// FIX ROUND 1 (2026-08-05). Before this, the window's close handler only
+/// called `api.prevent_close()` when `closeToTray` was on; with it off the
+/// window was DESTROYED. Confirmed against the vendored
+/// `tauri-runtime-wry-2.11.4` source: destroying the last window fires
+/// `RunEvent::ExitRequested` itself (`TaoWindowEvent::Destroyed`, `lib.rs`
+/// ~4310-4326), independent of `app.exit()`. That landed in the
+/// `ExitRequested` arm below with a running server, so `should_prompt_on_exit`
+/// returned true and `api.prevent_exit()` fired -- but the window was already
+/// gone, so there was nothing left to show a dialog in, `tray::show_main_window`
+/// could not recreate it (`get_webview_window` returns `None` for a destroyed
+/// window), and every later exit attempt re-entered the same unlatched check
+/// and was prevented again: unclosable except via Task Manager, which skips
+/// `RunEvent::Exit` and hands the server the exact hard WSL cut this plan
+/// exists to prevent. Before this fix the same click sequence exited
+/// cleanly (ungracefully, but it terminated) -- a regression, not a
+/// pre-existing gap.
+///
+/// The fix: the window is NEVER destroyed by a close click, full stop --
+/// `on_window_event` below now calls `api.prevent_close()` unconditionally,
+/// before even reading `closeToTray`, so this function only ever chooses
+/// between hiding and asking `app.exit(0)` to close the process the ordinary
+/// way (`RunEvent::ExitRequested`, which CAN be prevented and answered,
+/// unlike a window destroy). Pure and built from pieces that already exist —
+/// `should_prompt_on_exit` (which itself checks `EXIT_CONFIRMED`) rather than
+/// a second decision — so a confirmed exit still closes even if this is the
+/// event that carries it, and the two exit surfaces cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCloseAction {
+    /// `closeToTray` is on: hide, unconditionally. Server state and the
+    /// confirm latch are irrelevant here — hiding is always safe/recoverable,
+    /// which is the whole reason the setting needs no confirmation dialog.
+    HideToTray,
+    /// `closeToTray` is off and nothing needs protecting (or the exit is
+    /// already confirmed): finish what the user asked for.
+    ExitNow,
+    /// `closeToTray` is off, but a server is running or its state is unknown,
+    /// and the exit is not yet confirmed: hide rather than destroy — the
+    /// destroy is what orphaned the process — and ask, exactly like the tray
+    /// path already does.
+    HideAndPrompt,
+}
+
+fn window_close_action(hide_to_tray: bool, action: wsl_keepalive::ExitAction) -> WindowCloseAction {
+    if hide_to_tray {
+        return WindowCloseAction::HideToTray;
+    }
+    if should_prompt_on_exit(action) {
+        WindowCloseAction::HideAndPrompt
+    } else {
+        WindowCloseAction::ExitNow
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::Emitter;
@@ -7530,19 +7585,40 @@ pub fn run() {
                 if window.label() != tray::MAIN_WINDOW {
                     return;
                 }
+                // ALWAYS prevent the destroy, unconditionally, before even
+                // reading `closeToTray`. See `WindowCloseAction`'s doc
+                // comment: a destroyed window can never come back, and that
+                // is what let a running server end up unprotected here.
+                api.prevent_close();
+
                 // Read the preference fresh rather than caching it: the user
                 // can change it in Settings without restarting, and a window
                 // close is rare enough that a small file read is free.
-                let hide = dml_core::util::dml_home_dir()
+                let hide_to_tray = dml_core::util::dml_home_dir()
                     .map(|h| dml_core::launcher_config::load(&h).close_to_tray)
                     .unwrap_or(true);
-                if hide {
-                    api.prevent_close();
-                    // HIDE, never destroy. The webview must keep running: it
-                    // owns the 7s status poll that feeds the tray, and the
-                    // auto-shutdown toggle is re-asserted to Rust from its
-                    // onMount. Destroying it would silently kill both.
-                    let _ = window.hide();
+                let action = current_exit_action();
+
+                match window_close_action(hide_to_tray, action) {
+                    WindowCloseAction::HideToTray => {
+                        // HIDE, never destroy. The webview must keep running:
+                        // it owns the 7s status poll that feeds the tray, and
+                        // the auto-shutdown toggle is re-asserted to Rust
+                        // from its onMount. Destroying it would silently
+                        // kill both.
+                        let _ = window.hide();
+                    }
+                    WindowCloseAction::HideAndPrompt => {
+                        let _ = window.hide();
+                        let _ = window.app_handle().emit("exit-requested", exit_action_wire(action));
+                    }
+                    WindowCloseAction::ExitNow => {
+                        // Through `app.exit(0)` -- the SAME path Tray Quit
+                        // and a confirmed dialog use -- rather than letting
+                        // this event's own close proceed. One way to actually
+                        // leave the process, not two that could drift.
+                        window.app_handle().exit(0);
+                    }
                 }
             }
         })
@@ -9069,6 +9145,66 @@ mod tests {
         assert_eq!(exit_action_wire(ExitAction::ExitNow), "exit_now");
         assert_eq!(exit_action_wire(ExitAction::PromptRunning), "prompt_running");
         assert_eq!(exit_action_wire(ExitAction::PromptUnknown), "prompt_unknown");
+    }
+
+    // -- window close (Fix round 1): never destroy, only hide or exit ------
+    //
+    // `window_close_action` calls `should_prompt_on_exit`, which reads
+    // `EXIT_CONFIRMED` -- so every test here takes `EXIT_CONFIRMED_TEST_LOCK`
+    // too, for the same reason the two tests above do.
+
+    /// `closeToTray` ON always hides, whatever the server is doing and
+    /// whatever the confirm latch says -- unchanged by this fix. Pinned so a
+    /// future edit to this function cannot silently start asking a question
+    /// the user turned off.
+    #[test]
+    fn hide_to_tray_wins_regardless_of_server_state_or_the_latch() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for latched in [false, true] {
+            EXIT_CONFIRMED.store(latched, Ordering::SeqCst);
+            for action in [ExitAction::ExitNow, ExitAction::PromptRunning, ExitAction::PromptUnknown] {
+                assert_eq!(window_close_action(true, action), WindowCloseAction::HideToTray);
+            }
+        }
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+    }
+
+    /// `closeToTray` OFF with nothing running closes cleanly — unchanged.
+    #[test]
+    fn close_to_tray_off_with_nothing_running_exits() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+        assert_eq!(window_close_action(false, ExitAction::ExitNow), WindowCloseAction::ExitNow);
+    }
+
+    /// THE REGRESSION THIS FIXES. `closeToTray` OFF with a server running or
+    /// its state unknown must hide, NEVER destroy — a destroyed window can
+    /// never come back (`get_webview_window` returns `None`), which is what
+    /// made the process unclosable except via Task Manager, which skips
+    /// `RunEvent::Exit` and hands the server the exact hard WSL cut this plan
+    /// exists to prevent.
+    #[test]
+    fn close_to_tray_off_with_a_server_hides_and_asks_instead_of_destroying() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+        for action in [ExitAction::PromptRunning, ExitAction::PromptUnknown] {
+            assert_eq!(window_close_action(false, action), WindowCloseAction::HideAndPrompt);
+        }
+    }
+
+    /// A latched (already-confirmed) close must still close even when THIS
+    /// `WindowEvent::CloseRequested` is the one carrying it — otherwise a
+    /// confirm followed by a second click on X, or a slow
+    /// `exit_stop_and_close` still in flight, could re-prompt forever.
+    /// `window_close_action` gets this for free by calling
+    /// `should_prompt_on_exit` rather than re-deciding independently — this
+    /// test is what makes that a proven property instead of an assumption.
+    #[test]
+    fn a_confirmed_exit_still_closes_from_the_window_path_too() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+        assert_eq!(window_close_action(false, ExitAction::PromptRunning), WindowCloseAction::ExitNow);
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
     }
 }
 
