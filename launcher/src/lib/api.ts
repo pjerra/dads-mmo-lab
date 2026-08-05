@@ -1691,6 +1691,10 @@ export interface SoapBootstrapVerdict {
   detail: string;
   /** Where the credentials were saved. Non-null ONLY on "ok". */
   saved_to: string | null;
+  /** See `SoapAutosetupVerdict.soap_env`. Diagnostic only. */
+  soap_env?: string;
+  /** See `SoapAutosetupVerdict.soap_env_detail`. Never a secret. */
+  soap_env_detail?: string | null;
 }
 // Verifies a REAL SOAP round-trip and only then saves the credentials. A
 // "rejected" or "unreachable" verdict arrives as a resolved promise, not a
@@ -1721,6 +1725,24 @@ export interface SoapAutosetupVerdict {
   user: string | null;
   /** Why this run stopped trying. Non-null ONLY on "gave_up". */
   reason: string | null;
+  /**
+   * Whether the credentials reached the CLI that actually runs SOAP verbs.
+   *
+   * DIAGNOSTIC ONLY -- no UI decision may switch on it, and `status` above stays
+   * the sole trigger. The two facts are genuinely different: on the in-distro
+   * backends the launcher writes the Windows `~/.dml/soap.env` while GM Tools,
+   * My Party, console send and announcements are answered by a CLI inside
+   * `dml-arch` reading `/home/dml/.dml/soap.env`, so "an account exists" and
+   * "the features work" can disagree. Conflating them is how that split hid.
+   *
+   * "not_applicable" (native -- same file, nothing to do) | "no_credentials" |
+   * "already_published" | "exhausted" | "cli_already_works" (its own credentials
+   * still authenticate; nothing was overwritten) | "unknown" | "published" |
+   * "unproven" | "failed". Optional so an older backend keeps working.
+   */
+  soap_env?: string;
+  /** Why, for the "unknown" / "unproven" / "failed" verdicts. Never a secret. */
+  soap_env_detail?: string | null;
 }
 // One call per launcher run does real work; every later call re-derives the
 // same verdict ("created"/"gave_up") from the concluded run without opening a

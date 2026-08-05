@@ -113,6 +113,16 @@ pub struct AppState {
     /// launcher restart to self-heal. The alternative is an unlatched loop
     /// writing rows into a database that keeps losing them.
     pub soap_autosetup: Arc<Mutex<dml_wow::soap_autosetup::AutoSetup>>,
+    /// Whether the credentials this launcher proved have reached the CLI that
+    /// uses them — see [`dml_core::soap_env`].
+    ///
+    /// A SEPARATE latch from `soap_autosetup`, deliberately. That one answers
+    /// "has an account been made this run"; this one answers "does the CLI route
+    /// authenticate", and the two come apart in the ordinary case: a launcher
+    /// whose own SOAP works creates no account at all (`not_needed`, never
+    /// latched) while the in-distro CLI is refused on every verb. Folding them
+    /// into one flag would tie the repair to a decision that was never taken.
+    pub soap_env_sync: Arc<Mutex<dml_core::soap_env::SoapEnvSync>>,
 }
 
 pub use dml_core::error::CmdError;
@@ -6711,22 +6721,30 @@ async fn wow_soap_account_create(
     })?;
     let url = dml_wow::soap::SoapConfig::load().url;
     let soap_lock = state.soap_lock.clone();
+    let runner = state.runner.clone();
+    let env_latch = state.soap_env_sync.clone();
 
-    let result = tauri::async_runtime::spawn_blocking(move || {
+    let (result, synced) = tauri::async_runtime::spawn_blocking(move || {
         let cfg = dml_wow::db::DbConfig::from_env();
-        if let Err(e) = dml_wow::account_write::create_gm_account(&cfg, &user, &pass) {
-            return Err(e);
-        }
-        // Same verify-then-save routine the manual path uses, so there is one
-        // definition of "done" rather than two that can disagree.
-        sb::bootstrap_verify_with(&home, &url, &user, &pass, |c, cmd| {
-            let _guard = soap_lock.lock();
-            dml_wow::soap::exec(c, cmd)
-        })
+        let result = (|| {
+            dml_wow::account_write::create_gm_account(&cfg, &user, &pass)?;
+            // Same verify-then-save routine the manual path uses, so there is
+            // one definition of "done" rather than two that can disagree.
+            sb::bootstrap_verify_with(&home, &url, &user, &pass, |c, cmd| {
+                let _guard = soap_lock.lock();
+                dml_wow::soap::exec(c, cmd)
+            })
+        })();
+        // The manual fallback must repair the same split automatic setup does.
+        // Fixing the Windows copy and leaving the in-distro CLI refused would
+        // reproduce R6 through the one screen that exists to unstick a user.
+        let synced = sync_distro_soap_env(&runner, &env_latch);
+        (result, synced)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
 
+    let (soap_env, soap_env_detail) = soap_env_sync_json(&synced);
     match result {
         Ok((outcome, path)) => {
             let (status, detail) = match &outcome {
@@ -6738,6 +6756,8 @@ async fn wow_soap_account_create(
                 "status": status,
                 "detail": detail,
                 "saved_to": path.map(|p| p.display().to_string()),
+                "soap_env": soap_env,
+                "soap_env_detail": soap_env_detail,
             }))
         }
         // A refusal is an ANSWER about the server, not a failure of the command,
@@ -6749,6 +6769,81 @@ async fn wow_soap_account_create(
             "saved_to": serde_json::Value::Null,
         })),
     }
+}
+
+/// Make the credentials this launcher proved reach the CLI that uses them.
+///
+/// ## The split (R6)
+///
+/// Everything above this line runs IN THE LAUNCHER, on Windows, and persists to
+/// the Windows `~/.dml/soap.env`. On `Backend::Arch` and `Backend::Wsl` the CLI
+/// that answers every SOAP-backed verb — GM Tools, My Party, console send,
+/// announcements, motd — runs INSIDE `dml-arch` and reads
+/// `/home/dml/.dml/soap.env`. Nothing has ever copied one to the other, so the
+/// launcher could prove a round-trip, report success and show the account in its
+/// credentials panel while every one of those features returned `SOAP_AUTH`.
+///
+/// ## Why it hangs off this command rather than the status poll
+///
+/// The frontend calls automatic setup exactly when `detail.soap.auth_ok ===
+/// false`, and on the two in-distro backends that `detail` IS the distro's own
+/// answer (`wow server-detail` goes through the runner). So the one trigger the
+/// UI already has is, on those backends, precisely "the in-distro CLI is being
+/// refused" — the question this repair exists to answer. Adding a second poll
+/// would ask the same thing again, less accurately.
+///
+/// Everything else lives in [`dml_core::soap_env`]: the `Backend::Native` gate
+/// (no distro, same file, zero spawns), the rule that a credential the CLI route
+/// still authenticates with is NEVER overwritten, the tri-state that keeps a
+/// booting world server from being read as a broken account, the per-credential
+/// latch, and the stdin delivery that keeps the password out of every argv.
+///
+/// Best-effort and non-fatal by construction: the outcome is REPORTED, never
+/// thrown. A failure here must not turn a successful account setup into an error
+/// the card cannot render.
+fn sync_distro_soap_env(
+    runner: &DmlRunner,
+    latch: &Mutex<dml_core::soap_env::SoapEnvSync>,
+) -> dml_core::soap_env::SyncOutcome {
+    use dml_core::soap_env as se;
+    let backend = dml_wow::backend::selected();
+    // The `Backend::Native` exit, taken before ANY resolution, spawn or read.
+    if !se::cli_home_is_the_distro(backend) {
+        return se::SyncOutcome::NotApplicable;
+    }
+    // Resolved HERE rather than passed in, so a credential a caller just created
+    // and proved is the one that gets published. `configured` is carried through
+    // from the resolver for the same reason the credentials panel does it: only
+    // that resolver can tell a real account named `admin` from the compiled-in
+    // default nobody supplied.
+    let (cfg, configured) = dml_wow::soap::SoapConfig::load_with_provenance();
+    let contents = dml_wow::soap_bootstrap::soap_env_contents(&cfg.url, &cfg.user, &cfg.pass);
+    let mut st = match latch.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    se::sync_with(
+        backend,
+        configured,
+        &contents,
+        &mut st,
+        || se::probe_cli_soap(runner),
+        se::publish_to_distro,
+    )
+}
+
+/// The non-secret half of a sync outcome, for the command payloads.
+///
+/// `(status, detail)`. The detail strings come from [`dml_core::soap_env`]'s own
+/// variants, none of which can carry a credential — the write script echoes
+/// nothing and the probe reports envelope codes.
+fn soap_env_sync_json(o: &dml_core::soap_env::SyncOutcome) -> (String, serde_json::Value) {
+    use dml_core::soap_env::SyncOutcome as S;
+    let detail = match o {
+        S::Unknown(m) | S::Unproven(m) | S::Failed(m) => serde_json::Value::String(m.clone()),
+        _ => serde_json::Value::Null,
+    };
+    (dml_core::soap_env::outcome_status(o).to_string(), detail)
 }
 
 /// Set SOAP up by itself, once per launcher run.
@@ -6789,52 +6884,72 @@ async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Va
     let url = dml_wow::soap::SoapConfig::load().url;
     let soap_lock = state.soap_lock.clone();
     let latch = state.soap_autosetup.clone();
+    let runner = state.runner.clone();
+    let env_latch = state.soap_env_sync.clone();
 
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        // Cheap exit first: a concluded run must not even ask the server. It
-        // still ANSWERS, through the same derivation `advance_with` uses -- a
-        // reloaded webview has forgotten how this run went, and a contentless
-        // "already concluded" would leave it unable to render the fallback card
-        // on the exact path where the card is the only remaining way in.
-        {
-            let g = latch.lock().unwrap();
-            if let auto::AutoSetup::Done(c) = &*g {
-                return auto::concluded_outcome(c);
+    let (outcome, synced) = tauri::async_runtime::spawn_blocking(move || {
+        // The account machine, UNCHANGED. Wrapped in a closure only so the
+        // cheap exit below still returns from IT rather than from the whole
+        // task -- the distro sync after it has to run on that path too, and it
+        // is the path a concluded-but-still-broken run depends on.
+        let outcome = (|| {
+            // Cheap exit first: a concluded run must not even ask the server. It
+            // still ANSWERS, through the same derivation `advance_with` uses -- a
+            // reloaded webview has forgotten how this run went, and a contentless
+            // "already concluded" would leave it unable to render the fallback card
+            // on the exact path where the card is the only remaining way in.
+            {
+                let g = latch.lock().unwrap();
+                if let auto::AutoSetup::Done(c) = &*g {
+                    return auto::concluded_outcome(c);
+                }
             }
-        }
 
-        let status = sb::soap_status_with(|cfg, cmd| {
-            let _guard = soap_lock.lock();
-            dml_wow::soap::exec(cfg, cmd)
-        });
+            let status = sb::soap_status_with(|cfg, cmd| {
+                let _guard = soap_lock.lock();
+                dml_wow::soap::exec(cfg, cmd)
+            });
 
-        let cfg = dml_wow::db::DbConfig::from_env();
-        let mut g = latch.lock().unwrap();
-        let state_now = g.clone();
-        let (next, outcome) = auto::advance_with(
-            state_now,
-            &status,
-            |u| dml_wow::account_write::account_exists(&cfg, u),
-            |p| dml_wow::account_write::account_family_exists(&cfg, p),
-            |u, p| dml_wow::account_write::create_gm_account(&cfg, u, p),
-            |u, p| {
-                // This is the writer of ~/.dml/soap.env, and it writes only
-                // after the round-trip below succeeds.
-                sb::bootstrap_verify_with(&home, &url, u, p, |c, cmd| {
-                    let _guard = soap_lock.lock();
-                    dml_wow::soap::exec(c, cmd)
-                })
-                .map(|(v, _path)| v)
-            },
-            auto::random_hex6,
-            auto::generate_password,
-        );
-        *g = next;
-        outcome
+            let cfg = dml_wow::db::DbConfig::from_env();
+            let mut g = latch.lock().unwrap();
+            let state_now = g.clone();
+            let (next, outcome) = auto::advance_with(
+                state_now,
+                &status,
+                |u| dml_wow::account_write::account_exists(&cfg, u),
+                |p| dml_wow::account_write::account_family_exists(&cfg, p),
+                |u, p| dml_wow::account_write::create_gm_account(&cfg, u, p),
+                |u, p| {
+                    // This is the writer of ~/.dml/soap.env, and it writes only
+                    // after the round-trip below succeeds.
+                    sb::bootstrap_verify_with(&home, &url, u, p, |c, cmd| {
+                        let _guard = soap_lock.lock();
+                        dml_wow::soap::exec(c, cmd)
+                    })
+                    .map(|(v, _path)| v)
+                },
+                auto::random_hex6,
+                auto::generate_password,
+            );
+            *g = next;
+            outcome
+        })();
+
+        // AFTER the machine has advanced, and on every arm including the cheap
+        // exit. Two reasons for that placement, both real: a credential
+        // `advance_with` has just created and PROVED is the one that should
+        // reach the distro, and the common case for this repair
+        // (`AutoOutcome::NotNeeded` -- the launcher's own SOAP works, the
+        // in-distro CLI's does not) never reaches the machine's write path at
+        // all. It reads nothing out of `outcome` and decides nothing from it,
+        // so it cannot perturb that state machine.
+        let synced = sync_distro_soap_env(&runner, &env_latch);
+        (outcome, synced)
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
 
+    let (soap_env, soap_env_detail) = soap_env_sync_json(&synced);
     Ok(serde_json::json!({
         "status": auto::outcome_status(&outcome),
         "user": match &outcome {
@@ -6845,6 +6960,12 @@ async fn wow_soap_autosetup(state: State<'_, AppState>) -> Result<serde_json::Va
             auto::AutoOutcome::GaveUp { reason } => serde_json::Value::String(reason.clone()),
             _ => serde_json::Value::Null,
         },
+        // Diagnostic only. The UI switches on `status` alone and must keep
+        // doing so: whether the CLI got the credentials is a different fact
+        // from whether an account was made, and conflating them is what let
+        // the split hide in the first place.
+        "soap_env": soap_env,
+        "soap_env_detail": soap_env_detail,
     }))
 }
 
@@ -6907,26 +7028,37 @@ async fn wow_soap_bootstrap_verify(
     // use.
     let url = dml_wow::soap::SoapConfig::load().url;
     let soap_lock = state.soap_lock.clone();
-    let (outcome, path) = tauri::async_runtime::spawn_blocking(move || {
-        sb::bootstrap_verify_with(&home, &url, &user, &pass, |cfg, cmd| {
+    let runner = state.runner.clone();
+    let env_latch = state.soap_env_sync.clone();
+    let (result, synced) = tauri::async_runtime::spawn_blocking(move || {
+        let result = sb::bootstrap_verify_with(&home, &url, &user, &pass, |cfg, cmd| {
             // Serialized like every other native SOAP call: the worldserver's
             // SOAP listener runs on the single world thread.
             let _guard = soap_lock.lock();
             dml_wow::soap::exec(cfg, cmd)
-        })
+        });
+        // Same repair as the automatic path, for the same reason: credentials
+        // the launcher has just proved are no use to GM Tools, My Party or the
+        // console while the CLI that runs them reads a different file.
+        let synced = sync_distro_soap_env(&runner, &env_latch);
+        (result, synced)
     })
     .await
-    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })??;
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?;
+    let (outcome, path) = result?;
 
     let (status, detail) = match &outcome {
         sb::VerifyOutcome::Ok => ("ok", String::new()),
         sb::VerifyOutcome::Rejected(m) => ("rejected", m.clone()),
         sb::VerifyOutcome::Unreachable(m) => ("unreachable", m.clone()),
     };
+    let (soap_env, soap_env_detail) = soap_env_sync_json(&synced);
     Ok(serde_json::json!({
         "status": status,
         "detail": detail,
         "saved_to": path.map(|p| p.display().to_string()),
+        "soap_env": soap_env,
+        "soap_env_detail": soap_env_detail,
     }))
 }
 
@@ -7263,6 +7395,7 @@ pub fn run() {
             config_lock: Arc::new(Mutex::new(())),
             last_status_push: Arc::new(Mutex::new(None)),
             soap_autosetup: Arc::new(Mutex::new(dml_wow::soap_autosetup::AutoSetup::Idle)),
+            soap_env_sync: Arc::new(Mutex::new(dml_core::soap_env::SoapEnvSync::default())),
         })
         .setup(|app| {
             // (Task 8 removed the startup registry prefetch here: the config/
@@ -9307,6 +9440,54 @@ pub(crate) mod vocab_coverage_tests {
             assert!(
                 dml_core::vocab::is_classified(&[n.as_str()]),
                 "tool_install can send {n:?}, which has no vocab::TABLE row"
+            );
+        }
+    }
+
+    /// EVERY WRITER OF THE LAUNCHER'S `soap.env` ALSO PUBLISHES IT TO THE CLI.
+    ///
+    /// `soap_bootstrap::bootstrap_verify_with` is the single choke point where
+    /// this app persists SOAP credentials — automatic setup, the manual card's
+    /// one-click create, and the manual card's verify all go through it. On the
+    /// two in-distro backends the CLI that runs every SOAP verb reads a
+    /// DIFFERENT file (R6), so a writer that does not also call
+    /// `sync_distro_soap_env` leaves the launcher reporting success while GM
+    /// Tools, My Party and the console stay dead.
+    ///
+    /// A count would not catch that: the failure is per-command, and a fourth
+    /// writer added without the repair would keep any total ≥ 3 satisfied. So
+    /// this scans command-by-command, and the comment stripper is mandatory —
+    /// this file's prose names both functions repeatedly.
+    #[test]
+    fn every_command_that_saves_soap_credentials_also_publishes_them_to_the_cli() {
+        let src = production_half(include_str!("lib.rs"));
+        // Chunk by `#[tauri::command]`, so each piece is one command's body plus
+        // the next one's attributes — near enough, since a writer and its repair
+        // are always in the same body.
+        let chunks: Vec<&str> = src.split("#[tauri::command]").skip(1).collect();
+        let writers: Vec<&&str> = chunks
+            .iter()
+            .filter(|c| c.contains("bootstrap_verify_with("))
+            .collect();
+        // Non-vacuity, and the number is the point: three commands persist
+        // credentials today. If one disappears this must be read, not adjusted.
+        assert_eq!(
+            writers.len(),
+            3,
+            "expected exactly 3 credential-writing commands (autosetup, account_create, \
+             bootstrap_verify); found {}",
+            writers.len()
+        );
+        for c in writers {
+            let name = c
+                .lines()
+                .find(|l| l.contains("fn "))
+                .unwrap_or("<unnamed>")
+                .trim();
+            assert!(
+                c.contains("sync_distro_soap_env("),
+                "this command saves SOAP credentials but never publishes them to the in-distro \
+                 CLI, so on Backend::Arch/Wsl every SOAP verb keeps returning SOAP_AUTH: {name}"
             );
         }
     }

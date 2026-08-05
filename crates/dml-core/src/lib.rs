@@ -13,5 +13,6 @@ pub mod launcher_config;
 pub mod proc;
 pub mod runner;
 pub mod setup;
+pub mod soap_env;
 pub mod util;
 pub mod vocab;

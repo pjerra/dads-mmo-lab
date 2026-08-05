@@ -649,6 +649,184 @@ fn live_stats_dials_the_db_port_from_the_title_dir() {
     }
 }
 
+// -- 5c. the SOAP-backed verbs ----------------------------------------------
+//
+// # THE BUG THIS GROUP EXISTS FOR (R6, fixed 2026-08-05)
+//
+// `wow_soap_autosetup` runs in the LAUNCHER, on Windows, and writes the Windows
+// `~/.dml/soap.env`. On `Backend::Arch` and `Backend::Wsl` the CLI that answers
+// every SOAP-backed verb — GM Tools, My Party, console send, announcements,
+// motd — runs INSIDE `dml-arch` and reads `/home/dml/.dml/soap.env`. Two files;
+// nothing copied one to the other. The launcher could prove a real round-trip,
+// report success and show the account in its credentials panel while every one
+// of those features came back `SOAP_AUTH`.
+//
+// Measured on this machine on 2026-08-05, before the fix: both copies named the
+// account `dmlsoap` and their passwords hashed differently
+// (`ed85a338402f…` on Windows, `c8e16a1e3b48…` in the distro).
+//
+// `dml_core::soap_env` closes it: the launcher publishes its proven credentials
+// into the distro, over stdin so no password reaches an argv, and ONLY over a
+// copy the distro's own CLI has just been refused with.
+//
+// This group is deliberately narrow. It asserts what a READ-ONLY suite can:
+// that the SOAP-backed verb answers the same way through both in-distro CLIs,
+// that a `SOAP_AUTH` is reported as such rather than hidden, and — the part no
+// unit test can reach — that `soap_env`'s classifier reads the REAL envelope
+// correctly. It never publishes anything: writing into the user's distro is the
+// launcher's job, not a test's.
+
+/// `wow server-info` → `dml-wow server-info`. THE probe verb, and a SOAP-backed
+/// read.
+///
+/// Both CLIs live in the same distro and read the same
+/// `/home/dml/.dml/soap.env`, so they must agree — and that agreement is the
+/// whole point: it is what makes `soap_env`'s single probe a valid statement
+/// about all 74 translated verbs rather than about `dml-wow` alone.
+///
+/// The assertion is on the VERDICT, not the payload: `players` and `uptime`
+/// move between two calls seconds apart, and `mean_ms`/`median_ms` are
+/// measurements.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_server_info_agrees_across_backends() {
+    let argv = &["wow", "server-info"];
+    let p = differential(argv);
+
+    // Both must reach the same verdict about the credentials. An `ok` on one
+    // side and a `SOAP_AUTH` on the other would mean the two CLIs are reading
+    // different files — which is exactly the class of bug this group is about,
+    // one level further in.
+    let code = |e: &Envelope| e.error.as_ref().map(|x| x.code.clone()).unwrap_or_default();
+    assert_eq!(
+        (p.bash.ok, code(&p.bash)),
+        (p.arch.ok, code(&p.arch)),
+        "the two in-distro CLIs disagree about SOAP: bash={} arch={}",
+        brief(&p.bash),
+        brief(&p.arch)
+    );
+
+    // And the `online` field must agree, since it is derived from the same
+    // credentials against the same worldserver.
+    if p.bash.ok {
+        assert_eq!(
+            p.bash.data["online"], p.arch.data["online"],
+            "server-info must agree about whether the world answered"
+        );
+    }
+}
+
+/// THE FIX, PROVEN ON THE REAL ENVELOPE.
+///
+/// `soap_env::classify_probe` is the one thing standing between "the in-distro
+/// CLI is refused" and a write into the user's distro, and every unit test of it
+/// feeds it an envelope the test itself built. This feeds it the envelope the
+/// REAL binary produced, through the REAL runner, and states what that means.
+///
+/// Three outcomes, all legitimate, all named — because a suite that could only
+/// pass when the server happened to be up would be skipped in disguise:
+///
+///   * `Working`  — the distro's credentials authenticate. `sync_with` will
+///                  NOT overwrite them. This is the state a healthy
+///                  `Backend::Wsl` user is in, and the reason the repair is
+///                  safe to turn on for them.
+///   * `Refused`  — the distro's credentials are wrong. THE state R6 leaves
+///                  behind, and the only one that licenses a write.
+///   * `Unknown`  — the world server is not answering. Nothing is written.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_the_probe_classifier_reads_the_real_cli_answer() {
+    use dml_core::soap_env::{classify_probe, probe_cli_soap, DistroSoap, PROBE_VERB};
+
+    // Straight through the production helper, so the runner, the translation and
+    // the classifier are all exercised as the launcher exercises them.
+    let via_helper = probe_cli_soap(&DmlRunner::arch());
+
+    // ...and again off the raw envelope, so the eprintln below can show WHAT was
+    // classified. These must agree; if they do not, the helper is not using the
+    // classifier this test is checking.
+    let argv: Vec<&str> = PROBE_VERB.to_vec();
+    let env = DmlRunner::arch()
+        .run_json(&argv)
+        .unwrap_or_else(|e| panic!("the probe verb must answer through the Arch runner: {e:?}"));
+    let direct = classify_probe(&env);
+    eprintln!("--- {argv:?} (soap_env probe)\n    envelope: {}\n    verdict : {direct:?}", brief(&env));
+    assert_eq!(via_helper, direct, "probe_cli_soap must use classify_probe's verdict");
+
+    match direct {
+        DistroSoap::Working => {
+            assert!(env.ok && env.data["online"] == true, "{}", brief(&env));
+        }
+        DistroSoap::Refused => {
+            // The R6 state. Named loudly rather than passed over: this is the
+            // machine telling us the in-distro CLI cannot do a single SOAP verb.
+            assert_eq!(env.error.as_ref().map(|e| e.code.as_str()), Some("SOAP_AUTH"));
+            eprintln!(
+                "    NOTE: the in-distro CLI is REFUSED. Every SOAP verb (GM Tools, My Party, \
+                 console send, announcements) fails until the launcher publishes its credentials."
+            );
+        }
+        DistroSoap::Unknown(ref why) => {
+            // Must never be reachable from a `SOAP_AUTH`: that would mean the
+            // one verdict that licenses a write is being thrown away.
+            assert_ne!(
+                env.error.as_ref().map(|e| e.code.as_str()),
+                Some("SOAP_AUTH"),
+                "a SOAP_AUTH was classified as Unknown: {why}"
+            );
+        }
+    }
+}
+
+/// NON-VACUITY CONTROL for the group above, and the reason it is worth its
+/// runtime: it proves the probe verb can FAIL on credentials, live.
+///
+/// `dml-wow server-info` is asked again with `DML_SOAP_PASS` deliberately wrong.
+/// The env pair outranks `~/.dml/soap.env` in `SoapConfig::load`, so this is a
+/// clean way to make the real binary produce the real `SOAP_AUTH` envelope
+/// WITHOUT touching a single file, a single account or a single row — the
+/// override lives in one child process and dies with it.
+///
+/// Without this, `live_the_probe_classifier_reads_the_real_cli_answer` passing
+/// as `Working` would prove only that the classifier can say yes.
+#[test]
+#[ignore = "spawns into the real dml-arch distro; run with --ignored"]
+fn live_a_wrong_password_really_produces_the_soap_auth_the_classifier_keys_on() {
+    use dml_core::soap_env::{classify_probe, DistroSoap};
+
+    // `--exec` runs no shell, so `env` does the exporting as a real argv token.
+    // Nothing here is written anywhere: this is a per-process override.
+    let (stdout, _) = raw(&[
+        "env",
+        "DML_SOAP_USER=dml_no_such_acct",
+        "DML_SOAP_PASS=definitelyNotIt",
+        ARCH_BINARY,
+        "server-info",
+    ]);
+    let line = stdout.trim().lines().next().unwrap_or("{}");
+    let env = dml_core::envelope::parse_envelope(line)
+        .unwrap_or_else(|e| panic!("expected an envelope, got: {stdout} ({e})"));
+
+    // If the world server is down, this call cannot reach a 401 at all — and
+    // saying so is better than a green tick that proved nothing.
+    let reachable = !(env.ok && env.data["online"] == false);
+    assert!(
+        reachable,
+        "CONTROL SKIPPED: the world server is not answering SOAP, so a wrong password cannot be \
+         distinguished from a down server. Start the server and re-run: {}",
+        brief(&env)
+    );
+
+    assert_eq!(env.ok, false, "a wrong password must not answer ok: {}", brief(&env));
+    assert_eq!(
+        env.error.as_ref().map(|e| e.code.as_str()),
+        Some("SOAP_AUTH"),
+        "the refusal must be SOAP_AUTH — that literal is what classify_probe keys on: {}",
+        brief(&env)
+    );
+    assert_eq!(classify_probe(&env), DistroSoap::Refused);
+}
+
 // -- 6. the bash fallback --------------------------------------------------
 
 /// THE SAFETY PROPERTY, proven end to end for the first time.
