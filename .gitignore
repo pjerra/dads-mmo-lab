@@ -1,3 +1,6 @@
 .DS_store
 .vscode
 /target/
+# bats/build.sh writes cli/dml through a mktemp sibling; a run interrupted
+# mid-build leaves one behind and `git add -A` sweeps it into a commit.
+cli/dml.build.*

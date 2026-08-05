@@ -761,6 +761,37 @@ Append to `docs/superpowers/plans/2026-08-05-server-survival.md` a short **Human
 
 ---
 
+## Known residual findings after fix round 3 (2026-08-05)
+
+Recorded HERE, in git, rather than only in `.superpowers/` — which is gitignored,
+and this repo has already lost a user-approved spec and a 13-item feature batch
+that way. All four are below the line the final review drew as "blocks the gate";
+none of them is a reason to delay the click-through.
+
+- **M9 — the exit guarantee is per-60-second-burst, not per-sequence.** Proven
+  RED by a probe: twenty exit requests spaced one `EXIT_REQUEST_WINDOW` apart
+  were all prevented. A webview that spoke once and then died therefore traps a
+  *patient* user forever — click Exit, window surfaces, no dialog paints, go
+  away, come back, click again, vetoed, indefinitely. Nothing tells them to
+  click again. The signal that collapses this is already in the file and unused:
+  the keep-awake watchdog treats the same `AppState::last_status_push` as stale
+  after 2 minutes, while `exit_prevention_allowed` reads it as a set-once latch.
+  Reuse the threshold.
+- **L11 — a fourth `ExitAction` variant compiles, silently prompts, and is
+  untested.** `should_prompt_on_exit` is `!matches!(…, ExitNow)` rather than an
+  exhaustive match, and every test iterates a hand-written array parallel to the
+  real enum.
+- **L12 — `HideToTray` hides a launcher that is silently staying up.** Created
+  by C1: with `closeToTray` ON (the default) and a stop in flight, X hides the
+  terminal, the note and the Close-anyway button. If the stop then fails the
+  launcher does not exit, so there is no visible surface at all — a `wsl.exe`
+  holder pinning ~1.4 GB, server still up, indistinguishable from a clean close.
+- **L13's remainder — copy and doc drift.** `Config.svelte`'s "so the launcher
+  stops the server for you" is now conditional three ways (Close anyway, the
+  bound, the never-spoke path) and the spec sentence moves with it;
+  `backend-copy.test.ts` still carries its own pre-refactor `code()`/`find()`
+  without `normalizeEol`, the one stripper the F2 consolidation missed.
+
 ## Human gate
 
 `live_wsl_keepalive.rs` (Task 6) proves the WSL-side timing claim against the real distro — measured 2026-08-05: established the holder, survived 40.1s (well past the ~15s deadline), released, died 16.9s later (inside the ~25s expectation). It cannot prove the other half of this plan: real OS window state (hidden vs. destroyed vs. surfaced) and a real tray-icon click do not exist inside a `cargo test`/`vitest` process. Tasks 3 and 4's reviews caught two genuine regressions in this exact area — a window-destroy loop and a dialog opening into a hidden webview nobody could see — by reading source (vendored Tauri runtime code, `RunEvent` wiring), not by running anything, precisely because nothing runnable could see them either. **Tray Quit and window-close were previously code-inspected only; that is exactly what makes a scripted check insufficient here.** The items below are what only a person, running the real app, can verify — including two cases the plan's original script would never have reproduced.
