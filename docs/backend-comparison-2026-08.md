@@ -325,12 +325,52 @@ Two consequences:
   is a larger advantage than the table shows, and a liability at the same time,
   because the same mechanism takes a running server with it.
 
-This is a *measured behaviour of this machine as configured*
-(`vmIdleTimeout=60000`), not a proven property of every Arch WSL install. In
-production the launcher polls status through `wsl.exe`, and each poll resets the
-idle timer — so a running launcher would likely mask it entirely. **It has not
-been verified whether a server survives unattended with the launcher closed.**
-That is the obvious next test, and it matters more than any number above.
+### The cause, established 2026-08-05
+
+The mechanism was chased down the next day and is no longer open. Full workings,
+including every mitigation tested and the launcher change it implies:
+[`docs/superpowers/plans/2026-08-05-wsl-distro-lifetime.md`](superpowers/plans/2026-08-05-wsl-distro-lifetime.md).
+The short version:
+
+**WSL 2.7.10 terminates a distro instance ~15 s after the last `wsl.exe` client
+session *into that distro* exits, regardless of what is still running inside it.
+The timer is reset only by another session into that distro, and no
+configuration key anywhere changes or disables it.**
+
+Measured with an oracle that never calls `wsl.exe` during the observation window
+(a heartbeat from a systemd unit inside the guest, watched from Windows by file
+length — polling with `wsl --list` would have measured the harness itself).
+**Eight unattended runs: 14.7–14.9 s, median 14.8, spread 0.2 s.** This is not a
+"sometimes".
+
+* `vmIdleTimeout` is a **second, independent stage** and not the one that
+  matters: it governs when the empty *VM* exits, measured at distro death + 61.8 s.
+  Setting `vmIdleTimeout=-1` was tested directly — **the distro still died at
+  14.8 s** and the VM then never exited. It fixes nothing and makes the idle
+  cost permanent, i.e. it destroys the only thing the Arch backend wins.
+* The guest journal names the caller: `poweroff requested from client PID 577
+  ('systemctl') (unit init.scope)` — WSL's own init. `dockerd` then logs
+  `Daemon shutdown complete`. The containers were **stopped gracefully**, which
+  is exactly why `OOMKilled=false` / `ExitCode=0` fitted nothing crash-shaped.
+* The 25 s in the incident vs 15 s at idle is the same event: 15 s idle timer,
+  then WSL's 10 s grace expiring because systemd could not stop 1,948 bots in
+  time, hence `reboot(RB_POWER_OFF)`.
+
+The guess above — that launcher polling would mask it — was **half right, and the
+half that is wrong is the important half.** A session into the distro every 7 s
+does hold it (proven by causation: stop polling, it dies 14.0 s later). But
+`wsl --list --verbose` every 7 s does **not** (dead at 14.8 s despite 8 polls),
+and a session every 20 s does not either. And the launcher's poll is a
+`setInterval` in a WebView2 webview that **hides to tray on close** — the exact
+state in which Chromium-family engines throttle timers past the 15 s budget. So
+the keep-alive must be an explicit, Rust-owned held session, not a side effect of
+the status poll.
+
+`restart: unless-stopped` (set on 3 services) does not prevent any of this. It
+makes the outage *self-healing on next touch*: the next `wsl -d dml-arch …` boots
+the distro and `dockerd` restores the stack. The user therefore sees a server
+that is up every time they look at it and down whenever their friends try to
+connect.
 
 ---
 
@@ -353,6 +393,34 @@ pile of superseded image tags rather than a difference between the backends.
 The one place the Arch backend wins decisively is a case the harness cannot
 score: left alone, it stops costing anything at all, because WSL tears it down
 — and the same mechanism will take a running server down with it.
+
+### The qualification that outranks the resource question (2026-08-05)
+
+**As it stands, `Backend::Arch` cannot host a server unattended.** 15 s after the
+last `wsl.exe` session into `dml-arch` exits, WSL powers the distro off with
+whatever is running inside it. Eight measured runs, 0.2 s spread, no
+configuration that prevents it. That is not a footnote to a RAM comparison; it
+is the difference between a backend that saves a gigabyte and a backend that
+cannot do its job.
+
+It is fixable and the fix is measured to work: the launcher must hold one
+long-lived `wsl.exe --exec /bin/sleep infinity` session for as long as the
+server should run — one Windows process and one guest `sleep`, touching no
+user-owned state. That work is specified in
+[`docs/superpowers/plans/2026-08-05-wsl-distro-lifetime.md`](superpowers/plans/2026-08-05-wsl-distro-lifetime.md)
+and is **required before the Arch backend can be offered for running a server**,
+not an optimisation.
+
+Two consequences for the comparison above:
+
+* **Part of the Arch idle saving is a bill not yet paid.** Docker Desktop spends
+  some of its ~590 MB of Windows-side processes doing exactly this babysitting,
+  deliberately. The Arch column does not yet carry its equivalent.
+* **Even fixed, the contract becomes "the server runs while the launcher runs."**
+  Server-up with no DML process on Windows at all is not achievable on the Arch
+  backend by any mechanism found; matching Docker Desktop there would mean
+  shipping a Windows service. If unattended hosting matters, that is a point for
+  Docker Desktop that launcher work does not erase.
 
 ---
 
@@ -395,9 +463,12 @@ produced the disk tables above. The precondition self-test still passes 13/13.
 * **A like-for-like server-load comparison.** Blocked by the 19.5× config
   difference in §1, which could not be corrected without a forbidden config
   change.
-* **Whether the server survives unattended.** The teardown above was observed
-  with the launcher closed and no client holding the distro. Whether a normal
-  session (launcher open, polling) prevents it was not tested.
+* ~~**Whether the server survives unattended.**~~ **Answered 2026-08-05: it does
+  not.** WSL powers the distro off ~15 s after the last session into it exits
+  (8 runs, 14.7–14.9 s). A distro session every 7 s does prevent it; a
+  `wsl --list` poll every 7 s does not, and neither does a session every 20 s.
+  See the "cause" subsection above and
+  [`docs/superpowers/plans/2026-08-05-wsl-distro-lifetime.md`](superpowers/plans/2026-08-05-wsl-distro-lifetime.md).
 * **A quiet machine.** The user's session was live throughout; see §4.
 
 ---
