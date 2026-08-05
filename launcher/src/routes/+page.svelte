@@ -15,7 +15,14 @@
   import { listen } from "@tauri-apps/api/event";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { charStore, charView, setSelectedChar } from "$lib/char-store.svelte";
-  import { backendStatus, wowAccounts, type Account, type CharacterSummary } from "$lib/api";
+  import {
+    backendStatus,
+    wowAccounts,
+    exitStopAndClose,
+    exitAnyway,
+    type Account,
+    type CharacterSummary,
+  } from "$lib/api";
   import Home from "$lib/pages/Home.svelte";
   import Library from "$lib/pages/Library.svelte";
   import Console from "$lib/pages/Console.svelte";
@@ -47,6 +54,21 @@
     initKeepaliveWatch,
     dismissKeepaliveWarning,
   } from "$lib/keepalive-state.svelte";
+  import { exitGuard, exitCopy } from "$lib/exit-guard.svelte";
+  import { termBuf, beginRun } from "$lib/term-store.svelte";
+  import { applyEvent } from "$lib/terminal-state";
+  import Terminal from "$lib/Terminal.svelte";
+  import { toolPrefs } from "$lib/tool-prefs.svelte";
+
+  // v0.1.0 scope is WoW Playerbots on the native backend only, so this is the
+  // one title id in play -- same literal every other page hardcodes locally
+  // (Home.svelte, Config.svelte, ModuleFiles.svelte, Library.svelte).
+  const WOW_ID = "wow-server-playerbots";
+  // The exit dialog's own terminal buffer (Task 4). A distinct key from
+  // "home"/"library"/etc: this streams into the shell-level exit modal, not
+  // any one page, and the modal has to work no matter which page is open when
+  // the user closes the launcher.
+  const exitBuf = termBuf("exit");
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -130,6 +152,31 @@
     // news is "your server is about to stop", and it must not depend on which
     // page happens to be open.
     initKeepaliveWatch();
+    // THE MISSING LISTENER (Task 4). Both close entry points -- the window's
+    // own X (on_window_event/CloseRequested) and Tray Quit
+    // (RunEvent::ExitRequested) -- already hide the window and emit this when
+    // a running-or-unknown server would be cut off; before this listener
+    // existed that emission had nobody to hear it, so the only recovery was
+    // the tray's Open item. Registered here (mount, shell level) rather than
+    // inside a page, for the same reason tray-action/keepalive are: it must
+    // fire no matter which page happens to be open. This is as early as the
+    // frontend can register it -- see the Task 4 report for the residual
+    // (pre-existing, shared with tray-action/wsl-keepalive) race between the
+    // native window's first paint and this script's first run.
+    void listen<string>("exit-requested", (e) => {
+      // A confirmed stop can already be running in the background (see
+      // confirmExit below). EXIT_CONFIRMED only latches Rust-side once that
+      // stop SETTLES, so a second close attempt mid-stop (e.g. Tray Quit
+      // clicked twice) genuinely re-emits -- and must not reset progress or
+      // the terminal out from under the run already in flight.
+      if (exitGuard.busy) return;
+      // The wire only ever carries these two values on this event (a third,
+      // "exit_now", never reaches an emit -- see should_prompt_on_exit in
+      // lib.rs) -- this fallback is forward-compat, not a real branch.
+      exitGuard.kind = e.payload === "prompt_unknown" ? "prompt_unknown" : "prompt_running";
+      exitGuard.open = true;
+      exitGuard.note = "";
+    });
     // Tray Start/Stop. Rust has already surfaced the window; land on Home and
     // hand the request over, so Home runs the SAME act() its own buttons do.
     void listen<string>("tray-action", (e) => {
@@ -215,6 +262,61 @@
   function pickChar(account: string, c: CharacterSummary) {
     setSelectedChar({ guid: c.guid, name: c.name, account });
     charMenuOpen = false;
+  }
+
+  // The exit dialog (Task 4). Confirm runs the ordinary games_stop path (via
+  // exit_stop_and_close) and streams it into exitBuf so a long stop -- ~2,000
+  // bots is not instant -- shows progress instead of a frozen-looking window.
+  // manageDocker comes from the SAME persisted preference gamesStop's other
+  // call sites use (toolPrefs.manageDocker, Home.svelte's act("stop")) rather
+  // than a second default invented here.
+  async function confirmExit() {
+    exitGuard.busy = true;
+    exitGuard.note = "";
+    const buf = beginRun("exit");
+    try {
+      await exitStopAndClose(
+        WOW_ID,
+        (e) => {
+          buf.term = applyEvent(buf.term, e);
+        },
+        toolPrefs.manageDocker,
+      );
+      // Success: exit_stop_and_close already called app.exit(0) Rust-side
+      // once the stop settled. Still being here means the process is on its
+      // way down -- nothing left for this component to do.
+    } catch (e) {
+      // The stop reported a failure -- but exit_stop_and_close calls
+      // app.exit(0) UNCONDITIONALLY right after games_stop settles, success
+      // or not (see its doc comment in lib.rs), so the process is closing
+      // regardless. Surface the failure in the terminal rather than let it
+      // vanish, and drop `busy` so the dialog is never stuck mid-run on the
+      // off chance close is delayed long enough for this catch to paint.
+      const err = e as { code?: string; message?: string; hint?: string };
+      buf.term = applyEvent(buf.term, {
+        event: "error",
+        error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
+      });
+      exitGuard.busy = false;
+      exitGuard.note = "The stop reported a problem. The launcher is still closing.";
+    }
+  }
+
+  // Cancel is only reachable while NOT busy (see the markup's `disabled`) --
+  // once Confirm has actually started stopping the server for real, there is
+  // no cancel path back (exit_stop_and_close doesn't support one), so a
+  // clickable Cancel there would just hide the dialog while an unannounced
+  // close still lands seconds later. Close anyway is the one exit while busy.
+  function cancelExit() {
+    exitGuard.open = false;
+    exitGuard.note = "";
+  }
+
+  // The escape hatch (point C: the launcher must always be closable). Its own
+  // command, independent of exit_stop_and_close, so it still works if that
+  // stop is hung rather than merely slow.
+  async function closeAnyway() {
+    await exitAnyway();
   }
 </script>
 
@@ -411,6 +513,42 @@
     </button>
   {/if}
 </main>
+
+{#if exitGuard.open}
+  <!-- The exit dialog (Task 4). A true overlay, not a grid child like the
+       banners above -- see those banners' CSS comments for why an auto-placed
+       grid child lands in the 200px sidebar track; a fixed-position overlay
+       sidesteps that instead of fighting it, and this one has to sit above
+       everything else in the shell, not next to it. -->
+  {@const copy = exitCopy(exitGuard.kind)}
+  <div class="exit-overlay">
+    <div class="exit-modal" role="alertdialog" aria-modal="true" aria-labelledby="exit-title">
+      <h2 id="exit-title">{copy.title}</h2>
+      <p class="exit-body">{copy.body}</p>
+      {#if exitBuf.show}
+        <Terminal state={exitBuf.term} logName="dml-exit" />
+      {/if}
+      {#if exitGuard.note}
+        <p class="exit-note">{exitGuard.note}</p>
+      {/if}
+      <div class="exit-actions">
+        <button onclick={cancelExit} disabled={exitGuard.busy}>{copy.cancel}</button>
+        <div class="exit-actions-right">
+          {#if exitGuard.busy}
+            <!-- Stopping ~2,000 bots is not instant. Without this, a window
+                 that looks frozen is how a user reaches for Task Manager --
+                 which reproduces the exact hard cut this whole feature
+                 exists to prevent. -->
+            <button class="exit-force" onclick={closeAnyway}>Close anyway</button>
+          {/if}
+          <button class="primary" onclick={confirmExit} disabled={exitGuard.busy}>
+            {exitGuard.busy ? "Stopping…" : copy.confirm}
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   :global(body) { margin: 0; background: #010409; color: #c9d1d9; font-family: "Segoe UI", system-ui, sans-serif; }
@@ -623,4 +761,52 @@
   .sidebar .char-menu .char-row.cursel { color: #58a6ff; }
   .char-sub { font-size: 11px; color: #6e7681; }
   .char-err { font-size: 11.5px; color: #f85149; padding: 4px 6px; }
+
+  /* The exit dialog (Task 4). z-index above .ready-toast (50): closing the
+     app takes priority over a dismissible toast. Fixed + inset:0 rather than
+     a grid child -- see the markup comment. */
+  .exit-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: rgba(1, 4, 9, 0.72);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .exit-modal {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: min(520px, 100%);
+    max-height: 85vh;
+    overflow-y: auto;
+    background: #0d1117;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: 20px 22px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+  }
+  .exit-modal h2 { margin: 0; font-size: 17px; color: #f0f6fc; }
+  .exit-body { margin: 0; color: #c9d1d9; font-size: 14px; line-height: 1.45; }
+  .exit-note { margin: 0; font-size: 12.5px; color: #d29922; }
+  .exit-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; }
+  .exit-actions-right { display: flex; gap: 8px; }
+  .exit-modal button {
+    background: #21262d;
+    color: #c9d1d9;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 7px 16px;
+    font-size: 13.5px;
+    cursor: pointer;
+  }
+  .exit-modal button:disabled { opacity: 0.5; cursor: default; }
+  .exit-modal button.primary { background: #238636; border-color: #2ea043; color: white; }
+  /* Deliberately not styled like a normal destructive action (solid red) --
+     this isn't "delete something", it's "skip the safety this whole feature
+     provides", so it reads as available-but-not-the-default rather than as
+     the button to reach for first. */
+  .exit-modal button.exit-force { background: transparent; border-color: #f85149; color: #f85149; }
 </style>

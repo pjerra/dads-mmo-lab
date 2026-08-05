@@ -10,6 +10,7 @@ function report(over: Partial<KeepaliveReport> = {}): KeepaliveReport {
     gave_up: false,
     attempts: 0,
     last_error: null,
+    last_verdict: null,
     ...over,
   };
 }

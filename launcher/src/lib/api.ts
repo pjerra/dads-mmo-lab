@@ -2152,6 +2152,14 @@ export interface KeepaliveReport {
   gave_up: boolean;
   attempts: number;
   last_error: string | null;
+  // The most recent status-poll verdict observed, whatever it was (null if no
+  // poll has landed yet). Rust-side since Task 2 of the server-survival plan
+  // (wsl_keepalive.rs's KeepaliveReport); this mirror was missing until Task 4
+  // touched this file for the exit-dialog wrappers below and closed the gap.
+  // Nothing here reads it yet -- keepaliveWarning() only needs gave_up/
+  // last_error -- but the type must stay byte-true to the Rust struct, which
+  // serializes it unconditionally (no skip_serializing_if).
+  last_verdict: string | null;
 }
 export async function wslKeepaliveStatus(): Promise<KeepaliveReport> {
   return await invoke<KeepaliveReport>("wsl_keepalive_status");
@@ -2173,4 +2181,40 @@ export async function autostartSet(on: boolean): Promise<void> {
 // (see auto-shutdown.svelte.ts); this just flips the backend watcher.
 export async function setAutoShutdown(enabled: boolean): Promise<void> {
   return await invoke("set_auto_shutdown", { enabled });
+}
+
+// --- Exit confirmation (server-survival plan, Task 4) ----------------------
+// Closing the launcher can stop the server -- see exit-guard.svelte.ts and
+// wsl_keepalive.rs for the full story. The Rust side decides WHETHER to ask
+// (an "exit-requested" event, not a command -- listened for in +page.svelte)
+// and these are the two commands the resulting dialog drives. `exit_intent`
+// also exists Rust-side but is deliberately not wrapped here: the dialog is
+// driven entirely by the event payload it already received, and querying
+// exit_intent on mount would recompute a fresh verdict with no relation to
+// whether the user actually asked to close -- i.e. it would pop the dialog
+// unprompted on ordinary startup whenever a server happens to be running.
+
+// Same id/onEvent/manageDocker shape as gamesStop, because this runs the
+// exact same games_stop path before the process exits. ORDER IS THE
+// CONTRACT on the Rust side too: exit_stop_and_close awaits the stop in
+// full and THEN calls app.exit(0) -- unconditionally, whether the stop
+// succeeded or not -- so a failed stop still closes the launcher rather
+// than stranding the dialog. See exit_stop_and_close's doc comment in
+// lib.rs.
+export const exitStopAndClose = (
+  id: string,
+  onEvent: (e: TermEvent) => void,
+  manageDocker?: boolean,
+): Promise<void> => {
+  const ch = new Channel<TermEvent>();
+  ch.onmessage = onEvent;
+  return invoke("exit_stop_and_close", { id, manageDocker, onEvent: ch });
+};
+
+// The escape hatch. Stopping ~2,000 bots is not instant, and this closes
+// immediately regardless of what exit_stop_and_close is doing -- it is a
+// separate command, not a cancellation of the first one, so it works even
+// if the stop is hung.
+export async function exitAnyway(): Promise<void> {
+  return await invoke("exit_anyway");
 }
