@@ -7,8 +7,11 @@ illustrations of what a reading would mean — the measured answers are in the
 results document, and where the two disagree the results document wins. Three
 corrections it makes to this one:
 
-* the "~740 MB of Windows-side processes" figure below measured **551.8–594.2 MB
-  across 8 processes** on the day of the run;
+* the "~740 MB of Windows-side processes" figure below measured **548.6–586.5 MB
+  across 8 processes** on the day of the run (nine Desktop samples,
+  `samples.csv` lines 3–11; an earlier version of this line said
+  "551.8–594.2 MB", which was wrong at both ends — 594.2 appears in no record
+  and 551.8 is not the minimum);
 * `docker desktop stop` **exits the whole application** on Docker Desktop engine
   29.6.2, so the "running, engine stopped" row of the three-state table costs
   **0 MB**, not ~740 MB, by that route;
@@ -16,6 +19,12 @@ corrections it makes to this one:
   the last `wsl.exe` client exited — once with 1,948 bots live — so every Arch
   sample needs a holder process, and the run procedure in Part C below is
   incomplete without one.
+* the run's **boot timing was never sampled**: all 20 records carry
+  `"ready": null` because `-TimeReady` was not run. It was re-measured
+  separately on 2026-08-05 (Desktop **33.1 s**, Arch **23.5 s**, T0 to the log
+  marker); see the results document. Note for anyone using `-TimeReady` next
+  time that its `MarkerSeconds` is **poll-derived on a 5 s loop**, not taken
+  from the log line's own timestamp.
 
 **What is being compared.** The same AzerothCore + playerbots stack, two ways:
 
@@ -220,6 +229,12 @@ The authoritative probe is the product's own definition, mirrored from
 ac-worldserver`, scanning case-insensitively for `world initialized in`. The
 harness records **both** times so the gap is visible, and marks a TCP-only
 result as not authoritative.
+
+**Both of the harness's own figures are poll-derived**, on a 5 s sleep loop, and
+`-TimeReady` does not start the server — it prints "Trigger the start NOW" and
+waits, so T0 and the start are separate acts. A figure that must be
+*timestamp*-derived has to come from `docker logs -t` and the marker line's own
+timestamp, which is how the 2026-08-05 re-measurement was taken.
 
 ### 10. Disk: the two sides are not like for like
 
