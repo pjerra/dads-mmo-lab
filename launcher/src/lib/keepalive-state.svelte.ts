@@ -32,13 +32,23 @@ export const keepaliveState = $state<{ warning: string | null; dismissed: boolea
 /// mechanism that is not running. Both answer `null`, but for different
 /// reasons, and the distinction is why this takes the whole report rather than
 /// a boolean.
+///
+/// THE WAY OUT IS NAMED. A give-up latches until the user asks again, and
+/// `want_running` -- which `games_start`/`games_restart` call -- is what reopens
+/// the budget. A banner that reports the failure and its consequence but not the
+/// one action that fixes it leaves the user staring at a dead server with no
+/// visible move; that was the whole reason the recovery path went unnoticed as
+/// broken in the first place.
+const RECOVERY = "Press Start (or Restart) on the Home page to try again.";
+
 export function keepaliveWarning(r: KeepaliveReport | null): string | null {
   if (!r || !r.applies) return null;
   if (!r.gave_up) return null;
   const why = r.last_error?.trim();
-  return why
-    ? `The launcher could not keep the WSL distro open: ${why} Your server will stop about 15 seconds after the last connection to it closes.`
-    : "The launcher could not keep the WSL distro open. Your server will stop about 15 seconds after the last connection to it closes.";
+  const cause = why
+    ? `The launcher could not keep the WSL distro open: ${why}`
+    : "The launcher could not keep the WSL distro open.";
+  return `${cause} Your server will stop about 15 seconds after the last connection to it closes. ${RECOVERY}`;
 }
 
 /// Read the live report AND subscribe to the announcement. Both, on purpose.

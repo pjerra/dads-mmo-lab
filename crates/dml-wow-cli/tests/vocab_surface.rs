@@ -47,6 +47,197 @@ fn every_dml_wow_translation_parses_under_the_real_clap_tree() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T1b — do the promoted flags land on the RIGHT positionals?
+//
+// T1 above is a much weaker claim than it looks, and the gap is silent data
+// corruption rather than a crash: TWO POSITIONALS OF THE SAME TYPE PARSE IN
+// EITHER ORDER. Swap `wow party kick`'s `pos` from `["--player","--bot"]` to
+// `["--bot","--player"]` and the launcher's `--player Bob --bot Zug` becomes
+// `party kick Zug Bob` — kicking a bot named "Bob" from a player named "Zug" —
+// and every suite in the workspace stays green. Mutation-proven, and ~19 rows
+// are exposed, several of them mutating GM verbs: `account set-password`,
+// `account set-gm`, `mail-item`, `gm gold`/`summon`/`at-login`, `config set`,
+// `tuning set`, `party preset-save`/`preset-load`.
+//
+// The oracle stays the clap derive rather than a hand-written argv table —
+// hand-writing the expected output is the failure mode this file was built to
+// avoid. Clap knows every subcommand's positionals AND their index order, and
+// the launcher's flag `--player` is the same word as the derive's field
+// `player`. So the row's promotion order must equal the leaf subcommand's
+// positional order, name for name. A row whose flags do NOT share their
+// names with the arm's fields is not a hole — it fails loudly and is listed in
+// `ALIASES` with the reason.
+// ---------------------------------------------------------------------------
+
+/// Bash flags whose `dml-wow` positional is spelled differently, and why.
+///
+/// Deliberately short and explicit rather than a fuzzy match: an alias is a
+/// place where the two vocabularies disagree, and each one is a decision
+/// somebody made. A NEW mismatch must be read and named here — absorbing it
+/// silently is how an order bug would hide.
+///
+/// Every entry below is a rename of a SINGLE positional, where no order can be
+/// wrong; that is not a coincidence, it is why nobody noticed the spellings had
+/// drifted. Keyed on `(row verb, flag) -> field` so an alias cannot leak into
+/// another row that happens to use the same flag name.
+const ALIASES: &[(&[&str], &str, &str)] = &[
+    // `dml-wow client-path set` names its argument for what it is on that side:
+    // the WoW install DIRECTORY, not a free-form path.
+    (&["wow", "client-path", "set"], "--path", "dir"),
+    // `char` is a Rust KEYWORD, so no derive can ever spell this field `char`.
+    // A structural rename, not a choice — but written out per row anyway, so a
+    // sixth character-taking verb has to be looked at rather than absorbed.
+    (&["wow", "teleport"], "--char", "char_name"),
+    (&["wow", "paperdoll"], "--char", "name"),
+    (&["wow", "char-progress"], "--char", "name"),
+    (&["wow", "achievements"], "--char", "name"),
+    // `--entries` is bash's word for the comma-separated id list; `dml-wow`
+    // parses it into `ItemIds` and names it for the ids it holds.
+    (&["wow", "item-info"], "--entries", "ids"),
+    // bash's `--file` is `dml-wow`'s `name`, and the arm's own doc says why:
+    // it is a file NAME from the `config files` allowlist, never a path.
+    (&["wow", "config", "raw-read"], "--file", "name"),
+    (&["wow", "config", "raw-write"], "--file", "name"),
+];
+
+/// The `dml-wow` positional this row's flag promotes to.
+fn positional_id(verb: &[&str], flag: &str) -> String {
+    for (v, from, to) in ALIASES {
+        if *v == verb && *from == flag {
+            return (*to).to_string();
+        }
+    }
+    flag.trim_start_matches('-').replace('-', "_")
+}
+
+/// The leaf subcommand `argv` selects, walked through clap's own metadata.
+/// Stops at the first token that names no subcommand — that token is the first
+/// positional value.
+fn leaf<'a>(root: &'a clap::Command, argv: &[String]) -> &'a clap::Command {
+    let mut cur = root;
+    for tok in argv {
+        let Some(next) = cur
+            .get_subcommands()
+            .find(|s| s.get_name() == tok || s.get_all_aliases().any(|a| a == tok))
+        else {
+            break;
+        };
+        cur = next;
+    }
+    cur
+}
+
+/// The leaf's positionals, in the index order clap will fill them.
+///
+/// The caller MUST have called `Command::build()` on the root first: clap
+/// assigns positional indices during the build, so on an unbuilt tree
+/// `get_index()` answers `None` for everything and this returns an empty list —
+/// which every prefix comparison below would then satisfy at length zero. A
+/// vacuous pass that looks exactly like a clean one; the length floor in the
+/// test is the second guard against it.
+fn positionals_in_order(cmd: &clap::Command) -> Vec<String> {
+    let mut v: Vec<(usize, String)> = cmd
+        .get_arguments()
+        .filter(|a| a.is_positional())
+        .filter_map(|a| a.get_index().map(|i| (i, a.get_id().as_str().to_string())))
+        .collect();
+    v.sort_by_key(|(i, _)| *i);
+    v.into_iter().map(|(_, id)| id).collect()
+}
+
+/// THE TEST. Every promoted flag lands on the positional that means the same
+/// thing, in the same order.
+#[test]
+fn every_promoted_flag_lands_on_the_positional_that_means_the_same_thing() {
+    use clap::CommandFactory;
+    // `build()` is not optional — see `positionals_in_order`. Without it every
+    // positional's index is `None` and the whole test passes by comparing
+    // empty lists.
+    let mut root = Cli::command();
+    root.build();
+
+    let mut checked = 0usize;
+    let mut multi = 0usize;
+    // COLLECTED, not asserted one at a time: a table-wide invariant should
+    // report the whole truth in one run, or fixing five rows takes five runs
+    // and the fifth is a surprise.
+    let mut wrong: Vec<String> = Vec::new();
+
+    for row in TABLE.iter().filter(|r| r.target == Target::DmlWow && !r.positionals.is_empty()) {
+        let t = translate_for_arch(row.sample);
+        let cmd = leaf(&root, &t.argv);
+        let have = positionals_in_order(cmd);
+        let want: Vec<String> =
+            row.positionals.iter().map(|f| positional_id(row.verb, f)).collect();
+
+        checked += 1;
+        if want.len() >= 2 {
+            multi += 1;
+        }
+        if have.len() < want.len() {
+            wrong.push(format!(
+                "{:?} promotes {} flags but `dml-wow {}` declares only {} positionals: {have:?}",
+                row.verb,
+                want.len(),
+                cmd.get_name(),
+                have.len()
+            ));
+            continue;
+        }
+        if have[..want.len()] != want[..] {
+            wrong.push(format!(
+                "{:?} promotes {:?} -> {want:?}, but `dml-wow {}` fills {:?} IN THAT ORDER",
+                row.verb,
+                row.positionals,
+                cmd.get_name(),
+                &have[..want.len()]
+            ));
+        }
+    }
+
+    // NON-VACUITY. A filter that matched nothing, or an unbuilt clap tree
+    // (every `get_index()` `None`, so every `have` empty and every comparison
+    // trivially true at length zero), must fail here rather than pass.
+    assert!(checked >= 30, "only {checked} rows with promoted flags checked");
+    assert!(
+        multi >= 15,
+        "only {multi} rows promote two or more flags — those are the only ones an ORDER \
+         error can corrupt, and the scan found too few of them to be working"
+    );
+    assert!(
+        wrong.is_empty(),
+        "these rows send their values to the wrong `dml-wow` positionals:\n  {}\n\n\
+         An order error here is SILENT: two positionals of the same type parse either way \
+         round, so the command still runs — with the values swapped. Fix the row's `pos` \
+         order in crates/dml-core/src/vocab.rs, or, if the two vocabularies really do spell \
+         one argument differently, add it to ALIASES above WITH ITS REASON.",
+        wrong.join("\n  ")
+    );
+}
+
+/// THE INCIDENT, spelled out. The generic guard above covers all ~19 rows; this
+/// names the one the reviewer mutated, end to end and in the launcher's own
+/// words, because a swap here kicks the wrong character out of the wrong party.
+#[test]
+fn party_kick_sends_the_player_first_and_the_bot_second() {
+    let t = translate_for_arch(&["wow", "party", "kick", "--player", "Bob", "--bot", "Zug"]);
+    assert_eq!(t.argv, vec!["party", "kick", "Bob", "Zug"]);
+
+    let argv: Vec<&str> =
+        std::iter::once("dml-wow").chain(t.argv.iter().map(String::as_str)).collect();
+    let parsed = Cli::try_parse_from(&argv).expect("the translation must parse");
+    match parsed.command {
+        dml_wow_cli::cli::Cmd::Party {
+            cmd: dml_wow_cli::cli::PartyCmd::Kick { player, bot },
+        } => {
+            assert_eq!(player, "Bob", "the --player value must arrive as the player");
+            assert_eq!(bot, "Zug", "the --bot value must arrive as the bot");
+        }
+        other => panic!("expected Party Kick, got {other:?}"),
+    }
+}
+
 /// The other half of the incompatibility: `--json`. Verified against the real
 /// binary — `dml-wow version --json` is "unexpected argument '--json' found".
 /// If the translation ever let one through, this is where it shows up.

@@ -48,6 +48,20 @@ describe("keepaliveWarning", () => {
     expect(msg).not.toContain("null");
   });
 
+  it("names the way out, not just the damage", () => {
+    // A give-up latches until the user asks again -- `games_start` calls
+    // `server_should_run()`, which is the ONE thing that reopens the budget in
+    // `wsl_keepalive.rs`. A banner that reports a dead keep-alive without
+    // naming the action that revives it leaves the user with no visible move,
+    // which is how the recovery path stayed broken unnoticed.
+    for (const r of [
+      report({ holding: false, gave_up: true, last_error: "wsl.exe not found" }),
+      report({ holding: false, gave_up: true, last_error: null }),
+    ]) {
+      expect(keepaliveWarning(r)).toContain("Start");
+    }
+  });
+
   it("survives a missing report", () => {
     expect(keepaliveWarning(null)).toBeNull();
   });

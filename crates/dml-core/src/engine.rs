@@ -444,20 +444,52 @@ pub const ENGINE_START_ASK_TIMEOUT: std::time::Duration = std::time::Duration::f
 /// desktop start` that will not answer is exactly the case where launching the
 /// exe is the remaining option.
 pub fn start_engine(program: &OsStr) -> std::io::Result<std::process::Output> {
+    start_engine_with(program, &docker_desktop_start_args(), ENGINE_START_ASK_TIMEOUT)
+}
+
+/// [`start_engine`]'s body, with the argv and the deadline as parameters.
+///
+/// THE SEAM EXISTS BECAUSE THE BOUND WAS UNTESTABLE WITHOUT IT, and an
+/// untestable bound is one nobody notices losing. The test that was supposed to
+/// pin this built its OWN `Command` and called `proc::output_bounded_draining`
+/// directly — so it proved that helper works and said nothing about this
+/// function. Measured: reverting the body to a bare `cmd.output()` left 338
+/// passed / 0 failed.
+///
+/// A timeout parameter alone would not have been enough. The production argv is
+/// `desktop start -d`, and every "never returns" program available on a test
+/// machine needs its own arguments to block (`ping -n 600 …`), so a test that
+/// could only choose the program would be handed a child that exits
+/// immediately — a bounded-wait test satisfied by a process that never waited.
+pub fn start_engine_with(
+    program: &OsStr,
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
     let mut cmd = Command::new(program);
-    cmd.args(docker_desktop_start_args());
+    cmd.args(args);
     cmd.stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    crate::proc::output_bounded_draining(cmd, ENGINE_START_ASK_TIMEOUT).ok_or_else(|| {
-        std::io::Error::new(
+    // `run_bounded_outcome`, not `output_bounded_draining`: the latter collapses
+    // a spawn failure and a deadline into the same `None`, so a machine with no
+    // docker CLI at all reported "docker desktop start did not answer" — a
+    // message that names the wrong thing and points at the wrong repair. The
+    // OUTCOME is identical either way (`start_engine_succeeded` is false, and
+    // the caller falls back to the exe), which is exactly why this could be
+    // wrong for as long as it liked: a probe whose failure mode is
+    // indistinguishable from its other failure mode is still not a probe.
+    match crate::proc::run_bounded_outcome(cmd, timeout) {
+        crate::proc::BoundedOutcome::Ran(out) => Ok(out),
+        crate::proc::BoundedOutcome::SpawnFailed(e) => Err(e),
+        crate::proc::BoundedOutcome::TimedOut => Err(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             "docker desktop start did not answer",
-        )
-    })
+        )),
+    }
 }
 
 /// Did `docker desktop start` actually take responsibility for the engine?
@@ -607,19 +639,33 @@ mod tests {
     /// checked the result would pass on a machine where the child never ran —
     /// the vacuous-pass shape this project has recorded. The elapsed check is
     /// something only a real wait can satisfy.
+    ///
+    /// AND IT CALLS THE PRODUCTION FUNCTION. The version this replaces built
+    /// its own `Command` and called `crate::proc::output_bounded_draining`
+    /// directly, so it exercised the helper and never touched `start_engine` at
+    /// all: measured, reverting `start_engine`'s body to a bare `cmd.output()`
+    /// left 338 passed / 0 failed. A test named after a function it does not
+    /// call is not a weak test, it is a decoration.
     #[test]
     fn start_engine_is_bounded_rather_than_blocking_forever() {
         // A short bound so the test is quick; the production constant is
-        // asserted separately below.
+        // asserted separately below, and the delegation that carries it is
+        // pinned by `start_engine_delegates_with_the_production_argv_and_bound`.
         let (prog, args) = never_returns();
-        let mut cmd = Command::new(prog);
-        cmd.args(&args);
-        cmd.stdin(Stdio::null());
         let began = std::time::Instant::now();
-        let out = crate::proc::output_bounded_draining(cmd, std::time::Duration::from_millis(600));
+        let out = start_engine_with(
+            OsStr::new(prog),
+            &args,
+            std::time::Duration::from_millis(600),
+        );
         let elapsed = began.elapsed();
 
-        assert!(out.is_none(), "a process that never exits must time out, not return output");
+        let err = out.expect_err("a process that never exits must time out, not return output");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the deadline must be reported as a TIMEOUT, not as some other failure: {err}"
+        );
         assert!(
             elapsed >= std::time::Duration::from_millis(600),
             "returned in {elapsed:?} — that is a failed spawn, not a real bounded wait"
@@ -627,6 +673,41 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(30),
             "took {elapsed:?}; the bound did not fire"
+        );
+    }
+
+    /// The seam is only honest if the production entry point really goes
+    /// through it, with the production argv and the production deadline.
+    ///
+    /// A source scan rather than a call, because the alternative is a live
+    /// 60-second wait for the one property a shorter one cannot show. Cheap and
+    /// exact: `start_engine` is a single delegating expression, so this reads
+    /// its whole body. (The repo idiom — `provision.rs` reads the `.ps1`,
+    /// `vocab_surface` reads `run.rs`.)
+    #[test]
+    fn start_engine_delegates_with_the_production_argv_and_bound() {
+        let src = include_str!("engine.rs");
+        let at = src
+            .find("pub fn start_engine(program: &OsStr)")
+            .expect("start_engine's signature moved; this scan no longer reads its body");
+        let open = src[at..].find('{').expect("start_engine has no body") + at;
+        let close = src[open..].find("\n}").expect("start_engine's body is unterminated") + open;
+        let body = &src[open..close];
+
+        for needed in ["start_engine_with(", "docker_desktop_start_args()", "ENGINE_START_ASK_TIMEOUT"]
+        {
+            assert!(
+                body.contains(needed),
+                "start_engine's body does not name {needed:?}, so the bounded seam below it is \
+                 not what production reaches:\n{body}"
+            );
+        }
+        // NON-VACUITY: a scan that grabbed the whole file would satisfy the
+        // loop above. The body is one expression.
+        assert!(
+            body.lines().count() <= 4,
+            "read {} lines as start_engine's body — the scan is not isolating it:\n{body}",
+            body.lines().count()
         );
     }
 
@@ -1108,8 +1189,25 @@ mod start_engine_tests {
     #[test]
     fn a_spawn_failure_is_never_mistaken_for_a_started_engine() {
         let missing = std::ffi::OsString::from("dml-no-such-docker-binary-ever.exe");
+        let began = std::time::Instant::now();
         let result = start_engine(&missing);
-        assert!(result.is_err(), "the fake binary must not exist: {result:?}");
+
+        let err = result.as_ref().expect_err("the fake binary must not exist");
+        // NOT a bare `is_err()`, which the timeout arm right above would also
+        // satisfy — and would satisfy while proving the opposite of this test's
+        // name, since a 60-second wall-clock timeout is exactly what a *found*
+        // binary that never answers produces. `NotFound` is reachable only by a
+        // real spawn attempt against a real missing program.
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "expected a spawn failure, got {err} ({:?})",
+            err.kind()
+        );
+        assert!(
+            began.elapsed() < ENGINE_START_ASK_TIMEOUT,
+            "a missing binary must fail immediately, not sit out the whole deadline"
+        );
         assert!(!start_engine_succeeded(&result));
     }
 }

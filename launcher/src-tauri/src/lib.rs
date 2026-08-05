@@ -1647,8 +1647,20 @@ fn native_facts() -> dml_core::setup::NativeFacts {
 /// folder" are different screens, and conflating them would offer a fresh
 /// install to someone whose existing server is merely unreadable.
 fn native_title_count() -> Option<usize> {
-    let dir = dml_core::compose::games_dir_from_env();
-    let entries = match std::fs::read_dir(&dir) {
+    native_title_count_in(&dml_core::compose::games_dir_from_env())
+}
+
+/// [`native_title_count`]'s answer for a games directory handed in.
+///
+/// THE DIRECTORY IS AN ARGUMENT, and that is not tidiness. The test for the
+/// absent-directory case used to `set_var("DML_GAMES_DIR", …)` — a
+/// PROCESS-GLOBAL mutation inside a test binary whose threads run in parallel,
+/// while `native_title_count` and `native_facts` read that same variable in the
+/// same binary. It is the flake generator an earlier task already removed from
+/// `games_dir_from`, reintroduced one function along. A pure function taking the
+/// value cannot race anything.
+fn native_title_count_in(dir: &std::path::Path) -> Option<usize> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(it) => it,
         // A GAMES DIR THAT IS NOT THERE HOLDS ZERO TITLES. That is a definite
         // answer, not a shrug, and collapsing it into `None` broke the fresh
@@ -7795,19 +7807,40 @@ mod tests {
     /// again" button that re-ran the identical failing read forever. The
     /// `no_titles` -> "Open Library" arm was unreachable for exactly the user it
     /// was built for.
+    ///
+    /// Takes the directory as an ARGUMENT rather than exporting
+    /// `DML_GAMES_DIR`. The env version mutated process-global state inside a
+    /// test binary whose threads run in parallel, while `native_title_count`
+    /// and `native_facts` read that same variable in the same binary — the
+    /// flake generator an earlier task removed from `games_dir_from`, one
+    /// function along. Nothing here can now race anything.
     #[test]
     fn an_absent_games_dir_holds_zero_titles_not_an_unknown_number() {
         let missing = std::env::temp_dir().join(format!("dml-absent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&missing);
         assert!(!missing.exists());
-        let prev = std::env::var_os("DML_GAMES_DIR");
-        unsafe { std::env::set_var("DML_GAMES_DIR", &missing) };
-        let got = native_title_count();
-        match prev {
-            Some(v) => unsafe { std::env::set_var("DML_GAMES_DIR", v) },
-            None => unsafe { std::env::remove_var("DML_GAMES_DIR") },
-        }
-        assert_eq!(got, Some(0), "a games dir that is not there holds zero titles");
+        assert_eq!(
+            native_title_count_in(&missing),
+            Some(0),
+            "a games dir that is not there holds zero titles"
+        );
+    }
+
+    /// The other half: a directory we CANNOT read is a genuine "could not
+    /// tell", and must stay `None`. Asserted through the same seam, so the two
+    /// answers are shown to differ rather than assumed to.
+    #[test]
+    fn a_games_dir_that_is_a_file_is_unknown_not_zero() {
+        // A path that exists but is not a directory: `read_dir` fails with a
+        // kind that is NOT NotFound, which is the branch that must answer None.
+        let f = std::env::temp_dir().join(format!("dml-notadir-{}", std::process::id()));
+        std::fs::write(&f, b"not a directory").unwrap();
+        let got = native_title_count_in(&f);
+        let _ = std::fs::remove_file(&f);
+        assert_eq!(
+            got, None,
+            "a games dir we could not read is 'we could not tell', never 'you have no titles'"
+        );
     }
 
     #[test]
@@ -9044,6 +9077,88 @@ pub(crate) mod vocab_coverage_tests {
         out
     }
 
+    /// Source with every `#[cfg(test)]` item removed, brace-matched.
+    ///
+    /// Deliberately NOT "cut at the first `#[cfg(test)]`", which is what
+    /// [`production_half`] used to do: this file carries THREE test modules with
+    /// production code above them, and `dml-core/src/engine.rs` has two with
+    /// production code BETWEEN them. Truncating at the first silently stops
+    /// scanning everything below — a hole in the one direction that makes a
+    /// guard useless, because it makes coverage depend on where in the file you
+    /// happen to type. An item whose attribute is followed by a `;` before any
+    /// `{` (`#[cfg(test)] use …;`) is cut at the semicolon instead.
+    ///
+    /// Input must already be comment-stripped, so a `{` inside prose cannot
+    /// unbalance the match.
+    ///
+    /// `pub(crate)` and living HERE, beside [`strip_comments`], because it was
+    /// implemented 700 lines away in `startup.rs` while `production_half` did
+    /// the wrong thing — two answers to one question, in one crate, is how the
+    /// hole survived. One home, both scans.
+    pub(crate) fn strip_cfg_test(code: &str) -> String {
+        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
+        let b: Vec<char> = code.chars().collect();
+        let mut out = String::with_capacity(code.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i..].starts_with(&attr[..]) {
+                i = end_of_cfg_test_item(&b, i + attr.len());
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// One past the end of the item the attribute ending at `from` decorates.
+    fn end_of_cfg_test_item(b: &[char], from: usize) -> usize {
+        let mut i = from;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                // String and char literals may hold braces and semicolons.
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                ';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        b.len()
+    }
+
     fn skip_ws(b: &[u8], mut i: usize) -> usize {
         while i < b.len() && (b[i] as char).is_whitespace() {
             i += 1;
@@ -9323,12 +9438,27 @@ pub(crate) mod vocab_coverage_tests {
         (found, unresolved, helper_bodies)
     }
 
-    /// A test module is not a call site. Cutting here also stops the extractor
+    /// A test module is not a call site. Removing them also stops the extractor
     /// finding its OWN shape strings (`"run_json_cmd("` et al) and reporting
     /// them as unclassifiable sites.
-    fn production_half(src: &str) -> String {
-        let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
-        strip_comments(&src[..cut])
+    ///
+    /// REMOVES rather than TRUNCATES, and the difference is the whole point.
+    /// This used to be `src.find("#[cfg(test)]")` and a cut, so nothing below
+    /// the first test module was ever scanned — everything past line 7765 of
+    /// this file. Harmless on the day it was found (no production
+    /// `#[tauri::command]` lived down there) and latent in the worst possible
+    /// direction: a real call site APPENDED to the end of the file would sail
+    /// through the classification guard, while the identical function moved
+    /// 2000 lines up would fail it loudly. A guard whose coverage depends on
+    /// where in the file you type is not a guard. `strip_cfg_test`, 700 lines
+    /// away in `startup.rs`, already did this correctly.
+    ///
+    /// `pub(crate)` so `keepalive_wiring_tests` reads the same production text
+    /// this does — two definitions of "the production half" would drift, and
+    /// both scans exist precisely because a comment or a test must never read
+    /// as a production call site.
+    pub(crate) fn production_half(src: &str) -> String {
+        strip_cfg_test(&strip_comments(src))
     }
 
     fn all_sites() -> (Vec<Vec<String>>, Vec<String>, usize) {
@@ -9492,6 +9622,48 @@ pub(crate) mod vocab_coverage_tests {
         }
     }
 
+    /// `production_half` REMOVES test modules; it does not stop at the first.
+    ///
+    /// The truncating version scanned nothing below line 7765 of this file, so
+    /// a genuine call site appended to the END would have passed the
+    /// classification guard while the same function 2000 lines higher up failed
+    /// it. Both test modules' calls must vanish AND the production call between
+    /// them must survive — one assertion cannot show both.
+    #[test]
+    fn production_half_removes_test_modules_rather_than_truncating_at_the_first() {
+        let src = r#"
+fn early() { run_json_cmd(state, vec!["wow".into(), "before".into()]); }
+#[cfg(test)]
+mod a { fn t() { run_json_cmd(state, vec!["wow".into(), "invented-by-test-a".into()]); } }
+fn late() { run_json_cmd(state, vec!["wow".into(), "after".into()]); }
+#[cfg(test)]
+mod b { fn t() { run_json_cmd(state, vec!["wow".into(), "invented-by-test-b".into()]); } }
+"#;
+        let (found, _, _) = extract(&production_half(src));
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        assert_eq!(
+            flat,
+            vec!["wow before".to_string(), "wow after".to_string()],
+            "got {flat:?} — `wow after` missing means the scan still truncates; an \
+             `invented-by-test-*` present means a test module is being read as production"
+        );
+    }
+
+    /// ...and the `#[cfg(test)] use …;` form is cut at the semicolon, not at a
+    /// brace it does not have — otherwise it would swallow the next item whole,
+    /// which is the same hole in a smaller package.
+    #[test]
+    fn a_cfg_test_use_statement_is_cut_at_its_semicolon() {
+        let src = r#"
+#[cfg(test)]
+use something::else_;
+fn real() { run_json_cmd(state, vec!["wow".into(), "survivor".into()]); }
+"#;
+        let (found, _, _) = extract(&production_half(src));
+        let flat: Vec<String> = found.iter().map(|v| v.join(" ")).collect();
+        assert_eq!(flat, vec!["wow survivor".to_string()], "got {flat:?}");
+    }
+
     /// Comment stripping, proven on the exact shape that has burned this repo
     /// twice — prose that mentions a call, and a `//` inside a string literal
     /// (which must SURVIVE, or real argv would be eaten).
@@ -9509,6 +9681,246 @@ fn url() { let _ = "https://example.invalid/x"; }
         assert!(
             strip_comments(src).contains("https://example.invalid/x"),
             "the // inside a string literal must not be treated as a comment"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The WSL keep-alive's PRODUCTION WIRING
+// ---------------------------------------------------------------------------
+
+/// THE KEEP-ALIVE IS ACTUALLY WIRED IN, AND IN THE DOCUMENTED ORDER.
+///
+/// `wsl_keepalive`'s own unit tests drive [`wsl_keepalive::Keepalive`] through a
+/// fake spawner and prove the decision thoroughly. They prove NOTHING about this
+/// file, and the gap is total rather than partial: delete
+/// `wsl_keepalive::install(...)` and `STATE` is never set, so `state()` answers
+/// `None`, every `apply()` returns at its first line, no holder is ever spawned
+/// — and all eighteen still pass, because each builds its own `Keepalive`.
+/// Measured: with `install` no-op'd and the other four call sites deleted, this
+/// crate reported 234 passed / 0 failed. The feature can be removed from
+/// production with a green suite, SILENTLY, which is the exact failure mode the
+/// module exists to end.
+///
+/// Same shape as `every_command_that_saves_soap_credentials_also_publishes_them_to_the_cli`
+/// above: wiring a unit test cannot see is pinned by reading the source, with
+/// comments stripped first because this file's prose names every one of these
+/// functions repeatedly.
+#[cfg(test)]
+mod keepalive_wiring_tests {
+    use crate::vocab_coverage_tests::production_half;
+
+    /// The calls that make a lifecycle command take TIME. Each one either
+    /// spawns `wsl.exe`/`docker` or awaits something that does, so each is a
+    /// moment at which the distro must already be held — or, for a stop, must
+    /// still be held.
+    const WORK: &[&str] = &[
+        "ensure_engine_up(",
+        "run_games_lifecycle_native(",
+        "stream_action(",
+        "stream_args(",
+        "stop_engine_best_effort(",
+    ];
+
+    /// Every glue entry point in `wsl_keepalive`, and the function that must
+    /// call it. A `pub fn` in the production-glue half with no caller here is a
+    /// feature that exists only in its own tests.
+    const WIRING: &[(&str, &str)] = &[
+        // Arms STATE and the watchdog thread. Without this ONE call every other
+        // entry point below is a no-op at its first line.
+        ("wsl_keepalive::install(", "run"),
+        ("wsl_keepalive::server_should_run()", "games_start"),
+        ("wsl_keepalive::server_should_run()", "games_restart"),
+        ("wsl_keepalive::server_should_stop()", "games_stop"),
+        // Adoption: a server started by a PREVIOUS launcher session is running
+        // with nobody holding its distro.
+        ("wsl_keepalive::observed_status(", "tray_set_status"),
+        // The polite release. Without it an orphaned holder pins ~1.4 GB of VM.
+        ("wsl_keepalive::shutdown()", "run"),
+    ];
+
+    fn src() -> String {
+        production_half(include_str!("lib.rs"))
+    }
+
+    /// The brace-matched body of `fn <name>(`.
+    ///
+    /// String- and char-literal aware, so a `{` inside an argv literal cannot
+    /// unbalance the match. Comments are already gone — `production_half`
+    /// strips them — which is what makes this safe at all: the prose around
+    /// these very functions is dense with braces and with their own names.
+    ///
+    /// The first `{` after the signature opens the body: a Rust parameter list
+    /// and return type carry parens and angle brackets, never braces.
+    fn fn_body(code: &str, name: &str) -> String {
+        let needle = format!("fn {name}(");
+        let at = code.find(&needle).unwrap_or_else(|| {
+            panic!(
+                "no `{needle}` in the production half of lib.rs — the keep-alive's host \
+                 function has been renamed, deleted, or moved below a #[cfg(test)] module"
+            )
+        });
+        let b: Vec<char> = code[at..].chars().collect();
+        let mut i = 0usize;
+        while i < b.len() && b[i] != '{' {
+            i += 1;
+        }
+        assert!(i < b.len(), "`{needle}` has no body");
+        let start = i;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                // A char literal, distinguished from a lifetime (`&'a str`) by
+                // the closing quote two chars along, or by an escape.
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return b[start..=i].iter().collect();
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces scanning `{needle}`");
+    }
+
+    /// EVERY glue entry point has a production caller.
+    ///
+    /// This is the one that goes red on the reviewer's mutation, and it is
+    /// deliberately per-call-site rather than a count: the failure is per
+    /// command, so a total that stayed at six while `games_restart` lost its
+    /// declaration would be satisfied by a seventh call somewhere harmless.
+    #[test]
+    fn every_wsl_keepalive_entry_point_has_a_production_call_site() {
+        let code = src();
+        for (call, host) in WIRING {
+            let body = fn_body(&code, host);
+            assert!(
+                body.contains(call),
+                "`{host}` does not call `{call}`. On Backend::Arch that is not a missing \
+                 nicety: WSL powers the distro off ~15s after the last session into it \
+                 exits, so an unwired keep-alive means the server goes down a quarter of \
+                 a minute later and `restart: unless-stopped` hides it by healing on the \
+                 next touch. wsl_keepalive's own unit tests cannot see this — they build \
+                 their own Keepalive and pass either way."
+            );
+        }
+        // NON-VACUITY. A `fn_body` that returned something trivially containing
+        // everything (say the whole file) would satisfy the loop above, so pin
+        // the negatives too.
+        let stop = fn_body(&code, "games_stop");
+        assert!(
+            !stop.contains("wsl_keepalive::server_should_run()"),
+            "fn_body is not isolating one function — games_stop cannot declare Run"
+        );
+        assert!(
+            !fn_body(&code, "games_start").contains("wsl_keepalive::shutdown()"),
+            "fn_body is not isolating one function — games_start is not the exit handler"
+        );
+    }
+
+    /// ARMING IS SINGULAR. Two `install` calls would be harmless today (the
+    /// second `OnceLock::set` fails and returns), but the reason it is harmless
+    /// is a detail of `install`, not a property of the call sites — and a
+    /// second watchdog thread is exactly the duplicate-poller shape this repo
+    /// already refused for the tray status.
+    #[test]
+    fn the_keep_alive_is_armed_exactly_once() {
+        let code = src();
+        assert_eq!(
+            code.matches("wsl_keepalive::install(").count(),
+            1,
+            "expected exactly one wsl_keepalive::install call in production"
+        );
+    }
+
+    /// THE ORDERING, which is load-bearing rather than tidy.
+    ///
+    /// A lifecycle command is ITSELF a `wsl.exe` session into the distro, so
+    /// the 15 s clock starts when the command exits. Declaring Run after the
+    /// work leaves the window this module exists to close: the server starts,
+    /// the command's own session ends, and 15 s later the distro — and the
+    /// stack inside it — is gone. Declaring Stop before the work is the mirror
+    /// image: the hold is dropped while `compose down` is still stopping
+    /// containers, so the distro can power off mid-shutdown.
+    ///
+    /// Asserted against the REAL work calls in the real body, not a restated
+    /// list of steps: the recorded `lifecycle_steps_for_mode` lesson is that an
+    /// ordering pinned on a pure list production never reads is not pinned.
+    #[test]
+    fn the_intent_is_declared_before_a_start_and_after_a_stop() {
+        let code = src();
+
+        for host in ["games_start", "games_restart"] {
+            let body = fn_body(&code, host);
+            let at = body
+                .find("wsl_keepalive::server_should_run()")
+                .unwrap_or_else(|| panic!("{host} never declares the keep-alive intent"));
+            let first_work = WORK
+                .iter()
+                .filter_map(|w| body.find(w))
+                .min()
+                .unwrap_or_else(|| panic!("{host}: found none of the work calls {WORK:?}"));
+            // NON-VACUITY: an `at < first_work` that holds because the scan
+            // found only one late call proves nothing about the rest.
+            assert!(
+                WORK.iter().filter(|w| body.contains(*w)).count() >= 2,
+                "{host}: fewer than two work calls found — the scan is broken, not the command"
+            );
+            assert!(
+                at < first_work,
+                "{host} declares the keep-alive intent AFTER it starts working. The hold \
+                 must exist before this command's own wsl.exe session ends, or the server \
+                 it just started dies ~15s later."
+            );
+        }
+
+        let body = fn_body(&code, "games_stop");
+        let at = body
+            .find("wsl_keepalive::server_should_stop()")
+            .expect("games_stop never releases the keep-alive intent");
+        let last_work = WORK
+            .iter()
+            .filter_map(|w| body.rfind(w))
+            .max()
+            .expect("games_stop: found none of the work calls");
+        assert!(
+            WORK.iter().filter(|w| body.contains(*w)).count() >= 2,
+            "games_stop: fewer than two work calls found — the scan is broken"
+        );
+        assert!(
+            at > last_work,
+            "games_stop releases the hold BEFORE the stop has finished. That starts the \
+             distro's 15s clock while compose is still shutting containers down — the \
+             ungraceful stop this backend already struggles with."
         );
     }
 }

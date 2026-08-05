@@ -117,13 +117,42 @@ pub fn validate(user: &str, pass: &str) -> Result<(), CmdError> {
 
 /// `~/.dml/soap.env`'s contents for these credentials.
 ///
+/// Every value is SINGLE-QUOTED, because this file is `.`-sourced by bash.
+///
+/// `_soap_load_env` in `cli/src/20-soap.sh` runs `. "$f"`, so an unquoted value
+/// is shell SOURCE: `$(…)`, backticks, `$VAR` and globs all expand. Inside
+/// single quotes bash expands nothing at all.
+///
+/// It was safe only by luck rather than by design. `user` and `pass` go through
+/// [`validate`], which admits no shell metacharacter — but `url` has NO
+/// validator, and this file travels INTO `dml-arch`, where `dml` holds NOPASSWD
+/// sudo. Quoting costs two characters per line and does not depend on anyone
+/// remembering which of the three fields is checked, or on `url` staying
+/// non-user-supplied forever.
+///
 /// LF endings on purpose. The file is sourced by the bash CLI inside WSL, and
 /// a CRLF written by a Windows-side helper leaves a trailing `\r` on the
 /// password — an authentication failure whose only symptom is `SOAP_AUTH`, with
 /// nothing on screen suggesting the file is the problem. The Rust reader strips
 /// `\r` defensively for the same reason; this end simply never writes one.
 pub fn soap_env_contents(url: &str, user: &str, pass: &str) -> String {
-    format!("DML_SOAP_URL={url}\nDML_SOAP_USER={user}\nDML_SOAP_PASS={pass}\n")
+    format!(
+        "DML_SOAP_URL={}\nDML_SOAP_USER={}\nDML_SOAP_PASS={}\n",
+        sh_single_quote(url),
+        sh_single_quote(user),
+        sh_single_quote(pass)
+    )
+}
+
+/// Wrap one value in single quotes for a file bash sources.
+///
+/// A literal `'` cannot appear inside single quotes, so the standard form
+/// closes, escapes and reopens: `'\''`. [`crate::soap::parse_soap_env`] undoes
+/// exactly this, so both ends agree on what a quoted value means — a writer
+/// that escaped and a reader that did not would hand the world a password with
+/// four stray characters in it and call it authentication failure.
+fn sh_single_quote(v: &str) -> String {
+    format!("'{}'", v.replace('\'', r"'\''"))
 }
 
 /// Where the credentials live, given a home directory.
@@ -410,8 +439,54 @@ mod tests {
         assert!(outcome.is_ok());
         let p = path.expect("a verified setup must persist");
         let body = std::fs::read_to_string(&p).unwrap();
-        assert!(body.contains("DML_SOAP_USER=dmlsoap"), "{body}");
-        assert!(body.contains("DML_SOAP_PASS=hunter2"), "{body}");
+        assert!(body.contains("DML_SOAP_USER='dmlsoap'"), "{body}");
+        assert!(body.contains("DML_SOAP_PASS='hunter2'"), "{body}");
+    }
+
+    /// THE FILE IS SHELL SOURCE, so every value is single-quoted.
+    ///
+    /// `_soap_load_env` runs `. "$HOME/.dml/soap.env"`. Unquoted, a value is
+    /// code: `$(…)`, backticks, `$VAR` and globs all expand — inside a distro
+    /// where `dml` holds NOPASSWD sudo. Not reachable today (`user`/`pass` go
+    /// through `validate`, and `url` is ours), but `url` has NO validator, and
+    /// "safe because of what someone else checks" is not a property of this
+    /// function.
+    #[test]
+    fn every_value_is_single_quoted_because_bash_sources_this_file() {
+        let s = soap_env_contents("http://127.0.0.1:7878/", "dmlsoap", "hunter2");
+        for line in s.lines() {
+            let (_, v) = line.split_once('=').unwrap_or_else(|| panic!("not KEY=VALUE: {line:?}"));
+            assert!(
+                v.starts_with('\'') && v.ends_with('\''),
+                "unquoted value in a file bash sources: {line:?}"
+            );
+        }
+    }
+
+    /// The values that WOULD have been code, neutralised — asserted as the
+    /// exact text, because that is the whole of the fix.
+    #[test]
+    fn a_metacharacter_in_the_url_is_data_rather_than_a_command() {
+        let s = soap_env_contents("http://h/$(id>/tmp/pwned)`whoami`", "dmlsoap", "hunter2");
+        assert!(
+            s.contains("DML_SOAP_URL='http://h/$(id>/tmp/pwned)`whoami`'"),
+            "the expansion must sit inside single quotes verbatim: {s}"
+        );
+    }
+
+    /// A literal `'` closes the quoting, so it is escaped — and the READER
+    /// undoes exactly this escape. A writer that escaped against a reader that
+    /// did not would deliver a password with four extra characters in it and
+    /// call the result an authentication failure.
+    #[test]
+    fn a_quote_in_a_value_survives_the_round_trip_to_the_reader() {
+        let url = "http://h/it's";
+        let s = soap_env_contents(url, "dmlsoap", "hunter2");
+        assert!(s.contains(r"DML_SOAP_URL='http://h/it'\''s'"), "{s}");
+        let (got, user, pass) = crate::soap::parse_soap_env(&s);
+        assert_eq!(got.as_deref(), Some(url), "the reader must undo the escape");
+        assert_eq!(user.as_deref(), Some("dmlsoap"));
+        assert_eq!(pass.as_deref(), Some("hunter2"));
     }
 
     /// A server that answers and refuses the COMMAND has still authenticated
