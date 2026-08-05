@@ -2118,6 +2118,23 @@ export async function traySetStatus(verdict: string): Promise<void> {
   return await invoke("tray_set_status", { verdict });
 }
 
+// WSL keep-alive (Arch backend). Rust holds a `wsl.exe` session open while the
+// server is meant to be running, because WSL powers the distro off ~15s after
+// the last session into it exits -- see `wsl_keepalive.rs`. Nothing here does
+// any holding; this is the read-back so the UI can say when it FAILED.
+// `applies` is false on every other backend, where there is nothing to hold.
+export interface KeepaliveReport {
+  applies: boolean;
+  wanted: boolean;
+  holding: boolean;
+  gave_up: boolean;
+  attempts: number;
+  last_error: string | null;
+}
+export async function wslKeepaliveStatus(): Promise<KeepaliveReport> {
+  return await invoke<KeepaliveReport>("wsl_keepalive_status");
+}
+
 // Start-with-Windows, backed by an HKCU\...\Run entry. `autostartGet` reports
 // false for an entry whose recorded exe no longer exists, so a stale entry
 // from a deleted build does not show as enabled.

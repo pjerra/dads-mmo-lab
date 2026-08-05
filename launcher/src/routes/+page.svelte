@@ -42,6 +42,11 @@
     clearSoapSetup,
     dismissSoapSetup,
   } from "$lib/soap-setup-state.svelte";
+  import {
+    keepaliveState,
+    initKeepaliveWatch,
+    dismissKeepaliveWarning,
+  } from "$lib/keepalive-state.svelte";
 
   let page: PageId = $state(DEFAULT_PAGE);
 
@@ -120,6 +125,11 @@
     // Re-asserts the persisted auto-shutdown toggle to the Rust watcher and
     // hooks its event channel -- idempotent, like startStatusPolling.
     initAutoShutdown();
+    // Reads the WSL keep-alive's live verdict and subscribes to its
+    // announcements. Shell-level for the same reason the SOAP banner is: the
+    // news is "your server is about to stop", and it must not depend on which
+    // page happens to be open.
+    initKeepaliveWatch();
     // Tray Start/Stop. Rust has already surfaced the window; land on Home and
     // hand the request over, so Home runs the SAME act() its own buttons do.
     void listen<string>("tray-action", (e) => {
@@ -375,6 +385,23 @@
     </div>
   {/if}
 
+  {#if keepaliveState.warning && !keepaliveState.dismissed}
+    <!-- The keep-alive stopped keeping. On the Arch backend that means the
+         distro powers off ~15s after the last session into it closes and the
+         server goes with it -- cleanly, silently, and self-repairing the next
+         time the user opens the launcher, which is the worst possible shape for
+         a diagnosis. Shell-level and not dismissible-by-default for the same
+         reason the SOAP banner is: it is true wherever the user happens to be
+         standing. -->
+    <button
+      class="keepalive-banner"
+      onclick={dismissKeepaliveWarning}
+      title="Dismiss"
+    >
+      ⚠️ {keepaliveState.warning}
+    </button>
+  {/if}
+
   {#if serverStatus.readyToast}
     <!-- Batch 3 F10: in-app "world just came up" toast, visible from any
          page; mirrors the Windows notification the status store fires. -->
@@ -541,6 +568,25 @@
     cursor: pointer;
   }
   .soap-sub { display: block; opacity: 0.75; font-size: 0.8rem; }
+  /* Same grid-column: 2 reason as .soap-banner above -- an auto-placed item
+     lands in the 200px sidebar track. Warn colours, not the banner's green:
+     this one is bad news. */
+  .keepalive-banner {
+    grid-column: 2;
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin: 0.6rem 0 0;
+    padding: 0.55rem 0.8rem;
+    border: 1px solid var(--warn-fg, #f0c674);
+    border-radius: 0.4rem;
+    background: rgba(240, 198, 116, 0.09);
+    color: inherit;
+    font: inherit;
+    font-size: 0.88rem;
+    line-height: 1.35;
+    cursor: pointer;
+  }
   /* One grid item for the whole fallback, and the wrapper earns its keep twice:
      it keeps the reason directly ABOVE the card (block flow inside one cell,
      not two auto-placed cells), and it is the only handle this component has on

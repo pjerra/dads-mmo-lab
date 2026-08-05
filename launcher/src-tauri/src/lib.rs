@@ -9,6 +9,7 @@ mod autostart;
 mod single_instance;
 pub mod watch;
 pub mod wslconfig;
+pub mod wsl_keepalive;
 mod zam;
 
 use serde::Serialize;
@@ -450,7 +451,27 @@ fn tray_set_status(app: tauri::AppHandle, verdict: String, state: State<'_, AppS
     if let Ok(mut t) = state.last_status_push.lock() {
         *t = Some(std::time::Instant::now());
     }
+    // ADOPTION, and it is the only thing the keep-alive takes from the webview.
+    // A server the user started in a PREVIOUS launcher session is running with
+    // nobody holding its distro; the first positive verdict after this launcher
+    // starts is what tells Rust it exists. Everything AFTER that — noticing the
+    // holder died, respawning it, releasing it — is owned by a plain OS thread
+    // that no amount of timer throttling can reach. A negative verdict
+    // deliberately does nothing (see `Keepalive::observed_status`).
+    wsl_keepalive::observed_status(&verdict);
     tray::apply_status(&app, &verdict);
+}
+
+/// What the keep-alive is doing right now, re-derived from live state.
+///
+/// Sync and infallible, same doctrine as `set_keep_awake`. Called on mount as
+/// well as on the event, because the frontend's memory of a failure is a
+/// module-level store and a webview reload wipes it — the recorded
+/// soap-autosetup lesson, in the one place where the thing being forgotten is
+/// "your server is going to stop in 15 seconds".
+#[tauri::command]
+fn wsl_keepalive_status() -> wsl_keepalive::KeepaliveReport {
+    wsl_keepalive::keepalive_report()
 }
 
 /// Whether a Windows Run entry exists AND points at a file that still exists.
@@ -7070,6 +7091,12 @@ async fn games_start(
     if !validate_game_id(&id) {
         return Err(bad_id(&id));
     }
+    // INTENT, declared BEFORE the work starts. On the Arch backend the distro
+    // gets 15 seconds from the moment the last session into it exits — and this
+    // command IS such a session, so the hold has to exist before it returns or
+    // the server we just started dies a quarter of a minute later. No-op on
+    // every other backend.
+    wsl_keepalive::server_should_run();
     // NATIVE MODE: the engine is a hard prerequisite (regardless of the manage
     // toggle) — bring it up first, or abort before touching compose. WSL mode
     // skips this entirely and behaves exactly as before.
@@ -7116,6 +7143,13 @@ async fn games_stop(
     if stop_docker {
         stop_engine_best_effort(&on_event).await;
     }
+    // INTENT, declared AFTER the work. Releasing first would start the distro's
+    // 15s clock while compose is still shutting containers down — and a distro
+    // that powers off mid-`down` is the ungraceful stop this backend already
+    // struggles with. The result stands regardless: a stop that FAILED still
+    // means the user wants it down, and the watchdog must not go on holding a
+    // distro for a server nobody wants.
+    wsl_keepalive::server_should_stop();
     result
 }
 
@@ -7130,6 +7164,10 @@ async fn games_restart(
         return Err(bad_id(&id));
     }
     let skip = skip_saveall.unwrap_or(false);
+    // A restart means the server is meant to be UP on the far side, and the
+    // window in between is precisely when the distro is most likely to lose its
+    // last session.
+    wsl_keepalive::server_should_run();
     // Chunk 3b: native mode replaces the inner `dml` shell-out with direct
     // compose orchestration. No engine-lifecycle wrapping here (matches
     // today's WSL sibling: a restart assumes the server -- and so the
@@ -7234,6 +7272,16 @@ pub fn run() {
             if let Some(l) = instance_lock {
                 single_instance::serve(l, app.handle().clone());
             }
+
+            // WSL keep-alive (Arch backend only; a no-op everywhere else). WSL
+            // powers a distro off ~15s after the last session into it exits,
+            // whatever is running inside — see wsl_keepalive.rs. This arms the
+            // watchdog thread; nothing is held until something declares the
+            // server is meant to be running. Reads the backend from
+            // `backend::selected()` for the same reason AppState does: a
+            // backend change needs a relaunch, so the value cannot go stale
+            // underneath us.
+            wsl_keepalive::install(app.handle(), dml_wow::backend::selected());
 
             // Keep-awake safety net. Engagement is driven by the webview poll
             // loop; a hidden window whose timers get throttled would
@@ -7558,6 +7606,7 @@ pub fn run() {
             launcher_config_read,
             launcher_config_write,
             tray_set_status,
+            wsl_keepalive_status,
             autostart_get,
             autostart_set
         ])
@@ -7569,6 +7618,13 @@ pub fn run() {
             // slow teardown never holds the PC awake.
             if let tauri::RunEvent::Exit = event {
                 power::keep_awake(false);
+                // Release the held WSL session. THE POLITE PATH ONLY: an
+                // abrupt kill never reaches here, which is why the child is
+                // also in a KILL_ON_JOB_CLOSE job object (see
+                // `wsl_keepalive::jobguard`). An orphaned holder pins ~1.4 GB
+                // of VM forever and quietly undoes the only advantage this
+                // backend has.
+                wsl_keepalive::shutdown();
             }
         });
 }
