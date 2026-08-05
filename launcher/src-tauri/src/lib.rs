@@ -7377,8 +7377,72 @@ async fn wow_update_native(backup: Option<bool>, on_event: Channel<serde_json::V
     Ok(())
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Set once the user has confirmed the exit (or chosen to close anyway), so the
+/// `app.exit(0)` that follows is not intercepted and prompted a second time.
+static EXIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
+
+/// Pure: does this exit need a dialog, given the latch?
+fn should_prompt_on_exit(action: wsl_keepalive::ExitAction) -> bool {
+    if EXIT_CONFIRMED.load(Ordering::SeqCst) {
+        return false;
+    }
+    !matches!(action, wsl_keepalive::ExitAction::ExitNow)
+}
+
+/// The wire vocabulary the frontend switches on.
+fn exit_action_wire(action: wsl_keepalive::ExitAction) -> &'static str {
+    match action {
+        wsl_keepalive::ExitAction::ExitNow => "exit_now",
+        wsl_keepalive::ExitAction::PromptRunning => "prompt_running",
+        wsl_keepalive::ExitAction::PromptUnknown => "prompt_unknown",
+    }
+}
+
+fn current_exit_action() -> wsl_keepalive::ExitAction {
+    let report = wsl_keepalive::keepalive_report();
+    let presence = wsl_keepalive::presence_from(report.holding, report.last_verdict.as_deref());
+    wsl_keepalive::exit_decision(dml_core::backend::selected(), presence)
+}
+
+#[tauri::command]
+fn exit_intent() -> String {
+    exit_action_wire(current_exit_action()).to_string()
+}
+
+/// Close anyway — the escape hatch. The user is entitled to close their
+/// launcher even when the server misbehaves or the stop overruns.
+#[tauri::command]
+fn exit_anyway(app: tauri::AppHandle) {
+    EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// Stop the server the ordinary way, then close.
+///
+/// ORDER IS THE CONTRACT: the stop runs BEFORE the holder is released.
+/// Releasing first starts the distro's 15-second clock while compose is still
+/// shutting containers down, which is the ungraceful stop this whole command
+/// exists to avoid. `games_stop` already gets that ordering right internally.
+#[tauri::command]
+async fn exit_stop_and_close(
+    app: tauri::AppHandle,
+    id: String,
+    manage_docker: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
+    let result = games_stop(id, manage_docker, on_event, state).await;
+    EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+    app.exit(0);
+    result
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Emitter;
+
     // MUST run before any thread exists (Builder::setup spawns one) and
     // before AppState captures backend::selected().
     startup::resolve_and_export();
@@ -7753,30 +7817,46 @@ pub fn run() {
             tray_set_status,
             wsl_keepalive_status,
             autostart_get,
-            autostart_set
+            autostart_set,
+            exit_intent,
+            exit_stop_and_close,
+            exit_anyway
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        .run(|_app, event| {
-            // Belt-and-braces: Windows clears the execution state when the
-            // process dies, but clear it explicitly on the way out too so a
-            // slow teardown never holds the PC awake.
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            // THE HOOK THAT CAN SAY NO. `RunEvent::Exit` fires too late to ask
+            // anything — by then the decision is made. Tray Quit routes through
+            // `app.exit(0)` (tray.rs:90), so it reaches this same arm and there
+            // is no second path to maintain.
+            tauri::RunEvent::ExitRequested { api, .. } => {
+                let action = current_exit_action();
+                if should_prompt_on_exit(action) {
+                    api.prevent_exit();
+                    let _ = app.emit("exit-requested", exit_action_wire(action));
+                }
+            }
+            tauri::RunEvent::Exit => {
                 power::keep_awake(false);
-                // Release the held WSL session. THE POLITE PATH ONLY: an
-                // abrupt kill never reaches here, which is why the child is
-                // also in a KILL_ON_JOB_CLOSE job object (see
-                // `wsl_keepalive::jobguard`). An orphaned holder pins ~1.4 GB
-                // of VM forever and quietly undoes the only advantage this
-                // backend has.
+                // Release the held WSL session. THE POLITE PATH ONLY: an abrupt
+                // kill never reaches here, which is why the child is also in a
+                // KILL_ON_JOB_CLOSE job object.
                 wsl_keepalive::shutdown();
             }
+            _ => {}
         });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Brings the bare `ExitAction` used by the exit-prompt tests below into
+    // scope. Production code always spells it out as `wsl_keepalive::ExitAction`
+    // (see `should_prompt_on_exit`/`exit_action_wire`/`current_exit_action`), so
+    // this import has no production-side use and lives here rather than at the
+    // crate root, where it would be an unused-import warning on every non-test
+    // build.
+    use super::wsl_keepalive::ExitAction;
 
     // -- native_title_is_usable ---------------------------------------------
     //
@@ -8942,6 +9022,54 @@ mod tests {
 
     // -- native ahbot-repair: event-shape builders (Chunk 2 task C2c item 8) --
 
+    // -- exit / close-to-tray: ask before stopping the server (Task 3) -------
+    //
+    // `EXIT_CONFIRMED` is process-global `static` state and the two tests
+    // below both flip it. `cargo test` runs test functions on separate
+    // threads by default, so without serializing them one test's
+    // `store(true, ...)` could land between another's `store(false, ...)` and
+    // its assertion -- a flaky failure with nothing to do with the code under
+    // test. `wsl_keepalive`'s own `STATE` `OnceLock` hit the identical hazard
+    // in Task 2; the fix here is the same shape: a private lock held for each
+    // racey test's whole body, rather than anything touching the production
+    // type. `the_exit_intent_wire_values_are_stable` does not touch
+    // `EXIT_CONFIRMED` at all, so it does not need the lock.
+    static EXIT_CONFIRMED_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Re-entrancy. Confirming the dialog calls `app.exit(0)`, which fires
+    /// `ExitRequested` a SECOND time. Without the latch that second pass would
+    /// prompt again and the launcher could never close.
+    #[test]
+    fn a_confirmed_exit_is_not_prompted_a_second_time() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+        assert!(should_prompt_on_exit(ExitAction::PromptRunning), "first pass asks");
+        EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+        assert!(
+            !should_prompt_on_exit(ExitAction::PromptRunning),
+            "once confirmed, every later ExitRequested must pass straight through"
+        );
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn exit_now_never_prompts_whatever_the_latch_says() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for latched in [false, true] {
+            EXIT_CONFIRMED.store(latched, Ordering::SeqCst);
+            assert!(!should_prompt_on_exit(ExitAction::ExitNow));
+        }
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+    }
+
+    /// The wire strings the frontend switches on. A rename here is a silent
+    /// UI break, so they are pinned.
+    #[test]
+    fn the_exit_intent_wire_values_are_stable() {
+        assert_eq!(exit_action_wire(ExitAction::ExitNow), "exit_now");
+        assert_eq!(exit_action_wire(ExitAction::PromptRunning), "prompt_running");
+        assert_eq!(exit_action_wire(ExitAction::PromptUnknown), "prompt_unknown");
+    }
 }
 
 /// T2 — IS EVERY CALL SITE IN THIS FILE CLASSIFIED?
