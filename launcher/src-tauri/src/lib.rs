@@ -7511,9 +7511,26 @@ fn should_prompt_on_exit(action: wsl_keepalive::ExitAction) -> bool {
 /// Cancel is invisible to Rust (it touches no command), so three cancels
 /// spread over a working six-hour session would otherwise disarm the fourth
 /// Quit and hard-cut a live server. Only requests CLOSE TOGETHER count as one
-/// run of unanswered asks; a quiet gap starts fresh. Nothing needs to reset the
-/// count on a real answer, because both answers (`exit_anyway`,
-/// `exit_stop_and_close`'s success arm) end the process.
+/// run of unanswered asks; a quiet gap starts fresh.
+///
+/// FIX ROUND 3 (2026-08-05) — C2. THE COUNT MUST NOT RUN WHILE WE ARE BUSY
+/// ANSWERING. This comment used to end "nothing needs to reset the count on a
+/// real answer, because both answers end the process". That is false for
+/// exactly one call, and it is the dangerous one: `exit_stop_and_close` awaits
+/// `games_stop` — tens of seconds at ~2,000 bots — and does not latch
+/// `EXIT_CONFIRMED` until the stop settles. An impatient second click spends a
+/// prevention and, because the frontend drops it (`if (exitGuard.busy)
+/// return`) on an already-visible window, produces NO visible change at all.
+/// A third click inside the same window met the bound, was not prevented, and
+/// killed the process mid-`compose down` — holder released, distro off ~15s
+/// later. The launcher was sitting inside the await, holding ground truth that
+/// the request WAS being answered, and never asked itself.
+///
+/// So the bound is suspended, not enlarged, while a confirmed stop is
+/// draining: see [`stop_in_flight`]. It is bounded by the stop itself rather
+/// than by a clock, and "Close anyway" (`exit_anyway`, which latches
+/// `EXIT_CONFIRMED` and never reaches this guard) remains the unconditional
+/// escape throughout — so this cannot rebuild F1's trap.
 const MAX_UNANSWERED_EXIT_PREVENTIONS: u32 = 2;
 
 /// A gap this long between two exit requests starts a fresh count. See
@@ -7525,8 +7542,24 @@ const EXIT_REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(
 ///
 /// `webview_has_spoken` — has the frontend ever pushed a status
 /// (`AppState::last_status_push`)? `prevented_in_window` — how many requests we
-/// have already prevented in the current run of asks.
-fn may_prevent_exit(webview_has_spoken: bool, prevented_in_window: u32) -> bool {
+/// have already prevented in the current run of asks. `stop_in_flight` — is a
+/// CONFIRMED stop draining right now (C2)?
+///
+/// `stop_in_flight` outranks both, and it is the one input that can say YES on
+/// its own. The other two answer "is there any point asking?"; this one answers
+/// "are we already executing the answer?", and killing the process in the
+/// middle of `compose down` is the precise harm this whole module exists to
+/// prevent. It cannot trap anyone: it is true only while a `games_stop` the
+/// user themselves confirmed is running, and "Close anyway" bypasses this
+/// function entirely by latching `EXIT_CONFIRMED` first.
+fn may_prevent_exit(
+    webview_has_spoken: bool,
+    prevented_in_window: u32,
+    stop_in_flight: bool,
+) -> bool {
+    if stop_in_flight {
+        return true;
+    }
     webview_has_spoken && prevented_in_window < MAX_UNANSWERED_EXIT_PREVENTIONS
 }
 
@@ -7543,7 +7576,12 @@ impl ExitPromptGuard {
     /// driven in a test — the guarantee this whole module exists for is a
     /// statement about a SEQUENCE of requests, and a sequence that has to be
     /// waited out in real time is a guarantee nobody pins.
-    fn request(&mut self, webview_has_spoken: bool, now: std::time::Instant) -> bool {
+    fn request(
+        &mut self,
+        webview_has_spoken: bool,
+        stop_in_flight: bool,
+        now: std::time::Instant,
+    ) -> bool {
         let fresh_run = self
             .last_request
             .map_or(true, |t| now.duration_since(t) >= EXIT_REQUEST_WINDOW);
@@ -7551,11 +7589,24 @@ impl ExitPromptGuard {
             self.prevented = 0;
         }
         self.last_request = Some(now);
-        let allow = may_prevent_exit(webview_has_spoken, self.prevented);
-        if allow {
+        let allow = may_prevent_exit(webview_has_spoken, self.prevented, stop_in_flight);
+        // C2: a request made while we are already executing the user's answer
+        // is not an UNANSWERED ask, so it must not spend the budget either.
+        // Counting it would only defer the same death by a click or two.
+        if allow && !stop_in_flight {
             self.prevented += 1;
         }
         allow
+    }
+
+    /// The run is over because a real answer arrived that did NOT end the
+    /// process — today that is exactly one thing: `exit_stop_and_close`'s
+    /// failure arm (C1). Anything the user does next is a fresh decision made
+    /// with the failure in front of them, so it must not inherit a budget
+    /// already spent waiting for an answer they have now been given.
+    fn answered(&mut self) {
+        self.prevented = 0;
+        self.last_request = None;
     }
 }
 
@@ -7577,12 +7628,78 @@ static EXIT_PROMPT_GUARD: Mutex<ExitPromptGuard> =
 /// with `closeToTray` on (the default) would otherwise disarm the next Tray
 /// Quit's dialog and hard-cut a live server.
 fn exit_prevention_allowed(app: &tauri::AppHandle) -> bool {
-    let webview_has_spoken = app
-        .try_state::<AppState>()
+    exit_prevention_allowed_with(
+        webview_has_spoken(app),
+        stop_in_flight(),
+        std::time::Instant::now(),
+    )
+}
+
+/// FIX ROUND 3 (2026-08-05) — H6. Split out of [`exit_prevention_allowed`] so
+/// the decision has a seam a test can drive. Before this, BOTH of the reads
+/// below could be replaced by their own inverse — `let webview_has_spoken =
+/// true`, `.unwrap_or(false)` → `.unwrap_or(true)` — and the whole suite
+/// stayed at 273 passed. A paragraph of doc comment established the fail-open
+/// as load-bearing while nothing enforced it.
+///
+/// FAILS OPEN TOWARD CLOSING: a missing `AppState` or a poisoned lock answers
+/// `false`, i.e. "we have no evidence a webview exists to answer a question, so
+/// do not prevent". Inverted, a poisoned lock would start PREVENTING — the trap
+/// rebuilt out of the fix.
+fn webview_has_spoken(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppState>()
         .and_then(|s| s.last_status_push.lock().ok().map(|t| t.is_some()))
-        .unwrap_or(false);
+        .unwrap_or(false)
+}
+
+/// The counter half, with the clock as a parameter — same reason
+/// [`ExitPromptGuard::request`] takes one.
+fn exit_prevention_allowed_with(
+    webview_has_spoken: bool,
+    stop_in_flight: bool,
+    now: std::time::Instant,
+) -> bool {
     let mut guard = EXIT_PROMPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    guard.request(webview_has_spoken, std::time::Instant::now())
+    guard.request(webview_has_spoken, stop_in_flight, now)
+}
+
+/// C2: how many confirmed stops are draining right now. A DEPTH rather than a
+/// flag so two overlapping runs cannot have the first one's completion clear
+/// the second one's protection — the dialog disables Confirm while busy, but
+/// that is a frontend fact and this is the last line before the process dies.
+static EXIT_STOPS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+fn stop_in_flight() -> bool {
+    EXIT_STOPS_IN_FLIGHT.load(Ordering::SeqCst) > 0
+}
+
+/// RAII, deliberately: a `store(false)` at the end of `exit_stop_and_close`
+/// would leak the protection forever if that future were ever dropped
+/// (a webview reload cancels in-flight invokes), and a permanently-true
+/// `stop_in_flight` is an unbounded veto — F1 rebuilt from the other side.
+struct StopInFlight;
+
+impl StopInFlight {
+    fn begin() -> Self {
+        EXIT_STOPS_IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
+        StopInFlight
+    }
+}
+
+impl Drop for StopInFlight {
+    fn drop(&mut self) {
+        EXIT_STOPS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// A real answer arrived that did not end the process — see
+/// [`ExitPromptGuard::answered`].
+fn exit_prompt_run_answered() {
+    EXIT_PROMPT_GUARD
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .answered();
 }
 
 /// The wire vocabulary the frontend switches on.
@@ -7678,7 +7795,13 @@ async fn exit_stop_and_close(
     // exactly the failure it exists to catch. The stream is where a lifecycle
     // failure is actually reported — see `StreamOutcome`.
     let watch = StreamOutcome::default();
+    // FIX ROUND 3 (2026-08-05) — C2. From here until the stop settles, an exit
+    // request is not an unanswered ask: we are INSIDE the answer. Held as an
+    // RAII depth (see `StopInFlight`) so a dropped future cannot leave the veto
+    // permanently armed.
+    let in_flight = StopInFlight::begin();
     let result = games_stop_watched(id, manage_docker, on_event, state, watch.clone()).await;
+    drop(in_flight);
     let stop_ok = result.is_ok() && !watch.failed();
     match after_stop(stop_ok) {
         AfterStop::CloseNow => {
@@ -7692,6 +7815,11 @@ async fn exit_stop_and_close(
             // means the distro powers off ~15s from now underneath a server
             // nobody confirmed was down.
             wsl_keepalive::server_should_run();
+            // C2: the user asked, we answered, and the answer did not end the
+            // process. Whatever they click next is a fresh decision taken with
+            // the failure in front of them — it must not inherit a budget spent
+            // waiting for an answer they have now been given.
+            exit_prompt_run_answered();
         }
     }
     result
@@ -9546,7 +9674,7 @@ mod tests {
     fn a_webview_that_never_spoke_is_never_prevented_from_closing() {
         for prevented in 0..=(MAX_UNANSWERED_EXIT_PREVENTIONS + 3) {
             assert!(
-                !may_prevent_exit(false, prevented),
+                !may_prevent_exit(false, prevented, false),
                 "an exit was prevented with no evidence a webview exists to answer it \
                  (prevented_in_window={prevented}) — that is the unclosable launcher"
             );
@@ -9559,11 +9687,11 @@ mod tests {
     #[test]
     fn preventions_are_bounded_even_for_a_speaking_webview() {
         for prevented in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
-            assert!(may_prevent_exit(true, prevented), "prevented={prevented} must still ask");
+            assert!(may_prevent_exit(true, prevented, false), "prevented={prevented} must still ask");
         }
         for prevented in MAX_UNANSWERED_EXIT_PREVENTIONS..(MAX_UNANSWERED_EXIT_PREVENTIONS + 4) {
             assert!(
-                !may_prevent_exit(true, prevented),
+                !may_prevent_exit(true, prevented, false),
                 "prevented={prevented} is past the bound and must let the process go"
             );
         }
@@ -9585,7 +9713,7 @@ mod tests {
             // user clicking Quit over and over because nothing is happening.
             for i in 0..20u32 {
                 let now = t0 + std::time::Duration::from_secs(u64::from(i));
-                if guard.request(webview_has_spoken, now) {
+                if guard.request(webview_has_spoken, false, now) {
                     prevented += 1;
                 } else {
                     let_go = true;
@@ -9615,11 +9743,11 @@ mod tests {
         let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
         let t0 = std::time::Instant::now();
         for i in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
-            assert!(guard.request(true, t0 + std::time::Duration::from_secs(u64::from(i))));
+            assert!(guard.request(true, false, t0 + std::time::Duration::from_secs(u64::from(i))));
         }
         for i in MAX_UNANSWERED_EXIT_PREVENTIONS..(MAX_UNANSWERED_EXIT_PREVENTIONS + 5) {
             assert!(
-                !guard.request(true, t0 + std::time::Duration::from_secs(u64::from(i))),
+                !guard.request(true, false, t0 + std::time::Duration::from_secs(u64::from(i))),
                 "request {i} re-armed the veto inside the same run"
             );
         }
@@ -9636,13 +9764,13 @@ mod tests {
         let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
         let mut now = std::time::Instant::now();
         for _ in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
-            assert!(guard.request(true, now));
+            assert!(guard.request(true, false, now));
             now += std::time::Duration::from_secs(1);
         }
-        assert!(!guard.request(true, now), "the bound must be reachable at all");
+        assert!(!guard.request(true, false, now), "the bound must be reachable at all");
         now += EXIT_REQUEST_WINDOW;
         assert!(
-            guard.request(true, now),
+            guard.request(true, false, now),
             "an exit request a full window later is a NEW ask and must still be able to \
              protect a running server"
         );
@@ -9664,6 +9792,161 @@ mod tests {
                  prompt a webview that cannot answer"
             );
         }
+    }
+
+    // -- FIX ROUND 3, C2: the bound must not run while we are answering ------
+
+    /// THE BUG, REPRODUCED. Confirm -> `exit_stop_and_close` awaits
+    /// `games_stop` (tens of seconds at ~2,000 bots) and `EXIT_CONFIRMED` does
+    /// not latch until it settles. Click 2 spent a prevention and, because the
+    /// frontend drops it (`if (exitGuard.busy) return`) on an already-visible
+    /// window, produced NO visible change at all. Click 3 inside the same 60s
+    /// window met the bound, was not prevented, and killed the process
+    /// mid-`compose down` — holder released, distro off ~15s later. Twenty asks
+    /// here, not three, because "it survived exactly three" is a coincidence
+    /// and "it survives the whole stop" is the property.
+    #[test]
+    fn clicks_during_a_confirmed_stop_never_reach_an_exit() {
+        let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+        let t0 = std::time::Instant::now();
+        for i in 0..20u32 {
+            let now = t0 + std::time::Duration::from_secs(2 * u64::from(i));
+            assert!(
+                guard.request(true, true, now),
+                "ask {i} was let through while a confirmed stop was still draining. That \
+                 kills the process mid-`compose down`, releases the WSL holder and powers \
+                 the distro off ~15s later — the exact harm the bound was added to bound."
+            );
+        }
+    }
+
+    /// C2 HAS TWO HALVES AND THEY MASK EACH OTHER. Found by mutation while
+    /// writing this round: deleting the `stop_in_flight` override from
+    /// `may_prevent_exit` left the sequence test above GREEN, because the
+    /// second half (not spending the budget) keeps `prevented` at zero, so the
+    /// ordinary rule happens to answer yes for the first two clicks and then
+    /// forever. The override is only load-bearing where the ordinary rule says
+    /// NO — a budget already spent, or a webview `last_status_push` has not
+    /// heard from yet. That is the case this test states, and it is the only
+    /// one that reddens when the override goes.
+    #[test]
+    fn a_draining_stop_outranks_both_other_inputs() {
+        for spoken in [false, true] {
+            for prevented in 0..=(MAX_UNANSWERED_EXIT_PREVENTIONS + 3) {
+                assert!(
+                    may_prevent_exit(spoken, prevented, true),
+                    "spoken={spoken} prevented={prevented}: an exit was allowed through \
+                     while a confirmed stop was draining. Both other inputs answer \"is \
+                     there any point asking?\"; this one answers \"are we already \
+                     executing the answer?\", and killing the process mid-`compose down` \
+                     is the harm, not the remedy."
+                );
+            }
+        }
+    }
+
+    /// AND IT COSTS NOTHING. Suspending the bound is only half the fix: if
+    /// those clicks still spent the budget, the very next ask after the stop
+    /// settled would find it exhausted and the same death would land one click
+    /// later. Asserted WITHOUT `answered()`, so this holds even on a path that
+    /// forgets to reset.
+    #[test]
+    fn a_stop_in_flight_does_not_spend_the_budget() {
+        let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+        let mut now = std::time::Instant::now();
+        for _ in 0..(MAX_UNANSWERED_EXIT_PREVENTIONS + 3) {
+            assert!(guard.request(true, true, now));
+            now += std::time::Duration::from_secs(1);
+        }
+        for i in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
+            assert!(
+                guard.request(true, false, now),
+                "ask {i} after the stop settled found the budget already spent — the \
+                 in-flight clicks were counted after all"
+            );
+            now += std::time::Duration::from_secs(1);
+        }
+        assert!(
+            !guard.request(true, false, now),
+            "the ordinary bound must still be reachable — a stop-in-flight that permanently \
+             disarmed the counter would be F1 rebuilt from the other side"
+        );
+    }
+
+    /// AN ANSWER THAT DID NOT END THE PROCESS STARTS A FRESH RUN. The failure
+    /// arm (C1) is the one call where the old justification — "both answers end
+    /// the process, so nothing needs to reset the count" — is simply false.
+    #[test]
+    fn an_answer_that_did_not_close_starts_a_fresh_run() {
+        let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+        let mut now = std::time::Instant::now();
+        for _ in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
+            assert!(guard.request(true, false, now));
+            now += std::time::Duration::from_secs(1);
+        }
+        assert!(!guard.request(true, false, now), "the bound must be reachable at all");
+        guard.answered();
+        assert!(
+            guard.request(true, false, now + std::time::Duration::from_secs(1)),
+            "the stop failed and the launcher stayed up; the next click is a NEW decision \
+             taken with the failure on screen and must not inherit a spent budget"
+        );
+    }
+
+    /// THE DEPTH IS RELEASED BY DROP, and an inner run finishing does not clear
+    /// an outer one. A `store(false)` at the end of `exit_stop_and_close` would
+    /// leak the protection forever if that future were dropped (a webview
+    /// reload cancels in-flight invokes) — and a permanently-true
+    /// `stop_in_flight` is an unbounded veto, F1 rebuilt.
+    ///
+    /// Shares `EXIT_CONFIRMED_TEST_LOCK` because it mutates a process-global
+    /// the exit tests read; the crate runs as one binary with parallel threads.
+    #[test]
+    fn the_in_flight_marker_is_released_by_drop() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!stop_in_flight(), "leaked from an earlier test");
+        {
+            let _outer = StopInFlight::begin();
+            assert!(stop_in_flight());
+            {
+                let _inner = StopInFlight::begin();
+                assert!(stop_in_flight());
+            }
+            assert!(
+                stop_in_flight(),
+                "an inner stop finishing cleared the outer one's protection — a depth, not \
+                 a flag, is exactly what stops that"
+            );
+        }
+        assert!(
+            !stop_in_flight(),
+            "the marker outlived its guard. A stop_in_flight that never clears prevents \
+             every exit forever."
+        );
+    }
+
+    /// THE ESCAPE HATCH IS UNAFFECTED, which is what makes suspending the bound
+    /// safe. "Close anyway" latches `EXIT_CONFIRMED` first, and
+    /// `should_prompt_on_exit` short-circuits on that latch before the guard is
+    /// consulted at all — so it closes during a stop exactly as it does
+    /// outside one.
+    #[test]
+    fn close_anyway_still_closes_while_a_stop_is_in_flight() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _in_flight = StopInFlight::begin();
+        EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+        for action in [ExitAction::PromptRunning, ExitAction::PromptUnknown] {
+            assert!(
+                !should_prompt_on_exit(action),
+                "{action:?}: a confirmed exit must not be prompted again, stop or no stop"
+            );
+            assert_eq!(
+                window_close_action(false, action, true),
+                WindowCloseAction::ExitNow,
+                "{action:?}: Close anyway must leave, or a hung stop traps the user"
+            );
+        }
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
     }
 
     // -- FIX ROUND 2, F3: a confirmed stop that FAILS does not close ---------
@@ -10743,6 +11026,65 @@ mod keepalive_wiring_tests {
             "games_stop_watched releases the hold BEFORE the stop has finished. That starts \
              the distro's 15s clock while compose is still shutting containers down — the \
              ungraceful stop this backend already struggles with."
+        );
+    }
+
+    /// C2's WIRING HALF, and this branch has twice paid for leaving it out: a
+    /// pure guard is perfectly green under a revert that only unhooks it.
+    /// `clicks_during_a_confirmed_stop_never_reach_an_exit` drives
+    /// `ExitPromptGuard` directly and would stay green if production simply
+    /// stopped passing `stop_in_flight` — which is exactly the shape of the
+    /// bug, not a hypothetical.
+    #[test]
+    fn the_exit_guard_knows_a_confirmed_stop_is_draining() {
+        let code = src();
+
+        let allowed = fn_body(&code, "exit_prevention_allowed");
+        assert!(
+            allowed.contains("stop_in_flight()"),
+            "exit_prevention_allowed does not ask whether a confirmed stop is draining. \
+             Then an impatient third click during a stop meets the bound, is not \
+             prevented, and kills the process mid-`compose down` — holder released, \
+             distro off ~15s later (C2)."
+        );
+
+        let stop = fn_body(&code, "exit_stop_and_close");
+        let begin_at = stop.find("StopInFlight::begin()").expect(
+            "exit_stop_and_close never marks the stop as in flight, so exit_prevention_allowed \
+             can only ever see `false` and C2 is back",
+        );
+        let work_at = stop
+            .find("games_stop_watched(")
+            .expect("exit_stop_and_close no longer calls games_stop_watched");
+        assert!(
+            begin_at < work_at,
+            "the in-flight marker is taken AFTER the stop starts. The window it exists to \
+             cover is the await itself, so a marker set after it protects nothing."
+        );
+
+        // And the release is by Drop, not by a store the failure arm could skip
+        // or a dropped future could leak.
+        assert!(
+            !stop.contains("EXIT_STOPS_IN_FLIGHT.store("),
+            "exit_stop_and_close clears the in-flight depth by hand. Use the RAII guard: a \
+             future that is dropped (a webview reload cancels in-flight invokes) would \
+             otherwise leave the veto permanently armed, which is F1 rebuilt."
+        );
+
+        // The other half of the ruling: an answer that did NOT end the process
+        // starts a fresh run of asks.
+        let answered_at = stop.find("exit_prompt_run_answered()").expect(
+            "the failure arm does not reset the run of asks. The user asked, we answered, \
+             and the answer left the launcher up — the next click is a fresh decision and \
+             must not inherit a budget spent waiting for it (C2).",
+        );
+        let fail_arm = stop
+            .find("AfterStop::ReportFailure =>")
+            .expect("the ReportFailure arm was renamed or removed");
+        assert!(
+            answered_at > fail_arm,
+            "the run is reset outside the ReportFailure arm — on the success path the \
+             process is leaving and there is nothing to reset"
         );
     }
 
