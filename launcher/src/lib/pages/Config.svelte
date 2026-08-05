@@ -598,6 +598,11 @@
             </select>
           </label>
           <p class="muted">
+            On Docker Desktop your server keeps running when you close the launcher. On WSL it
+            cannot — Windows shuts the distro down shortly after, so the launcher stops the
+            server for you.
+          </p>
+          <p class="muted">
             Currently using <strong>{launcher.effectiveBackend}</strong>.
             {#if launcher.backendSource === "env"}
               Locked by the DML_BACKEND environment variable
