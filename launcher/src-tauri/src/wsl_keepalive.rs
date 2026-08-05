@@ -831,12 +831,20 @@ pub fn server_should_stop() {
 }
 
 /// A polled verdict from the frontend. Adopts a running server; never releases.
-/// See [`Keepalive::observed_status`].
+///
+/// Delegates to [`Keepalive::observed_status`] (the METHOD) rather than
+/// [`Keepalive::want_running`] — this used to cheap out on any verdict that
+/// didn't mean "running" and call `want_running` on the rest, which had two
+/// costs: a negative verdict never reached `last_verdict` at all (so
+/// `presence_from` could never see `Stopped`, only `Running`/`Unknown`), and
+/// `want_running` is a FRESH ask, so a positive verdict — pushed every ~7s by
+/// `tray_set_status` — reopened a latched give-up on every poll. The method
+/// already records the verdict unconditionally and already treats adoption as
+/// a non-fresh ask; see its doc comment for why that distinction matters.
+/// Deliberately giving up the early return: it is the early return that made
+/// a negative verdict invisible, so losing it is the point, not a regression.
 pub fn observed_status(verdict: &str) {
-    if !verdict_means_running(verdict) {
-        return; // cheap out before taking the lock
-    }
-    apply(|k| k.want_running());
+    apply(|k| k.observed_status(verdict));
 }
 
 /// Release on launcher exit. The polite path; [`jobguard`] covers the rest.
@@ -869,6 +877,10 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    // Shared with `lib.rs`'s `keepalive_wiring_tests`, which pins wiring the
+    // same way for the same reason: "two of these would drift" is that
+    // module's own doc comment on why it stayed `pub(crate)`.
+    use crate::vocab_coverage_tests::production_half;
 
     /// A holder whose life the TEST controls, and which records that it was
     /// really released.
@@ -1560,6 +1572,123 @@ mod tests {
     fn presence_with_no_verdict_at_all_is_unknown() {
         assert_eq!(presence_from(false, None), ServerPresence::Unknown);
         assert_eq!(presence_from(false, Some("")), ServerPresence::Unknown);
+    }
+
+    // -- fix round 1: the production entry point, not just the method --------
+    //
+    // Everything above drives `Keepalive` directly. `tray_set_status`
+    // (`lib.rs:471`) never touches the method — its only call is the FREE
+    // function `observed_status` a few hundred lines up in this file, and
+    // that function used to call `Keepalive::want_running` instead of
+    // `Keepalive::observed_status`. No test above could see that: each one
+    // builds its own bare `Keepalive`. See the two tests below for what that
+    // let through, and why they are shaped the way they are.
+
+    /// FIX ROUND 1, Finding 1 + Finding 2 (the "reaches the keepalive at
+    /// all" half). The free function used to cheap out before taking the
+    /// lock for any verdict that didn't mean "running", so a "stopped"
+    /// verdict never touched `last_verdict` — never even reached `STATE` —
+    /// and `presence_from` could then never return `Stopped`, only `Running`
+    /// (via `holding`) or `Unknown`.
+    ///
+    /// A NEGATIVE verdict is also the only kind this test may safely drive
+    /// through the real `STATE`/`apply` seam: `apply` unconditionally
+    /// reconciles with the production `WslSpawner`, and a negative verdict
+    /// never moves `Intent` away from `Stop`, so `reconcile` takes the
+    /// `Intent::Stop` branch and never reaches a real `wsl.exe` spawn — true
+    /// of both this fix and the reverted code, which is what makes it safe to
+    /// run unattended. A positive verdict cannot make that promise once a
+    /// give-up is involved; see the structural test below for that half.
+    ///
+    /// THE ONLY TEST IN THIS CRATE ALLOWED TO TOUCH `STATE`: it is a
+    /// process-wide `OnceLock`, `cargo test` runs every test in one binary,
+    /// and a second test racing this one for the first `STATE.set` would
+    /// silently inherit whichever one lost the race's leftover `Keepalive`.
+    #[test]
+    fn the_free_function_records_a_negative_verdict_the_old_cheap_out_dropped() {
+        assert!(
+            STATE.set(Mutex::new(Keepalive::new())).is_ok(),
+            "STATE was already installed — this must be the only test in the crate that does"
+        );
+
+        observed_status("stopped"); // the FREE function: what tray_set_status really calls
+
+        let report = keepalive_report();
+        assert!(report.applies, "STATE was just installed, so the report must reflect it");
+        assert!(!report.wanted, "a negative verdict must never adopt");
+        assert_eq!(
+            report.last_verdict.as_deref(),
+            Some("stopped"),
+            "a negative verdict must still reach the keepalive and be recorded — the old \
+             cheap-out returned before `apply` ever ran, so this was always None"
+        );
+    }
+
+    /// FIX ROUND 1, Finding 2 (the give-up-reopening half). `a_status_poll_
+    /// never_reopens_a_give_up` above proves the METHOD is safe to call from
+    /// a poll. Before this fix round the free function — the only thing
+    /// `tray_set_status` ever calls — reached `want_running()` instead,
+    /// which the method's own doc comment names as a FRESH ask: it DOES
+    /// reopen a latched give-up (see
+    /// `pressing_start_again_after_a_give_up_reaches_the_spawner`, which
+    /// proves `want_running` reopens it ON PURPOSE, for the Start button).
+    ///
+    /// Reproducing the reopened-give-up scenario through the real free
+    /// function is not something this suite may automate: `apply`
+    /// unconditionally reconciles with the production `WslSpawner`, and a
+    /// reopened give-up's very next `reconcile` — called inside the SAME
+    /// `apply` invocation, before a test gets control back — attempts a REAL
+    /// `wsl.exe -d dml-arch` spawn. A test that actually reproduced this bug
+    /// would, on any machine with `wsl.exe` on PATH (this one included), boot
+    /// a real held session into the real distro as a side effect of running
+    /// `cargo test` — exactly the class of accident this module exists to
+    /// prevent, and a worse outcome than the bug it would be proving.
+    ///
+    /// Source-level is therefore the honest seam. `production_half` (which
+    /// itself calls `strip_comments`) is the SAME helper `lib.rs`'s
+    /// `keepalive_wiring_tests` uses to pin wiring a unit test cannot see —
+    /// reused rather than reimplemented, per that helper's own doc comment
+    /// ("two of these would drift"). The free function has no nested braces
+    /// in either its broken or fixed form, so finding its closing `}` on its
+    /// own line (rather than lib.rs's full brace-matching `fn_body`) is
+    /// enough; that stops being true only if the function grows real control
+    /// flow, at which point this test's boundary search will panic loudly
+    /// instead of silently mis-scoping.
+    ///
+    /// Reddens on exactly the revert this fix round's report pastes:
+    /// `if !verdict_means_running(verdict) { return; } apply(|k| k.want_running());`
+    /// fails all three assertions below.
+    #[test]
+    fn the_free_observed_status_delegates_to_the_method_not_want_running() {
+        // Normalized to `\n` first: this file checks out CRLF on Windows (no
+        // `.gitattributes` LF rule covers `*.rs`), so a bare `"\n}\n"` search
+        // against the raw bytes would never match `"\r\n}\r\n"`.
+        let code = production_half(include_str!("wsl_keepalive.rs")).replace("\r\n", "\n");
+        let sig = "pub fn observed_status(verdict: &str) {";
+        let start = code
+            .find(sig)
+            .expect("the free `observed_status` function must still exist under this name");
+        let after = &code[start..];
+        let close = after
+            .find("\n}\n")
+            .expect("could not find the free function's closing brace on its own line");
+        let body = &after[..close + 2];
+
+        assert!(
+            body.contains("k.observed_status(verdict)"),
+            "the free function must delegate to the METHOD, which records `last_verdict` \
+             unconditionally and treats adoption as a non-fresh ask:\n{body}"
+        );
+        assert!(
+            !body.contains("want_running"),
+            "the free function must never call want_running — that is a FRESH ask and \
+             reopens a latched give-up on every ~7s poll:\n{body}"
+        );
+        assert!(
+            !body.contains("verdict_means_running"),
+            "the early cheap-out is what made a negative verdict invisible to `last_verdict`; \
+             it must be gone, not narrowed to fewer verdicts:\n{body}"
+        );
     }
 
     // -----------------------------------------------------------------------
