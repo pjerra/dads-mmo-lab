@@ -152,11 +152,75 @@ describe("the shell hears the exit request", () => {
     expect(body, "the kind must be derived from the event payload").toMatch(/e\.payload/);
   });
 
+  /**
+   * AND THE TERNARY POINTS THE RIGHT WAY (M10, final review 2026-08-05).
+   *
+   * Inverting `e.payload === "prompt_unknown" ? "prompt_unknown" : …` left 18
+   * tests green across both files: `exitGuard.kind` is still assigned, the
+   * payload is still read, and every assertion above still holds. The result
+   * is an Unknown close that asserts "Your server is running" as settled fact
+   * — the exact overclaim `exit-guard.test.ts`'s own fix round exists to
+   * forbid, reintroduced one level up where that suite structurally cannot
+   * see it.
+   */
+  it("maps the unknown payload to the unknown copy, not to its opposite", () => {
+    const body = handler();
+    expect(
+      body,
+      'the "prompt_unknown" payload must select the prompt_unknown copy — inverted, the ' +
+        "dialog tells a user whose server state we could NOT read that it is definitely running",
+    ).toMatch(/e\.payload\s*===\s*"prompt_unknown"\s*\?\s*"prompt_unknown"/);
+  });
+
+  /**
+   * H3 (final review 2026-08-05). THE ASSERTION THAT WAS POLARITY-BLIND.
+   *
+   * This used to be `toMatch(/exitGuard\.busy\)\s*return/)`, which matches
+   * `!exitGuard.busy) return` verbatim. One character — `if (exitGuard.busy)`
+   * to `if (!exitGuard.busy)` — restored the whole Task-4 product failure with
+   * 784 tests green and svelte-check at 0 errors: `busy` is false on every
+   * fresh close, so the handler returns before touching `exitGuard`, the
+   * dialog never opens, Rust has already called `prevent_exit`, and the window
+   * surfaces with no explanation.
+   *
+   * So: the SHAPE (which rejects the negation), and the POSITION (nothing else
+   * may bail out before the dialog opens). The position half also closes
+   * M10's first mutation — prepending `if (firstRun) return;` to this handler
+   * was invisible to the whole suite, and the identical guard sits twelve
+   * lines below in the tray-action listener WITH a comment recommending it.
+   */
   it("ignores a re-emit while a confirmed stop is already running", () => {
     // Tray Quit clicked twice mid-stop re-emits for real. Without this the
     // second one resets the terminal and the progress out from under a stop
     // that is genuinely in flight.
-    expect(handler(), "the handler must bail out while busy").toMatch(/exitGuard\.busy\)\s*return/);
+    const body = handler();
+    expect(body, "the handler must bail out while busy").toMatch(
+      /if\s*\(\s*exitGuard\.busy\s*\)\s*return/,
+    );
+    expect(
+      body,
+      "the busy guard is NEGATED — it now bails out on every fresh close, which is the " +
+        "dialog never opening at all",
+    ).not.toMatch(/if\s*\(\s*!\s*exitGuard\.busy\s*\)/);
+  });
+
+  it("has no other way to bail out before the dialog opens", () => {
+    const body = handler();
+    const returns = body.match(/\breturn\b/g) ?? [];
+    expect(
+      returns.length,
+      "every `return` in this handler is a path on which the user clicks Exit and NOTHING " +
+        "happens, while Rust has already vetoed the exit. There must be exactly one, and " +
+        "it must be the busy guard.",
+    ).toBe(1);
+    const bail = body.indexOf("return");
+    const opens = body.indexOf("exitGuard.open = true");
+    expect(opens, "the handler no longer opens the dialog at all").toBeGreaterThan(-1);
+    expect(
+      bail,
+      "a return sits AFTER the dialog is opened — then it is not the busy guard and the " +
+        "handler has an exit path this test cannot account for",
+    ).toBeLessThan(opens);
   });
 });
 
@@ -246,5 +310,41 @@ describe("the IPC wrappers name the commands lib.rs registers", () => {
     expect(commands).toContain("exit_anyway");
     expect(api).toMatch(/export\s+(const|async function)\s+exitStopAndClose/);
     expect(api).toMatch(/export\s+(const|async function)\s+exitAnyway/);
+  });
+
+  /**
+   * H4 (final review 2026-08-05). A RENAME WAS CAUGHT; THE SWAP WAS NOT.
+   *
+   * The assertions above check that both literals appear somewhere in the file
+   * and that both export names exist. Exchanging the two literals satisfies
+   * every one of them: 15 passed, `npm run check` 0 errors. Under the swap
+   * "Stop server and close" invokes `exit_anyway` and HARD-CUTS a live server
+   * with ~2,000 bots on it — the incident this plan was written for — while
+   * "Close anyway", the control whose entire purpose is to work when the stop
+   * is hung, blocks on that stop instead.
+   *
+   * The membership test above is about the file; this one is about each
+   * wrapper's own body.
+   */
+  it("binds each wrapper to its own command, so a swap is not invisible", () => {
+    const api = code(find("/api.ts"));
+    const stopAndClose = blockOf(api, "export const exitStopAndClose");
+    const anyway = blockOf(api, "export async function exitAnyway");
+
+    expect(stopAndClose, "exitStopAndClose must invoke exit_stop_and_close").toContain(
+      '"exit_stop_and_close"',
+    );
+    expect(
+      stopAndClose,
+      'exitStopAndClose invokes exit_anyway — the button labelled "Stop server and close" ' +
+        "now hard-cuts a live server instead of stopping it",
+    ).not.toContain('"exit_anyway"');
+
+    expect(anyway, "exitAnyway must invoke exit_anyway").toContain('"exit_anyway"');
+    expect(
+      anyway,
+      "exitAnyway invokes exit_stop_and_close — the escape hatch now blocks on the very " +
+        "stop it exists to escape",
+    ).not.toContain('"exit_stop_and_close"');
   });
 });

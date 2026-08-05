@@ -11029,6 +11029,54 @@ mod keepalive_wiring_tests {
         );
     }
 
+    /// H6 (final review 2026-08-05). THE FAIL-OPEN THE DOC COMMENT CALLS
+    /// LOAD-BEARING, ENFORCED.
+    ///
+    /// `exit_prevention_allowed` had zero tests, and both of its reads shipped
+    /// at 273 passed under their own inverse: `let webview_has_spoken = true`,
+    /// and `.unwrap_or(false)` -> `.unwrap_or(true)`. A paragraph of prose spent
+    /// establishing "every uncertainty here must resolve in favour of the user
+    /// being able to close their launcher" while nothing checked it. Inverted, a
+    /// poisoned lock or an unmanaged `AppState` starts PREVENTING — the trap
+    /// rebuilt out of the fix.
+    ///
+    /// The counter half now has a seam (`exit_prevention_allowed_with`) that
+    /// unit tests drive; this is the part that still needs a real `AppHandle`,
+    /// so it is pinned by reading it.
+    #[test]
+    fn the_webview_evidence_fails_open_toward_closing() {
+        let code = src();
+        let body = fn_body(&code, "webview_has_spoken");
+
+        assert!(
+            body.contains("last_status_push"),
+            "webview_has_spoken no longer reads last_status_push — it is the ONLY thing \
+             Rust knows about whether a webview exists to answer a question"
+        );
+        assert!(
+            body.contains("try_state::<AppState>()"),
+            "webview_has_spoken no longer asks AppState at all; a hardcoded answer here \
+             is invisible to every unit test in this crate (H6)"
+        );
+        assert!(
+            body.contains(".unwrap_or(false)"),
+            "the fail-open is gone. A missing AppState or a poisoned lock must answer \
+             `false` — do not prevent. Any other default makes an uncertainty START \
+             preventing, which is the unclosable launcher (F1) rebuilt out of its own fix."
+        );
+        assert!(
+            !body.contains(".unwrap_or(true)"),
+            "the fail-open is INVERTED — a poisoned lock now vetoes the user's exit (H6)"
+        );
+
+        // NON-VACUITY: `fn_body` must really be isolating this function.
+        assert!(
+            !body.contains("EXIT_PROMPT_GUARD"),
+            "fn_body is not isolating one function — the counter lives in \
+             exit_prevention_allowed_with, not here"
+        );
+    }
+
     /// C2's WIRING HALF, and this branch has twice paid for leaving it out: a
     /// pure guard is perfectly green under a revert that only unhooks it.
     /// `clicks_during_a_confirmed_stop_never_reach_an_exit` drives
@@ -11288,6 +11336,36 @@ mod keepalive_wiring_tests {
                  Manager (F1)."
             );
         }
+
+        // H5 (final review 2026-08-05). CONSULTING IT IS NOT THE SAME AS USING
+        // THE ANSWER. `window_close_action(hide_to_tray, action, true)` —
+        // leaving the `guard_allows` binding in place so only an
+        // `unused_variables` warning marks it, and CI sets no `-D warnings` —
+        // passed all 273 tests under the test written to prevent exactly this.
+        // Half of F1 restored: with `closeToTray` off, a dead webview gets a
+        // `PromptVisible` on every X click forever, and `PromptVisible` never
+        // exits. The assertion above only proves the string appears SOMEWHERE
+        // in a slice spanning the whole plugin/invoke block.
+        assert!(
+            window_arm.contains("window_close_action(hide_to_tray, action, guard_allows)"),
+            "the window-close handler no longer passes the guard's own answer to \
+             window_close_action. A literal there (or a second variable) makes the bound \
+             advisory on this surface: closeToTray off + a webview that cannot render the \
+             dialog = PromptVisible on every X click, forever, and PromptVisible never \
+             exits (H5)."
+        );
+        let guard_binding = window_arm
+            .find("let guard_allows =")
+            .expect("the guard's answer is no longer bound as `guard_allows` in the window arm");
+        let binding_line: String = window_arm[guard_binding..]
+            .chars()
+            .take_while(|c| *c != ';')
+            .collect();
+        assert!(
+            binding_line.contains("exit_prevention_allowed("),
+            "`guard_allows` is bound to something other than the guard's answer, so the \
+             call site above is pinned to a name that no longer means what it says (H5)"
+        );
 
         // The tray/exit arm is the one that actually calls prevent_exit, so its
         // ORDER is checkable: the guard must be consulted first.
