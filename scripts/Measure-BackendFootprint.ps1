@@ -525,6 +525,51 @@ function Get-DistroDiskSample {
 }
 
 <#
+    Quote one argv element for the single Windows command line.
+
+    ProcessStartInfo.ArgumentList - the API that takes a real argv and does
+    this for you - DOES NOT EXIST on .NET Framework, which is what Windows
+    PowerShell 5.1 runs on. It was added in .NET Core 2.1. This file declares
+    itself 5.1-compatible, so reaching for it made every -QueryDocker sample
+    die with "You cannot call a method on a null-valued expression" - a null
+    property, not a missing method, so the failure named the symptom and not
+    the cause. Measured on this box: PSVersion 5.1.26100.8875, CLR 4.0.30319,
+    $psi.ArgumentList -eq $null.
+
+    So the string is built here, by the Windows CommandLineToArgvW rules:
+    quote when the value contains whitespace or a quote, double the run of
+    backslashes that immediately precedes a quote, and escape embedded quotes.
+    Nothing user-supplied crosses this boundary today (every caller passes our
+    own literals plus a docker-emitted RFC3339 timestamp), but a helper that is
+    only correct for its current callers is a trap for the next one.
+#>
+function ConvertTo-Win32Arg {
+    param([string]$Value)
+    if ($Value -eq '') { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $sb = New-Object System.Text.StringBuilder
+    $null = $sb.Append('"')
+    $slashes = 0
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -eq '\') {
+            $slashes++
+            continue
+        }
+        if ($ch -eq '"') {
+            $null = $sb.Append('\' * ($slashes * 2 + 1))
+            $slashes = 0
+            $null = $sb.Append('"')
+            continue
+        }
+        if ($slashes -gt 0) { $null = $sb.Append('\' * $slashes); $slashes = 0 }
+        $null = $sb.Append($ch)
+    }
+    if ($slashes -gt 0) { $null = $sb.Append('\' * ($slashes * 2)) }
+    $null = $sb.Append('"')
+    return $sb.ToString()
+}
+
+<#
     Build the argv for a docker call on the backend under test.
 
     Arch goes through the distro. --exec, never --, because 'wsl -- ' runs a
@@ -545,7 +590,7 @@ function Invoke-BackendDocker {
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
-    foreach ($a in $argv) { $null = $psi.ArgumentList.Add($a) }
+    $psi.Arguments = (($argv | ForEach-Object { ConvertTo-Win32Arg -Value $_ }) -join ' ')
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
@@ -1101,6 +1146,34 @@ function Invoke-SelfTest {
         if ($n -like '*`**') {
             Write-Host "  FAIL  '$n' is a wildcard; VM processes must be matched by exact name." -ForegroundColor Red
             $script:stFail++
+        }
+    }
+
+    # Argv quoting. ProcessStartInfo.ArgumentList - which would have done this
+    # for us - is absent on .NET Framework, so Windows PowerShell 5.1 builds the
+    # command line by hand and every -QueryDocker sample depends on it being
+    # right. Case 1 is the ANTI-VACUITY case: it asserts that a plain value is
+    # passed through UNQUOTED, so a helper mutated to quote everything (or to
+    # return its input unchanged) cannot leave this block green.
+    Write-Section 'Self-test: argv quoting (ConvertTo-Win32Arg)'
+    $argCases = @(
+        @{ In = 'version';                Out = 'version';                Why = 'plain value is not quoted' },
+        @{ In = '{{.Names}}|{{.State}}';  Out = '{{.Names}}|{{.State}}';  Why = 'docker --format strings pass through untouched' },
+        @{ In = '';                       Out = '""';                     Why = 'empty argument survives as an empty argv slot' },
+        @{ In = 'a b';                    Out = '"a b"';                  Why = 'whitespace forces quoting' },
+        @{ In = 'a"b';                    Out = '"a\"b"';                 Why = 'embedded quote is escaped' },
+        @{ In = 'a\"b';                   Out = '"a\\\"b"';               Why = 'backslash run before a quote is doubled' },
+        @{ In = 'a b\';                   Out = '"a b\\"';                Why = 'trailing backslash is doubled so it does not escape the closing quote' }
+    )
+    foreach ($c in $argCases) {
+        $got = ConvertTo-Win32Arg -Value $c.In
+        if ($got -ceq $c.Out) {
+            $script:stPass++
+            Write-Host "  PASS  $($c.Why)" -ForegroundColor Green
+        } else {
+            $script:stFail++
+            Write-Host "  FAIL  $($c.Why)" -ForegroundColor Red
+            Write-Host "          in='$($c.In)' expected='$($c.Out)' got='$got'" -ForegroundColor Red
         }
     }
 

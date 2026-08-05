@@ -1,10 +1,21 @@
 # Measuring Docker Desktop against Arch WSL — method
 
-**Status:** harness built and validated 2026-08-05. **No real measurements have
-been taken yet.** Every number in this document is either a property of the
-machine (read-only probes) or an illustration of what a reading would mean.
-The results document is `docs/backend-comparison-2026-08.md` and does not exist
-until the controller runs the procedure below on a quiet machine.
+**Status:** harness built and validated 2026-08-05; **the run was taken the same
+day** and the results are in [`docs/backend-comparison-2026-08.md`](backend-comparison-2026-08.md).
+Numbers in *this* document are properties of the machine (read-only probes) or
+illustrations of what a reading would mean — the measured answers are in the
+results document, and where the two disagree the results document wins. Three
+corrections it makes to this one:
+
+* the "~740 MB of Windows-side processes" figure below measured **551.8–594.2 MB
+  across 8 processes** on the day of the run;
+* `docker desktop stop` **exits the whole application** on Docker Desktop engine
+  29.6.2, so the "running, engine stopped" row of the three-state table costs
+  **0 MB**, not ~740 MB, by that route;
+* `dml-arch` does **not stay running unattended**. WSL terminated it ~25 s after
+  the last `wsl.exe` client exited — once with 1,948 bots live — so every Arch
+  sample needs a holder process, and the run procedure in Part C below is
+  incomplete without one.
 
 **What is being compared.** The same AzerothCore + playerbots stack, two ways:
 
