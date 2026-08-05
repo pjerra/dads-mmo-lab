@@ -8698,3 +8698,389 @@ mod tests {
     // -- native ahbot-repair: event-shape builders (Chunk 2 task C2c item 8) --
 
 }
+
+/// THE RUST HALF OF "A RESULT IS NOT AN OUTCOME".
+///
+/// `DmlRunner::run_captured` never even reads the child's exit status — it
+/// returns `Ok(combined_output)` for a clean run, a compose refusal and a
+/// server that ignored the stop alike (`crates/dml-core/src/runner.rs:216`).
+/// Its streaming sibling `run_stream` is the same story one layer up
+/// (`Ok(code)` for every code), which is why the frontend derives lifecycle
+/// success from the terminal `done` event and never from the promise —
+/// pinned in `launcher/src/lib/lifecycle-surface.test.ts`.
+///
+/// Two places in this file stop the server with no terminal attached and then
+/// have to TELL THE USER whether it worked:
+///   * `auto_shutdown_watcher` — the card's `stopped` / `stop_failed` outcome;
+///   * `restart_wsl` — the `stopped_server` flag, reported just before
+///     `wsl --shutdown` power-kills whatever is left.
+/// Both are honest only because they run `stop_confirmed_down`, a SECOND,
+/// independent read of the server verdict. Both say so in a comment, and a
+/// comment is not a guard: rewriting either to
+/// `runner.run_captured(&[…]).is_ok()` compiles, type-checks, and tells a user
+/// their world shut down gracefully when it did not — right before the VM is
+/// hard-cut with ~2,000 bots on it.
+///
+/// Nothing pure can see this. Neither function is reachable from a unit test:
+/// one is an infinite watcher loop holding a `tauri::AppHandle`, the other
+/// spawns `wsl --shutdown`. So the assertions below read the real source.
+///
+/// Like `each_probe_seam_item_carries_its_own_doc` above, this scan lives in
+/// the launcher crate and reads `include_str!("lib.rs")`, so it runs on the
+/// WINDOWS CI job only — the ubuntu job builds the three crates, not the
+/// launcher. Do not later read a green ubuntu run as coverage for it.
+#[cfg(test)]
+mod stop_outcome_scan_tests {
+    /// Rust source with comments removed. MANDATORY, and this repo has been
+    /// bitten TWICE by skipping it: `feature-keys.test.ts` read a comment as a
+    /// call site, and `Test-InstallerNative.ps1` read the installer's own
+    /// explanation of what it does NOT do as evidence that it does. The two
+    /// call sites scanned here are surrounded by prose naming
+    /// `run_captured`, `stop_confirmed_down` and `stop_failed` verbatim — the
+    /// doc block directly above this module does it too.
+    ///
+    /// String and char literals are preserved (the argv literals ARE the data);
+    /// raw strings and escapes are tracked so a `//` inside one is not mistaken
+    /// for a comment.
+    fn strip_comments(src: &str) -> String {
+        let b = src.as_bytes();
+        let mut out = String::with_capacity(src.len());
+        let mut i = 0usize;
+        let (mut in_str, mut in_raw, mut in_ch) = (false, false, false);
+        while i < b.len() {
+            let c = b[i] as char;
+            let n = if i + 1 < b.len() { b[i + 1] as char } else { '\0' };
+            if in_str {
+                if c == '\\' && !in_raw {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    in_str = false;
+                    in_raw = false;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if in_ch {
+                if c == '\\' {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '\'' {
+                    in_ch = false;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '/' && n == '/' {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && n == '*' {
+                i += 2;
+                let mut depth = 1usize;
+                while i < b.len() && depth > 0 {
+                    if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(' ');
+                continue;
+            }
+            if c == 'r' && (n == '"' || n == '#') {
+                let mut j = i + 1;
+                while j < b.len() && b[j] == b'#' {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'"' {
+                    in_str = true;
+                    in_raw = true;
+                    for k in i..=j {
+                        out.push(b[k] as char);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if c == '"' {
+                in_str = true;
+                in_raw = false;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            // A lifetime (`'a`) is not a char literal.
+            if c == '\'' {
+                let closes = (i + 2 < b.len() && b[i + 2] == b'\'')
+                    || (n == '\\' && i + 3 < b.len() && b[i + 3] == b'\'');
+                if closes {
+                    in_ch = true;
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
+    }
+
+    /// Source with every `#[cfg(test)]` item removed, brace-matched.
+    ///
+    /// Deliberately NOT "cut at the first `#[cfg(test)]`". Truncating there
+    /// silently stops scanning everything below, which makes a guard's coverage
+    /// depend on where in the file you happen to type — a call site appended to
+    /// the end of the file would sail through while the identical function 2000
+    /// lines up would fail loudly. This file's `mod tests` is the last item
+    /// today, so a truncating version would be harmless RIGHT NOW and latent in
+    /// the worst direction. An item whose attribute is followed by a `;` before
+    /// any `{` (`#[cfg(test)] use …;`) is cut at the semicolon instead.
+    ///
+    /// Input must already be comment-stripped, so a `{` inside prose cannot
+    /// unbalance the match.
+    fn strip_cfg_test(code: &str) -> String {
+        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
+        let b: Vec<char> = code.chars().collect();
+        let mut out = String::with_capacity(code.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i..].starts_with(&attr[..]) {
+                i = end_of_item(&b, i + attr.len());
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out
+    }
+
+    /// One past the end of the item starting at `from` — the first `;` at depth
+    /// zero, or the `}` that closes its first block. String and char literals
+    /// are skipped so a brace or semicolon inside one cannot unbalance it.
+    fn end_of_item(b: &[char], from: usize) -> usize {
+        let mut i = from;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                ';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        b.len()
+    }
+
+    /// The production text: no comments, no test modules. Everything below
+    /// scans THIS, never the raw file.
+    fn production_half(src: &str) -> String {
+        strip_cfg_test(&strip_comments(src))
+    }
+
+    /// The body of the item introduced by `anchor`. PANICS when the anchor is
+    /// gone rather than returning "" — every assertion built on a scanner is
+    /// vacuous if the scanner silently finds nothing.
+    fn body_of(src: &str, anchor: &str) -> String {
+        let at = src.find(anchor).unwrap_or_else(|| panic!("anchor not found: {anchor}"));
+        let b: Vec<char> = src.chars().collect();
+        let start = src[..at + anchor.len()].chars().count();
+        let end = end_of_item(&b, start);
+        b[start..end].iter().collect()
+    }
+
+    /// Every `run_captured(...)` whose argv is a `games stop`, as
+    /// `(what BINDS the call, what runs immediately after it)`.
+    ///
+    /// The binding half has the receiver path removed (`… let _ = runner.` ->
+    /// `… let _ =`), so the assertion is about how the Result is treated and
+    /// not about what the runner happens to be called at that call site.
+    fn stop_capture_sites(src: &str) -> Vec<(String, String)> {
+        let needle = "run_captured(";
+        let mut out = Vec::new();
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find(needle) {
+            let at = from + rel;
+            from = at + needle.len();
+            let args_end = src[at..].find(')').map(|r| at + r).unwrap_or(src.len());
+            let args = &src[at..args_end];
+            if !(args.contains("\"games\"") && args.contains("\"stop\"")) {
+                continue;
+            }
+            let lead = src[..at]
+                .trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.')
+                .trim_end()
+                .to_string();
+            let semi = src[args_end..].find(';').map(|r| args_end + r + 1).unwrap_or(src.len());
+            let tail: String = src[semi..].chars().take(120).collect();
+            out.push((lead, tail.trim_start().to_string()));
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------------
+
+    /// Non-vacuity for the strippers. Both were ported from the sibling branch
+    /// that wrote them, and a stripper that quietly returned its input (or
+    /// everything) would make every assertion below meaningless in one
+    /// direction or the other.
+    #[test]
+    fn the_strippers_strip_prose_and_keep_code() {
+        assert!(!strip_comments("// run_captured(&[\"games\", \"stop\"])\nlet a = 1;")
+            .contains("run_captured"));
+        assert!(!strip_comments("/* stop_confirmed_down */ let a = 1;").contains("stop_confirmed"));
+        // A `//` INSIDE a string literal is data, not a comment.
+        assert!(strip_comments("let u = \"https://x/y\";").contains("https://x/y"));
+        // The argv literals must survive — they are what the scan classifies on.
+        assert!(strip_comments("run_captured(&[\"games\", \"stop\"]);").contains("\"games\""));
+        // Removed, not truncated: production code AFTER a test module survives.
+        let src = "fn a() {}\n#[cfg(test)]\nmod t { fn x() { let s = \"}\"; } }\nfn b() {}\n";
+        let out = strip_cfg_test(src);
+        assert!(out.contains("fn a()"), "{out:?}");
+        assert!(
+            out.contains("fn b()"),
+            "a truncating strip_cfg_test stops scanning everything below the first test \
+             module, which makes coverage depend on where in the file you type: {out:?}"
+        );
+        assert!(!out.contains("fn x()"), "{out:?}");
+        // `#[cfg(test)] use …;` is cut at the semicolon, not at a later brace.
+        let u = strip_cfg_test("#[cfg(test)]\nuse std::x;\nfn keep() {}\n");
+        assert!(!u.contains("use std::x"), "{u:?}");
+        assert!(u.contains("fn keep()"), "{u:?}");
+    }
+
+    /// Non-vacuity for the site extractor itself, with a known positive, two
+    /// known negatives and the panic-on-miss contract.
+    #[test]
+    fn the_site_extractor_finds_stop_captures_and_nothing_else() {
+        let one = stop_capture_sites("let _ = runner.run_captured(&[\"games\", \"stop\", T]);\nnext();");
+        assert_eq!(one.len(), 1);
+        assert!(one[0].0.ends_with("let _ ="), "{:?}", one[0].0);
+        assert!(one[0].1.starts_with("next()"), "{:?}", one[0].1);
+        // A different verb is not a stop.
+        assert!(stop_capture_sites("runner.run_captured(&[\"doctor\"]);").is_empty());
+        assert!(stop_capture_sites("runner.run_captured(&refs);").is_empty());
+        // Prose is not a call site — the real file has this exact sentence in
+        // a comment, so the scan MUST go through production_half().
+        assert!(
+            stop_capture_sites(&production_half(
+                "// let _ = runner.run_captured(&[\"games\", \"stop\", T]);\n"
+            ))
+            .is_empty()
+        );
+        assert!(std::panic::catch_unwind(|| body_of("fn a() {}", "fn zz(")).is_err());
+    }
+
+    /// THE TEST.
+    #[test]
+    fn a_stop_is_judged_by_a_second_read_never_by_the_runners_result() {
+        let src = production_half(include_str!("lib.rs"));
+        let sites = stop_capture_sites(&src);
+
+        // NON-VACUITY: an extractor that stopped matching must fail loudly
+        // rather than pass an empty loop.
+        assert_eq!(
+            sites.len(),
+            2,
+            "this suite knows about 2 terminal-less `games stop` call sites in lib.rs \
+             (auto_shutdown_watcher, restart_wsl), and found {}. A new one is not \
+             automatically wrong — but it reports an outcome to the user with no terminal \
+             attached, so it has to be READ and this number bumped deliberately.",
+            sites.len()
+        );
+
+        for (lead, tail) in &sites {
+            assert!(
+                lead.ends_with("let _ ="),
+                "a `games stop` result is being BOUND here. `run_captured` returns \
+                 Ok(output) for every exit code — it never reads the child's status — so \
+                 anything derived from that Result reports success for a stop that did not \
+                 happen. Discard it (`let _ =`) and judge the stop by effect. Lead: {:?}",
+                &lead[lead.len().saturating_sub(90)..]
+            );
+            assert!(
+                tail.starts_with("stop_confirmed_down(") || tail.starts_with("if stop_confirmed_down("),
+                "the statement immediately after a `games stop` must be the independent \
+                 re-read that decides the outcome. Anything else means the outcome came \
+                 from somewhere that cannot know whether the world actually went down — \
+                 and both of these call sites then TELL THE USER it did. Found: {tail:?}"
+            );
+        }
+    }
+
+    /// ...and the re-read must itself be a re-read.
+    ///
+    /// The test above is satisfied by a `stop_confirmed_down` that returns
+    /// `runner.run_captured(&["games","stop",…]).is_ok()`, or `true`. Then the
+    /// effect check is a rubber stamp and every assertion above still passes.
+    #[test]
+    fn stop_confirmed_down_asks_the_server_again() {
+        let body = body_of(&production_half(include_str!("lib.rs")), "fn stop_confirmed_down(");
+        assert!(
+            body.contains("read_server_verdict("),
+            "stop_confirmed_down must re-read the server verdict — that second, independent \
+             read is the ONLY thing that makes `stopped` an honest claim: {body:?}"
+        );
+        assert!(
+            !body.contains("run_captured("),
+            "stop_confirmed_down is judging the stop by a runner Result, which is Ok on \
+             every exit code: {body:?}"
+        );
+        assert!(
+            body.contains("verdict_needs_stop("),
+            "stop_confirmed_down must map the verdict through the same predicate the caller \
+             used to decide a stop was needed, or the two can disagree: {body:?}"
+        );
+    }
+}
