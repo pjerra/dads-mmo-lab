@@ -54,7 +54,7 @@
     initKeepaliveWatch,
     dismissKeepaliveWarning,
   } from "$lib/keepalive-state.svelte";
-  import { exitGuard, exitCopy } from "$lib/exit-guard.svelte";
+  import { exitGuard, exitCopy, EXIT_STOP_FAILED_NOTE } from "$lib/exit-guard.svelte";
   import { termBuf, beginRun } from "$lib/term-store.svelte";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -176,6 +176,7 @@
       exitGuard.kind = e.payload === "prompt_unknown" ? "prompt_unknown" : "prompt_running";
       exitGuard.open = true;
       exitGuard.note = "";
+      exitGuard.failed = false;
     });
     // Tray Start/Stop. Rust has already surfaced the window; land on Home and
     // hand the request over, so Home runs the SAME act() its own buttons do.
@@ -273,6 +274,7 @@
   async function confirmExit() {
     exitGuard.busy = true;
     exitGuard.note = "";
+    exitGuard.failed = false;
     const buf = beginRun("exit");
     try {
       await exitStopAndClose(
@@ -286,19 +288,27 @@
       // once the stop settled. Still being here means the process is on its
       // way down -- nothing left for this component to do.
     } catch (e) {
-      // The stop reported a failure -- but exit_stop_and_close calls
-      // app.exit(0) UNCONDITIONALLY right after games_stop settles, success
-      // or not (see its doc comment in lib.rs), so the process is closing
-      // regardless. Surface the failure in the terminal rather than let it
-      // vanish, and drop `busy` so the dialog is never stuck mid-run on the
-      // off chance close is delayed long enough for this catch to paint.
+      // FIX ROUND 3 (2026-08-05). THE LAUNCHER IS STAYING OPEN. This comment
+      // used to say the opposite -- exit_stop_and_close called app.exit(0)
+      // unconditionally, so the process was closing whatever happened -- and
+      // C1 changed exactly that: a stop that failed now leaves the dialog up,
+      // re-takes the WSL hold, and hands the decision back to the user.
+      //
+      // So three things happen here, and each is a different one of the
+      // user's next options: the error goes into the terminal (what went
+      // wrong), `busy` drops so Confirm and Cancel work again (try again, or
+      // stay), and `failed` latches so the "Close anyway" button keeps
+      // rendering (leave regardless). Before `failed` existed that button was
+      // gated on `busy` alone, so the escape hatch vanished at the exact
+      // moment it became the only control that still did anything (M7).
       const err = e as { code?: string; message?: string; hint?: string };
       buf.term = applyEvent(buf.term, {
         event: "error",
         error: { code: err.code ?? "IPC", message: err.message ?? String(e), hint: err.hint ?? "" },
       });
       exitGuard.busy = false;
-      exitGuard.note = "The stop reported a problem. The launcher is still closing.";
+      exitGuard.failed = true;
+      exitGuard.note = EXIT_STOP_FAILED_NOTE;
     }
   }
 
@@ -310,6 +320,7 @@
   function cancelExit() {
     exitGuard.open = false;
     exitGuard.note = "";
+    exitGuard.failed = false;
   }
 
   // The escape hatch (point C: the launcher must always be closable). Its own
@@ -534,11 +545,20 @@
       <div class="exit-actions">
         <button onclick={cancelExit} disabled={exitGuard.busy}>{copy.cancel}</button>
         <div class="exit-actions-right">
-          {#if exitGuard.busy}
+          {#if exitGuard.busy || exitGuard.failed}
             <!-- Stopping ~2,000 bots is not instant. Without this, a window
                  that looks frozen is how a user reaches for Task Manager --
                  which reproduces the exact hard cut this whole feature
-                 exists to prevent. -->
+                 exists to prevent.
+
+                 `|| exitGuard.failed` is M7 (fix round 3, 2026-08-05). The
+                 failure arm clears `busy` -- correctly, that run is over --
+                 so gating on `busy` alone made this button VANISH at the one
+                 moment it was the only control that still did anything: the
+                 stop just failed, the launcher is deliberately staying open
+                 (C1), and Cancel does nothing about a server that may still
+                 be up. Spec line 117: "if the stop fails, report the failure
+                 and offer to close anyway." -->
             <button class="exit-force" onclick={closeAnyway}>Close anyway</button>
           {/if}
           <button class="primary" onclick={confirmExit} disabled={exitGuard.busy}>

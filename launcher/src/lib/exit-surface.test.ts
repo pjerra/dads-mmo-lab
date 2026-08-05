@@ -294,6 +294,69 @@ describe("the dialog's three buttons reach three different places", () => {
     expect(confirm, "a failure must leave a note for the user").toMatch(/exitGuard\.note\s*=/);
     expect(confirm, "a failure must release the busy flag").toContain("exitGuard.busy = false");
   });
+
+  /**
+   * M8's wiring half (final review 2026-08-05). An empty `catch { }` with the
+   * note and `busy = false` moved into the success path left 15 tests green —
+   * F3's frontend half was pinned in name only. The note now comes from a
+   * shared constant `exit-guard.test.ts` owns the wording of, so this side
+   * only has to prove the catch actually uses it.
+   */
+  it("reports the failure from the one constant whose wording is pinned", () => {
+    const confirm = blockOf(shell(), "async function confirmExit(");
+    const caught = blockOf(confirm, "catch (e)");
+    expect(
+      caught,
+      "the catch is empty or writes an ad-hoc string. An inline literal is deletable — " +
+        "changing this note to \"\" left 784 tests green — so it lives in EXIT_STOP_FAILED_NOTE",
+    ).toContain("EXIT_STOP_FAILED_NOTE");
+    expect(caught, "the failure must reach the terminal too").toContain("applyEvent(");
+  });
+
+  /**
+   * M7 (final review 2026-08-05). THE ESCAPE HATCH VANISHED EXACTLY WHEN IT
+   * WAS NEEDED. `{#if exitGuard.busy}` gated the "Close anyway" button, and
+   * the failure arm clears `busy` — correctly, that run is over — so after a
+   * failed stop the user was left with Cancel (does nothing about a server
+   * that may still be up) and a Confirm that had just failed. Spec line 117:
+   * "if the stop fails, report the failure and offer to close anyway."
+   *
+   * Both halves proved by mutation: an assertion forbidding the `busy`-only
+   * gate went RED against the old markup, and wrapping the button in
+   * `{#if false}` stayed green — the gate itself was unpinned.
+   */
+  it("keeps the escape hatch on screen after a failed stop", () => {
+    const markup = exitModalMarkup(shell());
+    const gate = markup.match(/\{#if\s+([^}]*)\}\s*<button class="exit-force"/);
+    expect(
+      gate,
+      'the "Close anyway" button is no longer behind a readable {#if} immediately above ' +
+        "it — if it is now ungated that is fine, but this assertion has to be rewritten " +
+        "deliberately rather than silently stop checking",
+    ).not.toBeNull();
+    const condition = gate![1];
+    expect(
+      condition,
+      "the escape hatch is gated on `busy` alone. The failure arm clears `busy`, so the " +
+        "one control that still works after a failed stop disappears at that exact " +
+        "moment, and the user is left with Cancel and a Confirm that just failed (M7).",
+    ).toContain("exitGuard.failed");
+    expect(condition, "it must still show during the stop itself").toContain("exitGuard.busy");
+    expect(condition, "the gate must be a disjunction, not a conjunction").toContain("||");
+  });
+
+  it("latches the failure flag the escape hatch depends on, and clears it on a fresh ask", () => {
+    const src = shell();
+    expect(
+      blockOf(src, "async function confirmExit("),
+      "nothing sets exitGuard.failed, so the M7 gate above can never become true",
+    ).toContain("exitGuard.failed = true");
+    expect(
+      blockOf(src, '"exit-requested"'),
+      "a fresh exit-requested must clear the previous run's failure, or the escape hatch " +
+        "renders on a dialog that has not failed yet",
+    ).toContain("exitGuard.failed = false");
+  });
 });
 
 // ---------------------------------------------------------------------------

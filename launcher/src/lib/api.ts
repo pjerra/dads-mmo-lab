@@ -2197,10 +2197,15 @@ export async function setAutoShutdown(enabled: boolean): Promise<void> {
 // Same id/onEvent/manageDocker shape as gamesStop, because this runs the
 // exact same games_stop path before the process exits. ORDER IS THE
 // CONTRACT on the Rust side too: exit_stop_and_close awaits the stop in
-// full and THEN calls app.exit(0) -- unconditionally, whether the stop
-// succeeded or not -- so a failed stop still closes the launcher rather
-// than stranding the dialog. See exit_stop_and_close's doc comment in
-// lib.rs.
+// full and THEN decides.
+//
+// IT IS NOT UNCONDITIONAL, and this comment used to say it was (fix round 3,
+// 2026-08-05 -- C1/M8). A stop that FAILS does not close the launcher: it
+// re-takes the WSL hold, leaves the dialog up and rejects this promise, and
+// the caller's catch is what the user actually sees. "The process is closing
+// regardless" is the belief that made confirmExit tell them the opposite of
+// what was happening. Failure is reported in the STREAM as much as in this
+// rejection -- see StreamOutcome in lib.rs.
 export const exitStopAndClose = (
   id: string,
   onEvent: (e: TermEvent) => void,
