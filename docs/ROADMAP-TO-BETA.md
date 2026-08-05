@@ -80,10 +80,18 @@ native IS the retirement path — there is no shortcut through the existing dist
 > `DmlRunner::arch()` all exist and are tested, and Task 10's live gate
 > provisioned a genuinely fresh `dml-arch-test` from nothing in ≈3m43s
 > (`docs/superpowers/plans/2026-08-04-arch-wsl-backend-gate.md`).
-> **The launcher wiring is NOT done.** Nothing in `launcher/` calls
-> `probe_arch_with`, and the call sites still speak the bash CLI's vocabulary
-> (`games list`, `wow server-detail`, an unconditional `--json`), none of which
-> `dml-wow-cli` defines.
+> **AMENDED 2026-08-05.** The vocabulary half of that sentence is now WRONG and
+> is corrected here rather than deleted: the port shipped (`dml_core::vocab`,
+> 107 call sites — 74 translated, 33 falling back to the bash `dml` in the same
+> distro), `--json` is appended only for the bash target, and `dml-wow` gained
+> `games-list`/`games-status`. **The launcher wiring is still NOT done** for the
+> other half: `probe_arch_with`, `derive_arch` and `dml_core::distro` have zero
+> production callers, so an Arch user has no first-run path, and the Settings
+> dropdown offers no `arch` option. Four blockers found and closed the same day
+> (the vocabulary, a games-dir split that made reads silently wrong, WSL powering
+> the distro off 15s after the last session, and a SOAP credential split) are
+> recorded in `docs/backend-comparison-2026-08.md`,
+> `docs/superpowers/plans/2026-08-05-wsl-distro-lifetime.md` and `CLAUDE.md`.
 >
 > **So the default deliberately still points at the old backend.** `DML_BACKEND`
 > unset, empty or unrecognised resolves to `Wsl` (the bash CLI in the distro),
