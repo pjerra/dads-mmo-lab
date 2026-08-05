@@ -2,6 +2,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::proc::windows_no_window;
+
 /// Environment override for the docker executable, so a boxed/portable install
 /// or CI can point at an arbitrary `docker.exe` without patching discovery.
 pub const DOCKER_ENV: &str = "DML_DOCKER";
