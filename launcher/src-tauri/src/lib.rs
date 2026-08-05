@@ -7391,6 +7391,119 @@ fn should_prompt_on_exit(action: wsl_keepalive::ExitAction) -> bool {
     !matches!(action, wsl_keepalive::ExitAction::ExitNow)
 }
 
+/// FIX ROUND 2 (2026-08-05) — F1: `prevent_exit()` had no bound and no
+/// fallback, so a dead webview made the launcher UNCLOSABLE.
+///
+/// The trap was self-reinforcing. A webview that fails to load (vite down under
+/// `tauri dev`, a broken WebView2, a JS error before `onMount`) never calls
+/// `tray_set_status`, so `Keepalive::last_verdict` stays `None`, so
+/// `presence_from(false, None)` is `Unknown`, so `exit_decision` is
+/// `PromptUnknown`, so `should_prompt_on_exit` is true, so `prevent_exit()`
+/// fires — and the dialog that would answer it is exactly what cannot render.
+/// Tray Quit then did nothing, window X is `prevent_close()`d unconditionally
+/// and routes to `HideToTray`/`PromptVisible` (neither of which exits), and NO
+/// UI PATH CLOSED THE PROCESS. The user reaches for Task Manager, which skips
+/// `RunEvent::Exit` and hands the server the exact hard WSL cut this plan
+/// exists to prevent. It was also a REGRESSION: before this plan `RunEvent::
+/// Exit` prevented nothing and the app always terminated.
+///
+/// THE PROPERTY GUARANTEED, in one line: **no sequence of exit requests can be
+/// prevented forever — at most [`MAX_UNANSWERED_EXIT_PREVENTIONS`] of them in a
+/// row are, and a webview that has never spoken is never prevented at all.**
+/// Both halves are needed, and each covers the other's hole:
+///
+/// * **Never spoken → never prevent.** `AppState::last_status_push` is `None`
+///   until the frontend's first `tray_set_status`, so it is the one thing Rust
+///   knows about whether a webview exists to answer a question. When it never
+///   spoke, the ONLY reason we would prompt is `PromptUnknown` — and that
+///   Unknown is *caused by* the same silence, so it is evidence of a dead
+///   webview, not of a running server. Closing on the first click there is
+///   exactly the pre-plan behaviour, i.e. no regression at all in the case
+///   that matters most (a launcher whose UI never came up is useless anyway).
+/// * **A bound on consecutive preventions.** A webview that speaks (the poll
+///   keeps running) but cannot show THIS dialog — the exact regression the
+///   Task-4 fix round chased, and the one a renamed event literal reproduces —
+///   would sail past the rule above forever. So the guard also counts: after
+///   two prevented requests with no Rust-visible answer, the third closes.
+///
+/// A count alone would be wrong, which is why [`EXIT_REQUEST_WINDOW`] exists:
+/// Cancel is invisible to Rust (it touches no command), so three cancels
+/// spread over a working six-hour session would otherwise disarm the fourth
+/// Quit and hard-cut a live server. Only requests CLOSE TOGETHER count as one
+/// run of unanswered asks; a quiet gap starts fresh. Nothing needs to reset the
+/// count on a real answer, because both answers (`exit_anyway`,
+/// `exit_stop_and_close`'s success arm) end the process.
+const MAX_UNANSWERED_EXIT_PREVENTIONS: u32 = 2;
+
+/// A gap this long between two exit requests starts a fresh count. See
+/// [`MAX_UNANSWERED_EXIT_PREVENTIONS`] for why the window, not just the count,
+/// is load-bearing.
+const EXIT_REQUEST_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Pure: may this exit request be PREVENTED at all?
+///
+/// `webview_has_spoken` — has the frontend ever pushed a status
+/// (`AppState::last_status_push`)? `prevented_in_window` — how many requests we
+/// have already prevented in the current run of asks.
+fn may_prevent_exit(webview_has_spoken: bool, prevented_in_window: u32) -> bool {
+    webview_has_spoken && prevented_in_window < MAX_UNANSWERED_EXIT_PREVENTIONS
+}
+
+/// The run of unanswered exit requests, and the clock that ends it.
+struct ExitPromptGuard {
+    prevented: u32,
+    last_request: Option<std::time::Instant>,
+}
+
+impl ExitPromptGuard {
+    /// Record an exit request and answer whether it may be prevented.
+    ///
+    /// Takes `now` rather than reading the clock itself so the window can be
+    /// driven in a test — the guarantee this whole module exists for is a
+    /// statement about a SEQUENCE of requests, and a sequence that has to be
+    /// waited out in real time is a guarantee nobody pins.
+    fn request(&mut self, webview_has_spoken: bool, now: std::time::Instant) -> bool {
+        let fresh_run = self
+            .last_request
+            .map_or(true, |t| now.duration_since(t) >= EXIT_REQUEST_WINDOW);
+        if fresh_run {
+            self.prevented = 0;
+        }
+        self.last_request = Some(now);
+        let allow = may_prevent_exit(webview_has_spoken, self.prevented);
+        if allow {
+            self.prevented += 1;
+        }
+        allow
+    }
+}
+
+static EXIT_PROMPT_GUARD: Mutex<ExitPromptGuard> =
+    Mutex::new(ExitPromptGuard { prevented: 0, last_request: None });
+
+/// The ONE gate both exit surfaces consult, and the only place a prevention is
+/// recorded. Impure (it reads `AppState` and the clock and mutates the run
+/// counter); the decision itself is [`may_prevent_exit`].
+///
+/// FAILS OPEN TOWARD CLOSING, deliberately: a missing `AppState` or a poisoned
+/// lock answers `false`, i.e. "do not prevent". Every uncertainty here must
+/// resolve in favour of the user being able to close their launcher — that is
+/// the whole point of the guard, and an uncertainty that resolved the other way
+/// would rebuild the trap out of the fix.
+///
+/// CALL IT ONLY WHEN A PROMPT IS ACTUALLY ON THE TABLE. Hiding to the tray asks
+/// the user nothing, so it must not spend a prevention: three ordinary X-clicks
+/// with `closeToTray` on (the default) would otherwise disarm the next Tray
+/// Quit's dialog and hard-cut a live server.
+fn exit_prevention_allowed(app: &tauri::AppHandle) -> bool {
+    let webview_has_spoken = app
+        .try_state::<AppState>()
+        .and_then(|s| s.last_status_push.lock().ok().map(|t| t.is_some()))
+        .unwrap_or(false);
+    let mut guard = EXIT_PROMPT_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    guard.request(webview_has_spoken, std::time::Instant::now())
+}
+
 /// The wire vocabulary the frontend switches on.
 fn exit_action_wire(action: wsl_keepalive::ExitAction) -> &'static str {
     match action {
@@ -7419,12 +7532,56 @@ fn exit_anyway(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+/// What [`exit_stop_and_close`] does once the stop settles. Pure, and read by
+/// production — see the `after_stop(result.is_ok())` call below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterStop {
+    /// The stop succeeded: latch the confirmation and close, as asked.
+    CloseNow,
+    /// The stop FAILED: stay up and report it. See `after_stop`.
+    ReportFailure,
+}
+
+/// Pure: a stop that failed does not close the launcher.
+fn after_stop(stop_ok: bool) -> AfterStop {
+    if stop_ok {
+        AfterStop::CloseNow
+    } else {
+        AfterStop::ReportFailure
+    }
+}
+
 /// Stop the server the ordinary way, then close.
 ///
 /// ORDER IS THE CONTRACT: the stop runs BEFORE the holder is released.
 /// Releasing first starts the distro's 15-second clock while compose is still
 /// shutting containers down, which is the ungraceful stop this whole command
 /// exists to avoid. `games_stop` already gets that ordering right internally.
+///
+/// FIX ROUND 2 (2026-08-05) — F3: A CONFIRMED STOP THAT FAILED USED TO CLOSE
+/// THE LAUNCHER WITHOUT REPORTING. The old body was `let result = games_stop(…)
+/// .await; EXIT_CONFIRMED.store(true); app.exit(0); result` — unconditional.
+/// Two costs. (1) `app.exit(0)` is dispatched to the event loop before the IPC
+/// result reaches the webview, so `confirmExit`'s catch — the only thing that
+/// would say "The stop reported a problem" — RACED a process exit. The user
+/// clicked a button labelled "Stop server and close", the stop did not happen,
+/// and they were told nothing. (2) `games_stop` calls
+/// `wsl_keepalive::server_should_stop()` regardless of outcome, so the holder
+/// was already released and the distro's 15-second clock was running while
+/// containers a failed `compose down` left up were still alive.
+///
+/// Both are fixed here rather than in `games_stop`, whose unconditional release
+/// is CORRECT for its other caller (Home's Stop button: a stop that failed
+/// still means the user wants it down, and the watchdog must not go on holding
+/// a distro for a server nobody wants). What changed is only this command's
+/// meaning: the launcher is NOT leaving, and the server was not confirmed down,
+/// so whatever survived the failed stop must not be cut by a power-off fifteen
+/// seconds later — hence the re-declared Run intent on the failure arm. The
+/// dialog is still open on the frontend; it reports the failure and its
+/// "Close anyway" (`exit_anyway`) carries the decision, which is exactly what
+/// that button exists for. A failure deliberately does NOT latch
+/// `EXIT_CONFIRMED` either: latching would disarm the prompt on the next close
+/// attempt, i.e. close silently with the server still up.
 #[tauri::command]
 async fn exit_stop_and_close(
     app: tauri::AppHandle,
@@ -7434,8 +7591,20 @@ async fn exit_stop_and_close(
     state: State<'_, AppState>,
 ) -> Result<(), CmdError> {
     let result = games_stop(id, manage_docker, on_event, state).await;
-    EXIT_CONFIRMED.store(true, Ordering::SeqCst);
-    app.exit(0);
+    match after_stop(result.is_ok()) {
+        AfterStop::CloseNow => {
+            EXIT_CONFIRMED.store(true, Ordering::SeqCst);
+            app.exit(0);
+        }
+        AfterStop::ReportFailure => {
+            // Re-take the hold `games_stop` released on its way out. The stop
+            // did not succeed, so containers may still be up, and we are no
+            // longer on our way out of the process — a released holder here
+            // means the distro powers off ~15s from now underneath a server
+            // nobody confirmed was down.
+            wsl_keepalive::server_should_run();
+        }
+    }
     result
 }
 
@@ -7495,11 +7664,22 @@ enum WindowCloseAction {
     PromptVisible,
 }
 
-fn window_close_action(hide_to_tray: bool, action: wsl_keepalive::ExitAction) -> WindowCloseAction {
+/// `guard_allows` is [`exit_prevention_allowed`]'s answer — FIX ROUND 2 (F1).
+/// Without it this surface kept its own unbounded opinion: with `closeToTray`
+/// off, a dead webview met `PromptVisible` on every X click forever, and
+/// `PromptVisible` never exits. The guard has to reach BOTH surfaces or the
+/// bound is only half a bound. Callers pass `false` whenever no prompt is on
+/// the table (hiding to the tray, an already-`ExitNow` action) so that a mere
+/// hide never spends a prevention — see `exit_prevention_allowed`.
+fn window_close_action(
+    hide_to_tray: bool,
+    action: wsl_keepalive::ExitAction,
+    guard_allows: bool,
+) -> WindowCloseAction {
     if hide_to_tray {
         return WindowCloseAction::HideToTray;
     }
-    if should_prompt_on_exit(action) {
+    if guard_allows && should_prompt_on_exit(action) {
         WindowCloseAction::PromptVisible
     } else {
         WindowCloseAction::ExitNow
@@ -7610,8 +7790,16 @@ pub fn run() {
                     .map(|h| dml_core::launcher_config::load(&h).close_to_tray)
                     .unwrap_or(true);
                 let action = current_exit_action();
+                // FIX ROUND 2 (F1). The guard is consulted — and a prevention
+                // SPENT — only when a dialog is actually on the table: not
+                // when we are merely hiding to the tray, and not when the
+                // action needs no prompt at all. Ordinary X-clicks with
+                // `closeToTray` on are the common case and must stay free.
+                let guard_allows = !hide_to_tray
+                    && should_prompt_on_exit(action)
+                    && exit_prevention_allowed(window.app_handle());
 
-                match window_close_action(hide_to_tray, action) {
+                match window_close_action(hide_to_tray, action, guard_allows) {
                     WindowCloseAction::HideToTray => {
                         // HIDE, never destroy. The webview must keep running:
                         // it owns the 7s status poll that feeds the tray, and
@@ -7929,7 +8117,12 @@ pub fn run() {
             // is no second path to maintain.
             tauri::RunEvent::ExitRequested { api, .. } => {
                 let action = current_exit_action();
-                if should_prompt_on_exit(action) {
+                // FIX ROUND 2 (F1): `exit_prevention_allowed` is what keeps
+                // this from being an unbounded veto. Short-circuited on
+                // purpose — an action that needs no prompt must not spend a
+                // prevention. See MAX_UNANSWERED_EXIT_PREVENTIONS for the
+                // property this guarantees.
+                if should_prompt_on_exit(action) && exit_prevention_allowed(app) {
                     api.prevent_exit();
                     // SURFACE before asking (TASK 4 FIX ROUND 1, 2026-08-05).
                     // Tray Quit (tray.rs:90) is the only production caller
@@ -9198,7 +9391,9 @@ mod tests {
         for latched in [false, true] {
             EXIT_CONFIRMED.store(latched, Ordering::SeqCst);
             for action in [ExitAction::ExitNow, ExitAction::PromptRunning, ExitAction::PromptUnknown] {
-                assert_eq!(window_close_action(true, action), WindowCloseAction::HideToTray);
+                for guard_allows in [false, true] {
+                    assert_eq!(window_close_action(true, action, guard_allows), WindowCloseAction::HideToTray);
+                }
             }
         }
         EXIT_CONFIRMED.store(false, Ordering::SeqCst);
@@ -9209,7 +9404,7 @@ mod tests {
     fn close_to_tray_off_with_nothing_running_exits() {
         let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXIT_CONFIRMED.store(false, Ordering::SeqCst);
-        assert_eq!(window_close_action(false, ExitAction::ExitNow), WindowCloseAction::ExitNow);
+        assert_eq!(window_close_action(false, ExitAction::ExitNow, true), WindowCloseAction::ExitNow);
     }
 
     /// THE REGRESSION TASK 3 FIXED. `closeToTray` OFF with a server running
@@ -9227,7 +9422,7 @@ mod tests {
         let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXIT_CONFIRMED.store(false, Ordering::SeqCst);
         for action in [ExitAction::PromptRunning, ExitAction::PromptUnknown] {
-            assert_eq!(window_close_action(false, action), WindowCloseAction::PromptVisible);
+            assert_eq!(window_close_action(false, action, true), WindowCloseAction::PromptVisible);
         }
     }
 
@@ -9242,8 +9437,161 @@ mod tests {
     fn a_confirmed_exit_still_closes_from_the_window_path_too() {
         let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         EXIT_CONFIRMED.store(true, Ordering::SeqCst);
-        assert_eq!(window_close_action(false, ExitAction::PromptRunning), WindowCloseAction::ExitNow);
+        assert_eq!(window_close_action(false, ExitAction::PromptRunning, true), WindowCloseAction::ExitNow);
         EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+    }
+
+    // -- FIX ROUND 2, F1: the launcher can always be closed ------------------
+    //
+    // The bug: `prevent_exit()` had no bound and no fallback, and the condition
+    // that reached it was CAUSED by the same dead webview that could not answer
+    // it (`last_verdict: None` -> `Unknown` -> `PromptUnknown` -> prompt). Tray
+    // Quit did nothing, X was `prevent_close()`d, and no UI path closed the
+    // process. See `MAX_UNANSWERED_EXIT_PREVENTIONS` for the property below.
+
+    /// HALF ONE. A webview that has never pushed a status cannot render a
+    /// dialog, so its exit is never prevented — whatever the count says. This
+    /// is the `tauri dev`-with-vite-down / broken-WebView2 case, where the
+    /// first click must close, exactly as it did before this plan existed.
+    #[test]
+    fn a_webview_that_never_spoke_is_never_prevented_from_closing() {
+        for prevented in 0..=(MAX_UNANSWERED_EXIT_PREVENTIONS + 3) {
+            assert!(
+                !may_prevent_exit(false, prevented),
+                "an exit was prevented with no evidence a webview exists to answer it \
+                 (prevented_in_window={prevented}) — that is the unclosable launcher"
+            );
+        }
+    }
+
+    /// HALF TWO. Even a webview that DOES speak only buys a bounded number of
+    /// preventions — the Task-4-style regression (poll alive, dialog broken)
+    /// sails past half one and would otherwise veto forever.
+    #[test]
+    fn preventions_are_bounded_even_for_a_speaking_webview() {
+        for prevented in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
+            assert!(may_prevent_exit(true, prevented), "prevented={prevented} must still ask");
+        }
+        for prevented in MAX_UNANSWERED_EXIT_PREVENTIONS..(MAX_UNANSWERED_EXIT_PREVENTIONS + 4) {
+            assert!(
+                !may_prevent_exit(true, prevented),
+                "prevented={prevented} is past the bound and must let the process go"
+            );
+        }
+    }
+
+    /// THE PROPERTY, stated as a sequence rather than a table: **no run of exit
+    /// requests can be prevented forever.** This is the one that fails if
+    /// either half of `may_prevent_exit` is deleted, and it is driven through
+    /// the real `ExitPromptGuard` (the counter production mutates), not through
+    /// the pure predicate alone.
+    #[test]
+    fn repeated_exit_requests_always_reach_an_exit() {
+        for webview_has_spoken in [false, true] {
+            let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+            let t0 = std::time::Instant::now();
+            let mut prevented = 0u32;
+            let mut let_go = false;
+            // Twenty asks inside ONE window (1s apart, window is 60s), i.e. the
+            // user clicking Quit over and over because nothing is happening.
+            for i in 0..20u32 {
+                let now = t0 + std::time::Duration::from_secs(u64::from(i));
+                if guard.request(webview_has_spoken, now) {
+                    prevented += 1;
+                } else {
+                    let_go = true;
+                    break;
+                }
+            }
+            assert!(
+                let_go,
+                "spoken={webview_has_spoken}: twenty consecutive exit requests were ALL \
+                 prevented — there is no path out of the process except Task Manager, \
+                 which skips RunEvent::Exit and hard-cuts the distro"
+            );
+            assert!(
+                prevented <= MAX_UNANSWERED_EXIT_PREVENTIONS,
+                "spoken={webview_has_spoken}: {prevented} preventions before giving up, \
+                 bound is {MAX_UNANSWERED_EXIT_PREVENTIONS}"
+            );
+        }
+    }
+
+    /// ONCE IT LETS GO IT STAYS LET GO, within the same run of asks. A guard
+    /// that re-armed on the next request would make the escape a coin flip:
+    /// click, click, click-closes, and the NEXT launcher session traps again on
+    /// its second click.
+    #[test]
+    fn the_guard_does_not_rearm_inside_the_same_run_of_asks() {
+        let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+        let t0 = std::time::Instant::now();
+        for i in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
+            assert!(guard.request(true, t0 + std::time::Duration::from_secs(u64::from(i))));
+        }
+        for i in MAX_UNANSWERED_EXIT_PREVENTIONS..(MAX_UNANSWERED_EXIT_PREVENTIONS + 5) {
+            assert!(
+                !guard.request(true, t0 + std::time::Duration::from_secs(u64::from(i))),
+                "request {i} re-armed the veto inside the same run"
+            );
+        }
+    }
+
+    /// THE WINDOW, and why it is not a knob. Cancel touches no Rust command, so
+    /// a cancelled dialog is indistinguishable from a dead one at this
+    /// boundary. Without the quiet-gap reset, three cancels spread across a
+    /// working six-hour session would disarm the fourth Quit's dialog and
+    /// hard-cut a live server — the exact harm this plan exists to prevent,
+    /// rebuilt out of its own fix.
+    #[test]
+    fn a_quiet_gap_starts_a_fresh_run_of_asks() {
+        let mut guard = ExitPromptGuard { prevented: 0, last_request: None };
+        let mut now = std::time::Instant::now();
+        for _ in 0..MAX_UNANSWERED_EXIT_PREVENTIONS {
+            assert!(guard.request(true, now));
+            now += std::time::Duration::from_secs(1);
+        }
+        assert!(!guard.request(true, now), "the bound must be reachable at all");
+        now += EXIT_REQUEST_WINDOW;
+        assert!(
+            guard.request(true, now),
+            "an exit request a full window later is a NEW ask and must still be able to \
+             protect a running server"
+        );
+    }
+
+    /// The guard reaches the window-close surface too. `PromptVisible` never
+    /// exits, so a `closeToTray`-off X click against a dead webview was its own
+    /// unbounded veto — the bound has to hold on BOTH surfaces or it is half a
+    /// bound.
+    #[test]
+    fn the_window_path_closes_once_the_guard_has_let_go() {
+        let _guard = EXIT_CONFIRMED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        EXIT_CONFIRMED.store(false, Ordering::SeqCst);
+        for action in [ExitAction::PromptRunning, ExitAction::PromptUnknown] {
+            assert_eq!(
+                window_close_action(false, action, false),
+                WindowCloseAction::ExitNow,
+                "{action:?}: with the guard spent, X must close the process rather than \
+                 prompt a webview that cannot answer"
+            );
+        }
+    }
+
+    // -- FIX ROUND 2, F3: a confirmed stop that FAILS does not close ---------
+
+    /// The whole decision, and production reads this exact function — see
+    /// `exit_stop_and_close`'s `after_stop(result.is_ok())` and the wiring test
+    /// `a_failed_confirmed_stop_does_not_reach_the_exit_call`, which is what
+    /// keeps this from being a pure list nothing consults.
+    #[test]
+    fn a_failed_stop_reports_instead_of_closing() {
+        assert_eq!(after_stop(true), AfterStop::CloseNow);
+        assert_eq!(
+            after_stop(false),
+            AfterStop::ReportFailure,
+            "the user clicked \"Stop server and close\", the stop did not happen, and \
+             closing anyway tells them nothing while the holder is already released"
+        );
     }
 }
 
@@ -10342,5 +10690,151 @@ mod keepalive_wiring_tests {
                  not merely appear somewhere in the same arm."
             );
         }
+    }
+
+    /// NEITHER EXIT SURFACE MAY PREVENT WITHOUT CONSULTING THE GUARD. FIX
+    /// ROUND 2 (2026-08-05), finding F1.
+    ///
+    /// `may_prevent_exit`/`ExitPromptGuard`'s own tests (in `mod tests`) prove
+    /// the bound is right in isolation, and every one of them stays green if
+    /// the production condition goes back to a bare `should_prompt_on_exit(
+    /// action)` — which is the entire bug: an unbounded `prevent_exit()` whose
+    /// triggering condition (`last_verdict: None` -> `Unknown` ->
+    /// `PromptUnknown`) is CAUSED by the same dead webview that cannot answer
+    /// it. Tray Quit then does nothing, X is `prevent_close()`d
+    /// unconditionally, and the only way out is Task Manager — which skips
+    /// `RunEvent::Exit` and hands the server the hard WSL cut this plan exists
+    /// to prevent.
+    ///
+    /// Bounded per arm, and the ordering is asserted rather than mere presence,
+    /// for the same reason the test above does it: a guard call that happens
+    /// AFTER `api.prevent_exit()` has already fired is not a guard.
+    #[test]
+    fn no_exit_surface_can_prevent_without_consulting_the_guard() {
+        let code = src();
+        let body = fn_body(&code, "run");
+
+        let window_arm_start = body
+            .find("let hide_to_tray")
+            .expect("on_window_event no longer reads the close_to_tray preference");
+        let window_arm_end = body[window_arm_start..]
+            .find("tauri::RunEvent::ExitRequested")
+            .map(|rel| window_arm_start + rel)
+            .expect("RunEvent::ExitRequested not found after the window-close handler");
+        let window_arm = &body[window_arm_start..window_arm_end];
+
+        let tray_quit_arm_start = body
+            .find("tauri::RunEvent::ExitRequested { api, .. } => {")
+            .expect("the RunEvent::ExitRequested arm was renamed or removed");
+        let tray_quit_arm_end = body[tray_quit_arm_start..]
+            .find("tauri::RunEvent::Exit =>")
+            .map(|rel| tray_quit_arm_start + rel)
+            .expect("RunEvent::Exit arm not found after RunEvent::ExitRequested");
+        let tray_quit_arm = &body[tray_quit_arm_start..tray_quit_arm_end];
+
+        for (name, arm) in [
+            ("the window-close handler", window_arm),
+            ("the RunEvent::ExitRequested arm", tray_quit_arm),
+        ] {
+            assert!(
+                arm.contains("exit_prevention_allowed("),
+                "{name} decides to prompt without consulting exit_prevention_allowed(...). \
+                 That is an UNBOUNDED veto: a webview that cannot render the dialog can \
+                 never answer it, so the launcher becomes unclosable except via Task \
+                 Manager (F1)."
+            );
+        }
+
+        // The tray/exit arm is the one that actually calls prevent_exit, so its
+        // ORDER is checkable: the guard must be consulted first.
+        let guard_at = tray_quit_arm.find("exit_prevention_allowed(").unwrap();
+        let prevent_at = tray_quit_arm
+            .find("api.prevent_exit();")
+            .expect("the RunEvent::ExitRequested arm no longer calls api.prevent_exit()");
+        assert!(
+            guard_at < prevent_at,
+            "exit_prevention_allowed(...) must be consulted BEFORE api.prevent_exit() — a \
+             bound checked after the veto has fired is not a bound"
+        );
+
+        // NON-VACUITY: the two slices must really be different regions, or a
+        // `fn_body` that returned the whole file would satisfy both.
+        assert!(
+            !window_arm.contains("api.prevent_exit();"),
+            "the arm slicing is broken — the window-close handler does not call prevent_exit"
+        );
+        assert!(
+            !tray_quit_arm.contains("window_close_action("),
+            "the arm slicing is broken — the RunEvent arm does not route through \
+             window_close_action"
+        );
+    }
+
+    /// A FAILED CONFIRMED STOP DOES NOT REACH THE EXIT CALL. FIX ROUND 2
+    /// (2026-08-05), finding F3.
+    ///
+    /// The old body was unconditional — `let result = games_stop(…).await;
+    /// EXIT_CONFIRMED.store(true, …); app.exit(0); result` — so a stop that
+    /// FAILED still closed the launcher, `app.exit(0)` raced the IPC error back
+    /// to the webview, and the dialog's "The stop reported a problem" was never
+    /// painted. `after_stop`'s own unit test cannot see any of that: reverting
+    /// production to the three unconditional lines leaves it perfectly green
+    /// (the recorded `lifecycle_steps_for_mode` lesson — never pin an
+    /// invariant on a pure value production does not read).
+    #[test]
+    fn a_failed_confirmed_stop_does_not_reach_the_exit_call() {
+        let code = src();
+        let body = fn_body(&code, "exit_stop_and_close");
+
+        assert!(
+            body.contains("after_stop(result.is_ok())"),
+            "exit_stop_and_close no longer branches on the stop's outcome at all — a stop \
+             that failed closes the launcher and tells the user nothing (F3)"
+        );
+
+        let close_arm = body
+            .find("AfterStop::CloseNow =>")
+            .expect("the CloseNow arm was renamed or removed");
+        let fail_arm = body
+            .find("AfterStop::ReportFailure =>")
+            .expect("the ReportFailure arm was renamed or removed");
+        assert!(close_arm < fail_arm, "arms reordered — this test's slicing assumes CloseNow first");
+
+        // EXACTLY ONE exit call, and it is inside the success arm.
+        assert_eq!(
+            body.matches("app.exit(0)").count(),
+            1,
+            "exit_stop_and_close must call app.exit(0) exactly once"
+        );
+        let exit_at = body.find("app.exit(0)").unwrap();
+        assert!(
+            exit_at > close_arm && exit_at < fail_arm,
+            "app.exit(0) is not inside the CloseNow arm — a failed stop still closes the \
+             launcher, and the error it returns races the process exit (F3)"
+        );
+
+        // The latch too: latching on a failure would silence the prompt on the
+        // NEXT close attempt, i.e. close with the server still up.
+        let latch_at = body
+            .find("EXIT_CONFIRMED.store(true")
+            .expect("exit_stop_and_close no longer latches EXIT_CONFIRMED at all");
+        assert!(
+            latch_at > close_arm && latch_at < fail_arm,
+            "EXIT_CONFIRMED is latched outside the CloseNow arm — a failed stop would then \
+             disarm the dialog on the next close attempt"
+        );
+
+        // And the holder: `games_stop` releases it whatever happened (correct
+        // for Home's Stop button), so the failure arm — which no longer exits —
+        // has to take it back, or the distro powers off ~15s from now
+        // underneath containers a failed `compose down` left running.
+        let rehold_at = body.find("wsl_keepalive::server_should_run()").expect(
+            "the failure arm does not re-take the keep-alive hold that games_stop released \
+             on its way out — the launcher stays up while the distro's 15s clock runs",
+        );
+        assert!(
+            rehold_at > fail_arm,
+            "the hold is re-taken outside the ReportFailure arm"
+        );
     }
 }
