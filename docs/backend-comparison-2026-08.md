@@ -406,17 +406,25 @@ cannot do its job.
 It is fixable and the fix is measured to work: the launcher must hold one
 long-lived `wsl.exe --exec /bin/sleep infinity` session for as long as the
 server should run — one Windows process and one guest `sleep`, touching no
-user-owned state. That work is specified in
+user-owned state. That work was specified in
 [`docs/superpowers/plans/2026-08-05-wsl-distro-lifetime.md`](superpowers/plans/2026-08-05-wsl-distro-lifetime.md)
-and is **required before the Arch backend can be offered for running a server**,
-not an optimisation.
+and **shipped on 2026-08-05** as `launcher/src-tauri/src/wsl_keepalive.rs`.
+Measured against the real distro: held for 62.1 s — 4.1× the deadline — and
+died 16.5 s after the holder was released, which is the half that makes the
+holder the cause rather than a coincidence. It was **required before the Arch
+backend could be offered for running a server**, not an optimisation, so the
+paragraphs below now describe a paid bill rather than an outstanding one.
 
 Two consequences for the comparison above:
 
-* **Part of the Arch idle saving is a bill not yet paid.** Docker Desktop spends
+* **Part of the Arch idle saving was a bill not yet paid.** Docker Desktop spends
   some of its ~590 MB of Windows-side processes doing exactly this babysitting,
-  deliberately. The Arch column does not yet carry its equivalent.
-* **Even fixed, the contract becomes "the server runs while the launcher runs."**
+  deliberately. The Arch column now carries its equivalent — one `wsl.exe` and
+  one guest `sleep`, a few MB, so the 1.0–1.6 GB figure survives essentially
+  intact. What changes is the reading, not the arithmetic: the saving is no
+  longer partly an unpaid cost.
+* **Even fixed — and it is now fixed — the contract is "the server runs while
+  the launcher runs."**
   Server-up with no DML process on Windows at all is not achievable on the Arch
   backend by any mechanism found; matching Docker Desktop there would mean
   shipping a Windows service. If unattended hosting matters, that is a point for

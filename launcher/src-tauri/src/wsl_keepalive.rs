@@ -1256,7 +1256,12 @@ mod tests {
         let text = decode_wsl(&out.stdout);
         for line in text.lines() {
             let mut tokens = line.split_whitespace();
-            let first = tokens.next()?;
+            // `continue`, NOT `?`. A `?` here returns None from the whole
+            // function on the first blank line, and `is_running` would then
+            // report a Running distro as dead — a probe whose failure mode is
+            // indistinguishable from its negative answer, which is the exact
+            // class this repo keeps re-learning.
+            let Some(first) = tokens.next() else { continue };
             // The default distro is marked with a leading `*` token.
             let (distro, state) = if first == "*" {
                 (tokens.next(), tokens.next())
