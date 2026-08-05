@@ -758,3 +758,48 @@ Append to `docs/superpowers/plans/2026-08-05-server-survival.md` a short **Human
 **Not covered, deliberately:** unattended hosting (a Windows service) is named in the spec as out of scope; `vmIdleTimeout` is measured not to help.
 
 **Type consistency.** `ServerPresence` and `ExitAction` (Task 2) are consumed by `current_exit_action` and `should_prompt_on_exit` (Task 3). The wire strings `exit_now`/`prompt_running`/`prompt_unknown` (Task 3) are the same literals `ExitPrompt` accepts (Task 4). `keepalive_report()` supplies `holding` (exists today) and `last_verdict` (does NOT exist today — Task 2 adds it, along with storing the verdict in `Keepalive::observed_status`, which currently discards it). Verified against the current source rather than assumed.
+
+---
+
+## Human gate
+
+`live_wsl_keepalive.rs` (Task 6) proves the WSL-side timing claim against the real distro — measured 2026-08-05: established the holder, survived 40.1s (well past the ~15s deadline), released, died 16.9s later (inside the ~25s expectation). It cannot prove the other half of this plan: real OS window state (hidden vs. destroyed vs. surfaced) and a real tray-icon click do not exist inside a `cargo test`/`vitest` process. Tasks 3 and 4's reviews caught two genuine regressions in this exact area — a window-destroy loop and a dialog opening into a hidden webview nobody could see — by reading source (vendored Tauri runtime code, `RunEvent` wiring), not by running anything, precisely because nothing runnable could see them either. **Tray Quit and window-close were previously code-inspected only; that is exactly what makes a scripted check insufficient here.** The items below are what only a person, running the real app, can verify — including two cases the plan's original script would never have reproduced.
+
+**Setup, once:** `cd launcher && npm run tauri dev`. Have a title installed so a server can actually be started (Home → Start). Keep a second terminal free for `wsl --list --verbose` / `Get-Process wsl,wslrelay,vmmemWSL`.
+
+For each item: what to do, what to expect, and what its ABSENCE would mean — a gate that only says "check it works" is not a gate.
+
+1. **Tray Quit from an ALREADY-HIDDEN window** — the default path, since `closeToTray` is ON by default and this is what closing the launcher normally looks like.
+   - Do: start a server, close the window with its own X (hides to tray, no prompt — that part is already correct and unrelated to this check), THEN right-click the tray icon and click **Exit**.
+   - Expect: the window comes back on screen — unminimized and focused — with the exit dialog ("Your server is running" / "Your server may be running") already open in it.
+   - If it did not happen: the window stays hidden and the dialog renders into a webview nobody can see, so clicking Exit produces no visible change at all. That is the Task 4 review finding verbatim (`show_main_window` missing from the `tray_quit → RunEvent::ExitRequested` path) — the natural next move for "I clicked Exit and nothing happened" is Task Manager, which skips the clean stop and hands the server the exact hard WSL cut this whole plan exists to prevent. Opening a fresh, already-visible `tauri dev` window and clicking Quit does NOT reproduce this; you must close to tray first.
+
+2. **`closeToTray` OFF plus the window's own X, with a server running.**
+   - Do: in Settings, turn off "Closing the window keeps DML Launcher running in the system tray". Start a server. Click the window's native X.
+   - Expect: the window stays visible the whole time — it must not vanish, even for an instant — and the exit dialog opens in place. Click Cancel, then click "Open DML Launcher" from the tray menu: the same window should simply refocus, with no relaunch and no error.
+   - If it did not happen: two distinct historical bugs live here, and either reappearing is a real regression. (a) The window disappears and nothing else happens — the `HideAndPrompt` bug (Task 4) in this arm instead of the tray arm: hide-then-prompt into a webview nobody can see. (b) The window disappears and never comes back — tray Open does nothing, a second X click repeats the same nothing — the Task 3 regression: `WindowEvent::Destroyed` fires its own `ExitRequested` with no window left for `show_main_window` to find, recoverable only by Task Manager (the exact hard cut this plan exists to prevent, plus a hang no click can escape).
+
+3. **`closeToTray` OFF, nothing running.**
+   - Do: with the setting still off, make sure no server is running, then click the window's X.
+   - Expect: the launcher closes immediately — no dialog, no delay, no flicker.
+   - If it did not happen: a dialog appearing with nothing at risk is a false alarm, and a feature that cries wolf trains its user to click through the real one; it also means a user who explicitly turned OFF the tray behaviour is being asked something anyway.
+
+4. **Cancel leaves the launcher open with the server still up.**
+   - Do: trigger the dialog by any route above with a server running, click **Cancel**.
+   - Expect: the dialog closes; the window is exactly as before (visible, usable); the server is still running (Home's status card, or `wsl --list --verbose` still shows `dml-arch` `Running`); the launcher process has not exited.
+   - If it did not happen: Cancel stopping the server, or closing the app anyway, turns a routine "not now" into an accidental server stop or an app that will not stay open — the opposite of what the button promises.
+
+5. **Confirming streams the stop to completion before the window closes.**
+   - Do: trigger the dialog again, click **"Stop server and close."**
+   - Expect: the button relabels to "Stopping…" and disables; a terminal pane appears in the dialog and shows the ordinary `games stop` sequence actually running (log snapshot, pre-stop backup, compose down); only once that stream reaches its terminal event (`done` or `error`) does the window disappear and the process exit.
+   - If it did not happen: a window that vanishes before the stream reaches its terminal event means the server is being cut mid-stop instead of given the chance to shut down cleanly — the identical failure this feature exists to prevent, just moved one step later and dressed up as a "confirmed" exit.
+
+6. **"Close anyway" works while a stop is running.**
+   - Do: while item 5's confirmed stop is still streaming ("Stopping…" showing, terminal active), click **"Close anyway."**
+   - Expect: the launcher closes promptly, without waiting for the stop to finish.
+   - If it did not happen: stopping ~2,000 bots is not instant, and a dialog with no escape while it works is how a user reaches for Task Manager — reproducing the exact hard cut this feature exists to prevent. This is the one state where the launcher must remain closable mid-operation.
+
+7. **`wsl --list --verbose` shows the distro stopping, not being cut.**
+   - Do: from item 5's confirmed exit, watch the second terminal's `wsl --list --verbose` for the ~30s after the launcher window disappears.
+   - Expect: `dml-arch` is still `Running` for a few seconds after the window closes (the holder is only released once `games_stop` has already finished, per the Global Constraints ordering), then transitions to `Stopped` within roughly 15–25s — the same idle-timer-plus-poweroff-grace window `live_wsl_keepalive.rs` measures automatically.
+   - If it did not happen: an INSTANT transition to `Stopped` at the same moment the window closes would mean the holder was released before, or without, the stop actually running — reopening the exact hard-cut risk this plan exists to close. A distro that never reaches `Stopped` (stays `Running` with the launcher process gone) means the holder leaked: ~1.4GB of VM held open with no launcher left to manage or release it, discoverable only by chance — a stray `wslrelay.exe`/`vmmemWSL` in Task Manager, or RAM that never comes back.
