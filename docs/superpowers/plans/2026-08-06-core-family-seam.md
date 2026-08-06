@@ -597,6 +597,33 @@ Then extend the JSON object line to include it:
           tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"family\":\"$tfamily\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
 ```
 
+- [ ] **Step 5b: Pin the catalog JSON's family — this closes a gap Task 2 could not**
+
+Task 2 fixed the six-variable read, then honestly reported that **reverting it to
+five variables reddened nothing**: no assertion anywhere read `tkind`/`tlauncher`
+out of the catalog JSON, so the corruption — and its fix — were both invisible.
+Adding `family` to the JSON is the first time that loop's tail has an observable
+consequence, so it is the first time the read can be pinned. Do not skip this.
+
+Add to `cli/tests/games-titles.bats`, following the conventions already in that
+file:
+
+```bash
+@test "games catalog reports each title's family" {
+  run dml games catalog --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-server-playerbots") | .family')" = "azerothcore" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-vanilla-server") | .family')" = "cmangos" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="maplestory-server") | .family')" = "other" ]
+}
+```
+
+Then MUTATE the read back to five variables
+(`... tkind tlauncher;`, dropping `tfamily`) and run this file. It must go RED —
+`family` will be empty or absent. If it does NOT go red, the assertion is not
+actually reaching the catalog arm and must be fixed before you continue.
+Restore with an Edit, then rebuild `cli/dml`.
+
 - [ ] **Step 6: Apply the filter in the Library**
 
 Find the Library's title list (`grep -rn "gamesCatalog\|TitleCatalog" launcher/src/lib/pages/Library.svelte`) and wrap the rendered array in `visibleTitles(...)`, importing it from `$lib/title-install`.
