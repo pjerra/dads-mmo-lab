@@ -79,6 +79,16 @@ pub struct TitleRow {
     pub installer: &'static str,
     pub kind: &'static str,
     pub launcher: &'static str,
+    /// Which emulator family this title's installer BUILDS — a catalog default
+    /// for a title that may not be installed yet, not a claim about any
+    /// installed server. The operating answer is resolved from the server
+    /// itself (`family::family_from_container_names`); this is what the Library
+    /// filters on and what a fresh install records.
+    ///
+    /// `"azerothcore" | "cmangos" | "other"`. A string, not `CoreFamily`,
+    /// because bash carries the identical value in `_title_registry`'s 6th
+    /// field and the two surfaces must be byte-comparable.
+    pub family: &'static str,
 }
 
 /// `_title_registry` (`80-titles.sh:12-21`), verbatim — six rows, in order.
@@ -89,6 +99,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-wow-wotlk.sh",
         kind: "games",
         launcher: "wow-playerbots-launcher.sh",
+        family: "azerothcore",
     },
     TitleRow {
         id: "wow-vanilla-server",
@@ -96,6 +107,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-wow-vanilla.sh",
         kind: "home",
         launcher: "wow-vanilla-launcher.sh",
+        family: "cmangos",
     },
     TitleRow {
         id: "wow-tbc-server",
@@ -103,6 +115,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-wow-tbc.sh",
         kind: "home",
         launcher: "wow-tbc-launcher.sh",
+        family: "cmangos",
     },
     TitleRow {
         id: "maplestory-server",
@@ -110,6 +123,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-maplestory.sh",
         kind: "home",
         launcher: "maplestory-launcher.sh",
+        family: "other",
     },
     TitleRow {
         id: "runescape-server",
@@ -117,6 +131,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-runescape.sh",
         kind: "home",
         launcher: "runescape-launcher.sh",
+        family: "other",
     },
     TitleRow {
         id: "muonline-server",
@@ -124,6 +139,7 @@ pub const TITLE_REGISTRY: &[TitleRow] = &[
         installer: "install-muonline.sh",
         kind: "home",
         launcher: "muonline-launcher.sh",
+        family: "other",
     },
 ];
 
@@ -989,6 +1005,62 @@ mod tests {
         assert!(title_row("../../etc/passwd").is_none());
         assert!(title_row("").is_none());
         assert!(title_row("WOW-SERVER-PLAYERBOTS").is_none()); // case-sensitive
+    }
+
+    #[test]
+    fn every_title_declares_a_family() {
+        for row in TITLE_REGISTRY {
+            assert!(
+                matches!(row.family, "azerothcore" | "cmangos" | "other"),
+                "{}: family {:?} is not one of the three known values",
+                row.id,
+                row.family
+            );
+        }
+    }
+
+    #[test]
+    fn the_wow_titles_declare_the_family_their_installer_builds() {
+        for (id, family) in [
+            ("wow-server-playerbots", "azerothcore"),
+            ("wow-vanilla-server", "cmangos"),
+            ("wow-tbc-server", "cmangos"),
+            ("maplestory-server", "other"),
+            ("runescape-server", "other"),
+            ("muonline-server", "other"),
+        ] {
+            let row = title_row(id).unwrap_or_else(|| panic!("{id} missing from the registry"));
+            assert_eq!(row.family, family, "{id}");
+        }
+    }
+
+    /// THE MIRROR. `_title_registry` and `TITLE_REGISTRY` are the same table on
+    /// two surfaces; a family added to one and not the other is a Library that
+    /// shows different titles depending on which binary answered.
+    #[test]
+    fn the_bash_registry_carries_the_same_families() {
+        let sh = include_str!("../../../cli/src/80-titles.sh").replace("\r\n", "\n");
+        let body = sh
+            .split_once("_title_registry() {\ncat <<'EOF'\n")
+            .expect("the _title_registry heredoc was renamed or reshaped")
+            .1
+            .split_once("\nEOF\n")
+            .expect("unterminated _title_registry heredoc")
+            .0;
+        let rows: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            rows.len(),
+            TITLE_REGISTRY.len(),
+            "bash has {} rows, Rust has {}",
+            rows.len(),
+            TITLE_REGISTRY.len()
+        );
+        for (line, row) in rows.iter().zip(TITLE_REGISTRY) {
+            let f: Vec<&str> = line.split('|').collect();
+            assert_eq!(f.len(), 6, "row {line:?} does not have 6 fields");
+            assert_eq!(f[0], row.id, "id mismatch in {line:?}");
+            assert_eq!(f[5], row.family, "family mismatch for {}", row.id);
+        }
     }
 
     // -- title_installed ---------------------------------------------------
