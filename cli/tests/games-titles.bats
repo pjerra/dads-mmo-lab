@@ -36,6 +36,23 @@ EOF
   [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .running')" = "null" ]
 }
 
+# --- _title_family (internal helper, no CLI verb) ---------------------------
+# Not called from anywhere yet (a later task wires it into games catalog's
+# JSON) -- covered directly by sourcing the file, same pattern as
+# wow-module-cpp.bats's _module_key_from_url/_rebuild_pending_add tests.
+
+@test "_title_family: known id prints its family" {
+  run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/80-titles.sh"; _title_family wow-vanilla-server'
+  [ "$status" -eq 0 ]
+  [ "$output" = "cmangos" ]
+}
+
+@test "_title_family: unknown id fails with no output" {
+  run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/80-titles.sh"; _title_family not-a-title'
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
 # --- install_supported (host verdict) --------------------------------------
 # script_available answers "is the installer FILE there?"; install_supported
 # answers "could a script run on this host AT ALL?". They are separate fields

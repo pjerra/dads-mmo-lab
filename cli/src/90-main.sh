@@ -1644,7 +1644,7 @@ case "$cmd" in
         # perfectly good dev-install to re-run dev-install.
         tinstsup=true; _installers_supported || tinstsup=false
         tout='['; first=1
-        while IFS='|' read -r tid tname tscript tkind tlauncher; do
+        while IFS='|' read -r tid tname tscript tkind tlauncher tfamily; do
           [[ -z "$tid" ]] && continue
           tinst=false; _title_installed "$tid" && tinst=true
           tscriptok=false; [[ -f "$(_installers_dir)/$tscript" ]] && tscriptok=true
