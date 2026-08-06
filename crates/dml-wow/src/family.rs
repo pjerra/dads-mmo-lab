@@ -218,6 +218,101 @@ mod resolver_scan_tests {
         out
     }
 
+    /// One past the end of the item starting at `from` — the first `;` at
+    /// depth zero, or the `}` that closes its first block. String and char
+    /// literals are skipped so a brace or semicolon inside one (an assert
+    /// message with `{name}` in it, say) cannot unbalance the match.
+    ///
+    /// CORRECTED 2026-08-06 (round 2): ported verbatim from
+    /// `launcher/src-tauri/src/lib.rs`'s `end_of_item` (used there by
+    /// `strip_cfg_test` inside `mod stop_outcome_scan_tests`), not
+    /// reinvented — `dml-wow` cannot depend on the launcher crate (the
+    /// dependency runs the other way: launcher depends on dml-wow) and the
+    /// function lives in a `#[cfg(test)]`-private module there besides, so a
+    /// literal import was not possible. Writing a second string-aware brace
+    /// matcher independently would have been the exact two-resolvers shape
+    /// this whole guard exists to catch, so this is a port, not a rewrite.
+    fn end_of_item(b: &[char], from: usize) -> usize {
+        let mut i = from;
+        let mut depth = 0usize;
+        while i < b.len() {
+            match b[i] {
+                '"' => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '"' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '\'' if i + 2 < b.len() && (b[i + 2] == '\'' || b[i + 1] == '\\') => {
+                    i += 1;
+                    while i < b.len() {
+                        if b[i] == '\\' {
+                            i += 2;
+                            continue;
+                        }
+                        if b[i] == '\'' {
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                ';' if depth == 0 => return i + 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        b.len()
+    }
+
+    /// Source with every `#[cfg(test)]` item removed, brace-matched — NOT
+    /// cut at the first marker.
+    ///
+    /// CORRECTED 2026-08-06 (round 2): the first draft used
+    /// `src.split("#[cfg(test)]").next()`, which truncates at the FIRST test
+    /// module and makes every production line below it invisible to the
+    /// scan. `family.rs` itself has two `#[cfg(test)]` modules with the real
+    /// `family_from_container_names` definition between them, and
+    /// `native.rs`/`tuning.rs` in this same crate are shaped the same way —
+    /// this was not hypothetical. Two planted callers placed AFTER the
+    /// file's first test module sailed through undetected; the identical
+    /// callers placed before it were caught. Same idiom as
+    /// `launcher/src-tauri/src/lib.rs`'s `strip_cfg_test` — ported, see
+    /// `end_of_item`'s doc comment for why this is not a second
+    /// implementation of the same stripper.
+    ///
+    /// Input must already be comment-stripped by [`strip_comments`], so a
+    /// `{` inside prose cannot unbalance the match; string and char literals
+    /// inside surviving code are still handled here, by `end_of_item`.
+    fn strip_cfg_test(code: &str) -> String {
+        let attr: Vec<char> = "#[cfg(test)]".chars().collect();
+        let b: Vec<char> = code.chars().collect();
+        let mut out = String::with_capacity(code.len());
+        let mut i = 0usize;
+        while i < b.len() {
+            if b[i..].starts_with(&attr[..]) {
+                i = end_of_item(&b, i + attr.len());
+                continue;
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out
+    }
+
     #[test]
     fn only_family_rs_decides_what_a_stack_is() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -233,10 +328,11 @@ mod resolver_scan_tests {
             scanned += 1;
             let src = strip_comments(&std::fs::read_to_string(&path).expect("read"));
             // Production half only: the tests in family.rs call the resolver
-            // many times and must not count.
-            let production = src.split("#[cfg(test)]").next().unwrap_or("");
+            // many times and must not count. Brace-matched removal, not
+            // cut-at-first — see strip_cfg_test's doc comment.
+            let production = strip_cfg_test(&src);
             for (at, _) in production.match_indices(RESOLVER_SYMBOL) {
-                if !is_definition(production, at) {
+                if !is_definition(&production, at) {
                     calls += 1;
                 }
             }
