@@ -169,6 +169,11 @@ pub fn conf_path_in(title_dir: &Path, file: &str) -> PathBuf {
 pub struct ConfigReader {
     title_dir: PathBuf,
     env_map: HashMap<String, String>,
+    /// The BASE compose file's `ac-worldserver` environment, kept SEPARATE
+    /// from `env_map` on purpose — only [`ConfigReader::database_info_value`]
+    /// may read it. See that method for why [`ConfigReader::compute_value`]
+    /// must not.
+    base_env_map: HashMap<String, String>,
     conf_cache: HashMap<PathBuf, HashMap<String, String>>,
 }
 
@@ -185,14 +190,21 @@ impl ConfigReader {
         base.join(TITLE)
     }
 
-    /// Construct from an explicit title dir, eagerly loading the override env map.
+    /// Construct from an explicit title dir, eagerly loading the override env
+    /// map (and, separately, the base compose's — see [`Self::database_info_value`]).
     pub fn for_title(title_dir: impl Into<PathBuf>) -> Self {
         let title_dir = title_dir.into();
         let override_path = title_dir.join("docker-compose.override.yml");
         let env_map = std::fs::read_to_string(&override_path)
             .map(|t| parse_override_env(&t))
             .unwrap_or_default();
-        ConfigReader { title_dir, env_map, conf_cache: HashMap::new() }
+        // Which file IS the base compose is `dml_core::compose`'s decision
+        // (four recognised names), not a second literal here.
+        let base_env_map = dml_core::compose::compose_file_name(&title_dir)
+            .and_then(|name| std::fs::read_to_string(title_dir.join(name)).ok())
+            .map(|t| parse_override_env(&t))
+            .unwrap_or_default();
+        ConfigReader { title_dir, env_map, base_env_map, conf_cache: HashMap::new() }
     }
 
     /// Convenience: build from `DML_GAMES_DIR`.
@@ -258,6 +270,55 @@ impl ConfigReader {
             val = default.to_string();
         }
         val
+    }
+
+    /// The live value of one `*DatabaseInfo` conf key
+    /// (`LoginDatabaseInfo`/`WorldDatabaseInfo`/`CharacterDatabaseInfo`),
+    /// resolved the way the SERVER resolves it — which is NOT the way
+    /// [`Self::compute_value`] does.
+    ///
+    /// Same three tiers, in the same order (env → live conf → `.dist`), and
+    /// the same [`env_name_for`] derivation, but the env tier is the FULL
+    /// compose environment for `ac-worldserver`: `docker-compose.override.yml`
+    /// first, then the BASE compose file. That difference is load-bearing in
+    /// BOTH directions:
+    ///
+    ///  * Every DML-generated native install writes
+    ///    `AC_LOGIN_DATABASE_INFO`/`AC_WORLD_DATABASE_INFO`/
+    ///    `AC_CHARACTER_DATABASE_INFO` into the BASE compose
+    ///    (`data/native-compose.yml.tmpl`), never into the override — and an
+    ///    `AC_*` env var OVERRIDES the matching conf key (composegen's
+    ///    shadowing rule). Reading only the conf therefore answers with a value
+    ///    worldserver PROVABLY never reads: on a real install the on-disk
+    ///    `worldserver.conf` is byte-identical to its stock `.dist` and still
+    ///    says `127.0.0.1;3306;acore;acore;acore_auth` — a host that container
+    ///    cannot even reach. Renaming a schema the only way a native install
+    ///    exposes (edit the compose env, `docker compose up`) has to be visible
+    ///    here or the reader connects to the wrong database.
+    ///  * [`Self::compute_value`] must NOT gain the base map in exchange: it is
+    ///    a parity port of bash `_cfg_env_load_map` (40-config.sh:189), which
+    ///    loads the OVERRIDE alone, and the `config list` parity suite pins it.
+    ///
+    /// `None` — never a guessed name — when no tier answers.
+    pub fn database_info_value(&mut self, conf_key: &str) -> Option<String> {
+        let ename = env_name_for(conf_key);
+        for map in [&self.env_map, &self.base_env_map] {
+            if let Some(v) = map.get(&ename).filter(|v| !v.is_empty()) {
+                return Some(v.clone());
+            }
+        }
+        // `conf_path_in` has NO `.dist` fallback of its own — every caller adds
+        // one (`compute_value` above, `tuning.rs`) — and this one must too: a
+        // `worldserver.conf` that exists but omits a `*DatabaseInfo` key is
+        // LEGAL, because AC merges the `.conf` over the `.conf.dist`.
+        let path = self.conf_path("worldserver.conf");
+        let live = self.conf_value(&path, conf_key);
+        if !live.is_empty() {
+            return Some(live);
+        }
+        let dist = path.with_file_name("worldserver.conf.dist");
+        let from_dist = self.conf_value(&dist, conf_key);
+        if from_dist.is_empty() { None } else { Some(from_dist) }
     }
 
     /// Assemble `{"settings":[…]}` from the cached registry rows, filling each

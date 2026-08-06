@@ -38,6 +38,17 @@ fn games_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\perzi\dml-native"))
 }
 
+/// This suite's own [`DbConfig`], resolved against [`games_dir`] instead of
+/// the ambient `DML_GAMES_DIR`. Schema names come from the server's own
+/// config now, so the in-process half has to be told WHICH server — the same
+/// one `games_dir()` hands the bash oracle. Without this an unset
+/// `DML_GAMES_DIR` leaves `db_names` `None` and every native read refuses
+/// with `DB_NAMES_UNRESOLVED` while bash answers normally, which reads
+/// exactly like a parity regression and is not one.
+fn live_db_config() -> DbConfig {
+    DbConfig::for_title(&games_dir().join(dml_wow::config::TITLE))
+}
+
 fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(b);
@@ -318,7 +329,7 @@ fn games_status_native_matches_cli_for_wow_server_playerbots() {
 /// reach the DB to produce the result being asserted (see each test's own
 /// doc comment for its call).
 fn db_reachable(label: &str) -> Option<DbConfig> {
-    let cfg = DbConfig::from_env();
+    let cfg = live_db_config();
     let addr = format!("{}:{}", cfg.host, cfg.port);
     let reachable = addr
         .parse()
@@ -382,7 +393,7 @@ fn pick_offline_character(cfg: &DbConfig) -> Option<(u64, String, f64, f64, f64,
 #[test]
 fn teleport_coords_native_offline_round_trip_matches_cli() {
     let Some(h) = harness("teleport-coords parity") else { return };
-    let cfg = DbConfig::from_env();
+    let cfg = live_db_config();
     let Some((guid, name, x, y, z, map)) = pick_offline_character(&cfg) else {
         eprintln!("SKIP teleport-coords parity: no offline non-bot character found");
         return;

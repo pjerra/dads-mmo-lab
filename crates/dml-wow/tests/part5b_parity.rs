@@ -43,6 +43,17 @@ fn games_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\perzi\dml-native"))
 }
 
+/// This suite's own [`DbConfig`], resolved against [`games_dir`] instead of
+/// the ambient `DML_GAMES_DIR`. Schema names come from the server's own
+/// config now, so the in-process half has to be told WHICH server — the same
+/// one `games_dir()` hands the bash oracle. Without this an unset
+/// `DML_GAMES_DIR` leaves `db_names` `None` and every native read refuses
+/// with `DB_NAMES_UNRESOLVED` while bash answers normally, which reads
+/// exactly like a parity regression and is not one.
+fn live_db_config() -> DbConfig {
+    DbConfig::for_title(&games_dir().join(dml_wow::config::TITLE))
+}
+
 fn find_bash() -> Option<OsString> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(b);
@@ -226,7 +237,7 @@ fn files_by_name(v: &serde_json::Value) -> Option<Vec<serde_json::Value>> {
 #[test]
 fn module_tracking_native_matches_cli_for_installed_module() {
     let Some(h) = harness("module tracking parity") else { return };
-    if db::connect(&DbConfig::from_env(), Database::World).is_err() {
+    if db::connect(&live_db_config(), Database::World).is_err() {
         eprintln!("SKIP module tracking parity: ac-database not reachable");
         return;
     }
@@ -234,7 +245,7 @@ fn module_tracking_native_matches_cli_for_installed_module() {
     assert_eq!(want["ok"], true, "module tracking not ok: {want}");
 
     let sdir = h.games.join("wow-server-playerbots");
-    let cfg = DbConfig::from_env();
+    let cfg = live_db_config();
     let got = native_tracking(&cfg, &sdir, INSTALLED_KEY);
 
     assert_eq!(got["key"], want["data"]["key"], "key diverged");

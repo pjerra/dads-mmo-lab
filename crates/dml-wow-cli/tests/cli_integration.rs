@@ -373,8 +373,24 @@ fn config_get_unknown_key_is_not_found() {
 /// right now -- the same lightweight TCP probe `db_pages_parity.rs` uses to
 /// skip its DB-gated tests gracefully rather than failing the whole suite
 /// when only the DB tier (or nothing) is running.
+/// Gate for the tests that need a REAL server behind the spawned binary.
+///
+/// Two conditions, and the second one is not decoration: MySQL answering on
+/// loopback, AND an installed title the child can read its schema names out of
+/// (`DML_GAMES_DIR` → `wow-server-playerbots` → compose env / `worldserver.conf`).
+/// Schema names stopped being hardcoded, so without that context the child
+/// refuses with `DB_NAMES_UNRESOLVED` before it ever opens a socket, and a
+/// TCP-only gate turned that into three failures that had nothing to do with
+/// the code under test. A test whose premise is "a real DB read" must not run
+/// where there is no server to read.
+///
+/// The tests that must work with NO server at all (the `DB_UNREACHABLE` hint
+/// test) are deliberately NOT gated on this — they build their own fixture.
 fn db_reachable() -> bool {
     let cfg = dml_wow::db::DbConfig::from_env();
+    if cfg.db_names.is_none() {
+        return false;
+    }
     let addr = format!("{}:{}", cfg.host, cfg.port);
     addr.parse()
         .ok()
@@ -440,18 +456,53 @@ fn paperdoll_unknown_character_is_not_found_exit_1() {
     assert_eq!(envelope["error"]["message"], "No such character or no equipped items: NoSuchChar");
 }
 
+/// A minimal installed-title fixture: `<games dir>/wow-server-playerbots/`
+/// with a `docker-compose.yml` whose `ac-worldserver` environment names the
+/// three schemas, exactly as `data/native-compose.yml.tmpl` generates. Returns
+/// the GAMES dir, to be handed to a child as `DML_GAMES_DIR`.
+///
+/// Needed because schema names are no longer hardcoded: without a server to
+/// read them from, every DB command reports `DB_NAMES_UNRESOLVED` before it
+/// ever opens a socket. `DML_GAMES_DIR` happens to be exported in the author's
+/// user environment and is set NOWHERE in `.github/workflows/rust.yml`, so a
+/// test that leans on the ambient one passes locally and fails on CI.
+fn games_dir_fixture(name: &str) -> PathBuf {
+    let games = std::env::temp_dir().join(format!("dml-cli-games-{name}-{}", std::process::id()));
+    let title = games.join("wow-server-playerbots");
+    let _ = fs::remove_dir_all(&games);
+    fs::create_dir_all(&title).expect("create the fixture title dir");
+    fs::write(
+        title.join("docker-compose.yml"),
+        "services:\n  ac-worldserver:\n    environment:\n\
+         \x20     AC_LOGIN_DATABASE_INFO: \"ac-database;3306;root;pw;acore_auth\"\n\
+         \x20     AC_WORLD_DATABASE_INFO: \"ac-database;3306;root;pw;acore_world\"\n\
+         \x20     AC_CHARACTER_DATABASE_INFO: \"ac-database;3306;root;pw;acore_characters\"\n",
+    )
+    .expect("write the fixture compose file");
+    games
+}
+
 /// (4) THE test that would have caught review finding 1: an unreachable DB
 /// (via an env override that needs no real server, up or down) must report
 /// the EXACT hint `dml_wow::db::db_err_to_cmd` uses, not a hand-copied
 /// string that merely looked plausible. NOT DB-gated -- the whole point is
 /// that this works regardless of whether `ac-database` is up.
+///
+/// It IS server-context-gated, though, and deliberately supplies that context
+/// itself (`games_dir_fixture`) rather than inheriting whatever `DML_GAMES_DIR`
+/// the box happens to export: reaching the connect attempt at all now requires
+/// resolvable schema names, and without them the binary answers
+/// `DB_NAMES_UNRESOLVED` — a different code, raised before any socket.
 #[test]
 fn db_unreachable_reports_the_launchers_exact_hint() {
+    let games = games_dir_fixture("db-unreachable");
     let out = bin()
         .arg("players-online")
+        .env("DML_GAMES_DIR", &games)
         .env("DOCKER_DB_EXTERNAL_PORT", "1")
         .output()
         .expect("spawn dml-wow players-online with an unreachable DB port");
+    let _ = fs::remove_dir_all(&games);
     assert_eq!(out.status.code(), Some(1));
     let envelope = parse_envelope(&out.stdout);
     assert_eq!(envelope["ok"], false);

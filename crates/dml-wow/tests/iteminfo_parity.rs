@@ -31,6 +31,17 @@ fn games_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(r"C:\Users\perzi\dml-native"))
 }
 
+/// This suite's own [`DbConfig`], resolved against [`games_dir`] instead of
+/// the ambient `DML_GAMES_DIR`. Schema names come from the server's own
+/// config now, so the in-process half has to be told WHICH server — the same
+/// one `games_dir()` hands the bash oracle. Without this an unset
+/// `DML_GAMES_DIR` leaves `db_names` `None` and every native read refuses
+/// with `DB_NAMES_UNRESOLVED` while bash answers normally, which reads
+/// exactly like a parity regression and is not one.
+fn live_db_config() -> DbConfig {
+    DbConfig::for_title(&games_dir().join(dml_wow::config::TITLE))
+}
+
 fn find_bash() -> Option<PathBuf> {
     if let Some(b) = std::env::var_os("DML_BASH").filter(|s| !s.is_empty()) {
         return Some(PathBuf::from(b));
@@ -109,7 +120,7 @@ fn native_reader_matches_wow_item_info_for_a_known_item() {
     let want = &want_env["data"]["items"][0];
 
     let cache_root = cache_dir().expect("resolve wowhead cache dir");
-    let db_cfg = DbConfig::from_env();
+    let db_cfg = live_db_config();
     let got_env = read_item_info(&cache_root, Some(&db_cfg), &[25]);
     let got = &got_env["items"][0];
 

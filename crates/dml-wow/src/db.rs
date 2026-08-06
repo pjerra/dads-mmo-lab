@@ -29,8 +29,6 @@
 
 #![allow(dead_code)] // spike foundation: consumed by the per-page reader tasks, not yet by a Tauri command
 
-use std::path::PathBuf;
-
 use dml_core::error::CmdError;
 
 /// Loopback host the native stack publishes MySQL on.
@@ -43,9 +41,10 @@ pub const DEFAULT_DB_PORT: u16 = 3306;
 pub const DEFAULT_DB_PASSWORD: &str = "password";
 
 /// The four AzerothCore schemas this launcher reads. Names are user-configurable
-/// (renamed in `worldserver.conf`'s `*DatabaseInfo` lines), so the enum only
-/// picks WHICH schema — the actual name comes from a resolved [`DatabaseNames`];
-/// an enum keeps callers from typo-ing a DB name into a SQL connection.
+/// (renamed in the compose env's `AC_*_DATABASE_INFO`, or in `worldserver.conf`'s
+/// `*DatabaseInfo` lines), so the enum only picks WHICH schema — the actual name
+/// comes from a resolved [`DatabaseNames`]; an enum keeps callers from typo-ing a
+/// DB name into a SQL connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Database {
     World,
@@ -72,10 +71,10 @@ impl Database {
     }
 }
 
-/// Error code when the server's conf could not answer.
+/// Error code when the server's own config could not answer.
 pub const ERR_DB_NAMES_UNRESOLVED: &str = "DB_NAMES_UNRESOLVED";
 
-/// The three schema names, read from the server's own conf.
+/// The three schema names, read from the server's own config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseNames {
     pub world: String,
@@ -95,21 +94,25 @@ pub fn parse_database_info(line: &str) -> Option<&str> {
     if last.is_empty() { None } else { Some(last) }
 }
 
-/// Read all three names, or refuse. Never a partial answer and never a default.
-pub fn database_names_from_conf(conf: &str) -> Option<DatabaseNames> {
-    fn value_of<'a>(conf: &'a str, key: &str) -> Option<&'a str> {
-        conf.lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .find_map(|l| {
-                let (k, v) = l.split_once('=')?;
-                (k.trim() == key).then_some(v)
-            })
-    }
+/// Read all three names for a title dir, or refuse. Never a partial answer and
+/// never a default.
+///
+/// Each name comes from [`super::config::ConfigReader::database_info_value`] —
+/// the ONE place that knows the precedence the server itself applies (compose
+/// `AC_*_DATABASE_INFO` env → live `worldserver.conf` → `worldserver.conf.dist`).
+/// Resolving from the conf ALONE was the original bug: a DML native install
+/// carries the real names in the compose environment, and leaves
+/// `worldserver.conf` byte-identical to its stock `.dist`.
+pub fn database_names_for_title(title_dir: &std::path::Path) -> Option<DatabaseNames> {
+    let mut reader = super::config::ConfigReader::for_title(title_dir);
+    let mut name = |conf_key: &str| -> Option<String> {
+        let raw = reader.database_info_value(conf_key)?;
+        parse_database_info(&raw).map(str::to_string)
+    };
     Some(DatabaseNames {
-        auth: parse_database_info(value_of(conf, "LoginDatabaseInfo")?)?.to_string(),
-        world: parse_database_info(value_of(conf, "WorldDatabaseInfo")?)?.to_string(),
-        characters: parse_database_info(value_of(conf, "CharacterDatabaseInfo")?)?.to_string(),
+        auth: name("LoginDatabaseInfo")?,
+        world: name("WorldDatabaseInfo")?,
+        characters: name("CharacterDatabaseInfo")?,
     })
 }
 
@@ -152,9 +155,10 @@ pub enum DbError {
     Unreachable(String),
     /// Connected, but running the query failed (SQL/protocol error).
     Query(String),
-    /// The server's conf could not answer the schema names (missing/unreadable
-    /// `worldserver.conf`, or a missing `*DatabaseInfo` key) — see
-    /// [`database_names_from_conf`]. REFUSED, never a fallback to a guessed name.
+    /// The server's own config could not answer the schema names (no
+    /// `AC_*_DATABASE_INFO` in the compose env AND no `*DatabaseInfo` key in
+    /// `worldserver.conf`/its `.dist`) — see [`database_names_for_title`].
+    /// REFUSED, never a fallback to a guessed name.
     NamesUnresolved(String),
 }
 
@@ -188,25 +192,40 @@ pub struct DbConfig {
     pub port: u16,
     pub user: String,
     pub password: String,
-    /// The schema names read from the server's own `worldserver.conf`, or
-    /// `None` when the conf was missing/unreadable or a key was absent. NEVER
-    /// a default — a caller reaching for a name resolves against this and gets
-    /// [`DbError::NamesUnresolved`] rather than a guessed `acore_*` name.
+    /// The schema names read from the server's own config (compose env first,
+    /// then `worldserver.conf`, then its `.dist`), or `None` when none of them
+    /// answered. NEVER a default — a caller reaching for a name resolves
+    /// against this and gets [`DbError::NamesUnresolved`] rather than a guessed
+    /// `acore_*` name.
     pub db_names: Option<DatabaseNames>,
 }
 
 impl DbConfig {
     /// Resolve from the real process environment plus the title dir's `.env`
     /// (the file Compose reads for `${VAR}` interpolation), and the schema
-    /// names from `<title dir>/env/dist/etc/worldserver.conf`. Title dir is
+    /// names via [`database_names_for_title`]. Title dir is
     /// `DML_GAMES_DIR/wow-server-playerbots`, shared with
     /// [`super::config::ConfigReader::title_dir_from_env`].
     pub fn from_env() -> Self {
-        let dotenv = std::fs::read_to_string(dotenv_path()).ok();
+        Self::for_title(&super::config::ConfigReader::title_dir_from_env())
+    }
+
+    /// [`Self::from_env`] with the title dir supplied instead of read out of
+    /// `DML_GAMES_DIR` — same `.env` and schema-name resolution, one explicit
+    /// server.
+    ///
+    /// Exists for the live parity suites: each carries its OWN `games_dir()`
+    /// (env var, else the snapshot server's path) and hands it to the bash
+    /// oracle explicitly, so the in-process half has to be able to name the
+    /// same server. Since schema names stopped being hardcoded, an unset
+    /// `DML_GAMES_DIR` left `db_names` `None` and every native read refused
+    /// with `DB_NAMES_UNRESOLVED` while bash — handed `games_dir()` — answered
+    /// normally: 13 live tests failed or skipped for a reason that had nothing
+    /// to do with the code under test.
+    pub fn for_title(title_dir: &std::path::Path) -> Self {
+        let dotenv = std::fs::read_to_string(title_dir.join(".env")).ok();
         let mut cfg = resolve_db_config(|k| std::env::var(k).ok(), dotenv.as_deref());
-        cfg.db_names = std::fs::read_to_string(worldserver_conf_path())
-            .ok()
-            .and_then(|text| database_names_from_conf(&text));
+        cfg.db_names = database_names_for_title(title_dir);
         cfg
     }
 
@@ -217,7 +236,8 @@ impl DbConfig {
     fn opts(&self, db: Database) -> Result<mysql::Opts, DbError> {
         let names = self.db_names.as_ref().ok_or_else(|| {
             DbError::NamesUnresolved(
-                "could not read the schema names from the server's worldserver.conf".to_string(),
+                "could not read the schema names from the server's compose env or worldserver.conf"
+                    .to_string(),
             )
         })?;
         let db_name = db.name(names).to_string();
@@ -245,20 +265,6 @@ impl DbConfig {
             .init(vec!["SET NAMES utf8mb4"])
             .into())
     }
-}
-
-/// Path of the title dir's `.env` (`DML_GAMES_DIR/wow-server-playerbots/.env`).
-fn dotenv_path() -> PathBuf {
-    super::config::ConfigReader::title_dir_from_env().join(".env")
-}
-
-/// Path of the title dir's `worldserver.conf`
-/// (`DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/worldserver.conf`), host
-/// readable. Reuses [`super::config::conf_path_in`] — the same helper the
-/// config reader and tuning reader use — rather than a second path join, so
-/// there is exactly one place that knows where a title's confs live.
-fn worldserver_conf_path() -> PathBuf {
-    super::config::conf_path_in(&super::config::ConfigReader::title_dir_from_env(), "worldserver.conf")
 }
 
 /// Look one key out of a parsed `.env`-style text: `KEY=VALUE` lines, `#`
@@ -482,14 +488,14 @@ pub fn db_unreachable_err(message: impl Into<String>) -> CmdError {
 /// `*DatabaseInfo` at all (it uses its own hardcoded `acore_*` constants), so
 /// this failure mode does not exist on that side to be byte-identical with —
 /// it is native-only, and folding it into `DB_UNREACHABLE` would tell the user
-/// "is the engine down?" for a misconfigured `worldserver.conf`, which is a
-/// different question with a different fix.
+/// "is the engine down?" for a server whose config never names its schemas,
+/// which is a different question with a different fix.
 pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
     match &e {
         crate::db::DbError::NamesUnresolved(_) => CmdError {
             code: crate::db::ERR_DB_NAMES_UNRESOLVED.into(),
             message: e.to_string(),
-            hint: "Could not read the schema names from worldserver.conf".into(),
+            hint: "Could not read the schema names from the server's compose env or worldserver.conf".into(),
         },
         _ => CmdError {
             code: "DB_UNREACHABLE".into(),
@@ -527,6 +533,136 @@ mod tests {
         assert_eq!(parse_database_info("nosemicolons"), None);
     }
 
+    // -----------------------------------------------------------------------
+    // Schema-name resolution fixtures. These build a real title dir on disk
+    // rather than feeding a conf STRING, because the defect being pinned is
+    // precisely that the conf is not the only source (nor the winning one).
+    // -----------------------------------------------------------------------
+
+    /// What a DML native install actually leaves in `worldserver.conf`: the
+    /// stock `.dist` values, naming a host the worldserver container cannot
+    /// even reach. Verified byte-for-byte on the live install at
+    /// `C:\Users\perzi\dml-native\wow-server-playerbots` (2026-08-06) — the
+    /// conf and its `.dist` are the same size and carry these three lines.
+    const STOCK_CONF: &str = "\
+LoginDatabaseInfo     = \"127.0.0.1;3306;acore;acore;acore_auth\"
+WorldDatabaseInfo     = \"127.0.0.1;3306;acore;acore;acore_world\"
+CharacterDatabaseInfo = \"127.0.0.1;3306;acore;acore;acore_characters\"
+";
+
+    /// A compose document carrying `services.ac-worldserver.environment` —
+    /// the shape `data/native-compose.yml.tmpl` generates and the shape
+    /// [`crate::config::parse_override_env`] reads.
+    fn compose_yaml(entries: &[(&str, &str)]) -> String {
+        let mut s = String::from("services:\n  ac-worldserver:\n    environment:\n");
+        for (k, v) in entries {
+            s.push_str(&format!("      {k}: \"{v}\"\n"));
+        }
+        s
+    }
+
+    /// `AC_*_DATABASE_INFO` entries naming `<prefix>_auth/_world/_chars`, in
+    /// the `Host;Port;User;Pass;DBName` form the compose env really uses.
+    fn db_info_entries(prefix: &str) -> Vec<(String, String)> {
+        [
+            ("AC_LOGIN_DATABASE_INFO", "auth"),
+            ("AC_WORLD_DATABASE_INFO", "world"),
+            ("AC_CHARACTER_DATABASE_INFO", "chars"),
+        ]
+        .iter()
+        .map(|(k, sfx)| ((*k).to_string(), format!("ac-database;3306;root;pw;{prefix}_{sfx}")))
+        .collect()
+    }
+
+    fn compose_db_info(prefix: &str) -> String {
+        let owned = db_info_entries(prefix);
+        let refs: Vec<(&str, &str)> =
+            owned.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        compose_yaml(&refs)
+    }
+
+    /// Build a title-dir fixture. Each source is optional so a test can leave
+    /// exactly the tiers it means to exercise.
+    fn title_fixture(
+        name: &str,
+        base_compose: Option<&str>,
+        override_compose: Option<&str>,
+        conf: Option<&str>,
+        dist: Option<&str>,
+    ) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-dbnames-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let etc = dir.join("env").join("dist").join("etc");
+        std::fs::create_dir_all(&etc).unwrap();
+        if let Some(t) = base_compose {
+            std::fs::write(dir.join("docker-compose.yml"), t).unwrap();
+        }
+        if let Some(t) = override_compose {
+            std::fs::write(dir.join("docker-compose.override.yml"), t).unwrap();
+        }
+        if let Some(t) = conf {
+            std::fs::write(etc.join("worldserver.conf"), t).unwrap();
+        }
+        if let Some(t) = dist {
+            std::fs::write(etc.join("worldserver.conf.dist"), t).unwrap();
+        }
+        dir
+    }
+
+    fn triple(n: &DatabaseNames) -> (&str, &str, &str) {
+        (n.auth.as_str(), n.world.as_str(), n.characters.as_str())
+    }
+
+    /// THE regression test for the defect this round exists to fix. A DML
+    /// native install writes the real schema names into the compose
+    /// `environment:` and leaves `worldserver.conf` byte-identical to its
+    /// stock `.dist` — and an `AC_*` env var OVERRIDES the matching conf key
+    /// (composegen's shadowing rule, `composegen.rs:47-53`). A resolver that
+    /// reads only the conf therefore answers `acore_*` for a server that is
+    /// using something else entirely: the exact bug Task 5 exists to remove.
+    ///
+    /// All three names are asserted INDIVIDUALLY and the conf supplies a
+    /// (wrong) value for each, so dropping the env tier for any ONE key is
+    /// caught on its own rather than being masked by its siblings.
+    #[test]
+    fn the_compose_env_beats_the_conf_the_server_ignores() {
+        let dir = title_fixture(
+            "env-beats-conf",
+            Some(&compose_db_info("renamed")),
+            None,
+            Some(STOCK_CONF),
+            Some(STOCK_CONF),
+        );
+        let n = database_names_for_title(&dir).expect("the compose env answers all three");
+        assert_eq!(
+            triple(&n),
+            ("renamed_auth", "renamed_world", "renamed_chars"),
+            "AC_*_DATABASE_INFO must win: it is what worldserver reads, and the \
+             on-disk conf on a real install is untouched stock"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compose's own later-file-wins rule: `docker-compose.override.yml` is
+    /// merged on top of the base file, so an `AC_*_DATABASE_INFO` there beats
+    /// the base compose's.
+    #[test]
+    fn the_override_compose_beats_the_base_compose() {
+        let dir = title_fixture(
+            "override-beats-base",
+            Some(&compose_db_info("base")),
+            Some(&compose_db_info("ovr")),
+            Some(STOCK_CONF),
+            None,
+        );
+        let n = database_names_for_title(&dir).expect("both compose files answer");
+        assert_eq!(triple(&n), ("ovr_auth", "ovr_world", "ovr_chars"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no compose env at all the conf is still read — and READ, not
+    /// assumed. (This is the tier the WSL-era/hand-rolled stacks rely on.)
     #[test]
     fn conf_names_are_read_not_assumed() {
         let conf = "\
@@ -534,10 +670,29 @@ LoginDatabaseInfo     = \"127.0.0.1;3306;acore;pw;my_auth\"
 WorldDatabaseInfo     = \"127.0.0.1;3306;acore;pw;my_world\"
 CharacterDatabaseInfo = \"127.0.0.1;3306;acore;pw;my_chars\"
 ";
-        let n = database_names_from_conf(conf).expect("all three keys present");
-        assert_eq!(n.auth, "my_auth");
-        assert_eq!(n.world, "my_world");
-        assert_eq!(n.characters, "my_chars");
+        let dir = title_fixture("conf-only", None, None, Some(conf), None);
+        let n = database_names_for_title(&dir).expect("all three keys present");
+        assert_eq!(triple(&n), ("my_auth", "my_world", "my_chars"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `worldserver.conf` that EXISTS but omits a `*DatabaseInfo` key is
+    /// legal — AC merges the `.conf` over the `.conf.dist` — so the resolver
+    /// must fall through to the `.dist` rather than refusing. `conf_path_in`
+    /// has no `.dist` fallback of its own; every caller adds one, and this
+    /// pins that this caller does too.
+    #[test]
+    fn a_conf_that_omits_the_keys_falls_through_to_the_dist() {
+        let dir = title_fixture(
+            "dist-fallback",
+            None,
+            None,
+            Some("Rate.XP.Kill = 3\n"),
+            Some(STOCK_CONF),
+        );
+        let n = database_names_for_title(&dir).expect(".dist answers what the conf omits");
+        assert_eq!(triple(&n), ("acore_auth", "acore_world", "acore_characters"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// REFUSE, do not fall back. Falling back to the old constants restores the
@@ -545,8 +700,25 @@ CharacterDatabaseInfo = \"127.0.0.1;3306;acore;pw;my_chars\"
     /// answering ok:true against a database that is not the server's.
     #[test]
     fn a_missing_key_refuses_rather_than_defaulting() {
-        let conf = "LoginDatabaseInfo = \"h;3306;u;p;my_auth\"\n";
-        assert_eq!(database_names_from_conf(conf), None);
+        let dir = title_fixture(
+            "missing-key",
+            None,
+            None,
+            Some("LoginDatabaseInfo = \"h;3306;u;p;my_auth\"\n"),
+            None,
+        );
+        assert_eq!(database_names_for_title(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing anywhere — no compose, no conf, no `.dist` — is a refusal, not
+    /// a guess. This is the state a not-yet-installed title is in, and it is
+    /// what `DB_NAMES_UNRESOLVED` reports.
+    #[test]
+    fn an_empty_title_dir_refuses() {
+        let dir = title_fixture("empty", None, None, None, None);
+        assert_eq!(database_names_for_title(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ISOLATES each key's refusal from the other two. The test above leaves
@@ -579,11 +751,13 @@ CharacterDatabaseInfo = \"127.0.0.1;3306;acore;pw;my_chars\"
             ),
         ];
         for (missing, conf) in cases {
+            let dir = title_fixture(&format!("missing-{missing}"), None, None, Some(conf), None);
             assert_eq!(
-                database_names_from_conf(conf),
+                database_names_for_title(&dir),
                 None,
                 "missing only {missing} must still refuse, not partially default"
             );
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
@@ -595,8 +769,10 @@ LoginDatabaseInfo     = \"h;3306;u;p;a\"
 WorldDatabaseInfo     = \"h;3306;u;p;w\"
 CharacterDatabaseInfo = \"h;3306;u;p;c\"
 ";
-        let n = database_names_from_conf(conf).expect("all three present");
+        let dir = title_fixture("commented", None, None, Some(conf), None);
+        let n = database_names_for_title(&dir).expect("all three present");
         assert_eq!(n.world, "w", "a commented key must not win");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -850,9 +1026,42 @@ BLANK=
     /// loopback. Gated on a TCP connect to `127.0.0.1:<resolved port>` so the
     /// suite stays green on a box with no server running (it becomes a no-op),
     /// but exercises the real driver end-to-end when the server IS up.
+    ///
+    /// THE SCHEMA COMES FROM A FIXTURE, not from the ambient environment.
+    /// Since schema names stopped being hardcoded, `DbConfig::from_env()`
+    /// answers `None` unless a real title dir is installed at `DML_GAMES_DIR`
+    /// — which is exported on the author's box and set NOWHERE in
+    /// `.github/workflows/rust.yml`, so this test panicked with
+    /// `NamesUnresolved` on CI. It is given the server context it needs
+    /// instead of being weakened or skipped (a test that skips on CI is this
+    /// repo's recorded vacuous-pass trap). `information_schema` is the schema
+    /// EVERY MySQL server has, so the fixture also removes this test's old
+    /// dependency on an AzerothCore install; host/port/password still come
+    /// from the real `DbConfig::from_env()` precedence.
     #[test]
     fn live_db_roundtrip_when_reachable() {
-        let cfg = DbConfig::from_env();
+        let mut cfg = DbConfig::from_env();
+        let dir = title_fixture(
+            "live-roundtrip",
+            Some(&compose_yaml(&[
+                ("AC_LOGIN_DATABASE_INFO", "ac-database;3306;root;pw;information_schema"),
+                ("AC_WORLD_DATABASE_INFO", "ac-database;3306;root;pw;information_schema"),
+                ("AC_CHARACTER_DATABASE_INFO", "ac-database;3306;root;pw;information_schema"),
+            ])),
+            None,
+            None,
+            None,
+        );
+        cfg.db_names = database_names_for_title(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Assert the fixture really resolved: if it silently did not, the
+        // whole test below would fail for the wrong reason (or, worse, a
+        // future `expect`-free rewrite would pass vacuously).
+        assert_eq!(
+            cfg.db_names.as_ref().map(|n| n.auth.as_str()),
+            Some("information_schema"),
+            "the fixture must resolve through the real resolver"
+        );
         let addr = format!("{}:{}", cfg.host, cfg.port);
         let reachable = std::net::TcpStream::connect_timeout(
             &addr.parse().expect("valid loopback addr"),
