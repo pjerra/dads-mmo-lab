@@ -573,13 +573,25 @@ Expected: PASS.
 
 - [ ] **Step 5: Emit `family` from the bash catalog arm**
 
-In `cli/src/90-main.sh`'s `catalog)` arm, alongside the existing `tid`/`tname`/`tscript` extraction, add:
+**CORRECTED 2026-08-06** — the first draft of this step read a `$trow` variable
+that does not exist at this call site, and would also have left a real defect in
+place. The `catalog)` arm is a positional read loop
+(`cli/src/90-main.sh:1647`), and `cli/src/70-modules.sh:75-79` already records
+why that matters: *"every registry consumer does a positional `IFS='|' read`
+whose LAST variable swallows any trailing remainder, so appending a column would
+silently corrupt the last field."* With five variables against six fields,
+`tlauncher` silently becomes `"wow-playerbots-launcher.sh|azerothcore"`.
+
+So extend the READ, which fixes the corruption and provides the value in one
+move:
 
 ```bash
-          tfamily="$(printf '%s' "$trow" | cut -d'|' -f6)"
+        while IFS='|' read -r tid tname tscript tkind tlauncher tfamily; do
 ```
 
-and extend the JSON object line to include it:
+If Task 2's fix round already made this change, verify it rather than repeating it.
+
+Then extend the JSON object line to include it:
 
 ```bash
           tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"family\":\"$tfamily\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
