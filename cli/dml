@@ -3963,16 +3963,26 @@ _installers_unsupported_msg() {
 }
 
 # id|display name|installer script|kind(games=installer manages ~/games itself,
-# home=legacy $HOME/<id> layout needing a post-install symlink)|launcher file
+# home=legacy $HOME/<id> layout needing a post-install symlink)|launcher file|
+# family(azerothcore|cmangos|other -- which emulator the installer BUILDS; the
+# Library filters on it, and it MIRRORS destructive.rs's TitleRow.family)
 _title_registry() {
 cat <<'EOF'
-wow-server-playerbots|WoW WotLK (Playerbots)|install-wow-wotlk.sh|games|wow-playerbots-launcher.sh
-wow-vanilla-server|WoW Vanilla|install-wow-vanilla.sh|home|wow-vanilla-launcher.sh
-wow-tbc-server|WoW TBC|install-wow-tbc.sh|home|wow-tbc-launcher.sh
-maplestory-server|MapleStory v83|install-maplestory.sh|home|maplestory-launcher.sh
-runescape-server|RuneScape|install-runescape.sh|home|runescape-launcher.sh
-muonline-server|MU Online|install-muonline.sh|home|muonline-launcher.sh
+wow-server-playerbots|WoW WotLK (Playerbots)|install-wow-wotlk.sh|games|wow-playerbots-launcher.sh|azerothcore
+wow-vanilla-server|WoW Vanilla|install-wow-vanilla.sh|home|wow-vanilla-launcher.sh|cmangos
+wow-tbc-server|WoW TBC|install-wow-tbc.sh|home|wow-tbc-launcher.sh|cmangos
+maplestory-server|MapleStory v83|install-maplestory.sh|home|maplestory-launcher.sh|other
+runescape-server|RuneScape|install-runescape.sh|home|runescape-launcher.sh|other
+muonline-server|MU Online|install-muonline.sh|home|muonline-launcher.sh|other
 EOF
+}
+
+# Prints the family for an id, or nothing.
+_title_family() {
+    local row
+    row="$(_title_row "$1")" || return 1
+    [ -n "$row" ] || return 1
+    printf '%s' "$row" | cut -d'|' -f6
 }
 
 # Prints the registry row for an id, or nothing (exact-key match).
