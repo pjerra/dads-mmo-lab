@@ -166,11 +166,27 @@ mod resolver_scan_tests {
     /// NOT catch a cleverly-rewritten independent implementation; nothing
     /// textual would. That residue is covered by review, and it is named here
     /// rather than papered over.
-    const RESOLVER_CALL: &str = "family_from_container_names(";
+    /// CORRECTED 2026-08-06. The first draft matched the literal
+    /// `"family_from_container_names("` — but the definition is
+    /// `pub fn family_from_container_names<'a>(`, where the lifetime sits
+    /// between the name and the paren, so the literal never matched it. That
+    /// was an ACCIDENTAL exclusion: remove the lifetime later and the count
+    /// silently shifts by one for no visible reason. Match the bare symbol
+    /// instead and exclude definitions EXPLICITLY via [`is_definition`].
+    const RESOLVER_SYMBOL: &str = "family_from_container_names";
     const MARKER_TABLES: &[&str] = &["AC_MARKERS", "CMANGOS_SUFFIXES"];
 
     /// The ONLY file allowed to define the tables.
     const OWNER: &str = "family.rs";
+
+    /// True when the occurrence of the resolver's name at byte offset `at`
+    /// in `src` is its own `fn` definition rather than a call site — i.e.
+    /// the text immediately before it, trimmed, ends with `fn`. Same idiom
+    /// this repo uses elsewhere (`vocab_coverage_tests`) to tell a
+    /// definition apart from a use.
+    fn is_definition(src: &str, at: usize) -> bool {
+        src[..at].trim_end().ends_with("fn")
+    }
 
     fn strip_comments(src: &str) -> String {
         let mut out = String::with_capacity(src.len());
@@ -219,7 +235,11 @@ mod resolver_scan_tests {
             // Production half only: the tests in family.rs call the resolver
             // many times and must not count.
             let production = src.split("#[cfg(test)]").next().unwrap_or("");
-            calls += production.matches(RESOLVER_CALL).count();
+            for (at, _) in production.match_indices(RESOLVER_SYMBOL) {
+                if !is_definition(production, at) {
+                    calls += 1;
+                }
+            }
             if name == OWNER {
                 continue;
             }
@@ -241,12 +261,21 @@ mod resolver_scan_tests {
              the games-dir incident, and this one picks the database and the SOAP \
              namespace."
         );
-        // The resolver's DEFINITION in family.rs contributes one occurrence
-        // (`pub fn family_from_container_names(`), so one call site means two.
+        // CORRECTED 2026-08-06. The old cap was <= 2, reasoning that the
+        // definition contributed one occurrence and one caller a second. Both
+        // halves were wrong: the definition's `<'a>` meant it never counted
+        // (see RESOLVER_SYMBOL above), and with the real production count at
+        // 0 today (no consumer exists yet on this branch — the first real
+        // caller arrives with a later increment; do NOT read 0 as "the guard
+        // is broken"), a cap of 2 was near-vacuous: it took THREE planted
+        // callers to trip it. `is_definition` now excludes the definition
+        // explicitly rather than by accident, so the cap can be the actual
+        // invariant: AT MOST ONE production call site, full stop.
         assert!(
-            calls <= 2,
-            "{RESOLVER_CALL} appears {calls} times in production (definition + call sites). \
-             More than one caller is how two fallbacks diverge."
+            calls <= 1,
+            "the resolver is called from {calls} production sites. At most ONE may call it: \
+             two callers with different fallbacks is exactly the games-dir incident this \
+             guard exists to prevent, and this one picks the database and the SOAP namespace."
         );
     }
 
