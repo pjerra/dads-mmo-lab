@@ -30,7 +30,7 @@ Commands:
 - `dml games list --json` → `{"games":[{"id","path","running"}]}`
 - `dml games status <id> --json` → `{"id","state":"running"|"stopped"}`
 - `dml games start|restart|stop <id> --json` → NDJSON stream
-- `dml games catalog --json` → `{"titles":[{"id","name","installed","running","script_available"}],"install_supported":<bool>}`
+- `dml games catalog --json` → `{"titles":[{"id","name","installed","running","script_available","family"}],"install_supported":<bool>}` — `family` is `"azerothcore"`, `"cmangos"` or `"other"`, naming the emulator the title's installer builds
 - `dml version --json` → `{"version":"3.0.0"}`
 
 `games catalog` answers TWO separate questions, and a consumer must not collapse

@@ -45,9 +45,15 @@ EOF
 }
 
 # --- _title_family (internal helper, no CLI verb) ---------------------------
-# Not called from anywhere yet (a later task wires it into games catalog's
-# JSON) -- covered directly by sourcing the file, same pattern as
+# Deliberately NOT wired into games catalog: that arm reads the family straight
+# out of the registry row's 6th field (90-main.sh), because it already does a
+# positional `read` over the same line and calling a helper would re-split it.
+# So this helper has no production caller and is not going to get one -- it is
+# kept as the single readable place that answers "what family is <id>?" for
+# future bash callers, and tested directly by sourcing the file, same pattern as
 # wow-module-cpp.bats's _module_key_from_url/_rebuild_pending_add tests.
+# (The earlier comment here promised a later task would wire it in. Task 3
+# decided otherwise; the promise was left behind. Final review, 2026-08-06.)
 
 @test "_title_family: known id prints its family" {
   run bash -c 'source "'"$BATS_TEST_DIRNAME"'/../src/80-titles.sh"; _title_family wow-vanilla-server'

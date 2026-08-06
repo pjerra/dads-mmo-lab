@@ -87,8 +87,21 @@ pub struct DatabaseNames {
 /// SPLIT FROM THE RIGHT. A password may contain semicolons, and indexing from
 /// the left would then shift the schema field and connect to whatever happened
 /// to land at index 4.
+///
+/// A value with FEWER than five fields is refused rather than mined for its
+/// last one: `"h;3306;u;secret"` (a truncated hand-edit — no dbname) would
+/// otherwise resolve the schema to `secret`, the PASSWORD. That is not a loud
+/// failure — it is a plausible-looking name that connects nowhere, and the
+/// error the user then sees is `db_err_to_cmd`'s "Is ac-database running?"
+/// about a server that is up and healthy. Refusing sends them to the conf
+/// instead. Found by the final branch review, 2026-08-06.
 pub fn parse_database_info(line: &str) -> Option<&str> {
     let v = line.trim().trim_matches('"');
+    // Count from the right, since the password may itself contain semicolons:
+    // five fields means at least four separators.
+    if v.matches(';').count() < 4 {
+        return None;
+    }
     let (_, last) = v.rsplit_once(';')?;
     let last = last.trim();
     if last.is_empty() { None } else { Some(last) }
@@ -495,7 +508,17 @@ pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
         crate::db::DbError::NamesUnresolved(_) => CmdError {
             code: crate::db::ERR_DB_NAMES_UNRESOLVED.into(),
             message: e.to_string(),
-            hint: "Could not read the schema names from the server's compose env or worldserver.conf".into(),
+            // Names DML_GAMES_DIR, because on the CLI that is the likeliest
+            // cause by far: with it unset the title dir resolves to a RELATIVE
+            // `./wow-server-playerbots` (config.rs), so a command run from any
+            // other directory refuses. A hint that only describes the symptom
+            // leaves the user editing a conf that was never the problem.
+            // (The launcher is unaffected — startup.rs exports the var into its
+            // own process before any in-process DB read.)
+            hint: "Could not read the schema names from the server's compose env or \
+                   worldserver.conf. Is DML_GAMES_DIR set to the directory holding \
+                   your server?"
+                .into(),
         },
         _ => CmdError {
             code: "DB_UNREACHABLE".into(),
@@ -531,6 +554,25 @@ mod tests {
         );
         assert_eq!(parse_database_info(""), None);
         assert_eq!(parse_database_info("nosemicolons"), None);
+    }
+
+    /// A short value must REFUSE, not hand back the password as a schema name.
+    #[test]
+    fn a_truncated_value_refuses_rather_than_returning_the_password() {
+        assert_eq!(
+            parse_database_info("127.0.0.1;3306;acore;hunter2"),
+            None,
+            "four fields means no dbname; returning the last one hands back the PASSWORD \
+             as a schema, which connects nowhere and reports the failure as \
+             'Is ac-database running?' about a healthy server"
+        );
+        assert_eq!(parse_database_info("127.0.0.1;3306;acore"), None);
+        assert_eq!(parse_database_info("a;b"), None);
+        // The boundary: exactly five fields is the shortest legal value.
+        assert_eq!(parse_database_info("h;3306;u;p;d"), Some("d"));
+        // And a semicolon-laden password still resolves, since the count is a
+        // FLOOR — it must not become a second way to refuse a legal value.
+        assert_eq!(parse_database_info("h;3306;u;p;w;d;my_world"), Some("my_world"));
     }
 
     // -----------------------------------------------------------------------
