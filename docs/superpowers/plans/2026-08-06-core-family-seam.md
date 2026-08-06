@@ -819,12 +819,26 @@ mod resolver_scan_tests {
              the games-dir incident, and this one picks the database and the SOAP \
              namespace."
         );
-        // The resolver's DEFINITION in family.rs contributes one occurrence
-        // (`pub fn family_from_container_names(`), so one call site means two.
+        // CORRECTED 2026-08-06. The first draft matched the literal
+        // `family_from_container_names(` and capped at 2, reasoning that the
+        // definition contributed one occurrence. Both halves were wrong: the
+        // definition is `pub fn family_from_container_names<'a>(`, so the
+        // generic sits between the name and the paren and the literal never
+        // matched it — an ACCIDENTAL exclusion that would silently shift the
+        // count if the lifetime were ever removed — and with the real
+        // production count at 0, a cap of 2 was near-vacuous (it took THREE
+        // planted callers to trip it). Match the bare symbol, exclude
+        // definitions explicitly with the `ends_with("fn")` idiom this repo
+        // already uses in `vocab_coverage_tests`, and cap at ONE.
+        //
+        // The count is 0 today because no consumer exists yet on this branch;
+        // the first real caller arrives with a later increment. Do not read 0
+        // as "the guard is broken".
         assert!(
-            calls <= 2,
-            "{RESOLVER_CALL} appears {calls} times in production (definition + call sites). \
-             More than one caller is how two fallbacks diverge."
+            calls <= 1,
+            "the resolver is called from {calls} production sites. At most ONE may call it: \
+             two callers with different fallbacks is exactly the games-dir incident this \
+             guard exists to prevent, and this one picks the database and the SOAP namespace."
         );
     }
 
@@ -860,18 +874,34 @@ Then remove it with an Edit.
 
 - [ ] **Step 3b: Mutation — prove the call-site cap detects a second caller**
 
-Add to any other file in `crates/dml-wow/src/`, at module scope:
+**CORRECTED 2026-08-06** — with the cap at ONE, a single planted caller is
+LEGAL. Plant **two** and confirm the cap trips. Add to any other file(s) in
+`crates/dml-wow/src/`, at module scope:
 
 ```rust
 #[allow(dead_code)]
 fn second_resolver(names: &[&str]) -> crate::family::FamilyVerdict {
     crate::family::family_from_container_names(names.iter().copied())
 }
+#[allow(dead_code)]
+fn third_resolver(names: &[&str]) -> crate::family::FamilyVerdict {
+    crate::family::family_from_container_names(names.iter().copied())
+}
 ```
 
 Run: `cargo test -p dml-wow --lib resolver_scan`
-Expected: FAIL — `appears 3 times in production`.
-Then remove it with an Edit.
+Expected: FAIL — "the resolver is called from 2 production sites".
+Then remove both with an Edit.
+
+- [ ] **Step 3c: Mutation — prove the definition exclusion is deliberate, not accidental**
+
+Temporarily remove the lifetime from the definition, making it
+`pub fn family_from_container_names(`. The counted total must **not** change.
+
+Run: `cargo test -p dml-wow --lib resolver_scan`
+Expected: PASS, unchanged. If it fails, the exclusion is matching on the generic
+rather than on `fn` — which is the accidental exclusion this step exists to
+catch. Restore with an Edit.
 
 - [ ] **Step 4: Mutation — prove the non-vacuity floor bites**
 
