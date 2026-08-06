@@ -513,11 +513,49 @@ mod resolver_scan_tests {
 
     /// The stripper must not be fooled by prose — this file's own doc comments
     /// name every marker above.
+    ///
+    /// CORRECTED 2026-08-06 (round 4): added the three cases below. Before
+    /// this, the char-literal-holding-a-quote defect that round 3 fixed —
+    /// the entire reason `strip_comments` was ported rather than left as the
+    /// original brief draft — had NO regression test at all; its only proof
+    /// was a manual A/B transcript in the SDD report, which nothing re-runs.
     #[test]
     fn the_stripper_removes_comments_and_keeps_code() {
         assert!(!strip_comments("// ac-worldserver\n").contains("ac-worldserver"));
         assert!(!strip_comments("/* -mangosd */").contains("-mangosd"));
         assert!(strip_comments("let s = \"ac-worldserver\";").contains("ac-worldserver"));
         assert!(strip_comments("let s = \"// not a comment\";").contains("// not a comment"));
+        // THE defect: a char literal holding a double quote must not be
+        // mistaken for the START of a string literal. Pre-fix, the `"`
+        // inside `'"'` flipped `in_str` to true and it did not come back out
+        // until the NEXT literal `"` anywhere later, so a real comment
+        // sitting right after the char literal survived into the output.
+        let out = strip_comments("let q = '\"'; // gone\n");
+        assert!(
+            !out.contains("gone"),
+            "a char literal holding a double quote must not swallow the comment \
+             that follows it: {out:?}"
+        );
+        // A lifetime is NOT a char literal: the comment after it must still
+        // be recognised and stripped, and the lifetime text itself must
+        // survive — this pins the disambiguation `strip_comments` was
+        // ported specifically to carry.
+        let out = strip_comments("fn f<'a>(x: &'a str) {} // gone\n");
+        assert!(
+            !out.contains("gone"),
+            "a lifetime must not be mistaken for an open char literal that \
+             swallows the comment after it: {out:?}"
+        );
+        assert!(
+            out.contains("'a"),
+            "the lifetime text itself must survive stripping: {out:?}"
+        );
+        // A raw string whose contents merely LOOK like a line comment is
+        // DATA, not a comment, and must survive untouched.
+        let out = strip_comments("let s = r#\"not // a comment\"#;");
+        assert!(
+            out.contains("not // a comment"),
+            "a raw string's contents must survive stripping: {out:?}"
+        );
     }
 }
