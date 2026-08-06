@@ -42,10 +42,10 @@ pub const DEFAULT_DB_PORT: u16 = 3306;
 /// Compose default for the root password (`DB_ROOT_PASSWORD:-password`).
 pub const DEFAULT_DB_PASSWORD: &str = "password";
 
-/// The four AzerothCore schemas this launcher reads. Names are fixed by the
-/// server build (see the `AC_*_DATABASE_INFO` lines in the native
-/// `docker-compose.yml`); an enum keeps callers from typo-ing a DB name into a
-/// SQL connection.
+/// The four AzerothCore schemas this launcher reads. Names are user-configurable
+/// (renamed in `worldserver.conf`'s `*DatabaseInfo` lines), so the enum only
+/// picks WHICH schema — the actual name comes from a resolved [`DatabaseNames`];
+/// an enum keeps callers from typo-ing a DB name into a SQL connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Database {
     World,
@@ -55,15 +55,62 @@ pub enum Database {
 }
 
 impl Database {
-    /// The literal schema name to `USE`.
-    pub fn name(self) -> &'static str {
+    /// The schema name to `USE`, resolved from the server's own conf.
+    ///
+    /// `Playerbots` is the one exception: it keeps its hardcoded
+    /// `"acore_playerbots"` because that name comes from a DIFFERENT evidence
+    /// source (`AC_PLAYERBOTS_DATABASE_INFO` in the compose env, not
+    /// `worldserver.conf`), and resolving it here would mix two sources for
+    /// one value. Follow-up: give it its own conf-resolution path.
+    pub fn name(self, names: &DatabaseNames) -> &str {
         match self {
-            Database::World => "acore_world",
-            Database::Characters => "acore_characters",
-            Database::Auth => "acore_auth",
+            Database::World => &names.world,
+            Database::Characters => &names.characters,
+            Database::Auth => &names.auth,
             Database::Playerbots => "acore_playerbots",
         }
     }
+}
+
+/// Error code when the server's conf could not answer.
+pub const ERR_DB_NAMES_UNRESOLVED: &str = "DB_NAMES_UNRESOLVED";
+
+/// The three schema names, read from the server's own conf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatabaseNames {
+    pub world: String,
+    pub characters: String,
+    pub auth: String,
+}
+
+/// The schema name out of a `host;port;user;pass;dbname` value.
+///
+/// SPLIT FROM THE RIGHT. A password may contain semicolons, and indexing from
+/// the left would then shift the schema field and connect to whatever happened
+/// to land at index 4.
+pub fn parse_database_info(line: &str) -> Option<&str> {
+    let v = line.trim().trim_matches('"');
+    let (_, last) = v.rsplit_once(';')?;
+    let last = last.trim();
+    if last.is_empty() { None } else { Some(last) }
+}
+
+/// Read all three names, or refuse. Never a partial answer and never a default.
+pub fn database_names_from_conf(conf: &str) -> Option<DatabaseNames> {
+    fn value_of<'a>(conf: &'a str, key: &str) -> Option<&'a str> {
+        conf.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| {
+                let (k, v) = l.split_once('=')?;
+                (k.trim() == key).then_some(v)
+            })
+    }
+    Some(DatabaseNames {
+        auth: parse_database_info(value_of(conf, "LoginDatabaseInfo")?)?.to_string(),
+        world: parse_database_info(value_of(conf, "WorldDatabaseInfo")?)?.to_string(),
+        characters: parse_database_info(value_of(conf, "CharacterDatabaseInfo")?)?.to_string(),
+    })
 }
 
 /// One resolved cell from a result set, typed just enough for faithful JSON
@@ -105,6 +152,10 @@ pub enum DbError {
     Unreachable(String),
     /// Connected, but running the query failed (SQL/protocol error).
     Query(String),
+    /// The server's conf could not answer the schema names (missing/unreadable
+    /// `worldserver.conf`, or a missing `*DatabaseInfo` key) — see
+    /// [`database_names_from_conf`]. REFUSED, never a fallback to a guessed name.
+    NamesUnresolved(String),
 }
 
 impl DbError {
@@ -113,6 +164,7 @@ impl DbError {
         match self {
             DbError::Unreachable(_) => "DB_UNREACHABLE",
             DbError::Query(_) => "DB_QUERY_FAILED",
+            DbError::NamesUnresolved(_) => ERR_DB_NAMES_UNRESOLVED,
         }
     }
 }
@@ -122,6 +174,7 @@ impl std::fmt::Display for DbError {
         match self {
             DbError::Unreachable(m) => write!(f, "{m}"),
             DbError::Query(m) => write!(f, "{m}"),
+            DbError::NamesUnresolved(m) => write!(f, "{m}"),
         }
     }
 }
@@ -135,27 +188,45 @@ pub struct DbConfig {
     pub port: u16,
     pub user: String,
     pub password: String,
+    /// The schema names read from the server's own `worldserver.conf`, or
+    /// `None` when the conf was missing/unreadable or a key was absent. NEVER
+    /// a default — a caller reaching for a name resolves against this and gets
+    /// [`DbError::NamesUnresolved`] rather than a guessed `acore_*` name.
+    pub db_names: Option<DatabaseNames>,
 }
 
 impl DbConfig {
     /// Resolve from the real process environment plus the title dir's `.env`
-    /// (the file Compose reads for `${VAR}` interpolation). Title dir is
+    /// (the file Compose reads for `${VAR}` interpolation), and the schema
+    /// names from `<title dir>/env/dist/etc/worldserver.conf`. Title dir is
     /// `DML_GAMES_DIR/wow-server-playerbots`, shared with
     /// [`super::config::ConfigReader::title_dir_from_env`].
     pub fn from_env() -> Self {
         let dotenv = std::fs::read_to_string(dotenv_path()).ok();
-        resolve_db_config(|k| std::env::var(k).ok(), dotenv.as_deref())
+        let mut cfg = resolve_db_config(|k| std::env::var(k).ok(), dotenv.as_deref());
+        cfg.db_names = std::fs::read_to_string(worldserver_conf_path())
+            .ok()
+            .and_then(|text| database_names_from_conf(&text));
+        cfg
     }
 
     /// A [`mysql::Opts`] pointed at `db`, built from these params. Split out so
-    /// tests can assert the shape without opening a socket.
-    fn opts(&self, db: Database) -> mysql::Opts {
-        mysql::OptsBuilder::new()
+    /// tests can assert the shape without opening a socket. Refuses with
+    /// [`DbError::NamesUnresolved`] rather than falling back to a guessed name
+    /// when [`Self::db_names`] never resolved.
+    fn opts(&self, db: Database) -> Result<mysql::Opts, DbError> {
+        let names = self.db_names.as_ref().ok_or_else(|| {
+            DbError::NamesUnresolved(
+                "could not read the schema names from the server's worldserver.conf".to_string(),
+            )
+        })?;
+        let db_name = db.name(names).to_string();
+        Ok(mysql::OptsBuilder::new()
             .ip_or_hostname(Some(self.host.clone()))
             .tcp_port(self.port)
             .user(Some(self.user.clone()))
             .pass(Some(self.password.clone()))
-            .db_name(Some(db.name()))
+            .db_name(Some(db_name))
             // Fail fast when the engine is down rather than hanging the UI: a
             // few seconds is plenty for a loopback connect.
             .tcp_connect_timeout(Some(std::time::Duration::from_secs(5)))
@@ -172,13 +243,22 @@ impl DbConfig {
             // multi-byte-escape SQL-injection class that bound params are
             // meant to close outright (review finding, 2026-07-24).
             .init(vec!["SET NAMES utf8mb4"])
-            .into()
+            .into())
     }
 }
 
 /// Path of the title dir's `.env` (`DML_GAMES_DIR/wow-server-playerbots/.env`).
 fn dotenv_path() -> PathBuf {
     super::config::ConfigReader::title_dir_from_env().join(".env")
+}
+
+/// Path of the title dir's `worldserver.conf`
+/// (`DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/worldserver.conf`), host
+/// readable. Reuses [`super::config::conf_path_in`] — the same helper the
+/// config reader and tuning reader use — rather than a second path join, so
+/// there is exactly one place that knows where a title's confs live.
+fn worldserver_conf_path() -> PathBuf {
+    super::config::conf_path_in(&super::config::ConfigReader::title_dir_from_env(), "worldserver.conf")
 }
 
 /// Look one key out of a parsed `.env`-style text: `KEY=VALUE` lines, `#`
@@ -237,11 +317,16 @@ pub fn resolve_db_config(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_DB_PASSWORD.to_string());
 
+    // db_names is deliberately NOT resolved here: this function is the pure
+    // host/port/user/password precedence logic, unit-tested without touching
+    // the filesystem. Schema-name resolution (which DOES touch the
+    // filesystem, reading worldserver.conf) happens only in `from_env`.
     DbConfig {
         host: DB_HOST.to_string(),
         port,
         user: DB_USER.to_string(),
         password,
+        db_names: None,
     }
 }
 
@@ -277,7 +362,8 @@ fn convert_value(v: mysql::Value) -> SqlValue {
 /// Pooling stays out of scope for this pass; revisit if a reader's connect
 /// overhead ever shows up in practice.
 pub fn connect(cfg: &DbConfig, db: Database) -> Result<mysql::Conn, DbError> {
-    mysql::Conn::new(cfg.opts(db))
+    let opts = cfg.opts(db)?;
+    mysql::Conn::new(opts)
         .map_err(|e| DbError::Unreachable(format!("Could not reach the database: {e}")))
 }
 
@@ -382,19 +468,34 @@ pub fn db_unreachable_err(message: impl Into<String>) -> CmdError {
 }
 
 /// Map a native-mode [`crate::db::DbError`] to the [`CmdError`] the frontend
-/// already knows how to render. Both variants collapse to `DB_UNREACHABLE`,
-/// matching the CLI: every one of these arms (`teleport-list` / `bots list` /
-/// `accounts` / `paperdoll`) reports `DB_UNREACHABLE` for ANY `db_*_query`
-/// failure in `90-main.sh` — the bash has no separate "connected but the query
-/// itself failed" code path, so a native `DbError::Query` (e.g. a genuinely
-/// malformed statement) must still read as `DB_UNREACHABLE` to stay
-/// byte-identical to `dml`. Same collapse [`stats_err_to_cmd`] already does for
-/// the `stats` arm — see its comment for the fuller rationale.
+/// already knows how to render. `Unreachable`/`Query` collapse to
+/// `DB_UNREACHABLE`, matching the CLI: every one of these arms
+/// (`teleport-list` / `bots list` / `accounts` / `paperdoll`) reports
+/// `DB_UNREACHABLE` for ANY `db_*_query` failure in `90-main.sh` — the bash has
+/// no separate "connected but the query itself failed" code path, so a native
+/// `DbError::Query` (e.g. a genuinely malformed statement) must still read as
+/// `DB_UNREACHABLE` to stay byte-identical to `dml`. Same collapse
+/// [`stats_err_to_cmd`] already does for the `stats` arm — see its comment for
+/// the fuller rationale.
+///
+/// `NamesUnresolved` is NOT part of that collapse: bash `dml` never reads
+/// `*DatabaseInfo` at all (it uses its own hardcoded `acore_*` constants), so
+/// this failure mode does not exist on that side to be byte-identical with —
+/// it is native-only, and folding it into `DB_UNREACHABLE` would tell the user
+/// "is the engine down?" for a misconfigured `worldserver.conf`, which is a
+/// different question with a different fix.
 pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
-    CmdError {
-        code: "DB_UNREACHABLE".into(),
-        message: e.to_string(),
-        hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    match &e {
+        crate::db::DbError::NamesUnresolved(_) => CmdError {
+            code: crate::db::ERR_DB_NAMES_UNRESOLVED.into(),
+            message: e.to_string(),
+            hint: "Could not read the schema names from worldserver.conf".into(),
+        },
+        _ => CmdError {
+            code: "DB_UNREACHABLE".into(),
+            message: e.to_string(),
+            hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+        },
     }
 }
 
@@ -408,12 +509,107 @@ pub fn count_result(res: crate::db::QueryResult) -> i64 {
 mod tests {
     use super::*;
 
+    /// The value is `host;port;user;pass;dbname` — the schema is the LAST
+    /// field, and the password may itself contain anything, so split from the
+    /// right and take one field. Never parse left-to-right by index.
+    #[test]
+    fn the_schema_is_the_last_semicolon_field() {
+        assert_eq!(
+            parse_database_info("127.0.0.1;3306;acore;pw;acore_world"),
+            Some("acore_world")
+        );
+        assert_eq!(
+            parse_database_info("\"127.0.0.1;3306;acore;p;w;d;my_world\""),
+            Some("my_world"),
+            "a password containing semicolons must not shift the schema field"
+        );
+        assert_eq!(parse_database_info(""), None);
+        assert_eq!(parse_database_info("nosemicolons"), None);
+    }
+
+    #[test]
+    fn conf_names_are_read_not_assumed() {
+        let conf = "\
+LoginDatabaseInfo     = \"127.0.0.1;3306;acore;pw;my_auth\"
+WorldDatabaseInfo     = \"127.0.0.1;3306;acore;pw;my_world\"
+CharacterDatabaseInfo = \"127.0.0.1;3306;acore;pw;my_chars\"
+";
+        let n = database_names_from_conf(conf).expect("all three keys present");
+        assert_eq!(n.auth, "my_auth");
+        assert_eq!(n.world, "my_world");
+        assert_eq!(n.characters, "my_chars");
+    }
+
+    /// REFUSE, do not fall back. Falling back to the old constants restores the
+    /// exact bug this change exists to fix, invisibly — the reader would go on
+    /// answering ok:true against a database that is not the server's.
+    #[test]
+    fn a_missing_key_refuses_rather_than_defaulting() {
+        let conf = "LoginDatabaseInfo = \"h;3306;u;p;my_auth\"\n";
+        assert_eq!(database_names_from_conf(conf), None);
+    }
+
+    /// ISOLATES each key's refusal from the other two. The test above leaves
+    /// BOTH `WorldDatabaseInfo` and `CharacterDatabaseInfo` absent, so a
+    /// broken (fallback-instead-of-refuse) mutation on EITHER of those two
+    /// fields alone still returns `None` overall, because the OTHER missing
+    /// field's own (unmutated) `?` masks it — proved live: reintroducing
+    /// `.unwrap_or("acore_world")` on just the `world` field left that test
+    /// green. This is the "fix with two/three independent halves is not
+    /// proven by a sequence test" trap this repo has hit before (see the
+    /// crates/CLAUDE.md gotcha). Each case below supplies every OTHER key
+    /// with a real value, so only the one key under test can make it fail.
+    #[test]
+    fn each_missing_key_refuses_on_its_own_not_only_in_combination() {
+        let cases: [(&str, &str); 3] = [
+            (
+                "world",
+                "LoginDatabaseInfo     = \"h;3306;u;p;a\"\n\
+                 CharacterDatabaseInfo = \"h;3306;u;p;c\"\n",
+            ),
+            (
+                "auth",
+                "WorldDatabaseInfo     = \"h;3306;u;p;w\"\n\
+                 CharacterDatabaseInfo = \"h;3306;u;p;c\"\n",
+            ),
+            (
+                "characters",
+                "LoginDatabaseInfo = \"h;3306;u;p;a\"\n\
+                 WorldDatabaseInfo = \"h;3306;u;p;w\"\n",
+            ),
+        ];
+        for (missing, conf) in cases {
+            assert_eq!(
+                database_names_from_conf(conf),
+                None,
+                "missing only {missing} must still refuse, not partially default"
+            );
+        }
+    }
+
+    #[test]
+    fn commented_out_keys_are_not_read() {
+        let conf = "\
+# WorldDatabaseInfo = \"h;3306;u;p;WRONG\"
+LoginDatabaseInfo     = \"h;3306;u;p;a\"
+WorldDatabaseInfo     = \"h;3306;u;p;w\"
+CharacterDatabaseInfo = \"h;3306;u;p;c\"
+";
+        let n = database_names_from_conf(conf).expect("all three present");
+        assert_eq!(n.world, "w", "a commented key must not win");
+    }
+
     #[test]
     fn database_names_match_the_server_schemas() {
-        assert_eq!(Database::World.name(), "acore_world");
-        assert_eq!(Database::Characters.name(), "acore_characters");
-        assert_eq!(Database::Auth.name(), "acore_auth");
-        assert_eq!(Database::Playerbots.name(), "acore_playerbots");
+        let names = DatabaseNames {
+            world: "acore_world".to_string(),
+            characters: "acore_characters".to_string(),
+            auth: "acore_auth".to_string(),
+        };
+        assert_eq!(Database::World.name(&names), "acore_world");
+        assert_eq!(Database::Characters.name(&names), "acore_characters");
+        assert_eq!(Database::Auth.name(&names), "acore_auth");
+        assert_eq!(Database::Playerbots.name(&names), "acore_playerbots");
     }
 
     #[test]
@@ -538,6 +734,15 @@ BLANK=
     fn db_error_codes() {
         assert_eq!(DbError::Unreachable("x".into()).code(), "DB_UNREACHABLE");
         assert_eq!(DbError::Query("x".into()).code(), "DB_QUERY_FAILED");
+        assert_eq!(DbError::NamesUnresolved("x".into()).code(), ERR_DB_NAMES_UNRESOLVED);
+    }
+
+    fn test_names() -> DatabaseNames {
+        DatabaseNames {
+            world: "acore_world".to_string(),
+            characters: "acore_characters".to_string(),
+            auth: "acore_auth".to_string(),
+        }
     }
 
     #[test]
@@ -547,8 +752,9 @@ BLANK=
             port: 13306,
             user: "root".into(),
             password: "password".into(),
+            db_names: Some(test_names()),
         };
-        let opts = cfg.opts(Database::Characters);
+        let opts = cfg.opts(Database::Characters).expect("names resolved");
         assert_eq!(opts.get_ip_or_hostname(), "127.0.0.1");
         assert_eq!(opts.get_tcp_port(), 13306);
         assert_eq!(opts.get_user().as_deref(), Some("root"));
@@ -565,12 +771,52 @@ BLANK=
             port: 3306,
             user: "root".into(),
             password: "password".into(),
+            db_names: Some(test_names()),
         };
-        let opts = cfg.opts(Database::Characters);
+        let opts = cfg.opts(Database::Characters).expect("names resolved");
         assert_eq!(opts.get_tcp_connect_timeout(), Some(std::time::Duration::from_secs(5)));
         assert_eq!(opts.get_read_timeout(), Some(&std::time::Duration::from_secs(30)));
         assert_eq!(opts.get_write_timeout(), Some(&std::time::Duration::from_secs(30)));
         assert_eq!(opts.get_init(), vec!["SET NAMES utf8mb4".to_string()]);
+    }
+
+    /// The refusal is load-bearing at the `opts` boundary too, not only in
+    /// `database_names_from_conf`: a `DbConfig` whose names never resolved
+    /// must refuse to build ANY connection options rather than falling back
+    /// to a guessed `acore_*` name.
+    #[test]
+    fn opts_refuses_when_names_are_unresolved() {
+        let cfg = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: "root".into(),
+            password: "password".into(),
+            db_names: None,
+        };
+        let err = cfg.opts(Database::Characters).expect_err("names unresolved");
+        assert_eq!(err.code(), ERR_DB_NAMES_UNRESOLVED);
+    }
+
+    /// `Playerbots` is the one variant that does NOT need resolved names —
+    /// its literal comes from a different evidence source entirely — but
+    /// `opts` still refuses when `db_names` is `None`, because [`Database::name`]
+    /// unconditionally takes a `&DatabaseNames` argument. This pins that
+    /// documented (not accidental) coupling so a future change either keeps it
+    /// or updates this test deliberately.
+    #[test]
+    fn opts_for_playerbots_still_requires_resolved_names() {
+        let cfg = DbConfig {
+            host: "127.0.0.1".into(),
+            port: 3306,
+            user: "root".into(),
+            password: "password".into(),
+            db_names: None,
+        };
+        assert!(cfg.opts(Database::Playerbots).is_err());
+
+        let cfg = DbConfig { db_names: Some(test_names()), ..cfg };
+        let opts = cfg.opts(Database::Playerbots).expect("names resolved");
+        assert_eq!(opts.get_db_name().as_deref(), Some("acore_playerbots"));
     }
 
     #[test]

@@ -557,8 +557,20 @@ mod tests {
     #[test]
     fn lan_current_address_none_on_unreachable_db() {
         // A bogus port guarantees an unreachable connection without touching
-        // the real DB -- exercises the `.ok()?` degrade-to-None path.
-        let cfg = crate::db::DbConfig { host: "127.0.0.1".into(), port: 1, user: "root".into(), password: "x".into() };
+        // the real DB -- exercises the `.ok()?` degrade-to-None path. Names
+        // are resolved (not `None`) so the failure is genuinely the port, not
+        // a names-unresolved refusal short-circuiting before the connect.
+        let cfg = crate::db::DbConfig {
+            host: "127.0.0.1".into(),
+            port: 1,
+            user: "root".into(),
+            password: "x".into(),
+            db_names: Some(crate::db::DatabaseNames {
+                world: "acore_world".into(),
+                characters: "acore_characters".into(),
+                auth: "acore_auth".into(),
+            }),
+        };
         assert_eq!(lan_current_address(&cfg), None);
     }
 
