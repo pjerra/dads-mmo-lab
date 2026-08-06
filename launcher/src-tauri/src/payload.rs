@@ -502,11 +502,19 @@ mod tests {
         // Drift guard: `_title_registry` in cli/src/80-titles.sh is the list
         // `games install` actually looks up by name. Shipping a different six
         // means a title whose installer is simply not on the machine.
+        // Match on the ROW SHAPE, not on what the row happens to end with: the
+        // registry grew a sixth `family` column on 2026-08-06 and an
+        // `ends_with("-launcher.sh")` filter silently parsed zero rows, which
+        // reads as "the bundle drifted" rather than "the guard stopped looking".
         let registry = include_str!("../../../cli/src/80-titles.sh");
         let mut from_registry: Vec<&str> = registry
             .lines()
-            .filter(|l| l.contains("|install-") && l.ends_with("-launcher.sh"))
-            .filter_map(|l| l.split('|').nth(2))
+            .map(|l| l.trim_end_matches('\r'))
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .map(|l| l.split('|').collect::<Vec<_>>())
+            .filter(|f| f.len() >= 5)
+            .filter_map(|f| f.get(2).copied())
+            .filter(|s| s.starts_with("install-") && s.ends_with(".sh"))
             .collect();
         from_registry.sort_unstable();
         assert_eq!(from_registry.len(), 6, "parsed registry rows: {from_registry:?}");
