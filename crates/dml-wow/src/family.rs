@@ -137,3 +137,126 @@ mod tests {
         }
     }
 }
+
+/// EXACTLY ONE PLACE DECIDES A TITLE'S FAMILY.
+///
+/// Modelled on the games-dir incident: two resolvers answered one question,
+/// they agreed on the happy path, and only the FALLBACK disagreed — so every
+/// read fell through to defaults and answered `ok:true` with numbers that were
+/// not the server's. A second family resolver would be worse: it decides which
+/// DATABASE to read and which SOAP namespace to send.
+///
+/// A runtime directory walk, not a fixed file list, because the failure mode is
+/// a second resolver arriving in a file this test has never heard of.
+#[cfg(test)]
+mod resolver_scan_tests {
+    use std::collections::BTreeSet;
+
+    /// WHAT THIS CAN AND CANNOT CATCH — read before changing it.
+    ///
+    /// The obvious marker list (`"ac-worldserver"`, `"-mangosd"`, …) is WRONG
+    /// and was tried first: those container names legitimately appear in 10+
+    /// files, because `composegen` generates them and `lifecycle` stops them.
+    /// Mentioning a container name is not deciding a family.
+    ///
+    /// So this guard pins two narrower things: exactly one production CALL of
+    /// the resolver, and the marker tables living only in `family.rs`. It
+    /// catches the two realistic accidents — a second caller with its own
+    /// fallback (the games-dir shape) and a copy-pasted marker table. It does
+    /// NOT catch a cleverly-rewritten independent implementation; nothing
+    /// textual would. That residue is covered by review, and it is named here
+    /// rather than papered over.
+    const RESOLVER_CALL: &str = "family_from_container_names(";
+    const MARKER_TABLES: &[&str] = &["AC_MARKERS", "CMANGOS_SUFFIXES"];
+
+    /// The ONLY file allowed to define the tables.
+    const OWNER: &str = "family.rs";
+
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let b: Vec<char> = src.chars().collect();
+        let (mut i, mut in_str, mut in_line, mut in_block) = (0usize, false, false, 0usize);
+        while i < b.len() {
+            let c = b[i];
+            let next = b.get(i + 1).copied().unwrap_or('\0');
+            if in_line {
+                if c == '\n' { in_line = false; out.push(c); }
+            } else if in_block > 0 {
+                if c == '*' && next == '/' { in_block -= 1; i += 2; continue; }
+                if c == '/' && next == '*' { in_block += 1; i += 2; continue; }
+                if c == '\n' { out.push(c); }
+            } else if in_str {
+                out.push(c);
+                if c == '\\' { if let Some(n) = b.get(i + 1) { out.push(*n); } i += 2; continue; }
+                if c == '"' { in_str = false; }
+            } else if c == '/' && next == '/' {
+                in_line = true;
+            } else if c == '/' && next == '*' {
+                in_block = 1; i += 2; continue;
+            } else {
+                if c == '"' { in_str = true; }
+                out.push(c);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn only_family_rs_decides_what_a_stack_is() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut scanned = 0usize;
+        let mut calls = 0usize;
+        let mut offenders: BTreeSet<String> = BTreeSet::new();
+        for entry in std::fs::read_dir(&dir).expect("crates/dml-wow/src is unreadable") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            scanned += 1;
+            let src = strip_comments(&std::fs::read_to_string(&path).expect("read"));
+            // Production half only: the tests in family.rs call the resolver
+            // many times and must not count.
+            let production = src.split("#[cfg(test)]").next().unwrap_or("");
+            calls += production.matches(RESOLVER_CALL).count();
+            if name == OWNER {
+                continue;
+            }
+            for m in MARKER_TABLES {
+                if src.contains(m) {
+                    offenders.insert(format!("{name} contains the marker table {m:?}"));
+                }
+            }
+        }
+        // NON-VACUITY: a walk that found nothing would pass against anything.
+        assert!(
+            scanned >= 40,
+            "the directory walk found only {scanned} .rs files — the scan is broken, not the code"
+        );
+        assert!(
+            offenders.is_empty(),
+            "a SECOND place carries the family marker table: {offenders:?}\n\
+             Two resolvers that agree on the happy path and differ in the fallback is \
+             the games-dir incident, and this one picks the database and the SOAP \
+             namespace."
+        );
+        // The resolver's DEFINITION in family.rs contributes one occurrence
+        // (`pub fn family_from_container_names(`), so one call site means two.
+        assert!(
+            calls <= 2,
+            "{RESOLVER_CALL} appears {calls} times in production (definition + call sites). \
+             More than one caller is how two fallbacks diverge."
+        );
+    }
+
+    /// The stripper must not be fooled by prose — this file's own doc comments
+    /// name every marker above.
+    #[test]
+    fn the_stripper_removes_comments_and_keeps_code() {
+        assert!(!strip_comments("// ac-worldserver\n").contains("ac-worldserver"));
+        assert!(!strip_comments("/* -mangosd */").contains("-mangosd"));
+        assert!(strip_comments("let s = \"ac-worldserver\";").contains("ac-worldserver"));
+        assert!(strip_comments("let s = \"// not a comment\";").contains("// not a comment"));
+    }
+}
