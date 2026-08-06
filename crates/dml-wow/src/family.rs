@@ -192,6 +192,67 @@ mod resolver_scan_tests {
         src[..at].trim_end().ends_with("fn")
     }
 
+    /// Production call sites of the resolver in one already-stripped source.
+    ///
+    /// Extracted so the scan's counting rule and the tests that pin it are the
+    /// same code — the guard test walks real files, which cannot exercise
+    /// "an import plus its call is ONE consumer" until such a consumer exists.
+    fn count_call_sites(production: &str) -> usize {
+        production
+            .match_indices(RESOLVER_SYMBOL)
+            .filter(|(at, _)| !is_definition(production, *at) && !is_use_path(production, *at))
+            .count()
+    }
+
+    /// An `use` path is not a call site.
+    ///
+    /// FOUND 2026-08-06 by the final branch review, and it is the SIXTH defect
+    /// in this one guard. `is_definition` excluded the definition, but nothing
+    /// excluded the import: in `use crate::family::family_from_container_names;`
+    /// the text before the symbol trims to `…family::`, which does not end in
+    /// `fn`, so the occurrence counted. One idiomatic consumer — an import plus
+    /// the call it enables — therefore counted as **two**, and the guard failed
+    /// with "the resolver is called from 2 production sites", a sentence that is
+    /// not true.
+    ///
+    /// That was worse than a nuisance. The first real consumer arrives with a
+    /// later increment, so this would have fired on the very next task, and the
+    /// obvious repair — raise the cap to 2 — would have restored exactly the
+    /// near-vacuity round 3 removed (at a cap of 2 it took THREE planted callers
+    /// to trip). A guard that cries wolf teaches you to widen it.
+    ///
+    /// Decided on the LINE, not on the preceding `::`: a use-list spanning lines
+    /// (`use crate::family::{\n    family_from_container_names,\n};`) puts the
+    /// symbol on a line of its own, and `pub use` re-exports must be excluded
+    /// too. Both are handled by walking back to the line start.
+    fn is_use_path(src: &str, at: usize) -> bool {
+        let line_start = src[..at].rfind('\n').map_or(0, |nl| nl + 1);
+        let line = src[line_start..at].trim_start();
+        line.starts_with("use ") || line.starts_with("pub use ") || in_open_use_list(src, line_start)
+    }
+
+    /// True when `line_start` sits inside a `use …{ … }` list that opened on an
+    /// earlier line — the multi-line import form, where the symbol's own line
+    /// carries no `use` keyword at all.
+    fn in_open_use_list(src: &str, line_start: usize) -> bool {
+        for line in src[..line_start].lines().rev() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if t.contains('}') {
+                return false;
+            }
+            if t.starts_with("use ") || t.starts_with("pub use ") {
+                return t.contains('{');
+            }
+            if !t.ends_with(',') && !t.contains('{') {
+                return false;
+            }
+        }
+        false
+    }
+
     /// CORRECTED 2026-08-06 (round 3): the first port here had NO branch for
     /// `'` at all — no char literals, no raw strings. `'"'` (a char literal
     /// holding a double quote — it appears in this crate's own source, e.g.
@@ -438,6 +499,17 @@ mod resolver_scan_tests {
         }
     }
 
+    /// SCOPE, stated because the test's name overclaims: the walk is
+    /// `CARGO_MANIFEST_DIR/src`, i.e. `crates/dml-wow/src` ONLY. A second
+    /// resolver in `launcher/src-tauri/src` — where the Tauri command layer
+    /// lives, and a plausible home for the first consumer — or in `dml-core`
+    /// is invisible here. That is a real hole in a guard whose whole subject is
+    /// "somebody adds a second one somewhere"; it is left open rather than
+    /// papered over because a cross-crate walk from a unit test would reach
+    /// outside the crate's own manifest dir, and the honest fix is a guard that
+    /// lives where the launcher's own source scans already do
+    /// (`launcher/src/lib/source-scan.ts` has the equivalent for TS).
+    /// Raised by the final branch review, 2026-08-06.
     #[test]
     fn only_family_rs_decides_what_a_stack_is() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -461,11 +533,7 @@ mod resolver_scan_tests {
             // many times and must not count. Brace-matched removal, not
             // cut-at-first — see strip_cfg_test's doc comment.
             let production = strip_cfg_test(&src);
-            for (at, _) in production.match_indices(RESOLVER_SYMBOL) {
-                if !is_definition(&production, at) {
-                    calls += 1;
-                }
-            }
+            calls += count_call_sites(&production);
             if rel == OWNER {
                 continue;
             }
@@ -508,6 +576,75 @@ mod resolver_scan_tests {
             "the resolver is called from {calls} production sites. At most ONE may call it: \
              two callers with different fallbacks is exactly the games-dir incident this \
              guard exists to prevent, and this one picks the database and the SOAP namespace."
+        );
+    }
+
+    /// One idiomatic consumer — a `use` plus the call it enables — is ONE call
+    /// site, not two.
+    ///
+    /// This is the case the file-walking guard structurally cannot reach: no
+    /// consumer exists yet, so the walk counts 0 and would keep counting 0
+    /// whatever `is_use_path` did. The review found the defect by planting a
+    /// real consumer in `native.rs`; this test plants it in a string instead,
+    /// so it stays a regression test after the real consumer arrives.
+    #[test]
+    fn an_import_is_not_a_call_site() {
+        let one_consumer = "\
+use crate::family::family_from_container_names;
+
+pub fn probe(names: &[String]) -> FamilyVerdict {
+    family_from_container_names(names.iter().map(String::as_str))
+}
+";
+        assert_eq!(
+            count_call_sites(one_consumer),
+            1,
+            "an import plus the call it enables is ONE consumer; counting the `use` \
+             makes the FIRST legitimate caller trip a cap of one, and the obvious \
+             repair (raise the cap to 2) restores the near-vacuity round 3 removed"
+        );
+
+        // The multi-line use-list form: the symbol's own line has no `use` on it.
+        let list_form = "\
+use crate::family::{
+    family_from_container_names,
+    CoreFamily,
+};
+
+fn probe(n: &[String]) -> FamilyVerdict {
+    family_from_container_names(n.iter().map(String::as_str))
+}
+";
+        assert_eq!(count_call_sites(list_form), 1, "a multi-line use list is still an import");
+
+        // And a re-export, which has no call at all.
+        assert_eq!(
+            count_call_sites("pub use crate::family::family_from_container_names;\n"),
+            0,
+            "a re-export calls nothing"
+        );
+    }
+
+    /// The exclusion must not swallow a REAL second caller that merely sits
+    /// near an import — otherwise finding 1's fix would re-open the hole the
+    /// guard exists to close.
+    #[test]
+    fn the_import_exclusion_does_not_hide_a_second_caller() {
+        let two_consumers = "\
+use crate::family::family_from_container_names;
+
+fn a(n: &[String]) -> FamilyVerdict {
+    family_from_container_names(n.iter().map(String::as_str))
+}
+
+fn b(n: &[String]) -> FamilyVerdict {
+    family_from_container_names(n.iter().map(String::as_str))
+}
+";
+        assert_eq!(
+            count_call_sites(two_consumers),
+            2,
+            "two real callers must still count as two — the whole point of the cap"
         );
     }
 
