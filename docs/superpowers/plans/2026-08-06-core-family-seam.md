@@ -136,6 +136,8 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
+**First add `pub mod family;` to `crates/dml-wow/src/lib.rs`** (alphabetical position among the existing `pub mod` lines). A `.rs` file in `src/` that no module declaration references is never compiled by cargo — without this line the run reports unrelated passing tests instead of the failure, which is a vacuous green dressed as a red. Corrected 2026-08-06 after the Task 1 implementer hit it.
+
 Run: `cargo test -p dml-wow --lib family`
 Expected: FAIL to compile — `cannot find function family_from_container_names`, `cannot find type FamilyVerdict`.
 
@@ -219,11 +221,7 @@ pub fn family_from_container_names<'a>(
 
 Note `"mangosd"` alone must NOT match: `ends_with("-mangosd")` requires the hyphen, which is what the `a_lookalike_name_does_not_match` case pins.
 
-Add to `crates/dml-wow/src/lib.rs`, in alphabetical position among the existing `pub mod` lines:
-
-```rust
-pub mod family;
-```
+(`pub mod family;` was already added in Step 2 — see the note there for why it cannot wait until here.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
