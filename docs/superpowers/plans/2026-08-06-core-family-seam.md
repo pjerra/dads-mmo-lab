@@ -1197,3 +1197,15 @@ server.
 **Contract surface:** `DB_NAMES_UNRESOLVED` is absent from `docs/cli-contract.md`
 and from every frontend consumer, so the launcher currently renders it as a bare
 unknown code. Fix with this task.
+
+**Two more, raised by fix round 1 (2026-08-06):**
+
+- `parse_override_env` understands only the **mapping** form of compose
+  `environment:`. The equally legal list form (`- AC_WORLD_DATABASE_INFO=…`)
+  falls through to the conf — i.e. straight back into the bug fix round 1
+  closed, for anyone whose compose uses it. Not fixed there because fixing it
+  means a second parser, which is the thing that round was removing.
+- `Database::Playerbots` still returns a hardcoded `"acore_playerbots"` even
+  though the compose now carries `AC_PLAYERBOTS_DATABASE_INFO` and
+  `database_info_value` could answer it. Was defensible when nothing could
+  resolve it; is now just an exception with no reason.
