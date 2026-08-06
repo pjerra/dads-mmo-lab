@@ -542,7 +542,9 @@ Expected: FAIL — `visibleTitles is not exported`.
 
 - [ ] **Step 3: Implement**
 
-In `launcher/src/lib/title-install.ts`, add `family?: string;` to the `TitleInfo` interface (alongside its existing fields), then append:
+**CORRECTED 2026-08-06** — `TitleInfo` is DECLARED in `launcher/src/lib/api.ts`;
+`title-install.ts` only imports it. Add `family?: string;` to the interface where
+it actually lives, then append the filter below to `title-install.ts`:
 
 ```ts
 /**
@@ -608,9 +610,15 @@ consequence, so it is the first time the read can be pinned. Do not skip this.
 Add to `cli/tests/games-titles.bats`, following the conventions already in that
 file:
 
+**CORRECTED 2026-08-06** — the first draft invoked a bare `run dml …`. `dml` is
+not on PATH anywhere in this suite; every sibling test uses `run bash "$DML" …`.
+The bare form would have gone red for the wrong reason, which makes a mutation
+proof worthless — the same class as the recorded "anchor the ordering test on
+the REFUSAL, not on X-appears-before-Y" lesson. Match the file's own convention.
+
 ```bash
 @test "games catalog reports each title's family" {
-  run dml games catalog --json
+  run bash "$DML" games catalog --json
   [ "$status" -eq 0 ]
   [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-server-playerbots") | .family')" = "azerothcore" ]
   [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-vanilla-server") | .family')" = "cmangos" ]
