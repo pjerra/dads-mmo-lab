@@ -218,11 +218,15 @@ export function normalizeCatalog(d: {
 const VISIBLE_FAMILIES = ["azerothcore", "cmangos"];
 
 /**
- * FAILS OPEN on a missing family, for the same reason `normalizeCatalog`'s
- * `install_supported` does: an older `dml` in dml-arch predating the family
- * column omits it, and hiding every title there turns a working Library into
- * an empty one.
+ * FAILS OPEN on a missing, empty, or null family, for the same reason
+ * `normalizeCatalog`'s `install_supported` does: an older `dml` in dml-arch
+ * predating the family column omits the key entirely, and a registry row
+ * whose 6th pipe-delimited field is empty (bash) reports it as `""` -- both
+ * mean "we don't know", not "hide this", and `null` is reachable too (the
+ * value crosses a JSON boundary from bash, so the declared TS type is a claim
+ * about that payload rather than a guarantee about it). Hiding a title in any
+ * of these cases turns a working Library into an empty one.
  */
 export function visibleTitles(titles: TitleInfo[]): TitleInfo[] {
-  return titles.filter((t) => t.family === undefined || VISIBLE_FAMILIES.includes(t.family));
+  return titles.filter((t) => !t.family || VISIBLE_FAMILIES.includes(t.family));
 }

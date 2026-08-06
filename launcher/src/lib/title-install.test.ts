@@ -157,6 +157,26 @@ describe("visibleTitles", () => {
   it("hides an unknown family rather than showing it", () => {
     expect(visibleTitles([t("something", "runescape")])).toEqual([]);
   });
+
+  /**
+   * FAILS OPEN on an empty string too, not just an absent key: a registry row
+   * whose 6th pipe-delimited field is blank (cli/src/90-main.sh's `catalog)`
+   * arm) reports `family: ""`, which is "we don't know", not "hide this".
+   */
+  it("shows a title whose family the CLI reported as an empty string", () => {
+    const out = visibleTitles([t("wow-server-playerbots", "")]);
+    expect(out.map((x) => x.id)).toEqual(["wow-server-playerbots"]);
+  });
+
+  /**
+   * `null` is outside the declared `family?: string` type but reachable: the
+   * value crosses a JSON boundary from bash, so the type is a claim about the
+   * payload, not a guarantee about it.
+   */
+  it("shows a title whose family the CLI reported as null", () => {
+    const out = visibleTitles([t("wow-server-playerbots", null as unknown as string)]);
+    expect(out.map((x) => x.id)).toEqual(["wow-server-playerbots"]);
+  });
 });
 
 describe("the Library actually applies the filter", () => {
