@@ -451,8 +451,16 @@ Expected: 840 ok, 0 not ok. Any `not ok` means a consumer was reading `cut -d'|'
 
 - [ ] **Step 10: Commit**
 
+**`cli/dml` IS A COMMITTED BUILD ARTIFACT.** Any change under `cli/src/` must be
+followed by `bash cli/build.sh` and the rebuilt `cli/dml` committed WITH it —
+otherwise the source has the family column and the binary that actually runs
+does not. (bats' own `setup()` rebuilds it as a side effect, so a bats run
+leaves the tree dirty; that dirt is the real artifact and must be committed, not
+discarded.) Added 2026-08-06 after the Task 2 implementer caught the omission.
+
 ```bash
-git add cli/src/80-titles.sh crates/dml-wow/src/destructive.rs
+bash cli/build.sh
+git add cli/src/80-titles.sh crates/dml-wow/src/destructive.rs cli/dml
 git commit -m "feat(titles): every title declares the emulator family it builds
 
 Mirrored, in one commit, because the catalog exists on both surfaces and a
@@ -622,8 +630,12 @@ Run: `cd launcher && npm run check` → expected 333 files, 0 errors.
 
 - [ ] **Step 10: Commit**
 
+`cli/dml` is a committed build artifact — see Task 2 Step 10. This task edits
+`cli/src/90-main.sh`, so rebuild and commit it in the same commit.
+
 ```bash
-git add cli/src/90-main.sh launcher/src/lib/title-install.ts launcher/src/lib/title-install.test.ts launcher/src/lib/pages/Library.svelte
+bash cli/build.sh
+git add cli/src/90-main.sh cli/dml launcher/src/lib/title-install.ts launcher/src/lib/title-install.test.ts launcher/src/lib/pages/Library.svelte
 git commit -m "feat(library): show WoW titles only
 
 Sub-project #0. The three non-WoW titles stay on disk -- they are currently
