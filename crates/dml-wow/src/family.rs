@@ -147,7 +147,11 @@ mod tests {
 /// DATABASE to read and which SOAP namespace to send.
 ///
 /// A runtime directory walk, not a fixed file list, because the failure mode is
-/// a second resolver arriving in a file this test has never heard of.
+/// a second resolver arriving in a file this test has never heard of. The walk
+/// is RECURSIVE (round 3, 2026-08-06) for the same reason: a resolver arriving
+/// in a new SUBDIRECTORY (a future `src/family/other.rs`, say) is exactly as
+/// invisible to a flat `read_dir` as one in a new top-level file, and the
+/// module's own rationale above draws no line at depth 1.
 #[cfg(test)]
 mod resolver_scan_tests {
     use std::collections::BTreeSet;
@@ -188,31 +192,129 @@ mod resolver_scan_tests {
         src[..at].trim_end().ends_with("fn")
     }
 
+    /// CORRECTED 2026-08-06 (round 3): the first port here had NO branch for
+    /// `'` at all — no char literals, no raw strings. `'"'` (a char literal
+    /// holding a double quote — it appears in this crate's own source, e.g.
+    /// `if c == '"' { in_str = true; }` a few lines below) flipped `in_str`
+    /// to true and it did not come back out until the NEXT literal `"`
+    /// anywhere later in the file; every real `//`/`/* */` comment inside
+    /// that wrongly-"in a string" span survived into the supposedly-stripped
+    /// output. Measured on the real `family.rs`: raw occurrences of
+    /// `family_from_container_names` = 10, but the old stripper's output
+    /// still carried 7 (5 leaked straight out of doc comments). A leaked
+    /// comment carrying an unbalanced `{` then makes [`end_of_item`]'s depth
+    /// counter run PAST a test module's true closing brace and swallow real
+    /// production code after it — including a second caller — which
+    /// UNDER-counts `calls`. That is the cut-at-first failure again, one
+    /// function upstream of where round 2 fixed it.
+    ///
+    /// Ported verbatim from `launcher/src-tauri/src/lib.rs`'s
+    /// `stop_outcome_scan_tests::strip_comments` — same reasoning as
+    /// [`end_of_item`]/[`strip_cfg_test`]: `dml-wow` cannot depend on the
+    /// launcher crate and the function is `#[cfg(test)]`-private there
+    /// besides, so this is a port, not a hand-merge, and not a second
+    /// independent implementation of "strip comments" (this codebase having
+    /// two of those, agreeing on the easy cases and diverging on the one
+    /// that matters, is exactly the two-resolvers disease this guard exists
+    /// to prevent).
     fn strip_comments(src: &str) -> String {
+        let b = src.as_bytes();
         let mut out = String::with_capacity(src.len());
-        let b: Vec<char> = src.chars().collect();
-        let (mut i, mut in_str, mut in_line, mut in_block) = (0usize, false, false, 0usize);
+        let mut i = 0usize;
+        let (mut in_str, mut in_raw, mut in_ch) = (false, false, false);
         while i < b.len() {
-            let c = b[i];
-            let next = b.get(i + 1).copied().unwrap_or('\0');
-            if in_line {
-                if c == '\n' { in_line = false; out.push(c); }
-            } else if in_block > 0 {
-                if c == '*' && next == '/' { in_block -= 1; i += 2; continue; }
-                if c == '/' && next == '*' { in_block += 1; i += 2; continue; }
-                if c == '\n' { out.push(c); }
-            } else if in_str {
+            let c = b[i] as char;
+            let n = if i + 1 < b.len() { b[i + 1] as char } else { '\0' };
+            if in_str {
+                if c == '\\' && !in_raw {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '"' {
+                    in_str = false;
+                    in_raw = false;
+                }
                 out.push(c);
-                if c == '\\' { if let Some(n) = b.get(i + 1) { out.push(*n); } i += 2; continue; }
-                if c == '"' { in_str = false; }
-            } else if c == '/' && next == '/' {
-                in_line = true;
-            } else if c == '/' && next == '*' {
-                in_block = 1; i += 2; continue;
-            } else {
-                if c == '"' { in_str = true; }
-                out.push(c);
+                i += 1;
+                continue;
             }
+            if in_ch {
+                if c == '\\' {
+                    out.push(c);
+                    if i + 1 < b.len() {
+                        out.push(n);
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == '\'' {
+                    in_ch = false;
+                }
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            if c == '/' && n == '/' {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && n == '*' {
+                i += 2;
+                let mut depth = 1usize;
+                while i < b.len() && depth > 0 {
+                    if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && i + 1 < b.len() && b[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                out.push(' ');
+                continue;
+            }
+            if c == 'r' && (n == '"' || n == '#') {
+                let mut j = i + 1;
+                while j < b.len() && b[j] == b'#' {
+                    j += 1;
+                }
+                if j < b.len() && b[j] == b'"' {
+                    in_str = true;
+                    in_raw = true;
+                    for k in i..=j {
+                        out.push(b[k] as char);
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+            if c == '"' {
+                in_str = true;
+                in_raw = false;
+                out.push(c);
+                i += 1;
+                continue;
+            }
+            // A lifetime (`'a`) is not a char literal.
+            if c == '\'' {
+                let closes = (i + 2 < b.len() && b[i + 2] == b'\'')
+                    || (n == '\\' && i + 3 < b.len() && b[i + 3] == b'\'');
+                if closes {
+                    in_ch = true;
+                    out.push(c);
+                    i += 1;
+                    continue;
+                }
+            }
+            out.push(c);
             i += 1;
         }
         out
@@ -313,20 +415,48 @@ mod resolver_scan_tests {
         out
     }
 
+    /// Every `.rs` file under `dir`, recursively. FINDING 3, 2026-08-06
+    /// (round 3): the original walk was one level of `read_dir`, so a
+    /// resolver arriving in a new SUBDIRECTORY was as invisible to it as a
+    /// fixed file list is to a resolver arriving in a new top-level file —
+    /// the exact failure mode this whole guard exists to catch, one level
+    /// deeper. Panics rather than returning an empty `Vec` on an unreadable
+    /// directory, same as the original flat walk: an empty walk must be
+    /// LOUD, not a quiet pass.
+    fn collect_rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("directory is unreadable: {} ({e})", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                collect_rs_files(&path, out);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
     #[test]
     fn only_family_rs_decides_what_a_stack_is() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        collect_rs_files(&dir, &mut files);
         let mut scanned = 0usize;
         let mut calls = 0usize;
         let mut offenders: BTreeSet<String> = BTreeSet::new();
-        for entry in std::fs::read_dir(&dir).expect("crates/dml-wow/src is unreadable") {
-            let path = entry.expect("dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
-            }
-            let name = path.file_name().unwrap().to_string_lossy().to_string();
+        for path in &files {
+            // Relative path (forward-slashed), not the bare file name, so a
+            // future src/family/other.rs is distinguishable from src/other.rs
+            // in the offender message and cannot be mistaken for OWNER.
+            let rel = path
+                .strip_prefix(&dir)
+                .expect("walked file must live under dir")
+                .to_string_lossy()
+                .replace('\\', "/");
             scanned += 1;
-            let src = strip_comments(&std::fs::read_to_string(&path).expect("read"));
+            let src = strip_comments(&std::fs::read_to_string(path).expect("read"));
             // Production half only: the tests in family.rs call the resolver
             // many times and must not count. Brace-matched removal, not
             // cut-at-first — see strip_cfg_test's doc comment.
@@ -336,12 +466,18 @@ mod resolver_scan_tests {
                     calls += 1;
                 }
             }
-            if name == OWNER {
+            if rel == OWNER {
                 continue;
             }
+            // FINDING 2, 2026-08-06 (round 3): scan the PRODUCTION half, the
+            // same extraction the call count uses — not the merely
+            // comment-stripped `src`. A doc comment inside some OTHER file's
+            // OWN test module that names a marker table in prose (e.g. a
+            // future parity test saying "mirrors family.rs's AC_MARKERS
+            // list") must not false-positive this guard.
             for m in MARKER_TABLES {
-                if src.contains(m) {
-                    offenders.insert(format!("{name} contains the marker table {m:?}"));
+                if production.contains(m) {
+                    offenders.insert(format!("{rel} contains the marker table {m:?}"));
                 }
             }
         }
