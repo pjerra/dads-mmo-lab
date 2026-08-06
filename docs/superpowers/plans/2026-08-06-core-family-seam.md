@@ -1152,3 +1152,48 @@ AzerothCore server, zero SKIP."
 - **I2–I5**, their own plan, written against Task 1's real API.
 - `Database::Playerbots` conf-resolution (Task 5 note).
 - The `.dml-install.json` `family` field, with sub-project #2.
+
+### Task 6 — the qualified-literal half of I1 (raised by Task 5's review, 2026-08-06)
+
+Task 5's review confirmed that `Database::name()` sets only the **connection's
+default schema**, so I1 as built fixes 1½ of the four features the spec names.
+Every SQL string that qualifies a table with a literal schema is untouched, and
+those are the majority of the DB surface:
+
+| Feature | After Task 5 | Why |
+|---|---|---|
+| Item DB | fixed | `pages.rs` `FROM item_template` — unqualified |
+| Characters (list) | fixed | unqualified |
+| Characters (Accounts, paperdoll) | **still broken** | `pages.rs` `FROM acore_auth.account`; `paperdoll.rs` `JOIN acore_world.item_template` |
+| Dashboard | **still broken** | `stats.rs` — `acore_playerbots.…`, `acore_auth.account` |
+| Bots | **still broken** | `botid.rs` — same two literals |
+
+29 dotted literals across 8 files (`botid` 7, `stats` 5, `migrate` 5, `pages` 4,
+`moduletail` 4, `paperdoll` 2, `unbound` 1, `config` 1), plus the undotted
+schema lists in `backup.rs`'s dump set and `modmgr.rs`.
+
+Two of those are worse than a broken read. `backup.rs`'s dump list would
+silently **dump nothing** on a renamed server — a backup that reports success
+and contains no data. `migrate.rs`'s emptiness guard would answer
+`MIGRATE_TARGET_UNKNOWN` and refuse, which is the safe direction but for the
+wrong reason.
+
+The failure mode is the same silent-wrong-direction class I1 exists to close,
+merely relocated from connect-time to query-time: a renamed world DB makes
+paperdoll raise `DbError::Query`, which `db_err_to_cmd` collapses into
+`DB_UNREACHABLE` — the launcher then says "Is ac-database running?" about a
+server that is up and healthy.
+
+**Also owed here: the bash mirror.** Root `CLAUDE.md`'s rule is "a fix on ONE
+surface only half-ships", and bash does not merely lag — it *contradicts*.
+`cli/src/30-db.sh:26-28` hardcodes the three names and **line 41 is an
+allowlist** (`acore_world|acore_characters|acore_auth) ;;`) that would REFUSE any
+conf-resolved name. Same in `cli/src/48-stats.sh:60` and
+`cli/src/60-backup.sh:53-54`. Either bash gets the same resolution or the
+divergence gets a stated reason recorded in `cli/CLAUDE.md` — silence is not an
+option, because today the two surfaces answer different questions about the same
+server.
+
+**Contract surface:** `DB_NAMES_UNRESOLVED` is absent from `docs/cli-contract.md`
+and from every frontend consumer, so the launcher currently renders it as a bare
+unknown code. Fix with this task.
