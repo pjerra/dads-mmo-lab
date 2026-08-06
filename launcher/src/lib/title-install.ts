@@ -208,3 +208,21 @@ export function normalizeCatalog(d: {
     installSupported: d.install_supported !== false,
   };
 }
+
+/**
+ * The families the Library shows. WoW only, by user ruling 2026-08-06 — the
+ * non-WoW titles stay on disk because they are currently the suite's only
+ * multi-title fixtures (`cli/tests/games-list.bats:15` installs runescape).
+ * They get deleted once vanilla can replace them as that fixture.
+ */
+const VISIBLE_FAMILIES = ["azerothcore", "cmangos"];
+
+/**
+ * FAILS OPEN on a missing family, for the same reason `normalizeCatalog`'s
+ * `install_supported` does: an older `dml` in dml-arch predating the family
+ * column omits it, and hiding every title there turns a working Library into
+ * an empty one.
+ */
+export function visibleTitles(titles: TitleInfo[]): TitleInfo[] {
+  return titles.filter((t) => t.family === undefined || VISIBLE_FAMILIES.includes(t.family));
+}

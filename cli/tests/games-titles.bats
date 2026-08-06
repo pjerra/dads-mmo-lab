@@ -36,6 +36,14 @@ EOF
   [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="runescape-server") | .running')" = "null" ]
 }
 
+@test "games catalog reports each title's family" {
+  run bash "$DML" games catalog --json
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-server-playerbots") | .family')" = "azerothcore" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="wow-vanilla-server") | .family')" = "cmangos" ]
+  [ "$(echo "$output" | jq -r '.data.titles[] | select(.id=="maplestory-server") | .family')" = "other" ]
+}
+
 # --- _title_family (internal helper, no CLI verb) ---------------------------
 # Not called from anywhere yet (a later task wires it into games catalog's
 # JSON) -- covered directly by sourcing the file, same pattern as

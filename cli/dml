@@ -5707,7 +5707,7 @@ case "$cmd" in
             fi
           fi
           [[ $first -eq 0 ]] && tout+=','
-          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
+          tout+="{\"id\":\"$tid\",\"name\":\"$(json_escape "$tname")\",\"family\":\"$tfamily\",\"installed\":$tinst,\"running\":$trun,\"script_available\":$tscriptok}"
           first=0
         done < <(_title_registry)
         tout+=']'

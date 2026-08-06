@@ -21,7 +21,7 @@
   import { termBuf, beginRun, clearBuf, installStore } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
   import { taskbarBusy, taskbarIdle } from "$lib/taskbar";
-  import { titleInstallGate, installUnavailableNotice, urlInstallGate } from "$lib/title-install";
+  import { titleInstallGate, installUnavailableNotice, urlInstallGate, visibleTitles } from "$lib/title-install";
 
   let catalog: TitleInfo[] = $state([]);
   // Whether the backend's HOST can run the title installers at all (the CLI's
@@ -171,7 +171,9 @@
   async function refresh() {
     try {
       const c = await gamesCatalog();
-      catalog = c.titles;
+      // WoW only (user ruling 2026-08-06, sub-project #0) -- see visibleTitles
+      // for why this FAILS OPEN on a title whose family the CLI didn't report.
+      catalog = visibleTitles(c.titles);
       installSupported = c.installSupported;
       loadError = null;
       // Recomputed HERE rather than at mount, so the Refresh button and the

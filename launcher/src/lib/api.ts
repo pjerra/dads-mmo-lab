@@ -1468,6 +1468,8 @@ export interface TitleInfo {
   installed: boolean;
   running: "running" | "stopped" | null;
   script_available: boolean;
+  /** azerothcore | cmangos | other. Absent on a `dml` predating the column. */
+  family?: string;
 }
 // Returns the WHOLE envelope, not just the rows: `install_supported` is a
 // per-host verdict that belongs to the catalog, not to any one title, and

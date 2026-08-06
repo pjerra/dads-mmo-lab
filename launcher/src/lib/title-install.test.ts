@@ -6,8 +6,17 @@ import {
   UNSUPPORTED_HOST_HINT,
   MISSING_SCRIPTS_HINT,
   urlInstallGate,
+  visibleTitles,
 } from "./title-install";
 import type { TitleInfo } from "./api";
+import { code, sourceFinder, blockOf } from "./source-scan";
+
+const LIB = import.meta.glob(["../lib/pages/Library.svelte"], {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+const findLib = sourceFinder(LIB);
 
 // The live blocker these pin: on the Windows-native backend the bash CLI runs
 // under Git Bash, where the (Linux) installers dir does not exist, so every
@@ -113,6 +122,51 @@ describe("normalizeCatalog", () => {
 
   it("tolerates a payload with no titles array", () => {
     expect(normalizeCatalog({}).titles).toEqual([]);
+  });
+
+  it("carries the family through untouched", () => {
+    const out = normalizeCatalog({ titles: [{ id: "a", name: "A", family: "cmangos" }] as TitleInfo[] });
+    expect(out.titles[0].family).toBe("cmangos");
+  });
+});
+
+describe("visibleTitles", () => {
+  const t = (id: string, family?: string) => ({ id, name: id, family }) as TitleInfo;
+
+  it("shows the WoW families and hides everything else", () => {
+    const out = visibleTitles([
+      t("wow-server-playerbots", "azerothcore"),
+      t("wow-vanilla-server", "cmangos"),
+      t("maplestory-server", "other"),
+      t("runescape-server", "other"),
+    ]);
+    expect(out.map((x) => x.id)).toEqual(["wow-server-playerbots", "wow-vanilla-server"]);
+  });
+
+  /**
+   * FAILS OPEN, exactly like normalizeCatalog's install_supported. An older
+   * `dml` in dml-arch that predates the family column omits it, and hiding
+   * every title there would replace a working Library with an empty one --
+   * swapping one wrong story for another.
+   */
+  it("shows a title whose family the CLI did not report", () => {
+    const out = visibleTitles([t("wow-server-playerbots", undefined)]);
+    expect(out.map((x) => x.id)).toEqual(["wow-server-playerbots"]);
+  });
+
+  it("hides an unknown family rather than showing it", () => {
+    expect(visibleTitles([t("something", "runescape")])).toEqual([]);
+  });
+});
+
+describe("the Library actually applies the filter", () => {
+  it("calls visibleTitles on the rendered list", () => {
+    const src = code(findLib("Library.svelte"));
+    expect(
+      src,
+      "Library renders the raw catalog. visibleTitles can be perfectly unit-tested " +
+        "and never called -- that is the wiring failure this repo paid for twice on 2026-08-05.",
+    ).toContain("visibleTitles(");
   });
 });
 
