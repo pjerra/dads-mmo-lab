@@ -21,6 +21,7 @@ pub mod config;
 pub mod db;
 pub mod destructive;
 pub use dml_core::envelope;
+pub mod family;
 pub mod install_native;
 pub mod iteminfo;
 pub mod lan;
