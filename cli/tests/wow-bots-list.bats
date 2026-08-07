@@ -88,7 +88,7 @@ seed_two_bots() {
   [ "$status" -eq 0 ]
   # The mirror-image failure: a match-all prefix would call every real
   # player's account a bot.
-  ! grep -q "LIKE '%'" "$FIXTURE/q.log"
+  [ "$(grep -c "LIKE '%'" "$FIXTURE/q.log")" = "0" ]
   grep -q "UPPER(username) LIKE 'RNDBOT%'" "$FIXTURE/q.log"
 }
 

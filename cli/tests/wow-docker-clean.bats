@@ -54,8 +54,8 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ -n "$builder_line" ]
   [ "$db_line" -lt "$stop_line" ]
   [ "$stop_line" -lt "$builder_line" ]
-  ! grep -q '^volume ' "$DML_STUB_CALL_LOG"
-  ! grep -q '^image ' "$DML_STUB_CALL_LOG"
+  [ "$(grep -c '^volume ' "$DML_STUB_CALL_LOG")" = "0" ]
+  [ "$(grep -c '^image ' "$DML_STUB_CALL_LOG")" = "0" ]
   d="$(_done_data "$output")"
   [ "$(echo "$d" | jq -r '.data.level')" = "1" ]
   [ "$(echo "$d" | jq -r '.data.cleaned')" = "true" ]

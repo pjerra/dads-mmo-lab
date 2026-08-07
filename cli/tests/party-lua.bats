@@ -27,7 +27,11 @@ LUA_DIR="$BATS_TEST_DIRNAME/../lua/party"
 @test "addclass runs the correct 'playerbots bot addclass' command path" {
   grep -q 'playerbots bot addclass' "$LUA_DIR/dml_addclass.lua"
   # Must NOT use the intuitive-but-wrong 'playerbots addclass' (no 'bot').
-  ! grep -qE 'playerbots addclass' "$LUA_DIR/dml_addclass.lua"
+  # Anchored to a Lua STRING LITERAL: the header comment legitimately names
+  # the wrong form in prose (backtick-quoted), so a raw whole-file grep reads
+  # the explanation as a violation (the strip-COMMENTS-first gotcha) -- the
+  # old bare-! form was masking exactly that false match.
+  [ "$(grep -cE "[\"']playerbots addclass" "$LUA_DIR/dml_addclass.lua")" = "0" ]
   grep -q 'RunCommand' "$LUA_DIR/dml_addclass.lua"
 }
 

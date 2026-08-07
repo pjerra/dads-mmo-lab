@@ -50,7 +50,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow module rebuild --backup --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'BACKUP_FAILED'
-  ! grep -q 'compose up' "$FIXTURE/calls.log"
+  [ "$(grep -c 'compose up' "$FIXTURE/calls.log")" = "0" ]
   [ -f "$SDIR/.dml-rebuild-pending" ]
 }
 

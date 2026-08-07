@@ -63,7 +63,7 @@ set_client() {
   [ "$status" -eq 0 ]
   grep -q -- 'run --rm -v wow-server-playerbots_ac-client-data:/data' "$DML_STUB_CALL_LOG"
   # exact-match the full fallback string, not the manager's bare ac-client-data
-  ! grep -qE -- '-v ac-client-data:/data' "$DML_STUB_CALL_LOG"
+  [ "$(grep -cE -- '-v ac-client-data:/data' "$DML_STUB_CALL_LOG")" = "0" ]
   echo "$output" | grep -q 'using the default name wow-server-playerbots_ac-client-data'
 }
 
@@ -99,7 +99,8 @@ set_client() {
   run bash "$DML" wow module install --family cpp --key mod-arac --json
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"rebuild_required":false'
-  ! grep -qxF 'mod-arac' "$SDIR/.dml-rebuild-pending" 2>/dev/null
+  run grep -qxF 'mod-arac' "$SDIR/.dml-rebuild-pending"
+  [ "$status" -ne 0 ]   # absent file or absent entry, either way: no pending mark
   run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"rebuild_required":true'

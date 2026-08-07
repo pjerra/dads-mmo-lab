@@ -122,7 +122,7 @@ teardown() { teardown_fixture; }
   run bash "$DML" wow module install --family sql --key hearthstone-cd --variant 5min --no-backup --json
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'applying HS_5min.sql'
-  ! echo "$output" | grep -q 'applying HS_15min.sql'
+  [ "$(echo "$output" | grep -c 'applying HS_15min.sql')" = "0" ]
   grep -q 'HEARTHSTONE_COOLDOWN=5min' "$SDIR/sql_scripts/installed/hearthstone-cd.installed"
 }
 

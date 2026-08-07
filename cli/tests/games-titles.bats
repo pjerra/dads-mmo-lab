@@ -126,7 +126,7 @@ EOF
   run env DML_OSTYPE=msys bash "$DML" games install maplestory-server
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'WSL backend'
-  ! echo "$output" | grep -q 'dev-install.ps1'
+  [ "$(echo "$output" | grep -c 'dev-install.ps1')" = "0" ]
   [ ! -e "$FIXTURE/maplestory-server" ]
 }
 
@@ -158,8 +158,8 @@ EOF
   mkdir -p "$FIXTURE/home"
   run env DML_OSTYPE=msys HOME="$FIXTURE/home" bash "$DML" games install wow-server-playerbots
   [ "$status" -eq 1 ]
-  ! echo "$output" | grep -q 'install-native'
-  ! echo "$output" | grep -q 'Library ->'
+  [ "$(echo "$output" | grep -c 'install-native')" = "0" ]
+  [ "$(echo "$output" | grep -c 'Library ->')" = "0" ]
   # The one thing that does work, and never the step that was already fine.
   echo "$output" | grep -q 'WSL backend'
   echo "$output" | grep -q 'Switch Settings'
