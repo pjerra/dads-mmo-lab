@@ -33,10 +33,13 @@ Automated suites cannot see any of this. That is the entire point of the run.
 6. Take a VM snapshot here and name it `clean`. Several phases below are worth
    re-running from it.
 
-**Do NOT set `DML_BACKEND=auto`.** Leave it unset. `auto` is a known open bug
-(`startup.rs` never exports it, `backend.rs` falls through to `Wsl`), so the app
-would silently drive a `dml-arch` distro that does not exist on this VM. Unset
-= correct auto-detection. If you want to force it, use `native`.
+**`DML_BACKEND=auto` is now safe** (fixed in `0c61127`, after this document was
+first written — it used to resolve to `Wsl` and drive a `dml-arch` distro that
+does not exist on a fresh VM). Leaving it unset is still the realistic user
+path and the one to test. **Setting it to `auto` explicitly is worth one
+deliberate check**, since that is the obvious thing to type on a new box: the
+app must come up on the native backend, and the Settings dropdown must stay
+editable rather than reporting itself locked by an environment variable.
 
 ---
 
@@ -172,8 +175,8 @@ message), the terminal NDJSON, and whether it reproduced from the `clean`
 snapshot. A failure that does not reproduce from `clean` is a state bug, which
 is more interesting than one that does.
 
-## Recommended before the run
+## Done before the run
 
-Fix the `DML_BACKEND=auto` bug first (port `115c513` + `d22e9e3` from
-`feat/arch-wsl-backend`). It is two commits, it is already written, and it is
-precisely the wrong thing to discover at hour three of a VM session.
+The `DML_BACKEND=auto` bug is **fixed** (`0c61127`) — it was precisely the wrong
+thing to discover at hour three of a VM session. Phase 0 now tests it instead of
+avoiding it.
