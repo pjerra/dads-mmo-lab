@@ -1209,3 +1209,131 @@ unknown code. Fix with this task.
   though the compose now carries `AC_PLAYERBOTS_DATABASE_INFO` and
   `database_info_value` could answer it. Was defensible when nothing could
   resolve it; is now just an exception with no reason.
+
+### Task 6 design (2026-08-07) — from a six-way survey, not from the table above
+
+A six-agent read-only sweep (Rust dotted sites, DbConfig plumbing, bash mirror
+ground truth, contract+frontend, playerbots resolution, test landscape) was run
+before designing. Its corrections to this plan's own text, then the design.
+
+**Corrections to the record:**
+
+- The "29 dotted literals" figure is exact as a grep count but only **13 are
+  load-bearing production SQL**; the rest are comments and tests. The
+  per-file split (botid 7, stats 5, migrate 5, pages 4, moduletail 4,
+  paperdoll 2, unbound 1, config 1) verified; unbound's and config.rs's are
+  test/comment only.
+- This plan's claim that the launcher "renders `DB_NAMES_UNRESOLVED` as a bare
+  unknown code" is **wrong**: every DB page renders `message — hint`
+  (`formatLoadError`, `page-cache.svelte.ts:56-59`), so the generic path
+  already shows the hint. The one genuinely broken surface is
+  **`stats_err_to_cmd` (`launcher lib.rs:2096-2102`)**, which collapses
+  `NamesUnresolved` into `DB_UNREACHABLE` + "Is ac-database running?" — the
+  Statistics page tells the wrong story for the exact code the branch
+  introduced.
+- `docs/cli-contract.md:629` still says "schemas fixed (`acore_world`, …) —
+  none env-overridable". False since Task 5. A false contract claim, not a gap.
+- `TITLE_FAMILY_UNKNOWN` has **no emitter anywhere** — the const exists
+  (`family.rs:34`), zero call sites. It must NOT be tabulated in the contract
+  as if live; it belongs to I2–I5, whose first consumer will emit it.
+- The playerbots resolution chain is **proven, not inferred**: the live
+  server's own `Server.log:51` logs `Found config value 'PlayerbotsDatabaseInfo'
+  from environment variable 'AC_PLAYERBOTS_DATABASE_INFO'` — the AC env bridge
+  covers module confs, the key's on-disk home is
+  `env/dist/etc/modules/playerbots.conf:2141`, and `conf_path_in` already
+  routes module confs there (no change needed to it).
+- The WSL installer **never writes `AC_*_DATABASE_INFO`** (verified: zero hits
+  under `guides/`), so on WSL installs the conf tier is the live resolution
+  path while on native the compose tier is. Both tiers are live somewhere;
+  neither is decoration.
+- **No parity suite compares SQL text or argv — all 18 compare JSON payloads**,
+  so bash-hardcoded vs Rust-resolved is invisible to every existing test as
+  long as both resolve to `acore_*` on the test box. The proof of the mirror
+  must be NEW tests.
+
+**Scope ruling — the module subsystem is a recorded exception, not a target.**
+modmgr, moduletail's BATTLEPASS consts, 70-modules' `_ale_sql`/`_sqlmod`,
+90-main's module sql/repair/fixit arms, and unbound all execute **third-party
+or fingerprint-pinned SQL payloads whose own content hardcodes standard schema
+names** (unbound's payload is byte-pinned by FNV-1a; module `.sql` files ship
+with the modules). Resolving only our argv while the payload hardcodes is a
+half-rename that breaks worse than either consistent state. On a renamed
+server the module subsystem is broken by the modules themselves before our
+tooling enters. Same for `acore_ale` (module-owned fifth schema) and bash's
+legacy text-mode `lan` verb (frozen output contract; the Rust lan path is
+already resolved via `Database::Auth`). Each exception gets a doc comment at
+its executor naming this ruling.
+
+**What resolves (the user-data surfaces):**
+
+1. `DatabaseNames` gains `playerbots: Option<String>` — resolved via
+   `database_info_value` extended with a conf-file parameter
+   (`AC_PLAYERBOTS_DATABASE_INFO` → `playerbots.conf` → `.dist` → `None`).
+   Optional because a non-playerbots server is legal and a required field
+   would blanket-refuse Dashboard/Item DB/Characters — surfaces that never
+   touch the schema. Refusal happens AT USE (`opts(Playerbots)`,
+   dump-set inclusion, registry clause), never blanket.
+2. **Identifier validation as the choke point in `parse_database_info`**:
+   resolved names must match `^[A-Za-z0-9_$]+$` or refuse. Schema names are
+   spliced identifiers — MySQL cannot `?`-bind them — and the compose env is
+   user-writable text reachable through the launcher's own `config set`, so
+   this is the SQL-injection gate. Mirrors the repo's numeric-whitelist
+   doctrine.
+3. `DbConfig::names() -> Result<&DatabaseNames, DbError>` — the reader-level
+   refusal, one line per reader, same error path `opts()` already uses.
+4. The pure builders take names: botid's `registry_clause`/`prefix_clause`
+   (with `bot_clause(col, prefix, playerbots: Option<&str>)` — `None` ⇒ the
+   existing prefix-only degrade, preserving the 2026-08-01 incident
+   semantics); stats' `PROBE_SQL`/`SYS_SUBQUERY` become builders and
+   `BOT_SUBQUERY` is deleted (it duplicates `registry_clause`; its tests
+   re-anchor); pages' `accounts_sql(prefix, auth)`; paperdoll's
+   `join_tail(world)`; backup's `mysqldump_args_for(..., names)` (playerbots
+   in the dump set when `Some` — its absence on a schema-less server turns
+   today's hard mysqldump failure into a correct omission); migrate's three
+   `SQL_*` consts become builders resolved from the title dir the engine
+   already knows.
+5. `stats_err_to_cmd` gains the `NamesUnresolved` carve-out `db_err_to_cmd`
+   already has.
+6. `parse_override_env` learns the compose `environment:` LIST form
+   (`- KEY=value`) — a `Value::Sequence` arm in the SAME parser, not a second
+   one — and bash's `_cfg_env_load_map` yq program gains the matching seq
+   branch **in the same change** (the env map feeds `compute_value`, whose
+   parity is pinned; the two surfaces must learn the form together).
+
+**The bash mirror (the half that closes cli/CLAUDE.md item 10):**
+
+- `_db_names_resolve` in 30-db.sh: memoized once per invocation; tiers
+  override-compose-env → base-compose-env → `worldserver.conf` → `.dist`;
+  the compose tiers read via a **pure-awk, service-scoped extractor**
+  (mapping AND list forms, `ac-worldserver` only — `ac-db-import` carries the
+  same keys and must not be the source; values may hold semicolons inside
+  quotes) — **no yq on the DB path**: yq is a per-arm dep gated by
+  MISSING_DEP, and three registry arms are bats-pinned to never fork it.
+  Parse mirrors `parse_database_info` byte-for-byte: strip quotes, ≥4
+  semicolons, last field, identifier charset, refuse otherwise.
+- `db_world_query`/`db_chars_query`/`db_auth_query` use resolved names;
+  failure surfaces `json_err DB_NAMES_UNRESOLVED` (streaming arms:
+  `ndjson_error`) BEFORE any docker exec — never `DB_UNREACHABLE` for a
+  resolution failure.
+- `_db_write_stmt`'s allowlist is **re-anchored on the resolved trio** —
+  still a closed set of exactly three, still refusing everything else,
+  plus the charset check. Never widened (standing order, cli/CLAUDE.md).
+- `_bot_account_where`: playerbots resolved optionally from the module conf
+  30-db.sh already reads for `_bot_prefix`; absent ⇒ the existing
+  prefix-only form. 48-stats keeps its query COUNT and ORDER (the positional
+  stub contract). 60-backup's dump set resolves; 90-main's accounts and
+  paperdoll dotted literals resolve.
+- `config list`'s motd read keeps its degrade-to-registry-default — refusal
+  is for fabricated answers, not for a path that already handles absence.
+- **Bats fixtures**: `add_game` in `env.bash` grows the stock
+  `worldserver.conf.dist` (+ `modules/playerbots.conf.dist`) so every
+  existing test resolves the stock names for the RIGHT reason with zero
+  per-file churn; new bats cover a renamed-name fixture end-to-end (the name
+  flows into logged SQL/argv), the unresolvable refusal, the list-form
+  compose, and the allowlist refusing a non-member resolved name.
+
+**Contract/docs half:** add `DB_NAMES_UNRESOLVED` to cli-contract.md's §5
+pass-through paragraph and cli/README.md's error catalog (bash now emits it);
+fix the false line 629; leave `TITLE_FAMILY_UNKNOWN` undocumented until it has
+an emitter; rewrite cli/CLAUDE.md item 10 from "divergence recorded" to
+"closed for user-data surfaces, module subsystem excepted with reasons".
