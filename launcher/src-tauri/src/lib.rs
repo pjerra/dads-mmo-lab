@@ -1757,7 +1757,7 @@ fn launcher_config_read() -> Result<serde_json::Value, CmdError> {
     // resolved value into DML_BACKEND, so reading the env here would report
     // EVERY session as env-locked and leave the dropdown permanently
     // read-only — defeating the whole setting.
-    let env_backend = if startup::backend_was_user_set() {
+    let env_backend = if startup::backend_pinned_by_env() {
         std::env::var("DML_BACKEND").ok().filter(|v| !v.trim().is_empty())
     } else {
         None
