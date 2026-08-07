@@ -679,6 +679,29 @@ pub fn mysqldump_args(password: &str, include_world: bool, names: &crate::db::Da
 /// what used to be a HARD mysqldump failure (unknown database
 /// `acore_playerbots`) into a correct omission: the schema is not dumped
 /// because the server does not have one.
+/// The dump surfaces' narration: what the copy promises, and the warning that
+/// accompanies a playerbots OMISSION.
+///
+/// The copy must not promise bots when the dump will not carry them. A server
+/// whose playerbots name did not resolve gets a correct omission from
+/// [`mysqldump_args_for`] — but an omission a user only discovers at restore
+/// time is data loss in the one artifact they restore from, so every dump
+/// surface narrates it (R1 review finding, 2026-08-07). One pure function so
+/// the rule is decided once and pinned once; `modmgr::module_backup_now` and
+/// the bots-flush safety dump follow the same rule with their own copy.
+pub fn dump_narration(include_world: bool, has_bots: bool) -> (&'static str, Option<&'static str>) {
+    let copy = match (include_world, has_bots) {
+        (true, true) => "backing up characters, bots, accounts and world...",
+        (false, true) => "backing up characters, bots and accounts...",
+        (true, false) => "backing up characters, accounts and world...",
+        (false, false) => "backing up characters and accounts...",
+    };
+    let omission = (!has_bots).then_some(
+        "no playerbots database is configured on this server -- the backup will not include bot data",
+    );
+    (copy, omission)
+}
+
 pub fn mysqldump_args_for(
     container: &str,
     password: &str,
@@ -1101,10 +1124,11 @@ pub fn backup_create_stream(
     let file_name = backup::new_backup_file_name(include_world);
     let out_path = bdir.join(&file_name);
 
-    emit(bc_event_line(
-        "info",
-        if include_world { "backing up characters, bots, accounts and world..." } else { "backing up characters, bots and accounts..." },
-    ));
+    let (copy, omission) = dump_narration(include_world, names.playerbots.is_some());
+    emit(bc_event_line("info", copy));
+    if let Some(w) = omission {
+        emit(bc_event_line("warn", w));
+    }
 
     if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path, &names) {
         emit(bc_event_section_end("error"));
@@ -1526,6 +1550,26 @@ mod tests {
                 "my_auth", "--single-transaction", "--quick",
             ]
         );
+    }
+
+    /// The narration must track the dump set: a copy that promises bots while
+    /// `mysqldump_args_for` omits the schema is the silent-omission hazard the
+    /// R1 review named — data loss discovered at restore time.
+    #[test]
+    fn the_narration_never_promises_bots_the_dump_will_not_carry() {
+        for include_world in [false, true] {
+            let (with_bots, none1) = dump_narration(include_world, true);
+            assert!(with_bots.contains("bots"), "resolved playerbots must be narrated");
+            assert_eq!(none1, None, "no omission warning when the dump carries bots");
+
+            let (without_bots, warn) = dump_narration(include_world, false);
+            assert!(
+                !without_bots.contains("bots"),
+                "an omitted playerbots schema must not be promised: {without_bots:?}"
+            );
+            let w = warn.expect("the omission must be narrated, not silent");
+            assert!(w.contains("will not include bot data"), "got: {w:?}");
+        }
     }
 
     #[test]

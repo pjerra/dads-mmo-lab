@@ -249,7 +249,9 @@ const BACKUP_RESTORE_SECTION: &str = "backup-restore";
 
 /// The blocking flow itself (real docker/SOAP/fs I/O) — run under
 /// `spawn_blocking`. Order mirrors the oracle top-to-bottom: name-shape gate
-/// -> backup file exists? -> server installed? -> saveall (best-effort) ->
+/// -> schema-names resolution (refuses `DB_NAMES_UNRESOLVED` before anything
+/// is touched — Task 6) -> backup file exists? -> server installed? ->
+/// saveall (best-effort) ->
 /// stop world+auth (hard-fail: "Nothing was changed") -> pre-restore safety
 /// dump (hard-fail: restart best-effort + "nothing was restored") -> the
 /// import itself (hard-fail: server LEFT STOPPED, no auto-restart) -> start

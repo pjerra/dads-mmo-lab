@@ -861,7 +861,8 @@ pub fn bots_flush_stream(soap_lock: Arc<Mutex<()>>, db_cfg: crate::db::DbConfig,
     // --include-world): matches `_backup_dump_to ... 0` exactly, NOT the
     // world-inclusive `modmgr::module_backup_now` module install/update/
     // rebuild use -- a bot flush never touches `acore_world`.
-    emit(modmgr::line_event("info", "backing up characters, bots and accounts first..."));
+    // Copy narrated AFTER names resolve (below) — see backup_create_stream's
+    // narration rule: never promise bots the dump will not carry.
     let Some(bdir) = backup::backup_dir() else {
         emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
         emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", ""));
@@ -884,6 +885,15 @@ pub fn bots_flush_stream(soap_lock: Arc<Mutex<()>>, db_cfg: crate::db::DbConfig,
             return;
         }
     };
+    if names.playerbots.is_some() {
+        emit(modmgr::line_event("info", "backing up characters, bots and accounts first..."));
+    } else {
+        emit(modmgr::line_event("info", "backing up characters and accounts first..."));
+        emit(modmgr::line_event(
+            "warn",
+            "no playerbots database is configured on this server -- the backup will not include bot data",
+        ));
+    }
     let bfile = backup::new_backup_file_name(false);
     let bpath = bdir.join(&bfile);
     if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, false, &bpath, &names) {

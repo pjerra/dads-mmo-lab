@@ -892,7 +892,17 @@ pub fn module_backup_now(program: &OsStr, db_cfg: &crate::db::DbConfig, emit: &d
     }
     let file_name = backup::new_backup_file_name(true);
     let out_path = bdir.join(&file_name);
-    emit(line_event("info", "backing up characters, bots, accounts and world..."));
+    // Same narration rule as `backup_create_stream`: never promise bots the
+    // dump will not carry (R1 review finding, 2026-08-07).
+    if names.playerbots.is_some() {
+        emit(line_event("info", "backing up characters, bots, accounts and world..."));
+    } else {
+        emit(line_event("info", "backing up characters, accounts and world..."));
+        emit(line_event(
+            "warn",
+            "no playerbots database is configured on this server -- the backup will not include bot data",
+        ));
+    }
     if let Err(errtail) = backup::dump_to(program, &db_cfg.password, true, &out_path, names) {
         if !errtail.is_empty() {
             emit(line_event("warn", format!("backup failed: {errtail}")));

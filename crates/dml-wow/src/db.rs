@@ -133,6 +133,14 @@ pub fn parse_database_info(line: &str) -> Option<&str> {
     if !last.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
         return None;
     }
+    // An all-digits name passes the charset but is not a legal UNQUOTED MySQL
+    // identifier — splicing it fails loudly as a syntax error, which then
+    // reports as "Is ac-database running?" about a healthy server: the exact
+    // mislabel class this resolver exists to remove. Refuse it here instead
+    // (R1 review finding, 2026-08-07).
+    if last.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     Some(last)
 }
 
@@ -643,7 +651,7 @@ mod tests {
     /// mutation that lets one class through cannot hide behind another.
     #[test]
     fn a_hostile_schema_name_refuses_rather_than_being_spliced() {
-        let hostile: [(&str, &str); 8] = [
+        let hostile: [(&str, &str); 9] = [
             ("acore_world'", "a single quote breaks out of table_schema='…' literals"),
             ("acore`world", "a backtick breaks out of quoted identifiers"),
             ("x;DROP TABLE y", "a semicolon-split name must not survive as a statement"),
@@ -652,6 +660,8 @@ mod tests {
             ("d' OR '1'='1", "the classic quote breakout"),
             ("acore_world--x", "comment introducers stay out of SQL text"),
             ("acore\\world", "a backslash must not reach an escape-sensitive context"),
+            ("12345", "all-digits passes the charset but is not a legal unquoted identifier; \
+                       splicing it fails as a syntax error mislabelled 'Is ac-database running?'"),
         ];
         for (bad, why) in hostile {
             assert_eq!(
@@ -1224,6 +1234,14 @@ BLANK=
         };
         let err = cfg.opts(Database::Playerbots).expect_err("no playerbots schema");
         assert_eq!(err.code(), ERR_DB_NAMES_UNRESOLVED);
+        // The MESSAGE is load-bearing, not just the code: this refusal must
+        // name the playerbots evidence sources, because the generic "schema
+        // names" copy would send the user to worldserver.conf — a file that
+        // cannot hold this key (R1 review: the copy was unpinned).
+        assert!(
+            err.to_string().contains("AC_PLAYERBOTS_DATABASE_INFO"),
+            "the playerbots refusal must name its own evidence source, got: {err}"
+        );
         assert!(
             cfg.opts(Database::Characters).is_ok(),
             "a missing playerbots schema must not refuse the core connections"
