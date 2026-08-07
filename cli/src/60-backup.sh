@@ -1,6 +1,7 @@
 # ---------------------------------------------------------------------------
 # Character backups (Lab-parity round 5): whole-server snapshots.
-# mysqldump of acore_characters+acore_playerbots+acore_auth -> ~/.dml/backups.
+# mysqldump of the RESOLVED characters+playerbots+auth schemas (30-db.sh
+# _db_names_resolve, Task 6) -> ~/.dml/backups.
 # SIX DIRECT MYSQL WRITES ARE SANCTIONED PROJECT-WIDE: the pre-existing LAN
 # toggle's realmlist UPDATE (90-main.sh `lan`), teleport-coords'
 # characters.position_x/y/z/map/orientation UPDATE (offline characters only
@@ -44,14 +45,29 @@ _backup_prune() {
     return 0
 }
 
-# Dump the character DBs (plus acore_world when $2 = 1 -- used before
+# Dump the character DBs (plus the world schema when $2 = 1 -- used before
 # module installs, which mutate world data), gzip to a tmp file, mv into
 # place ($1) -- no partial files on failure. On failure: tmp removed,
 # "$1.err" left with stderr (caller reads + removes it), returns 1.
+#
+# Task 6: the dump set is the RESOLVED schema names -- a renamed server used
+# to get a dump of the WRONG (absent) acore_* schemas, the worst failure
+# class this repo records, because the backup reports success and holds
+# nothing. Playerbots joins the set only WHEN RESOLVED: its absence on a
+# schema-less server turns what used to be a hard mysqldump failure
+# ("unknown database acore_playerbots") into a correct omission -- which
+# every dump surface must NARRATE (see _dump_narration below), since an
+# omission a user only discovers at restore time is data loss in the one
+# artifact they restore from. Unresolved core names refuse (rc 1) before
+# any docker exec; streaming arms already refused DB_NAMES_UNRESOLVED via
+# _db_names_require_stream first. Mirrors backup.rs mysqldump_args_for.
 _backup_dump_to() {
     local out="$1" incw="${2:-0}" tmp
-    local dbs=(acore_characters acore_playerbots acore_auth)
-    [[ "$incw" == 1 ]] && dbs+=(acore_world)
+    _db_names_resolve || return 1
+    local dbs=("$DB_NAME_CHARS")
+    [[ -n "$DB_NAME_PLAYERBOTS" ]] && dbs+=("$DB_NAME_PLAYERBOTS")
+    dbs+=("$DB_NAME_AUTH")
+    [[ "$incw" == 1 ]] && dbs+=("$DB_NAME_WORLD")
     tmp="$out.tmp"
     if docker exec ac-database mysqldump -uroot -p"$(_db_pw)" --databases "${dbs[@]}" --single-transaction --quick 2>"$out.err" | gzip > "$tmp"; then
         mv "$tmp" "$out"
@@ -60,6 +76,39 @@ _backup_dump_to() {
     fi
     rm -f "$tmp"
     return 1
+}
+
+# ---------------------------------------------------------------------------
+# Dump narration (Task 6) -- the copy must track the dump set: a line that
+# promises bots while _backup_dump_to omits the playerbots schema is the
+# silent-omission hazard named above. One helper pair so the rule is decided
+# once; the bots-flush and module-backup surfaces follow the same rule with
+# their own copy (mirrors backup.rs dump_narration + destructive.rs /
+# modmgr.rs -- keep the strings byte-identical to the Rust twins).
+# ---------------------------------------------------------------------------
+
+# _dump_narration <include_world>: echoes `backup create`'s "backing up ..."
+# copy for the current resolved names.
+_dump_narration() {
+    _db_names_resolve || return 1
+    if [[ -n "$DB_NAME_PLAYERBOTS" ]]; then
+        if [[ "${1:-0}" == 1 ]]; then printf 'backing up characters, bots, accounts and world...'
+        else printf 'backing up characters, bots and accounts...'; fi
+    else
+        if [[ "${1:-0}" == 1 ]]; then printf 'backing up characters, accounts and world...'
+        else printf 'backing up characters and accounts...'; fi
+    fi
+    return 0
+}
+
+# _dump_omission_warn: the shared ndjson warn line for a playerbots omission;
+# a no-op when the schema resolved (or nothing resolved at all -- the caller
+# already refused then).
+_dump_omission_warn() {
+    _db_names_resolve || return 0
+    [[ -z "$DB_NAME_PLAYERBOTS" ]] || return 0
+    ndjson_line warn "no playerbots database is configured on this server -- the backup will not include bot data"
+    return 0
 }
 
 # ---------------------------------------------------------------------------

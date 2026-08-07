@@ -592,7 +592,13 @@ Codes constructed by the CLI crate itself (`crates/dml-wow-cli/src`), with verba
 Pass-through codes: most error call sites forward a library `CmdError` verbatim — its three
 fields ARE the envelope's three fields, and the CLI never invents a code for a failure the
 library already described. Examples that surface on the wire this way: `DB_UNREACHABLE` (via
-`dml_wow::db::db_err_to_cmd`, the same mapper the launcher uses) and `DOCKER_DESKTOP_MISSING`
+`dml_wow::db::db_err_to_cmd`, the same mapper the launcher uses); `DB_NAMES_UNRESOLVED` (same
+mapper — the server's own config could not answer the schema names: no `AC_*_DATABASE_INFO` in
+the compose env and no `*DatabaseInfo` key in `worldserver.conf`/its `.dist` — refused rather
+than guessed, BEFORE any connection attempt, so it is never mislabelled `DB_UNREACHABLE`;
+**both surfaces emit it** — bash `dml` resolves the same tiers since Task 6 chunk B1 and its
+DB-backed `wow` arms refuse with this code, streamed arms as an in-stream `error` event); and
+`DOCKER_DESKTOP_MISSING`
 (from `start`'s engine-ensure, hint
 `Install Docker Desktop, or set DML_DOCKER_DESKTOP to its exe.`). Its sibling
 `DOCKER_CLI_MISSING` comes from the same engine-ensure and is a DIFFERENT repair: the docker
@@ -626,7 +632,7 @@ settings: `DML_GAMES_DIR` whenever the process cwd is not the games directory; `
 |---|---|---|
 | `DML_GAMES_DIR` | `.` (current directory) | Games root. Title dir = `$DML_GAMES_DIR/wow-server-playerbots`; also `games_dir/<id>` for start/stop/restart/status of an arbitrary id. **No scan, no `%USERPROFILE%\dml-native` fallback in the CLI path** (that fallback is launcher-only). With it unset, reads simply miss (registry defaults / not-installed-class errors), no panic. |
 | `DOCKER_DB_EXTERNAL_PORT` / `DB_EXTERNAL_PORT` | 3306 | MySQL port. Precedence (first non-empty value that parses as u16 and is non-zero): env `DOCKER_DB_EXTERNAL_PORT` → env `DB_EXTERNAL_PORT` → title-`.env` `DOCKER_DB_EXTERNAL_PORT` → title-`.env` `DB_EXTERNAL_PORT` → 3306. Trimmed before parse; 0 rejected. |
-| `DB_ROOT_PASSWORD` | `password` | MySQL password: env → title `.env` file → default; empty filtered. Host is hardcoded `127.0.0.1`, user hardcoded `root`, schemas fixed (`acore_world`, `acore_characters`, `acore_auth`, `acore_playerbots`) — none env-overridable. |
+| `DB_ROOT_PASSWORD` | `password` | MySQL password: env → title `.env` file → default; empty filtered. Host is hardcoded `127.0.0.1`, user hardcoded `root`. Schema names are NOT fixed: they resolve from the server's own config — compose `AC_LOGIN/WORLD/CHARACTER_DATABASE_INFO` env (`docker-compose.override.yml` first, then the base compose) → `worldserver.conf` `*DatabaseInfo` → its `.dist`; the playerbots schema resolves separately and OPTIONALLY (`AC_PLAYERBOTS_DATABASE_INFO` → `playerbots.conf` → `.dist` → absent, refusing only at use). No tier answering the core trio → `DB_NAMES_UNRESOLVED`, never a guessed `acore_*` default. Both surfaces (bash `dml` and native) resolve identically. |
 | `DML_SOAP_URL` | `http://127.0.0.1:7878/` | SOAP endpoint. Per-key precedence: env (set and non-empty) → `~/.dml/soap.env` → default. |
 | `DML_SOAP_USER` | `admin` | SOAP account. Same precedence. |
 | `DML_SOAP_PASS` | `admin` | SOAP password. Same precedence. Wrong creds surface as `SOAP_AUTH`. |

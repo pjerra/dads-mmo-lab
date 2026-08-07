@@ -29,11 +29,35 @@ add_game() {  # add_game <id> compose|install|empty|nested
   local id="$1" kind="$2" dir="$DML_GAMES_DIR/$1"
   mkdir -p "$dir"
   case "$kind" in
-    compose) touch "$dir/docker-compose.yml" ;;
+    compose) touch "$dir/docker-compose.yml"; seed_db_info_dists "$dir" ;;
     install) touch "$dir/install.sh" ;;
-    nested)  mkdir -p "$dir/sub" && touch "$dir/sub/compose.yml" ;;
+    nested)  mkdir -p "$dir/sub" && touch "$dir/sub/compose.yml"; seed_db_info_dists "$dir/sub" ;;
     empty)   : ;;
   esac
+}
+
+# Stock *DatabaseInfo .dist fixtures (Task 6): the CLI now RESOLVES schema
+# names (compose env -> worldserver.conf -> .dist; playerbots.conf[.dist]
+# optional) instead of hardcoding acore_*. Seeding the stock .dists into
+# every compose-shaped game makes every existing DB-verb test resolve the
+# stock names FOR THE RIGHT REASON -- through the real .dist tier -- with no
+# per-test conf churn. Values mirror AC's stock worldserver.conf.dist (the
+# same fixture db.rs's STOCK_CONF pins). Deliberately .dist-ONLY and
+# DatabaseInfo-ONLY: no live .conf (tests that create one keep owning it)
+# and no other keys (so _bot_prefix, config list, party specs etc. keep
+# their absent-key fallbacks). Tests exercising renamed/unresolvable shapes
+# overwrite or delete these files.
+seed_db_info_dists() {
+  local cdir="$1"
+  mkdir -p "$cdir/env/dist/etc/modules"
+  cat > "$cdir/env/dist/etc/worldserver.conf.dist" <<'EOF'
+LoginDatabaseInfo     = "127.0.0.1;3306;acore;acore;acore_auth"
+WorldDatabaseInfo     = "127.0.0.1;3306;acore;acore;acore_world"
+CharacterDatabaseInfo = "127.0.0.1;3306;acore;acore;acore_characters"
+EOF
+  cat > "$cdir/env/dist/etc/modules/playerbots.conf.dist" <<'EOF'
+PlayerbotsDatabaseInfo = "127.0.0.1;3306;acore;acore;acore_playerbots"
+EOF
 }
 
 use_docker_stub() {

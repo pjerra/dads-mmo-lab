@@ -65,6 +65,9 @@ EOF
 }
 
 @test "conf-row set errors NOT_FOUND when neither conf nor dist exists" {
+  # Task 6: add_game seeds a stock worldserver.conf.dist for schema-name
+  # resolution -- this test owns the BOTH-absent scenario, so delete it.
+  rm -f "$ETC/worldserver.conf.dist"
   use_curl_stub
   run bash "$DML" wow config set --key rates.honor --value 2 --json
   [ "$status" -eq 1 ]

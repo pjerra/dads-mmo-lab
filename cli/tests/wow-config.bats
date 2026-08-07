@@ -183,6 +183,10 @@ teardown() { teardown_fixture; }
   # NB: $(cat file) inside the arm strips the trailing newline before
   # json_escape, and $(...) here strips it again -- compare without it.
   [ "$(echo "$output" | jq -r '.data.content')" = $'FOO=bar\nBAZ=1' ]
+  # Task 6: add_game seeds a stock worldserver.conf.dist (schema-name
+  # resolution); raw-read's dist fallback would legitimately serve it, and
+  # this sub-case owns the file-absent scenario -- delete the seeded dist.
+  rm -f "$GDIR/env/dist/etc/worldserver.conf.dist"
   run bash "$DML" wow config raw-read --file worldserver.conf --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]

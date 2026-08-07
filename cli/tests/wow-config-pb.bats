@@ -65,6 +65,9 @@ EOF
 }
 
 @test "pb-keys errors NOT_FOUND when neither conf nor dist exists" {
+  # Task 6: add_game seeds a stock playerbots.conf.dist for schema-name
+  # resolution -- this test owns the BOTH-absent scenario, so delete it.
+  rm -f "$PB.dist"
   run bash "$DML" wow config pb-keys --json
   [ "$status" -eq 1 ]
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]

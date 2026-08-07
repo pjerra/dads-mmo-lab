@@ -193,6 +193,14 @@ CFG_ENV_MAP_LOADED=0
 # _cfg_env_read calls resolve in-process. Safe when the file/section is absent
 # (an empty map is a valid answer). A caller that later MUTATES the override
 # must _cfg_env_unload_map so reads see fresh data.
+#
+# Task 6: the yq program understands BOTH compose env forms -- the mapping
+# (`KEY: value`) and the equally-legal LIST form (`- KEY=value`, already
+# KEY=value strings, `=`-less items dropped) -- in lockstep with Rust's
+# parse_override_env gaining its Sequence arm (config.rs): the env map feeds
+# `config list`, whose parity is pinned, so the two surfaces must learn the
+# form together. A list-form compose used to load as an EMPTY map, silently
+# reading every env-backed row as unset.
 _cfg_env_load_map() {
     CFG_ENV_MAP=()
     CFG_ENV_MAP_LOADED=1
@@ -202,7 +210,7 @@ _cfg_env_load_map() {
         [[ -z "$line" ]] && continue
         k="${line%%=*}"; v="${line#*=}"
         [[ -n "$k" ]] && CFG_ENV_MAP["$k"]="$v"
-    done < <("$DML_YQ_BIN" -r '.services.ac-worldserver.environment // {} | to_entries[] | .key + "=" + (.value | tostring)' "$cfg_ovr" 2>/dev/null || true)
+    done < <("$DML_YQ_BIN" -r '(.services.ac-worldserver.environment // {}) | ((select(tag == "!!map") | to_entries[] | .key + "=" + (.value | tostring)), (select(tag == "!!seq") | .[] | select(tag == "!!str") | select(test("="))))' "$cfg_ovr" 2>/dev/null || true)
     return 0
 }
 

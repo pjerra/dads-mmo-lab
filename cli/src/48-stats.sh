@@ -11,9 +11,10 @@
 # Segment-sensitive stats (classes/factions/top-levels/richest) carry
 # per-segment family/bots data for the page's All|Family|Bots filter
 # ("all" is a client-side merge):
-#   1  playerbots-schema probe (chars; the ONLY tolerated failure -- a
-#      missing acore_playerbots schema degrades every bot stat to zero
-#      instead of failing the whole envelope)
+#   1  playerbots-schema probe (chars; the ONLY tolerated failure -- an
+#      unusable playerbots schema degrades bot detection to prefix-only
+#      instead of failing the whole envelope; SKIPPED entirely when the
+#      config resolves no playerbots schema at all, same degrade)
 #   2  population overview (chars)   3  level buckets (chars)
 #   4  class breakdown f/b (chars)   5  faction split f/b (chars)
 #   6  top-5 levels FAMILY (chars)   7  top-5 levels BOTS (chars)
@@ -49,6 +50,11 @@ _stats_bool() {
 # zeros / empty arrays (a freshly-installed empty DB is a valid state).
 _stats_payload() {
     local bot sys fam rows
+    # Task 6: schema names are resolved, never hardcoded. The `stats` arm
+    # already refused DB_NAMES_UNRESOLVED via _db_names_require before
+    # calling here; this guard only keeps a future direct caller from
+    # building SQL over unset names (rc 1 maps to the arm's DB error path).
+    _db_names_resolve || return 1
     # Bot accounts: the shared two-signal identity from 30-db.sh (playerbots
     # registry OR the reserved bot account-name prefix) used by _bots_counts,
     # `players online` and the backup summary. Registry-only detection put
@@ -57,18 +63,26 @@ _stats_payload() {
     bot="$(_bot_account_where c.account)"
     # System accounts that are neither family nor ambient bots: the auction
     # house seeder and the launcher's own SOAP account.
-    sys="c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))"
+    sys="c.account IN (SELECT id FROM $DB_NAME_AUTH.account WHERE username IN ('AHBOT','DMLSOAP'))"
 
     # -- 1: playerbots schema probe (review finding 8c). A box without the
-    # acore_playerbots schema (playerbots module absent / not yet migrated)
-    # used to fail EVERY $bot-referencing query and surface as one opaque
+    # playerbots schema (playerbots module absent / not yet migrated) used to
+    # fail EVERY $bot-referencing query and surface as one opaque
     # DB_UNREACHABLE. Probe it once; when missing, drop the registry half and
     # keep the account-prefix half, so bots on a box whose playerbots schema
     # is unreadable are still counted as bots (this used to degrade to a
     # constant FALSE -- "there are no bots here" -- which quietly moved every
     # bot into the family totals). A fully-down DB fails this probe too --
     # and then also fails query 2, so the envelope still errors as before.
-    if ! db_chars_query "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;" >/dev/null 2>&1; then
+    # Task 6: the probe runs against the RESOLVED playerbots name; when the
+    # config names NO playerbots schema the probe is SKIPPED outright to the
+    # SAME degrade ($bot is already the prefix-only form then) -- there is no
+    # name to probe, and a fabricated one would be the exact guess this
+    # resolver exists to refuse. NB the skip removes query 1 from the fixed
+    # positional order ONLY on a playerbots-less server; the stock fixtures
+    # resolve the schema, so the DML_STUB_DB_ROWS_SEQ contract is unchanged.
+    if [[ -n "$DB_NAME_PLAYERBOTS" ]] \
+       && ! db_chars_query "SELECT 1 FROM $DB_NAME_PLAYERBOTS.playerbots_account_type LIMIT 1;" >/dev/null 2>&1; then
         bot="$(_bot_account_where_prefix_only c.account)"
     fi
     fam="NOT ($bot) AND NOT ($sys)"
@@ -256,7 +270,7 @@ _stats_payload() {
     done <<< "$rows"
     journey+=']'
 
-    # -- 15: server history aggregates (acore_auth.uptime) ------------------
+    # -- 15: server history aggregates (the auth schema's uptime table) -----
     local boots up_total up_longest up_peak
     rows="$(db_auth_query "SELECT COUNT(*), COALESCE(SUM(uptime),0), COALESCE(MAX(uptime),0), COALESCE(MAX(maxplayers),0) FROM uptime;")" || return 1
     rows="${rows%%$'\n'*}"

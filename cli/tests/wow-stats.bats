@@ -9,6 +9,7 @@ setup() {
   DML="$BATS_TEST_DIRNAME/../dml"
   bash "$BATS_TEST_DIRNAME/../build.sh" >/dev/null
   make_fixture
+  add_game wow-server-playerbots compose   # Task 6: DB verbs resolve schema names from the title dir
   use_mysql_stub
   export DML_STUB_DB_SEQ_STATE="$FIXTURE/seq.state"
 }

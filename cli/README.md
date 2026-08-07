@@ -107,7 +107,12 @@ required external tool, currently just `yq`, is not installed),
 rejected the console command — a SOAP fault body came back), `SOAP_AUTH`
 (SOAP HTTP Basic auth failed — HTTP 401), `SOAP_UNREACHABLE` (curl could
 not reach the SOAP endpoint — connection refused, timeout), `DB_UNREACHABLE`
-(the MySQL query against `ac-database` failed), `CHAR_ONLINE`
+(the MySQL query against `ac-database` failed), `DB_NAMES_UNRESOLVED`
+(the server's own config could not answer the schema names: no
+`AC_*_DATABASE_INFO` in the compose env — override, then base file — and no
+`*DatabaseInfo` key in `worldserver.conf`/its `.dist`; refused BEFORE any
+docker call, never a guessed `acore_*` default; the same code the native
+backend emits), `CHAR_ONLINE`
 (`teleport-coords` refused to write an online character's position —
 "Character must be logged out."), `EXISTS` (`preset-import` refused to
 overwrite an existing preset without `--force`), and the five

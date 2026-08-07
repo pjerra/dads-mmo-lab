@@ -565,12 +565,12 @@ pub fn db_unreachable_err(message: impl Into<String>) -> CmdError {
 /// [`stats_err_to_cmd`] already does for the `stats` arm — see its comment for
 /// the fuller rationale.
 ///
-/// `NamesUnresolved` is NOT part of that collapse: bash `dml` never reads
-/// `*DatabaseInfo` at all (it uses its own hardcoded `acore_*` constants), so
-/// this failure mode does not exist on that side to be byte-identical with —
-/// it is native-only, and folding it into `DB_UNREACHABLE` would tell the user
-/// "is the engine down?" for a server whose config never names its schemas,
-/// which is a different question with a different fix.
+/// `NamesUnresolved` is NOT part of that collapse: bash `dml` resolves the
+/// same tiers (`_db_names_resolve`, 30-db.sh — Task 6 chunk B1) and emits the
+/// same `DB_NAMES_UNRESOLVED` code from its own `_db_names_require` preamble,
+/// so the two surfaces tell one story — and folding it into `DB_UNREACHABLE`
+/// would tell the user "is the engine down?" for a server whose config never
+/// names its schemas, which is a different question with a different fix.
 pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
     match &e {
         crate::db::DbError::NamesUnresolved(_) => CmdError {

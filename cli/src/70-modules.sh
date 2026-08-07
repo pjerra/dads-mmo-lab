@@ -301,9 +301,25 @@ _sql_installed() { [[ -f "$1/sql_scripts/installed/$2.installed" ]]; }
 # aborts the whole operation).
 _module_backup_now() {
     local bdir bfile
+    # Task 6: the dump runs over the RESOLVED schema names -- and REFUSES
+    # when they never resolved: every caller treats rc 1 as "safety backup
+    # failed, abort", which is exactly right for a dump that would otherwise
+    # capture guessed schemas while reporting success. Same warn-then-fail
+    # shape as modmgr::module_backup_now.
+    if ! _db_names_resolve; then
+        ndjson_line warn "backup refused: $DB_NAMES_ERR_MSG"
+        return 1
+    fi
     bdir="$(_backup_dir)"; mkdir -p "$bdir"
     bfile="wow-$(date -u +%Y%m%d-%H%M%S)-full.sql.gz"
-    ndjson_line info "backing up characters, bots, accounts and world..."
+    # Narration rule (Task 6): never promise bots the dump will not carry --
+    # keep the strings byte-identical to modmgr::module_backup_now.
+    if [[ -n "$DB_NAME_PLAYERBOTS" ]]; then
+        ndjson_line info "backing up characters, bots, accounts and world..."
+    else
+        ndjson_line info "backing up characters, accounts and world..."
+        ndjson_line warn "no playerbots database is configured on this server -- the backup will not include bot data"
+    fi
     if ! _backup_dump_to "$bdir/$bfile" 1; then
         local errtail
         errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
@@ -386,6 +402,14 @@ _client_detect() {
 
 _lua_has_sql() { [[ "$1" == accountwide || "$1" == battlepass || "$1" == bmah || "$1" == paragon ]]; }
 
+# Task 6 scope ruling -- RECORDED EXCEPTION to resolved-name splicing: this
+# helper's call sites pass hardcoded acore_* (and the module-owned acore_ale)
+# literals on purpose. The module .sql payloads they apply hardcode the
+# standard schema names INTERNALLY, so resolving only our argv while the
+# payload hardcodes would be a half-rename that breaks worse than either
+# consistent state; on a renamed server the module subsystem is broken by
+# the modules themselves before our tooling enters. Same ruling as
+# moduletail.rs's BATTLEPASS consts and unbound.rs on the Rust side.
 _ale_sql_file() {
     docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"
 }
@@ -716,6 +740,9 @@ _aw_rep_files() {
 _sqlmod_dirs() { mkdir -p "$1/sql_scripts/installed" "$1/sql_scripts/clones"; return 0; }
 _sqlmod_marker() { echo "$1/sql_scripts/installed/$2.installed"; }
 
+# Task 6 scope ruling -- RECORDED EXCEPTION, same as _ale_sql_file above:
+# call sites pass hardcoded acore_* literals because the SQL payloads they
+# run (third-party module .sql files) hardcode the standard names anyway.
 _sqlmod_run_stmt() { docker exec ac-database mysql -uroot -p"$(_db_pw)" "$1" -e "$2"; }
 _sqlmod_run_file() { docker exec -i ac-database mysql -uroot -p"$(_db_pw)" "$1" < "$2"; }
 

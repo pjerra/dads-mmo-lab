@@ -13,6 +13,15 @@ setup() {
   MODS="$SDIR/env/dist/etc/modules"
   mkdir -p "$MODS"
   touch "$SDIR/docker-compose.yml"   # so _wow_server_dir resolves this dir
+  # Task 6: `party add` resolves the core schema names before its online
+  # guard; the stock .dist supplies them. DELIBERATELY no playerbots .dist
+  # here -- the "NOT_FOUND when no conf exists at all" test below owns the
+  # playerbots conf pair's absence.
+  cat > "$SDIR/env/dist/etc/worldserver.conf.dist" <<'EOF'
+LoginDatabaseInfo     = "127.0.0.1;3306;acore;acore;acore_auth"
+WorldDatabaseInfo     = "127.0.0.1;3306;acore;acore;acore_world"
+CharacterDatabaseInfo = "127.0.0.1;3306;acore;acore;acore_characters"
+EOF
 }
 teardown() { teardown_fixture; }
 

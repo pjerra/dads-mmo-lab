@@ -1422,6 +1422,12 @@ case "$cmd" in
             echo "[dml] ERROR: '$title' is not running. Start the server first, then change LAN settings."
             exit 1
         fi
+        # Task 6 scope ruling -- RECORDED EXCEPTION to resolved-name
+        # splicing: this legacy TEXT-mode verb's output contract is frozen
+        # for the old C# tray, it predates the wow namespace, and it spans
+        # server families the resolver does not model (see the MaNGOS branch
+        # below). It keeps the hardcoded acore_auth; the Rust lan path is
+        # already resolved via Database::Auth.
         _lan_sql() { docker exec "$db" mysql -uroot -ppassword acore_auth -sN -e "$1" 2>/dev/null; }
     else
         # MaNGOS family. Only Tortoise (login DB 'tw_logon') is verified;
@@ -2506,6 +2512,7 @@ case "$cmd" in
             for v in "$quality" "$minl" "$maxl" "$limit"; do
               [[ "$v" == "-" || "$v" =~ ^[0-9]+$ ]] || { json_err BAD_ARG "Numeric flag expected, got: $v" ""; exit 1; }
             done
+            _db_names_require
             sql="$(build_item_search_sql "$name" "$quality" "$minl" "$maxl" "$limit")"
             rows="$(db_world_query "$sql")" || {
               json_err DB_UNREACHABLE "Could not query the item database" "Is ac-database running? Try: dml games status wow-server-playerbots"; exit 1; }
@@ -2569,6 +2576,7 @@ case "$cmd" in
         [[ "${1:-}" == "--search" ]] && { _need_flag_val "$1" $#; search="$2"; shift 2; }
         where="1=1"
         [[ -n "$search" ]] && where="name LIKE '%$(sql_escape "$search")%'"
+        _db_names_require
         sql="SELECT name,position_x,position_y,position_z,map FROM game_tele WHERE $where ORDER BY name LIMIT 500;"
         rows="$(db_world_query "$sql")" || { json_err DB_UNREACHABLE "Could not query teleport locations" ""; exit 1; }
         first=1; out='['
@@ -2649,6 +2657,7 @@ case "$cmd" in
         _valid_coord "$x" || { json_err BAD_ARG "Invalid coordinate: $x" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
         _valid_coord "$y" || { json_err BAD_ARG "Invalid coordinate: $y" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
         _valid_coord "$z" || { json_err BAD_ARG "Invalid coordinate: $z" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
+        _db_names_require
         row="$(db_chars_query "SELECT guid, online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
         [[ -n "$row" ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
@@ -2679,9 +2688,10 @@ case "$cmd" in
         # bot filter that does not require the acore_playerbots schema to
         # exist, and the character picker must not start erroring on a box
         # without the playerbots module.
+        _db_names_require
         sql="SELECT a.id, a.username, COALESCE(g.gmlevel,0), COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
-             FROM acore_auth.account a
-             LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM acore_auth.account_access GROUP BY id) g ON g.id = a.id
+             FROM $DB_NAME_AUTH.account a
+             LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM $DB_NAME_AUTH.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
              WHERE NOT $(_bot_username_is_bot a.username) AND a.username <> 'AHBOT'
              ORDER BY a.id, c.level DESC;"
@@ -2753,6 +2763,7 @@ case "$cmd" in
         acct=""
         [[ "${1:-}" == "--account" ]] && { _need_flag_val "$1" $#; acct="$2"; shift 2; }
         [[ -n "$acct" ]] || { json_err BAD_ARG "Missing --account <name>" ""; exit 1; }
+        _db_names_require
         # Test seam: DML_STUB_ACCOUNT_ID lets bats tests skip the auth-schema
         # lookup and go straight to a deterministic account id, since the
         # mysql stub answers every `docker exec` call from the same
@@ -2785,6 +2796,7 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        _db_names_require
         # Smoke item 5: the character row only updates on the character's
         # save, so an ONLINE character can show stale gear (seen live with a
         # GM robe swap). Best-effort freshness: when the target is online,
@@ -2828,7 +2840,7 @@ case "$cmd" in
         pd_join="FROM characters c
              JOIN character_inventory ci ON ci.guid=c.guid AND ci.bag=0 AND ci.slot BETWEEN 0 AND 18
              JOIN item_instance ii ON ii.guid=ci.item
-             JOIN acore_world.item_template it ON it.entry=ii.itemEntry
+             JOIN $DB_NAME_WORLD.item_template it ON it.entry=ii.itemEntry
              WHERE c.name='$(sql_escape "$char")' ORDER BY ci.slot;"
         pd_schema=new
         sql="SELECT c.name,c.level,c.class,c.money,c.race,c.gender,c.skin,c.face,c.hairStyle,c.hairColor,c.facialStyle,ci.slot,it.entry,it.name,it.Quality,it.ItemLevel,it.displayid $pd_join"
@@ -2876,6 +2888,7 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        _db_names_require
         cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
@@ -2914,6 +2927,7 @@ case "$cmd" in
         char=""
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
+        _db_names_require
         cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
@@ -3000,7 +3014,10 @@ case "$cmd" in
             # -i` reads stdin, and inside the while-read loop it would swallow
             # the remaining registry rows from the process substitution.
             # Guarded (set -e): a down DB or absent docker falls back to the
-            # registry default below, so `list` still answers.
+            # registry default below, so `list` still answers. Task 6:
+            # unresolved schema names take the SAME degrade (db_auth_query
+            # returns 1 before any docker exec) -- refusal is for fabricated
+            # answers, not for a path that already handles absence.
             if motd_live="$(db_auth_query "SELECT text FROM motd WHERE realmid=1 LIMIT 1;")"; then :; else motd_live=""; fi
             # Snapshot the override env map ONCE (single yq fork) so the ~65
             # per-row _cfg_env_read lookups below resolve in-process instead of
@@ -3259,6 +3276,7 @@ case "$cmd" in
                 # its GUID (this row's key) plus the matching Account id
                 # (companion write below) -- same resolution the old env
                 # route did, now landing in mod_ahbot.conf.
+                _db_names_require
                 crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
                   || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
                 [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
@@ -3772,6 +3790,7 @@ case "$cmd" in
         psub="${1:-}"; shift || true
         case "$psub" in
           online)
+            _db_names_require
             sql="SELECT c.name, c.level, c.class, c.zone
                  FROM characters c
                  WHERE c.online = 1
@@ -3805,6 +3824,7 @@ case "$cmd" in
         psub="${1:-}"; shift || true
         case "$psub" in
           online)
+            _db_names_require
             sql="SELECT c.guid, c.name, c.class, c.level
                  FROM characters c
                  WHERE c.online = 1
@@ -3871,6 +3891,10 @@ case "$cmd" in
             if [[ -n "$spec" ]] && ! _valid_bot_spec "$spec"; then
               json_err BAD_ARG "Unknown spec: $spec" "A premade spec name like 'frost pve' -- see the launcher's role picker for the full list."; exit 1
             fi
+            # Task 6: refuse unresolved schema names BEFORE the online-guard
+            # query -- otherwise a resolution failure masquerades as
+            # "Character not online".
+            _db_names_require
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first, then try again."; exit 1; }
             # Snapshot the group's members BEFORE firing so we can spot the new one.
@@ -3922,6 +3946,7 @@ case "$cmd" in
             player=""
             [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _db_names_require
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             sql="SELECT c.guid, c.name, c.class, c.level,
@@ -3973,6 +3998,7 @@ case "$cmd" in
             player=""
             [[ "${1:-}" == "--player" ]] && { _need_flag_val "$1" $#; player="$2"; shift 2; }
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
+            _db_names_require
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             # Same bot-members query as preset-load's kick phase.
@@ -4063,6 +4089,7 @@ case "$cmd" in
                 ;;
               *) json_err BAD_ARG "Invalid action: $action" "One of: gear talents maintain spec"; exit 1 ;;
             esac
+            _db_names_require
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             bguid="$(_party_online_guid "$bot")"
@@ -4081,6 +4108,7 @@ case "$cmd" in
             done
             _valid_charname "$player" || { json_err BAD_ARG "Invalid player name: $player" ""; exit 1; }
             _valid_preset_name "$name" || { json_err BAD_ARG "Invalid preset name: $name" "Letters, digits, - and _ (max 32)."; exit 1; }
+            _db_names_require
             pguid="$(_party_online_guid "$player")"
             [[ "$pguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "Character not online: $player" "Log the character into the game first."; exit 1; }
             sql="SELECT c.class
@@ -4155,6 +4183,7 @@ case "$cmd" in
               else echo "[dml] ERROR: no preset $name" >&2; fi
               exit 1
             fi
+            _db_names_require_stream preset-load
             pguid="$(_party_online_guid "$player")"
             if ! [[ "$pguid" =~ ^[0-9]+$ ]]; then
               if [[ "$DML_JSON" == 1 ]]; then
@@ -4358,6 +4387,7 @@ case "$cmd" in
             # Existence + name lookup (read-only) BEFORE any SOAP fire, so a
             # bad custom entry fails with a clean message instead of an
             # in-game silent no-op.
+            _db_names_require
             npcname="$(db_world_query "SELECT name FROM creature_template WHERE entry=$entry LIMIT 1;")" \
               || { json_err DB_UNREACHABLE "Could not check the creature entry" "Is ac-database running?"; exit 1; }
             [[ -n "$npcname" ]] || { json_err NOT_FOUND "No creature with entry $entry" "Check the id (creature_template.entry)."; exit 1; }
@@ -4405,6 +4435,7 @@ case "$cmd" in
             # (Alliance 1,3,4,7,11 / Horde 2,5,6,8,10), coords = the proven
             # place-npc capital spawn points (Stormwind map 0, Orgrimmar
             # map 1).
+            _db_names_require
             rh_row="$(db_chars_query "SELECT guid, race, online FROM characters WHERE name='$(sql_escape "$player")' LIMIT 1;")" \
               || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
             [[ -n "$rh_row" ]] || { json_err NOT_FOUND "No such character: $player" ""; exit 1; }
@@ -4453,6 +4484,11 @@ case "$cmd" in
             incworld=0
             [[ "${1:-}" == "--include-world" ]] && { incworld=1; shift; }
             [[ "$DML_JSON" == 1 ]] && ndjson_section_start backup-create
+            # Refuse an unresolved-names dump OUTRIGHT, before touching docker:
+            # a mysqldump argv built from guessed schema names either
+            # hard-fails or -- worse -- dumps the wrong schemas while
+            # reporting success (mirrors backup_create_stream's ordering).
+            _db_names_require_stream backup-create
             if ! docker info >/dev/null 2>&1; then
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end backup-create error
@@ -4464,10 +4500,12 @@ case "$cmd" in
             bsuffix=""
             [[ "$incworld" == 1 ]] && bsuffix="-full"
             bfile="wow-$(date -u +%Y%m%d-%H%M%S)$bsuffix.sql.gz"
-            if [[ "$incworld" == 1 ]]; then
-              [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots, accounts and world..."
-            else
-              [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts..."
+            # Task 6 narration rule: the copy tracks the RESOLVED dump set --
+            # never promise bots the dump will not carry, and narrate the
+            # omission (see _dump_narration / _dump_omission_warn).
+            if [[ "$DML_JSON" == 1 ]]; then
+              ndjson_line info "$(_dump_narration "$incworld")"
+              _dump_omission_warn
             fi
             if ! _backup_dump_to "$bdir/$bfile" "$incworld"; then
               errtail="$(tail -c 160 "$bdir/$bfile.err" 2>/dev/null | tr -d '\r\n"\\')" || errtail=""
@@ -4599,6 +4637,12 @@ case "$cmd" in
               else echo "[dml] ERROR: wow server not installed" >&2; fi
               exit 1
             fi
+            # Resolve the schema names BEFORE stopping anything: the
+            # pre-restore safety dump needs them, and refusing here means
+            # "nothing was changed" is still true -- refusing after the stop
+            # would leave the server down over a config problem (mirrors
+            # restore.rs).
+            _db_names_require_stream backup-restore
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "stopping the game server..."
             # Flush characters before the stop so the pre-restore safety
             # dump contains everyone's latest state (best-effort), and give
@@ -4696,6 +4740,7 @@ case "$cmd" in
             btlimit=$(( 10#$btlimit )); btoffset=$(( 10#$btoffset ))
             (( btlimit > 200 )) && btlimit=200
             (( btlimit < 1 )) && btlimit=1
+            _db_names_require
             btwhere="$(_bot_account_where c.account)"
             # --name is a LIKE prefix. _valid_charname permits '_', which is a
             # single-char LIKE wildcard, so a name like Foo_bar would also match
@@ -4782,8 +4827,18 @@ case "$cmd" in
             fi
             flush_t0=$SECONDS
             # (1) safety backup FIRST -- a failed dump aborts before any
-            # destructive step, nothing has changed yet.
-            [[ "$DML_JSON" == 1 ]] && ndjson_line info "backing up characters, bots and accounts first..."
+            # destructive step, nothing has changed yet. Task 6: names must
+            # resolve before the dump, and the copy tracks the resolved set
+            # (mirrors destructive.rs's bots-flush narration).
+            _db_names_require_stream bots-flush
+            if [[ "$DML_JSON" == 1 ]]; then
+              if [[ -n "$DB_NAME_PLAYERBOTS" ]]; then
+                ndjson_line info "backing up characters, bots and accounts first..."
+              else
+                ndjson_line info "backing up characters and accounts first..."
+                ndjson_line warn "no playerbots database is configured on this server -- the backup will not include bot data"
+              fi
+            fi
             bdir="$(_backup_dir)"; mkdir -p "$bdir"
             bfile="wow-$(date -u +%Y%m%d-%H%M%S).sql.gz"
             if ! _backup_dump_to "$bdir/$bfile" 0; then
@@ -5100,6 +5155,7 @@ case "$cmd" in
               else echo "[dml] ERROR: mod_ahbot.conf missing" >&2; fi
               exit 1
             fi
+            _db_names_require_stream ahbot-repair
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "looking up character $ahchar..."
             if ahrow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$ahchar")' LIMIT 1;")"; then :; else
               if [[ "$DML_JSON" == 1 ]]; then
@@ -5566,6 +5622,11 @@ case "$cmd" in
                   fi
                 fi
                 sqlfail=0; sibnote=""
+                # Task 6 scope ruling -- RECORDED EXCEPTION: every
+                # _sqlmod_run_* call in this arm (and the uninstall arm below)
+                # passes the hardcoded acore_world literal, because the module
+                # .sql payloads it applies hardcode the standard schema names
+                # internally -- see _sqlmod_run_stmt's comment (70-modules.sh).
                 case "$stype" in
                   clone_sql|clone_sql_norevert)
                     ucount=0
@@ -5856,6 +5917,7 @@ case "$cmd" in
             _cpp_installed "$sdir" "$mkey" || { json_err NOT_FOUND "Module not installed: $mkey" "Install it first."; exit 1; }
             # Manager's exact matching (show_module_tracking): key minus the
             # mod- prefix, plus an underscored variant.
+            _db_names_require
             stripped="${mkey#mod-}"
             term1="${stripped//-/_}"
             dbsj='{'; dbfirst=1
@@ -5926,6 +5988,14 @@ case "$cmd" in
             sdir="$(_wow_server_dir)"
             [[ -z "$sdir" ]] && { json_err NOT_FOUND "WoW Playerbots server not installed" ""; exit 1; }
             _cpp_installed "$sdir" "$mkey" || { json_err NOT_FOUND "Module not installed: $mkey" "Install it first."; exit 1; }
+            _db_names_require
+            # Task 6 scope ruling -- RECORDED EXCEPTION: the qualified name is
+            # still derived by acore_ prefix concatenation, because module SQL
+            # payloads (whose tracking rows this arm marks/clears) hardcode
+            # the standard schema names internally. On a renamed server the
+            # write below refuses at _db_write_stmt's resolved-trio allowlist
+            # -- the honest outcome; the module subsystem is broken there by
+            # the modules themselves before our tooling enters.
             db_full="acore_$rdb"
             if [[ -n "$rfiles" ]]; then
               rfilelist="$rfiles"
@@ -5988,6 +6058,15 @@ case "$cmd" in
               battlepass-npc) ;;
               *) json_err BAD_ARG "Unknown fixit: ${fkey:-<none>}" "Available: battlepass-npc"; exit 1 ;;
             esac
+            # Task 6 scope ruling -- RECORDED EXCEPTION: this arm's write
+            # statements below keep their hardcoded acore_world literals (both
+            # as the _db_write_stmt argument and INSIDE the schema-adaptive
+            # information_schema/PREPARE statements), because they are a port
+            # of the manager's fix whose SQL hardcodes the standard names. On
+            # a renamed server the writes refuse at _db_write_stmt's
+            # resolved-trio allowlist -- the honest outcome. Reads ride the
+            # resolved wrappers like everything else.
+            _db_names_require
             # Per-map idempotence: COUNT the entry-90100 spawns in EACH capital
             # SEPARATELY (map 0 = Stormwind, map 1 = Orgrimmar). A single
             # COUNT(*) across both maps reported already_placed as soon as
@@ -6088,6 +6167,11 @@ case "$cmd" in
             done <<< "$specs"
             # entry is shared across maps (format: map|entry|x|y|z|o).
             IFS='|' read -r pn_m0 pn_entry pn_junk <<< "${pn_specs[0]}"
+            # Task 6 scope ruling -- RECORDED EXCEPTION: the spawn INSERTs
+            # below keep their hardcoded acore_world argument (module-owned
+            # NPC templates; same reasoning as fixit above). On a renamed
+            # server they refuse at _db_write_stmt's resolved-trio allowlist.
+            _db_names_require
             # Template guard: never leave an orphan spawn pointing at a missing
             # creature_template (that is exactly what fixit exists to create for
             # battlepass). This is query #1 -- the per-map counts follow.
@@ -6594,6 +6678,7 @@ case "$cmd" in
             *) json_err BAD_ARG "Unknown flag: $1" "Usage: dml wow stats --json"; exit 1 ;;
           esac
         done
+        _db_names_require
         if st_payload="$(_stats_payload)"; then
           json_ok "$st_payload"
         else
