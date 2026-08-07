@@ -509,9 +509,10 @@ pub fn db_err_to_cmd(e: crate::db::DbError) -> CmdError {
             code: crate::db::ERR_DB_NAMES_UNRESOLVED.into(),
             message: e.to_string(),
             // Names DML_GAMES_DIR, because on the CLI that is the likeliest
-            // cause by far: with it unset the title dir resolves to a RELATIVE
-            // `./wow-server-playerbots` (config.rs), so a command run from any
-            // other directory refuses. A hint that only describes the symptom
+            // cause by far: with it unset the title dir falls back (`$HOME/
+            // games` off Windows, a RELATIVE `./wow-server-playerbots` on it —
+            // see `dml_core::compose::games_dir_from`), so a command run
+            // outside that one directory refuses. A hint that only describes the symptom
             // leaves the user editing a conf that was never the problem.
             // (The launcher is unaffected — startup.rs exports the var into its
             // own process before any in-process DB read.)

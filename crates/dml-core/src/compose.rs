@@ -9,15 +9,90 @@
 
 use std::path::{Path, PathBuf};
 
-/// `GAMES_DIR` base -- same env var + fallback as `ConfigReader::
-/// title_dir_from_env()`, but generalized to an arbitrary title `id` rather
-/// than hardcoding `wow-server-playerbots` (mirrors `_games_resolve_or_fail`'s
-/// `dir="$GAMES_DIR/$gid"`, which works for any installed title).
+/// The pure decision behind [`games_dir_from_env`].
+///
+/// Split out so both branches are testable on both platforms without
+/// `std::env::set_var`, which mutates process-global state every other test in
+/// the binary shares — and cargo runs them in parallel.
+///
+/// Empty is NOT a value: an empty `DML_GAMES_DIR` falls through to the home
+/// default rather than resolving to nothing. Treating empty as set is the
+/// `${VAR:-default}` trap this repo hit on 2026-07-29, where a test that set a
+/// stub's value empty to mean "printed nothing" silently got the default back
+/// and proved nothing.
+pub fn games_dir_from(env_value: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = env_value.filter(|s| !s.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    // Off Windows nothing exports DML_GAMES_DIR for a bare CLI invocation, so
+    // this fallback IS the answer, and a cwd-relative "." would resolve the
+    // server to wherever the process happened to start. bash's own resolution
+    // is `${DML_GAMES_DIR:-$HOME/games}` (`cli/src/00-head.sh`), so `$HOME/
+    // games` is the one answer the two CLIs can share.
+    if let Some(home) = home.filter(|s| !s.is_empty()) {
+        return PathBuf::from(home).join("games");
+    }
+    PathBuf::from(".")
+}
+
+/// Whether the `HOME` fallback applies on this platform.
+///
+/// Off Windows, `HOME` is the user's own variable and is exactly what we
+/// want. ON Windows it must be ignored: **Git for Windows sets `HOME`**, and
+/// this repo's own documented workflow runs Git Bash (it drives `wslpath`
+/// translation and the bats suite) — so honouring it would silently resolve
+/// the games directory to `C:\Users\<name>\games` for any invocation that
+/// does not go through the launcher (before `resolve_and_export()` has run,
+/// from a shell, or from a future entry point). That is a THIRD location,
+/// distinct from both the old `.` fallback and the native default
+/// `%USERPROFILE%\dml-native`. On Windows the launcher exports
+/// `DML_GAMES_DIR` before anything else runs, so there is no gap the
+/// fallback needs to cover there — the unset answer stays byte-identical to
+/// what it always was (`.`). `is_windows` is a plain argument (rather
+/// than an inline `cfg!(windows)`) so both branches are testable on either
+/// build platform.
+pub fn home_fallback(is_windows: bool, home: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
+    if is_windows {
+        None
+    } else {
+        home
+    }
+}
+
+/// THE ONE READ of `DML_GAMES_DIR` from the process environment.
+///
+/// `Some` only when the variable is set AND non-empty (the `${VAR-default}` vs
+/// `${VAR:-default}` distinction this repo was bitten by on 2026-07-29); `None`
+/// means "the user pinned nothing", which each caller answers in its own way:
+///
+///   * [`games_dir_from_env`] falls back (home, then `.`) — reads may miss;
+///   * `dml_wow::install_native::games_dir_for_install` REFUSES — a command
+///     that clones gigabytes must never guess;
+///   * the launcher's `startup::resolve_and_export` moves on to
+///     `~/.dml/launcher.json` and then to auto-detection, and exports the
+///     answer so every child process sees a pinned value.
+///
+/// It exists as a named function, rather than three `var_os` calls that happen
+/// to agree, because they DIDN'T agree: `ConfigReader::title_dir_from_env`
+/// carried a second copy of this resolution whose fallback was the CURRENT
+/// WORKING DIRECTORY, so a bare CLI invocation — nothing exports
+/// `DML_GAMES_DIR` for those, and a Windows-side value does not cross
+/// `wsl.exe` — had every file-backed read answer `ok:true` off a title dir
+/// that does not exist. The Config page showed 1x rates on a server running
+/// 3x, with no error to notice (live differential smoke, 2026-08-04, on the
+/// arch-backend sibling branch). A test pins the count of production readers;
+/// see `startup.rs`'s `games_dir_reader_scan_tests`.
+pub fn games_dir_override() -> Option<std::ffi::OsString> {
+    std::env::var_os("DML_GAMES_DIR").filter(|s| !s.is_empty())
+}
+
+/// `GAMES_DIR` base -- the resolution `dml_wow::config::ConfigReader::
+/// title_dir_from_env()` now defers to, generalized to an arbitrary title `id`
+/// rather than hardcoding `wow-server-playerbots` (mirrors
+/// `_games_resolve_or_fail`'s `dir="$GAMES_DIR/$gid"`, which works for any
+/// installed title).
 pub fn games_dir_from_env() -> PathBuf {
-    std::env::var_os("DML_GAMES_DIR")
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    games_dir_from(games_dir_override(), home_fallback(cfg!(windows), std::env::var_os("HOME")))
 }
 
 /// `$GAMES_DIR/$gid` (`90-main.sh:174`).
@@ -143,6 +218,86 @@ pub fn compose_sequence_for_mode(mode: &str) -> Vec<Vec<&'static str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    /// The override seam every parity/bats/integration suite injects.
+    #[test]
+    fn the_env_var_wins_over_everything() {
+        // Forward slashes work on BOTH platforms; a backslash literal would be
+        // Windows-only (test-portability rule).
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), os("/home/dml")),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+    }
+
+    /// Empty is not a value. `:-`-style "empty means unset" has bitten this
+    /// repo before (the tailscale stub, 2026-07-29), so pin the direction.
+    #[test]
+    fn an_empty_env_var_falls_through_rather_than_resolving_to_nothing() {
+        assert_eq!(games_dir_from(os(""), os("/home/dml")), PathBuf::from("/home/dml/games"));
+    }
+
+    /// For a bare CLI invocation nothing exports DML_GAMES_DIR, so the
+    /// fallback IS the answer. `.` would put a server wherever the process
+    /// happened to start — and disagree with bash's `${DML_GAMES_DIR:-$HOME/
+    /// games}` (`cli/src/00-head.sh:9`).
+    #[test]
+    fn the_fallback_is_the_home_games_dir_not_the_cwd() {
+        let got = games_dir_from(None, os("/home/dml"));
+        assert_eq!(got, PathBuf::from("/home/dml/games"));
+        assert_ne!(got, PathBuf::from("."), "a cwd-relative default is the bug this fixes");
+    }
+
+    /// No env var and no home is the one case with nothing to go on. `.` is
+    /// the honest answer there — inventing a path would be worse.
+    #[test]
+    fn no_home_and_no_override_is_still_the_cwd() {
+        assert_eq!(games_dir_from(None, None), PathBuf::from("."));
+        assert_eq!(games_dir_from(None, os("")), PathBuf::from("."));
+    }
+
+    // -- the platform gate on HOME -------------------------------------------
+    //
+    // Git for Windows sets HOME, so a Windows build must never honour it as
+    // the games-dir fallback -- it would silently resolve to
+    // `C:\Users\<name>\games`, a third location distinct from both the old
+    // `.` fallback and the native default `%USERPROFILE%\dml-native`.
+
+    /// On Windows, a set HOME must be ignored -- Git for Windows sets it, and
+    /// honouring it is the exact bug this gate exists to prevent. This is also
+    /// what keeps the Windows unset answer byte-identical to what it was
+    /// before the home fallback existed.
+    #[test]
+    fn windows_ignores_a_set_home() {
+        assert_eq!(home_fallback(true, os("/home/dml")), None);
+    }
+
+    /// Off Windows, HOME is the user's own variable and is exactly what we
+    /// want -- honour it unchanged.
+    #[test]
+    fn non_windows_honours_home() {
+        assert_eq!(home_fallback(false, os("/home/dml")), os("/home/dml"));
+    }
+
+    /// DML_GAMES_DIR still wins over the home fallback on both platforms --
+    /// this exercises the gate feeding into the full decision, not just the
+    /// gate in isolation.
+    #[test]
+    fn env_var_wins_regardless_of_platform() {
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), home_fallback(true, os("C:/Users/dml"))),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+        assert_eq!(
+            games_dir_from(os("/tmp/dml-games-test"), home_fallback(false, os("/home/dml"))),
+            PathBuf::from("/tmp/dml-games-test")
+        );
+    }
 
     // -- title/compose-dir resolution --------------------------------------
     //

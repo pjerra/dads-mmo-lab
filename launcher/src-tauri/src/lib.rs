@@ -5702,8 +5702,11 @@ fn yq_target_path() -> std::path::PathBuf {
             return std::path::PathBuf::from(p);
         }
     }
-    let base = std::env::var_os("DML_GAMES_DIR")
-        .filter(|s| !s.is_empty())
+    // Deliberately NOT `games_dir_from_env()`: this chain carries the
+    // native-mode default `%USERPROFILE%\dml-native`, which the core resolver
+    // has no business knowing, and which the core's Windows answer (`.`) would
+    // silently replace. So it takes the OVERRIDE and keeps its own tail.
+    let base = dml_core::compose::games_dir_override()
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("USERPROFILE").map(|u| std::path::PathBuf::from(u).join("dml-native"))
@@ -6012,7 +6015,7 @@ fn native_defender_script() -> Result<String, CmdError> {
     if let Some(d) = docker_bin_dir_for_exclusion() {
         paths.push(d);
     }
-    if let Some(g) = std::env::var_os("DML_GAMES_DIR").filter(|s| !s.is_empty()) {
+    if let Some(g) = dml_core::compose::games_dir_override() {
         paths.push(g.to_string_lossy().into_owned());
     }
     let refs: Vec<&str> = paths.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
@@ -8730,7 +8733,7 @@ mod tests {
 /// WINDOWS CI job only — the ubuntu job builds the three crates, not the
 /// launcher. Do not later read a green ubuntu run as coverage for it.
 #[cfg(test)]
-mod stop_outcome_scan_tests {
+pub(crate) mod stop_outcome_scan_tests {
     /// Rust source with comments removed. MANDATORY, and this repo has been
     /// bitten TWICE by skipping it: `feature-keys.test.ts` read a comment as a
     /// call site, and `Test-InstallerNative.ps1` read the installer's own
@@ -8742,7 +8745,11 @@ mod stop_outcome_scan_tests {
     /// String and char literals are preserved (the argv literals ARE the data);
     /// raw strings and escapes are tracked so a `//` inside one is not mistaken
     /// for a comment.
-    fn strip_comments(src: &str) -> String {
+    ///
+    /// `pub(crate)` so `startup::games_dir_reader_scan_tests` shares it rather
+    /// than growing a second stripper: two of these would drift, and the whole
+    /// point of both scans is that a comment must never read as a call site.
+    pub(crate) fn strip_comments(src: &str) -> String {
         let b = src.as_bytes();
         let mut out = String::with_capacity(src.len());
         let mut i = 0usize;
@@ -8858,7 +8865,9 @@ mod stop_outcome_scan_tests {
     ///
     /// Input must already be comment-stripped, so a `{` inside prose cannot
     /// unbalance the match.
-    fn strip_cfg_test(code: &str) -> String {
+    ///
+    /// `pub(crate)` for the same sharing reason as [`strip_comments`].
+    pub(crate) fn strip_cfg_test(code: &str) -> String {
         let attr: Vec<char> = "#[cfg(test)]".chars().collect();
         let b: Vec<char> = code.chars().collect();
         let mut out = String::with_capacity(code.len());

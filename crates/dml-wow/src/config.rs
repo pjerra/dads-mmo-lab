@@ -178,16 +178,31 @@ pub struct ConfigReader {
 }
 
 impl ConfigReader {
-    /// Title dir from `DML_GAMES_DIR` + `wow-server-playerbots` (the task's
-    /// resolution, matching `_wow_server_dir`). Absent `DML_GAMES_DIR` yields a
-    /// bare relative path, so reads simply miss and values fall back to
-    /// defaults rather than panicking.
+    /// Title dir for the one title this crate drives — `<games dir>/
+    /// wow-server-playerbots`, matching bash's `_wow_server_dir`.
+    ///
+    /// A DELEGATION, not a resolution. It used to carry its own copy of the
+    /// games-dir lookup, and that copy fell back to `PathBuf::from(".")` — the
+    /// process's current working directory — while
+    /// [`dml_core::compose::games_dir_from_env`] and bash's
+    /// `${DML_GAMES_DIR:-$HOME/games}` (`cli/src/00-head.sh:9`) both fall back
+    /// to `$HOME/games`. For a bare CLI invocation nothing exports
+    /// `DML_GAMES_DIR` and a Windows-side value does not cross the `wsl.exe`
+    /// boundary (no `WSLENV` entry), so the fallback is what runs, and the
+    /// cwd is never the games dir. The result was the worst available shape:
+    /// `ok:true` with registry DEFAULTS — the Config page reporting 1x XP on a
+    /// 3x server, 500 bots on a 2000-bot server, with no error, no warning and
+    /// no empty result to notice (live differential smoke, 2026-08-04, on the
+    /// arch-backend sibling branch).
+    ///
+    /// Roughly twenty call sites across this crate route through here (config,
+    /// tuning, modules, ahbot, bridge, lan, maint, modmgr, restore,
+    /// destructive, and `db::DbConfig::from_env`, which is why the DB verbs
+    /// would otherwise dial 3306 instead of the port in the title's own
+    /// `.env`). They are all fixed by this one line, and they must stay that
+    /// way: the games dir is decided ONCE, in `dml_core::compose`.
     pub fn title_dir_from_env() -> PathBuf {
-        let base = std::env::var_os("DML_GAMES_DIR")
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        base.join(TITLE)
+        dml_core::compose::title_dir_for_id(TITLE)
     }
 
     /// Construct from an explicit title dir, eagerly loading the override env

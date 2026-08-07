@@ -809,8 +809,9 @@ pub fn dispatch(command: Cmd) -> i32 {
                 return emit_err(&e.code, &e.message, &e.hint);
             }
             // `games_dir_for_install`, never `games_dir_from_env`: the latter
-            // falls back to the process's cwd, and this command restores a
-            // database into whatever it finds there.
+            // falls back (home off Windows, the process's cwd on it — where
+            // this command actually runs), and this command restores a
+            // database into whatever directory the fallback invents.
             let games_dir = match dml_wow::migrate::games_dir() {
                 Ok(d) => d,
                 Err(e) => return emit_err(&e.code, &e.message, &e.hint),
@@ -846,11 +847,12 @@ pub fn dispatch(command: Cmd) -> i32 {
                 let e = bad_id(&id);
                 return emit_err(&e.code, &e.message, &e.hint);
             }
-            // NOT `games_dir_from_env()`: that falls back to the process's cwd,
+            // NOT `games_dir_from_env()`: that falls back (home off Windows,
+            // the process's cwd on it — where this command actually runs),
             // which is harmless for the reading commands that use it and wrong
             // for one that clones gigabytes. `games_dir_for_install` refuses
             // instead, and the rule lives in the library so the launcher cannot
-            // reintroduce the cwd default when it wires this up.
+            // reintroduce an inferred default when it wires this up.
             let games_dir = match dml_wow::install_native::games_dir_for_install() {
                 Ok(d) => d,
                 Err(e) => return emit_err(&e.code, &e.message, &e.hint),
