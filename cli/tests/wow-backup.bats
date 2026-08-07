@@ -149,7 +149,7 @@ _seed_backup() {
   run bash "$DML" wow backup restore --file wow-20250101-120000.sql.gz --json
   [ "$status" -eq 1 ]
   echo "$output" | grep -q '"code":"BACKUP_FAILED"'
-  ! grep -q 'mysqldump' "$DML_STUB_CALL_LOG"
+  [ "$(grep -c 'mysqldump' "$DML_STUB_CALL_LOG")" = "0" ]
   ! grep -q 'mysql-import' "$DML_STUB_CALL_LOG"
 }
 

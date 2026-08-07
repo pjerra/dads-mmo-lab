@@ -108,9 +108,13 @@ seed_two_bots() {
   export DML_STUB_DB_QUERY_LOG="$FIXTURE/q.log"
   run bash "$DML" wow bots list --json
   [ "$status" -eq 0 ]
-  ! grep -q 'LIKE' "$FIXTURE/q.log"
-  ! grep -q 'c.class =' "$FIXTURE/q.log"
-  ! grep -q 'c.level' "$FIXTURE/q.log"
+  # Filter SHAPES, not bare column/keyword greps: every bots-list query
+  # carries the bot-identity UPPER(username) LIKE '<prefix>%' clause and
+  # SELECTs c.level as a column, so 'LIKE' and 'c.level' can never be absent
+  # -- the old bare-! forms were masking exactly those false matches.
+  [ "$(grep -c 'c.name LIKE' "$FIXTURE/q.log")" = "0" ]
+  [ "$(grep -c 'c.class =' "$FIXTURE/q.log")" = "0" ]
+  [ "$(grep -cE 'c\.level (BETWEEN|>=|<=)' "$FIXTURE/q.log")" = "0" ]
   ! grep -q 'c.online = 1' "$FIXTURE/q.log"
 }
 

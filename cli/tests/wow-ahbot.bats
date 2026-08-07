@@ -121,8 +121,8 @@ EOF
   grep -q '^AuctionHouseBot.GUIDs = 7$' "$AHCONF"
   grep -q '^AuctionHouseBot.EnableSeller = 1$' "$AHCONF"
   grep -q '^AuctionHouseBot.Buyer.Enabled = 1$' "$AHCONF"
-  ! grep -qE '^AuctionHouseBot\.Account' "$AHCONF"
-  ! grep -qE '^AuctionHouseBot\.GUID ' "$AHCONF"
+  [ "$(grep -cE '^AuctionHouseBot\.Account' "$AHCONF")" = "0" ]
+  [ "$(grep -cE '^AuctionHouseBot\.GUID ' "$AHCONF")" = "0" ]
   ! grep -qE '^AuctionHouseBot\.EnableBuyer' "$AHCONF"
 }
 

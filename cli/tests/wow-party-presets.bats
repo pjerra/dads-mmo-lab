@@ -165,7 +165,7 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ "$status" -eq 0 ]
   # The add phase still fired; the bad name produced NO uninvite/logout fire.
   grep -q 'dml_addclass Testen mage' "$FIXTURE/allcaps.txt"
-  ! grep -q 'dml_uninvite' "$FIXTURE/allcaps.txt"
+  [ "$(grep -c 'dml_uninvite' "$FIXTURE/allcaps.txt")" = "0" ]
   ! grep -q 'Bad;Name' "$FIXTURE/allcaps.txt"
 }
 
