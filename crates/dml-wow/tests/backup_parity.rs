@@ -278,7 +278,8 @@ fn native_created_backup_is_readable_and_deletable_by_bash() {
     let out_path = bdir.join(&file);
     let _guard = CleanupGuard(out_path.clone());
 
-    backup::dump_to(&program, &cfg.password, false, &out_path)
+    let names = cfg.names().expect("the live server resolves its schema names").clone();
+    backup::dump_to(&program, &cfg.password, false, &out_path, &names)
         .unwrap_or_else(|e| panic!("native dump_to failed against the live DB: {e}"));
     backup::write_meta(&cfg, &out_path, None);
     let expected_size = std::fs::metadata(&out_path).expect("stat native backup").len();

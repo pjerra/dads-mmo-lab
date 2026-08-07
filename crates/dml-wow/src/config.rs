@@ -118,12 +118,36 @@ pub fn parse_override_env(yaml_text: &str) -> HashMap<String, String> {
         .get("services")
         .and_then(|s| s.get("ac-worldserver"))
         .and_then(|w| w.get("environment"));
-    if let Some(serde_yaml_ng::Value::Mapping(m)) = env {
-        for (k, v) in m {
-            if let Some(key) = k.as_str() {
-                map.insert(key.to_string(), yaml_scalar_to_string(v));
+    match env {
+        Some(serde_yaml_ng::Value::Mapping(m)) => {
+            for (k, v) in m {
+                if let Some(key) = k.as_str() {
+                    map.insert(key.to_string(), yaml_scalar_to_string(v));
+                }
             }
         }
+        // Compose's equally-legal LIST form: `environment:` as a sequence of
+        // `KEY=value` strings, split at the FIRST `=` (the value may itself
+        // contain `=`); non-string items and `=`-less entries are ignored, the
+        // same "a valid nothing" posture as the arms above (Task 6). A
+        // list-form compose used to parse as an EMPTY map, silently falling
+        // the schema-name resolution back to the stock conf — the exact
+        // wrong-source bug the env tier exists to beat. NB this widens
+        // `compute_value`'s env map too (both maps are built by this one
+        // parser): that cross-surface behaviour change is INTENDED, and bash's
+        // `_cfg_env_load_map` yq program gains the matching sequence branch in
+        // chunk B1 of the same task — the two surfaces learn the form
+        // together.
+        Some(serde_yaml_ng::Value::Sequence(items)) => {
+            for item in items {
+                if let Some(entry) = item.as_str() {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        map.insert(k.to_string(), v.to_string());
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     map
 }
@@ -288,9 +312,15 @@ impl ConfigReader {
     }
 
     /// The live value of one `*DatabaseInfo` conf key
-    /// (`LoginDatabaseInfo`/`WorldDatabaseInfo`/`CharacterDatabaseInfo`),
+    /// (`LoginDatabaseInfo`/`WorldDatabaseInfo`/`CharacterDatabaseInfo` in
+    /// `worldserver.conf`, `PlayerbotsDatabaseInfo` in the module conf
+    /// `playerbots.conf` — `conf_file` names which file the conf tiers read;
+    /// [`conf_path_in`] already routes module confs to `env/dist/etc/modules/`),
     /// resolved the way the SERVER resolves it — which is NOT the way
-    /// [`Self::compute_value`] does.
+    /// [`Self::compute_value`] does. The env tiers are file-agnostic: AC's
+    /// env bridge covers module-conf keys too (the live server's own log
+    /// records taking `PlayerbotsDatabaseInfo` from
+    /// `AC_PLAYERBOTS_DATABASE_INFO`).
     ///
     /// Same three tiers, in the same order (env → live conf → `.dist`), and
     /// the same [`env_name_for`] derivation, but the env tier is the FULL
@@ -315,7 +345,7 @@ impl ConfigReader {
     ///    loads the OVERRIDE alone, and the `config list` parity suite pins it.
     ///
     /// `None` — never a guessed name — when no tier answers.
-    pub fn database_info_value(&mut self, conf_key: &str) -> Option<String> {
+    pub fn database_info_value(&mut self, conf_file: &str, conf_key: &str) -> Option<String> {
         let ename = env_name_for(conf_key);
         for map in [&self.env_map, &self.base_env_map] {
             if let Some(v) = map.get(&ename).filter(|v| !v.is_empty()) {
@@ -324,14 +354,14 @@ impl ConfigReader {
         }
         // `conf_path_in` has NO `.dist` fallback of its own — every caller adds
         // one (`compute_value` above, `tuning.rs`) — and this one must too: a
-        // `worldserver.conf` that exists but omits a `*DatabaseInfo` key is
-        // LEGAL, because AC merges the `.conf` over the `.conf.dist`.
-        let path = self.conf_path("worldserver.conf");
+        // conf that exists but omits a `*DatabaseInfo` key is LEGAL, because
+        // AC merges the `.conf` over the `.conf.dist`.
+        let path = self.conf_path(conf_file);
         let live = self.conf_value(&path, conf_key);
         if !live.is_empty() {
             return Some(live);
         }
-        let dist = path.with_file_name("worldserver.conf.dist");
+        let dist = path.with_file_name(format!("{conf_file}.dist"));
         let from_dist = self.conf_value(&dist, conf_key);
         if from_dist.is_empty() { None } else { Some(from_dist) }
     }
@@ -1606,6 +1636,77 @@ services:
         assert!(parse_override_env("").is_empty());
         assert!(parse_override_env("services: {}").is_empty());
         assert!(parse_override_env(": : not : yaml : [").is_empty());
+    }
+
+    /// Compose's LIST form (`- KEY=value`) is equally legal and used to parse
+    /// as an EMPTY map — silently falling schema-name resolution back to the
+    /// stock conf, the exact wrong-source bug the env tier exists to beat
+    /// (Task 6). Split at the FIRST `=`: a `DatabaseInfo` value carries
+    /// semicolons and may carry `=` in the password.
+    #[test]
+    fn parse_override_env_reads_the_list_form() {
+        let yaml = "\
+services:
+  ac-worldserver:
+    environment:
+      - AC_WORLD_DATABASE_INFO=ac-database;3306;root;p=w;my_world
+      - AC_SOAP_IP=0.0.0.0
+";
+        let m = parse_override_env(yaml);
+        assert_eq!(
+            m.get("AC_WORLD_DATABASE_INFO").map(String::as_str),
+            Some("ac-database;3306;root;p=w;my_world"),
+            "split at the FIRST '=' only — the value keeps its own"
+        );
+        assert_eq!(m.get("AC_SOAP_IP").map(String::as_str), Some("0.0.0.0"));
+    }
+
+    /// Junk entries in a list-form environment are ignored, not fatal — the
+    /// same "a valid nothing" posture the mapping arm has for non-scalar
+    /// values. The well-formed neighbours still land.
+    #[test]
+    fn parse_override_env_list_form_ignores_junk_entries() {
+        let yaml = "\
+services:
+  ac-worldserver:
+    environment:
+      - JUSTAKEY
+      - 42
+      - [nested, list]
+      - AC_RATE_XP_KILL=3
+";
+        let m = parse_override_env(yaml);
+        assert_eq!(m.len(), 1, "only the KEY=value entry lands: {m:?}");
+        assert_eq!(m.get("AC_RATE_XP_KILL").map(String::as_str), Some("3"));
+    }
+
+    /// The end-to-end consequence for the DB path: a hand-written list-form
+    /// compose resolves its `AC_*_DATABASE_INFO` names, beating a stock conf
+    /// — byte-identical behaviour to the mapping form.
+    #[test]
+    fn list_form_compose_resolves_database_names() {
+        let dir = std::env::temp_dir()
+            .join(format!("dml-listform-dbnames-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("docker-compose.yml"),
+            "\
+services:
+  ac-worldserver:
+    environment:
+      - AC_LOGIN_DATABASE_INFO=h;3306;u;p;list_auth
+      - AC_WORLD_DATABASE_INFO=h;3306;u;p;list_world
+      - AC_CHARACTER_DATABASE_INFO=h;3306;u;p;list_chars
+",
+        )
+        .unwrap();
+        let n = crate::db::database_names_for_title(&dir).expect("the list form resolves");
+        assert_eq!(
+            (n.auth.as_str(), n.world.as_str(), n.characters.as_str()),
+            ("list_auth", "list_world", "list_chars")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -- override_env_write / override_env_remove -----------------------

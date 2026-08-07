@@ -345,9 +345,19 @@ fn interval_backup_tick(last_run: &Arc<Mutex<Option<u64>>>) {
         return;
     }
     let db_cfg = db::DbConfig::from_env();
+    // Unresolved schema names skip this tick (and log why) rather than
+    // dumping guessed schemas — `last_run` stays untouched so the next tick
+    // retries, same as a failed dump.
+    let names = match db_cfg.names() {
+        Ok(n) => n.clone(),
+        Err(e) => {
+            eprintln!("[dml] interval auto-backup skipped: {e}");
+            return;
+        }
+    };
     let file_name = backup::new_backup_file_name(false);
     let out_path = bdir.join(&file_name);
-    match backup::dump_to(&program, &db_cfg.password, false, &out_path) {
+    match backup::dump_to(&program, &db_cfg.password, false, &out_path, &names) {
         Ok(()) => {
             backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_INTERVAL_NAME));
             let _ = backup::prune(&bdir);
@@ -1204,6 +1214,11 @@ async fn wow_module_fixit_native(key: String) -> Result<serde_json::Value, CmdEr
 
         let template = if tcnt == 0 {
             let docker_program = dml_wow::native::docker_program();
+            // Task 6 ruling: the `"acore_world"` argv (and the acore_world
+            // literals inside the BATTLEPASS_* statements) stay STANDARD on
+            // purpose — the module subsystem is the recorded exception to
+            // resolved-name splicing, because the module's own SQL hardcodes
+            // the standard names internally. See `modmgr::mysql_run_stmt`.
             if !dml_wow::modmgr::mysql_run_stmt(&docker_program, &cfg.password, "acore_world", mt::BATTLEPASS_TEMPLATE_INSERT_SQL) {
                 return Err(CmdError {
                     code: "SQL_FAILED".into(),
@@ -2091,13 +2106,22 @@ async fn wow_achievements_read(char_name: String) -> Result<serde_json::Value, C
 /// Map a native-mode stats [`dml_wow::db::DbError`] to a [`CmdError`] whose
 /// code matches the CLI's `stats` arm: that arm reports `DB_UNREACHABLE` for
 /// EVERY payload failure (including a query error on a reachable DB — see the
-/// "honest hint" branch in 90-main.sh), so both DbError variants collapse to
+/// "honest hint" branch in 90-main.sh), so `Unreachable`/`Query` collapse to
 /// `DB_UNREACHABLE` here to stay byte-identical to `dml wow stats`.
+///
+/// `NamesUnresolved` is NOT part of that collapse — the same carve-out
+/// [`db_err_to_cmd`] has, delegated to it so the copy cannot drift: bash has
+/// no such failure mode to be byte-identical with, and folding it in told the
+/// Statistics page "Is ac-database running?" about a server whose config
+/// never named its schemas (Task 6 fix).
 fn stats_err_to_cmd(e: dml_wow::db::DbError) -> CmdError {
-    CmdError {
-        code: "DB_UNREACHABLE".into(),
-        message: e.to_string(),
-        hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+    match e {
+        dml_wow::db::DbError::NamesUnresolved(_) => db_err_to_cmd(e),
+        _ => CmdError {
+            code: "DB_UNREACHABLE".into(),
+            message: e.to_string(),
+            hint: "Is ac-database running? (native mode reads MySQL directly on 127.0.0.1)".into(),
+        },
     }
 }
 
@@ -8309,22 +8333,36 @@ mod tests {
     }
 
     #[test]
-    fn db_err_to_cmd_collapses_every_variant_to_db_unreachable() {
+    fn db_err_to_cmd_collapses_reachability_variants_but_not_names_unresolved() {
         // Finding #5: the bash arms these commands mirror can only ever emit
         // DB_UNREACHABLE (90-main.sh has no separate "connected but the query
         // failed" code for teleport-list/bots/accounts/paperdoll), so a native
         // DbError::Query must collapse to the same code, not surface
-        // DB_QUERY_FAILED and diverge from the CLI.
+        // DB_QUERY_FAILED and diverge from the CLI. NamesUnresolved is the
+        // deliberate carve-out (native-only failure mode, different fix) —
+        // the old name of this test overclaimed "every variant".
         use dml_wow::db::DbError;
         assert_eq!(db_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
         assert_eq!(db_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
+        assert_eq!(
+            db_err_to_cmd(DbError::NamesUnresolved("no names".into())).code,
+            "DB_NAMES_UNRESOLVED"
+        );
     }
 
     #[test]
-    fn stats_err_to_cmd_collapses_every_variant_to_db_unreachable() {
+    fn stats_err_to_cmd_collapses_reachability_variants_but_not_names_unresolved() {
+        // Task 6: stats used to collapse NamesUnresolved too, so the
+        // Statistics page said "Is ac-database running?" about a healthy
+        // server whose config never named its schemas. The carve-out is
+        // DELEGATED to db_err_to_cmd — assert the code AND the hint, so a
+        // reimplementation that keeps the code but drifts the copy reddens.
         use dml_wow::db::DbError;
         assert_eq!(stats_err_to_cmd(DbError::Unreachable("down".into())).code, "DB_UNREACHABLE");
         assert_eq!(stats_err_to_cmd(DbError::Query("bad sql".into())).code, "DB_UNREACHABLE");
+        let carved = stats_err_to_cmd(DbError::NamesUnresolved("no names".into()));
+        assert_eq!(carved.code, "DB_NAMES_UNRESOLVED");
+        assert_eq!(carved.hint, db_err_to_cmd(DbError::NamesUnresolved("no names".into())).hint);
     }
 
     // -- Task A2b: native SOAP command fault-mapping helpers -----------------

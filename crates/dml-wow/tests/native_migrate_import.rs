@@ -84,6 +84,21 @@ fn uncommented(yaml: &str) -> String {
         .join("\n")
 }
 
+/// The SQL the engine asks its emptiness/verification questions with, built
+/// through the SAME resolved-name builders production uses (Task 6). The
+/// stock `acore_*` arguments are what the engine's own generated compose
+/// resolves to in these fixtures — `do_generate` writes the base compose
+/// (with its `AC_*_DATABASE_INFO` entries) before `db-restore` asks anything.
+fn table_present_sql() -> String {
+    migrate::sql_table_present("acore_characters")
+}
+fn character_count_sql() -> String {
+    migrate::sql_character_count("acore_characters")
+}
+fn account_count_sql() -> String {
+    migrate::sql_account_count("acore_auth")
+}
+
 fn opts(games: &Path) -> MigrateOpts {
     MigrateOpts {
         id: migrate::DEFAULT_TITLE_ID.to_string(),
@@ -173,9 +188,9 @@ fn happy() -> FakeIo {
     io.set(&["compose", "ps", "-a", "-q", "ac-worldserver"], 0, "world-container-id\n");
     io.set(&["logs"], 0, "World initialised in 12 seconds.\nWorld Initialized In 12s\n");
     // Fresh target: information_schema reports no characters table.
-    io.set(&[migrate::SQL_TABLE_PRESENT], 0, "0\n");
-    io.set(&[migrate::SQL_CHARACTER_COUNT], 0, "2505\n");
-    io.set(&[migrate::SQL_ACCOUNT_COUNT], 0, "255\n");
+    io.set(&[table_present_sql().as_str()], 0, "0\n");
+    io.set(&[character_count_sql().as_str()], 0, "2505\n");
+    io.set(&[account_count_sql().as_str()], 0, "255\n");
     io
 }
 
@@ -190,7 +205,7 @@ impl InstallIo for FakeIo {
         let joined = call.args.join(" ");
         self.calls.borrow_mut().push(call.args.clone());
 
-        if joined.contains(migrate::SQL_TABLE_PRESENT) {
+        if joined.contains(table_present_sql().as_str()) {
             *self.emptiness_asked.borrow_mut() = true;
         }
 
@@ -310,7 +325,7 @@ fn the_docker_calls_happen_in_the_order_the_stack_needs() {
     let shell = io.find(&["compose", "up", "--no-start"]).expect("the shell is created");
     let volume = io.find(&["run", "--rm", "client-data.tar"]).expect("the volume is restored");
     let db_up = io.find(&["compose", "up", "-d", "ac-database"]).expect("the database starts");
-    let ask = io.find(&[migrate::SQL_TABLE_PRESENT]).expect("emptiness is asked");
+    let ask = io.find(&[table_present_sql().as_str()]).expect("emptiness is asked");
     // NB the joined argv is `compose -p <project> up -d`, so this cannot be a
     // substring match on "compose up -d" -- it reads the argv vector instead.
     let full_up = io
@@ -428,8 +443,8 @@ fn it_refuses_a_target_that_already_holds_characters() {
     write_export(&title);
 
     let io = happy();
-    io.set(&[migrate::SQL_TABLE_PRESENT], 0, "1\n"); // the table is there...
-    io.set(&[migrate::SQL_CHARACTER_COUNT], 0, "2505\n"); // ...with somebody's server in it
+    io.set(&[table_present_sql().as_str()], 0, "1\n"); // the table is there...
+    io.set(&[character_count_sql().as_str()], 0, "2505\n"); // ...with somebody's server in it
 
     let (rc, events) = run_import(&io, &opts(&games));
     assert_eq!(rc, 1);
@@ -450,7 +465,7 @@ fn a_database_that_cannot_answer_is_a_refusal_too() {
     write_export(&title);
 
     let io = happy();
-    io.set(&[migrate::SQL_TABLE_PRESENT], 1, "ERROR 2002 (HY000): Can't connect\n");
+    io.set(&[table_present_sql().as_str()], 1, "ERROR 2002 (HY000): Can't connect\n");
 
     let (rc, events) = run_import(&io, &opts(&games));
     assert_eq!(rc, 1);
@@ -467,8 +482,8 @@ fn an_existing_but_empty_characters_table_is_still_importable() {
     write_export(&title);
 
     let io = happy();
-    io.set(&[migrate::SQL_TABLE_PRESENT], 0, "1\n");
-    io.set(&[migrate::SQL_CHARACTER_COUNT], 0, "0\n");
+    io.set(&[table_present_sql().as_str()], 0, "1\n");
+    io.set(&[character_count_sql().as_str()], 0, "0\n");
 
     let (rc, events) = run_import(&io, &opts(&games));
     assert_eq!(rc, 0, "{:#?}", terminal(&events));
@@ -513,13 +528,13 @@ fn a_resume_does_not_re_ask_a_question_it_already_answered() {
 
     // Now the database is FULL — exactly what a re-run sees.
     let io = happy();
-    io.set(&[migrate::SQL_TABLE_PRESENT], 0, "1\n");
-    io.set(&[migrate::SQL_CHARACTER_COUNT], 0, "2505\n");
+    io.set(&[table_present_sql().as_str()], 0, "1\n");
+    io.set(&[character_count_sql().as_str()], 0, "2505\n");
 
     let (rc, events) = run_import(&io, &opts(&games));
     assert_eq!(rc, 0, "a resume must not refuse the data it restored: {:#?}", terminal(&events));
     assert!(
-        !io.made(&[migrate::SQL_TABLE_PRESENT]),
+        !io.made(&[table_present_sql().as_str()]),
         "the recorded stage should make the question unnecessary, not merely survivable"
     );
 }
@@ -549,8 +564,8 @@ fn a_state_file_from_another_directory_is_not_trusted() {
     assert!(migrate::load_state(&title).is_none(), "a foreign state file must be refused");
 
     let io = happy();
-    io.set(&[migrate::SQL_TABLE_PRESENT], 0, "1\n");
-    io.set(&[migrate::SQL_CHARACTER_COUNT], 0, "2505\n");
+    io.set(&[table_present_sql().as_str()], 0, "1\n");
+    io.set(&[character_count_sql().as_str()], 0, "2505\n");
     let (rc, events) = run_import(&io, &opts(&games));
     assert_eq!(rc, 1, "the guard must still run");
     assert_eq!(err_code(&events), migrate::CODE_TARGET_NOT_EMPTY);

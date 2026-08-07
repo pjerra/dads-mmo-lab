@@ -56,17 +56,19 @@ pub enum Database {
 impl Database {
     /// The schema name to `USE`, resolved from the server's own conf.
     ///
-    /// `Playerbots` is the one exception: it keeps its hardcoded
-    /// `"acore_playerbots"` because that name comes from a DIFFERENT evidence
-    /// source (`AC_PLAYERBOTS_DATABASE_INFO` in the compose env, not
-    /// `worldserver.conf`), and resolving it here would mix two sources for
-    /// one value. Follow-up: give it its own conf-resolution path.
-    pub fn name(self, names: &DatabaseNames) -> &str {
+    /// Returns `Option` because `Playerbots` is legitimately absent on a
+    /// server without mod-playerbots: its name resolves from its OWN chain
+    /// (compose `AC_PLAYERBOTS_DATABASE_INFO` → `playerbots.conf` → `.dist`,
+    /// see [`database_names_for_title`]) and `None` there means "this server
+    /// has no playerbots schema" — a legal state, refused only at USE
+    /// ([`DbConfig::opts`]), never by guessing `acore_playerbots`. The three
+    /// core names are required fields, so their arms are always `Some`.
+    pub fn name(self, names: &DatabaseNames) -> Option<&str> {
         match self {
-            Database::World => &names.world,
-            Database::Characters => &names.characters,
-            Database::Auth => &names.auth,
-            Database::Playerbots => "acore_playerbots",
+            Database::World => Some(&names.world),
+            Database::Characters => Some(&names.characters),
+            Database::Auth => Some(&names.auth),
+            Database::Playerbots => names.playerbots.as_deref(),
         }
     }
 }
@@ -74,12 +76,21 @@ impl Database {
 /// Error code when the server's own config could not answer.
 pub const ERR_DB_NAMES_UNRESOLVED: &str = "DB_NAMES_UNRESOLVED";
 
-/// The three schema names, read from the server's own config.
+/// The schema names, read from the server's own config.
+///
+/// The three core names are ALL-or-nothing (a server without them is
+/// unresolvable, see [`database_names_for_title`]). `playerbots` is
+/// `Option` because a server without mod-playerbots is legal: making it a
+/// required field would blanket-refuse Dashboard/Item DB/Characters —
+/// surfaces that never touch that schema — so its absence refuses only at
+/// the point of use (the `opts(Playerbots)` connection, the stats probe,
+/// the mysqldump set), never up front.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseNames {
     pub world: String,
     pub characters: String,
     pub auth: String,
+    pub playerbots: Option<String>,
 }
 
 /// The schema name out of a `host;port;user;pass;dbname` value.
@@ -95,6 +106,18 @@ pub struct DatabaseNames {
 /// error the user then sees is `db_err_to_cmd`'s "Is ac-database running?"
 /// about a server that is up and healthy. Refusing sends them to the conf
 /// instead. Found by the final branch review, 2026-08-06.
+///
+/// THE SQL-INJECTION GATE (Task 6). A resolved name must match
+/// `^[A-Za-z0-9_$]+$` (ASCII, MySQL's unquoted-identifier charset minus its
+/// non-ASCII range — conservative on purpose) or it is refused. Schema names
+/// are spliced into SQL text as IDENTIFIERS, which MySQL cannot `?`-bind, and
+/// the value being parsed here originates in user-writable text: the compose
+/// `environment:` is reachable through the launcher's own `config set`
+/// (`override_env_write`), and `worldserver.conf` is a plain file. This is
+/// the ONE choke point every production name flows through
+/// ([`database_names_for_title`]), so every downstream splice — dotted
+/// qualifiers, `table_schema='…'` literals, mysqldump argv — can trust the
+/// charset. Mirrors the repo's numeric-whitelist-before-splice doctrine.
 pub fn parse_database_info(line: &str) -> Option<&str> {
     let v = line.trim().trim_matches('"');
     // Count from the right, since the password may itself contain semicolons:
@@ -104,29 +127,46 @@ pub fn parse_database_info(line: &str) -> Option<&str> {
     }
     let (_, last) = v.rsplit_once(';')?;
     let last = last.trim();
-    if last.is_empty() { None } else { Some(last) }
+    if last.is_empty() {
+        return None;
+    }
+    if !last.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') {
+        return None;
+    }
+    Some(last)
 }
 
-/// Read all three names for a title dir, or refuse. Never a partial answer and
-/// never a default.
+/// Read the schema names for a title dir, or refuse. Never a partial answer
+/// for the core three and never a default.
 ///
 /// Each name comes from [`super::config::ConfigReader::database_info_value`] —
 /// the ONE place that knows the precedence the server itself applies (compose
-/// `AC_*_DATABASE_INFO` env → live `worldserver.conf` → `worldserver.conf.dist`).
-/// Resolving from the conf ALONE was the original bug: a DML native install
-/// carries the real names in the compose environment, and leaves
-/// `worldserver.conf` byte-identical to its stock `.dist`.
+/// `AC_*_DATABASE_INFO` env → live conf → its `.dist`). Resolving from the
+/// conf ALONE was the original bug: a DML native install carries the real
+/// names in the compose environment, and leaves the on-disk confs
+/// byte-identical to their stock `.dist`s.
+///
+/// `playerbots` resolves SEPARATELY, from the module's own conf file
+/// (`AC_PLAYERBOTS_DATABASE_INFO` → `playerbots.conf` `PlayerbotsDatabaseInfo`
+/// → `playerbots.conf.dist` → `None`) — the chain the live server provably
+/// applies (its own `Server.log` records taking `PlayerbotsDatabaseInfo` from
+/// `AC_PLAYERBOTS_DATABASE_INFO`). Its `None` does NOT fail the struct: a
+/// non-playerbots server is legal, and refusal happens at USE. A value that
+/// is present but unparseable (truncated, hostile charset) also resolves
+/// `None` — the server itself could not open a pool from it either, and
+/// treating it as "unusable schema" keeps the failure direction identical to
+/// the schema simply being absent.
 pub fn database_names_for_title(title_dir: &std::path::Path) -> Option<DatabaseNames> {
     let mut reader = super::config::ConfigReader::for_title(title_dir);
-    let mut name = |conf_key: &str| -> Option<String> {
-        let raw = reader.database_info_value(conf_key)?;
+    let mut name = |conf_file: &str, conf_key: &str| -> Option<String> {
+        let raw = reader.database_info_value(conf_file, conf_key)?;
         parse_database_info(&raw).map(str::to_string)
     };
-    Some(DatabaseNames {
-        auth: name("LoginDatabaseInfo")?,
-        world: name("WorldDatabaseInfo")?,
-        characters: name("CharacterDatabaseInfo")?,
-    })
+    let auth = name("worldserver.conf", "LoginDatabaseInfo")?;
+    let world = name("worldserver.conf", "WorldDatabaseInfo")?;
+    let characters = name("worldserver.conf", "CharacterDatabaseInfo")?;
+    let playerbots = name("playerbots.conf", "PlayerbotsDatabaseInfo");
+    Some(DatabaseNames { world, characters, auth, playerbots })
 }
 
 /// One resolved cell from a result set, typed just enough for faithful JSON
@@ -242,18 +282,38 @@ impl DbConfig {
         cfg
     }
 
-    /// A [`mysql::Opts`] pointed at `db`, built from these params. Split out so
-    /// tests can assert the shape without opening a socket. Refuses with
-    /// [`DbError::NamesUnresolved`] rather than falling back to a guessed name
-    /// when [`Self::db_names`] never resolved.
-    fn opts(&self, db: Database) -> Result<mysql::Opts, DbError> {
-        let names = self.db_names.as_ref().ok_or_else(|| {
+    /// The resolved [`DatabaseNames`], or the same [`DbError::NamesUnresolved`]
+    /// refusal [`Self::opts`] makes — the reader-level gate for every builder
+    /// that splices a schema name into SQL text or process argv (Task 6). One
+    /// line per reader: `let names = cfg.names()?;`.
+    pub fn names(&self) -> Result<&DatabaseNames, DbError> {
+        self.db_names.as_ref().ok_or_else(|| {
             DbError::NamesUnresolved(
                 "could not read the schema names from the server's compose env or worldserver.conf"
                     .to_string(),
             )
-        })?;
-        let db_name = db.name(names).to_string();
+        })
+    }
+
+    /// A [`mysql::Opts`] pointed at `db`, built from these params. Split out so
+    /// tests can assert the shape without opening a socket. Refuses with
+    /// [`DbError::NamesUnresolved`] rather than falling back to a guessed name
+    /// when [`Self::db_names`] never resolved — and, for `Playerbots`, when the
+    /// resolved names carry no playerbots schema (a legal non-playerbots
+    /// server): the refusal happens HERE, at use, never as a blanket failure.
+    fn opts(&self, db: Database) -> Result<mysql::Opts, DbError> {
+        let names = self.names()?;
+        let db_name = db
+            .name(names)
+            .ok_or_else(|| {
+                DbError::NamesUnresolved(
+                    "the server's config does not name a playerbots schema (no \
+                     AC_PLAYERBOTS_DATABASE_INFO in the compose env and no \
+                     PlayerbotsDatabaseInfo in playerbots.conf or its .dist)"
+                        .to_string(),
+                )
+            })?
+            .to_string();
         Ok(mysql::OptsBuilder::new()
             .ip_or_hostname(Some(self.host.clone()))
             .tcp_port(self.port)
@@ -576,6 +636,34 @@ mod tests {
         assert_eq!(parse_database_info("h;3306;u;p;w;d;my_world"), Some("my_world"));
     }
 
+    /// THE injection gate (Task 6): a schema name is a spliced IDENTIFIER
+    /// (MySQL cannot `?`-bind it) and the value comes from user-writable text
+    /// (`config set` can write the compose env), so anything outside
+    /// `[A-Za-z0-9_$]` refuses. Each hostile shape is asserted ON ITS OWN so a
+    /// mutation that lets one class through cannot hide behind another.
+    #[test]
+    fn a_hostile_schema_name_refuses_rather_than_being_spliced() {
+        let hostile: [(&str, &str); 8] = [
+            ("acore_world'", "a single quote breaks out of table_schema='…' literals"),
+            ("acore`world", "a backtick breaks out of quoted identifiers"),
+            ("x;DROP TABLE y", "a semicolon-split name must not survive as a statement"),
+            ("acore world", "whitespace splits a mysqldump argv / SQL qualifier"),
+            ("acore-world", "a hyphen is not a legal unquoted identifier char"),
+            ("d' OR '1'='1", "the classic quote breakout"),
+            ("acore_world--x", "comment introducers stay out of SQL text"),
+            ("acore\\world", "a backslash must not reach an escape-sensitive context"),
+        ];
+        for (bad, why) in hostile {
+            assert_eq!(
+                parse_database_info(&format!("h;3306;u;p;{bad}")),
+                None,
+                "{bad:?} must refuse: {why}"
+            );
+        }
+        // The full legal charset stays legal — refusal is the exception.
+        assert_eq!(parse_database_info("h;3306;u;p;My_DB$2"), Some("My_DB$2"));
+    }
+
     // -----------------------------------------------------------------------
     // Schema-name resolution fixtures. These build a real title dir on disk
     // rather than feeding a conf STRING, because the defect being pinned is
@@ -651,6 +739,15 @@ CharacterDatabaseInfo = \"127.0.0.1;3306;acore;acore;acore_characters\"
             std::fs::write(etc.join("worldserver.conf.dist"), t).unwrap();
         }
         dir
+    }
+
+    /// Drop a module conf (e.g. `playerbots.conf` / its `.dist`) into the
+    /// fixture's `env/dist/etc/modules/` — the directory `conf_path_in` routes
+    /// every non-worldserver/authserver conf to.
+    fn write_module_conf(dir: &std::path::Path, file: &str, text: &str) {
+        let modules = dir.join("env").join("dist").join("etc").join("modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join(file), text).unwrap();
     }
 
     fn triple(n: &DatabaseNames) -> (&str, &str, &str) {
@@ -818,17 +915,101 @@ CharacterDatabaseInfo = \"h;3306;u;p;c\"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // -----------------------------------------------------------------------
+    // Playerbots resolution (Task 6). The chain the live server provably
+    // applies: compose env `AC_PLAYERBOTS_DATABASE_INFO` (override, then
+    // base) → `playerbots.conf` `PlayerbotsDatabaseInfo` → its `.dist` →
+    // None. The key's on-disk home is the MODULE conf under
+    // `env/dist/etc/modules/`, never `worldserver.conf`.
+    // -----------------------------------------------------------------------
+
+    /// The compose-env tier, the one every DML native install uses: the base
+    /// compose carries `AC_PLAYERBOTS_DATABASE_INFO`, and it must beat a
+    /// stock module conf naming an unreachable host — the same
+    /// wrong-source-bug shape the core three were fixed for.
+    #[test]
+    fn playerbots_resolves_from_the_compose_env_over_the_module_conf() {
+        let mut base = compose_db_info("renamed");
+        base.push_str("      AC_PLAYERBOTS_DATABASE_INFO: \"ac-database;3306;root;pw;renamed_pb\"\n");
+        let dir = title_fixture("pb-env", Some(&base), None, None, Some(STOCK_CONF));
+        write_module_conf(
+            &dir,
+            "playerbots.conf",
+            "PlayerbotsDatabaseInfo = \"127.0.0.1;3306;acore;acore;acore_playerbots\"\n",
+        );
+        let n = database_names_for_title(&dir).expect("core trio resolves");
+        assert_eq!(n.playerbots.as_deref(), Some("renamed_pb"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The conf tier (WSL-era installs write no `AC_*_DATABASE_INFO` at all):
+    /// `playerbots.conf` answers, and a conf that omits the key falls through
+    /// to `playerbots.conf.dist` — a fresh install carries ONLY the `.dist`.
+    #[test]
+    fn playerbots_falls_through_module_conf_then_dist() {
+        let dir = title_fixture("pb-conf", None, None, Some(STOCK_CONF), None);
+        write_module_conf(&dir, "playerbots.conf", "PlayerbotsDatabaseInfo = \"h;3306;u;p;pb_live\"\n");
+        write_module_conf(&dir, "playerbots.conf.dist", "PlayerbotsDatabaseInfo = \"h;3306;u;p;pb_dist\"\n");
+        let n = database_names_for_title(&dir).expect("core trio resolves");
+        assert_eq!(n.playerbots.as_deref(), Some("pb_live"), "the live module conf wins");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = title_fixture("pb-dist", None, None, Some(STOCK_CONF), None);
+        write_module_conf(&dir, "playerbots.conf", "AiPlayerbot.RandomBotAccountPrefix = \"rndbot\"\n");
+        write_module_conf(&dir, "playerbots.conf.dist", "PlayerbotsDatabaseInfo = \"h;3306;u;p;pb_dist\"\n");
+        let n = database_names_for_title(&dir).expect("core trio resolves");
+        assert_eq!(n.playerbots.as_deref(), Some("pb_dist"), "a conf omitting the key falls to .dist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server with NO playerbots source anywhere resolves the core trio and
+    /// `playerbots: None` — the struct does NOT fail, because a blanket
+    /// refusal would break Dashboard/Item DB/Characters on a legal
+    /// non-playerbots server. Same for a value that is present but hostile:
+    /// unusable resolves as absent, never as a splice.
+    #[test]
+    fn a_missing_playerbots_schema_does_not_fail_the_core_trio() {
+        let dir = title_fixture("pb-absent", None, None, Some(STOCK_CONF), None);
+        let n = database_names_for_title(&dir).expect("the core trio must still resolve");
+        assert_eq!(triple(&n), ("acore_auth", "acore_world", "acore_characters"));
+        assert_eq!(n.playerbots, None);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let dir = title_fixture("pb-hostile", None, None, Some(STOCK_CONF), None);
+        write_module_conf(&dir, "playerbots.conf", "PlayerbotsDatabaseInfo = \"h;3306;u;p;pb'; DROP--\"\n");
+        let n = database_names_for_title(&dir).expect("the core trio must still resolve");
+        assert_eq!(n.playerbots, None, "an unusable value is absent, never spliced");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// DELIBERATE update (Task 6): `Playerbots` no longer answers a hardcoded
+    /// `"acore_playerbots"` — it answers the RESOLVED field, and `None` when
+    /// the server has none. The old assertion pinned the last hardcoded name
+    /// precisely so this change would be made on purpose; it was.
     #[test]
     fn database_names_match_the_server_schemas() {
         let names = DatabaseNames {
             world: "acore_world".to_string(),
             characters: "acore_characters".to_string(),
             auth: "acore_auth".to_string(),
+            playerbots: Some("acore_playerbots".to_string()),
         };
-        assert_eq!(Database::World.name(&names), "acore_world");
-        assert_eq!(Database::Characters.name(&names), "acore_characters");
-        assert_eq!(Database::Auth.name(&names), "acore_auth");
-        assert_eq!(Database::Playerbots.name(&names), "acore_playerbots");
+        assert_eq!(Database::World.name(&names), Some("acore_world"));
+        assert_eq!(Database::Characters.name(&names), Some("acore_characters"));
+        assert_eq!(Database::Auth.name(&names), Some("acore_auth"));
+        assert_eq!(Database::Playerbots.name(&names), Some("acore_playerbots"));
+
+        let schemaless = DatabaseNames { playerbots: None, ..names };
+        assert_eq!(
+            Database::Playerbots.name(&schemaless),
+            None,
+            "a non-playerbots server answers None, never a guessed acore_playerbots"
+        );
+        assert_eq!(
+            Database::World.name(&schemaless),
+            Some("acore_world"),
+            "the core three are unaffected by a missing playerbots schema"
+        );
     }
 
     #[test]
@@ -961,6 +1142,7 @@ BLANK=
             world: "acore_world".to_string(),
             characters: "acore_characters".to_string(),
             auth: "acore_auth".to_string(),
+            playerbots: Some("acore_playerbots".to_string()),
         }
     }
 
@@ -1016,12 +1198,11 @@ BLANK=
         assert_eq!(err.code(), ERR_DB_NAMES_UNRESOLVED);
     }
 
-    /// `Playerbots` is the one variant that does NOT need resolved names —
-    /// its literal comes from a different evidence source entirely — but
-    /// `opts` still refuses when `db_names` is `None`, because [`Database::name`]
-    /// unconditionally takes a `&DatabaseNames` argument. This pins that
-    /// documented (not accidental) coupling so a future change either keeps it
-    /// or updates this test deliberately.
+    /// DELIBERATE update (Task 6): `Playerbots` now resolves through its own
+    /// chain, so `opts` refuses in TWO distinct states — names never resolved
+    /// at all, and names resolved WITHOUT a playerbots schema (a legal
+    /// non-playerbots server). Both must refuse rather than guess
+    /// `acore_playerbots`; a resolved playerbots name connects to it.
     #[test]
     fn opts_for_playerbots_still_requires_resolved_names() {
         let cfg = DbConfig {
@@ -1031,7 +1212,22 @@ BLANK=
             password: "password".into(),
             db_names: None,
         };
-        assert!(cfg.opts(Database::Playerbots).is_err());
+        let err = cfg.opts(Database::Playerbots).expect_err("names unresolved");
+        assert_eq!(err.code(), ERR_DB_NAMES_UNRESOLVED);
+
+        // Resolved names, but no playerbots schema: refusal AT USE — the
+        // other three variants keep connecting (asserted elsewhere), only the
+        // playerbots connection is refused.
+        let cfg = DbConfig {
+            db_names: Some(DatabaseNames { playerbots: None, ..test_names() }),
+            ..cfg
+        };
+        let err = cfg.opts(Database::Playerbots).expect_err("no playerbots schema");
+        assert_eq!(err.code(), ERR_DB_NAMES_UNRESOLVED);
+        assert!(
+            cfg.opts(Database::Characters).is_ok(),
+            "a missing playerbots schema must not refuse the core connections"
+        );
 
         let cfg = DbConfig { db_names: Some(test_names()), ..cfg };
         let opts = cfg.opts(Database::Playerbots).expect("names resolved");

@@ -20,12 +20,14 @@
 //! continent bucket), there are no floats here — the `CAST`-to-text float dance
 //! the teleport reader needs does not apply.
 //!
-//! BOT DETECTION. Query 1 probes `acore_playerbots.playerbots_account_type`; a
-//! box without that schema degrades the `bot` predicate to a constant `0=1`
-//! (every bot stat becomes zero) instead of failing the whole envelope — exactly
-//! the bash's "only tolerated failure". A fully-down DB fails the probe too, and
-//! then also fails query 2, so the envelope still errors (mapped to
-//! `DB_UNREACHABLE` by the caller, as the CLI's `stats` arm does).
+//! BOT DETECTION. Query 1 probes the RESOLVED playerbots schema's
+//! `playerbots_account_type` (a config naming no such schema skips the probe
+//! outright — same observable degrade); a failed/skipped probe degrades the
+//! `bot` predicate to the account-prefix-only form (see [`crate::botid`])
+//! instead of failing the whole envelope — exactly the bash's "only tolerated
+//! failure". A fully-down DB fails the probe too, and then also fails query 2,
+//! so the envelope still errors (mapped to `DB_UNREACHABLE` by the caller, as
+//! the CLI's `stats` arm does).
 //!
 //! A cargo parity test (`stats_parity.rs`, DB-gated) deep-equals this reader
 //! against a live `dml wow stats --json`. Native-mode-only by convention: WSL
@@ -37,33 +39,46 @@ use super::db::{self, Database, DbConfig, DbError, QueryResult};
 use super::pages::cell_text;
 
 /// Query 1: the playerbots-schema probe. When this errors (schema absent OR DB
-/// down) the `bot` predicate becomes `0=1`. Mirrors 48-stats.sh:67.
-pub const PROBE_SQL: &str = "SELECT 1 FROM acore_playerbots.playerbots_account_type LIMIT 1;";
+/// down) the bot predicate degrades to the prefix-only form. Mirrors
+/// 48-stats.sh:67. `playerbots` is the RESOLVED schema name (Task 6) — the
+/// charset gate in [`crate::db::parse_database_info`] makes it splice-safe.
+pub fn probe_sql(playerbots: &str) -> String {
+    format!("SELECT 1 FROM {playerbots}.playerbots_account_type LIMIT 1;")
+}
 
-/// DEPRECATED as a predicate: the registry-only clause, kept as a named
-/// constant purely so tests can assert it is NOT what production splices any
-/// more (an install with an empty `playerbots_account_type` counted every bot
-/// as family). Live detection goes through [`bot_predicate`].
-///
-/// The authoritative bot-account predicate (account_type 1|2), used verbatim by
-/// `_bots_counts` / `players online` / the stats envelope (48-stats.sh:55).
-pub const BOT_SUBQUERY: &str = "c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))";
+/// Whether (and with what SQL) to run the probe: `None` when the server's
+/// config names no playerbots schema at all — the probe is SKIPPED, and
+/// [`read_stats`] goes straight to the prefix-only degrade, the SAME
+/// observable outcome as a probe that ran and failed. Split out so the
+/// skip decision is testable without a database.
+pub fn probe_plan(playerbots: Option<&str>) -> Option<String> {
+    playerbots.map(|pb| probe_sql(pb))
+}
 
 /// The live bot predicate for the stats envelope: both signals when the
 /// playerbots schema answers, the account-prefix signal alone when it does
-/// not. `probe_ok == false` used to mean `0=1` — "this box has no bots" —
-/// which is a lie on any box that has them and silently moved every bot into
-/// the family totals.
-pub fn bot_predicate(probe_ok: bool, bot_prefix: &str) -> String {
-    if probe_ok {
-        crate::botid::bot_clause("c.account", bot_prefix)
-    } else {
-        crate::botid::bot_clause_prefix_only("c.account", bot_prefix)
-    }
+/// not (probe failed, or no schema is configured — `playerbots: None`).
+/// `probe_ok == false` used to mean `0=1` — "this box has no bots" — which is
+/// a lie on any box that has them and silently moved every bot into the
+/// family totals.
+///
+/// (The registry-only `BOT_SUBQUERY` const that used to live here is GONE:
+/// it duplicated [`crate::botid::registry_clause`]'s text, and the one place
+/// that decides what a bot is must stay one place.)
+pub fn bot_predicate(probe_ok: bool, bot_prefix: &str, auth: &str, playerbots: Option<&str>) -> String {
+    crate::botid::bot_clause(
+        "c.account",
+        bot_prefix,
+        auth,
+        if probe_ok { playerbots } else { None },
+    )
 }
 
 /// System accounts that are neither family nor ambient bots (48-stats.sh:58).
-pub const SYS_SUBQUERY: &str = "c.account IN (SELECT id FROM acore_auth.account WHERE username IN ('AHBOT','DMLSOAP'))";
+/// `auth` is the RESOLVED auth-schema name (Task 6).
+pub fn sys_subquery(auth: &str) -> String {
+    format!("c.account IN (SELECT id FROM {auth}.account WHERE username IN ('AHBOT','DMLSOAP'))")
+}
 
 // Fixed positions of the 18 post-probe queries in the concurrent batch — the
 // same order as 48-stats.sh's `-- 2` … `-- 19` (the probe is `-- 1`, run first
@@ -137,7 +152,7 @@ fn is_digits(s: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Build the 18 post-probe `(schema, sql)` pairs in `Q_*` order, embedding the
-/// resolved `bot` predicate (either [`BOT_SUBQUERY`] or `0=1`) and `fam`/`sys`.
+/// resolved `bot` predicate (see [`bot_predicate`]) and `fam`/`sys`.
 pub fn build_queries(bot: &str, sys: &str) -> Vec<(Database, String)> {
     let fam = format!("NOT ({bot}) AND NOT ({sys})");
     let mut q = vec![(Database::Characters, String::new()); N_QUERIES];
@@ -510,13 +525,24 @@ fn richest(res: &QueryResult, family: bool) -> Vec<Value> {
 /// CLI's `stats` arm does); an empty result set is NOT a failure (a fresh DB
 /// answers with zeros / empty arrays).
 pub fn read_stats(cfg: &DbConfig) -> Result<Value, DbError> {
+    let names = cfg.names()?;
     // Query 1: probe. An error (schema absent OR DB down) drops the registry
     // half and leaves the account-prefix half standing — bots stay counted as
     // bots. A fully-down DB then also fails query 2 below, so the envelope
-    // still errors.
-    let probe_ok = db::query(cfg, Database::Characters, PROBE_SQL).is_ok();
-    let bot = bot_predicate(probe_ok, &crate::botid::bot_account_prefix());
-    let queries = build_queries(&bot, SYS_SUBQUERY);
+    // still errors. When the config names NO playerbots schema the probe is
+    // SKIPPED outright (`probe_plan` → None): there is nothing to probe, and
+    // the observable degrade is identical to a failed probe.
+    let probe_ok = match probe_plan(names.playerbots.as_deref()) {
+        Some(sql) => db::query(cfg, Database::Characters, &sql).is_ok(),
+        None => false,
+    };
+    let bot = bot_predicate(
+        probe_ok,
+        &crate::botid::bot_account_prefix(),
+        &names.auth,
+        names.playerbots.as_deref(),
+    );
+    let queries = build_queries(&bot, &sys_subquery(&names.auth));
     let results = run_concurrent(cfg, &queries)?;
     Ok(assemble_stats(&results))
 }
@@ -579,16 +605,25 @@ mod tests {
         assert!(!stats_bool("true"));
     }
 
+    /// Re-anchored (Task 6): the deleted `BOT_SUBQUERY` const used to feed
+    /// this test — the predicate now comes from [`bot_predicate`] itself, the
+    /// same builder production uses, with resolved (renamed) names so a
+    /// fallback to `acore_*` cannot hide.
     #[test]
     fn build_queries_embeds_predicates_in_order() {
-        let q = build_queries(BOT_SUBQUERY, SYS_SUBQUERY);
+        let bot = bot_predicate(true, "rndbot", "my_auth", Some("my_pb"));
+        let sys = sys_subquery("my_auth");
+        let q = build_queries(&bot, &sys);
         assert_eq!(q.len(), N_QUERIES);
         // fam = NOT (bot) AND NOT (sys) appears in the population query.
-        assert!(q[Q_POP].1.contains("NOT (c.account IN (SELECT account_id"));
+        assert!(q[Q_POP].1.contains(&format!("NOT ({bot}) AND NOT ({sys})")), "got: {}", q[Q_POP].1);
+        assert!(q[Q_POP].1.contains("my_pb.playerbots_account_type"), "got: {}", q[Q_POP].1);
         assert!(q[Q_POP].1.contains("FROM characters c;"));
-        // The 0=1 degrade path threads through where `bot` is used.
-        let qd = build_queries("0=1", SYS_SUBQUERY);
-        assert!(qd[Q_ZONES].1.contains("AND (0=1)"));
+        // The degrade path threads through where `bot` is used.
+        let bot_degraded = bot_predicate(false, "rndbot", "my_auth", Some("my_pb"));
+        let qd = build_queries(&bot_degraded, &sys);
+        assert!(qd[Q_ZONES].1.contains(&format!("AND ({bot_degraded})")), "got: {}", qd[Q_ZONES].1);
+        assert!(!qd[Q_ZONES].1.contains("playerbots_account_type"), "got: {}", qd[Q_ZONES].1);
         // Auth-schema queries are routed to Auth.
         assert_eq!(q[Q_UPTIME].0, Database::Auth);
         assert_eq!(q[Q_REALM].0, Database::Auth);
@@ -598,6 +633,35 @@ mod tests {
         assert!(q[Q_LEVELS].1.contains("FLOOR((GREATEST(c.level,1)-1)/10)"));
         assert!(q[Q_CONTS].1.contains("CASE WHEN c.map IN (0,1,530,571) THEN c.map ELSE -1 END"));
         assert!(q[Q_TOP_FAM].1.contains("ORDER BY c.level DESC, c.totaltime DESC, c.name LIMIT 5"));
+    }
+
+    /// Task 6, the probe-skip half ISOLATED from the clause-degrade half (the
+    /// two are independent — see the sequence-test trap in crates/CLAUDE.md):
+    /// with no configured playerbots schema there is no probe SQL AT ALL, and
+    /// with one there is exactly the resolved-name probe.
+    #[test]
+    fn probe_plan_skips_the_probe_when_no_playerbots_schema_is_configured() {
+        assert_eq!(probe_plan(None), None, "no schema -> no probe query to run");
+        assert_eq!(
+            probe_plan(Some("my_pb")).as_deref(),
+            Some("SELECT 1 FROM my_pb.playerbots_account_type LIMIT 1;")
+        );
+    }
+
+    /// The clause-degrade half, isolated: whatever the probe said, a `None`
+    /// playerbots name yields the prefix-only predicate — and a probe failure
+    /// does the same even when a schema IS configured.
+    #[test]
+    fn bot_predicate_degrades_to_prefix_only_without_a_schema_or_a_probe() {
+        let prefix_only = crate::botid::bot_clause_prefix_only("c.account", "rndbot", "my_auth");
+        assert_eq!(bot_predicate(true, "rndbot", "my_auth", None), prefix_only);
+        assert_eq!(bot_predicate(false, "rndbot", "my_auth", None), prefix_only);
+        assert_eq!(bot_predicate(false, "rndbot", "my_auth", Some("my_pb")), prefix_only);
+        // And the full form only when BOTH the schema exists and the probe passed.
+        assert_eq!(
+            bot_predicate(true, "rndbot", "my_auth", Some("my_pb")),
+            crate::botid::bot_clause("c.account", "rndbot", "my_auth", Some("my_pb"))
+        );
     }
 
     /// Build a full 18-element result vector with sensible fakes, then assert

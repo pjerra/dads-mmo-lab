@@ -574,18 +574,20 @@ pub fn read_ports(program: &OsStr, timeout: Duration) -> Ports {
 /// [`crate::botid`] bot identity as `players online`/`party online`
 /// (`dml::pages`), inverted to INCLUDE bot accounts. Registry-only detection
 /// reported 0 bots online on an install whose registry was never populated.
-fn bots_online_sql(bot_prefix: &str) -> String {
+fn bots_online_sql(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT COUNT(*) FROM characters WHERE online = 1 AND {};",
-        crate::botid::bot_clause("account", bot_prefix)
+        crate::botid::bot_clause("account", bot_prefix, &names.auth, names.playerbots.as_deref())
     )
 }
 
 /// Live online-bot count. A query/connection failure degrades to `None`
 /// (matches `_bots_counts`'s `|| true` swallow — a read-only lookup never
-/// errors the whole `server-detail` envelope).
+/// errors the whole `server-detail` envelope). A names-unresolved config
+/// takes the same degrade via the `?` here + the caller's `.ok()`.
 pub fn bots_online(cfg: &DbConfig, bot_prefix: &str) -> Result<Option<i64>, DbError> {
-    let res = db::query(cfg, Database::Characters, &bots_online_sql(bot_prefix))?;
+    let names = cfg.names()?;
+    let res = db::query(cfg, Database::Characters, &bots_online_sql(bot_prefix, names))?;
     let raw = res.rows.first().and_then(|r| r.first()).map(super::pages::cell_text).unwrap_or_default();
     Ok(is_digits(&raw).then(|| raw.parse().ok()).flatten())
 }

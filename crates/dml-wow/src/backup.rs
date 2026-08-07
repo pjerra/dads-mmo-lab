@@ -378,10 +378,15 @@ const SUMMARY_ACCOUNTS_SQL: &str = "SELECT COUNT(*) FROM account;";
 /// clause — the registry alone reported 0 bots on an install whose
 /// `playerbots_account_type` was never populated, which made a 1000-bot
 /// snapshot look like a 1000-character family server in the backup list.
-fn summary_bots_sql() -> String {
+fn summary_bots_sql(names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT COUNT(*) FROM characters WHERE {};",
-        crate::botid::bot_clause("account", &crate::botid::bot_account_prefix())
+        crate::botid::bot_clause(
+            "account",
+            &crate::botid::bot_account_prefix(),
+            &names.auth,
+            names.playerbots.as_deref()
+        )
     )
 }
 
@@ -419,9 +424,7 @@ pub fn format_summary_line(chars: i64, accounts: i64, bots: Option<i64>, name: O
 /// bots}` counts, or `None` if either of the two REQUIRED counts (characters,
 /// accounts) couldn't be read — `bots` alone is optional (stays `null`).
 pub fn compute_summary(cfg: &DbConfig) -> Option<Value> {
-    let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
-    let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
-    let bots = db::query(cfg, Database::Characters, &summary_bots_sql()).ok().and_then(|r| scalar_i64(&r));
+    let (chars, accounts, bots) = compute_summary_parts(cfg)?;
     serde_json::from_str(&format_summary_line(chars, accounts, bots, None)).ok()
 }
 
@@ -443,7 +446,14 @@ pub fn write_meta(cfg: &DbConfig, sql_gz_path: &Path, name: Option<&str>) {
 fn compute_summary_parts(cfg: &DbConfig) -> Option<(i64, i64, Option<i64>)> {
     let chars = db::query(cfg, Database::Characters, SUMMARY_CHARS_SQL).ok().and_then(|r| scalar_i64(&r))?;
     let accounts = db::query(cfg, Database::Auth, SUMMARY_ACCOUNTS_SQL).ok().and_then(|r| scalar_i64(&r))?;
-    let bots = db::query(cfg, Database::Characters, &summary_bots_sql()).ok().and_then(|r| scalar_i64(&r));
+    // Best-effort like everything else here: names-unresolved degrades the
+    // bot count to null exactly like an unreachable DB would (the two counts
+    // above already failed in that state anyway).
+    let bots = cfg
+        .names()
+        .ok()
+        .and_then(|names| db::query(cfg, Database::Characters, &summary_bots_sql(names)).ok())
+        .and_then(|r| scalar_i64(&r));
     Some((chars, accounts, bots))
 }
 
@@ -647,9 +657,12 @@ pub fn latest_auto_interval_backup_unix(dir: &Path) -> Option<u64> {
 pub const DUMP_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// The `docker exec ac-database mysqldump …` argv — a port of
-/// `_backup_dump_to`'s command line (`60-backup.sh:56`).
-pub fn mysqldump_args(password: &str, include_world: bool) -> Vec<String> {
-    mysqldump_args_for("ac-database", password, include_world)
+/// `_backup_dump_to`'s command line (`60-backup.sh:56`), over the RESOLVED
+/// schema names (Task 6): a renamed server used to get a dump of the WRONG
+/// (absent) `acore_*` schemas — the worst failure class this repo records,
+/// because the backup reports success and holds nothing.
+pub fn mysqldump_args(password: &str, include_world: bool, names: &crate::db::DatabaseNames) -> Vec<String> {
+    mysqldump_args_for("ac-database", password, include_world, names)
 }
 
 /// [`mysqldump_args`] against an explicit container — id or name.
@@ -660,7 +673,18 @@ pub fn mysqldump_args(password: &str, include_world: bool) -> Vec<String> {
 /// happens to own the global name `ac-database` could capture a DIFFERENT
 /// server's databases than the ones about to be mutated — a backup that
 /// exists and is useless.
-pub fn mysqldump_args_for(container: &str, password: &str, include_world: bool) -> Vec<String> {
+///
+/// The dump set is characters, playerbots WHEN CONFIGURED, auth, plus world
+/// when `include_world`. A `None` playerbots on a schema-less server turns
+/// what used to be a HARD mysqldump failure (unknown database
+/// `acore_playerbots`) into a correct omission: the schema is not dumped
+/// because the server does not have one.
+pub fn mysqldump_args_for(
+    container: &str,
+    password: &str,
+    include_world: bool,
+    names: &crate::db::DatabaseNames,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "exec".into(),
         container.into(),
@@ -668,12 +692,14 @@ pub fn mysqldump_args_for(container: &str, password: &str, include_world: bool) 
         "-uroot".into(),
         format!("-p{password}"),
         "--databases".into(),
-        "acore_characters".into(),
-        "acore_playerbots".into(),
-        "acore_auth".into(),
+        names.characters.clone(),
     ];
+    if let Some(pb) = &names.playerbots {
+        args.push(pb.clone());
+    }
+    args.push(names.auth.clone());
     if include_world {
-        args.push("acore_world".into());
+        args.push(names.world.clone());
     }
     args.push("--single-transaction".into());
     args.push("--quick".into());
@@ -733,8 +759,14 @@ fn push_bounded_tail(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) {
 /// itself is generic over program/args/timeout so the streaming engine can
 /// be exercised in tests against a harmless `cmd.exe` child and a
 /// millisecond-scale deadline instead.
-pub fn dump_to(program: &OsStr, password: &str, include_world: bool, out_path: &Path) -> Result<(), String> {
-    dump_stream(program, &mysqldump_args(password, include_world), out_path, DUMP_TIMEOUT)
+pub fn dump_to(
+    program: &OsStr,
+    password: &str,
+    include_world: bool,
+    out_path: &Path,
+    names: &crate::db::DatabaseNames,
+) -> Result<(), String> {
+    dump_stream(program, &mysqldump_args(password, include_world, names), out_path, DUMP_TIMEOUT)
 }
 
 /// [`dump_to`] against an explicit container id/name — see
@@ -745,8 +777,9 @@ pub fn dump_to_container(
     password: &str,
     include_world: bool,
     out_path: &Path,
+    names: &crate::db::DatabaseNames,
 ) -> Result<(), String> {
-    dump_stream(program, &mysqldump_args_for(container, password, include_world), out_path, DUMP_TIMEOUT)
+    dump_stream(program, &mysqldump_args_for(container, password, include_world, names), out_path, DUMP_TIMEOUT)
 }
 
 /// The generic streaming-pipe engine behind [`dump_to`] — see that
@@ -1029,6 +1062,21 @@ pub fn backup_create_stream(
 
     emit(bc_event_section_start());
 
+    // Refuse an unresolved-names dump OUTRIGHT, before touching docker: a
+    // mysqldump argv built from guessed schema names either hard-fails or —
+    // worse — dumps the wrong schemas while reporting success (the recorded
+    // worst class). `DB_NAMES_UNRESOLVED` via the shared mapper, so the copy
+    // matches every other surface.
+    let names = match db_cfg.names() {
+        Ok(n) => n.clone(),
+        Err(e) => {
+            let err = crate::db::db_err_to_cmd(e);
+            emit(bc_event_section_end("error"));
+            emit(bc_event_error(&err.code, err.message, &err.hint));
+            return;
+        }
+    };
+
     let program = native::docker_program();
     if !maint::docker_engine_up(&program, maint::PROBE_TIMEOUT) {
         emit(bc_event_section_end("error"));
@@ -1058,7 +1106,7 @@ pub fn backup_create_stream(
         if include_world { "backing up characters, bots, accounts and world..." } else { "backing up characters, bots and accounts..." },
     ));
 
-    if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path) {
+    if let Err(errtail) = backup::dump_to(&program, &db_cfg.password, include_world, &out_path, &names) {
         emit(bc_event_section_end("error"));
         emit(bc_event_error("BACKUP_FAILED", "mysqldump failed", &errtail));
         return;
@@ -1426,26 +1474,56 @@ mod tests {
 
     // -- dump args / err_tail --------------------------------------------------
 
+    /// The names fixture the argv tests dump through — RENAMED values, so an
+    /// argv builder that quietly reverted to `acore_*` literals goes red
+    /// (both suites resolve `acore_*` on the live box, which is exactly why a
+    /// stock-named fixture would prove nothing).
+    fn dump_names() -> crate::db::DatabaseNames {
+        crate::db::DatabaseNames {
+            world: "my_world".to_string(),
+            characters: "my_chars".to_string(),
+            auth: "my_auth".to_string(),
+            playerbots: Some("my_pb".to_string()),
+        }
+    }
+
     #[test]
     fn mysqldump_args_characters_only() {
-        let args = mysqldump_args("hunter2", false);
+        let args = mysqldump_args("hunter2", false, &dump_names());
         assert_eq!(
             args,
             vec![
-                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "acore_characters",
-                "acore_playerbots", "acore_auth", "--single-transaction", "--quick",
+                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "my_chars",
+                "my_pb", "my_auth", "--single-transaction", "--quick",
             ]
         );
     }
 
     #[test]
     fn mysqldump_args_include_world_adds_the_schema_before_the_flags() {
-        let args = mysqldump_args("hunter2", true);
+        let args = mysqldump_args("hunter2", true, &dump_names());
         assert_eq!(
             args,
             vec![
-                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "acore_characters",
-                "acore_playerbots", "acore_auth", "acore_world", "--single-transaction", "--quick",
+                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "my_chars",
+                "my_pb", "my_auth", "my_world", "--single-transaction", "--quick",
+            ]
+        );
+    }
+
+    /// Task 6: a server whose config names NO playerbots schema OMITS it from
+    /// the dump set — the correct answer, where the old hardcoded list made
+    /// mysqldump hard-fail on the unknown `acore_playerbots`. The rest of the
+    /// set (and the flag order) is untouched.
+    #[test]
+    fn mysqldump_args_omit_an_unconfigured_playerbots_schema() {
+        let names = crate::db::DatabaseNames { playerbots: None, ..dump_names() };
+        let args = mysqldump_args("hunter2", false, &names);
+        assert_eq!(
+            args,
+            vec![
+                "exec", "ac-database", "mysqldump", "-uroot", "-phunter2", "--databases", "my_chars",
+                "my_auth", "--single-transaction", "--quick",
             ]
         );
     }

@@ -95,9 +95,14 @@ pub fn escape_like_literal(s: &str) -> String {
 
 /// Signal 1: the playerbots registry (`1` = random bot, `2` = addclass bot).
 /// Authoritative when populated, silently empty on some installs.
-pub fn registry_clause(col: &str) -> String {
+///
+/// `playerbots` is the RESOLVED schema name (Task 6) — it must come from a
+/// [`crate::db::DatabaseNames`], whose parse gate
+/// ([`crate::db::parse_database_info`]) enforces the `[A-Za-z0-9_$]`
+/// identifier charset before any value can reach this splice.
+pub fn registry_clause(col: &str, playerbots: &str) -> String {
     format!(
-        "{col} IN (SELECT account_id FROM acore_playerbots.playerbots_account_type \
+        "{col} IN (SELECT account_id FROM {playerbots}.playerbots_account_type \
          WHERE account_type IN (1,2))"
     )
 }
@@ -113,9 +118,12 @@ pub fn registry_clause(col: &str) -> String {
 /// this makes the match independent of that. (The `accounts` verb's
 /// long-standing `NOT LIKE 'RNDBOT%'` filter is safe for the same reason: its
 /// literal is already upper-case.)
-pub fn prefix_clause(col: &str, prefix: &str) -> String {
+///
+/// `auth` is the RESOLVED auth-schema name — see [`registry_clause`] for the
+/// charset gate that makes it splice-safe.
+pub fn prefix_clause(col: &str, prefix: &str, auth: &str) -> String {
     format!(
-        "{col} IN (SELECT id FROM acore_auth.account WHERE {})",
+        "{col} IN (SELECT id FROM {auth}.account WHERE {})",
         username_is_bot("username", prefix)
     )
 }
@@ -126,7 +134,7 @@ pub fn prefix_clause(col: &str, prefix: &str) -> String {
 /// escaping, empty-prefix fallback — has exactly ONE definition.
 ///
 /// NB the `accounts` verb deliberately uses THIS and not [`bot_clause`]: it is
-/// the one bot filter that does not require the `acore_playerbots` schema to
+/// the one bot filter that does not require the playerbots schema to
 /// exist, and the launcher's character picker should not start erroring on a
 /// box without the playerbots module (the same concern that made the stats
 /// envelope probe for that schema).
@@ -137,21 +145,34 @@ pub fn username_is_bot(col: &str, prefix: &str) -> String {
 
 /// "This account is a bot" — either signal is enough. Always parenthesised so
 /// it can be `AND`-ed into a larger WHERE without changing its meaning.
-pub fn bot_clause(col: &str, prefix: &str) -> String {
-    format!("({} OR {})", registry_clause(col), prefix_clause(col, prefix))
+///
+/// `playerbots: None` means the server has no playerbots schema (a legal
+/// state since Task 6 resolves the name instead of assuming
+/// `acore_playerbots`) — the clause degrades to
+/// [`bot_clause_prefix_only`], EXACTLY the 2026-08-01 incident posture: the
+/// prefix signal keeps finding bots, and the missing registry never reads as
+/// "this box has no bots".
+pub fn bot_clause(col: &str, prefix: &str, auth: &str, playerbots: Option<&str>) -> String {
+    match playerbots {
+        Some(pb) => format!("({} OR {})", registry_clause(col, pb), prefix_clause(col, prefix, auth)),
+        None => bot_clause_prefix_only(col, prefix, auth),
+    }
 }
 
 /// "This account is a real player" — the exact negation of [`bot_clause`], so
 /// the two can never drift apart and double-count or double-drop a character.
-pub fn human_clause(col: &str, prefix: &str) -> String {
-    format!("NOT {}", bot_clause(col, prefix))
+/// (That includes the degrade: with `playerbots: None` this is the negation
+/// of the prefix-only form.)
+pub fn human_clause(col: &str, prefix: &str, auth: &str, playerbots: Option<&str>) -> String {
+    format!("NOT {}", bot_clause(col, prefix, auth, playerbots))
 }
 
-/// The bot half when the playerbots schema is unusable (stats' probe) — the
-/// prefix signal alone. Previously this degraded to a constant `0=1`, i.e.
-/// "there are no bots", which is a lie on any box that has them.
-pub fn bot_clause_prefix_only(col: &str, prefix: &str) -> String {
-    format!("({})", prefix_clause(col, prefix))
+/// The bot half when the playerbots schema is unusable (stats' probe) or not
+/// configured at all — the prefix signal alone. Previously this degraded to a
+/// constant `0=1`, i.e. "there are no bots", which is a lie on any box that
+/// has them.
+pub fn bot_clause_prefix_only(col: &str, prefix: &str, auth: &str) -> String {
+    format!("({})", prefix_clause(col, prefix, auth))
 }
 
 /// Live prefix for this install: process env override, else the title's
@@ -181,28 +202,37 @@ pub fn bot_account_prefix() -> String {
 mod tests {
     use super::*;
 
+    /// DELIBERATE update (Task 6): the schema qualifiers are now the RESOLVED
+    /// names the caller passes, so the pins assert them through the
+    /// parameters — with renamed values, so a builder that quietly fell back
+    /// to `acore_*` goes red here.
     #[test]
     fn bot_clause_accepts_either_signal() {
-        let c = bot_clause("c.account", "rndbot");
+        let c = bot_clause("c.account", "rndbot", "my_auth", Some("my_pb"));
         assert!(
             c.contains(
-                "c.account IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2))"
+                "c.account IN (SELECT account_id FROM my_pb.playerbots_account_type WHERE account_type IN (1,2))"
             ),
             "registry signal missing: {c}"
         );
         assert!(
-            c.contains("c.account IN (SELECT id FROM acore_auth.account WHERE UPPER(username) LIKE 'RNDBOT%')"),
+            c.contains("c.account IN (SELECT id FROM my_auth.account WHERE UPPER(username) LIKE 'RNDBOT%')"),
             "prefix signal missing: {c}"
         );
         assert!(c.contains(" OR "), "the two signals must be OR-ed, not AND-ed: {c}");
         // Parenthesised, so `... AND <bot_clause>` cannot re-associate.
         assert!(c.starts_with('(') && c.ends_with(')'), "got: {c}");
+        assert!(!c.contains("acore_"), "a resolved clause must not fall back to acore_*: {c}");
     }
 
     #[test]
     fn human_clause_is_exactly_the_negation_of_bot_clause() {
-        let bot = bot_clause("c.account", "rndbot");
-        let human = human_clause("c.account", "rndbot");
+        let bot = bot_clause("c.account", "rndbot", "my_auth", Some("my_pb"));
+        let human = human_clause("c.account", "rndbot", "my_auth", Some("my_pb"));
+        assert_eq!(human, format!("NOT {bot}"));
+        // The invariant survives the degrade too — one definition, negated.
+        let bot = bot_clause("c.account", "rndbot", "my_auth", None);
+        let human = human_clause("c.account", "rndbot", "my_auth", None);
         assert_eq!(human, format!("NOT {bot}"));
     }
 
@@ -212,11 +242,25 @@ mod tests {
     /// in the human clause IS the fix.
     #[test]
     fn human_clause_does_not_rest_on_the_registry_alone() {
-        let human = human_clause("c.account", "rndbot");
+        let human = human_clause("c.account", "rndbot", "my_auth", Some("my_pb"));
         assert!(
-            human.contains("acore_auth.account WHERE UPPER(username) LIKE 'RNDBOT%'"),
+            human.contains("my_auth.account WHERE UPPER(username) LIKE 'RNDBOT%'"),
             "an empty playerbots registry would classify every bot as human: {human}"
         );
+    }
+
+    /// The Task 6 degrade, ISOLATED: a `None` playerbots name produces the
+    /// prefix-only form — byte-identical to [`bot_clause_prefix_only`] — and
+    /// never mentions the registry table (there is no schema to qualify it
+    /// with, and a guessed `acore_playerbots` would be the exact fallback
+    /// this branch removed).
+    #[test]
+    fn a_missing_playerbots_name_degrades_to_the_prefix_only_form() {
+        let degraded = bot_clause("c.account", "rndbot", "my_auth", None);
+        assert_eq!(degraded, bot_clause_prefix_only("c.account", "rndbot", "my_auth"));
+        assert!(!degraded.contains("playerbots_account_type"), "got: {degraded}");
+        assert!(!degraded.contains("acore_"), "got: {degraded}");
+        assert!(degraded.contains("LIKE 'RNDBOT%'"), "the prefix signal must survive: {degraded}");
     }
 
     #[test]
@@ -225,7 +269,7 @@ mod tests {
         assert_eq!(normalize_prefix("   "), "rndbot");
         assert_eq!(normalize_prefix("\"\""), "rndbot");
         // The hazard this guards: LIKE '%' matches every account.
-        let c = prefix_clause("c.account", "");
+        let c = prefix_clause("c.account", "", "acore_auth");
         assert!(!c.contains("LIKE '%'"), "empty prefix became a match-all: {c}");
         assert!(c.contains("LIKE 'RNDBOT%'"), "got: {c}");
     }
@@ -243,13 +287,13 @@ mod tests {
         // prefix would silently widen the bot set.
         assert_eq!(escape_like_literal("bot_%x"), "bot\\_\\%x");
         assert_eq!(escape_like_literal("a\\b"), "a\\\\b");
-        let c = prefix_clause("c.account", "my_bots");
+        let c = prefix_clause("c.account", "my_bots", "acore_auth");
         assert!(c.contains("LIKE 'MY\\_BOTS%'"), "got: {c}");
     }
 
     #[test]
     fn a_quote_in_the_prefix_cannot_break_out_of_the_literal() {
-        let c = prefix_clause("c.account", "o'brien");
+        let c = prefix_clause("c.account", "o'brien", "acore_auth");
         assert!(c.contains("LIKE 'O''BRIEN%'"), "got: {c}");
         // One opening + one closing quote around the pattern, nothing loose.
         assert_eq!(c.matches('\'').count() % 2, 0, "unbalanced quoting: {c}");
@@ -258,7 +302,7 @@ mod tests {
     #[test]
     fn prefix_only_degrade_still_finds_bots() {
         // The stats probe's fallback used to be `0=1` — "no bots exist".
-        let c = bot_clause_prefix_only("c.account", "rndbot");
+        let c = bot_clause_prefix_only("c.account", "rndbot", "acore_auth");
         assert!(c.contains("LIKE 'RNDBOT%'"), "got: {c}");
         assert!(!c.contains("playerbots_account_type"), "got: {c}");
     }

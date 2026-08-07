@@ -484,6 +484,16 @@ fn git_clone_depth1(program: &OsStr, url: &str, dest: &Path) -> bool {
 /// (Chunk 5, Part 5b) for its multi-statement (`SET`/`PREPARE`/`EXECUTE`)
 /// canned fixes, which the `mysql` crate's single-statement `exec_drop`
 /// cannot run — see this module's doc comment for the fuller rationale.
+///
+/// TASK 6 SCOPE RULING — the module subsystem is a recorded EXCEPTION to
+/// resolved-name splicing, not a target. Every `db` argument at this
+/// executor's call sites stays a standard `acore_*` literal on purpose: the
+/// SQL payloads this runs are third-party module `.sql` files (and canned
+/// statements ported from them) whose OWN CONTENT hardcodes the standard
+/// schema names internally. Resolving only our argv while the payload
+/// hardcodes is a half-rename that breaks worse than either consistent state
+/// — on a renamed server the modules are broken by their own SQL before our
+/// tooling enters. The module subsystem requires standard names end-to-end.
 pub fn mysql_run_stmt(program: &OsStr, password: &str, db: &str, stmt: &str) -> bool {
     let mut cmd = Command::new(program);
     cmd.args(["exec", "ac-database", "mysql", "-uroot", &format!("-p{password}"), db, "-e", stmt]);
@@ -553,6 +563,10 @@ pub(crate) fn run_with_stdin_bounded_draining(mut cmd: Command, input: Vec<u8>, 
 
 /// `_ale_sql_file`/`_sqlmod_run_file` (`70-modules.sh:382,712`): `docker exec
 /// -i ac-database mysql -uroot -p<pw> <db> < <file>`.
+///
+/// TASK 6 SCOPE RULING: deliberately NOT resolved-name-driven — see
+/// [`mysql_run_stmt`]'s ruling; the files piped here ship with the modules
+/// and hardcode standard schema names internally.
 fn mysql_run_file(program: &OsStr, password: &str, db: &str, file: &Path) -> bool {
     let Ok(bytes) = std::fs::read(file) else { return false };
     let mut cmd = Command::new(program);
@@ -858,8 +872,20 @@ fn tweak_reverse(program: &OsStr, password: &str, sdir: &Path, key: &str) -> boo
 // either — only `backup create`'s own arm does).
 // ---------------------------------------------------------------------------
 
-pub fn module_backup_now(program: &OsStr, password: &str, emit: &dyn Fn(Value)) -> bool {
+pub fn module_backup_now(program: &OsStr, db_cfg: &crate::db::DbConfig, emit: &dyn Fn(Value)) -> bool {
     use super::backup;
+    // Takes the whole DbConfig (not just the password) so the dump runs over
+    // the RESOLVED schema names (Task 6) — and REFUSES when they never
+    // resolved: every caller treats `false` as "safety backup failed, abort",
+    // which is exactly right for a dump that would otherwise capture guessed
+    // schemas while reporting success.
+    let names = match db_cfg.names() {
+        Ok(n) => n,
+        Err(e) => {
+            emit(line_event("warn", format!("backup refused: {e}")));
+            return false;
+        }
+    };
     let Some(bdir) = backup::backup_dir() else { return false };
     if std::fs::create_dir_all(&bdir).is_err() {
         return false;
@@ -867,7 +893,7 @@ pub fn module_backup_now(program: &OsStr, password: &str, emit: &dyn Fn(Value)) 
     let file_name = backup::new_backup_file_name(true);
     let out_path = bdir.join(&file_name);
     emit(line_event("info", "backing up characters, bots, accounts and world..."));
-    if let Err(errtail) = backup::dump_to(program, password, true, &out_path) {
+    if let Err(errtail) = backup::dump_to(program, &db_cfg.password, true, &out_path, names) {
         if !errtail.is_empty() {
             emit(line_event("warn", format!("backup failed: {errtail}")));
         }
@@ -1120,6 +1146,10 @@ pub fn lua_apply_sql(program: &OsStr, password: &str, sdir: &Path, key: &str, em
                     continue;
                 }
                 emit(line_event("info", format!("  {bn}")));
+                // `acore_ale` is mod-ale's OWN fifth schema — module-owned,
+                // never named by any `*DatabaseInfo` key, so it has no
+                // resolution chain to join (Task 6 ruling: out of the
+                // four-family scope, module subsystem exception).
                 if !mysql_run_file(program, password, "acore_ale", &f) {
                     return false;
                 }
@@ -1581,7 +1611,10 @@ pub fn install_cpp(
     Ok(serde_json::json!({"key": mkey, "action": action, "rebuild_required": rebuild_required}))
 }
 
-/// `install)`'s `lua)` case (`90-main.sh:4672-4724`).
+/// `install)`'s `lua)` case (`90-main.sh:4672-4724`). Takes the `DbConfig`
+/// (not a bare password) so the `--backup` gate's dump runs over resolved
+/// schema names; the module SQL itself stays on the standard-name exec path
+/// (see [`mysql_run_stmt`]'s Task 6 ruling).
 pub fn install_lua(
     git_program: &OsStr,
     docker_program: &OsStr,
@@ -1589,10 +1622,11 @@ pub fn install_lua(
     key: &str,
     url: Option<&str>,
     backup: Option<bool>,
-    password: &str,
+    db_cfg: &crate::db::DbConfig,
     client_path: Option<&Path>,
     emit: &dyn Fn(Value),
 ) -> Result<Value, ()> {
+    let password: &str = &db_cfg.password;
     let Some(lrow) = lua_row(key) else {
         emit(section_end(SECTION_INSTALL, "error"));
         emit(error_event("BAD_ARG", format!("Unknown lua script: {key}"), "Lua scripts come from the registry only."));
@@ -1617,7 +1651,7 @@ pub fn install_lua(
                 return Err(());
             }
             Some(true) => {
-                if !module_backup_now(docker_program, password, emit) {
+                if !module_backup_now(docker_program, db_cfg, emit) {
                     emit(section_end(SECTION_INSTALL, "error"));
                     emit(error_event("BACKUP_FAILED", "Safety backup failed — nothing was installed", ""));
                     return Err(());
@@ -1669,9 +1703,10 @@ pub fn install_sql(
     url: Option<&str>,
     backup: Option<bool>,
     variant: Option<&str>,
-    password: &str,
+    db_cfg: &crate::db::DbConfig,
     emit: &dyn Fn(Value),
 ) -> Result<Value, ()> {
+    let password: &str = &db_cfg.password;
     let Some(srow) = sql_row(key) else {
         emit(section_end(SECTION_INSTALL, "error"));
         emit(error_event("BAD_ARG", format!("Unknown SQL mod: {key}"), ""));
@@ -1712,7 +1747,7 @@ pub fn install_sql(
             }
         }
     }
-    if backup == Some(true) && !module_backup_now(docker_program, password, emit) {
+    if backup == Some(true) && !module_backup_now(docker_program, db_cfg, emit) {
         emit(section_end(SECTION_INSTALL, "error"));
         emit(error_event("BACKUP_FAILED", "Safety backup failed — nothing was installed", ""));
         return Err(());
@@ -1822,7 +1857,8 @@ pub fn remove_lua(sdir: &Path, key: &str, backup: Option<bool>, emit: &dyn Fn(Va
 
 /// `remove)`'s `sql)` case (`90-main.sh:4897-4960`). `docker_program` only —
 /// removal never touches git.
-pub fn remove_sql(docker_program: &OsStr, sdir: &Path, key: &str, backup: Option<bool>, password: &str, emit: &dyn Fn(Value)) -> Result<Value, ()> {
+pub fn remove_sql(docker_program: &OsStr, sdir: &Path, key: &str, backup: Option<bool>, db_cfg: &crate::db::DbConfig, emit: &dyn Fn(Value)) -> Result<Value, ()> {
+    let password: &str = &db_cfg.password;
     let Some(srow) = sql_row(key) else {
         emit(section_end(SECTION_REMOVE, "error"));
         emit(error_event("BAD_ARG", format!("Unknown SQL mod: {key}"), ""));
@@ -1846,7 +1882,7 @@ pub fn remove_sql(docker_program: &OsStr, sdir: &Path, key: &str, backup: Option
         emit(error_event("BAD_ARG", "Pick --backup or --no-backup", "Removal changes the world database."));
         return Err(());
     }
-    if backup == Some(true) && !module_backup_now(docker_program, password, emit) {
+    if backup == Some(true) && !module_backup_now(docker_program, db_cfg, emit) {
         emit(section_end(SECTION_REMOVE, "error"));
         emit(error_event("BACKUP_FAILED", "Safety backup failed — nothing was removed", ""));
         return Err(());
@@ -2017,7 +2053,7 @@ pub fn module_install_stream(
                 key.as_deref().unwrap_or(""),
                 url.as_deref(),
                 backup,
-                &db_cfg.password,
+                &db_cfg,
                 client_path.as_deref(),
                 &emit,
             )
@@ -2030,7 +2066,7 @@ pub fn module_install_stream(
             url.as_deref(),
             backup,
             variant.as_deref(),
-            &db_cfg.password,
+            &db_cfg,
             &emit,
         ),
         other => {
@@ -2091,7 +2127,7 @@ pub fn module_remove_stream(
     let result = match family.as_str() {
         "cpp" => modmgr::remove_cpp(&sdir, &key, backup, &emit),
         "lua" => modmgr::remove_lua(&sdir, &key, backup, &emit),
-        "sql" => modmgr::remove_sql(&program, &sdir, &key, backup, &db_cfg.password, &emit),
+        "sql" => modmgr::remove_sql(&program, &sdir, &key, backup, &db_cfg, &emit),
         other => {
             emit(modmgr::section_end(modmgr::SECTION_REMOVE, "error"));
             emit(modmgr::error_event("BAD_ARG", format!("Unknown family: {other}"), "cpp, lua or sql"));
@@ -2145,7 +2181,7 @@ pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, 
         // Same helper `wow update`'s --backup gate uses (Chunk 3b) --
         // world-INCLUSIVE (module/core SQL lands during the rebuild), a
         // faithful port of `_module_backup_now` (`70-modules.sh:294-312`).
-        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+        if !modmgr::module_backup_now(&docker_program, &db_cfg, &emit) {
             emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
             emit(modmgr::error_event("BACKUP_FAILED", "Safety backup failed -- rebuild not started", ""));
             return;

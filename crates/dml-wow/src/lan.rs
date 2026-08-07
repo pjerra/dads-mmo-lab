@@ -569,6 +569,7 @@ mod tests {
                 world: "acore_world".into(),
                 characters: "acore_characters".into(),
                 auth: "acore_auth".into(),
+                playerbots: Some("acore_playerbots".into()),
             }),
         };
         assert_eq!(lan_current_address(&cfg), None);

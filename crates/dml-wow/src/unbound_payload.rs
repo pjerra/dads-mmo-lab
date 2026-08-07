@@ -122,6 +122,13 @@ pub enum SqlDb {
 }
 
 impl SqlDb {
+    /// TASK 6 SCOPE RULING: these stay the STANDARD names on purpose — the
+    /// Wrath Unbound payload is byte-pinned (FNV-1a fingerprint) third-party
+    /// SQL whose own content hardcodes `acore_*` internally, so resolving
+    /// only this argv while the payload hardcodes would be a half-rename
+    /// that breaks worse than either consistent state. The add-on requires
+    /// standard schema names end-to-end (its install guard refuses a server
+    /// where `acore_world` does not answer). Do not resolve.
     pub fn database(self) -> &'static str {
         match self {
             SqlDb::World => "acore_world",

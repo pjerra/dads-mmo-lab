@@ -510,7 +510,7 @@ pub fn update_stream(backup: Option<bool>, emit: impl Fn(serde_json::Value)) {
     if do_backup {
         let docker_program = native::docker_program();
         let db_cfg = crate::db::DbConfig::from_env();
-        if !modmgr::module_backup_now(&docker_program, &db_cfg.password, &emit) {
+        if !modmgr::module_backup_now(&docker_program, &db_cfg, &emit) {
             emit(serde_json::json!({"event": "section_end", "name": WOW_UPDATE_SECTION, "status": "error"}));
             emit(crate::lifecycle::gl_error("BACKUP_FAILED", "Safety backup failed -- update not started", ""));
             return;

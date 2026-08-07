@@ -462,20 +462,36 @@ pub fn mysql_scalar_argv(container: &str, password: &str, sql: &str) -> Vec<Stri
     ]
 }
 
-/// Does the target hold a `acore_characters.characters` TABLE at all?
+/// Does the target hold a `<characters>.characters` TABLE at all?
 ///
 /// Asked through `information_schema` on purpose. The obvious
-/// `SELECT COUNT(*) FROM acore_characters.characters` ERRORS on a genuinely
+/// `SELECT COUNT(*) FROM <characters>.characters` ERRORS on a genuinely
 /// fresh database — which is the case we most need to say "yes, proceed" to —
 /// and that error is indistinguishable from "the server did not answer". A
 /// question that returns 0 instead of failing is the only one whose failure
 /// means what a failure should mean.
-pub const SQL_TABLE_PRESENT: &str = "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='acore_characters' AND table_name='characters'";
+///
+/// `characters` is the RESOLVED characters-schema name (Task 6), read from
+/// the title dir whose compose THIS engine generated one stage earlier — so
+/// the guard asks about the schema the restore will actually write, not a
+/// hardcoded `acore_characters` that a renamed target would never match
+/// (silently disarming the guard). The name sits inside a single-quoted SQL
+/// string, which is safe because [`crate::db::parse_database_info`]'s charset
+/// gate (`[A-Za-z0-9_$]`) excludes quotes before any value can get here.
+pub fn sql_table_present(characters: &str) -> String {
+    format!(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='{characters}' AND table_name='characters'"
+    )
+}
 
 /// How many characters are on the target. Only asked when the table exists.
-pub const SQL_CHARACTER_COUNT: &str = "SELECT COUNT(*) FROM acore_characters.characters";
+pub fn sql_character_count(characters: &str) -> String {
+    format!("SELECT COUNT(*) FROM {characters}.characters")
+}
 
-pub const SQL_ACCOUNT_COUNT: &str = "SELECT COUNT(*) FROM acore_auth.account";
+pub fn sql_account_count(auth: &str) -> String {
+    format!("SELECT COUNT(*) FROM {auth}.account")
+}
 
 /// Three answers, never two.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,7 +509,7 @@ pub enum Emptiness {
 /// Decide emptiness from the two raw query answers.
 ///
 /// Pure, so the decision can be tested without a database. `present` is the
-/// output of [`SQL_TABLE_PRESENT`]; `count` is [`SQL_CHARACTER_COUNT`]'s, and
+/// output of [`sql_table_present`]; `count` is [`sql_character_count`]'s, and
 /// is only consulted when `present` parsed to a non-zero number.
 pub fn classify_emptiness(present: Option<&str>, count: impl FnOnce() -> Option<String>) -> Emptiness {
     let Some(present) = present else {
@@ -959,16 +975,38 @@ impl Engine<'_> {
         }
     }
 
+    /// The schema names the emptiness guard and the verification counts ask
+    /// about — resolved from the title dir whose compose trio THIS engine
+    /// generated in `do_generate` (so by `db-restore` time the answer is the
+    /// generated stack's own names). `None` never guesses: the guard turns it
+    /// into `Emptiness::Unknown` → `MIGRATE_TARGET_UNKNOWN`, the same refusal
+    /// a database that would not answer earns.
+    fn resolved_names(&self) -> Option<crate::db::DatabaseNames> {
+        crate::db::database_names_for_title(&self.title_dir)
+    }
+
     fn check_emptiness(&self, container: &str) -> Emptiness {
-        let present = self.ask_scalar(container, SQL_TABLE_PRESENT);
-        classify_emptiness(present.as_deref(), || self.ask_scalar(container, SQL_CHARACTER_COUNT))
+        let Some(names) = self.resolved_names() else {
+            return Emptiness::Unknown(
+                "could not resolve the target's schema names from its generated compose".into(),
+            );
+        };
+        let present = self.ask_scalar(container, &sql_table_present(&names.characters));
+        classify_emptiness(present.as_deref(), || {
+            self.ask_scalar(container, &sql_character_count(&names.characters))
+        })
     }
 
     /// Echo what actually landed. The migration's own verification step: a
     /// number the user can compare against the server they left behind.
     fn report_counts(&self, container: &str) {
-        let chars = self.ask_scalar(container, SQL_CHARACTER_COUNT);
-        let accounts = self.ask_scalar(container, SQL_ACCOUNT_COUNT);
+        let (chars, accounts) = match self.resolved_names() {
+            Some(names) => (
+                self.ask_scalar(container, &sql_character_count(&names.characters)),
+                self.ask_scalar(container, &sql_account_count(&names.auth)),
+            ),
+            None => (None, None),
+        };
         match (chars, accounts) {
             (Some(c), Some(a)) => {
                 self.line("info", format!("restored: {c} characters, {a} accounts"));

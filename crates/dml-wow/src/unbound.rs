@@ -307,6 +307,11 @@ impl UninstallStage {
 /// revert predicates, not an approximation of one. (This is why the design
 /// doc's "narrowed predicates" idea was dropped: narrower than the add-on's
 /// own re-run semantics would revert less than an upgrade already deletes.)
+///
+/// TASK 6 SCOPE RULING: the `acore_*` db column stays STANDARD on purpose —
+/// this reverts the fingerprint-pinned Unbound payload, whose own SQL
+/// hardcodes the standard names; the add-on requires them end-to-end. See
+/// `unbound_payload::SqlDb::database` for the full ruling. Do not resolve.
 pub const REVERT_SQL: [(&str, &str, &str); 11] = [
     (
         "acore_world",
@@ -618,7 +623,21 @@ impl UnboundIo for ProcUnboundIo {
             "info".into(),
             "backing up characters, bots, accounts and world before changing anything...".into(),
         );
-        backup::dump_to_container(&self.inner.docker, container, password, true, &out_path)?;
+        // Task 6 scope ruling: the unbound subsystem is a recorded EXCEPTION
+        // to resolved-name splicing — its fingerprint-pinned SQL payload
+        // hardcodes the standard `acore_*` schemas internally, so the whole
+        // add-on requires standard names end-to-end (its own guard probes
+        // `acore_world` and refuses a renamed server before this dump can
+        // run). The safety dump therefore names the SAME standard set the
+        // migrations are about to mutate — not a guess, the subsystem's
+        // contract.
+        let standard = crate::db::DatabaseNames {
+            world: "acore_world".to_string(),
+            characters: "acore_characters".to_string(),
+            auth: "acore_auth".to_string(),
+            playerbots: Some("acore_playerbots".to_string()),
+        };
+        backup::dump_to_container(&self.inner.docker, container, password, true, &out_path, &standard)?;
         for p in backup::prune(&bdir) {
             on_line("info".into(), format!("pruned old backup: {p}"));
         }

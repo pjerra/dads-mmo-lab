@@ -274,7 +274,7 @@ pub const GROUP_MEMBER_GUIDS_SQL: &str =
 /// prefix): with registry-only detection, a party full of bots read back as
 /// zero bots, so `dismiss-all` dismissed nobody and `preset-save` saved an
 /// empty preset.
-pub fn bot_member_names_sql(bot_prefix: &str) -> String {
+pub fn bot_member_names_sql(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT c.name \
          FROM group_member gm \
@@ -282,14 +282,14 @@ pub fn bot_member_names_sql(bot_prefix: &str) -> String {
          WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
            AND {} \
          ORDER BY c.name",
-        crate::botid::bot_clause("c.account", bot_prefix)
+        crate::botid::bot_clause("c.account", bot_prefix, &names.auth, names.playerbots.as_deref())
     )
 }
 
 /// `preset-save`'s bot-class query (`90-main.sh:3296-3301`) — same JOIN
 /// shape as [`bot_member_names_sql`] but selects `c.class` (no name needed
 /// for a class-only preset).
-pub fn bot_member_classes_sql(bot_prefix: &str) -> String {
+pub fn bot_member_classes_sql(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT c.class \
          FROM group_member gm \
@@ -297,7 +297,7 @@ pub fn bot_member_classes_sql(bot_prefix: &str) -> String {
          WHERE gm.guid = (SELECT guid FROM group_member WHERE memberGuid=? LIMIT 1) \
            AND {} \
          ORDER BY c.name",
-        crate::botid::bot_clause("c.account", bot_prefix)
+        crate::botid::bot_clause("c.account", bot_prefix, &names.auth, names.playerbots.as_deref())
     )
 }
 
@@ -477,8 +477,11 @@ pub fn char_name_by_guid(cfg: &crate::db::DbConfig, guid: i64) -> Option<String>
 /// unreachable DB as "zero bots" -- so this returns `Result`, not a
 /// silently-emptied `Vec`.
 pub fn bot_member_names(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<String>, CmdError> {
+    // Names-unresolved surfaces as DB_NAMES_UNRESOLVED (via db_err_to_cmd),
+    // never as "Could not read the party" about a healthy server.
+    let names = cfg.names().map_err(crate::db::db_err_to_cmd)?;
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    let sql = bot_member_names_sql(&crate::botid::bot_account_prefix());
+    let sql = bot_member_names_sql(&crate::botid::bot_account_prefix(), names);
     crate::db::query_with_params(cfg, crate::db::Database::Characters, &sql, params)
         .map(|res| res.rows.iter().filter_map(|r| cell_string(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))
@@ -491,8 +494,9 @@ pub fn bot_member_names(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<Str
 /// (`90-main.sh:3302-3303`), so a query error must propagate rather than be
 /// swallowed into an empty (and thus falsely "no bots to save") list.
 pub fn bot_member_classes(cfg: &crate::db::DbConfig, pguid: i64) -> Result<Vec<i64>, CmdError> {
+    let names = cfg.names().map_err(crate::db::db_err_to_cmd)?;
     let params: Vec<mysql::Value> = vec![mysql::Value::from(pguid)];
-    let sql = bot_member_classes_sql(&crate::botid::bot_account_prefix());
+    let sql = bot_member_classes_sql(&crate::botid::bot_account_prefix(), names);
     crate::db::query_with_params(cfg, crate::db::Database::Characters, &sql, params)
         .map(|res| res.rows.iter().filter_map(|r| sql_row_int(r.first())).collect())
         .map_err(|_| db_unreachable_err("Could not read the party"))

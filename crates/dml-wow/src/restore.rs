@@ -289,6 +289,20 @@ pub fn backup_restore_stream(
         return;
     };
 
+    // Resolve the schema names BEFORE stopping anything: the pre-restore
+    // safety dump needs them, and refusing here means "Nothing was changed"
+    // is still true — refusing after the stop would leave the server down
+    // over a config problem.
+    let names = match db_cfg.names() {
+        Ok(n) => n.clone(),
+        Err(e) => {
+            let err = crate::db::db_err_to_cmd(e);
+            emit(modmgr::section_end(BACKUP_RESTORE_SECTION, "error"));
+            emit(modmgr::error_event(&err.code, err.message, &err.hint));
+            return;
+        }
+    };
+
     let docker_program = native::docker_program();
 
     emit(modmgr::line_event("info", "stopping the game server..."));
@@ -312,7 +326,7 @@ pub fn backup_restore_stream(
     emit(modmgr::line_event("info", "taking a pre-restore safety backup..."));
     let (safety, include_world) = restore::prerestore_name(&file);
     let safety_path = bdir.join(&safety);
-    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, include_world, &safety_path) {
+    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, include_world, &safety_path, &names) {
         let _ = errtail; // bash discards the tail here too -- fixed hint text only.
         let mut start_cmd = std::process::Command::new(&docker_program);
         start_cmd.current_dir(&sdir).args(["compose", "start", "ac-worldserver", "ac-authserver"]);

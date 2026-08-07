@@ -872,9 +872,21 @@ pub fn bots_flush_stream(soap_lock: Arc<Mutex<()>>, db_cfg: crate::db::DbConfig,
         emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", ""));
         return;
     }
+    // Unresolved schema names refuse the flush OUTRIGHT (nothing has changed
+    // yet): a safety dump over guessed names is the recorded worst class — a
+    // backup that reports success and holds the wrong schemas.
+    let names = match db_cfg.names() {
+        Ok(n) => n.clone(),
+        Err(e) => {
+            let err = crate::db::db_err_to_cmd(e);
+            emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
+            emit(modmgr::error_event(&err.code, err.message, &err.hint));
+            return;
+        }
+    };
     let bfile = backup::new_backup_file_name(false);
     let bpath = bdir.join(&bfile);
-    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, false, &bpath) {
+    if let Err(errtail) = backup::dump_to(&docker_program, &db_cfg.password, false, &bpath, &names) {
         emit(modmgr::section_end(BOTS_FLUSH_SECTION, "error"));
         emit(modmgr::error_event("BACKUP_FAILED", "The safety backup failed - nothing was changed", &errtail));
         return;

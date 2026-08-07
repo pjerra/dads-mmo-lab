@@ -251,6 +251,14 @@ pub fn module_update_check(program: &std::ffi::OsStr, sdir: &Path) -> Value {
 // the single-statement COUNT reads / spawn INSERT are plain bound-param
 // `db::query_with_params`/`db::execute` calls, shared by fixit AND
 // place-npc (identical shape, different entry/coords).
+//
+// TASK 6 SCOPE RULING: the `acore_world` literals inside the BATTLEPASS_*
+// consts (both the `TABLE_SCHEMA='acore_world'` probes and the dotted names
+// inside the single-quoted dynamic-SQL strings) are a recorded EXCEPTION to
+// resolved-name splicing — these statements repair the Battle Pass MODULE,
+// whose own shipped SQL hardcodes the standard schema names internally, so
+// the module subsystem requires standard names end-to-end (see
+// `modmgr::mysql_run_stmt`'s ruling). Do not resolve them.
 // ---------------------------------------------------------------------------
 
 pub const CREATURE_TEMPLATE_COUNT_SQL: &str = "SELECT COUNT(*) FROM creature_template WHERE entry=?";

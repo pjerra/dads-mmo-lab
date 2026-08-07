@@ -170,8 +170,8 @@ pub fn valid_bot_class(class: u32) -> bool {
 /// validated by the command layer — see [`valid_bot_class`] — and never routed
 /// through string escaping), so splicing their decimal form is safe; only the
 /// free-text name needs binding.
-pub fn bots_where(f: &BotFilters, bot_prefix: &str) -> (String, Vec<mysql::Value>) {
-    let mut w = crate::botid::bot_clause("c.account", bot_prefix);
+pub fn bots_where(f: &BotFilters, bot_prefix: &str, names: &crate::db::DatabaseNames) -> (String, Vec<mysql::Value>) {
+    let mut w = crate::botid::bot_clause("c.account", bot_prefix, &names.auth, names.playerbots.as_deref());
     let mut params: Vec<mysql::Value> = Vec::new();
     if let Some(name) = f.name.as_deref().filter(|n| !n.is_empty()) {
         let like = name.replace('%', "!%").replace('_', "!_");
@@ -195,15 +195,15 @@ pub fn bots_where(f: &BotFilters, bot_prefix: &str) -> (String, Vec<mysql::Value
 
 /// `SELECT COUNT(*)` over the filtered bot population (drives the `total`),
 /// plus its bound parameters.
-pub fn bots_total_sql(f: &BotFilters, bot_prefix: &str) -> (String, Vec<mysql::Value>) {
-    let (where_clause, params) = bots_where(f, bot_prefix);
+pub fn bots_total_sql(f: &BotFilters, bot_prefix: &str, names: &crate::db::DatabaseNames) -> (String, Vec<mysql::Value>) {
+    let (where_clause, params) = bots_where(f, bot_prefix, names);
     (format!("SELECT COUNT(*) FROM characters c WHERE {where_clause};"), params)
 }
 
 /// One page of bot rows, ordered/limited/offset exactly like the arm, plus its
 /// bound parameters.
-pub fn bots_rows_sql(f: &BotFilters, bot_prefix: &str) -> (String, Vec<mysql::Value>) {
-    let (where_clause, params) = bots_where(f, bot_prefix);
+pub fn bots_rows_sql(f: &BotFilters, bot_prefix: &str, names: &crate::db::DatabaseNames) -> (String, Vec<mysql::Value>) {
+    let (where_clause, params) = bots_where(f, bot_prefix, names);
     let sql = format!(
         "SELECT c.guid, c.name, c.class, c.race, c.gender, c.level, c.online, c.zone \
          FROM characters c WHERE {where_clause} ORDER BY c.name LIMIT {} OFFSET {};",
@@ -245,8 +245,9 @@ pub fn assemble_bots(total: &str, limit: u32, offset: u32, rows: &QueryResult) -
 /// Run both bot queries (count then page, same WHERE, same order as the CLI) and
 /// assemble the CLI-identical JSON.
 pub fn read_bots(cfg: &DbConfig, f: &BotFilters) -> Result<Value, DbError> {
+    let names = cfg.names()?;
     let bot_prefix = crate::botid::bot_account_prefix();
-    let (total_sql, total_params) = bots_total_sql(f, &bot_prefix);
+    let (total_sql, total_params) = bots_total_sql(f, &bot_prefix, names);
     let total_res = db::query_with_params(cfg, Database::Characters, &total_sql, total_params)?;
     let total = total_res
         .rows
@@ -254,7 +255,7 @@ pub fn read_bots(cfg: &DbConfig, f: &BotFilters) -> Result<Value, DbError> {
         .and_then(|r| r.first())
         .map(cell_text)
         .unwrap_or_default();
-    let (rows_sql, rows_params) = bots_rows_sql(f, &bot_prefix);
+    let (rows_sql, rows_params) = bots_rows_sql(f, &bot_prefix, names);
     let rows = db::query_with_params(cfg, Database::Characters, &rows_sql, rows_params)?;
     Ok(assemble_bots(&total, f.limit, f.offset, &rows))
 }
@@ -264,21 +265,23 @@ pub fn read_bots(cfg: &DbConfig, f: &BotFilters) -> Result<Value, DbError> {
 // ---------------------------------------------------------------------------
 
 /// The exact SELECT the `accounts` arm runs (bot/AHBOT filtered; gmlevel =
-/// MAX across realms; LEFT JOIN characters). Fully-qualified `acore_auth.*`, so
-/// it runs against the characters DB like the CLI's `db_chars_query`.
+/// MAX across realms; LEFT JOIN characters). Fully-qualified `<auth>.*` (the
+/// RESOLVED auth name, Task 6), so it runs against the characters DB like the
+/// CLI's `db_chars_query`.
 ///
 /// The bot filter is [`crate::botid::username_is_bot`] rather than a hardcoded
 /// `NOT LIKE 'RNDBOT%'`, so a server that customised
 /// `AiPlayerbot.RandomBotAccountPrefix` does not get 250 bot accounts in its
 /// character picker. It stays PREFIX-ONLY on purpose — see that function's
-/// docs: this is the one bot filter that must not require the
-/// `acore_playerbots` schema to exist.
-pub fn accounts_sql(bot_prefix: &str) -> String {
+/// docs: this is the one bot filter that must not require the playerbots
+/// schema to exist, which is also why this builder takes ONLY the auth name:
+/// the playerbots name structurally cannot be spliced here.
+pub fn accounts_sql(bot_prefix: &str, auth: &str) -> String {
     format!(
         "SELECT a.id, a.username, COALESCE(g.gmlevel,0), \
          COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'') \
-         FROM acore_auth.account a \
-         LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM acore_auth.account_access GROUP BY id) g ON g.id = a.id \
+         FROM {auth}.account a \
+         LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM {auth}.account_access GROUP BY id) g ON g.id = a.id \
          LEFT JOIN characters c ON c.account = a.id \
          WHERE NOT {} AND a.username <> 'AHBOT' \
          ORDER BY a.id, c.level DESC;",
@@ -348,7 +351,12 @@ fn account_flush(out: &mut Vec<Value>, id: &str, name: &str, gm: &str, chars: Ve
 
 /// Run the accounts read against the live DB and assemble the CLI-identical JSON.
 pub fn read_accounts(cfg: &DbConfig) -> Result<Value, DbError> {
-    let res = db::query(cfg, Database::Characters, &accounts_sql(&crate::botid::bot_account_prefix()))?;
+    let names = cfg.names()?;
+    let res = db::query(
+        cfg,
+        Database::Characters,
+        &accounts_sql(&crate::botid::bot_account_prefix(), &names.auth),
+    )?;
     Ok(assemble_accounts(&res))
 }
 
@@ -367,27 +375,30 @@ pub fn read_accounts(cfg: &DbConfig) -> Result<Value, DbError> {
 /// install) — so the launcher's Home page listed 1000 playerbots as real
 /// players. Bot identity now comes from [`crate::botid::human_clause`], which
 /// also checks the reserved account-name prefix. See `botid`'s module docs.
-fn online_humans_where(bot_prefix: &str) -> String {
-    format!("c.online = 1 AND {}", crate::botid::human_clause("c.account", bot_prefix))
+fn online_humans_where(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
+    format!(
+        "c.online = 1 AND {}",
+        crate::botid::human_clause("c.account", bot_prefix, &names.auth, names.playerbots.as_deref())
+    )
 }
 
 /// The exact SELECT the `players online` arm runs (no bound params — nothing
 /// user-controlled).
-fn players_online_sql(bot_prefix: &str) -> String {
+fn players_online_sql(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT c.name, c.level, c.class, c.zone FROM characters c WHERE {} \
          ORDER BY c.name;",
-        online_humans_where(bot_prefix)
+        online_humans_where(bot_prefix, names)
     )
 }
 
 /// The exact SELECT the `party online` arm runs — same WHERE, different
 /// projection/order (guid, name, class, level).
-fn party_online_sql(bot_prefix: &str) -> String {
+fn party_online_sql(bot_prefix: &str, names: &crate::db::DatabaseNames) -> String {
     format!(
         "SELECT c.guid, c.name, c.class, c.level FROM characters c WHERE {} \
          ORDER BY c.name;",
-        online_humans_where(bot_prefix)
+        online_humans_where(bot_prefix, names)
     )
 }
 
@@ -455,14 +466,24 @@ pub fn assemble_party_online(res: &QueryResult) -> Value {
 /// Run the players-online read against the live DB and assemble the
 /// CLI-identical JSON.
 pub fn read_players_online(cfg: &DbConfig) -> Result<Value, DbError> {
-    let res = db::query(cfg, Database::Characters, &players_online_sql(&crate::botid::bot_account_prefix()))?;
+    let names = cfg.names()?;
+    let res = db::query(
+        cfg,
+        Database::Characters,
+        &players_online_sql(&crate::botid::bot_account_prefix(), names),
+    )?;
     Ok(assemble_players_online(&res))
 }
 
 /// Run the party-online read against the live DB and assemble the
 /// CLI-identical JSON.
 pub fn read_party_online(cfg: &DbConfig) -> Result<Value, DbError> {
-    let res = db::query(cfg, Database::Characters, &party_online_sql(&crate::botid::bot_account_prefix()))?;
+    let names = cfg.names()?;
+    let res = db::query(
+        cfg,
+        Database::Characters,
+        &party_online_sql(&crate::botid::bot_account_prefix(), names),
+    )?;
     Ok(assemble_party_online(&res))
 }
 
@@ -823,8 +844,20 @@ mod tests {
         assert_eq!(clamp_limit(Some(9999)), 200);
     }
 
+    /// The stock-name fixture the SQL-builder tests thread through — the same
+    /// shape a resolved live install produces.
+    fn test_names() -> crate::db::DatabaseNames {
+        crate::db::DatabaseNames {
+            world: "acore_world".to_string(),
+            characters: "acore_characters".to_string(),
+            auth: "acore_auth".to_string(),
+            playerbots: Some("acore_playerbots".to_string()),
+        }
+    }
+
     #[test]
     fn bots_where_builds_filters() {
+        let names = test_names();
         let base = BotFilters {
             name: None,
             class: None,
@@ -834,8 +867,11 @@ mod tests {
             limit: 50,
             offset: 0,
         };
-        let (w, p) = bots_where(&base, "rndbot");
-        assert_eq!(w, crate::botid::bot_clause("c.account", "rndbot"));
+        let (w, p) = bots_where(&base, "rndbot", &names);
+        assert_eq!(
+            w,
+            crate::botid::bot_clause("c.account", "rndbot", "acore_auth", Some("acore_playerbots"))
+        );
         // Both signals, so an unpopulated playerbots registry cannot empty the
         // bots page (the 2026-08-01 incident).
         assert!(w.contains("playerbots_account_type"), "got: {w}");
@@ -850,7 +886,7 @@ mod tests {
             limit: 50,
             offset: 0,
         };
-        let (w, p) = bots_where(&full, "rndbot");
+        let (w, p) = bots_where(&full, "rndbot", &names);
         // LIKE metachars escaped with ! and declared ESCAPE '!'; the value is
         // bound (finding #1), not spliced as a quoted literal.
         assert!(w.contains("AND c.name LIKE ? ESCAPE '!'"), "got: {w}");
@@ -860,9 +896,9 @@ mod tests {
         assert!(w.ends_with("AND c.online = 1"));
         // min-only / max-only branches.
         let minonly = BotFilters { max_level: None, min_level: Some(7), ..base.clone() };
-        assert!(bots_where(&minonly, "rndbot").0.contains("AND c.level >= 7"));
+        assert!(bots_where(&minonly, "rndbot", &names).0.contains("AND c.level >= 7"));
         let maxonly = BotFilters { min_level: None, max_level: Some(7), ..base.clone() };
-        assert!(bots_where(&maxonly, "rndbot").0.contains("AND c.level <= 7"));
+        assert!(bots_where(&maxonly, "rndbot", &names).0.contains("AND c.level <= 7"));
     }
 
     #[test]
@@ -876,9 +912,10 @@ mod tests {
             limit: 25,
             offset: 100,
         };
-        let (s, _) = bots_rows_sql(&f, "rndbot");
+        let names = test_names();
+        let (s, _) = bots_rows_sql(&f, "rndbot", &names);
         assert!(s.contains("ORDER BY c.name LIMIT 25 OFFSET 100"), "got: {s}");
-        assert!(bots_total_sql(&f, "rndbot").0.starts_with("SELECT COUNT(*) FROM characters c WHERE"));
+        assert!(bots_total_sql(&f, "rndbot", &names).0.starts_with("SELECT COUNT(*) FROM characters c WHERE"));
     }
 
     #[test]
@@ -962,32 +999,46 @@ mod tests {
 
     #[test]
     fn players_online_and_party_online_sql_share_the_where() {
-        let p = players_online_sql("rndbot");
-        let o = party_online_sql("rndbot");
+        let names = test_names();
+        let p = players_online_sql("rndbot", &names);
+        let o = party_online_sql("rndbot", &names);
         assert!(p.contains("SELECT c.name, c.level, c.class, c.zone"), "got: {p}");
         assert!(o.contains("SELECT c.guid, c.name, c.class, c.level"), "got: {o}");
         for sql in [&p, &o] {
             assert!(sql.contains("c.online = 1"), "got: {sql}");
-            assert!(sql.contains(&crate::botid::human_clause("c.account", "rndbot")), "got: {sql}");
+            assert!(
+                sql.contains(&crate::botid::human_clause(
+                    "c.account",
+                    "rndbot",
+                    "acore_auth",
+                    Some("acore_playerbots")
+                )),
+                "got: {sql}"
+            );
             assert!(sql.contains("ORDER BY c.name;"), "got: {sql}");
         }
     }
 
-    /// The character picker's bot filter: conf-driven prefix, and NO
-    /// dependency on the playerbots schema (the deliberate difference from
-    /// every other bot filter — see `botid::username_is_bot`).
+    /// The character picker's bot filter: conf-driven prefix, resolved auth
+    /// name, and NO dependency on the playerbots schema (the deliberate
+    /// difference from every other bot filter — see `botid::username_is_bot`;
+    /// the builder does not even take a playerbots name, so the negative pin
+    /// below is structural as well as asserted).
     #[test]
     fn accounts_sql_uses_the_configured_prefix_and_never_the_playerbots_schema() {
-        let sql = accounts_sql("rndbot");
+        let sql = accounts_sql("rndbot", "my_auth");
         assert!(sql.contains("NOT UPPER(a.username) LIKE 'RNDBOT%'"), "got: {sql}");
         assert!(sql.contains("a.username <> 'AHBOT'"), "got: {sql}");
+        assert!(sql.contains("FROM my_auth.account a"), "got: {sql}");
+        assert!(sql.contains("FROM my_auth.account_access"), "got: {sql}");
+        assert!(!sql.contains("acore_"), "the resolved auth name must be used: {sql}");
         assert!(
-            !sql.contains("acore_playerbots"),
+            !sql.contains("playerbots"),
             "the picker must keep working on a box with no playerbots module: {sql}"
         );
         // A customised prefix reaches the SQL — this was hardcoded 'RNDBOT%',
         // so such a server got every bot account in its picker.
-        let custom = accounts_sql("fakebot");
+        let custom = accounts_sql("fakebot", "acore_auth");
         assert!(custom.contains("NOT UPPER(a.username) LIKE 'FAKEBOT%'"), "got: {custom}");
         assert!(!custom.contains("RNDBOT"), "got: {custom}");
     }
@@ -996,10 +1047,11 @@ mod tests {
     /// and an EMPTY `playerbots_account_type`, so the registry-only filter
     /// (`account NOT IN (<empty set>)` -> TRUE for every row) listed all of
     /// them on Home as real players. The human filter must therefore never
-    /// depend on the registry alone.
+    /// depend on the registry alone — asserted through the RESOLVED auth name.
     #[test]
     fn who_is_online_does_not_rest_on_the_playerbots_registry_alone() {
-        for sql in [players_online_sql("rndbot"), party_online_sql("rndbot")] {
+        let names = test_names();
+        for sql in [players_online_sql("rndbot", &names), party_online_sql("rndbot", &names)] {
             assert!(
                 sql.contains("acore_auth.account WHERE UPPER(username) LIKE 'RNDBOT%'"),
                 "an empty playerbots registry would let every bot through: {sql}"

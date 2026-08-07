@@ -807,6 +807,7 @@ fn snapshot_world_log_before_stop(
 /// backups" section doc comment).
 fn auto_backup_before_stop(
     docker_program: &std::ffi::OsStr,
+    title_dir: &std::path::Path,
     backups_dir: Option<&std::path::Path>,
     emit: &impl Fn(serde_json::Value),
 ) {
@@ -821,10 +822,26 @@ fn auto_backup_before_stop(
     }
 
     gl_line(emit, "info", "automatic backup before stop...");
-    let db_cfg = db::DbConfig::from_env();
+    // Resolved against the TITLE DIR BEING STOPPED (the caller already knows
+    // it), not the ambient `DML_GAMES_DIR` — the two agree in production (the
+    // launcher exports the var at startup), but the server whose stop this
+    // dump protects is the one whose config should name the schemas being
+    // dumped.
+    let db_cfg = db::DbConfig::for_title(title_dir);
+    // Unresolved names skip the dump with a warn, exactly like a failed dump
+    // below — an automatic backup must NEVER block the stop/restart the user
+    // asked for, and a dump argv built from guessed names would be worse
+    // than no dump (wrong/no schemas, reported as success).
+    let names = match db_cfg.names() {
+        Ok(n) => n.clone(),
+        Err(e) => {
+            gl_line(emit, "warn", format!("automatic backup skipped -- {e}"));
+            return;
+        }
+    };
     let file_name = backup::new_backup_file_name(false);
     let out_path = bdir.join(&file_name);
-    match backup::dump_to(docker_program, &db_cfg.password, false, &out_path) {
+    match backup::dump_to(docker_program, &db_cfg.password, false, &out_path, &names) {
         Ok(()) => {
             backup::write_meta(&db_cfg, &out_path, Some(backup::AUTO_STOP_NAME));
             gl_line(emit, "info", format!("automatic backup saved: {file_name}"));
@@ -1139,7 +1156,7 @@ pub fn games_lifecycle_stream_with(
             mode,
             &emit,
         );
-        auto_backup_before_stop(&docker_program, env.backups_dir.as_deref(), &emit);
+        auto_backup_before_stop(&docker_program, &title_dir, env.backups_dir.as_deref(), &emit);
     }
 
     // Self-heal an interrupted `wow bots flush` -- start+restart only (a
@@ -1760,7 +1777,20 @@ mod tests {
         let games = base.join("games");
         let compose_dir = games.join(title);
         std::fs::create_dir_all(&compose_dir).unwrap();
-        std::fs::write(compose_dir.join("docker-compose.yml"), "services: {}\n").unwrap();
+        // The compose carries the stock `AC_*_DATABASE_INFO` trio so the
+        // pre-stop safety dump resolves its schema names for the RIGHT reason
+        // (Task 6): the dump resolves against the title dir being stopped, and
+        // without a names source it correctly SKIPS — which would starve the
+        // ordering assertions below of their `exec ac-database` call. The
+        // skip itself is pinned by its own test.
+        std::fs::write(
+            compose_dir.join("docker-compose.yml"),
+            "services:\n  ac-worldserver:\n    environment:\n      \
+             AC_LOGIN_DATABASE_INFO: \"ac-database;3306;root;pw;acore_auth\"\n      \
+             AC_WORLD_DATABASE_INFO: \"ac-database;3306;root;pw;acore_world\"\n      \
+             AC_CHARACTER_DATABASE_INFO: \"ac-database;3306;root;pw;acore_characters\"\n",
+        )
+        .unwrap();
         let calls = base.join("docker-calls.log");
         let docker = write_lifecycle_fake_docker(&base, &calls);
         let logs = base.join("logs");
@@ -1837,6 +1867,43 @@ mod tests {
         assert!(
             text_pos(&texts, "automatic backup before stop") < text_pos(&texts, "stopping containers"),
             "{texts:#?}"
+        );
+        assert_eq!(events.last().unwrap()["event"], "done", "{events:#?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Task 6: a title whose config cannot answer the schema names SKIPS the
+    /// automatic dump — with a warn naming why — and the stop itself still
+    /// runs to completion. A dump over guessed names would capture wrong/no
+    /// schemas while reporting success, and an automatic backup must never
+    /// block the stop the user asked for. (The dump-runs case, with a
+    /// resolvable fixture, is the ordering test above.)
+    #[test]
+    fn games_stop_skips_the_dump_when_names_are_unresolved_but_still_stops() {
+        let title = "wow-server-playerbots";
+        let (base, calls, _logs, env) = lifecycle_env_fixture("stop-no-names", title);
+        // Strip the fixture's names source: a compose with no environment.
+        std::fs::write(
+            env.games_dir.join(title).join("docker-compose.yml"),
+            "services: {}\n",
+        )
+        .unwrap();
+
+        let events = std::cell::RefCell::new(Vec::new());
+        games_lifecycle_stream_with(&env, "stop", title.to_string(), false, |v| events.borrow_mut().push(v));
+        let events = events.into_inner();
+
+        let calls_text = std::fs::read_to_string(&calls).unwrap();
+        assert!(
+            !calls_text.contains("exec ac-database"),
+            "an unresolved-names stop must not dump guessed schemas:\n{calls_text}"
+        );
+        assert!(calls_text.contains("compose down"), "the stop itself must still run:\n{calls_text}");
+        let texts = event_texts(&events);
+        assert!(
+            texts.iter().any(|t| t.starts_with("automatic backup skipped")),
+            "the skip must be narrated, not silent: {texts:#?}"
         );
         assert_eq!(events.last().unwrap()["event"], "done", "{events:#?}");
 
