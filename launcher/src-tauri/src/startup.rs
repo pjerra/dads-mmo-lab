@@ -509,6 +509,15 @@ mod games_dir_reader_scan_tests {
     /// `set_var("…", v)` does not match either shape (its second argument
     /// keeps the `)` off the closing quote): SETTING the variable is the
     /// supported override seam, not a resolver.
+    ///
+    /// KNOWN EVASION (found by this port's review, 2026-08-07): the shape
+    /// requires a QUOTED LITERAL inside the call, so
+    /// `const V: &str = "DML_GAMES_DIR"; var_os(V)` is invisible to this scan
+    /// while being a real production read — and the mention floor does not
+    /// catch it, because the const's string still counts as a mention. If you
+    /// are refactoring the variable name to a shared const, this guard is the
+    /// reason not to: the literal-in-call shape is what keeps the scan honest,
+    /// and one extra string per call site is the price.
     fn env_read_count(code: &str) -> usize {
         [format!("var(\"{VAR}\")"), format!("var_os(\"{VAR}\")")]
             .iter()

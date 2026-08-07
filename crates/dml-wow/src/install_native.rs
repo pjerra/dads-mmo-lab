@@ -3639,7 +3639,8 @@ mod tests {
             }
             Ok(d) => {
                 // Set in this environment -- then it must be the value verbatim,
-                // never the cwd fallback that `games_dir_from_env` would give.
+                // never a fallback (`games_dir_from_env`'s unset answer: the
+                // cwd on Windows, $HOME/games elsewhere).
                 let raw = std::env::var_os("DML_GAMES_DIR").expect("Ok implies it is set");
                 assert_eq!(d, PathBuf::from(raw));
                 assert_ne!(d, PathBuf::from("."), "the cwd fallback must not be reachable here");

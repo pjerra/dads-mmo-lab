@@ -880,7 +880,9 @@ pub fn dispatch(command: Cmd) -> i32 {
 
 /// `dml-wow unbound …` — `dml_wow::unbound`. Same discipline as
 /// `InstallNative`: id validated before it joins a path, the games dir must
-/// be configured (never the cwd fallback), and the exit code comes from the
+/// be configured (never inferred — on Windows, where this command runs,
+/// `games_dir_from_env`'s unset answer is the cwd, and an inferred install
+/// dir is a silent double-install), and the exit code comes from the
 /// terminal-event tracker, not from the engine's return value.
 fn cmd_unbound(cmd: UnboundCmd) -> i32 {
     // Status is the read-only one: no stream, no docker, plain envelope.
