@@ -1,182 +1,173 @@
-# VM acceptance test — what a clean machine has to prove
+# VM acceptance test — Round 2 (2026-08-07)
 
-Written 2026-08-06, before merging `feat/core-family` into `rust-main`.
+Supersedes the 2026-08-06 draft, which was never run. Written after Task 12
+(one games-dir resolver), the auto-backend fix, and Task 6 (schema names
+resolved end-to-end, both surfaces). Run this against a launcher built from
+`feat/core-family` AFTER the B1 (bash mirror) chunk has landed — the plan
+assumes both halves of Task 6 are in the build.
 
-**Why a VM and not this box.** The dev machine hides at least seven things a
-user's machine does not have, and two of them have already produced false
-green results *this week*:
+**Why a VM and not the dev box.** The dev machine hides at least seven things
+a user's machine does not have, and two of them produced false green results
+this week:
 
-| Hidden here | A fresh VM has |
+| Hidden on the dev box | A fresh VM has |
 |---|---|
-| `DML_GAMES_DIR`, `DML_BACKEND`, `DML_SCRIPT`, `DML_YQ_BIN` as **User env vars** | none — and a whole branch passed `cargo test --workspace` here that would have failed CI |
+| `DML_GAMES_DIR`, `DML_BACKEND`, `DML_SCRIPT`, `DML_YQ_BIN` as User env vars | none — a whole branch passed `cargo test` here that would have failed CI |
 | A working migrated server at `C:\Users\perzi\dml-native`, full of real data | nothing to read |
 | Docker Desktop installed, WSL2 configured, engine auto-starting | nothing |
 | The `dml-arch` WSL distro | nothing |
-| Rust 1.97 + MSVC Build Tools + Node 22 + WebView2 | WebView2 only (ships with Win11) |
-| `yq.exe` at a known path | nothing |
-| A warm BuildKit cache and pulled images | a 30–90 minute build from zero |
-
-Automated suites cannot see any of this. That is the entire point of the run.
+| Rust + MSVC + Node toolchains, `yq.exe` at a known path | WebView2 only |
+| A warm BuildKit cache and pulled images | a 30–90 min build from zero |
+| A compose env whose schema names happen to equal the old hardcoded ones | the same — which is why Phase 7 *edits* them |
 
 ---
 
-## Phase 0 — VM preconditions
+## Phase 0 — VM preconditions (~30 min)
 
-1. Windows 11 Pro, fresh install, fully updated.
-2. **Nested virtualisation ON in the hypervisor.** Without it WSL2 and Docker
-   Desktop will not start at all, and the failure looks like a DML bug.
-3. 16 GB RAM minimum, 8 vCPU recommended (the AzerothCore build is the load).
-4. **150 GB free disk.** Source tree + build output + ~15 GB client data.
-5. Install **Docker Desktop** and nothing else. No Rust, no Node, no Git, no
-   WSL distro. If you install dev tools you have rebuilt this box and thrown
-   away the run.
-6. Take a VM snapshot here and name it `clean`. Several phases below are worth
-   re-running from it.
+1. Windows 11 Pro, fresh, updated.
+2. **Nested virtualisation ON** in the hypervisor — without it WSL2/Docker
+   Desktop won't start and the failure masquerades as a DML bug.
+3. 16 GB RAM minimum, 8 vCPU recommended; **150 GB free disk**.
+4. Install **Docker Desktop and nothing else**. No Rust, no Node, no Git. Dev
+   tools installed = the run is invalidated.
+5. Snapshot the VM as `clean`.
 
-**`DML_BACKEND=auto` is now safe** (fixed in `0c61127`, after this document was
-first written — it used to resolve to `Wsl` and drive a `dml-arch` distro that
-does not exist on a fresh VM). Leaving it unset is still the realistic user
-path and the one to test. **Setting it to `auto` explicitly is worth one
-deliberate check**, since that is the obvious thing to type on a new box: the
-app must come up on the native backend, and the Settings dropdown must stay
-editable rather than reporting itself locked by an environment variable.
+`DML_BACKEND` note: leave it unset for the main run. **One deliberate check**
+later (23) sets it to `auto` — that used to silently mean WSL and is now fixed;
+the VM proves the fix on the hardware class it was written for.
 
 ---
 
-## Phase 1 — Install the launcher
+## Phase 1 — Install (~10 min)
 
-Build on the dev box (`npm run tauri build`), copy the NSIS installer over.
+6. Build on the dev box (`npm run tauri build`), copy the NSIS installer over,
+   run it. SmartScreen will warn — unsigned, "Run anyway" is expected.
+7. Launch from the **Start menu**, never from a terminal (a terminal leaks the
+   shell's env — the zero-config resolution is the thing under test).
 
-1. Run the installer. **SmartScreen will warn — it is unsigned.** "More info →
-   Run anyway". *Pass:* installs without admin-rights surprises.
-2. Launch from the Start menu, not from a terminal. *This matters:* a terminal
-   would leak the shell's environment, which is the thing being tested.
+**Pass:** window opens on Home.
 
-**Pass:** the window opens on Home with no env vars set anywhere.
+## Phase 2 — Zero-config first run (~10 min)
 
----
+8. Backend resolves to **native** with no env vars anywhere.
+9. `%USERPROFILE%\.dml\launcher.json` gets written.
+10. Close → hides to tray; second launch from Start menu → focuses the
+    existing window (single-instance).
 
-## Phase 2 — First run, zero configuration
+## Phase 3 — First-run backend setup (~5 min)
 
-The single riskiest phase, because everything downstream assumes it worked.
+11. The setup screen names what is **first** missing, not a generic error.
+12. The bundled payload (dml script, Lua bridges, six installers) is found —
+    "payload missing" here is a packaging bug the dev box structurally cannot
+    show (the files are simply present in the repo).
 
-3. *Pass:* Home renders. Backend resolves to **native** on its own.
-4. Check `%USERPROFILE%\.dml\launcher.json` gets written.
-5. Close the window. *Pass:* it hides to tray, does not exit.
-6. Re-open from tray; open a second copy from the Start menu. *Pass:* the
-   single-instance guard focuses the existing window instead of opening two.
+## Phase 4 — Native install of WoW WotLK Playerbots (30–90 min)
 
----
+13. Library → **exactly three titles** (Vanilla, TBC, WotLK Playerbots — no
+    MapleStory/RuneScape/MU). Vanilla/TBC visible but not installable on
+    native (CMaNGOS, v0.2) with a stated reason, not a failure.
+14. Install WotLK Playerbots. Progress bar moves during clone/build/up and
+    **never goes backwards**; the "ready" stage shows elapsed time, not a
+    percentage (deliberate).
+15. **Kill the launcher mid-build once, deliberately.** Reopen, resume — it
+    continues from the last completed stage, it does not restart.
+16. Stack comes up; Home reports the server online.
 
-## Phase 3 — First-run backend setup
+On failure: capture the terminal NDJSON, `%USERPROFILE%\.dml\logs\`, and
+`docker compose ps` before touching anything.
 
-7. The setup screen should say what is **first** missing, not a generic error.
-8. *Pass:* the bundled payload (the `dml` script, the Lua bridges, the six
-   installers) is found. A "payload missing" here means `tauri.conf.json`'s
-   `bundle.resources` did not ship — a packaging bug the dev box cannot show
-   you, because the files are simply present in the repo.
+## Phase 5 — SOAP self-setup (~10 min)
 
----
+17. The launcher creates the `dmlsoap` GM3 account by itself and raises a
+    banner naming it (a fresh AzerothCore has NO accounts).
+18. Home's health panel reveals the password on demand.
+19. Restart the app: if setup had failed, the manual fallback card must still
+    render (a reloaded UI must not be told only "already concluded").
 
-## Phase 4 — Native install of WoW WotLK Playerbots
+## Phase 6 — Feature sweep (~60 min, each pass/fail on its own)
 
-The long one. Budget 30–90 minutes depending on vCPU.
-
-9. Library → WoW WotLK (Playerbots) → Install.
-10. Watch the progress bar. *Pass:* it moves during clone, build and up, and
-    **never goes backwards**. During "ready" it shows elapsed time, not a
-    percentage — that is deliberate.
-11. **Kill the launcher mid-build, deliberately, once.** Reopen and resume.
-    *Pass:* it picks up from the last completed stage rather than restarting.
-    This is the whole reason the install engine is a state machine.
-12. *Pass:* stack comes up; Home reports the server online.
-
-If it fails: capture the terminal NDJSON, `%USERPROFILE%\.dml\logs\`, and
-`docker compose ps` output before touching anything.
-
----
-
-## Phase 5 — SOAP self-setup
-
-13. *Pass:* the launcher creates the `dmlsoap` GM3 account by itself and raises
-    a banner naming it. A fresh AzerothCore has **no** accounts, so every SOAP
-    feature depends on this working unattended.
-14. Reveal the password from Home's health panel. *Pass:* it appears on demand.
-15. Reload the webview (or restart the app). *Pass:* the manual fallback card
-    still renders if setup had failed — a reloaded UI must not be told only
-    "already concluded".
-
----
-
-## Phase 6 — What `feat/core-family` actually changes
-
-16. Open **Library**. *Pass:* exactly three titles — WoW Vanilla, WoW TBC, WoW
-    WotLK (Playerbots). **No MapleStory, no RuneScape, no MU Online.** They are
-    hidden, not deleted; this is the user-visible deliverable of the branch.
-17. *Pass:* Vanilla and TBC appear but are not installable on native (they are
-    CMaNGOS, deferred to v0.2) — the page should say so rather than failing.
-
----
-
-## Phase 7 — The schema-name fix (the branch's real bug fix)
-
-This is the one thing on the branch that no automated test can prove on a real
-server, because on a stock install the compose and the conf happen to agree.
-
-18. Stop the server. Edit the title's `docker-compose.yml`: change
-    `AC_WORLD_DATABASE_INFO`'s last field from `acore_world` to
-    `acore_world_nope`. Save. Restart the launcher (not just the server).
-19. Open **Item Database**. *Pass:* it fails, and fails **because of the new
-    name** — proving the app now reads the compose environment. Before this
-    branch it would have queried its own hardcoded `acore_world` and worked,
-    silently talking to a database the server was not using.
-20. Revert the edit. *Pass:* Item DB works again.
-
-**Known and expected to still be broken (Task 6, recorded in the plan):**
-Dashboard, Bots, the Accounts tab and paperdoll would *not* follow a real
-rename, because 29 SQL strings still name their schema inline. Do not file
-these as new bugs — but do confirm they behave the same before and after the
-edit, which tells us the branch changed nothing it did not intend to.
-
----
-
-## Phase 8 — Feature sweep (each is pass/fail on its own)
-
-21. **Home** — start, stop, restart. Players online reads 0 with bots running
+20. **Home** start/stop/restart; "Players online" reads 0 with bots running
     (not 1000 — that was a real incident).
-22. **Dashboard** — renders real numbers.
-23. **Item Database** — search returns items.
-24. **Characters** — list, then paperdoll on one character.
-25. **Teleport** — list loads.
-26. **GM Tools** — revive/heal/gold on an online character, level on an offline
-    one. Summon an NPC (it should despawn on a timer, deliberately).
-27. **Playerbots / My Party** — enable, restart once, add a class, bot joins.
-28. **Settings / Modules** — edit a module conf and save; confirm `.env` and
-    `docker-compose.override.yml` are **read-only** in the raw editor.
-29. **Backups** — create, list, then restore. Restore is the only sanctioned
-    write path into character data; confirm it takes a safety dump first.
+21. **Dashboard, Item DB, Characters (+paperdoll), Teleport, GM Tools**
+    (revive/heal/gold online, level offline, summon → NPC despawns on a
+    timer, deliberately), **My Party** (enable → restart once → add class →
+    bot joins), **Settings/Modules** (edit a module conf; `.env` and
+    `docker-compose.override.yml` are read-only in the raw editor),
+    **Backups** (create → list → restore; restore takes a safety dump first).
+22. After the backup create: open the archive (`7z`/`zcat`) and confirm it
+    contains **all four** schemas (`acore_characters`, `acore_playerbots`,
+    `acore_auth`, and with include-world also `acore_world`).
+
+## Phase 7 — What this branch actually changed (~30 min, the centerpiece)
+
+### 7a. `DML_BACKEND=auto` (the fixed trap)
+
+23. Quit the launcher. Set a User env var `DML_BACKEND=auto`. Relaunch.
+    **Pass:** the app runs on the **native** backend (before the fix: it
+    silently drove a nonexistent WSL distro), AND Settings' backend dropdown
+    is **editable** — not "locked by an environment variable". Remove the var
+    after.
+
+### 7b. Schema names are read, not assumed
+
+The stock install's compose env and conf agree on `acore_*`, so resolution is
+invisible until you make the sources disagree. That's the test.
+
+24. Stop the server. Edit the title's `docker-compose.yml`: change the last
+    field of `AC_WORLD_DATABASE_INFO` from `acore_world` to
+    `acore_world_nope`. Restart the launcher (not just the server).
+25. **Pass: the failure is CONSISTENT.** Item DB, Dashboard, Bot Browser,
+    Characters/paperdoll ALL fail — because they all read the same resolved
+    name. Before Task 6, this exact edit produced the incoherent state: Item
+    DB failed while Dashboard/Bots/paperdoll kept "working" against the
+    hardcoded old name — silently reading a database the server wasn't using.
+26. **Backup create on this state must REFUSE or carry the new name** — never
+    quietly dump the old `acore_world`. (The recorded worst class: a backup
+    that reports success and contains nothing.)
+27. Revert the edit. Everything works again.
+
+### 7c. The refusal, and the page that used to lie about it
+
+28. Break `AC_WORLD_DATABASE_INFO` differently: truncate it to four fields
+    (`ac-database;3306;root;password` — no dbname). Restart the launcher.
+    **Pass:** DB pages refuse with the **schema-names story** ("could not read
+    the schema names…"), NOT "Is ac-database running?" — and specifically the
+    **Statistics page** says the same (its error mapper used to collapse this
+    into the engine-down message; fixed this branch).
+29. A value whose dbname carries hostile characters
+    (`…;root;pw;acore_world; DROP TABLE x` style) must also REFUSE — the
+    identifier gate. No page may pass it into a query.
+30. Revert. Green again.
+
+### 7d. Games-dir resolution (Task 12)
+
+31. Standalone check, PowerShell: run the bundled
+    `dml-wow.exe server-detail` (or any DB verb) from an arbitrary directory
+    with NO `DML_GAMES_DIR` set. **Pass:** a clean refusal whose hint names
+    `DML_GAMES_DIR` — never a half-answer resolved against the current
+    directory.
+
+## Phase 8 — Lifecycle edges (~15 min)
+
+32. Stop the server mid-boot: no hang, clear outcome.
+33. A world-log snapshot lands in `%USERPROFILE%\.dml\logs\` on stop (the
+    container's own log dies with `compose down`).
+34. Quit the app with the server running: the exit prompt appears with the
+    window on-screen and focused.
 
 ---
 
-## Phase 9 — Lifecycle edge cases
+## Expected still-broken (do NOT file as new)
 
-30. Stop the server while it is mid-boot. *Pass:* no hang, clear outcome.
-31. Confirm a world log snapshot lands in `%USERPROFILE%\.dml\logs\` on stop —
-    the container's own log is destroyed by `compose down`.
-32. Quit the app with the server running. *Pass:* the exit prompt appears and
-    the window is on-screen and focused when it does.
-
----
+- **The module subsystem on a renamed-schema server** (module install/repair/
+  tuning-tail/fixit, Wrath Unbound): recorded exception — the modules' own SQL
+  payloads hardcode standard names internally, so DML's tooling keeps them
+  too. On a renamed server these fail; that is the documented ruling, not a
+  regression.
+- **Anything on the WSL backend**: v0.2 scope.
 
 ## What to record
 
-For every failure: the phase number, the exact error **code** (not just the
-message), the terminal NDJSON, and whether it reproduced from the `clean`
-snapshot. A failure that does not reproduce from `clean` is a state bug, which
-is more interesting than one that does.
-
-## Done before the run
-
-The `DML_BACKEND=auto` bug is **fixed** (`0c61127`) — it was precisely the wrong
-thing to discover at hour three of a VM session. Phase 0 now tests it instead of
-avoiding it.
+Per failure: phase number, the exact error **code**, the terminal NDJSON, and
+whether it reproduces from the `clean` snapshot. A failure that does NOT
+reproduce from `clean` is a state bug — more interesting, not less.
