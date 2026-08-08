@@ -28,9 +28,22 @@ this week:
 2. **Nested virtualisation ON** in the hypervisor — without it WSL2/Docker
    Desktop won't start and the failure masquerades as a DML bug.
 3. 16 GB RAM minimum, 8 vCPU recommended; **150 GB free disk**.
-4. Install **Docker Desktop and nothing else**. No Rust, no Node, no Git. Dev
-   tools installed = the run is invalidated.
-5. Snapshot the VM as `clean`.
+4. Install **Docker Desktop** and **Git for Windows** — and nothing else. No
+   Rust, no Node. Dev tools beyond those two = the run is invalidated.
+
+   Git is not a dev convenience here, it is a **runtime dependency of native
+   mode** (finding F2, found live 2026-08-09): the `dml` brain is a bash script
+   hosted by **Git Bash** (`runner.rs::native`), and `install_native` shells
+   `git` for its two clones. Without it, `find_bash()` falls through to a bare
+   `bash`, which on a WSL-enabled box is `C:\Windows\System32\bash.exe` — the
+   shim — whose default distro is Docker Desktop's own `docker-desktop`, an
+   image with no `/bin/bash`. The user then sees
+   `execvpe(/bin/bash) failed` on the Library page, an error that names WSL
+   while the app is on the native backend. **Nothing in the product says any of
+   this** — no probe, no setup screen. Fixing that is a follow-up; installing
+   Git here is the workaround that lets the rest of this plan run.
+5. Snapshot the VM as `clean` (Windows + WSL + Docker Desktop + Git, no
+   launcher) — that is exactly the state Phase 1 starts from.
 
 `DML_BACKEND` note: leave it unset for the main run. **One deliberate check**
 later (23) sets it to `auto` — that used to silently mean WSL and is now fixed;
@@ -141,11 +154,13 @@ invisible until you make the sources disagree. That's the test.
 
 ### 7d. Games-dir resolution (Task 12)
 
-31. Standalone check, PowerShell: run the bundled
-    `dml-wow.exe server-detail` (or any DB verb) from an arbitrary directory
-    with NO `DML_GAMES_DIR` set. **Pass:** a clean refusal whose hint names
-    `DML_GAMES_DIR` — never a half-answer resolved against the current
-    directory.
+31. Standalone check, PowerShell. **NB (finding F4): `dml-wow.exe` is NOT in
+    `bundle.resources`, so there is no bundled binary to run** — this step as
+    originally written cannot execute. Run it against the bundled bash CLI
+    instead: `& "C:\Program Files\Git\bin\bash.exe" "<install dir>\cli\dml" wow
+    server-detail --json` from an arbitrary directory with NO `DML_GAMES_DIR`
+    set. **Pass:** a clean refusal whose hint names `DML_GAMES_DIR` — never a
+    half-answer resolved against the current directory.
 
 ## Phase 8 — Lifecycle edges (~15 min)
 
@@ -156,6 +171,21 @@ invisible until you make the sources disagree. That's the test.
     window on-screen and focused.
 
 ---
+
+## Findings from the 2026-08-09 run (recorded, not yet fixed)
+
+- **F1** — a PC with **neither** Docker **nor** WSL shows the WSL first-run
+  screen ("set up WSL2… Install-DML.ps1"), not the Docker card. Correct per
+  `backend::detect` (never pick native without Docker → fall back to the Wsl
+  default → WSL advice), and wrong for a native-only v0.1: the `docker=no,
+  wsl=no` row should send the user to Docker Desktop. Not hit by the sanctioned
+  Phase 0 order, which installs Docker first.
+- **F2 (blocker)** — Git for Windows is an unstated runtime dependency of
+  native mode; see Phase 0 step 4 for the full mechanism. Needs a `no_git` link
+  in `dml_core::setup`'s native chain plus a `first-run.ts` card, mirroring
+  `no_docker`.
+- **F4** — Phase 7d referenced a bundled `dml-wow.exe` that the installer does
+  not carry. Step rewritten; decide separately whether the binary SHOULD ship.
 
 ## Expected still-broken (do NOT file as new)
 
