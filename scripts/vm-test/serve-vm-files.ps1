@@ -13,6 +13,11 @@ $Drop = Join-Path $RepoRoot 'target\vm-test-drop'
 $Files = @(
     (Join-Path $RepoRoot 'target\release\bundle\nsis\DML Launcher_0.1.0_x64-setup.exe'),
     (Join-Path $RepoRoot 'target\release\bundle\msi\DML Launcher_0.1.0_x64_en-US.msi'),
+    # The prerequisite installer. A VM round that side-loads only the NSIS exe
+    # tests the launcher but NOT the path a stranger takes -- and it skips the
+    # Git/yq/launcher.json steps, which is how the 2026-08-09 round hit a WSL
+    # relay error on the Library page (finding F2).
+    (Join-Path $RepoRoot 'guides\DML-Windows\Install-DML-Native.ps1'),
     (Join-Path $RepoRoot 'docs\VM-ACCEPTANCE-TEST.md'),
     (Join-Path $PSScriptRoot 'fetch-vm-files.ps1')
 )

@@ -28,22 +28,24 @@ this week:
 2. **Nested virtualisation ON** in the hypervisor — without it WSL2/Docker
    Desktop won't start and the failure masquerades as a DML bug.
 3. 16 GB RAM minimum, 8 vCPU recommended; **150 GB free disk**.
-4. Install **Docker Desktop** and **Git for Windows** — and nothing else. No
-   Rust, no Node. Dev tools beyond those two = the run is invalidated.
+4. **Install NOTHING else by hand.** No Docker, no Git, no Rust, no Node. The
+   prerequisites are Phase 1's job, and installing them yourself is what made
+   the 2026-08-09 round mis-test the product (see below).
+5. Snapshot the VM as `bare` — clean Windows, nested virt on, nothing else.
+   This is the only snapshot worth keeping: every round restores to it, so
+   every round re-tests the prerequisite path too.
 
-   Git is not a dev convenience here, it is a **runtime dependency of native
-   mode** (finding F2, found live 2026-08-09): the `dml` brain is a bash script
-   hosted by **Git Bash** (`runner.rs::native`), and `install_native` shells
-   `git` for its two clones. Without it, `find_bash()` falls through to a bare
-   `bash`, which on a WSL-enabled box is `C:\Windows\System32\bash.exe` — the
-   shim — whose default distro is Docker Desktop's own `docker-desktop`, an
-   image with no `/bin/bash`. The user then sees
-   `execvpe(/bin/bash) failed` on the Library page, an error that names WSL
-   while the app is on the native backend. **Nothing in the product says any of
-   this** — no probe, no setup screen. Fixing that is a follow-up; installing
-   Git here is the workaround that lets the rest of this plan run.
-5. Snapshot the VM as `clean` (Windows + WSL + Docker Desktop + Git, no
-   launcher) — that is exactly the state Phase 1 starts from.
+**WHY PHASE 1 CHANGED (2026-08-09).** The earlier revision of this plan said
+"install Docker Desktop and nothing else, then copy the NSIS installer over and
+run it". That is **side-loading**, and it skips the entire consumer path:
+`guides/DML-Windows/Install-DML-Native.ps1` is the script a stranger actually
+runs, and it is what installs Git for Windows, the pinned `yq.exe`, the
+Defender exclusions and `~/.dml/launcher.json` — none of which the NSIS bundle
+carries. Skipping it produced a `execvpe(/bin/bash) failed` WSL relay error on
+the Library page of a launcher that was correctly on the native backend
+(finding F2). `ROADMAP-TO-BETA.md` had already written the rule this round
+broke: side-loading "tests the launcher but NOT the path a stranger takes. A
+gate that skips the distribution step proves less than it appears to."
 
 `DML_BACKEND` note: leave it unset for the main run. **One deliberate check**
 later (23) sets it to `auto` — that used to silently mean WSL and is now fixed;
@@ -51,11 +53,35 @@ the VM proves the fix on the hardware class it was written for.
 
 ---
 
-## Phase 1 — Install (~10 min)
+## Phase 1 — Install, the way a stranger does (~25 min + a reboot)
 
-6. Build on the dev box (`npm run tauri build`), copy the NSIS installer over,
-   run it. SmartScreen will warn — unsigned, "Run anyway" is expected.
-7. Launch from the **Start menu**, never from a terminal (a terminal leaks the
+6. Copy `Install-DML-Native.ps1` and the freshly built NSIS installer to the VM
+   (`scripts/vm-test/serve-vm-files.ps1` on the dev box stages and serves both;
+   `fetch-vm-files.ps1` pulls them and verifies every SHA256).
+7. Run the prerequisite script in an **elevated** PowerShell:
+
+   ```
+   powershell -ExecutionPolicy Bypass -File Install-DML-Native.ps1 `
+       -InstallDocker -InstallGit -NoLauncher
+   ```
+
+   **Watch what it does — this is a tested surface, not just setup.** It should
+   name a missing BIOS virtualization bit before any 600 MB download, enable WSL
+   with `wsl --install --no-distribution`, queue itself in RunOnce and ask for a
+   restart, then on resume install Docker Desktop and Git via winget, drop a
+   hash-verified `yq.exe` into `<GamesDir>\tools\`, apply the Defender exclusion
+   BEFORE any build, and write `~/.dml/launcher.json` with `backend=native`.
+   Ending in "Ready." is the pass; ending in "Not ready yet:" with a named
+   problem is a legitimate outcome to record, not a crash.
+
+   **`-NoLauncher` is deliberate and must not be dropped for this round.**
+   Without it the script installs the launcher from the newest GitHub *release*
+   — `v0.1.0-rc1`, and this plan exists to test a branch build that is not
+   released. Its own launcher-install path is therefore NOT covered here; test
+   that separately at release time, or it will never be tested at all.
+8. Now install the build under test: run the NSIS installer by hand.
+   SmartScreen will warn — unsigned, "Run anyway" is expected.
+9. Launch from the **Start menu**, never from a terminal (a terminal leaks the
    shell's env — the zero-config resolution is the thing under test).
 
 **Pass:** window opens on Home.
@@ -180,10 +206,34 @@ invisible until you make the sources disagree. That's the test.
   default → WSL advice), and wrong for a native-only v0.1: the `docker=no,
   wsl=no` row should send the user to Docker Desktop. Not hit by the sanctioned
   Phase 0 order, which installs Docker first.
-- **F2 (blocker)** — Git for Windows is an unstated runtime dependency of
-  native mode; see Phase 0 step 4 for the full mechanism. Needs a `no_git` link
-  in `dml_core::setup`'s native chain plus a `first-run.ts` card, mirroring
-  `no_docker`.
+- **F2 (real, narrower than first written)** — Git for Windows is a RUNTIME
+  dependency of native mode: the `dml` brain is a bash script hosted by Git Bash
+  (`runner.rs::native`), and `install_native` shells `git` for its two clones.
+  With no Git, `find_bash()` falls through to a bare `bash`, which on a
+  WSL-enabled box is `C:\Windows\System32\bash.exe` — the shim — whose default
+  distro is Docker Desktop's own `docker-desktop`, an image with no `/bin/bash`.
+  Result: `execvpe(/bin/bash) failed` on the Library page, an error naming WSL
+  while the app is correctly on the native backend.
+
+  **`Install-DML-Native.ps1` installs Git (and yq, and `launcher.json`), so the
+  consumer path is covered** — the first write-up of this finding did not know
+  that and blamed the product for a plan error. What remains genuinely broken:
+  the NSIS installer is a published release asset a stranger can download
+  DIRECTLY, next to the script, and then nothing installs Git, nothing installs
+  yq, and the launcher neither detects nor explains the gap. **The launcher must
+  answer for its own prerequisites regardless of how it was installed** — a
+  `no_git` arm in `dml_core::setup`'s native chain plus a `first-run.ts` card
+  mirroring `no_docker`. Release notes should also point at the script.
+- **F5 (needs one confirmation)** — the script's DEFAULT path rests on "Docker
+  Desktop enables WSL during its own setup" (`Install-DML-Native.ps1:636-640`),
+  and that did not hold on this VM: Docker Desktop was installed interactively
+  and still reported virtualization unsupported until `wsl --install` was run by
+  hand. **Caveat, stated because it changes the verdict:** nested virt was being
+  fixed over the same period, so Docker may have run its setup while the
+  platform was genuinely absent and then failed to recover. Re-check from the
+  `bare` snapshot with nested virt already on. If it reproduces, the default
+  path needs the same `wsl --install --no-distribution` the `-InstallDocker`
+  path already does.
 - **F4** — Phase 7d referenced a bundled `dml-wow.exe` that the installer does
   not carry. Step rewritten; decide separately whether the binary SHOULD ship.
 
