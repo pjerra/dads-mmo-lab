@@ -888,6 +888,48 @@ only bounds a single run; that family check is what bounds the total, and
 without it an exported `DML_SOAP_USER`/`PASS` pair (which outranks the file the
 feature writes) turned every launcher start into one more GM3 account.
 
+## Round 5.7 — dmlpack: build-once, install-anywhere game packs (user-approved 2026-08-08)
+
+**Origin: community-proven, not speculative.** A community member (Baerthe)
+independently built and shipped pack-based distribution around DML's ecosystem:
+a ~13 GB `TurtleV2.dmlpack` + `install-dmlpack.sh` menu installer, distributed
+via Discord for Steam Deck. The tool underneath is a `dmlpack` CLI with
+`restore`, `restore --dry-run`, `verify`, `shortcuts`, and a `reclaim` whose
+safety gates are worth copying verbatim: refuses unless the pack has proven
+restorable on a second machine, re-checks every checksum before deleting
+anything, refuses while a running container holds the folders, and requires
+typing the game's name. Format: tar.xz with a `manifest.json` (display name,
+`packed_at`, members, game id) readable without full extraction
+(`tar -xOf pack manifest.json`).
+
+**Why DML adopts it (evaluated + user-approved 2026-08-08): it deletes the
+hours-long build.** The consent panel's "hours / tens of GB / cannot be
+cancelled" becomes unpack-13-GB + rebuild one small tools image — minutes. One
+dad builds once; family and friends install from a file. `pack create` /
+`pack install` / `pack verify` in Rust over the existing machinery (`wow backup`
+dump/restore, `migrate.rs` refusal semantics, compose generation,
+fingerprint-pinned payloads à la `unbound.rs`) is roughly 1–2 weeks. The
+Steam-shortcuts VDF piece is Deck-only — defer it.
+
+Two rules that are part of the feature, not commentary:
+
+1. **The legal line.** A pack necessarily contains the Blizzard client plus
+   built server binaries. DML ships the *packer tool*; the repo and GitHub
+   releases NEVER host a pack. Same posture as the installers (user supplies
+   the client) — written down here so it does not get relitigated per-pack.
+2. **Pack install joins the sanctioned MySQL-write list under `migrate.rs`'s
+   rules**: refuse a non-empty target (`MIGRATE_TARGET_NOT_EMPTY` class),
+   refuse an unanswerable probe. No new policy — the existing one applied.
+
+First task before any design: **obtain Baerthe's `dmlpack` tool source.** The
+format already exists in the wild with users; matching the manifest/format (or
+absorbing the tool, licence permitting) beats inventing a rival `.dmlpack`.
+Reference copies of the HOWTO + installer were fetched from
+`wow.baerthe.com` on 2026-08-08.
+
+**Scope: v0.2 headline candidate. Explicitly NOT in v0.1.0** — the beta scope
+is frozen by ROADMAP-TO-BETA's own rule.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
