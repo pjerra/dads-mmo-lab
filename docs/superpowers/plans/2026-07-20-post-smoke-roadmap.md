@@ -925,11 +925,10 @@ Two rules that are part of the feature, not commentary:
 (2100 lines, Python, stdlib-only) rides inside `install-dmlpack.sh` as a base64
 payload after a `__DMLPACK_PAYLOAD__` marker. Decoded from the real
 `TurtleV2.dmlpack` distribution; reference copies (tool, installer, manifest,
-handoff doc, launcher lib) in `C:\Users\perzi\Downloads\dmlpack-reference\` —
-NOT committed here, because the code carries **no licence header**, so
-absorbing any of it into this AGPL repo needs Baerthe's permission first.
-Format-compatibility needs no permission; ask anyway, for goodwill and because
-the format already has users. What the source settles: a `.dmlpack` is an
+handoff doc, launcher lib) now live in `docs/reference/dmlpack/` —
+**permission granted 2026-08-08**: Baerthe allows unrestricted use of
+`dmlpack.py` (relayed by the project owner via Discord; recorded in that
+directory's README). Code reuse is unblocked, not just format compatibility. What the source settles: a `.dmlpack` is an
 UNCOMPRESSED tar whose first member is `manifest.json` (manifest reads in
 milliseconds without touching the payload); member kinds `tar_zst`,
 `files_tar_zst`, `docker_volume`, `docker_image`, `root_tar_zst`, `qcow2`,

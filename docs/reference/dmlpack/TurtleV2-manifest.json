@@ -1,0 +1,290 @@
+{
+  "dmlpack_version": 1,
+  "game": "tortoise-wow-v2",
+  "display_name": "Turtle WoW V2",
+  "server_dir": "~/tortoise-wow-server-V2",
+  "recipe": {
+    "docker": {
+      "compose_dir": "~/tortoise-wow-server-V2",
+      "compose_file": "docker-compose.yml",
+      "build": false,
+      "image": "tortoise-v2:local",
+      "build_images": [],
+      "named_volumes": [],
+      "containers": [
+        "tw2-db",
+        "tw2-realmd",
+        "tw2-mangosd"
+      ],
+      "note": "build is FALSE and build_images is EMPTY, unlike V1 -- the image arrives via the docker_image member, so there is nothing to build. ensure_compose_images() still guards the outcome: it inspects the tag after restore and would fall back to building from the shipped Dockerfile if the load had somehow not produced it. tortoise-radio is intentionally NOT in containers[]; only its read-only bind mounts are archived."
+    },
+    "host_ports": [
+      80,
+      3309,
+      3724,
+      8095
+    ],
+    "client": {
+      "root": "~/Games/TurtleWoW/TurtleWoW",
+      "prefix": {
+        "path": null,
+        "proton": "Proton Experimental",
+        "regenerate": true,
+        "note": "The 'Turtle WoW' client shortcut runs under Proton Experimental and Steam manages the prefix itself, so nothing is archived -- but the compatibility tool must be set on the shortcut after restore, since the appid carries no CompatToolMapping entry."
+      },
+      "edits": [
+        {
+          "file": "realmlist.wtf",
+          "from": "logon.turtle-wow.org",
+          "to": "127.0.0.1",
+          "note": "must read exactly `set realmlist 127.0.0.1` with NO leading space -- a leading space causes an instant disconnect at login. Same file V1 uses; both servers listen on 3724, so one realmlist serves either."
+        }
+      ]
+    },
+    "steam": {
+      "packed_userdata_id": "28006437",
+      "_note": "informational only; the account is detected per-machine at restore",
+      "shortcuts": [
+        {
+          "name": "Turtle WoW",
+          "exe": "/home/deck/Games/TurtleWoW/TurtleWoW/WoW.exe",
+          "startdir": "/home/deck/Games/TurtleWoW/TurtleWoW/",
+          "launchopts": "",
+          "vdf": {
+            "appid": -105858796,
+            "AppName": "Turtle WoW",
+            "Exe": "\"/home/deck/Games/TurtleWoW/TurtleWoW/WoW.exe\"",
+            "StartDir": "/home/deck/Games/TurtleWoW/TurtleWoW/",
+            "icon": "",
+            "ShortcutPath": "",
+            "LaunchOptions": "",
+            "IsHidden": 0,
+            "AllowDesktopConfig": 1,
+            "AllowOverlay": 1,
+            "OpenVR": 0,
+            "Devkit": 0,
+            "DevkitGameID": "",
+            "DevkitOverrideAppID": 0,
+            "LastPlayTime": 1786161145,
+            "FlatpakAppID": "",
+            "sortas": "",
+            "tags": {}
+          }
+        },
+        {
+          "name": "Turtle WoW V2 Server",
+          "exe": "/usr/bin/konsole",
+          "startdir": "/home/deck",
+          "launchopts": "--hold -e bash /home/deck/tortoise-wow-v2-launcher.sh",
+          "vdf": {
+            "appid": -966953680,
+            "AppName": "Turtle WoW V2 Server",
+            "Exe": "\"/usr/bin/konsole\"",
+            "StartDir": "\"/home/deck\"",
+            "icon": "",
+            "ShortcutPath": "",
+            "LaunchOptions": "--hold -e bash /home/deck/tortoise-wow-v2-launcher.sh",
+            "IsHidden": 0,
+            "AllowDesktopConfig": 1,
+            "AllowOverlay": 1,
+            "OpenVR": 0,
+            "Devkit": 0,
+            "DevkitGameID": "",
+            "DevkitOverrideAppID": 0,
+            "LastPlayTime": 1786160012,
+            "FlatpakAppID": "",
+            "sortas": "",
+            "tags": {}
+          }
+        }
+      ],
+      "grid_note": "neither shortcut has grid artwork on this machine, so extras ships none"
+    },
+    "host_state": {
+      "systemd_user_units": [],
+      "systemd_system_units": [
+        {
+          "name": "tortoise-radio-hosts.service",
+          "install": "sudo bash ~/tortoise-radio/install-hosts-fix.sh",
+          "note": "re-applies the /etc/hosts pins after a SteamOS update wipes them"
+        }
+      ],
+      "etc_hosts": [
+        "127.0.0.1      radiodirect.turtle-music.org",
+        "127.0.0.1      radiodirect2.turtle-music.org"
+      ],
+      "sudoers_dropins": [],
+      "helper_processes": []
+    },
+    "runtime_deps": [
+      {
+        "path": "~/.steam/steam/steamapps/common/Proton - Experimental",
+        "kind": "proton",
+        "note": "1.5 G, not archived - Steam installs it. Set it on the 'Turtle WoW' shortcut via Properties > Compatibility."
+      }
+    ]
+  },
+  "reclaim": {
+    "paths": [
+      "~/tortoise-wow-server-V2"
+    ],
+    "docker_images": [
+      "tortoise-v2:local"
+    ],
+    "docker_volumes": [
+      "tortoise-wow-v2_dbdata"
+    ],
+    "never_touch": [
+      "~/dml-launcher-lib.sh",
+      "~/evejs-shortcut.py",
+      "~/Games/TurtleWoW",
+      "~/tortoise-radio"
+    ],
+    "note": "The client and the radio stack are ARCHIVED by this pack but deliberately NOT in reclaim paths, and are pinned in never_touch instead. Both are shared with Turtle WoW V1, whose pack also claims them; reclaiming V2 must never delete the client out from under V1. When V1 is finally retired, remove ~/Games/TurtleWoW and ~/tortoise-radio by hand rather than widening this list."
+  },
+  "accounts": [
+    {
+      "user": "player",
+      "pass": "player",
+      "note": "standard player account, rank 0"
+    },
+    {
+      "user": "mmodad",
+      "pass": "pass1234",
+      "note": "GM account, rank 3 -- the fleet-standard main account"
+    }
+  ],
+  "notes_file": "docs/TURTLE-WOW-V2-HANDOFF.md",
+  "tool_version": "1.0.0",
+  "pack_version": "1.0",
+  "packed_at": "2026-08-07T21:31:51-0700",
+  "packed_from": "steamdeck",
+  "members": [
+    {
+      "path": "server/server-dir.tar.zst",
+      "kind": "tar_zst",
+      "base": "~",
+      "sources": [
+        "tortoise-wow-server-V2"
+      ],
+      "exclude": [
+        "tortoise-wow-server-V2/logs",
+        "tortoise-wow-server-V2/src/.git",
+        "tortoise-wow-server-V2/*.log",
+        "*.bak-*",
+        "*.pre-rename-fix"
+      ],
+      "restore_to": "~",
+      "note": "Unlike V1, NO compiled binaries live here -- V2's Dockerfile compiles inside the image and CMAKE_INSTALL_PREFIX=/opt/turtle is baked in, so the server lives in the docker_image member below. What ships here is data/ (3.1 G of dbc/maps/vmaps/mmaps, the expensive part), etc/ (the tuned configs incl. 1000 playerbots), src/ (needed because ./src/sql is bind-mounted at runtime by the DB auto-updater), and the compose file. data/mmaps is root-owned but 0755/0644, so plain tar reads it fine and it restores as deck -- no root_tar_zst needed, unlike Talisman's 0750 datadir. logs/ is root-owned debris and excluded.",
+      "sha256": "6f98daa62165294df5b0e7fe89710c5ab6fe0b814da61c07349d8df839ef10b0",
+      "bytes": 1354112712,
+      "restore_bytes": 3698706552,
+      "source_mtimes": {
+        "~/tortoise-wow-server-V2": 1786158287
+      }
+    },
+    {
+      "path": "server/image.tar.zst",
+      "kind": "docker_image",
+      "image": "tortoise-v2:local",
+      "note": "THE SERVER ITSELF. V2's Dockerfile is a real two-stage compile (Debian trixie, GCC 14, BUILD_PLAYERBOTS=ON) whose output exists nowhere on the host -- only inside this image at /opt/turtle. Rebuilding it on a fresh Deck is a multi-hour job, so the built image ships. Restore does `docker load`, and ensure_compose_images() then finds the tag already present and skips the build. If this member is ever dropped, the Dockerfile is still shipped and restore will fall back to compiling -- correct, but slow.",
+      "sha256": "7af27f4d0b522dd3280ed406a873e079cef54dbe39a122e3047906d02f63695c",
+      "bytes": 547422021,
+      "restore_bytes": 1611342416,
+      "source_mtimes": {},
+      "source_image_id": "sha256:0a13a2be94fca3ce5cebc4f9968fb92a6e7c0e1900419b7b16ce110f92935ff5"
+    },
+    {
+      "path": "server/dbdata.tar.zst",
+      "kind": "docker_volume",
+      "volume": "tortoise-wow-v2_dbdata",
+      "restore_to": "~",
+      "note": "MariaDB 10.6 data dir (~700 M): the 4 databases, the 500 bot accounts + 4500 bot characters, and the mmodad/player accounts. Archived at rest -- pack refuses while tw2-db runs. 10.6 and NOT 11.8 on purpose: create_databases.sql is a 10.6 dump using utf8mb4_general_ci. The image tag is pinned in docker-compose.yml so the on-disk format matches on restore.",
+      "sha256": "24314329e295b40e4e9e60b1c35f4b3872323e2b281fed899890e3a62fd44e53",
+      "bytes": 74691998,
+      "restore_bytes": 681396424,
+      "source_mtimes": {}
+    },
+    {
+      "path": "radio/radio-dir.tar.zst",
+      "kind": "tar_zst",
+      "base": "~",
+      "sources": [
+        "tortoise-radio"
+      ],
+      "exclude": [
+        "*.bak-*"
+      ],
+      "restore_to": "~",
+      "note": "The .radio stack, shipped in full because V2 is becoming the main build and V1 will eventually be deleted -- this pack must not depend on tortoise-wow-1.0.dmlpack still existing. nginx/icecast config, fix-hosts.sh, the systemd unit, ./music + ./wow-music. Bind-mounted read-only, so it is safe to tar while the container runs, which is why tortoise-radio is NOT in containers[]. Its radio-cache VOLUME is deliberately not archived: it is a proxy cache of the OctoWow relay and refills on demand.",
+      "sha256": "c49f69ebe0bccadf2fbf709bdd1f4811d418e35edff9cdd341172d1914c0c977",
+      "bytes": 797937714,
+      "restore_bytes": 1038959537,
+      "source_mtimes": {
+        "~/tortoise-radio": 1784411872
+      }
+    },
+    {
+      "path": "client.tar.zst",
+      "kind": "tar_zst",
+      "base": "~/Games",
+      "sources": [
+        "TurtleWoW"
+      ],
+      "exclude": [
+        "TurtleWoW/TurtleWoW/Logs",
+        "TurtleWoW/TurtleWoW/WDB"
+      ],
+      "zstd_level": 3,
+      "restore_to": "~/Games",
+      "note": "The SAME 11 G client V1 uses -- build 7272, and V2 was built to match it exactly. Duplicated with tortoise-wow-1.0.dmlpack on purpose: V2 is the main build now and must restore standalone. Data/ is 9.4 G of already-compressed MPQs, so this member drops to zstd -3; -12 would burn CPU for almost nothing. WDB is excluded deliberately: a stale itemcache.wdb masks server-side item_template edits and has caused confusing bugs before. NOTE: if the Turtle client is ever updated, the stock mapextractor CRASHES on it (glibc _int_malloc assertion in old libmpq), so re-extracting data/ would become a real blocker -- see the handoff.",
+      "sha256": "60cae2ee530b1bed9ce547aa9d052c3452cacd80cb219c15835ca743274c5033",
+      "bytes": 11080930552,
+      "restore_bytes": 11376003361,
+      "source_mtimes": {
+        "~/Games/TurtleWoW": 1782871751
+      }
+    },
+    {
+      "path": "extras.tar.zst",
+      "kind": "files_tar_zst",
+      "files": [
+        {
+          "src": "~/tortoise-wow-v2-launcher.sh",
+          "arc": "scripts/tortoise-wow-v2-launcher.sh",
+          "restore_to": "~/tortoise-wow-v2-launcher.sh",
+          "mode": "0755"
+        },
+        {
+          "src": "~/tortoise-wow-v2-stop.sh",
+          "arc": "scripts/tortoise-wow-v2-stop.sh",
+          "restore_to": "~/tortoise-wow-v2-stop.sh",
+          "mode": "0755"
+        },
+        {
+          "src": "~/TURTLE-WOW-V2-HANDOFF.md",
+          "arc": "docs/TURTLE-WOW-V2-HANDOFF.md",
+          "restore_to": "~/TURTLE-WOW-V2-HANDOFF.md",
+          "mode": "0644"
+        },
+        {
+          "src": "~/dml-launcher-lib.sh",
+          "arc": "shared/dml-launcher-lib.sh",
+          "restore_to": "~/dml-launcher-lib.sh",
+          "mode": "0755",
+          "if_absent_only": true,
+          "note": "shared by 25+ launchers; never overwrite a newer one"
+        }
+      ],
+      "sha256": "ac59e347ef47c0588d219b39f1ab42d74bf6652b673634c8db1f180cf10fe021",
+      "bytes": 11987,
+      "restore_bytes": 30201,
+      "source_mtimes": {
+        "~/tortoise-wow-v2-launcher.sh": 1786158114,
+        "~/tortoise-wow-v2-stop.sh": 1786158130,
+        "~/TURTLE-WOW-V2-HANDOFF.md": 1786160870,
+        "~/dml-launcher-lib.sh": 1785556611
+      }
+    }
+  ]
+}
