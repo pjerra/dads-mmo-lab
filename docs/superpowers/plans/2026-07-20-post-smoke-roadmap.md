@@ -921,11 +921,24 @@ Two rules that are part of the feature, not commentary:
    rules**: refuse a non-empty target (`MIGRATE_TARGET_NOT_EMPTY` class),
    refuse an unanswerable probe. No new policy — the existing one applied.
 
-First task before any design: **obtain Baerthe's `dmlpack` tool source.** The
-format already exists in the wild with users; matching the manifest/format (or
-absorbing the tool, licence permitting) beats inventing a rival `.dmlpack`.
-Reference copies of the HOWTO + installer were fetched from
-`wow.baerthe.com` on 2026-08-08.
+**SOURCE OBTAINED 2026-08-08.** The installer is self-contained: `dmlpack.py`
+(2100 lines, Python, stdlib-only) rides inside `install-dmlpack.sh` as a base64
+payload after a `__DMLPACK_PAYLOAD__` marker. Decoded from the real
+`TurtleV2.dmlpack` distribution; reference copies (tool, installer, manifest,
+handoff doc, launcher lib) in `C:\Users\perzi\Downloads\dmlpack-reference\` —
+NOT committed here, because the code carries **no licence header**, so
+absorbing any of it into this AGPL repo needs Baerthe's permission first.
+Format-compatibility needs no permission; ask anyway, for goodwill and because
+the format already has users. What the source settles: a `.dmlpack` is an
+UNCOMPRESSED tar whose first member is `manifest.json` (manifest reads in
+milliseconds without touching the payload); member kinds `tar_zst`,
+`files_tar_zst`, `docker_volume`, `docker_image`, `root_tar_zst`, `qcow2`,
+each sha256-pinned with packed+restored byte counts; the manifest also carries
+host ports, client realmlist edits, binary-VDF Steam shortcut entries with the
+appid hash, `/etc/hosts` pins, systemd units, accounts, and a `never_touch`
+reclaim list for paths shared between packs. The Turtle pack is
+vMaNGOS-shaped (tw2-mangosd/realmd, MariaDB 10.6), not AzerothCore — the
+format is engine-agnostic, which strengthens the adoption case.
 
 **Scope: v0.2 headline candidate. Explicitly NOT in v0.1.0** — the beta scope
 is frozen by ROADMAP-TO-BETA's own rule.
