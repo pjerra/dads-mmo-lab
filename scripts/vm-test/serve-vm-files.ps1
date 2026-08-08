@@ -18,6 +18,11 @@ $Files = @(
     # Git/yq/launcher.json steps, which is how the 2026-08-09 round hit a WSL
     # relay error on the Library page (finding F2).
     (Join-Path $RepoRoot 'guides\DML-Windows\Install-DML-Native.ps1'),
+    # The one-click entry point: elevates once, up front, so every command
+    # under it inherits the elevated token. Must land in the SAME folder as
+    # Install-DML-Native.ps1 and the NSIS exe -- it looks for both beside
+    # itself, and picks the local build over a GitHub release when it finds one.
+    (Join-Path $PSScriptRoot 'INSTALL-DML-ADMIN.bat'),
     (Join-Path $RepoRoot 'docs\VM-ACCEPTANCE-TEST.md'),
     (Join-Path $PSScriptRoot 'fetch-vm-files.ps1')
 )
