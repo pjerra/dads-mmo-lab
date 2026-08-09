@@ -62,6 +62,7 @@
   import ModuleTuning from "$lib/ModuleTuning.svelte";
   import ModuleFiles from "$lib/ModuleFiles.svelte";
   import { moduleListCache } from "$lib/page-cache.svelte";
+  import { canBuild } from "$lib/module-canbuild";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -587,11 +588,19 @@
   {/if}
   {#if note}<p class="muted">{note}</p>{/if}
 
-  {#if list && list.rebuild_pending.length > 0}
-    <div class="card warn-card">
-      <p><strong>Server rebuild required for: {list.rebuild_pending.join(", ")}</strong></p>
+  {#if list}
+    {@const buildable = canBuild(list)}
+    <div class="card {list.rebuild_pending.length > 0 ? 'warn-card' : ''}">
+      {#if list.rebuild_pending.length > 0}
+        <p><strong>Server rebuild required for: {list.rebuild_pending.join(", ")}</strong></p>
+      {:else}
+        <p><strong>Server rebuild</strong> — recompiles the worldserver with the currently installed C++ modules.</p>
+      {/if}
+      {#if !buildable}
+        <p class="muted">This server runs prebuilt images — C++ modules can't be compiled into it, so rebuild is unavailable.</p>
+      {/if}
       <label class="row">
-        <input type="checkbox" bind:checked={backupChecked} disabled={busy} />
+        <input type="checkbox" bind:checked={backupChecked} disabled={busy || !buildable} />
         Back up the server first (recommended)
       </label>
       <div class="row">
@@ -599,10 +608,12 @@
           <button
             class="primary"
             onclick={rebuild}
-            disabled={busy || featureLocked("modules-rebuild")}
-            title={featureLocked("modules-rebuild") ? LOCKED_HINT : undefined}
+            disabled={busy || !buildable || featureLocked("modules-rebuild")}
+            title={!buildable
+              ? "This server runs prebuilt images — rebuild is unavailable."
+              : featureLocked("modules-rebuild") ? LOCKED_HINT : undefined}
           >
-            Rebuild now
+            {list.rebuild_pending.length > 0 ? "Rebuild now" : "Rebuild server"}
           </button>
         {:else}
           <span>Rebuild takes 30–90 minutes and stops the world while building. Continue?</span>

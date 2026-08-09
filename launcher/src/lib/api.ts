@@ -453,6 +453,11 @@ export interface ModuleList {
   families: { cpp: CppModule[]; lua: LuaModule[]; sql: SqlModule[] };
   rebuild_pending: string[];
   ale_ready: boolean;
+  // Additive (2026-08-09): false only on an image-only migrated server where
+  // C++ modules can't be compiled in. Missing on an older CLI — see
+  // module-canbuild.ts's fail-open canBuild() helper, never read this field
+  // raw.
+  can_build?: boolean;
 }
 export async function wowModuleList(): Promise<ModuleList> {
   return await invoke("wow_module_list");
