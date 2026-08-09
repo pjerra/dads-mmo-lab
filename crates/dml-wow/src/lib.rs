@@ -11,6 +11,7 @@ pub mod accountwide;
 pub mod ahbot;
 pub use dml_core::backend;
 pub mod backup;
+pub mod buildcap;
 pub mod botid;
 pub mod bridge;
 pub mod cachestatus;
