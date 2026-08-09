@@ -340,11 +340,13 @@ impl ModuleReader {
         let rebuild_pending: Vec<Value> =
             self.pending.iter().map(|s| Value::String(s.clone())).collect();
         let ale_ready = self.cpp_installed("mod-ale");
+        let can_build = self.title_dir.join("docker-compose.build.yml").is_file();
 
         json!({
             "families": { "cpp": cpp_out, "lua": lua_out, "sql": sql_out },
             "rebuild_pending": rebuild_pending,
             "ale_ready": ale_ready,
+            "can_build": can_build,
         })
     }
 }
@@ -493,6 +495,47 @@ mod tests {
         assert_eq!(data["families"]["sql"][0]["installed"], false);
         assert_eq!(data["rebuild_pending"], json!([]));
         assert_eq!(data["ale_ready"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn can_build_false_without_build_file() {
+        // When no docker-compose.build.yml exists, can_build should be false.
+        let dir = std::env::temp_dir().join(format!("dml-can-build-false-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let catalog = json!({
+            "families": {
+                "cpp": [],
+                "lua": [],
+                "sql": []
+            },
+            "rebuild_pending": [],
+            "ale_ready": false
+        });
+        let r = ModuleReader::for_title(&dir);
+        let data = r.assemble(&catalog);
+        assert_eq!(data["can_build"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn can_build_true_with_build_file() {
+        // When docker-compose.build.yml exists, can_build should be true.
+        let dir = std::env::temp_dir().join(format!("dml-can-build-true-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("docker-compose.build.yml"), "x").unwrap();
+        let catalog = json!({
+            "families": {
+                "cpp": [],
+                "lua": [],
+                "sql": []
+            },
+            "rebuild_pending": [],
+            "ale_ready": false
+        });
+        let r = ModuleReader::for_title(&dir);
+        let data = r.assemble(&catalog);
+        assert_eq!(data["can_build"], true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
