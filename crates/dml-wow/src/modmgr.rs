@@ -2006,6 +2006,31 @@ pub fn update_module(git_program: &OsStr, sdir: &Path, key: &str, emit: &dyn Fn(
     Ok(serde_json::json!({"key": key, "changed": changed, "before": ubefore, "after": uafter, "pending_rebuild": pending_rebuild}))
 }
 
+/// Shared cpp-family guard: can this server ever compile a C++ module? Runs
+/// `docker compose <build-files> config --format json` (the same -f set
+/// [`buildcap::build_files`] gives the rebuild build step, so the guard can
+/// never disagree with what a rebuild would actually see) and reads whether
+/// `ac-worldserver` carries a `build:` key via
+/// [`buildcap::worldserver_has_build`]. `Some(false)` = refuse (image-only
+/// server), `Some(true)` = fine, `None` = compose could not answer at all
+/// (bad exit, unreadable JSON) — tri-state, every caller warns and proceeds
+/// rather than refusing on a probe that told it nothing. ONE probe
+/// implementation shared by [`module_rebuild_stream_with`] and the cpp arms
+/// of [`module_install_stream`]/[`module_update_stream`] (spec 2026-08-09).
+pub fn cpp_build_guard(docker_program: &OsStr, sdir: &Path) -> Option<bool> {
+    let bfiles = crate::buildcap::build_files(sdir);
+    let mut args: Vec<&str> = vec!["compose"];
+    args.extend(bfiles.iter().map(String::as_str));
+    args.extend(["config", "--format", "json"]);
+    let mut cmd = Command::new(docker_program);
+    cmd.current_dir(sdir).args(&args);
+    windows_no_window(&mut cmd);
+    match output_bounded_draining(cmd, Duration::from_secs(30)) {
+        Some(out) if out.status.success() => crate::buildcap::worldserver_has_build(&String::from_utf8_lossy(&out.stdout)),
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // STREAMED per-command ORCHESTRATION (moved out of the launcher's `lib.rs` by
 // the cargo-workspace refactor, Task 9 — the Tauri commands are now thin
@@ -2042,6 +2067,30 @@ pub fn module_install_stream(
         return;
     };
 
+    let docker_program = native::docker_program();
+    module_install_stream_with(docker_program, sdir, family, key, url, backup, variant, db_cfg, emit);
+}
+
+/// [`module_install_stream`] with its docker executable/server dir supplied
+/// rather than resolved — the seam the build-config guard tests drive
+/// directly against a fake `docker`, same shape as
+/// [`module_rebuild_stream_with`]. Production reaches this only through the
+/// wrapper above (which has already resolved `docker_program`/`sdir` and
+/// emitted `section_start`), so this IS the real install orchestration, not a
+/// test-only restatement of it.
+pub fn module_install_stream_with(
+    docker_program: std::ffi::OsString,
+    sdir: PathBuf,
+    family: String,
+    key: Option<String>,
+    url: Option<String>,
+    backup: Option<bool>,
+    variant: Option<String>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::modmgr;
+
     // Two DIFFERENT executables: cpp install/update and every family's
     // clone step shell out to `git` (PATH-resolved, same convention as
     // `maint`'s `update-check`); the lua/sql families' SQL apply + safety
@@ -2051,9 +2100,30 @@ pub fn module_install_stream(
     // git call, and vice versa) -- see `dml::modmgr::install_lua`/
     // `install_sql`'s doc comments for which family touches which.
     let git_program = std::ffi::OsString::from("git");
-    let docker_program = native::docker_program();
     let result = match family.as_str() {
-        "cpp" => modmgr::install_cpp(&git_program, &sdir, key.as_deref(), url.as_deref(), backup, &emit),
+        "cpp" => {
+            // Build-config guard (spec 2026-08-09): refuse BEFORE cloning --
+            // a server that can never compile a C++ module gains nothing
+            // from a clone that just sits in `modules/` forever. Lua/sql
+            // never reach this arm at all.
+            match modmgr::cpp_build_guard(docker_program.as_os_str(), &sdir) {
+                Some(false) => {
+                    emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+                    emit(modmgr::error_event(
+                        "MODULE_NO_BUILD_CONFIG",
+                        "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing.",
+                        "Lua and SQL modules still work on this server.",
+                    ));
+                    return;
+                }
+                None => emit(modmgr::line_event(
+                    "warn",
+                    "could not read the compose configuration -- proceeding without the build-config check.",
+                )),
+                Some(true) => {}
+            }
+            modmgr::install_cpp(&git_program, &sdir, key.as_deref(), url.as_deref(), backup, &emit)
+        }
         "lua" => {
             let client_path = modmgr::effective_client_path();
             modmgr::install_lua(
@@ -2094,7 +2164,7 @@ pub fn module_install_stream(
 
 /// NATIVE-MODE `wow module update` — see the section comment above.
 pub fn module_update_stream(key: String, emit: impl Fn(serde_json::Value)) {
-    use crate::{config::ConfigReader, maint, modmgr};
+    use crate::{config::ConfigReader, maint, modmgr, native};
 
     emit(modmgr::section_start(modmgr::SECTION_UPDATE));
 
@@ -2105,9 +2175,48 @@ pub fn module_update_stream(key: String, emit: impl Fn(serde_json::Value)) {
         return;
     };
 
-    // `module update` is pure git -- no docker at all (see `update_module`'s
-    // doc comment).
+    let docker_program = native::docker_program();
+    module_update_stream_with(docker_program, sdir, key, emit);
+}
+
+/// [`module_update_stream`] with its docker executable/server dir supplied
+/// rather than resolved — same seam shape as
+/// [`module_install_stream_with`]/[`module_rebuild_stream_with`]. `update`
+/// itself is pure git (see [`update_module`]'s doc comment); the guard below
+/// is the ONE docker touch this stream makes, and it is a compose-file PARSE
+/// (`compose config`), which answers correctly even with the engine down --
+/// its failure only warns, it never refuses (spec 2026-08-09).
+pub fn module_update_stream_with(docker_program: std::ffi::OsString, sdir: PathBuf, key: String, emit: impl Fn(serde_json::Value)) {
+    use crate::modmgr;
+
     let git_program = std::ffi::OsString::from("git");
+
+    // Build-config guard, cpp-shaped keys only: a REGISTERED cpp module (in
+    // the catalog regardless of whether it's installed yet -- `update_module`
+    // itself answers NOT_FOUND for that) or a custom module that is actually
+    // an installed cpp clone. lua/sql keys never satisfy either arm, so they
+    // skip straight to `update_module`, which gives them their own BAD_ARG.
+    let is_cpp_shaped = modmgr::cpp_row(&key).is_some()
+        || (crate::modules::valid_cpp_key(&key) && sdir.join("modules").join(&key).join(".git").is_dir());
+    if is_cpp_shaped {
+        match modmgr::cpp_build_guard(docker_program.as_os_str(), &sdir) {
+            Some(false) => {
+                emit(modmgr::section_end(modmgr::SECTION_UPDATE, "error"));
+                emit(modmgr::error_event(
+                    "MODULE_NO_BUILD_CONFIG",
+                    "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing.",
+                    "Lua and SQL modules still work on this server.",
+                ));
+                return;
+            }
+            None => emit(modmgr::line_event(
+                "warn",
+                "could not read the compose configuration -- proceeding without the build-config check.",
+            )),
+            Some(true) => {}
+        }
+    }
+
     if let Ok(data) = modmgr::update_module(&git_program, &sdir, &key, &emit) {
         emit(modmgr::section_end(modmgr::SECTION_UPDATE, "ok"));
         emit(modmgr::done_event(data));
@@ -2228,37 +2337,22 @@ pub fn module_rebuild_stream_with(
     };
 
     // Build-config guard (spec 2026-08-09): refuse BEFORE the backup so a
-    // server that can never compile does not first sit through a dump. The
-    // overlay is never auto-loaded (unbound review CRITICAL 2026-08-02) — the
-    // config probe must pass the same -f set the build will use.
-    let bfiles = crate::buildcap::build_files(&sdir);
-    let mut cfg_args: Vec<&str> = vec!["compose"];
-    cfg_args.extend(bfiles.iter().map(String::as_str));
-    cfg_args.extend(["config", "--format", "json"]);
-    let mut cfg_cmd = Command::new(&docker_program);
-    cfg_cmd.current_dir(&sdir).args(&cfg_args);
-    windows_no_window(&mut cfg_cmd);
-    let cfg_out = output_bounded_draining(cfg_cmd, Duration::from_secs(30));
-    match cfg_out {
-        Some(out) if out.status.success() => {
-            match crate::buildcap::worldserver_has_build(&String::from_utf8_lossy(&out.stdout)) {
-                Some(false) => {
-                    emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
-                    emit(modmgr::error_event(
-                        "MODULE_NO_BUILD_CONFIG",
-                        "This server has no build configuration for ac-worldserver -- it runs from prebuilt images, so C++ modules cannot be compiled into it.",
-                        "A rebuild needs a server built from source (a native install or a WSL install). A migrated image-only server cannot rebuild yet.",
-                    ));
-                    return;
-                }
-                Some(true) => {}
-                None => emit(modmgr::line_event(
-                    "warn",
-                    "could not read the compose configuration -- proceeding without the build-config check.",
-                )),
-            }
+    // server that can never compile does not first sit through a dump.
+    // `cpp_build_guard` passes compose the same -f set the build step below
+    // will use (the overlay is never auto-loaded — unbound review CRITICAL
+    // 2026-08-02).
+    match modmgr::cpp_build_guard(&docker_program, &sdir) {
+        Some(false) => {
+            emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+            emit(modmgr::error_event(
+                "MODULE_NO_BUILD_CONFIG",
+                "This server has no build configuration for ac-worldserver -- it runs from prebuilt images, so C++ modules cannot be compiled into it.",
+                "A rebuild needs a server built from source (a native install or a WSL install). A migrated image-only server cannot rebuild yet.",
+            ));
+            return;
         }
-        _ => emit(modmgr::line_event(
+        Some(true) => {}
+        None => emit(modmgr::line_event(
             "warn",
             "could not read the compose configuration -- proceeding without the build-config check.",
         )),
@@ -2287,6 +2381,7 @@ pub fn module_rebuild_stream_with(
         format!("building (this can take 30-90 minutes; full log: {}/rebuild.log)...", sdir.display()),
     ));
     let log_path = sdir.join("rebuild.log");
+    let bfiles = crate::buildcap::build_files(&sdir);
     let mut build_args: Vec<&str> = vec!["compose"];
     build_args.extend(bfiles.iter().map(String::as_str));
     build_args.extend(["build", "ac-worldserver"]);
@@ -2952,5 +3047,227 @@ mod tests {
             "expected a warn about the unreadable compose config:\n{events:#?}"
         );
         assert!(calls.contains("build ac-worldserver"), "the build call must still happen after the warn:\n{calls}");
+    }
+
+    // -- module_install_stream_with / module_update_stream_with: cpp
+    // build-config guard (Task 4, spec 2026-08-09) -------------------------
+    //
+    // Same fake-docker + `REBUILD_ENV_LOCK` harness as the rebuild guard
+    // tests above (`write_fake_rebuild_docker` answers ANY `... config
+    // --format json` call, regardless of which stream issued it) -- no
+    // second harness.
+
+    /// Writes an `sdir` with both compose files present, points the fake
+    /// docker's env at a fresh call log, drives
+    /// [`module_install_stream_with`], and hands back the emitted events plus
+    /// the call log's text.
+    fn run_install(
+        tag: &str,
+        family: &str,
+        key: Option<&str>,
+        url: Option<&str>,
+        config_json: &str,
+        config_exit: Option<i32>,
+    ) -> (Vec<serde_json::Value>, String) {
+        let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let d = tmp_dir(&format!("install-{tag}"));
+        std::fs::write(d.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(d.join("docker-compose.build.yml"), "services: {}\n").unwrap();
+        let call_log = d.join("calls.log");
+        std::fs::write(&call_log, "").unwrap();
+        let docker = write_fake_rebuild_docker(&d);
+
+        std::env::set_var("FAKE_CALL_LOG", &call_log);
+        std::env::set_var("FAKE_CONFIG_JSON", config_json);
+        match config_exit {
+            Some(c) => std::env::set_var("FAKE_CONFIG_EXIT", c.to_string()),
+            None => std::env::remove_var("FAKE_CONFIG_EXIT"),
+        }
+        std::env::remove_var("FAKE_BUILD_EXIT");
+
+        let events = std::cell::RefCell::new(Vec::new());
+        module_install_stream_with(
+            docker.into_os_string(),
+            d.clone(),
+            family.to_string(),
+            key.map(str::to_string),
+            url.map(str::to_string),
+            None,
+            None,
+            rebuild_test_db_cfg(),
+            |v| events.borrow_mut().push(v),
+        );
+
+        std::env::remove_var("FAKE_CALL_LOG");
+        std::env::remove_var("FAKE_CONFIG_JSON");
+        std::env::remove_var("FAKE_CONFIG_EXIT");
+
+        let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
+        let events = events.into_inner();
+        let _ = std::fs::remove_dir_all(&d);
+        (events, calls)
+    }
+
+    /// Same shape for [`module_update_stream_with`].
+    fn run_update(tag: &str, key: &str, config_json: &str, config_exit: Option<i32>) -> (Vec<serde_json::Value>, String) {
+        let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let d = tmp_dir(&format!("update-{tag}"));
+        std::fs::write(d.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(d.join("docker-compose.build.yml"), "services: {}\n").unwrap();
+        let call_log = d.join("calls.log");
+        std::fs::write(&call_log, "").unwrap();
+        let docker = write_fake_rebuild_docker(&d);
+
+        std::env::set_var("FAKE_CALL_LOG", &call_log);
+        std::env::set_var("FAKE_CONFIG_JSON", config_json);
+        match config_exit {
+            Some(c) => std::env::set_var("FAKE_CONFIG_EXIT", c.to_string()),
+            None => std::env::remove_var("FAKE_CONFIG_EXIT"),
+        }
+        std::env::remove_var("FAKE_BUILD_EXIT");
+
+        let events = std::cell::RefCell::new(Vec::new());
+        module_update_stream_with(docker.into_os_string(), d.clone(), key.to_string(), |v| events.borrow_mut().push(v));
+
+        std::env::remove_var("FAKE_CALL_LOG");
+        std::env::remove_var("FAKE_CONFIG_JSON");
+        std::env::remove_var("FAKE_CONFIG_EXIT");
+
+        let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
+        let events = events.into_inner();
+        let _ = std::fs::remove_dir_all(&d);
+        (events, calls)
+    }
+
+    const NO_BUILD_CONFIG_JSON: &str = r#"{"services":{"ac-worldserver":{"image":"dml.local/ac-wotlk-worldserver:migrated"}}}"#;
+
+    #[test]
+    fn cpp_install_refuses_on_a_no_build_server_before_cloning() {
+        let (events, calls) = run_install("no-build", "cpp", Some("mod-solocraft"), None, NO_BUILD_CONFIG_JSON, None);
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(
+            last["error"]["message"],
+            "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing.",
+            "{events:#?}"
+        );
+        assert_eq!(last["error"]["hint"], "Lua and SQL modules still work on this server.", "{events:#?}");
+        assert!(
+            events.iter().any(|e| e["event"] == "section_end" && e["status"] == "error"),
+            "{events:#?}"
+        );
+
+        // The call log holds ONLY the config probe -- no git clone, proven
+        // both by the call log and by the modules/<key> dir never appearing.
+        assert!(calls.contains("config") && calls.contains("json"), "{calls}");
+        assert!(!calls.contains("clone"), "no git clone expected:\n{calls}");
+    }
+
+    #[test]
+    fn cpp_install_warns_and_proceeds_when_compose_cannot_answer() {
+        // `--url` rather than a registry `--key`: `.invalid` is an
+        // RFC 2606-reserved TLD that never resolves, so the clone this
+        // proceeds into fails DETERMINISTICALLY (unlike a real registry URL,
+        // which this sandbox can sometimes actually reach over the network).
+        let (events, calls) = run_install(
+            "unreadable",
+            "cpp",
+            None,
+            Some("https://mod-fake.invalid/mod-fake.git"),
+            "not read on a nonzero exit",
+            Some(1),
+        );
+
+        let warn_pos = events
+            .iter()
+            .position(|e| e["event"] == "line" && e["level"] == "warn" && e["text"].as_str().unwrap_or("").contains("could not read the compose configuration"))
+            .unwrap_or_else(|| panic!("expected a warn about the unreadable compose config:\n{events:#?}"));
+
+        // The guard did not refuse -- the normal clone path ran (and failed,
+        // since mod-fake.invalid can never resolve), giving a DIFFERENT,
+        // LATER error after the warn.
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_ne!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(last["error"]["code"], "GIT_FAILED", "{events:#?}");
+        let last_pos = events.len() - 1;
+        assert!(warn_pos < last_pos, "warn must precede the later failure:\n{events:#?}");
+        assert!(calls.contains("config") && calls.contains("json"), "{calls}");
+    }
+
+    #[test]
+    fn lua_and_sql_installs_skip_the_guard_entirely() {
+        let (events, calls) = run_install("lua-skip", "lua", Some("accountwide"), None, NO_BUILD_CONFIG_JSON, None);
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_ne!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(last["error"]["code"], "NOT_READY", "{events:#?}");
+        assert_eq!(last["error"]["message"], "Install the ALE module (mod-ale) first", "{events:#?}");
+
+        // The guard never ran the config probe at all for a lua install.
+        assert!(!calls.contains("config"), "no config probe expected for a lua install:\n{calls}");
+    }
+
+    #[test]
+    fn cpp_update_refuses_on_a_no_build_server_before_pulling() {
+        // "mod-solocraft" is a REGISTERED cpp key -- the guard fires from
+        // `cpp_row` alone, even though it was never actually installed here
+        // (no modules/mod-solocraft dir exists in this fresh sdir).
+        let (events, calls) = run_update("no-build", "mod-solocraft", NO_BUILD_CONFIG_JSON, None);
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(
+            last["error"]["message"],
+            "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing.",
+            "{events:#?}"
+        );
+        assert_eq!(last["error"]["hint"], "Lua and SQL modules still work on this server.", "{events:#?}");
+
+        // No git pull -- the guard refused before `update_module` ran at all.
+        assert!(calls.contains("config") && calls.contains("json"), "{calls}");
+        assert!(!calls.contains("pull"), "no git pull expected:\n{calls}");
+    }
+
+    #[test]
+    fn cpp_update_warns_and_proceeds_when_compose_cannot_answer() {
+        let (events, calls) = run_update("unreadable", "mod-solocraft", "not read on a nonzero exit", Some(1));
+
+        let warn_pos = events
+            .iter()
+            .position(|e| e["event"] == "line" && e["level"] == "warn" && e["text"].as_str().unwrap_or("").contains("could not read the compose configuration"))
+            .unwrap_or_else(|| panic!("expected a warn about the unreadable compose config:\n{events:#?}"));
+
+        // The guard did not refuse -- `update_module` ran next and answered
+        // NOT_FOUND (mod-solocraft was never actually installed in this sdir),
+        // a DIFFERENT, LATER error after the warn.
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_ne!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(last["error"]["code"], "NOT_FOUND", "{events:#?}");
+        let last_pos = events.len() - 1;
+        assert!(warn_pos < last_pos, "warn must precede the later failure:\n{events:#?}");
+        assert!(calls.contains("config") && calls.contains("json"), "{calls}");
+    }
+
+    #[test]
+    fn non_cpp_shaped_update_skips_the_guard_entirely() {
+        // Not in the cpp registry, not a valid module-key shape at all (a
+        // digit is not in [a-z-]) -- and even if it were, no
+        // modules/<key>/.git exists, so `is_cpp_shaped` is false either way.
+        let (events, calls) = run_update("skip", "not_a_key_1", NO_BUILD_CONFIG_JSON, None);
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "BAD_ARG", "{events:#?}");
+        assert_eq!(last["error"]["message"], "Invalid module key: not_a_key_1", "{events:#?}");
+
+        assert!(!calls.contains("config"), "no config probe expected for a non-cpp-shaped update:\n{calls}");
     }
 }
