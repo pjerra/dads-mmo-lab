@@ -2153,17 +2153,25 @@ pub fn module_remove_stream(
 
 /// NATIVE-MODE `wow module rebuild` (`90-main.sh:4967-5008`). The ONE new
 /// shape versus its install/update/remove siblings is the build step itself —
-/// `docker compose up -d --build` streams LIVE via
+/// `docker compose build` streams LIVE via
 /// [`super::destructive::run_streamed_unbounded`] rather than the
 /// bounded/captured-then-split pattern every other docker call in this crate
 /// uses, because a first-time AzerothCore rebuild can run 30-90 minutes and
 /// the UI needs to see progress as it happens, not just at the end.
+///
+/// Thin wrapper: everything this function does itself is env/title-dir
+/// resolution the [`module_rebuild_stream_with`] unit tests bypass by
+/// supplying `sdir`/`docker_program` directly. The backup-choice `BAD_ARG`
+/// gate is deliberately the FIRST statement — pinned by
+/// `module_rebuild_without_a_backup_choice_streams_bad_arg_and_exits_1` in
+/// `dml-wow-cli`'s `cli_integration` suite, which asserts it fires before the
+/// server-installed check below it even runs.
 pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, emit: impl Fn(serde_json::Value)) {
-    use crate::{config::ConfigReader, destructive, lifecycle, maint, modmgr, native};
+    use crate::{config::ConfigReader, maint, modmgr, native};
 
     emit(modmgr::section_start(MODULE_REBUILD_SECTION));
 
-    let Some(do_backup) = backup else {
+    if backup.is_none() {
         emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
         emit(modmgr::error_event(
             "BAD_ARG",
@@ -2171,7 +2179,7 @@ pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, 
             "Module SQL lands during the rebuild -- decide explicitly.",
         ));
         return;
-    };
+    }
 
     let title_dir = ConfigReader::title_dir_from_env();
     let Some(sdir) = maint::resolve_server_dir(&title_dir) else {
@@ -2187,6 +2195,75 @@ pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, 
         return;
     }
 
+    module_rebuild_stream_with(docker_program, sdir, backup, db_cfg, emit);
+}
+
+/// [`module_rebuild_stream`] with its docker executable/server dir supplied
+/// rather than resolved — the seam the guard/build-overlay tests drive
+/// directly against a fake `docker`. Production reaches this only through the
+/// wrapper above (which has already resolved `docker_program`/`sdir` and
+/// confirmed the engine is up), so this IS the real rebuild orchestration —
+/// backup gate, then the build-config guard, then the optional safety backup,
+/// then stop/build/up — not a test-only restatement of it. `backup` stays
+/// `Option<bool>` (rather than a plain `bool`) so this function is
+/// self-contained: a direct caller that skips the wrapper still gets the same
+/// `BAD_ARG` refusal instead of a silently-defaulted backup choice.
+pub fn module_rebuild_stream_with(
+    docker_program: std::ffi::OsString,
+    sdir: std::path::PathBuf,
+    backup: Option<bool>,
+    db_cfg: crate::db::DbConfig,
+    emit: impl Fn(serde_json::Value),
+) {
+    use crate::{destructive, lifecycle, modmgr};
+
+    let Some(do_backup) = backup else {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BAD_ARG",
+            "Pick --backup or --no-backup",
+            "Module SQL lands during the rebuild -- decide explicitly.",
+        ));
+        return;
+    };
+
+    // Build-config guard (spec 2026-08-09): refuse BEFORE the backup so a
+    // server that can never compile does not first sit through a dump. The
+    // overlay is never auto-loaded (unbound review CRITICAL 2026-08-02) — the
+    // config probe must pass the same -f set the build will use.
+    let bfiles = crate::buildcap::build_files(&sdir);
+    let mut cfg_args: Vec<&str> = vec!["compose"];
+    cfg_args.extend(bfiles.iter().map(String::as_str));
+    cfg_args.extend(["config", "--format", "json"]);
+    let mut cfg_cmd = Command::new(&docker_program);
+    cfg_cmd.current_dir(&sdir).args(&cfg_args);
+    windows_no_window(&mut cfg_cmd);
+    let cfg_out = output_bounded_draining(cfg_cmd, Duration::from_secs(30));
+    match cfg_out {
+        Some(out) if out.status.success() => {
+            match crate::buildcap::worldserver_has_build(&String::from_utf8_lossy(&out.stdout)) {
+                Some(false) => {
+                    emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+                    emit(modmgr::error_event(
+                        "MODULE_NO_BUILD_CONFIG",
+                        "This server has no build configuration for ac-worldserver -- it runs from prebuilt images, so C++ modules cannot be compiled into it.",
+                        "A rebuild needs a server built from source (a native install or a WSL install). A migrated image-only server cannot rebuild yet.",
+                    ));
+                    return;
+                }
+                Some(true) => {}
+                None => emit(modmgr::line_event(
+                    "warn",
+                    "could not read the compose configuration -- proceeding without the build-config check.",
+                )),
+            }
+        }
+        _ => emit(modmgr::line_event(
+            "warn",
+            "could not read the compose configuration -- proceeding without the build-config check.",
+        )),
+    }
+
     if do_backup {
         // Same helper `wow update`'s --backup gate uses (Chunk 3b) --
         // world-INCLUSIVE (module/core SQL lands during the rebuild), a
@@ -2199,26 +2276,54 @@ pub fn module_rebuild_stream(backup: Option<bool>, db_cfg: crate::db::DbConfig, 
     }
 
     emit(modmgr::line_event("info", "stopping worldserver..."));
-    let mut stop_cmd = std::process::Command::new(&docker_program);
+    let mut stop_cmd = Command::new(&docker_program);
     stop_cmd.current_dir(&sdir).args(["compose", "stop", "-t", "180", "ac-worldserver"]);
-    crate::status::windows_no_window(&mut stop_cmd);
+    windows_no_window(&mut stop_cmd);
     // Best-effort, swallowed like the bash arm's unchecked `|| true`.
-    let _ = crate::status::output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
+    let _ = output_bounded_draining(stop_cmd, lifecycle::COMPOSE_DOWN_TIMEOUT);
 
     emit(modmgr::line_event(
         "info",
         format!("building (this can take 30-90 minutes; full log: {}/rebuild.log)...", sdir.display()),
     ));
     let log_path = sdir.join("rebuild.log");
-    let status = destructive::run_streamed_unbounded(&docker_program, &["compose", "up", "-d", "--build"], &sdir, &log_path, |line| {
+    let mut build_args: Vec<&str> = vec!["compose"];
+    build_args.extend(bfiles.iter().map(String::as_str));
+    build_args.extend(["build", "ac-worldserver"]);
+    let mut progress = crate::install_native::BuildProgress::default();
+    let status = destructive::run_streamed_unbounded(&docker_program, &build_args, &sdir, &log_path, |line| {
+        if let Some(pct) = progress.observe(line) {
+            emit(dml_core::events::pct_event(pct));
+        }
         emit(modmgr::line_event("info", line));
     });
-
     if !matches!(&status, Some(s) if s.success()) {
         emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
         emit(modmgr::error_event(
             "BUILD_FAILED",
             "worldserver rebuild failed",
+            &format!("Full log: {}/rebuild.log", sdir.display()),
+        ));
+        return;
+    }
+
+    emit(modmgr::line_event("info", "build finished -- starting the stack..."));
+    // Plain up, NO overlay and NO --build: the installer's proven shape
+    // (build via -f set, then bare `compose up -d`). run_streamed_lines is
+    // the no-tee sibling — a second run_streamed_unbounded would TRUNCATE
+    // the build log just written (`File::create` semantics).
+    let up_status = dml_core::proc::run_streamed_lines(
+        &docker_program,
+        &["compose", "up", "-d"],
+        Some(&sdir),
+        dml_core::proc::LineSplit::Newline,
+        |line| emit(modmgr::line_event("info", line)),
+    );
+    if !matches!(&up_status, Some(s) if s.success()) {
+        emit(modmgr::section_end(MODULE_REBUILD_SECTION, "error"));
+        emit(modmgr::error_event(
+            "BUILD_FAILED",
+            "the stack did not come back up after the build",
             &format!("Full log: {}/rebuild.log", sdir.display()),
         ));
         return;
@@ -2650,5 +2755,202 @@ mod tests {
     #[test]
     fn update_gate_order_bad_arg_when_backup_choice_missing() {
         assert_eq!(update_gate_order(true, true, true, false, true, true, None), Some("BAD_ARG"));
+    }
+
+    // -- module_rebuild_stream_with: build-overlay guard + pct (Task 3, spec
+    // 2026-08-09) --------------------------------------------------------------
+    //
+    // Drives the REAL orchestration against a fake `docker`, per the
+    // `LifecycleEnv`/`write_lifecycle_fake_docker` pattern in `lifecycle.rs`
+    // (search that module for the harness this one copies). The fake docker
+    // reads FAKE_CONFIG_JSON/FAKE_CONFIG_EXIT/FAKE_BUILD_EXIT/FAKE_CALL_LOG
+    // from its own process environment at RUN time (not baked into the script
+    // text), so `run_rebuild` sets them on the current (test) process before
+    // spawning -- which is why every test below takes `REBUILD_ENV_LOCK`
+    // first: `std::process::Command` inherits the whole parent env, so an
+    // unguarded `set_var` here could poison a concurrently-running instance of
+    // this same helper (same hazard `iteminfo.rs`'s `ENV_TEST_LOCK` guards).
+
+    static REBUILD_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A stand-in `docker` for just the rebuild flow's THREE distinguishable
+    /// calls (config probe / build / everything else). Per-platform per
+    /// CLAUDE.md's test-portability rule -- never a hardcoded interpreter.
+    #[cfg(windows)]
+    fn write_fake_rebuild_docker(dir: &Path) -> PathBuf {
+        let p = dir.join("fake-docker-rebuild.cmd");
+        let script = "@echo off\r\n\
+            if not defined FAKE_CONFIG_EXIT set FAKE_CONFIG_EXIT=0\r\n\
+            if not defined FAKE_BUILD_EXIT set FAKE_BUILD_EXIT=0\r\n\
+            >>\"%FAKE_CALL_LOG%\" echo %*\r\n\
+            echo %*| findstr /C:\"config --format json\" >nul\r\n\
+            if %ERRORLEVEL%==0 (\r\n\
+            echo %FAKE_CONFIG_JSON%\r\n\
+            exit /b %FAKE_CONFIG_EXIT%\r\n\
+            )\r\n\
+            echo %*| findstr /C:\"build ac-worldserver\" >nul\r\n\
+            if %ERRORLEVEL%==0 (\r\n\
+            echo #26 1.0 [10/100] Building CXX object modules/x.cpp.o\r\n\
+            echo #26 2.0 [100/100] Linking CXX executable worldserver\r\n\
+            exit /b %FAKE_BUILD_EXIT%\r\n\
+            )\r\n\
+            exit /b 0\r\n";
+        std::fs::write(&p, script).unwrap();
+        p
+    }
+    #[cfg(not(windows))]
+    fn write_fake_rebuild_docker(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-docker-rebuild.sh");
+        let script = "#!/bin/sh\n\
+            echo \"$@\" >> \"$FAKE_CALL_LOG\"\n\
+            argv=\" $* \"\n\
+            case \"$argv\" in\n\
+            \x20 *\" config --format json \"*)\n\
+            \x20   printf '%s\\n' \"$FAKE_CONFIG_JSON\"\n\
+            \x20   exit \"${FAKE_CONFIG_EXIT:-0}\"\n\
+            \x20   ;;\n\
+            \x20 *\" build ac-worldserver \"*)\n\
+            \x20   echo '#26 1.0 [10/100] Building CXX object modules/x.cpp.o'\n\
+            \x20   echo '#26 2.0 [100/100] Linking CXX executable worldserver'\n\
+            \x20   exit \"${FAKE_BUILD_EXIT:-0}\"\n\
+            \x20   ;;\n\
+            esac\n\
+            exit 0\n";
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    fn rebuild_test_db_cfg() -> crate::db::DbConfig {
+        crate::db::DbConfig { host: "127.0.0.1".into(), port: 3306, user: "root".into(), password: "pw".into(), db_names: None }
+    }
+
+    /// Writes an `sdir` with both compose files present (so `build_files`
+    /// resolves the `-f` set), points the fake docker's env at a fresh call
+    /// log, drives [`module_rebuild_stream_with`], and hands back the emitted
+    /// events plus the call log's text (the read-back-in-order oracle).
+    fn run_rebuild(
+        tag: &str,
+        backup: Option<bool>,
+        config_json: &str,
+        config_exit: Option<i32>,
+        build_exit: Option<i32>,
+    ) -> (Vec<serde_json::Value>, String) {
+        let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let d = tmp_dir(&format!("rebuild-{tag}"));
+        std::fs::write(d.join("docker-compose.yml"), "services: {}\n").unwrap();
+        std::fs::write(d.join("docker-compose.build.yml"), "services: {}\n").unwrap();
+        let call_log = d.join("calls.log");
+        std::fs::write(&call_log, "").unwrap();
+        let docker = write_fake_rebuild_docker(&d);
+
+        std::env::set_var("FAKE_CALL_LOG", &call_log);
+        std::env::set_var("FAKE_CONFIG_JSON", config_json);
+        match config_exit {
+            Some(c) => std::env::set_var("FAKE_CONFIG_EXIT", c.to_string()),
+            None => std::env::remove_var("FAKE_CONFIG_EXIT"),
+        }
+        match build_exit {
+            Some(c) => std::env::set_var("FAKE_BUILD_EXIT", c.to_string()),
+            None => std::env::remove_var("FAKE_BUILD_EXIT"),
+        }
+
+        let events = std::cell::RefCell::new(Vec::new());
+        module_rebuild_stream_with(docker.into_os_string(), d.clone(), backup, rebuild_test_db_cfg(), |v| {
+            events.borrow_mut().push(v)
+        });
+
+        std::env::remove_var("FAKE_CALL_LOG");
+        std::env::remove_var("FAKE_CONFIG_JSON");
+        std::env::remove_var("FAKE_CONFIG_EXIT");
+        std::env::remove_var("FAKE_BUILD_EXIT");
+
+        let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
+        let events = events.into_inner();
+        let _ = std::fs::remove_dir_all(&d);
+        (events, calls)
+    }
+
+    #[test]
+    fn rebuild_refuses_before_backup_on_a_no_build_config() {
+        // backup: Some(true) is the point of this test -- it proves the guard
+        // refuses BEFORE the backup would have run, not merely that a
+        // --no-backup run never reaches a backup call.
+        let (events, calls) = run_rebuild(
+            "no-build",
+            Some(true),
+            r#"{"services":{"ac-worldserver":{"image":"x"}}}"#,
+            None,
+            None,
+        );
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert!(
+            events.iter().any(|e| e["event"] == "section_end" && e["status"] == "error"),
+            "{events:#?}"
+        );
+
+        // The call log must hold ONLY the config probe -- no backup
+        // (mysqldump goes through `docker exec`), no stop, no build. Checked
+        // by call SHAPE, not a bare "build" substring -- the config probe's
+        // own -f set legitimately names `docker-compose.build.yml`.
+        assert!(calls.contains("config") && calls.contains("json"), "{calls}");
+        assert!(!calls.contains("exec"), "no mysqldump call expected:\n{calls}");
+        assert!(!calls.contains("compose stop"), "no stop call expected:\n{calls}");
+        assert!(!calls.contains("build ac-worldserver"), "no build call expected:\n{calls}");
+    }
+
+    #[test]
+    fn rebuild_builds_through_the_overlay_then_ups_without_it() {
+        let (events, calls) = run_rebuild(
+            "overlay-build",
+            Some(false), // --no-backup
+            r#"{"services":{"ac-worldserver":{"build":{"context":"."}}}}"#,
+            None,
+            None,
+        );
+
+        let config_pos = calls.find("config --format json").unwrap_or_else(|| panic!("no config probe call:\n{calls}"));
+        let stop_pos = calls.find("compose stop").unwrap_or_else(|| panic!("no stop call:\n{calls}"));
+
+        let build_line = calls
+            .lines()
+            .find(|l| l.contains("build ac-worldserver"))
+            .unwrap_or_else(|| panic!("no build call among:\n{calls}"));
+        assert!(build_line.contains("docker-compose.yml"), "{build_line}");
+        assert!(build_line.contains("docker-compose.build.yml"), "{build_line}");
+        assert!(build_line.trim_end().ends_with("build ac-worldserver"), "{build_line}");
+        let build_pos = calls.find(build_line).unwrap();
+
+        let up_line = calls.lines().find(|l| l.contains("up -d")).unwrap_or_else(|| panic!("no up call among:\n{calls}"));
+        assert!(!up_line.contains("--build"), "{up_line}");
+        assert!(!up_line.contains("docker-compose.build.yml"), "{up_line}");
+        let up_pos = calls.find(up_line).unwrap();
+
+        assert!(config_pos < stop_pos, "config must precede stop:\n{calls}");
+        assert!(stop_pos < build_pos, "stop must precede build:\n{calls}");
+        assert!(build_pos < up_pos, "build must precede up:\n{calls}");
+
+        assert!(events.iter().any(|e| e["event"] == "pct"), "expected at least one pct event:\n{events:#?}");
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "done", "{events:#?}");
+        assert_eq!(last["data"]["rebuilt"], true, "{events:#?}");
+    }
+
+    #[test]
+    fn rebuild_proceeds_with_a_warn_when_compose_cannot_answer() {
+        let (events, calls) = run_rebuild("config-unreadable", Some(false), "not read on a nonzero exit", Some(1), None);
+
+        assert!(
+            events.iter().any(|e| e["event"] == "line"
+                && e["level"] == "warn"
+                && e["text"].as_str().unwrap_or("").contains("could not read the compose configuration")),
+            "expected a warn about the unreadable compose config:\n{events:#?}"
+        );
+        assert!(calls.contains("build ac-worldserver"), "the build call must still happen after the warn:\n{calls}");
     }
 }
