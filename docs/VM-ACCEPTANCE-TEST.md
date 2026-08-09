@@ -237,6 +237,23 @@ invisible until you make the sources disagree. That's the test.
 - **F4** — Phase 7d referenced a bundled `dml-wow.exe` that the installer does
   not carry. Step rewritten; decide separately whether the binary SHOULD ship.
 
+- **F6** — **the realmlist fix can report success on a client that ignores the
+  file it writes.** `launcher/src-tauri/src/realmlist.rs` models exactly two
+  places: `Data/<locale>/realmlist.wtf` (which it writes) and `Config.wtf` (a
+  read-only fallback for status). Found live 2026-08-09 connecting a real client
+  to the test VM over Tailscale: the user's custom 3.3.5 HD client keeps a
+  `vx.ServerList` of `["Host"]` entries in **`interface/loginui.lua`**, and its
+  login UI picks from THAT — editing both known files changed nothing the game
+  read. On such a client "Fix realmlist" would say it fixed something and the
+  player would still see "login server down": the reports-success-changed-nothing
+  class this project treats as worse than an error. Minimum honest fix: detect a
+  client-side server list and say the fix cannot speak for it, rather than
+  silently claiming the client is now pointed at this server. NB the diagnosis
+  order that worked, and is worth keeping: prove the SERVER first (a TCP connect
+  to 8085 that RECEIVES bytes is a live worldserver — a bare open port is not,
+  because Docker's proxy completes the handshake with nothing behind it), and
+  only then look at the client.
+
 ## Expected still-broken (do NOT file as new)
 
 - **The module subsystem on a renamed-schema server** (module install/repair/
