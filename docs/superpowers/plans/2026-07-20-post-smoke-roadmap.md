@@ -942,6 +942,22 @@ format is engine-agnostic, which strengthens the adoption case.
 **Scope: v0.2 headline candidate. Explicitly NOT in v0.1.0** — the beta scope
 is frozen by ROADMAP-TO-BETA's own rule.
 
+## Round 5.8 — Rebuild for migrated image-only servers (follow-up filed 2026-08-09)
+
+The module-rebuild fix (spec
+`docs/superpowers/specs/2026-08-09-module-rebuild-fix-design.md`) makes
+rebuild honest: on a migrated install (prebuilt `dml.local` images, no build
+config, no source checkout) it now REFUSES with `MODULE_NO_BUILD_CONFIG`
+instead of reporting a success that compiled nothing. The refusal is correct
+but the capability is real work someone wants: compiling C++ modules into a
+migrated server means building fresh images from a source checkout (clone
+core at the version the images were built from, copy/clone the module set,
+build via the `docker-compose.build.yml` overlay in a scratch dir), retagging
+as `dml.local/ac-wotlk-<svc>:<new tag>`, updating the compose tag, and
+swapping — with the moving-tag incident rules (2026-08-02) applied. Roughly
+install-native scale. Until built, migrated servers show the disabled
+Rebuild button with the "prebuilt images" hint.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
