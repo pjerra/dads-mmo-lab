@@ -120,7 +120,10 @@ if [[ "${1:-}" == "compose" ]]; then
   #   nobuild -> ac-worldserver without one (image-only server)
   #   fail    -> compose cannot answer (exit 1, nothing printed)
   # Default: build (the shape every existing test's server has).
-  if [[ "$2" == "config" || " $* " == *" config "* ]]; then
+  # $# -eq 2 (just "compose config", no extra flags) so this does NOT also
+  # swallow `docker compose config --services` (the legacy `lan` probe) --
+  # that call wants a plain service-name list, not canonicalized YAML.
+  if [[ $# -eq 2 && "$2" == "config" ]]; then
     case "${DML_STUB_COMPOSE_CONFIG:-build}" in
       fail) exit 1 ;;
       nobuild)
@@ -442,7 +445,9 @@ if [[ "${1:-}" == "compose" ]]; then
   # `docker compose config` -- same DML_STUB_COMPOSE_CONFIG contract as the
   # combined docker stub above (use_docker_stub); the module-rebuild suite
   # runs under THIS stub, so the build-config probe needs to answer here too.
-  if [[ "${2:-}" == "config" || " $* " == *" config "* ]]; then
+  # $# -eq 2 (bare "compose config") so `compose config --services` (the
+  # legacy `lan` probe) is NOT swallowed by this arm.
+  if [[ $# -eq 2 && "${2:-}" == "config" ]]; then
     case "${DML_STUB_COMPOSE_CONFIG:-build}" in
       fail) exit 1 ;;
       nobuild)

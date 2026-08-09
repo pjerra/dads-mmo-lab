@@ -193,6 +193,20 @@ origin_gains_commit() {
   [ ! -f "$SDIR/.dml-rebuild-pending" ]
 }
 
+@test "module update: registered-but-uninstalled cpp key on an image-only server -> MODULE_NO_BUILD_CONFIG" {
+  # mod-solocraft is a REGISTERED cpp key -- the guard must fire from the
+  # registry match alone, even though modules/mod-solocraft never existed in
+  # this fixture (no make_module_repo call). Pins that the build-config
+  # guard runs BEFORE the NOT_FOUND check, mirroring Rust's
+  # cpp_update_refuses_on_a_no_build_server_before_pulling.
+  use_docker_stub
+  export DML_STUB_COMPOSE_CONFIG=nobuild
+  run bash "$DML" wow module update --key mod-solocraft --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"MODULE_NO_BUILD_CONFIG"'
+  [ ! -d "$SDIR/modules/mod-solocraft" ]
+}
+
 @test "module update: unknown key -> NOT_FOUND; malformed key -> BAD_ARG" {
   run bash "$DML" wow module update --key mod-nope --json
   [ "$status" -eq 1 ]
