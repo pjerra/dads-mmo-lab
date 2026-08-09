@@ -1200,6 +1200,19 @@ impl<'a> Engine<'a> {
         Ok(())
     }
 
+    /// The mod-ale pin checkout -- shared by the first attempt and the
+    /// fetch-rescue retry in the mismatch branch below.
+    fn checkout_ale_pin(&self, ale: &Path) -> bool {
+        let (co, _) = self.run_collect(&self.git_probe(vec![
+            "-C".into(),
+            ale.display().to_string(),
+            "checkout".into(),
+            "--quiet".into(),
+            MOD_ALE_COMMIT.into(),
+        ]));
+        co.is_ok()
+    }
+
     fn do_clone_ale(&mut self) -> Result<(), Fail> {
         let sdir = self.sdir().to_path_buf();
         let ale = sdir.join("modules/mod-ale");
@@ -1226,18 +1239,43 @@ impl<'a> Engine<'a> {
                 let head = out.trim();
                 if !head.starts_with(MOD_ALE_COMMIT) {
                     self.line("info", "mod-ale is present but not at the pinned commit -- re-pinning it.");
-                    let (co, _) = self.run_collect(&self.git_probe(vec![
-                        "-C".into(),
-                        ale.display().to_string(),
-                        "checkout".into(),
-                        "--quiet".into(),
-                        MOD_ALE_COMMIT.into(),
-                    ]));
-                    if !co.is_ok() {
+                    let mut co = self.checkout_ale_pin(&ale);
+                    if !co {
+                        // A Modules-page install is a --depth 1 clone: the
+                        // pin can simply be absent locally (live 2026-08-09).
+                        // Fetch exactly that commit, then retry, before
+                        // concluding anything.
+                        self.line(
+                            "info",
+                            "the pinned commit is not in the local clone (shallow module-page clone) -- fetching it...",
+                        );
+                        let fetch = Call {
+                            program: Program::Git,
+                            args: vec![
+                                "-C".into(),
+                                ale.display().to_string(),
+                                "fetch".into(),
+                                "origin".into(),
+                                MOD_ALE_COMMIT.into(),
+                            ],
+                            cwd: None,
+                            // git_probe's PROBE_TIMEOUT is for reads that
+                            // already have their answer locally; a fetch
+                            // reaches the network for one commit, so it gets
+                            // the crate's git network bound instead (the
+                            // GIT_NET_TIMEOUT convention in modmgr.rs).
+                            timeout: Some(crate::modmgr::GIT_NET_TIMEOUT),
+                        };
+                        let (f, _) = self.run_collect(&fetch);
+                        if f.is_ok() {
+                            co = self.checkout_ale_pin(&ale);
+                        }
+                    }
+                    if !co {
                         return Err(Fail::new(
                             CODE_ALE_PIN_MISMATCH,
                             format!("mod-ale is checked out at {head}, not the pinned commit, and re-pinning failed."),
-                            "The add-on is tested against exactly that commit. Fetch it (git -C modules/mod-ale fetch) or remove modules/mod-ale and run this again.",
+                            "The add-on is tested against exactly that commit. A Modules-page install clones it shallowly, so the pin can simply be missing locally -- the automatic fetch of that commit just failed too. Check the network, or remove modules/mod-ale and run this again.",
                         ));
                     }
                 }
@@ -2607,6 +2645,11 @@ mod tests {
         code: i32,
         out: Vec<String>,
         unanswerable: bool,
+        /// Consumed on its first matching call, then gets out of the way so
+        /// scanning falls through to the next reply sharing this key (see
+        /// `reply_once`).
+        once: bool,
+        used: Cell<bool>,
     }
 
     /// Records every call (run and run_stdin) and answers from a scripted
@@ -2672,10 +2715,41 @@ mod tests {
                 code,
                 out: out.iter().map(|s| s.to_string()).collect(),
                 unanswerable: false,
+                once: false,
+                used: Cell::new(false),
             })
         }
         fn unanswerable(self, key: &str) -> Self {
-            self.set(Reply { key: key.to_string(), code: -1, out: Vec::new(), unanswerable: true })
+            self.set(Reply {
+                key: key.to_string(),
+                code: -1,
+                out: Vec::new(),
+                unanswerable: true,
+                once: false,
+                used: Cell::new(false),
+            })
+        }
+        /// Answers a matching call ONCE, then gets out of the way so the
+        /// NEXT reply sharing this key (e.g. `happy()`'s permanent success
+        /// entry) answers every later call. Deliberately NOT built on `set`'s
+        /// replace-in-place semantics: a once-reply must coexist with the
+        /// permanent entry for the same key, not overwrite it, so it is
+        /// inserted at the FRONT of the scan order instead (`answer` always
+        /// finds an unconsumed once-reply before anything registered via
+        /// `reply`/`unanswerable`, and skips it once `used`).
+        fn reply_once(self, key: &str, code: i32, out: &[&str]) -> Self {
+            self.replies.borrow_mut().insert(
+                0,
+                Reply {
+                    key: key.to_string(),
+                    code,
+                    out: out.iter().map(|s| s.to_string()).collect(),
+                    unanswerable: false,
+                    once: true,
+                    used: Cell::new(false),
+                },
+            );
+            self
         }
         fn backup(mut self, b: Result<&str, &str>) -> Self {
             self.backup = b.map(str::to_string).map_err(str::to_string);
@@ -2718,11 +2792,13 @@ mod tests {
                 }
             }
             let replies = self.replies.borrow();
-            match replies.iter().find(|r| joined.contains(&r.key)) {
+            match replies.iter().find(|r| joined.contains(&r.key) && !(r.once && r.used.get())) {
                 Some(r) if r.unanswerable => {
+                    r.used.set(true);
                     RunOutcome::CouldNotTell("stub could not answer".into())
                 }
                 Some(r) => {
+                    r.used.set(true);
                     for l in &r.out {
                         on_line(l);
                     }
@@ -3082,6 +3158,70 @@ mod tests {
         assert_eq!(code, 1);
         assert_eq!(error_code(&events), CODE_ALE_PIN_MISMATCH);
         // The bash built HEAD here. Nothing may build.
+        assert!(!io.log().iter().any(|l| l.contains("compose build")));
+    }
+
+    /// mod-ale already on disk from a PRIOR shallow (`--depth 1`) clone --
+    /// the Modules-page install scenario (live 2026-08-09). This routes
+    /// `do_clone_ale` into its "already present" branch instead of the
+    /// fresh-clone branch above. `rev-parse HEAD` has no scripted reply, so
+    /// FakeIo's default (exit 0, empty output) trims to "", which never
+    /// starts_with `MOD_ALE_COMMIT` -- read as a pin mismatch, same as a
+    /// real shallow clone whose HEAD is not the pinned commit.
+    fn ale_shallow_clone(sdir: &Path) {
+        let ale = sdir.join("modules/mod-ale");
+        std::fs::create_dir_all(&ale).unwrap();
+        std::fs::write(ale.join("CMakeLists.txt"), "ale\n").unwrap();
+    }
+
+    #[test]
+    fn a_shallow_ale_clone_is_rescued_by_fetching_the_pin() {
+        let (games, sdir) = fake_server("aleshallow");
+        ale_shallow_clone(&sdir);
+        // First checkout fails (shallow clone lacks the commit): FakeIo::set
+        // replaces same-key entries in place, so a plain `.reply()` here
+        // would fail every checkout forever, including the retry. Script
+        // the failure to fire ONCE; the fetch answers via happy()'s default
+        // (no reply registered -> Exited(0)); the retry then falls through
+        // to happy()'s own permanent "checkout --quiet" success entry.
+        let io = FakeIo::happy(&sdir).reply_once("checkout --quiet", 1, &["error: pathspec"]);
+        let (code, events) = run(&io, &opts_for(&games));
+        let _ = code;
+        // The install proceeds past clone-ale: it may complete ("done") or
+        // stop at some LATER stage in this bare fixture, but never on the
+        // pin mismatch the fetch was supposed to rescue.
+        let t = terminal(&events);
+        if t["event"] == "error" {
+            assert_ne!(t["error"]["code"].as_str(), Some(CODE_ALE_PIN_MISMATCH), "{events:?}");
+        }
+        assert!(io.log().iter().any(|l| l.contains("fetch origin")), "{:#?}", io.log());
+        // The fetch reaches the network for one commit -- it must NOT share
+        // git_probe's 20s local-read bound (PROBE_TIMEOUT, under the 30s
+        // line the brief drew); it gets the crate's git network timeout.
+        let fetch_call = io
+            .calls
+            .borrow()
+            .iter()
+            .map(|(_, c)| c.clone())
+            .find(|c| c.args.join(" ").contains("fetch origin"))
+            .expect("fetch call recorded");
+        assert_eq!(
+            fetch_call.timeout,
+            Some(crate::modmgr::GIT_NET_TIMEOUT),
+            "the pin fetch must not be bounded by the local-read probe timeout"
+        );
+    }
+
+    #[test]
+    fn a_failing_fetch_still_refuses_with_the_pin_mismatch() {
+        let (games, sdir) = fake_server("alefetchfail");
+        ale_shallow_clone(&sdir);
+        let io = FakeIo::happy(&sdir)
+            .reply("checkout --quiet", 1, &["error: pathspec"])
+            .reply("fetch origin", 1, &["fatal: could not read from remote"]);
+        let (code, events) = run(&io, &opts_for(&games));
+        assert_eq!(code, 1);
+        assert_eq!(error_code(&events), CODE_ALE_PIN_MISMATCH);
         assert!(!io.log().iter().any(|l| l.contains("compose build")));
     }
 
