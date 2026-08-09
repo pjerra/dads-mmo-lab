@@ -3061,6 +3061,11 @@ mod tests {
     /// docker's env at a fresh call log, drives
     /// [`module_install_stream_with`], and hands back the emitted events plus
     /// the call log's text.
+    /// Returns `(events, calls, module_dir_existed)`. `module_dir_existed` is
+    /// the real filesystem evidence for "did install_cpp's clone step run":
+    /// `sdir/modules/<key>` existing, checked BEFORE this helper's own
+    /// `remove_dir_all(&d)` cleanup erases it. Only meaningful for a `--key`
+    /// call (the `--url` tests don't need it, so they get `false`).
     fn run_install(
         tag: &str,
         family: &str,
@@ -3068,7 +3073,7 @@ mod tests {
         url: Option<&str>,
         config_json: &str,
         config_exit: Option<i32>,
-    ) -> (Vec<serde_json::Value>, String) {
+    ) -> (Vec<serde_json::Value>, String, bool) {
         let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let d = tmp_dir(&format!("install-{tag}"));
@@ -3105,8 +3110,9 @@ mod tests {
 
         let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
         let events = events.into_inner();
+        let module_dir_existed = key.is_some_and(|k| d.join("modules").join(k).exists());
         let _ = std::fs::remove_dir_all(&d);
-        (events, calls)
+        (events, calls, module_dir_existed)
     }
 
     /// Same shape for [`module_update_stream_with`].
@@ -3145,7 +3151,7 @@ mod tests {
 
     #[test]
     fn cpp_install_refuses_on_a_no_build_server_before_cloning() {
-        let (events, calls) = run_install("no-build", "cpp", Some("mod-solocraft"), None, NO_BUILD_CONFIG_JSON, None);
+        let (events, calls, module_dir_existed) = run_install("no-build", "cpp", Some("mod-solocraft"), None, NO_BUILD_CONFIG_JSON, None);
 
         let last = events.last().expect("a terminal event");
         assert_eq!(last["event"], "error", "{events:#?}");
@@ -3161,10 +3167,15 @@ mod tests {
             "{events:#?}"
         );
 
-        // The call log holds ONLY the config probe -- no git clone, proven
-        // both by the call log and by the modules/<key> dir never appearing.
+        // The call log holds ONLY the config probe -- no git clone.
         assert!(calls.contains("config") && calls.contains("json"), "{calls}");
-        assert!(!calls.contains("clone"), "no git clone expected:\n{calls}");
+        // `calls.contains("clone")` would be vacuous here: `calls` is written
+        // by the FAKE DOCKER stub only, and `install_cpp`'s clone step shells
+        // out to the REAL system `git`, which never touches this log -- so
+        // that assertion would pass whether or not a clone actually ran. The
+        // real evidence of "the clone step never ran" is that it never wrote
+        // its destination: `sdir/modules/mod-solocraft` must not exist.
+        assert!(!module_dir_existed, "modules/mod-solocraft must not appear when the build guard refuses before cloning:\n{calls}");
     }
 
     #[test]
@@ -3173,7 +3184,7 @@ mod tests {
         // RFC 2606-reserved TLD that never resolves, so the clone this
         // proceeds into fails DETERMINISTICALLY (unlike a real registry URL,
         // which this sandbox can sometimes actually reach over the network).
-        let (events, calls) = run_install(
+        let (events, calls, _module_dir_existed) = run_install(
             "unreadable",
             "cpp",
             None,
@@ -3201,7 +3212,7 @@ mod tests {
 
     #[test]
     fn lua_and_sql_installs_skip_the_guard_entirely() {
-        let (events, calls) = run_install("lua-skip", "lua", Some("accountwide"), None, NO_BUILD_CONFIG_JSON, None);
+        let (events, calls, _module_dir_existed) = run_install("lua-skip", "lua", Some("accountwide"), None, NO_BUILD_CONFIG_JSON, None);
 
         let last = events.last().expect("a terminal event");
         assert_eq!(last["event"], "error", "{events:#?}");

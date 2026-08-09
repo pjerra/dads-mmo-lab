@@ -24,10 +24,17 @@
 //! THE ONE NEW SUBPROCESS SHAPE: [`run_streamed_unbounded`]. Every other
 //! docker/git call in this codebase goes through `status::
 //! output_bounded_draining` (bounded, and only readable AFTER the child
-//! exits). `module rebuild`'s `docker compose up -d --build` is different on
-//! purpose: it can legitimately run 30-90 minutes (a first build compiles
-//! the whole AzerothCore core), so a wall-clock kill would abort real
-//! progress, and the UI wants to see build output LIVE, not just at the end.
+//! exits). `module rebuild` is different on purpose: since 2026-08-09 it
+//! builds through the explicit overlay set (`docker compose -f
+//! docker-compose.yml -f docker-compose.override.yml -f
+//! docker-compose.build.yml build ac-worldserver`, streamed here with `pct`
+//! progress from ninja's step counter) and only then runs a plain `docker
+//! compose up -d` -- never a bare `up -d --build`, which on a composegen
+//! server carries no `-f` for the build overlay and would silently compile
+//! nothing. The build step can legitimately run 30-90 minutes (a first
+//! build compiles the whole AzerothCore core), so a wall-clock kill would
+//! abort real progress, and the UI wants to see build output LIVE, not just
+//! at the end.
 //! [`run_streamed_unbounded`] drains stdout/stderr on background threads
 //! (same anti-deadlock discipline as `output_bounded_draining` — see that
 //! function's doc comment for the live repro this avoids), forwards each

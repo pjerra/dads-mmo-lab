@@ -192,12 +192,12 @@ prints them.
 | `config write` | `<NAME>` — body read from **stdin**; `.env` and `docker-compose.override.yml` are rejected (library allowlist) | envelope | Overwrite one editable file (bash: `config raw-write`) |
 | `tuning list` | — | envelope | Every tuning knob with its live value + installed state |
 | `tuning set` | `<KEY> <VALUE>`, e.g. `sitmeansrest.duration` | envelope | Change one tuning knob (conf-backed or lua-backed) |
-| `module list` | — | envelope | Every module with its live install/deploy/rebuild state |
+| `module list` | — | envelope | Every module with its live install/deploy/rebuild state; `.data` also carries `can_build` (2026-08-09) — see the build-config guard note below |
 | `module catalog` | — | envelope | The static catalog only — no state read, no files touched |
-| `module install` | `--family <cpp\|lua\|sql>` (required); `[--key <KEY> \| --url <URL>]` (mutually exclusive, enforced in-library); `[--variant <V>]`; `[--backup \| --no-backup]` (see BackupChoice note) | stream | Install (or pull) one module |
+| `module install` | `--family <cpp\|lua\|sql>` (required); `[--key <KEY> \| --url <URL>]` (mutually exclusive, enforced in-library); `[--variant <V>]`; `[--backup \| --no-backup]` (see BackupChoice note) | stream | Install (or pull) one module; a cpp install refuses `MODULE_NO_BUILD_CONFIG` before cloning on a server with no build overlay — see below |
 | `module remove` | `--family <F> --key <KEY>` (both required); `[--backup \| --no-backup]` | stream | Remove one module |
-| `module update` | `--key <KEY>` (required) | stream | `git pull` one installed C++ module |
-| `module rebuild` | `[--backup \| --no-backup]`; neither → library `BAD_ARG` "Pick --backup or --no-backup" | stream | Recompile the server with pending module changes (30–90 min cold) |
+| `module update` | `--key <KEY>` (required) | stream | `git pull` one installed C++ module; a cpp-shaped key refuses `MODULE_NO_BUILD_CONFIG` before pulling on a server with no build overlay — see below |
+| `module rebuild` | `[--backup \| --no-backup]`; neither → library `BAD_ARG` "Pick --backup or --no-backup" | stream | Recompile the server with pending module changes (30–90 min cold): builds through the explicit overlay (`compose -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.build.yml build ac-worldserver`, `pct` from ninja's step counter), then a plain `compose up -d`; refuses `MODULE_NO_BUILD_CONFIG` before the safety backup on a server with no build overlay — see below |
 | `module repair` | `--key <KEY>` (valid cpp key) `--db <world\|characters\|auth>` `--mode <mark\|clear>` (all checked in run.rs — load-bearing, the library panics otherwise) `[--files <FILES>]` (space-separated .sql names; omitted = discover) | envelope | Mark/clear a module's rows in a database's updates tracking table |
 | `players-online` | — | envelope | Real (non-bot) characters currently online |
 | `accounts` | — | envelope | Every real account + its characters |
@@ -307,6 +307,27 @@ wording. Details a frontend should know:
   A frontend that unconditionally passes a backup flag therefore breaks on cpp installs/removes,
   lua removes, and no-SQL lua installs; one that never passes it breaks on sql installs/removes,
   SQL-shipping lua installs, `rebuild` and `self-update`. Decide per operation.
+- **The build-config guard, `MODULE_NO_BUILD_CONFIG` (2026-08-09).** `module list`'s `.data`
+  carries `can_build`: whether this server has a build overlay (`docker-compose.build.yml`) for
+  `ac-worldserver` at all. It is a tri-state probe (`docker compose -f <base+override+build>
+  config`, parsed for whether `ac-worldserver`'s definition actually came from the build overlay)
+  collapsed to a bool for the wire: `true` when the probe answered yes **or** could not answer at
+  all (docker down, unparseable config — a probe that cannot tell is not evidence the server can't
+  build, so it fails OPEN), `false` only on a definite no. A migrated, image-only server is the one
+  case that reports `false`. `module install --family cpp`, a cpp-shaped `module update` (a
+  registered catalog key, or a custom key with an actual `.git` clone under `modules/`), and
+  `module rebuild` all run the same guard and refuse with code `MODULE_NO_BUILD_CONFIG` (message
+  "This server runs from prebuilt images -- a C++ module can never be compiled into it, so
+  installing it would do nothing." / rebuild's wording names the missing build configuration
+  directly; hint points at lua/SQL modules still working, or at a native/WSL install for rebuild)
+  when the probe says `false` — lua/sql are unaffected, and a probe that could not answer degrades
+  to an in-stream `warn` line and proceeds rather than refusing. `module install` checks this
+  BEFORE cloning; `module rebuild` checks it BEFORE the optional safety backup. **On `module
+  update` this guard OUTRANKS the ordinary not-installed check**: a cpp key that is registered in
+  the catalog but was never actually installed now answers `MODULE_NO_BUILD_CONFIG` on an
+  image-only server, not `NOT_FOUND` — installing it would have been refused for the identical
+  reason, so `NOT_FOUND` would have been the misleading answer. Mirrored bash: `_module_can_build`
+  in `cli/src/90-main.sh`, same tri-state, same fail-open default.
 - `stop`: `--stop-engine`/`--no-stop-engine` conflict; neither = the library default, which is
   engine-stop **ON**.
 - Game-id rule for `start`/`stop`/`restart`/`install`: `[A-Za-z0-9._-]+`, else code `BAD_ID`,

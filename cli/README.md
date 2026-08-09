@@ -115,7 +115,11 @@ docker call, never a guessed `acore_*` default; the same code the native
 backend emits), `CHAR_ONLINE`
 (`teleport-coords` refused to write an online character's position —
 "Character must be logged out."), `EXISTS` (`preset-import` refused to
-overwrite an existing preset without `--force`), and the five
+overwrite an existing preset without `--force`), `MODULE_NO_BUILD_CONFIG`
+(`module install --family cpp`, a cpp-shaped `module update`, and `module
+rebuild` all refuse this way — before cloning/pulling/backing up — on a
+server with no build overlay for `ac-worldserver`, e.g. a migrated
+image-only install; see `module list` below), and the five
 `docker-restart` codes `NOT_SUPPORTED` / `NO_SUDO` / `RESTART_FAILED` /
 `RESTART_TIMEOUT` / `DOCKER_STILL_DOWN` (see `docker-restart` below). `NOT_FOUND` and
 `UNKNOWN_COMMAND` are reused from the base list.
@@ -373,7 +377,20 @@ silently ignored (treated as if omitted), rather than rejected.
   (module-update round) `head`/`head_date` — the installed clone's last
   commit (short sha + `YYYY-MM-DD`), both `null` when not installed / no
   `.git`; a local git read, offline (`module update-check` below owns
-  fetching).
+  fetching). `module list`'s top-level envelope also carries `can_build`
+  (2026-08-09): whether this server has a build overlay
+  (`docker-compose.build.yml`) for `ac-worldserver` at all — a tri-state
+  `docker compose config` probe (`_module_can_build`) that fails OPEN to
+  `true` when docker can't answer, and reports `false` only on a definite
+  no (a migrated, image-only server is the one case that does). `false`
+  is what makes `module install --family cpp`, a cpp-shaped `module
+  update`, and `module rebuild` refuse `MODULE_NO_BUILD_CONFIG` instead of
+  compiling nothing silently; `module rebuild` itself now builds through
+  the explicit overlay set (base + override + `docker-compose.build.yml`,
+  `build ac-worldserver`, `pct` progress from ninja's step counter) and
+  only then runs a plain `docker compose up -d` — never a bare `up -d
+  --build`, which on a composegen server carries no `-f` for the build
+  overlay.
 
 - `dml wow module update-check --json` → `{"repos":[{"label","url","branch",
   "head","dirty","behind"}]}` — the Modules page's "Check for updates"
