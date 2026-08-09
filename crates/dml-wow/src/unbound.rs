@@ -825,21 +825,10 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Which `-f` files the BUILD needs, from disk evidence. Composegen keeps
-    /// build: sections in [`composegen::BUILD_FILE`]; a bash-era server keeps
-    /// them in the base compose and needs no flags.
+    /// Which `-f` files the BUILD needs, from disk evidence — see
+    /// [`crate::buildcap::build_files`], extracted from this method.
     fn resolve_build_files(&mut self) {
-        let sdir = self.sdir().to_path_buf();
-        let mut files: Vec<String> = Vec::new();
-        if sdir.join(composegen::BUILD_FILE).is_file() {
-            for f in [composegen::BASE_FILE, composegen::OVERRIDE_FILE, composegen::BUILD_FILE] {
-                if sdir.join(f).is_file() {
-                    files.push("-f".into());
-                    files.push(f.into());
-                }
-            }
-        }
-        self.build_files = files;
+        self.build_files = crate::buildcap::build_files(&self.sdir().to_path_buf());
     }
 
     fn persist(&mut self) {
@@ -1084,13 +1073,8 @@ impl<'a> Engine<'a> {
         cfg_args.extend(["config".into(), "--format".into(), "json".into()]);
         let (outcome, out) = self.run_collect(&self.docker_probe(cfg_args, Some(sdir.clone())));
         if outcome.is_ok() {
-            match serde_json::from_str::<serde_json::Value>(&out) {
-                Ok(cfg) => {
-                    let has_build = cfg
-                        .get("services")
-                        .and_then(|s| s.get("ac-worldserver"))
-                        .map(|w| w.get("build").is_some())
-                        .unwrap_or(false);
+            match crate::buildcap::worldserver_has_build(&out) {
+                Some(has_build) => {
                     if !has_build {
                         return Err(Fail::new(
                             CODE_NO_BUILD_CONFIG,
@@ -1099,7 +1083,7 @@ impl<'a> Engine<'a> {
                         ));
                     }
                 }
-                Err(_) => self.line(
+                None => self.line(
                     "warn",
                     "could not parse the compose configuration -- proceeding without the build-config check.",
                 ),
