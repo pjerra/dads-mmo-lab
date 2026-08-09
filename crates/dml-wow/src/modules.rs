@@ -340,7 +340,7 @@ impl ModuleReader {
         let rebuild_pending: Vec<Value> =
             self.pending.iter().map(|s| Value::String(s.clone())).collect();
         let ale_ready = self.cpp_installed("mod-ale");
-        let can_build = self.title_dir.join("docker-compose.build.yml").is_file();
+        let can_build = self.title_dir.join(crate::composegen::BUILD_FILE).is_file();
 
         json!({
             "families": { "cpp": cpp_out, "lua": lua_out, "sql": sql_out },
