@@ -307,27 +307,37 @@ wording. Details a frontend should know:
   A frontend that unconditionally passes a backup flag therefore breaks on cpp installs/removes,
   lua removes, and no-SQL lua installs; one that never passes it breaks on sql installs/removes,
   SQL-shipping lua installs, `rebuild` and `self-update`. Decide per operation.
-- **The build-config guard, `MODULE_NO_BUILD_CONFIG` (2026-08-09).** `module list`'s `.data`
-  carries `can_build`: whether this server has a build overlay (`docker-compose.build.yml`) for
-  `ac-worldserver` at all. It is a tri-state probe (`docker compose -f <base+override+build>
-  config`, parsed for whether `ac-worldserver`'s definition actually came from the build overlay)
-  collapsed to a bool for the wire: `true` when the probe answered yes **or** could not answer at
-  all (docker down, unparseable config — a probe that cannot tell is not evidence the server can't
-  build, so it fails OPEN), `false` only on a definite no. A migrated, image-only server is the one
-  case that reports `false`. `module install --family cpp`, a cpp-shaped `module update` (a
-  registered catalog key, or a custom key with an actual `.git` clone under `modules/`), and
-  `module rebuild` all run the same guard and refuse with code `MODULE_NO_BUILD_CONFIG` (message
-  "This server runs from prebuilt images -- a C++ module can never be compiled into it, so
-  installing it would do nothing." / rebuild's wording names the missing build configuration
-  directly; hint points at lua/SQL modules still working, or at a native/WSL install for rebuild)
-  when the probe says `false` — lua/sql are unaffected, and a probe that could not answer degrades
-  to an in-stream `warn` line and proceeds rather than refusing. `module install` checks this
-  BEFORE cloning; `module rebuild` checks it BEFORE the optional safety backup. **On `module
-  update` this guard OUTRANKS the ordinary not-installed check**: a cpp key that is registered in
-  the catalog but was never actually installed now answers `MODULE_NO_BUILD_CONFIG` on an
-  image-only server, not `NOT_FOUND` — installing it would have been refused for the identical
-  reason, so `NOT_FOUND` would have been the misleading answer. Mirrored bash: `_module_can_build`
-  in `cli/src/90-main.sh`, same tri-state, same fail-open default.
+- **The build-config guard, `MODULE_NO_BUILD_CONFIG` (2026-08-09).** `module install --family
+  cpp`, a cpp-shaped `module update` (a registered catalog key, or a custom key with an actual
+  `.git` clone under `modules/`), and `module rebuild` all run a guard before doing anything
+  destructive (cloning, pulling, or the optional safety backup): a **tri-state** probe (`docker
+  compose -f <base+override+build> config`, parsed for whether `ac-worldserver`'s definition
+  actually came from the build overlay) — `yes` proceeds, `no` refuses, and an unreadable/absent
+  answer (docker down, unparseable config) is **never** a refusal: it degrades to an in-stream
+  `warn` line and proceeds, because a probe that cannot tell is not evidence the server can't
+  build. On `no` all three refuse with code `MODULE_NO_BUILD_CONFIG` (message "This server runs
+  from prebuilt images -- a C++ module can never be compiled into it, so installing it would do
+  nothing." / rebuild's wording names the missing build configuration directly; hint points at
+  lua/SQL modules still working, or at a native/WSL install for rebuild). A migrated, image-only
+  server is the one case that answers `no`. **On `module update` this guard OUTRANKS the ordinary
+  not-installed check**: a cpp key that is registered in the catalog but was never actually
+  installed now answers `MODULE_NO_BUILD_CONFIG` on an image-only server, not `NOT_FOUND` —
+  installing it would have been refused for the identical reason, so `NOT_FOUND` would have been
+  the misleading answer. Mirrored bash: `_module_can_build` in `cli/src/90-main.sh`, same
+  tri-state probe, same fail-open default, gating the same three arms.
+
+  `module list`'s `.data` separately carries `can_build`, and the two backends compute it
+  DIFFERENTLY — this is a read-only summary field, not the guard itself, and the two
+  implementations were never required to share a mechanism. **Native** reads plain disk evidence:
+  `docker-compose.build.yml` present at the title dir (`modules.rs:343`) → `true`, absent →
+  `false`. No docker call, no tri-state, no fail-open case — composegen-installed servers always
+  have the file, migrated image-only servers never do, so the file's presence already answers the
+  question `module list` (a read, not a mutation) is allowed to ask cheaply. **bash** instead
+  reuses the same `_module_can_build` tri-state probe the guard uses, collapsed to a bool: `true`
+  for `yes` **or** an unreadable answer (fails OPEN, same rule as the guard), `false` only for a
+  definite `no`. A frontend reading `can_build` therefore sees a plain existence check from one
+  backend and a fail-open docker probe from the other; both answer `false` only on a genuinely
+  unbuildable (migrated, image-only) server, which is the only case either was built to catch.
 - `stop`: `--stop-engine`/`--no-stop-engine` conflict; neither = the library default, which is
   engine-stop **ON**.
 - Game-id rule for `start`/`stop`/`restart`/`install`: `[A-Za-z0-9._-]+`, else code `BAD_ID`,
