@@ -193,11 +193,24 @@ _rebuild_pending_has_mem() { [[ -n "${_MOD_PENDING_SET[$1]:-}" ]]; }
 
 # Build-capability probe (spec 2026-08-09). Asks `docker compose config`
 # (client-side: works with the engine down) whether ac-worldserver can build.
-# Service-scoped awk over the CANONICALIZED yaml -- never a raw grep (the
-# _stack_is_ac lesson). Prints yes|no|unknown; unknown must never refuse.
+# Mirrors Rust's buildcap::build_files: a composegen-shaped server keeps
+# `build:` in docker-compose.build.yml, which compose NEVER auto-loads, so
+# the probe must pass the SAME explicit -f set (base, override, build --
+# each only if present, that order) the rebuild's own build step uses, or
+# the guard and the build step could disagree. A WSL/bash-era server has no
+# build.yml at all -- build: lives in the base compose there and needs no
+# flags, same as before this fix. Service-scoped awk over the CANONICALIZED
+# yaml -- never a raw grep (the _stack_is_ac lesson). Prints yes|no|unknown;
+# unknown must never refuse.
 _module_can_build() {
-    local cfg
-    cfg="$(cd "$1" 2>/dev/null && docker compose config 2>/dev/null)" || { echo unknown; return 0; }
+    local sdir="$1" f cfg
+    local -a fset=()
+    if [[ -f "$sdir/docker-compose.build.yml" ]]; then
+        for f in docker-compose.yml docker-compose.override.yml docker-compose.build.yml; do
+            [[ -f "$sdir/$f" ]] && fset+=(-f "$f")
+        done
+    fi
+    cfg="$(cd "$sdir" 2>/dev/null && docker compose ${fset[@]+"${fset[@]}"} config 2>/dev/null)" || { echo unknown; return 0; }
     [[ -z "$cfg" ]] && { echo unknown; return 0; }
     if printf '%s\n' "$cfg" | awk '
         /^services:/ { insvc=1; next }

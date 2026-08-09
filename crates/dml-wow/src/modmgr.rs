@@ -2102,6 +2102,24 @@ pub fn module_install_stream_with(
     let git_program = std::ffi::OsString::from("git");
     let result = match family.as_str() {
         "cpp" => {
+            // BAD_ARG (backup flags on cpp) OUTRANKS the build-config guard
+            // below -- bash mirrors this ordering (90-main.sh's cpp) case
+            // checks $bkchoice before _module_can_build): a caller who typed
+            // `--backup` on a cpp install made an argument-shape mistake
+            // that is true regardless of what kind of server this is, and a
+            // no-build server must not mask that mistake behind
+            // MODULE_NO_BUILD_CONFIG. Reuses install_cpp's own BAD_ARG
+            // strings verbatim; install_cpp's internal check stays in place
+            // for any caller that reaches it directly.
+            if backup.is_some() {
+                emit(modmgr::section_end(modmgr::SECTION_INSTALL, "error"));
+                emit(modmgr::error_event(
+                    "BAD_ARG",
+                    "cpp installs don't take backup flags",
+                    "Module SQL lands at rebuild time -- the backup choice belongs to: dml wow module rebuild",
+                ));
+                return;
+            }
             // Build-config guard (spec 2026-08-09): refuse BEFORE cloning --
             // a server that can never compile a C++ module gains nothing
             // from a clone that just sits in `modules/` forever. Lua/sql
@@ -2858,25 +2876,28 @@ mod tests {
     // Drives the REAL orchestration against a fake `docker`, per the
     // `LifecycleEnv`/`write_lifecycle_fake_docker` pattern in `lifecycle.rs`
     // (search that module for the harness this one copies). The fake docker
-    // reads FAKE_CONFIG_JSON/FAKE_CONFIG_EXIT/FAKE_BUILD_EXIT/FAKE_CALL_LOG
-    // from its own process environment at RUN time (not baked into the script
-    // text), so `run_rebuild` sets them on the current (test) process before
-    // spawning -- which is why every test below takes `REBUILD_ENV_LOCK`
-    // first: `std::process::Command` inherits the whole parent env, so an
-    // unguarded `set_var` here could poison a concurrently-running instance of
-    // this same helper (same hazard `iteminfo.rs`'s `ENV_TEST_LOCK` guards).
+    // reads FAKE_CONFIG_JSON/FAKE_CONFIG_EXIT/FAKE_BUILD_EXIT/FAKE_UP_EXIT/
+    // FAKE_CALL_LOG from its own process environment at RUN time (not baked
+    // into the script text), so `run_rebuild` sets them on the current (test)
+    // process before spawning -- which is why every test below takes
+    // `REBUILD_ENV_LOCK` first: `std::process::Command` inherits the whole
+    // parent env, so an unguarded `set_var` here could poison a
+    // concurrently-running instance of this same helper (same hazard
+    // `iteminfo.rs`'s `ENV_TEST_LOCK` guards).
 
     static REBUILD_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// A stand-in `docker` for just the rebuild flow's THREE distinguishable
-    /// calls (config probe / build / everything else). Per-platform per
-    /// CLAUDE.md's test-portability rule -- never a hardcoded interpreter.
+    /// A stand-in `docker` for just the rebuild flow's FOUR distinguishable
+    /// calls (config probe / build / up / everything else -- `FAKE_UP_EXIT`
+    /// added for F2, the build-succeeds-but-up-fails coverage). Per-platform
+    /// per CLAUDE.md's test-portability rule -- never a hardcoded interpreter.
     #[cfg(windows)]
     fn write_fake_rebuild_docker(dir: &Path) -> PathBuf {
         let p = dir.join("fake-docker-rebuild.cmd");
         let script = "@echo off\r\n\
             if not defined FAKE_CONFIG_EXIT set FAKE_CONFIG_EXIT=0\r\n\
             if not defined FAKE_BUILD_EXIT set FAKE_BUILD_EXIT=0\r\n\
+            if not defined FAKE_UP_EXIT set FAKE_UP_EXIT=0\r\n\
             >>\"%FAKE_CALL_LOG%\" echo %*\r\n\
             echo %*| findstr /C:\"config --format json\" >nul\r\n\
             if %ERRORLEVEL%==0 (\r\n\
@@ -2888,6 +2909,10 @@ mod tests {
             echo #26 1.0 [10/100] Building CXX object modules/x.cpp.o\r\n\
             echo #26 2.0 [100/100] Linking CXX executable worldserver\r\n\
             exit /b %FAKE_BUILD_EXIT%\r\n\
+            )\r\n\
+            echo %*| findstr /C:\"up -d\" >nul\r\n\
+            if %ERRORLEVEL%==0 (\r\n\
+            exit /b %FAKE_UP_EXIT%\r\n\
             )\r\n\
             exit /b 0\r\n";
         std::fs::write(&p, script).unwrap();
@@ -2910,6 +2935,9 @@ mod tests {
             \x20   echo '#26 2.0 [100/100] Linking CXX executable worldserver'\n\
             \x20   exit \"${FAKE_BUILD_EXIT:-0}\"\n\
             \x20   ;;\n\
+            \x20 *\" up -d \"*)\n\
+            \x20   exit \"${FAKE_UP_EXIT:-0}\"\n\
+            \x20   ;;\n\
             esac\n\
             exit 0\n";
         std::fs::write(&p, script).unwrap();
@@ -2922,21 +2950,27 @@ mod tests {
     }
 
     /// Writes an `sdir` with both compose files present (so `build_files`
-    /// resolves the `-f` set), points the fake docker's env at a fresh call
-    /// log, drives [`module_rebuild_stream_with`], and hands back the emitted
-    /// events plus the call log's text (the read-back-in-order oracle).
+    /// resolves the `-f` set) AND a pre-seeded `.dml-rebuild-pending` marker
+    /// (so a failed run's survival/clearing can be checked -- F2), points the
+    /// fake docker's env at a fresh call log, drives
+    /// [`module_rebuild_stream_with`], and hands back the emitted events, the
+    /// call log's text (the read-back-in-order oracle), and whether the
+    /// pending marker still exists afterward (checked BEFORE this helper's
+    /// own `remove_dir_all(&d)` cleanup erases it).
     fn run_rebuild(
         tag: &str,
         backup: Option<bool>,
         config_json: &str,
         config_exit: Option<i32>,
         build_exit: Option<i32>,
-    ) -> (Vec<serde_json::Value>, String) {
+        up_exit: Option<i32>,
+    ) -> (Vec<serde_json::Value>, String, bool) {
         let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let d = tmp_dir(&format!("rebuild-{tag}"));
         std::fs::write(d.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::write(d.join("docker-compose.build.yml"), "services: {}\n").unwrap();
+        std::fs::write(d.join(".dml-rebuild-pending"), "mod-aoe-loot\n").unwrap();
         let call_log = d.join("calls.log");
         std::fs::write(&call_log, "").unwrap();
         let docker = write_fake_rebuild_docker(&d);
@@ -2951,6 +2985,10 @@ mod tests {
             Some(c) => std::env::set_var("FAKE_BUILD_EXIT", c.to_string()),
             None => std::env::remove_var("FAKE_BUILD_EXIT"),
         }
+        match up_exit {
+            Some(c) => std::env::set_var("FAKE_UP_EXIT", c.to_string()),
+            None => std::env::remove_var("FAKE_UP_EXIT"),
+        }
 
         let events = std::cell::RefCell::new(Vec::new());
         module_rebuild_stream_with(docker.into_os_string(), d.clone(), backup, rebuild_test_db_cfg(), |v| {
@@ -2961,11 +2999,13 @@ mod tests {
         std::env::remove_var("FAKE_CONFIG_JSON");
         std::env::remove_var("FAKE_CONFIG_EXIT");
         std::env::remove_var("FAKE_BUILD_EXIT");
+        std::env::remove_var("FAKE_UP_EXIT");
 
         let calls = std::fs::read_to_string(&call_log).unwrap_or_default();
         let events = events.into_inner();
+        let pending_survived = d.join(".dml-rebuild-pending").is_file();
         let _ = std::fs::remove_dir_all(&d);
-        (events, calls)
+        (events, calls, pending_survived)
     }
 
     #[test]
@@ -2973,10 +3013,11 @@ mod tests {
         // backup: Some(true) is the point of this test -- it proves the guard
         // refuses BEFORE the backup would have run, not merely that a
         // --no-backup run never reaches a backup call.
-        let (events, calls) = run_rebuild(
+        let (events, calls, _pending) = run_rebuild(
             "no-build",
             Some(true),
             r#"{"services":{"ac-worldserver":{"image":"x"}}}"#,
+            None,
             None,
             None,
         );
@@ -3001,10 +3042,11 @@ mod tests {
 
     #[test]
     fn rebuild_builds_through_the_overlay_then_ups_without_it() {
-        let (events, calls) = run_rebuild(
+        let (events, calls, pending_survived) = run_rebuild(
             "overlay-build",
             Some(false), // --no-backup
             r#"{"services":{"ac-worldserver":{"build":{"context":"."}}}}"#,
+            None,
             None,
             None,
         );
@@ -3034,11 +3076,12 @@ mod tests {
         let last = events.last().expect("a terminal event");
         assert_eq!(last["event"], "done", "{events:#?}");
         assert_eq!(last["data"]["rebuilt"], true, "{events:#?}");
+        assert!(!pending_survived, "a successful rebuild must clear the pending marker:\n{events:#?}");
     }
 
     #[test]
     fn rebuild_proceeds_with_a_warn_when_compose_cannot_answer() {
-        let (events, calls) = run_rebuild("config-unreadable", Some(false), "not read on a nonzero exit", Some(1), None);
+        let (events, calls, _pending) = run_rebuild("config-unreadable", Some(false), "not read on a nonzero exit", Some(1), None, None);
 
         assert!(
             events.iter().any(|e| e["event"] == "line"
@@ -3047,6 +3090,40 @@ mod tests {
             "expected a warn about the unreadable compose config:\n{events:#?}"
         );
         assert!(calls.contains("build ac-worldserver"), "the build call must still happen after the warn:\n{calls}");
+    }
+
+    #[test]
+    fn rebuild_build_succeeds_but_up_fails_keeps_pending_and_refuses() {
+        // F2 (2026-08-09 final-fix wave): the build step succeeding is not
+        // the whole story -- `compose up -d` can still fail (a bad image, a
+        // port conflict, ...) after a real 30-90 minute compile. That must
+        // surface as the existing BUILD_FAILED shape (not a `done`), and the
+        // rebuild-pending marker -- the user's only signal that the module
+        // still needs compiling in -- must survive so a retry is possible.
+        let (events, calls, pending_survived) = run_rebuild(
+            "up-fails",
+            Some(false), // --no-backup
+            r#"{"services":{"ac-worldserver":{"build":{"context":"."}}}}"#,
+            None,
+            None,
+            Some(1),
+        );
+
+        assert!(calls.contains("build ac-worldserver"), "the build must have run first:\n{calls}");
+        let up_line = calls.lines().find(|l| l.contains("up -d")).unwrap_or_else(|| panic!("no up call among:\n{calls}"));
+        assert!(!up_line.contains("--build"), "{up_line}");
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "BUILD_FAILED", "{events:#?}");
+        assert_eq!(last["error"]["message"], "the stack did not come back up after the build", "{events:#?}");
+        assert!(
+            events.iter().any(|e| e["event"] == "section_end" && e["status"] == "error"),
+            "{events:#?}"
+        );
+        assert!(!events.iter().any(|e| e["event"] == "done"), "no done event expected on a failed up:\n{events:#?}");
+
+        assert!(pending_survived, "the rebuild-pending marker must survive a failed `up`");
     }
 
     // -- module_install_stream_with / module_update_stream_with: cpp
@@ -3066,6 +3143,10 @@ mod tests {
     /// `sdir/modules/<key>` existing, checked BEFORE this helper's own
     /// `remove_dir_all(&d)` cleanup erases it. Only meaningful for a `--key`
     /// call (the `--url` tests don't need it, so they get `false`).
+    /// `backup` defaults to `None` via [`run_install`]'s thin wrapper below;
+    /// [`run_install_with_backup`] is the one that actually threads a
+    /// caller-supplied choice through (M3: the cpp BAD_ARG-vs-guard
+    /// precedence test needs `Some(true)`).
     fn run_install(
         tag: &str,
         family: &str,
@@ -3073,6 +3154,19 @@ mod tests {
         url: Option<&str>,
         config_json: &str,
         config_exit: Option<i32>,
+    ) -> (Vec<serde_json::Value>, String, bool) {
+        run_install_with_backup(tag, family, key, url, config_json, config_exit, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_install_with_backup(
+        tag: &str,
+        family: &str,
+        key: Option<&str>,
+        url: Option<&str>,
+        config_json: &str,
+        config_exit: Option<i32>,
+        backup: Option<bool>,
     ) -> (Vec<serde_json::Value>, String, bool) {
         let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -3098,7 +3192,7 @@ mod tests {
             family.to_string(),
             key.map(str::to_string),
             url.map(str::to_string),
-            None,
+            backup,
             None,
             rebuild_test_db_cfg(),
             |v| events.borrow_mut().push(v),
@@ -3148,6 +3242,36 @@ mod tests {
     }
 
     const NO_BUILD_CONFIG_JSON: &str = r#"{"services":{"ac-worldserver":{"image":"dml.local/ac-wotlk-worldserver:migrated"}}}"#;
+
+    #[test]
+    fn cpp_install_backup_flag_is_bad_arg_even_on_a_no_build_server() {
+        // M3 (2026-08-09 final-fix wave): bash's cpp) case checks $bkchoice
+        // BEFORE _module_can_build (90-main.sh:5453-5463) -- an argument-
+        // shape mistake (--backup on a cpp install) must answer BAD_ARG
+        // regardless of server shape, not get masked behind
+        // MODULE_NO_BUILD_CONFIG on an image-only server.
+        let (events, calls, module_dir_existed) =
+            run_install_with_backup("backup-precedence", "cpp", Some("mod-solocraft"), None, NO_BUILD_CONFIG_JSON, None, Some(true));
+
+        let last = events.last().expect("a terminal event");
+        assert_eq!(last["event"], "error", "{events:#?}");
+        assert_eq!(last["error"]["code"], "BAD_ARG", "{events:#?}");
+        assert_ne!(last["error"]["code"], "MODULE_NO_BUILD_CONFIG", "{events:#?}");
+        assert_eq!(last["error"]["message"], "cpp installs don't take backup flags", "{events:#?}");
+        assert_eq!(
+            last["error"]["hint"],
+            "Module SQL lands at rebuild time -- the backup choice belongs to: dml wow module rebuild",
+            "{events:#?}"
+        );
+        assert!(
+            events.iter().any(|e| e["event"] == "section_end" && e["status"] == "error"),
+            "{events:#?}"
+        );
+
+        // The refusal precedes the guard entirely -- no config probe, no clone.
+        assert!(!calls.contains("config"), "no config probe expected before the backup refusal:\n{calls}");
+        assert!(!module_dir_existed, "modules/mod-solocraft must not appear:\n{calls}");
+    }
 
     #[test]
     fn cpp_install_refuses_on_a_no_build_server_before_cloning() {

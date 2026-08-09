@@ -17,9 +17,16 @@
 //! FILE/TOOL-GATED like `config_parity.rs`: runs only when the native files +
 //! `bash` are present (this dev box has them at `C:/Users/perzi/dml-native`);
 //! elsewhere it prints why it skipped and passes, leaving the pure-fn unit tests
-//! in `dml::modules` as always-run coverage. `module list`/`catalog` need no yq
-//! and no docker (pure file + local git), so — unlike config/tuning — yq is not
-//! required here.
+//! in `dml::modules` as always-run coverage. `module list`/`catalog` need no yq,
+//! so — unlike config/tuning — yq is not required here. Docker is NOT
+//! precondition-free any more, though: since 2026-08-09 bash's `module list`
+//! also forks `docker compose config` for the top-level `can_build` field (a
+//! tri-state probe, fail-open to `true` on a down/unreadable engine) --
+//! `ModuleReader` answers that ONE field from plain disk evidence instead
+//! (`docker-compose.build.yml` present or not), so the two backends can
+//! legitimately read `can_build` differently depending on docker's state on
+//! the box this test runs on; every other field stays pure file/git and
+//! keeps the exact deep-equal.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

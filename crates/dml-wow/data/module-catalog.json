@@ -425,5 +425,6 @@
     ]
   },
   "rebuild_pending": [],
-  "ale_ready": false
+  "ale_ready": false,
+  "can_build": true
 }

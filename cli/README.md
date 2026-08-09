@@ -385,12 +385,15 @@ silently ignored (treated as if omitted), rather than rejected.
   no (a migrated, image-only server is the one case that does). `false`
   is what makes `module install --family cpp`, a cpp-shaped `module
   update`, and `module rebuild` refuse `MODULE_NO_BUILD_CONFIG` instead of
-  compiling nothing silently; `module rebuild` itself now builds through
-  the explicit overlay set (base + override + `docker-compose.build.yml`,
-  `build ac-worldserver`, `pct` progress from ninja's step counter) and
-  only then runs a plain `docker compose up -d` — never a bare `up -d
-  --build`, which on a composegen server carries no `-f` for the build
-  overlay.
+  compiling nothing silently. The rebuild's own build STEP differs by
+  surface: bash/WSL keeps a plain `docker compose up -d --build` (WSL-shaped
+  servers carry `build:` in the base compose itself, so no `-f` overlay is
+  ever needed there) and emits no `pct`; the NATIVE (Rust) arm builds
+  through the explicit overlay set instead (base + override +
+  `docker-compose.build.yml`, `build ac-worldserver`, `pct` progress from
+  ninja's step counter) and only then runs a plain `docker compose up -d`
+  — never a bare `up -d --build`, which on a composegen server carries no
+  `-f` for the build overlay.
 
 - `dml wow module update-check --json` → `{"repos":[{"label","url","branch",
   "head","dirty","behind"}]}` — the Modules page's "Check for updates"

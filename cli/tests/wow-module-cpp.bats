@@ -159,3 +159,10 @@ src() {
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.data.can_build == true'
 }
+
+@test "module list emits can_build:false on an image-only server" {
+  export DML_STUB_COMPOSE_CONFIG=nobuild
+  run bash "$DML" wow module list --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.data.can_build == false'
+}

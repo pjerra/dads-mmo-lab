@@ -76,7 +76,8 @@ teardown() { teardown_fixture; }
 @test "module rebuild warns and proceeds when compose config cannot answer" {
   export DML_STUB_COMPOSE_CONFIG=fail
   run bash "$DML" wow module rebuild --no-backup --json
+  [ "$status" -eq 0 ]
   echo "$output" | grep -q 'could not read the compose configuration'
-  run bash -c "echo '$output' | grep -c '\"code\":\"MODULE_NO_BUILD_CONFIG\"'"
-  [ "$output" = "0" ]
+  count=$(printf '%s' "$output" | grep -c '"code":"MODULE_NO_BUILD_CONFIG"' || true)
+  [ "$count" = "0" ]
 }

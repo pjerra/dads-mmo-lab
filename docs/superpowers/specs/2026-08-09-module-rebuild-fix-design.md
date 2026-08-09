@@ -107,6 +107,12 @@ cannot-answer → warn + proceed.
 - bash: emit `true` (WSL installs are source checkouts); the authoritative
   refusal lives in the arms. Field documented in `docs/cli-contract.md` and
   `cli/README.md`.
+  **Implemented deviation:** bash does not emit a hardcoded `true` -- it
+  reuses the same `_module_can_build` tri-state probe the install/update/
+  rebuild guards use, collapsed to a bool (`true` for `yes` *or* an
+  unreadable answer -- fail-open, same rule as the guard; `false` only for a
+  definite `no`), so a migrated-shaped WSL server (were one ever to exist)
+  reports honestly instead of always `true`.
 - Frontend `normalizeCatalog` FAILS OPEN on a missing field (older CLI keeps
   working) — same pattern as `install_supported`.
 
