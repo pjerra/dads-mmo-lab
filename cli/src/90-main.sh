@@ -5371,7 +5371,8 @@ case "$cmd" in
             done < <(_module_registry_sql)
             sqlj+=']'
             aleready=false; _cpp_installed "$sdir" mod-ale && aleready=true
-            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":$(_rebuild_pending_json "$sdir"),\"ale_ready\":$aleready}"
+            canb=true; [[ "$(_module_can_build "$sdir")" == no ]] && canb=false
+            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":$(_rebuild_pending_json "$sdir"),\"ale_ready\":$aleready,\"can_build\":$canb}"
             ;;
           catalog)
             # Cheap, state-free sibling of `module list`: emits the SAME
@@ -5427,7 +5428,7 @@ case "$cmd" in
               first=0
             done < <(_module_registry_sql)
             sqlj+=']'
-            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":[],\"ale_ready\":false}"
+            json_ok "{\"families\":{\"cpp\":$cpp,\"lua\":$lua,\"sql\":$sqlj},\"rebuild_pending\":[],\"ale_ready\":false,\"can_build\":true}"
             ;;
           install)
             [[ "$DML_JSON" == 1 ]] && ndjson_section_start module-install
@@ -5454,6 +5455,13 @@ case "$cmd" in
                   ndjson_section_end module-install error
                   ndjson_error BAD_ARG "cpp installs don't take backup flags" "Module SQL lands at rebuild time -- the backup choice belongs to: dml wow module rebuild"; exit 1
                 fi
+                case "$(_module_can_build "$sdir")" in
+                  no)
+                    ndjson_section_end module-install error
+                    ndjson_error MODULE_NO_BUILD_CONFIG "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing." "Lua and SQL modules still work on this server."; exit 1
+                    ;;
+                  unknown) ndjson_line warn "could not read the compose configuration -- proceeding without the build-config check." ;;
+                esac
                 regrow=""
                 if [[ -n "$murl" ]]; then
                   if [[ -n "$mkey" ]]; then
@@ -5838,6 +5846,13 @@ case "$cmd" in
               ndjson_section_end module-rebuild error
               ndjson_error DOCKER_DOWN "Docker is not running" "Start Docker in the distro first."; exit 1
             fi
+            case "$(_module_can_build "$sdir")" in
+              no)
+                ndjson_section_end module-rebuild error
+                ndjson_error MODULE_NO_BUILD_CONFIG "This server has no build configuration for ac-worldserver -- it runs from prebuilt images, so C++ modules cannot be compiled into it." "A rebuild needs a server built from source (a native install or a WSL install). A migrated image-only server cannot rebuild yet."; exit 1
+                ;;
+              unknown) ndjson_line warn "could not read the compose configuration -- proceeding without the build-config check." ;;
+            esac
             if [[ "$bkchoice" == backup ]]; then
               if ! _module_backup_now; then
                 ndjson_section_end module-rebuild error
@@ -6380,6 +6395,13 @@ case "$cmd" in
               ndjson_section_end module-update error
               ndjson_error GIT_MISSING "$umdir is not a git checkout" "Can't update this module from source."; exit 1
             fi
+            case "$(_module_can_build "$sdir")" in
+              no)
+                ndjson_section_end module-update error
+                ndjson_error MODULE_NO_BUILD_CONFIG "This server runs from prebuilt images -- a C++ module can never be compiled into it, so installing it would do nothing." "Lua and SQL modules still work on this server."; exit 1
+                ;;
+              unknown) ndjson_line warn "could not read the compose configuration -- proceeding without the build-config check." ;;
+            esac
             # Core/module build compat: mod-playerbots tracks the custom
             # AzerothCore fork -- pulling it alone would desync the pair, so
             # this arm hard-refuses the key (`wow update` pulls both together).

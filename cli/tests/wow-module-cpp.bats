@@ -145,3 +145,17 @@ src() {
   [ "$status" -eq 1 ]
   echo "$output" | grep -q 'BAD_ARG'
 }
+
+@test "cpp install refuses an image-only server before cloning" {
+  export DML_STUB_COMPOSE_CONFIG=nobuild
+  run bash "$DML" wow module install --family cpp --key mod-transmog --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"MODULE_NO_BUILD_CONFIG"'
+  [ ! -d "$SDIR/modules/mod-transmog" ]
+}
+
+@test "module list emits can_build" {
+  run bash "$DML" wow module list --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.data.can_build == true'
+}

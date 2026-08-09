@@ -191,6 +191,24 @@ _rebuild_pending_load() {
 }
 _rebuild_pending_has_mem() { [[ -n "${_MOD_PENDING_SET[$1]:-}" ]]; }
 
+# Build-capability probe (spec 2026-08-09). Asks `docker compose config`
+# (client-side: works with the engine down) whether ac-worldserver can build.
+# Service-scoped awk over the CANONICALIZED yaml -- never a raw grep (the
+# _stack_is_ac lesson). Prints yes|no|unknown; unknown must never refuse.
+_module_can_build() {
+    local cfg
+    cfg="$(cd "$1" 2>/dev/null && docker compose config 2>/dev/null)" || { echo unknown; return 0; }
+    [[ -z "$cfg" ]] && { echo unknown; return 0; }
+    if printf '%s\n' "$cfg" | awk '
+        /^services:/ { insvc=1; next }
+        insvc && /^[^ ]/ { insvc=0 }
+        insvc && /^  ac-worldserver:/ { inws=1; next }
+        inws && /^  [^ ]/ { inws=0 }
+        inws && /^    build:/ { found=1; exit }
+        END { exit found?0:1 }
+    '; then echo yes; else echo no; fi
+}
+
 # --- conf names (verbatim table from the manager; custom-login added) ------
 # _module_conf_name_var <key>: NO-FORK form -- sets REPLY. _module_conf_name is
 # a thin echo wrapper kept for existing `$(...)` callers.

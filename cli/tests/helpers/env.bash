@@ -115,6 +115,23 @@ if [[ "${1:-}" == "compose" ]]; then
     echo "stub compose: $rest"
     exit "${DML_STUB_COMPOSE_EXIT:-0}"
   fi
+  # `docker compose config` -- canonicalized YAML. DML_STUB_COMPOSE_CONFIG:
+  #   build   -> ac-worldserver with a build: section (source-built server)
+  #   nobuild -> ac-worldserver without one (image-only server)
+  #   fail    -> compose cannot answer (exit 1, nothing printed)
+  # Default: build (the shape every existing test's server has).
+  if [[ "$2" == "config" || " $* " == *" config "* ]]; then
+    case "${DML_STUB_COMPOSE_CONFIG:-build}" in
+      fail) exit 1 ;;
+      nobuild)
+        printf 'services:\n  ac-worldserver:\n    image: dml.local/x:migrated\n'
+        ;;
+      *)
+        printf 'services:\n  ac-worldserver:\n    build:\n      context: .\n    image: acore/x\n'
+        ;;
+    esac
+    exit 0
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "ps" ]]; then
@@ -422,6 +439,21 @@ if [[ "${1:-}" == "exec" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "compose" ]]; then
+  # `docker compose config` -- same DML_STUB_COMPOSE_CONFIG contract as the
+  # combined docker stub above (use_docker_stub); the module-rebuild suite
+  # runs under THIS stub, so the build-config probe needs to answer here too.
+  if [[ "${2:-}" == "config" || " $* " == *" config "* ]]; then
+    case "${DML_STUB_COMPOSE_CONFIG:-build}" in
+      fail) exit 1 ;;
+      nobuild)
+        printf 'services:\n  ac-worldserver:\n    image: dml.local/x:migrated\n'
+        ;;
+      *)
+        printf 'services:\n  ac-worldserver:\n    build:\n      context: .\n    image: acore/x\n'
+        ;;
+    esac
+    exit 0
+  fi
   shift
   log "compose $*"
   exit "${DML_STUB_COMPOSE_EXIT:-0}"

@@ -62,3 +62,21 @@ teardown() { teardown_fixture; }
   echo "$output" | grep -q 'rebuild.log'
   [ -f "$SDIR/.dml-rebuild-pending" ]
 }
+
+@test "module rebuild refuses an image-only server before the backup" {
+  export DML_STUB_COMPOSE_CONFIG=nobuild
+  run bash "$DML" wow module rebuild --backup --json
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q '"code":"MODULE_NO_BUILD_CONFIG"'
+  # Refusal precedes the backup: no dump narration may appear.
+  run bash -c "echo '$output' | grep -c 'backing up'"
+  [ "$output" = "0" ]
+}
+
+@test "module rebuild warns and proceeds when compose config cannot answer" {
+  export DML_STUB_COMPOSE_CONFIG=fail
+  run bash "$DML" wow module rebuild --no-backup --json
+  echo "$output" | grep -q 'could not read the compose configuration'
+  run bash -c "echo '$output' | grep -c '\"code\":\"MODULE_NO_BUILD_CONFIG\"'"
+  [ "$output" = "0" ]
+}
