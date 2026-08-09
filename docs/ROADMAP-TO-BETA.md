@@ -456,9 +456,20 @@ No amount of engineering closes these. They are the release standard.
   16.4 GB, 1088.1s total** including the kill and resume — folded into
   SMOKE-TESTS §26, where the reason it does not contradict the 6/8 GB floors is
   written down (parallelism is memory-bound, so a bigger VM uses more rather
-  than needing more). ⬜ **Leg 2 outstanding**: the same on a VM that has never
-  seen DML (no Docker, no Git, no repo) — a build that only ever ran on the dev
-  box does not count. ✅ **Real WoW client login PASSED 2026-08-04** — a new
+  than needing more). ✅ **LEG 2 PASSED 2026-08-09**: a Windows 11 VM that had
+  never seen DML — no repo, no Docker, no Git, no distro — installed WoW WotLK
+  Playerbots **from the launcher's Library**, came up, listed its realm, and took
+  a real client into the world from a different PC over Tailscale. The backend
+  chose **native by detection**, which is the fresh-machine path that had only
+  ever been unit-tested (this dev box has `dml-arch`, so it always answers Wsl).
+  **Two honest limits on what leg 2 covered.** The prerequisites arrived partly
+  by hand rather than solely through `Install-DML-Native.ps1`, so the script's
+  own unattended path is NOT what this proves — that still wants its own run.
+  And the launcher was side-loaded from a branch build, so the script's
+  install-the-launcher-from-a-release step is likewise untested. Findings raised
+  on the way are F1–F6 in `VM-ACCEPTANCE-TEST.md`; F2 (Git is an unstated
+  runtime dependency when the launcher is installed without the script) is the
+  one that still needs code. ✅ **Real WoW client login PASSED 2026-08-04** — a new
   character created and entered the world on the RESUMED server. That is the
   part a status probe cannot stand in for: `verdict: online` says the stack
   answers, not that a player can play on it.
