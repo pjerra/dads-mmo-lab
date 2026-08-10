@@ -399,9 +399,7 @@ silently ignored (treated as if omitted), rather than rejected.
   `-f` for the build overlay. After a successful native rebuild, a
   best-effort advisory (read-only SELECTs against each affected database's
   `updates` ledger) warns per module whose shipped SQL the updater has not
-  yet applied: `<key>: <N> SQL file(s) not yet applied by the updater --
-  they land on the next rebuild + restart.`, or one
-  `could not read the update ledger -- skipping the module-SQL check.` warn
+  yet applied: `<key>: <N> SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart.`, or one `could not read the update ledger -- skipping the module-SQL check.` warn
   if the ledger can't be read at all. Advisory only — it never changes the
   rebuild's outcome or the `done` event, and bash has no mirror of it since
   bash's db-import already stays current every rebuild.
