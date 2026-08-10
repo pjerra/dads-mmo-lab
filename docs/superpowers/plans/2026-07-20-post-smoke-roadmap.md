@@ -958,6 +958,28 @@ swapping — with the moving-tag incident rules (2026-08-02) applied. Roughly
 install-native scale. Until built, migrated servers show the disabled
 Rebuild button with the "prebuilt images" hint.
 
+## Round 5.9 — Module SQL never auto-applies for post-install modules (found live on the VM, 2026-08-10)
+
+Diagnosed read-only on the VM, fix NOT built (user: "find out first").
+Module SQL auto-apply runs only in `ac-db-import`, whose image is frozen at
+install time — on the VM it contains core + mod-playerbots only, and the
+ledgers prove it: mod-playerbots' SQL is recorded in all three DBs
+(`Updates.AllowedModules = "all"` works), while NONE of the nine
+later-installed modules' SQL was ever applied. The rebuild arm (old and
+fixed alike) rebuilds only `ac-worldserver`, so db-import never catches up;
+the worldserver's own updater demonstrably does not fill the gap (boots with
+`./modules` mounted, records nothing). Symptom that surfaced it: 19
+mod-city-bots stage-cast mages with race/class pairs missing from
+`playercreateinfo` — the module's half-hand-applied SQL series. Known
+collateral: ah-bot-plus/autobalance/custom-login/junk-to-gold/npc-enchanter/
+quest-loot-party/multibot-bridge have no tables at all; transmog was
+hand-applied; unbound applies its own SQL by design (correct).
+Fix candidates: (a) rebuild also builds the `ac-db-import` target — shares
+build layers, db-import re-runs on every up and applies + ledgers new module
+SQL properly (leading); (b) composegen mounts `./modules` into db-import so
+SQL lands without a rebuild. Either way, add a doctor/rebuild check that
+compares installed modules against ledgered module SQL.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.
