@@ -298,6 +298,7 @@ pub fn accounts_sql(bot_prefix: &str, auth: &str, playerbots: Option<&str>) -> S
          LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM {auth}.account_access GROUP BY id) g ON g.id = a.id \
          LEFT JOIN characters c ON c.account = a.id \
          WHERE NOT {}{registry_arm} AND a.username <> 'AHBOT' \
+         AND a.username <> 'DMLSOAP' AND a.username NOT LIKE 'DMLSOAP\\_%' \
          ORDER BY a.id, c.level DESC;",
         crate::botid::username_is_bot("a.username", bot_prefix)
     )
@@ -1047,6 +1048,12 @@ mod tests {
         let sql = accounts_sql("rndbot", "my_auth", None);
         assert!(sql.contains("NOT UPPER(a.username) LIKE 'RNDBOT%'"), "got: {sql}");
         assert!(sql.contains("a.username <> 'AHBOT'"), "got: {sql}");
+        // The SOAP service account family is system noise in a character
+        // picker (user request 2026-08-10): the fixed name and autosetup's
+        // dmlsoap_<hex> fallbacks, with the LIKE underscore escaped so it
+        // cannot match e.g. DMLSOAPX.
+        assert!(sql.contains("a.username <> 'DMLSOAP'"), "got: {sql}");
+        assert!(sql.contains("a.username NOT LIKE 'DMLSOAP\\_%'"), "got: {sql}");
         assert!(sql.contains("FROM my_auth.account a"), "got: {sql}");
         assert!(sql.contains("FROM my_auth.account_access"), "got: {sql}");
         assert!(!sql.contains("acore_"), "the resolved auth name must be used: {sql}");

@@ -63,6 +63,10 @@ teardown() { teardown_fixture; }
   [ "$status" -eq 0 ]
   grep -q "NOT UPPER(a.username) LIKE 'RNDBOT%'" "$FIXTURE/query.log"
   grep -q "<> 'AHBOT'" "$FIXTURE/query.log"
+  # System noise (user request 2026-08-10): the SOAP service account and
+  # autosetup's dmlsoap_<hex> fallbacks stay out of the picker.
+  grep -q "<> 'DMLSOAP'" "$FIXTURE/query.log"
+  grep -q "NOT LIKE 'DMLSOAP\\\\_%'" "$FIXTURE/query.log"
 }
 
 @test "accounts SQL honours a customised bot account prefix" {

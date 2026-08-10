@@ -7120,9 +7120,9 @@ case "$cmd" in
         ;;
       accounts)
         # Read-only list of real player accounts and their characters.
-        # The 250 ambient-bot accounts and AHBOT are noise for the GUI's
-        # character picker; SOAP-only accounts (e.g. DMLSOAP) simply have no
-        # characters and are harmless to include. gmlevel is pulled from
+        # The 250 ambient-bot accounts, AHBOT and the DMLSOAP family
+        # (incl. autosetup's dmlsoap_<hex> fallbacks) are noise for the GUI's
+        # character picker. gmlevel is pulled from
         # account_access (MAX across realms, since a per-realm 0 row can
         # coexist with a real grant) so the GUI can show GM badges without a
         # second round trip.
@@ -7147,6 +7147,7 @@ case "$cmd" in
              LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM $DB_NAME_AUTH.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
              WHERE NOT $(_bot_username_is_bot a.username)$registry_arm AND a.username <> 'AHBOT'
+               AND a.username <> 'DMLSOAP' AND a.username NOT LIKE 'DMLSOAP\\_%'
              ORDER BY a.id, c.level DESC;"
         rows="$(db_chars_query "$sql")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }
