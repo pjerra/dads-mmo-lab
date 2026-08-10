@@ -960,7 +960,9 @@ Rebuild button with the "prebuilt images" hint.
 
 ## Round 5.9 — Module SQL never auto-applies for post-install modules (found live on the VM, 2026-08-10)
 
-Diagnosed read-only on the VM, fix NOT built (user: "find out first").
+**Spec'd 2026-08-10** (user approved the rebuild-builds-db-import approach):
+`docs/superpowers/specs/2026-08-10-module-sql-dbimport-design.md`.
+Diagnosed read-only on the VM first (user: "find out first").
 Module SQL auto-apply runs only in `ac-db-import`, whose image is frozen at
 install time — on the VM it contains core + mod-playerbots only, and the
 ledgers prove it: mod-playerbots' SQL is recorded in all three DBs
