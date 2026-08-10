@@ -206,13 +206,21 @@ export interface ConfFile {
   readonly: boolean;
 }
 
+// Self-routing (2026-08-10): native mode takes the direct-MySQL read, WSL keeps
+// shelling `dml` byte-identically. Found live on the VM: every CharPicker mount
+// (Characters/Teleport/GM Tools) went through the runner path, which on a
+// native box shells bash + docker exec and forks per row — with 400 citybot
+// accounts in the list the pickers took minutes and read as "never loads".
+// The fast sibling existed the whole time; nothing called it.
 export async function wowAccounts(): Promise<Account[]> {
-  const data = await invoke<{ accounts: Account[] }>("wow_accounts");
+  const mode = await resolveBackendMode();
+  const cmd = mode === "native" ? "wow_accounts_read" : "wow_accounts";
+  const data = await invoke<{ accounts: Account[] }>(cmd);
   return data.accounts;
 }
 // NATIVE-MODE fast sibling of wowAccounts: identical Account[] shape, read over a
 // direct MySQL connection in the launcher's Rust core (no bash, no docker exec).
-// Call ONLY when backendMode() === "native"; in wsl mode call wowAccounts.
+// wowAccounts() routes here on its own now; this stays for explicit callers.
 export async function wowAccountsRead(): Promise<Account[]> {
   const data = await invoke<{ accounts: Account[] }>("wow_accounts_read");
   return data.accounts;
