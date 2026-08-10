@@ -2371,6 +2371,15 @@ pub fn unledgered_modules(
     Some(counts.into_iter().collect())
 }
 
+/// The exact per-module warn text [`module_rebuild_stream_with`] emits for
+/// one `(key, count)` entry from [`unledgered_modules`]'s result -- pulled
+/// out to a pure fn so a test can pin the literal string production actually
+/// emits without wiring a live database through the rebuild stream (spec
+/// 2026-08-10; the review's deferred coverage minor).
+pub fn unledgered_warn_line(key: &str, count: usize) -> String {
+    format!("{key}: {count} SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart.")
+}
+
 /// NATIVE-MODE `wow module rebuild` (`90-main.sh:4967-5008`). The ONE new
 /// shape versus its install/update/remove siblings is the build step itself —
 /// `docker compose build` streams LIVE via
@@ -2591,12 +2600,7 @@ pub fn module_rebuild_stream_with(
         };
         if let Some(missing) = modmgr::unledgered_modules(&sql_files, &lookup) {
             for (key, count) in missing {
-                emit(modmgr::line_event(
-                    "warn",
-                    format!(
-                        "{key}: {count} SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart."
-                    ),
-                ));
+                emit(modmgr::line_event("warn", modmgr::unledgered_warn_line(&key, count)));
             }
         }
     }
@@ -2773,6 +2777,41 @@ mod tests {
             }
         };
         assert_eq!(unledgered_modules(&files, &ledgered), None);
+    }
+
+    /// The success branch (missing files actually found, one warn line per
+    /// module) has NO end-to-end coverage elsewhere -- every rebuild test
+    /// drives an unreadable fake-docker DB, so it only ever exercises the
+    /// skip-warn branch (see `rebuild_builds_through_the_overlay_then_ups_
+    /// without_it`'s comment). This drives `unledgered_modules` and
+    /// `unledgered_warn_line` together against a missing-files fixture and
+    /// pins the EXACT string [`module_rebuild_stream_with`]'s wiring emits,
+    /// closing that gap without a live database (review minor, spec
+    /// 2026-08-10).
+    #[test]
+    fn unledgered_modules_feeds_the_exact_warn_line_production_emits() {
+        use crate::db::Database;
+        let files = vec![
+            (Database::World, "mod-city-bots".to_string(), "one.sql".to_string()),
+            (Database::World, "mod-city-bots".to_string(), "two.sql".to_string()),
+            (Database::Characters, "mod-ale".to_string(), "three.sql".to_string()),
+        ];
+        // Nothing is in the ledger -- every file is missing.
+        let ledgered = |_db: Database, _name: &str| -> Option<bool> { Some(false) };
+        let missing = unledgered_modules(&files, &ledgered).expect("an answerable ledger must not be None");
+
+        let lines: Vec<String> = missing.iter().map(|(key, count)| unledgered_warn_line(key, *count)).collect();
+
+        assert_eq!(
+            lines,
+            vec![
+                "mod-ale: 1 SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart."
+                    .to_string(),
+                "mod-city-bots: 2 SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart."
+                    .to_string(),
+            ],
+            "warn line text must match what module_rebuild_stream_with's wiring emits byte-for-byte:\n{lines:#?}"
+        );
     }
 
     // -- lua_has_sql / cpp_installed / sql_installed / lua_deployed --------------

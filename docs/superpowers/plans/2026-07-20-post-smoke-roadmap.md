@@ -982,6 +982,20 @@ SQL properly (leading); (b) composegen mounts `./modules` into db-import so
 SQL lands without a rebuild. Either way, add a doctor/rebuild check that
 compares installed modules against ledgered module SQL.
 
+**BUILT (2026-08-10, plan `docs/superpowers/plans/2026-08-10-module-sql-dbimport.md`,
+3 tasks, all commits reviewed).** Took candidate (a): the native rebuild's
+build step is now `compose <-f set> build ac-worldserver ac-db-import`
+(`crates/dml-wow/src/modmgr.rs`); bash needed no change (its WSL-shaped base
+composes already carry `build:` for every service). A post-rebuild advisory
+now warns per module whose shipped SQL is still missing from the update
+ledgers, tri-state and best-effort (unreadable ledger → one skip-warn,
+unresolved playerbots schema → those files skipped, and either way the
+rebuild's outcome and `done` event never change). **Remaining USER GATE: the
+live rebuild on the VM** — click Rebuild, watch db-import's run on the next
+start apply the nine modules' SQL backlog and ledger it, resolve any
+non-re-runnable hand-applied file on the spot (expected zero to two), then
+confirm the advisory reports nothing.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.

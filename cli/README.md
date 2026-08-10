@@ -388,12 +388,23 @@ silently ignored (treated as if omitted), rather than rejected.
   compiling nothing silently. The rebuild's own build STEP differs by
   surface: bash/WSL keeps a plain `docker compose up -d --build` (WSL-shaped
   servers carry `build:` in the base compose itself, so no `-f` overlay is
-  ever needed there) and emits no `pct`; the NATIVE (Rust) arm builds
+  ever needed there, and `build:` covers every service including
+  `ac-db-import` already) and emits no `pct`; the NATIVE (Rust) arm builds
   through the explicit overlay set instead (base + override +
-  `docker-compose.build.yml`, `build ac-worldserver`, `pct` progress from
+  `docker-compose.build.yml`, `build ac-worldserver ac-db-import` (2026-08-10
+  — db-import must rebuild alongside the worldserver, or the updater keeps
+  serving whatever module SQL existed at install time), `pct` progress from
   ninja's step counter) and only then runs a plain `docker compose up -d`
   — never a bare `up -d --build`, which on a composegen server carries no
-  `-f` for the build overlay.
+  `-f` for the build overlay. After a successful native rebuild, a
+  best-effort advisory (read-only SELECTs against each affected database's
+  `updates` ledger) warns per module whose shipped SQL the updater has not
+  yet applied: `<key>: <N> SQL file(s) not yet applied by the updater --
+  they land on the next rebuild + restart.`, or one
+  `could not read the update ledger -- skipping the module-SQL check.` warn
+  if the ledger can't be read at all. Advisory only — it never changes the
+  rebuild's outcome or the `done` event, and bash has no mirror of it since
+  bash's db-import already stays current every rebuild.
 
 - `dml wow module update-check --json` → `{"repos":[{"label","url","branch",
   "head","dirty","behind"}]}` — the Modules page's "Check for updates"
