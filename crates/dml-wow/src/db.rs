@@ -45,7 +45,7 @@ pub const DEFAULT_DB_PASSWORD: &str = "password";
 /// `*DatabaseInfo` lines), so the enum only picks WHICH schema — the actual name
 /// comes from a resolved [`DatabaseNames`]; an enum keeps callers from typo-ing a
 /// DB name into a SQL connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Database {
     World,
     Characters,

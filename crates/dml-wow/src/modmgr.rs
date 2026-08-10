@@ -2278,6 +2278,99 @@ pub fn module_remove_stream(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Post-rebuild unledgered-SQL advisory (spec 2026-08-10, Task 2). A module's
+// shipped `.sql` files are only APPLIED by `ac-db-import` running against a
+// live database (which happens on `up`, not on `build`) -- and the ONLY
+// record of "this file was applied" is the `updates` table each schema
+// carries. Right after a successful rebuild's `up -d`, comparing every
+// module's shipped filenames against that table's contents tells the user
+// whether the SQL they just added is really going to land, rather than
+// silently trusting db-import's internal state.
+// ---------------------------------------------------------------------------
+
+/// `modules/<key>/data/sql/<dbdir>/updates/*.sql` for every module directory
+/// under `sdir/modules` -- one `(target db, module key, sql filename)` triple
+/// per file. `<dbdir>` maps `db-world`/`db_world` -> [`crate::db::Database::World`],
+/// `db-characters`/`db_characters` -> `Characters`, `db-auth`/`db_auth` ->
+/// `Auth`, `playerbots` -> `Playerbots`; any other directory name is ignored,
+/// and a module with no `data/sql` directory at all contributes nothing.
+/// Only DIRECT children of `updates/` are read (no recursion), and only
+/// files whose extension is exactly `.sql` count -- matches
+/// [`has_sql_extension`]'s case-sensitive `find -name '*.sql'` semantics, so
+/// a stray `notes.txt` sitting next to real updates is never misread as SQL.
+pub fn module_sql_files(sdir: &Path) -> Vec<(crate::db::Database, String, String)> {
+    let mut out = Vec::new();
+    let Ok(modules_rd) = std::fs::read_dir(sdir.join("modules")) else { return out };
+    for module_entry in modules_rd.flatten() {
+        let Ok(ft) = module_entry.file_type() else { continue };
+        if !ft.is_dir() {
+            continue;
+        }
+        let key = module_entry.file_name().to_string_lossy().into_owned();
+        let sql_root = module_entry.path().join("data").join("sql");
+        let Ok(dbdir_rd) = std::fs::read_dir(&sql_root) else { continue };
+        for dbdir_entry in dbdir_rd.flatten() {
+            let Ok(dbdir_ft) = dbdir_entry.file_type() else { continue };
+            if !dbdir_ft.is_dir() {
+                continue;
+            }
+            let dbdir_name = dbdir_entry.file_name().to_string_lossy().into_owned();
+            let Some(db) = sql_dbdir_target(&dbdir_name) else { continue };
+            let Ok(updates_rd) = std::fs::read_dir(dbdir_entry.path().join("updates")) else { continue };
+            for file_entry in updates_rd.flatten() {
+                let Ok(file_ft) = file_entry.file_type() else { continue };
+                if !file_ft.is_file() || !has_sql_extension(&file_entry.path()) {
+                    continue;
+                }
+                out.push((db, key.clone(), file_entry.file_name().to_string_lossy().into_owned()));
+            }
+        }
+    }
+    out
+}
+
+/// The `<dbdir>` name -> [`crate::db::Database`] mapping [`module_sql_files`]
+/// uses -- both the hyphen and underscore spellings AzerothCore module repos
+/// use in the wild.
+fn sql_dbdir_target(name: &str) -> Option<crate::db::Database> {
+    use crate::db::Database;
+    match name {
+        "db-world" | "db_world" => Some(Database::World),
+        "db-characters" | "db_characters" => Some(Database::Characters),
+        "db-auth" | "db_auth" => Some(Database::Auth),
+        "playerbots" => Some(Database::Playerbots),
+        _ => None,
+    }
+}
+
+/// Per-module count of `files` whose filename `ledgered` reports as NOT yet
+/// present in that file's database's `updates` table. `ledgered(db,
+/// filename)` answers `Some(true)` (known to the ledger), `Some(false)`
+/// (missing) or `None` ("could not tell" -- an unreadable ledger for that
+/// db). ANY `None` makes the WHOLE answer `None`: a half-read ledger must
+/// never accuse the modules whose files happened to be checked before the
+/// failure, since "missing" and "never checked" would otherwise render
+/// identically to the user (tri-state, not a boolean). Modules with zero
+/// missing files are omitted entirely -- never a zero-count entry -- so a
+/// caller can iterate the result and emit one warn line per entry with no
+/// extra filtering. Sorted by module key ([`std::collections::BTreeMap`]'s
+/// own order).
+pub fn unledgered_modules(
+    files: &[(crate::db::Database, String, String)],
+    ledgered: &dyn Fn(crate::db::Database, &str) -> Option<bool>,
+) -> Option<Vec<(String, usize)>> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (db, key, file) in files {
+        match ledgered(*db, file) {
+            None => return None,
+            Some(true) => {}
+            Some(false) => *counts.entry(key.clone()).or_insert(0) += 1,
+        }
+    }
+    Some(counts.into_iter().collect())
+}
+
 /// NATIVE-MODE `wow module rebuild` (`90-main.sh:4967-5008`). The ONE new
 /// shape versus its install/update/remove siblings is the build step itself —
 /// `docker compose build` streams LIVE via
@@ -2445,6 +2538,69 @@ pub fn module_rebuild_stream_with(
     }
 
     modmgr::rebuild_pending_clear(&sdir);
+
+    // Post-rebuild unledgered-SQL advisory (Task 2, spec 2026-08-10): one
+    // warn per module whose shipped SQL the updater's own ledger does not
+    // yet know about. NEVER changes the rebuild outcome below -- a query
+    // failure (engine down, names unresolved, ...) degrades to a single
+    // skip-warn rather than an error, and success or failure here never
+    // touches `rebuild_pending_clear` or the `done` event.
+    let sql_files = modmgr::module_sql_files(&sdir);
+    // The playerbots schema is legitimately absent on a non-playerbots
+    // server (see `crate::db::Database::name`'s doc comment) -- that is
+    // "skip these files", never "could not tell", so they are dropped
+    // before the tri-state check ever sees them.
+    let playerbots_resolved = db_cfg.db_names.as_ref().is_some_and(|n| n.playerbots.is_some());
+    let sql_files: Vec<_> = sql_files
+        .into_iter()
+        .filter(|(db, _, _)| *db != crate::db::Database::Playerbots || playerbots_resolved)
+        .collect();
+
+    let mut needed_dbs: Vec<crate::db::Database> = Vec::new();
+    for (db, _, _) in &sql_files {
+        if !needed_dbs.contains(db) {
+            needed_dbs.push(*db);
+        }
+    }
+
+    let mut ledgers: std::collections::HashMap<crate::db::Database, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    let mut ledger_unreadable = false;
+    for db in needed_dbs {
+        match crate::db::query(&db_cfg, db, "SELECT name FROM updates") {
+            Ok(res) => {
+                let names: std::collections::HashSet<String> =
+                    res.rows.iter().filter_map(|row| crate::db::cell_string(row.first())).collect();
+                ledgers.insert(db, names);
+            }
+            Err(_) => {
+                ledger_unreadable = true;
+                break;
+            }
+        }
+    }
+
+    if ledger_unreadable {
+        emit(modmgr::line_event(
+            "warn",
+            "could not read the update ledger -- skipping the module-SQL check.",
+        ));
+    } else {
+        let lookup = |db: crate::db::Database, name: &str| -> Option<bool> {
+            ledgers.get(&db).map(|set| set.contains(name))
+        };
+        if let Some(missing) = modmgr::unledgered_modules(&sql_files, &lookup) {
+            for (key, count) in missing {
+                emit(modmgr::line_event(
+                    "warn",
+                    format!(
+                        "{key}: {count} SQL file(s) not yet applied by the updater -- they land on the next rebuild + restart."
+                    ),
+                ));
+            }
+        }
+    }
+
     emit(modmgr::section_end(MODULE_REBUILD_SECTION, "ok"));
     emit(modmgr::done_event(serde_json::json!({"rebuilt": true})));
 }
@@ -2542,6 +2698,81 @@ mod tests {
         rebuild_pending_add(&d, "core-update").unwrap();
         assert_eq!(std::fs::read_to_string(d.join(".dml-rebuild-pending")).unwrap(), "core-update\n");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- module_sql_files / unledgered_modules (Task 2, spec 2026-08-10) --------
+
+    #[test]
+    fn module_sql_files_scans_both_dir_spellings_and_ignores_noise() {
+        use crate::db::Database;
+        let d = tmp_dir("sql-files");
+
+        let a_updates = d.join("modules").join("mod-a").join("data").join("sql").join("db-world").join("updates");
+        std::fs::create_dir_all(&a_updates).unwrap();
+        std::fs::write(a_updates.join("one.sql"), "-- one\n").unwrap();
+        std::fs::write(a_updates.join("notes.txt"), "not sql\n").unwrap();
+
+        let b_updates =
+            d.join("modules").join("mod-b").join("data").join("sql").join("db_characters").join("updates");
+        std::fs::create_dir_all(&b_updates).unwrap();
+        std::fs::write(b_updates.join("two.sql"), "-- two\n").unwrap();
+
+        // mod-c: no data/sql directory at all.
+        std::fs::create_dir_all(d.join("modules").join("mod-c")).unwrap();
+
+        let d_updates =
+            d.join("modules").join("mod-d").join("data").join("sql").join("playerbots").join("updates");
+        std::fs::create_dir_all(&d_updates).unwrap();
+        std::fs::write(d_updates.join("three.sql"), "-- three\n").unwrap();
+
+        let mut files = module_sql_files(&d);
+        files.sort_by(|a, b| (a.1.as_str(), a.2.as_str()).cmp(&(b.1.as_str(), b.2.as_str())));
+
+        assert_eq!(
+            files,
+            vec![
+                (Database::World, "mod-a".to_string(), "one.sql".to_string()),
+                (Database::Characters, "mod-b".to_string(), "two.sql".to_string()),
+                (Database::Playerbots, "mod-d".to_string(), "three.sql".to_string()),
+            ],
+            "notes.txt must be absent and mod-c must contribute nothing:\n{files:#?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn unledgered_modules_counts_only_missing_files_per_module() {
+        use crate::db::Database;
+        let files = vec![
+            (Database::World, "mod-a".to_string(), "one.sql".to_string()),
+            (Database::World, "mod-a".to_string(), "two.sql".to_string()),
+            (Database::Characters, "mod-b".to_string(), "three.sql".to_string()),
+        ];
+        // one.sql is known to the ledger; everything else is answerable but
+        // missing.
+        let ledgered = |_db: Database, name: &str| -> Option<bool> { Some(name == "one.sql") };
+        let result = unledgered_modules(&files, &ledgered).expect("an answerable ledger must not be None");
+        assert_eq!(result, vec![("mod-a".to_string(), 1), ("mod-b".to_string(), 1)]);
+    }
+
+    #[test]
+    fn a_ledger_that_cannot_answer_yields_none_not_accusations() {
+        use crate::db::Database;
+        let files = vec![
+            (Database::World, "mod-a".to_string(), "one.sql".to_string()),
+            (Database::Characters, "mod-b".to_string(), "two.sql".to_string()),
+        ];
+        // The Characters lookup can't tell -- the WHOLE answer must be None,
+        // never a partial report that silently omits mod-b.
+        let ledgered = |db: Database, _name: &str| -> Option<bool> {
+            if db == Database::Characters {
+                None
+            } else {
+                Some(false)
+            }
+        };
+        assert_eq!(unledgered_modules(&files, &ledgered), None);
     }
 
     // -- lua_has_sql / cpp_installed / sql_installed / lua_deployed --------------
@@ -2973,6 +3204,21 @@ mod tests {
         std::fs::write(d.join("docker-compose.yml"), "services: {}\n").unwrap();
         std::fs::write(d.join("docker-compose.build.yml"), "services: {}\n").unwrap();
         std::fs::write(d.join(".dml-rebuild-pending"), "mod-aoe-loot\n").unwrap();
+        // A shipped module SQL file so the post-rebuild advisory (Task 2) has
+        // something to check on a successful run -- `rebuild_test_db_cfg`
+        // carries no resolved schema names, so the ledger query for it
+        // always errors and the advisory degrades to its skip-warn. Harmless
+        // for the tests above this one: none of them reach the advisory code
+        // (the guard/backup/build/up gates all return before it).
+        let fixture_updates = d
+            .join("modules")
+            .join("mod-fixture")
+            .join("data")
+            .join("sql")
+            .join("db-world")
+            .join("updates");
+        std::fs::create_dir_all(&fixture_updates).unwrap();
+        std::fs::write(fixture_updates.join("2026_08_10_01_fixture.sql"), "-- fixture\n").unwrap();
         let call_log = d.join("calls.log");
         std::fs::write(&call_log, "").unwrap();
         let docker = write_fake_rebuild_docker(&d);
@@ -3078,6 +3324,19 @@ mod tests {
         assert!(build_pos < up_pos, "build must precede up:\n{calls}");
 
         assert!(events.iter().any(|e| e["event"] == "pct"), "expected at least one pct event:\n{events:#?}");
+
+        // Task 2: the fake harness's db_cfg carries no resolved schema
+        // names, so the post-rebuild advisory's ledger query for the
+        // fixture module's World-db SQL file errors -- this pins the
+        // tri-state degradation (skip-warn, never an accusation) on the
+        // default path, and that the rebuild OUTCOME is unaffected by it.
+        assert!(
+            events.iter().any(|e| e["event"] == "line"
+                && e["level"] == "warn"
+                && e["text"].as_str().unwrap_or("").contains("could not read the update ledger")),
+            "expected the post-rebuild advisory's skip-warn:\n{events:#?}"
+        );
+
         let last = events.last().expect("a terminal event");
         assert_eq!(last["event"], "done", "{events:#?}");
         assert_eq!(last["data"]["rebuilt"], true, "{events:#?}");
