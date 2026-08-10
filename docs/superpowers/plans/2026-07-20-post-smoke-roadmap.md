@@ -960,8 +960,18 @@ Rebuild button with the "prebuilt images" hint.
 
 ## Round 5.9 — Module SQL never auto-applies for post-install modules (found live on the VM, 2026-08-10)
 
-**Spec'd 2026-08-10** (user approved the rebuild-builds-db-import approach):
-`docs/superpowers/specs/2026-08-10-module-sql-dbimport-design.md`.
+**BUILT + LIVE GATE PASSED 2026-08-11** (supervised first rebuild executed
+overnight on the VM via SSH, per the spec's rollout step): db-import applied
+and ledgered the whole backlog in one pass (5 world + 13 characters + 1 auth
+module files, zero failures — the hand-applied re-runs settled idempotently),
+the stale `.dml-rebuild-pending` cleared, worldserver clean (0 errors).
+**Known limitation the advisory now surfaces by design:** db-import does not
+apply modules' `data/sql/playerbots/updates` files (the playerbots schema
+belongs to mod-playerbots' own updater), so mod-city-bots' hand-applied
+`citizen_roster` file stays unledgered and the advisory reports
+`mod-city-bots: 1 SQL file(s) not yet applied` after every rebuild — table
+exists, cosmetic; fold a fix into any future playerbots-updater work.
+Spec: `docs/superpowers/specs/2026-08-10-module-sql-dbimport-design.md`.
 Diagnosed read-only on the VM first (user: "find out first").
 Module SQL auto-apply runs only in `ac-db-import`, whose image is frozen at
 install time — on the VM it contains core + mod-playerbots only, and the

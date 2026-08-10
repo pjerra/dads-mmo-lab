@@ -41,10 +41,15 @@ the VM (dad's real server, `perzi@100.99.161.102`, install at
 rebuilt with mod-city-bots and its 400-bot stage cast is confirmed in-game;
 19 stage-cast mages with invalid race/class pairs were repaired by applying
 the module's own `2026_07_16_08_sync_stage_cast_race_classes.sql` (its SQL
-series had been hand-applied and incomplete). **Known open gap, filed as
-roadmap Round 5.9:** module SQL auto-applies only via `ac-db-import`, whose
-image is frozen at install time — every post-install module's SQL never
-lands; spec in progress.
+series had been hand-applied and incomplete). **Round 5.9 closed 2026-08-11
+(built + live-verified overnight):** the rebuild now builds `ac-db-import`
+alongside the worldserver, so post-install modules' SQL auto-applies and
+ledgers on the next start (the VM's 19-file backlog landed in one pass), and
+a post-rebuild advisory names modules whose SQL is still unledgered. Known
+limitation the advisory surfaces by design: modules' `playerbots/updates`
+SQL is outside db-import's reach (mod-playerbots' own updater owns that
+schema) — mod-city-bots' roster file reports as 1 unledgered file forever;
+cosmetic, table exists.
 
 ### Rust CLI workspace
 
