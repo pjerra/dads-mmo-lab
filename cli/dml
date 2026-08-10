@@ -627,7 +627,11 @@ _bot_account_where() {
         _bot_account_where_prefix_only "$col"
         return 0
     fi
-    printf "(%s IN (SELECT account_id FROM %s.playerbots_account_type WHERE account_type IN (1,2)) OR %s IN (SELECT id FROM %s.account WHERE %s))" \
+    # account_type 3 = mod-city-bots citizens (CITIZEN_ACCOUNT_TYPE) -- their
+    # `citybot*` accounts never match the rndbot prefix arm, so the registry is
+    # their only signal (verified live 2026-08-10: 400 type-3 rows counted as
+    # family). Keep in sync with Rust botid.rs::registry_clause.
+    printf "(%s IN (SELECT account_id FROM %s.playerbots_account_type WHERE account_type IN (1,2,3)) OR %s IN (SELECT id FROM %s.account WHERE %s))" \
         "$col" "$DB_NAME_PLAYERBOTS" "$col" "$DB_NAME_AUTH" "$(_bot_username_is_bot username)"
     return 0
 }

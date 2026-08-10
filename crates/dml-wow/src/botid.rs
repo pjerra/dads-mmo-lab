@@ -93,8 +93,15 @@ pub fn escape_like_literal(s: &str) -> String {
     out
 }
 
-/// Signal 1: the playerbots registry (`1` = random bot, `2` = addclass bot).
+/// Signal 1: the playerbots registry (`1` = random bot, `2` = addclass bot,
+/// `3` = mod-city-bots citizen — `CITIZEN_ACCOUNT_TYPE` in that module's
+/// `CitizenInfo.h`; verified live 2026-08-10: 400 type-3 rows for the
+/// `citybot*` stage cast, which the launcher was counting as FAMILY).
 /// Authoritative when populated, silently empty on some installs.
+/// NB the prefix arm does NOT cover citizens (their accounts are `citybot*`,
+/// not `<AiPlayerbot.RandomBotAccountPrefix>*`), so the registry is their only
+/// signal — acceptable because the same module that creates the accounts
+/// writes the registry rows in the same transaction path.
 ///
 /// `playerbots` is the RESOLVED schema name (Task 6) — it must come from a
 /// [`crate::db::DatabaseNames`], whose parse gate
@@ -103,7 +110,7 @@ pub fn escape_like_literal(s: &str) -> String {
 pub fn registry_clause(col: &str, playerbots: &str) -> String {
     format!(
         "{col} IN (SELECT account_id FROM {playerbots}.playerbots_account_type \
-         WHERE account_type IN (1,2))"
+         WHERE account_type IN (1,2,3))"
     )
 }
 
@@ -211,7 +218,7 @@ mod tests {
         let c = bot_clause("c.account", "rndbot", "my_auth", Some("my_pb"));
         assert!(
             c.contains(
-                "c.account IN (SELECT account_id FROM my_pb.playerbots_account_type WHERE account_type IN (1,2))"
+                "c.account IN (SELECT account_id FROM my_pb.playerbots_account_type WHERE account_type IN (1,2,3))"
             ),
             "registry signal missing: {c}"
         );

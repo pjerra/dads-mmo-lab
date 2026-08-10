@@ -50,10 +50,12 @@ seed_two_bots() {
   run bash "$DML" wow bots list --json
   [ "$status" -eq 0 ]
   grep -q 'acore_playerbots.playerbots_account_type' "$FIXTURE/q.log"
-  grep -q 'account_type IN (1,2)' "$FIXTURE/q.log"
+  # (1,2,3): 3 = mod-city-bots citizens, whose citybot* accounts the prefix
+  # arm can never match (2026-08-10 -- 400 citizens counted as family).
+  grep -q 'account_type IN (1,2,3)' "$FIXTURE/q.log"
   grep -q "UPPER(username) LIKE 'RNDBOT%'" "$FIXTURE/q.log"
   # OR, never AND: an install with an unpopulated registry must still match.
-  grep -q 'account_type IN (1,2)) OR ' "$FIXTURE/q.log"
+  grep -q 'account_type IN (1,2,3)) OR ' "$FIXTURE/q.log"
 }
 
 @test "bot identity: a custom prefix is read from playerbots.conf and LIKE-escaped" {
