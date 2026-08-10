@@ -202,7 +202,7 @@ Plan: [`2026-07-29-native-first-install.md`](superpowers/plans/2026-07-29-native
 | 8 | `Install-DML-Native.ps1` | ✅ **2026-08-01** + a 40-check harness, 3 mutations caught |
 | 11 | Account + SOAP bootstrap | ✅ **2026-08-01** — verified before it saves |
 | 7 | Port guard on native start | ✅ **2026-08-01** — refuses on the three stack ports, mirrored bash↔Rust |
-| 10 | `migrate-import` | ❌ not started |
+| 10 | `migrate-import` | ✅ **built 2026-08-03** (`migrate.rs`, nine stages; restore safety is a refusal — see crates/CLAUDE.md); live gate = Task 13 |
 | 12, 13 | LIVE gates — real build, kill-mid-build resume, first login | 🙋 user |
 | 14 | Docs + doctrine reconciliation | partial |
 
@@ -439,10 +439,12 @@ the host, is just `install_native.rs` with extra steps.
 **WSL has none of this.** Docker Desktop's WSL integration translates paths
 natively, which is why the existing `dml-arch` server works today.
 
-### B5 — Task 10 (`migrate-import`)
+### B5 — Task 10 (`migrate-import`) — ✅ BUILT 2026-08-03
 
-The "bring your existing server across" path. Genuinely valuable and genuinely
-optional for a beta — a new user installs fresh.
+The "bring your existing server across" path. Built as `crates/dml-wow/src/migrate.rs`
+(nine stages, `.dml-migrate.json`, generates the compose trio, refusal-based
+restore safety — details in `crates/CLAUDE.md`). Was scoped as optional for a
+beta; it shipped anyway. Remaining: the live gate (Task 13, Phase C).
 
 ---
 
@@ -473,7 +475,7 @@ No amount of engineering closes these. They are the release standard.
   character created and entered the world on the RESUMED server. That is the
   part a status probe cannot stand in for: `verdict: online` says the stack
   answers, not that a player can play on it.
-- **Task 13 — LIVE migration gate**, if Task 10 ships: real export/import, the
+- **Task 13 — LIVE migration gate** (Task 10 shipped 2026-08-03): real export/import, the
   identity check (2505 characters, 255 accounts), then the negative test — with
   one server running the other must refuse on ports.
 - **The five outstanding live gates** already listed in SHIP-LIST Phase 1.

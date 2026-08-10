@@ -1,5 +1,10 @@
 # Module Rebuild Fix Implementation Plan
 
+> **STATUS 2026-08-10: EXECUTED, reviewed and live-verified** (commits
+> `3b41fae..ba16d53` + the final fix wave; the VM rebuilt with mod-city-bots
+> in game). The step checkboxes below were never ticked during execution —
+> read `git log` and the SDD ledger for state, not the boxes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `wow module rebuild` actually compile on native installs, refuse honestly on image-only servers, add a standing Rebuild button, and let Unbound recover from shallow mod-ale clones.

@@ -34,7 +34,8 @@ The tree that produced a working server -- what the SHA pin should record:
 
 **The `native-test` title dir is KEPT ON PURPOSE** -- stopped, not deleted. It is
 the only proven native install, and the launcher-wiring work needs one to wire
-against; rebuilding costs 21+ minutes. Delete it once that wiring is done.
+against; rebuilding costs 21+ minutes. AMENDED 2026-08-01 (roadmap): it stays
+KEPT even after the wiring — the warm Docker cache is worth the disk.
 
 THREE THINGS THIS RUN DID NOT PROVE, so none of them may be assumed:
 
@@ -53,8 +54,12 @@ THREE THINGS THIS RUN DID NOT PROVE, so none of them may be assumed:
 
 `cli/tests/soap.bats` test 6, "wow soap-exec returns result envelope on success",
 failed once in a full-suite run and passed on the next full run and in isolation
-(10/10). Nothing in that code path was touched that day. Likely cross-test
-contamination of `~/.dml/soap.env`, which tests 2 and 3 of that same file write.
+(10/10). Nothing in that code path was touched that day. NB the original
+"cross-test contamination of `~/.dml/soap.env`" hypothesis was DISPROVED
+(roadmap §A3, 2026-08-03: `setup()` exports `HOME="$FIXTURE"` from a fresh
+`mktemp -d` per test, so tests cannot see each other's soap.env; two real
+hazards were found and closed instead). If it flakes again, start from §A3's
+findings — not from the contamination theory.
 
 Worth fixing before the beta, for one reason: an intermittently red suite is
 indistinguishable from a real regression, and this repo has already lost time to
@@ -103,10 +108,10 @@ were taken as recommended.
 
 ## Phase 0 — stop the bleeding (30 minutes)
 
-- [ ] **0.1 — Clean the worktree.** 9 modified files + 3 untracked are sitting
-      uncommitted on `rust-main`. Commit them or stash them. Never start a smoke
-      pass on a dirty tree — you won't know whether a bug is in the build or in
-      the half-finished edit.
+- [x] **0.1 — Clean the worktree.** DONE (as of 2026-08-10 the tree is clean
+      apart from two untracked measurement dirs — `results/backend-comparison/`
+      and `launcher/src-tauri/backend/`). The standing rule holds: never start
+      a smoke pass on a dirty tree.
 - [ ] **0.2 — Stop trying to merge to `main`. Change the default branch instead.**
       On GitHub (`pjerra/dads-mmo-lab` → Settings → Branches) set the default
       branch to **`rust-main`**.
@@ -142,7 +147,8 @@ were taken as recommended.
 ## Phase 1 — prove it works (the boring part; ~2-3 hours before beta)
 
 `.superpowers/sdd/NATIVE-TAIL-SMOKE.md` currently has **zero of its boxes
-checked**. `docs/SMOKE-TESTS.md` is at **35 of 44 rows**. Those two files are the
+checked**. `docs/SMOKE-TESTS.md` is at **51 green / 99 unchecked (measured
+2026-08-10; the file has grown well past the original 44 rows)**. Those two files are the
 definition of "ready". Until they are green, "it's not ready yet" is not a
 judgement — it's just an untested build.
 

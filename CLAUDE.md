@@ -2,7 +2,7 @@
 
 Dad's MMO Lab: self-hosted MMO private-server tooling (WoW WotLK via AzerothCore + mod-playerbots, and other titles) targeting WSL2 on Windows. Fork of the upstream dads-mmo-lab repo (remotes: `origin` = pjerra fork, `upstream`). License AGPL-3.0.
 
-## Current work: branch `rust-main` — THE branch to use
+## Current work: branch `feat/core-family` (on top of `rust-main`)
 
 **START HERE: [`docs/ROADMAP-TO-BETA.md`](docs/ROADMAP-TO-BETA.md).** It is the
 SHORT ordered path to v0.1.0 and its rule is "if an item is not here, it is not
@@ -10,20 +10,47 @@ blocking the beta". `docs/SHIP-LIST.md` is release discipline + the incident
 record; `docs/superpowers/plans/2026-07-20-post-smoke-roadmap.md` is the
 exhaustive everything-ever-asked-for backlog. Three documents, three jobs.
 
-**v0.1.0 scope (user, 2026-08-01): WoW Playerbots on the NATIVE backend only.**
-Vanilla/TBC/Wrath Unbound move to v0.2 behind the `.sh`-in-a-distro runner.
+**v0.1.0 scope (user, 2026-08-01, AMENDED 2026-08-03): WoW Playerbots on the
+NATIVE backend, and Wrath Unbound is IN the v0.1.0 cut** (the roadmap carries
+the amendment). Vanilla/TBC move to v0.2 behind the `.sh`-in-a-distro runner.
 
-`rust-main` (renamed from `feat/rust-cli-workspace` on 2026-07-28) is the single
-integration line: the Rust CLI workspace + the launcher + the native-Docker
-spike + the round-2 launcher batch, all merged. `spike/docker-desktop-native`
-and `feat/round2-launcher-batch` are fully contained in it and are historical
-refs only — do not start new work on them. Standing policy: NO merge to `main`.
+**`feat/core-family` is the active line** (2026-08-06→): the core-family seam
+(Task 6/12, schema-name resolution both surfaces), the module-rebuild fix
+round below, the VM acceptance round-2 fixes, and the 2026-08-10 launcher
+picker fixes (bot identity incl. citizens, direct-MySQL accounts routing).
+Pushed to origin; parked on the VM acceptance run, then the merge-into-
+`rust-main` decision. `rust-main` (renamed from `feat/rust-cli-workspace`
+2026-07-28) is the base integration line under it; `spike/docker-desktop-native`
+and `feat/round2-launcher-batch` are historical refs only — do not start new
+work on them. Standing policy: NO merge to `main`.
+
+### Module-rebuild fix round (feat/core-family, 2026-08-09/10) — SHIPPED + LIVE-VERIFIED
+
+`wow module rebuild` compiled NOTHING on native installs (`up -d --build`
+never loads `docker-compose.build.yml`) and reported success — found live on
+the VM. Fixed via SDD (spec `docs/superpowers/specs/2026-08-09-module-rebuild-fix-design.md`,
+plan `docs/superpowers/plans/2026-08-09-module-rebuild-fix.md`, 9 tasks +
+final fix wave, commits `3b41fae..ba16d53`): shared `crates/dml-wow/src/buildcap.rs`,
+explicit overlay build + ninja `pct` on the Rust rebuild arm, `MODULE_NO_BUILD_CONFIG`
+refusals (rebuild + cpp install/update, both surfaces, before backup/clone),
+`can_build` in module list (native disk-evidence, bash tri-state fail-open),
+always-visible launcher "Server rebuild" card, unbound fetches its mod-ale pin
+before refusing shallow Modules-page clones. **Live gate PASSED 2026-08-10:**
+the VM (dad's real server, `perzi@100.99.161.102`, install at
+`C:\Users\perzi\dml-native\wow-server-playerbots`, a full source checkout)
+rebuilt with mod-city-bots and its 400-bot stage cast is confirmed in-game;
+19 stage-cast mages with invalid race/class pairs were repaired by applying
+the module's own `2026_07_16_08_sync_stage_cast_race_classes.sql` (its SQL
+series had been hand-applied and incomplete). **Known open gap, filed as
+roadmap Round 5.9:** module SQL auto-applies only via `ac-db-import`, whose
+image is frozen at install time — every post-install module's SQL never
+lands; spec in progress.
 
 ### Rust CLI workspace
 
-The Rust that used to live only inside the launcher is now a cargo workspace, so any frontend can drive the server without the launcher. Spec `docs/superpowers/specs/2026-07-26-rust-cli-workspace-design.md`, plan `docs/superpowers/plans/2026-07-26-rust-cli-workspace.md` (18 tasks), ledger `.superpowers/sdd/2026-07-26-rust-cli-workspace/progress.md`. See [`crates/CLAUDE.md`](crates/CLAUDE.md). Tasks 1–17 done; Task 18's gates are cleared except the user click-through of the release exe and a Linux community smoke. NO merge to main — standing user policy.
+The Rust that used to live only inside the launcher is now a cargo workspace, so any frontend can drive the server without the launcher. Spec `docs/superpowers/specs/2026-07-26-rust-cli-workspace-design.md`, plan `docs/superpowers/plans/2026-07-26-rust-cli-workspace.md` (18 tasks), ledger `.superpowers/sdd/2026-07-26-rust-cli-workspace/progress.md`. See [`crates/CLAUDE.md`](crates/CLAUDE.md). All 18 tasks complete (plan header is authoritative); the remaining user gates are the click-through of the release exe and a Linux community smoke. NO merge to main — standing user policy.
 
-## Earlier work: DML Launcher (branch `feat/dml-launcher-windows`)
+## Earlier work: DML Launcher (was branch `feat/dml-launcher-windows` — merged into the integration line and DELETED local+origin 2026-07-30; historical record only)
 
 Open-source cross-platform GUI (Tauri 2, Windows-first) replacing the closed-source "The Lab". Spec: `docs/superpowers/specs/2026-07-14-dml-launcher-windows-design.md`. Plans in `docs/superpowers/plans/`:
 - Plan 1 (dml CLI JSON foundation) — **complete**, final review verdict READY TO MERGE (merge = user decision, not done)
@@ -55,6 +82,7 @@ works under that directory. Cross-cutting rules stayed here.
 
 ## Gotchas
 
+- **`MapUpdate.Threads` must stay 1 while mod-ale is loaded (proven live 2026-08-10, VM).** `= 4` crashed the worldserver within minutes of bot login (`[ALE]: Cannot execute call: registered value is 35, not a function` → ASSERTION LuaEngine.cpp:856); the identical boot is stable at `= 1`. Eluna-class Lua engines are not thread-safe under multithreaded map update, and mod-ale carries the launcher's GM/party bridges, so the single map thread is a hard constraint — relevant to the perf-advisor spec. Measured on 20 cores: bot count moves the MEAN tick (2000 bots ≈ 66ms, 1000 ≈ 46ms) but the ~155ms p95 spike floor tracks the 30s `BotActiveAlone` rotation, not bot count.
 - **A detector with ONE signal fails OPEN, and nothing about the output looks broken (2026-08-01, mirrored bash↔Rust).** Every bot-vs-human check asked a single question — is the account in `acore_playerbots.playerbots_account_type` with `account_type IN (1,2)`? mod-playerbots populates that registry ITSELF, and on the freshly built `native-test` install it was **empty** (0 rows; `playerbots_random_bots` and `playerbots_account_links` too) while 1000 bot characters existed on 100 `RNDBOT*` accounts. `account NOT IN (<empty set>)` is TRUE for every row, so Home listed all 1000 bots as real players while "Bots online" read 0 — measured old-vs-new on that live DB: humans 1000→0, bots 0→1000. Bot identity now lives in ONE place per surface (`crates/dml-wow/src/botid.rs`, bash `_bot_prefix`/`_bot_account_where`/`_human_account_where` in `cli/src/30-db.sh`) and takes EITHER signal: registry membership **OR** `acore_auth.account.username LIKE '<AiPlayerbot.RandomBotAccountPrefix>%'` (default `rndbot`, `.conf` → `.conf.dist` → default, env `DML_BOT_ACCOUNT_PREFIX`). Registry membership means `account_type IN (1,2,3)` since 2026-08-10: type 3 is mod-city-bots' `CITIZEN_ACCOUNT_TYPE`, whose `citybot*` accounts the prefix arm never matches — 400 citizens were counted as family on the VM until the set was widened. Three rules, each load-bearing: an **empty** prefix is refused (it would compile to `LIKE '%'` and call the whole family bots — the mirror-image failure), `%`/`_`/`\`/`'` are escaped so a custom prefix cannot widen the match, and stats' schema-probe failure now degrades to prefix-only instead of `0=1` ("this box has no bots" is a lie on a box that has them). The Home "Players online" NUMBER came from the same incident but has a different cause: SOAP `.server info` "Connected players" counts bot sessions by design, so the number now comes from the bot-free DB list (refetched each poll) and the raw SOAP figure survives only as a labelled "Sessions (incl. bots)" diagnostic row.
 - **A Linux container CANNOT run the title installers (proven 2026-08-01, negative result).** A container with the docker socket mounted DOES drive the host daemon - but a nested bind mount silently resolves against the HOST filesystem, so `./modules:/azerothcore/modules` arrives as a path that does not exist there, and **a bind mount to a missing path is not an error, it is an EMPTY DIRECTORY**. The server then boots without its modules and looks healthy to every check we have (the recorded "boots a silently wrong server" class). Passing Windows host paths works, but `docker compose` computes absolute paths from ITS OWN cwd, so the installers would have to be patched - and using them unmodified was the whole appeal. Docker Desktop's WSL integration has none of this, which is why the `.sh` route uses a distro. `docker-desktop` itself has **no bash at all**, so it can never host them.
 - **A FIX WITH TWO HALVES IS NOT PROVEN BY A SEQUENCE TEST — the halves mask each other.** The fix had two independent parts: (a) an override that says "allow this", and (b) "and do not spend the budget doing so". The obvious test drove twenty requests through the real guard and asserted none escaped. Deleting half (a) left it **GREEN**: not spending the budget keeps the counter at zero, so the ordinary rule answers yes anyway for as long as you care to iterate. The override was only ever load-bearing where the ordinary rule says NO. A sequence test proves the CONJUNCTION; either half alone satisfies it. When a fix has independent halves, write the case that ISOLATES each one and mutate each half separately — the sequence test is still worth having, it is just not evidence about either part.

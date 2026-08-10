@@ -1,5 +1,11 @@
 # Core-Family Seam Implementation Plan
 
+> **STATUS 2026-08-10: EXECUTED and reviewed** (whole-branch review verdict
+> SAFE TO CONSIDER DONE; final gates cargo 1691/0/7, bats 858/0, parity 18/18 —
+> ledger `.superpowers/sdd/2026-08-06-core-family-seam/progress.md`). The step
+> checkboxes below were never ticked during execution — read `git log` and the
+> ledger for state, not the boxes. Remaining: VM acceptance run, merge decision.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Introduce a `CoreFamily` seam so a title's emulator family is resolved once, from evidence, and refused when unknown — delivering a WoW-only Library and fixing the hardcoded database names in the same shape.
