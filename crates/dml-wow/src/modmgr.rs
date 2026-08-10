@@ -2402,7 +2402,9 @@ pub fn module_rebuild_stream_with(
     let bfiles = crate::buildcap::build_files(&sdir);
     let mut build_args: Vec<&str> = vec!["compose"];
     build_args.extend(bfiles.iter().map(String::as_str));
-    build_args.extend(["build", "ac-worldserver"]);
+    // db-import must rebuild WITH the worldserver, or the updater keeps serving
+    // install-time module SQL (spec 2026-08-10; the VM ledger evidence).
+    build_args.extend(["build", "ac-worldserver", "ac-db-import"]);
     let mut progress = crate::install_native::BuildProgress::default();
     let status = destructive::run_streamed_unbounded(&docker_program, &build_args, &sdir, &log_path, |line| {
         if let Some(pct) = progress.observe(line) {
@@ -3060,12 +3062,15 @@ mod tests {
             .unwrap_or_else(|| panic!("no build call among:\n{calls}"));
         assert!(build_line.contains("docker-compose.yml"), "{build_line}");
         assert!(build_line.contains("docker-compose.build.yml"), "{build_line}");
-        assert!(build_line.trim_end().ends_with("build ac-worldserver"), "{build_line}");
+        assert!(build_line.contains("ac-worldserver"), "{build_line}");
+        assert!(build_line.contains("ac-db-import"), "{build_line}");
+        assert!(build_line.trim_end().ends_with("build ac-worldserver ac-db-import"), "{build_line}");
         let build_pos = calls.find(build_line).unwrap();
 
         let up_line = calls.lines().find(|l| l.contains("up -d")).unwrap_or_else(|| panic!("no up call among:\n{calls}"));
         assert!(!up_line.contains("--build"), "{up_line}");
         assert!(!up_line.contains("docker-compose.build.yml"), "{up_line}");
+        assert!(!up_line.contains("ac-db-import"), "{up_line}");
         let up_pos = calls.find(up_line).unwrap();
 
         assert!(config_pos < stop_pos, "config must precede stop:\n{calls}");
