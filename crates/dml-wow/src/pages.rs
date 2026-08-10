@@ -272,18 +272,32 @@ pub fn read_bots(cfg: &DbConfig, f: &BotFilters) -> Result<Value, DbError> {
 /// The bot filter is [`crate::botid::username_is_bot`] rather than a hardcoded
 /// `NOT LIKE 'RNDBOT%'`, so a server that customised
 /// `AiPlayerbot.RandomBotAccountPrefix` does not get 250 bot accounts in its
-/// character picker. It stays PREFIX-ONLY on purpose — see that function's
-/// docs: this is the one bot filter that must not require the playerbots
-/// schema to exist, which is also why this builder takes ONLY the auth name:
-/// the playerbots name structurally cannot be spliced here.
-pub fn accounts_sql(bot_prefix: &str, auth: &str) -> String {
+/// character picker. The prefix arm must not REQUIRE the playerbots schema to
+/// exist — a picker that errors on a schema-less box is worse than one that
+/// shows bots — so `playerbots: None` yields the historical prefix-only SQL.
+///
+/// `Some(pb)` ADDS the registry exclusion (2026-08-10): mod-city-bots'
+/// 400 `citybot*` citizens carry registry type 3 but no rndbot prefix, and
+/// they buried the picker (403 rows, 3 of them real on the live VM). The
+/// caller passes the name only when resolution actually produced one, keeping
+/// the fail-open posture; a config that names a playerbots schema which does
+/// not exist will error here, but that shape names a broken install, not a
+/// playerbots-less one.
+pub fn accounts_sql(bot_prefix: &str, auth: &str, playerbots: Option<&str>) -> String {
+    let registry_arm = match playerbots {
+        Some(pb) => format!(
+            " AND a.id NOT IN (SELECT account_id FROM {pb}.playerbots_account_type \
+             WHERE account_type IN (1,2,3))"
+        ),
+        None => String::new(),
+    };
     format!(
         "SELECT a.id, a.username, COALESCE(g.gmlevel,0), \
          COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'') \
          FROM {auth}.account a \
          LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM {auth}.account_access GROUP BY id) g ON g.id = a.id \
          LEFT JOIN characters c ON c.account = a.id \
-         WHERE NOT {} AND a.username <> 'AHBOT' \
+         WHERE NOT {}{registry_arm} AND a.username <> 'AHBOT' \
          ORDER BY a.id, c.level DESC;",
         crate::botid::username_is_bot("a.username", bot_prefix)
     )
@@ -355,7 +369,11 @@ pub fn read_accounts(cfg: &DbConfig) -> Result<Value, DbError> {
     let res = db::query(
         cfg,
         Database::Characters,
-        &accounts_sql(&crate::botid::bot_account_prefix(), &names.auth),
+        &accounts_sql(
+            &crate::botid::bot_account_prefix(),
+            &names.auth,
+            names.playerbots.as_deref(),
+        ),
     )?;
     Ok(assemble_accounts(&res))
 }
@@ -1020,13 +1038,13 @@ mod tests {
     }
 
     /// The character picker's bot filter: conf-driven prefix, resolved auth
-    /// name, and NO dependency on the playerbots schema (the deliberate
-    /// difference from every other bot filter — see `botid::username_is_bot`;
-    /// the builder does not even take a playerbots name, so the negative pin
-    /// below is structural as well as asserted).
+    /// name, and NO REQUIREMENT on the playerbots schema — `None` must yield
+    /// SQL that never mentions it (the box-without-playerbots posture), while
+    /// `Some` adds the registry exclusion that keeps the 400 `citybot*`
+    /// citizens out of the picker (2026-08-10: 403 rows, 3 real).
     #[test]
     fn accounts_sql_uses_the_configured_prefix_and_never_the_playerbots_schema() {
-        let sql = accounts_sql("rndbot", "my_auth");
+        let sql = accounts_sql("rndbot", "my_auth", None);
         assert!(sql.contains("NOT UPPER(a.username) LIKE 'RNDBOT%'"), "got: {sql}");
         assert!(sql.contains("a.username <> 'AHBOT'"), "got: {sql}");
         assert!(sql.contains("FROM my_auth.account a"), "got: {sql}");
@@ -1038,9 +1056,26 @@ mod tests {
         );
         // A customised prefix reaches the SQL — this was hardcoded 'RNDBOT%',
         // so such a server got every bot account in its picker.
-        let custom = accounts_sql("fakebot", "acore_auth");
+        let custom = accounts_sql("fakebot", "acore_auth", None);
         assert!(custom.contains("NOT UPPER(a.username) LIKE 'FAKEBOT%'"), "got: {custom}");
         assert!(!custom.contains("RNDBOT"), "got: {custom}");
+    }
+
+    /// The `Some` arm, isolated: the registry exclusion appears, carries the
+    /// RESOLVED playerbots name, covers type 3 (citizens — the accounts the
+    /// prefix arm can never match), and the prefix arm survives alongside it
+    /// (either-signal, mirroring `botid::bot_clause`).
+    #[test]
+    fn accounts_sql_with_a_playerbots_name_excludes_registry_accounts_too() {
+        let sql = accounts_sql("rndbot", "my_auth", Some("my_pb"));
+        assert!(
+            sql.contains(
+                "a.id NOT IN (SELECT account_id FROM my_pb.playerbots_account_type WHERE account_type IN (1,2,3))"
+            ),
+            "registry exclusion missing: {sql}"
+        );
+        assert!(sql.contains("NOT UPPER(a.username) LIKE 'RNDBOT%'"), "prefix arm must survive: {sql}");
+        assert!(!sql.contains("acore_"), "got: {sql}");
     }
 
     /// The 2026-08-01 incident, pinned: `native-test` had 1000 bot characters

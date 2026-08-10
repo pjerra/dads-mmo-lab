@@ -37,7 +37,7 @@ fn base_filters() -> dml_wow::pages::BotFilters {
 fn every_user_data_builder_carries_the_resolved_names_and_never_acore() {
     let n = renamed();
 
-    let accounts = dml_wow::pages::accounts_sql("rndbot", &n.auth);
+    let accounts = dml_wow::pages::accounts_sql("rndbot", &n.auth, n.playerbots.as_deref());
     assert!(accounts.contains("FROM my_auth.account a"), "accounts: {accounts}");
     assert!(accounts.contains("FROM my_auth.account_access"), "accounts: {accounts}");
 
@@ -113,9 +113,9 @@ fn a_playerbots_less_server_degrades_instead_of_guessing() {
     assert!(!dump.iter().any(|a| a.contains("playerbots")), "dump must omit it: {dump:?}");
     assert!(dump.iter().any(|a| a == "my_chars") && dump.iter().any(|a| a == "my_auth"));
 
-    assert_eq!(
-        dml_wow::pages::accounts_sql("rndbot", &n.auth),
-        dml_wow::pages::accounts_sql("rndbot", &renamed().auth),
-        "the picker never touches the playerbots schema, present or not"
+    let picker = dml_wow::pages::accounts_sql("rndbot", &n.auth, n.playerbots.as_deref());
+    assert!(
+        !picker.contains("playerbots"),
+        "with no playerbots schema the picker must not mention it: {picker}"
     );
 }

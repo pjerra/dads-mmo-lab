@@ -7130,16 +7130,23 @@ case "$cmd" in
         # The bot test is _bot_username_is_bot (the shared prefix, read from
         # playerbots.conf) rather than a hardcoded RNDBOT%, so a server with a
         # customised AiPlayerbot.RandomBotAccountPrefix does not get its bot
-        # accounts in the picker. Deliberately PREFIX-ONLY: this is the one
-        # bot filter that does not require the acore_playerbots schema to
-        # exist, and the character picker must not start erroring on a box
-        # without the playerbots module.
+        # accounts in the picker. The prefix arm must not REQUIRE the
+        # playerbots schema (a picker that errors on a schema-less box is
+        # worse than one that shows bots) -- but when _db_names_resolve DID
+        # produce one, the registry exclusion is added too: mod-city-bots'
+        # 400 citybot* citizens carry registry type 3 and no rndbot prefix,
+        # and they buried the picker (403 rows, 3 real -- 2026-08-10).
+        # Keep in sync with Rust pages.rs::accounts_sql.
         _db_names_require
+        registry_arm=""
+        if [[ -n "$DB_NAME_PLAYERBOTS" ]]; then
+            registry_arm=" AND a.id NOT IN (SELECT account_id FROM $DB_NAME_PLAYERBOTS.playerbots_account_type WHERE account_type IN (1,2,3))"
+        fi
         sql="SELECT a.id, a.username, COALESCE(g.gmlevel,0), COALESCE(c.guid,''), COALESCE(c.name,''), COALESCE(c.level,'')
              FROM $DB_NAME_AUTH.account a
              LEFT JOIN (SELECT id, MAX(gmlevel) AS gmlevel FROM $DB_NAME_AUTH.account_access GROUP BY id) g ON g.id = a.id
              LEFT JOIN characters c ON c.account = a.id
-             WHERE NOT $(_bot_username_is_bot a.username) AND a.username <> 'AHBOT'
+             WHERE NOT $(_bot_username_is_bot a.username)$registry_arm AND a.username <> 'AHBOT'
              ORDER BY a.id, c.level DESC;"
         rows="$(db_chars_query "$sql")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters/auth database" "Is ac-database running?"; exit 1; }

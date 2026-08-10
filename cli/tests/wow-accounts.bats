@@ -79,16 +79,30 @@ teardown() { teardown_fixture; }
   ! grep -q 'RNDBOT' "$FIXTURE/query.log"
 }
 
-@test "accounts SQL never depends on the acore_playerbots schema" {
-  # Deliberately prefix-only: the character picker is the one bot filter that
-  # must keep working on a box with no playerbots module, so the registry
-  # subselect (which would error there) stays out of THIS query.
+@test "accounts SQL adds the registry exclusion when a playerbots schema resolves" {
+  # mod-city-bots' citybot* citizens carry registry type 3 and no rndbot
+  # prefix, so prefix-only listed all 400 as family (2026-08-10: 403 rows in
+  # the picker, 3 real). The default fixture resolves acore_playerbots via the
+  # seeded playerbots.conf.dist, so the exclusion must appear with that name.
   printf '' > "$FIXTURE/rows.tsv"
   export DML_STUB_DB_ROWS="$FIXTURE/rows.tsv"
   export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
   run bash "$DML" wow accounts --json
   [ "$status" -eq 0 ]
-  ! grep -q 'acore_playerbots' "$FIXTURE/query.log"
+  grep -q 'a.id NOT IN (SELECT account_id FROM acore_playerbots.playerbots_account_type WHERE account_type IN (1,2,3))' "$FIXTURE/query.log"
+}
+
+@test "accounts SQL degrades to prefix-only on a box with no playerbots schema" {
+  # The picker must not REQUIRE the playerbots schema: with nothing resolving
+  # one, the registry subselect (which would error there) stays out entirely.
+  rm -f "$DML_GAMES_DIR/wow-server-playerbots/env/dist/etc/modules/playerbots.conf.dist"
+  printf '' > "$FIXTURE/rows.tsv"
+  export DML_STUB_DB_ROWS="$FIXTURE/rows.tsv"
+  export DML_STUB_DB_QUERY_LOG="$FIXTURE/query.log"
+  run bash "$DML" wow accounts --json
+  [ "$status" -eq 0 ]
+  grep -q "NOT UPPER(a.username) LIKE 'RNDBOT%'" "$FIXTURE/query.log"
+  ! grep -q 'playerbots_account_type' "$FIXTURE/query.log"
 }
 
 @test "accounts SQL orders by a.id (grouping depends on contiguous rows)" {
