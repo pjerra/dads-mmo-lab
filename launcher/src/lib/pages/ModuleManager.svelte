@@ -65,6 +65,7 @@
   import { canBuild } from "$lib/module-canbuild";
   import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
   import { requestConfFile, requestTuning } from "$lib/module-nav.svelte";
+  import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -225,6 +226,85 @@
       showErr(e);
     } finally {
       moduleBusy.busy = false;
+    }
+  }
+
+  // Needs-setup notices (Modules-page round, Task 5): installed rows whose
+  // key has a setup-catalog entry get an amber "Needs setup" chip + a panel
+  // (summary, steps, guided actions, "Mark as done"). Dismissal is stored in
+  // localStorage (recorded deviation #2 in the plan header, not
+  // launcher.json) keyed by server dir + module key -- SETUP_SERVER is a
+  // literal placeholder because nothing on this page currently exposes the
+  // real server identity; a later round can thread the real one through
+  // without changing setupDoneKey's signature.
+  const SETUP_SERVER = "native";
+  let setupOpen: string | null = $state(null);
+  let setupCopied: string | null = $state(null);
+  // localStorage reads inside needsSetup() aren't tracked by Svelte's
+  // reactivity -- bumping this on every dismissal forces `needsSetup` (and
+  // anything that calls it in a template) to re-evaluate.
+  let setupDismissals = $state(0);
+
+  function needsSetup(key: string): boolean {
+    setupDismissals;
+    if (!setupFor(key)) return false;
+    try {
+      return !localStorage.getItem(setupDoneKey(SETUP_SERVER, key));
+    } catch {
+      // Storage can be unavailable (e.g. locked down webview) -- fail open
+      // so the notice still shows rather than silently vanishing.
+      return true;
+    }
+  }
+
+  function toggleSetup(key: string) {
+    setupOpen = setupOpen === key ? null : key;
+    setupCopied = null;
+  }
+
+  function markSetupDone(key: string) {
+    try {
+      localStorage.setItem(setupDoneKey(SETUP_SERVER, key), "1");
+    } catch {
+      // Best-effort -- the chip just won't stay dismissed across reloads.
+    }
+    setupDismissals++;
+    setupOpen = null;
+  }
+
+  async function copySetupCommand(command: string) {
+    try {
+      await navigator.clipboard.writeText(command);
+      setupCopied = command;
+      setTimeout(() => {
+        if (setupCopied === command) setupCopied = null;
+      }, 2000);
+    } catch {
+      // Clipboard access can be denied -- the action just won't flash "copied".
+    }
+  }
+
+  // Dispatches a setup action to whichever existing machinery it wraps --
+  // no new mutation surfaces (plan Task 5 interface).
+  function runSetupAction(a: SetupAction) {
+    switch (a.type) {
+      case "open-tuner":
+        requestTuning(a.key);
+        tab = "tuning";
+        break;
+      case "open-files":
+        requestConfFile(a.file);
+        tab = "files";
+        break;
+      case "place-npc":
+        void placeNpc(a.key, a.label);
+        break;
+      case "fixit":
+        void fixitBattlepassNpc();
+        break;
+      case "copy-command":
+        void copySetupCommand(a.command);
+        break;
     }
   }
 
@@ -680,6 +760,46 @@
     </div>
   {/if}
 
+  <!-- Needs-setup chip + panel (Modules-page round, Task 5), shared between
+       the cpp and lua rows below -- both families have catalog entries
+       (mod-ahbot/mod-arac are cpp; battlepass/bmah/mod-1v1-arena/
+       mod-npc-beastmaster/mod-transmog can be lua). -->
+  {#snippet setupChip(key: string)}
+    {#if setupFor(key)}
+      {#if needsSetup(key)}<span class="badge warn">Needs setup</span>{/if}
+      <button class="setup-link" onclick={() => toggleSetup(key)}>
+        {needsSetup(key) ? "Setup…" : "Setup"}
+      </button>
+    {/if}
+  {/snippet}
+
+  {#snippet setupPanel(key: string)}
+    {#if setupOpen === key}
+      {@const setup = setupFor(key)}
+      {#if setup}
+        <div class="setup-panel">
+          <p>{setup.summary}</p>
+          <ol>
+            {#each setup.steps as step (step)}
+              <li>{step}</li>
+            {/each}
+          </ol>
+          {#if setup.actions.length > 0}
+            <div class="row">
+              {#each setup.actions as action (action.label)}
+                <button onclick={() => runSetupAction(action)} disabled={busy}>{action.label}</button>
+              {/each}
+            </div>
+          {/if}
+          {#if setupCopied}<p class="muted">Copied to clipboard.</p>{/if}
+          <div class="row">
+            <button onclick={() => markSetupDone(key)}>Mark as done</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
+  {/snippet}
+
   {#snippet cppRow(m: CppModule)}
     {@const ver = versionLabel(m.head, m.head_date)}
     {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
@@ -720,6 +840,7 @@
           title="Open {m.conf_name} in Module files"
         >{m.conf_name}</button>
       {/if}
+      {#if m.installed}{@render setupChip(m.key)}{/if}
       <span class="spacer"></span>
       {#if !m.installed}
         <button
@@ -783,6 +904,7 @@
         </button>
       {/if}
     </div>
+    {@render setupPanel(m.key)}
     {#if repairOpen === m.key}
       <div class="repair-panel">
         {#if repairError}<p class="inline-error">{repairError}</p>{/if}
@@ -902,6 +1024,7 @@
         {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
       </div>
       <span class="badge {luaStatus(m) === 'installed' ? 'on' : luaStatus(m) === 'cloned' ? 'warn' : 'off'}">{luaStatusLabel(luaStatus(m))}</span>
+      {#if m.deployed}{@render setupChip(m.key)}{/if}
       <span class="spacer"></span>
       {#if m.has_sql}
         <label class="row">
@@ -959,6 +1082,7 @@
         {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
       </button>
     </div>
+    {#if m.deployed}{@render setupPanel(m.key)}{/if}
     {#if m.warn}
       <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
            `.test` command), shown only when the CLI reports it. -->
@@ -1373,6 +1497,20 @@
   .chip.tracked { color: #3fb950; border-color: #3fb950; }
   .chip.untracked { color: #8b949e; }
   .repair-results { display: flex; flex-direction: column; gap: 6px; }
+  /* Needs-setup notices (Modules-page round, Task 5): "Setup…"/"Setup" reads
+     as a text label like .conf-link, not a full button; the panel reuses
+     the repair-panel's visual pattern. */
+  .setup-link {
+    background: none;
+    border: none;
+    color: #d29922;
+    font-size: 12px;
+    padding: 0;
+    cursor: pointer;
+  }
+  .setup-link:hover { text-decoration: underline; }
+  .setup-panel { margin: 0 0 6px 0; padding: 10px 12px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; }
+  .setup-panel ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
   .usage { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; margin: 0; font-size: 12px; color: #8b949e; overflow-x: auto; white-space: pre; }
   /* Check-for-updates busy spinner (Tools page's doctor-button pattern). */
   .spinner {
