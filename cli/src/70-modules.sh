@@ -147,11 +147,28 @@ _cpp_installed() { [[ -d "$1/modules/$2/.git" ]]; }
 
 _rebuild_pending_file() { echo "$1/.dml-rebuild-pending"; }
 
+# Advisory: the trailing `2>/dev/null || true` on the append is load-bearing
+# under the global `set -e`. A `||` list only protects the command BEFORE the
+# final `||`, so an append that fails (unwritable server dir, or a directory
+# sitting at the marker path) used to kill the whole install/update mid-flow
+# -- the caller's `return 0` never ran. The marker is a convenience for the
+# rebuild banner; it must never take the operation down with it. Callers that
+# report on it must ask `_rebuild_pending_has` instead of trusting this exit.
 _rebuild_pending_add() {
     local f; f="$(_rebuild_pending_file "$1")"
-    grep -qxF "$2" "$f" 2>/dev/null || printf '%s\n' "$2" >> "$f"
+    grep -qxF "$2" "$f" 2>/dev/null || printf '%s\n' "$2" >> "$f" 2>/dev/null || true
     return 0
 }
+
+# Did the marker file REALLY end up recording this key? `_rebuild_pending_add`
+# above always returns 0 on purpose (an unguarded call must never kill the
+# script under the global `set -e`), so its exit status says nothing about
+# whether the append happened -- an unwritable server dir, or a stray
+# directory sitting at the marker path, fails silently there. Callers that
+# report "the rebuild banner is up" must read the file back through this
+# helper instead. Mirrors Rust `rebuild_pending_add(...).is_ok()`
+# (crates/dml-wow/src/modmgr.rs). Exit status IS the signal.
+_rebuild_pending_has() { grep -qxF "$2" "$(_rebuild_pending_file "$1")" 2>/dev/null; }
 
 _rebuild_pending_clear() { rm -f "$(_rebuild_pending_file "$1")"; return 0; }
 
@@ -973,7 +990,14 @@ _wow_pull_repo() {
     if [[ -n "$dirty" ]]; then
         stamp="$(date -u +%Y%m%d-%H%M%S)"
         patch="$dir/local-changes-$stamp.patch"
-        if ! (cd "$dir" && git diff) > "$patch" 2>/dev/null; then
+        # `--binary HEAD`, not a bare `git diff` (mirrors Rust
+        # `git_diff_capture`): a bare diff is worktree-vs-INDEX, so an edit the
+        # user had already `git add`ed was backed up as an EMPTY patch while
+        # the stash below carried it away -- the "your edits are safe in two
+        # places" promise was false for exactly the user who was mid-commit.
+        # `--binary` keeps a modified binary asset (DBC/MPQ blobs ship in some
+        # module repos) re-appliable instead of a "Binary files differ" stub.
+        if ! (cd "$dir" && git diff --binary HEAD) > "$patch" 2>/dev/null; then
             rm -f "$patch"
             ndjson_error EDIT_BACKUP_FAILED "$label: could not back up local changes -- aborting" "Nothing was pulled."
             return 1

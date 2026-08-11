@@ -5520,12 +5520,23 @@ case "$cmd" in
                 # the rebuild-pending list (Batch 5 F2, sanctioned deviation
                 # from the generic cpp path). Its follow-up step is the
                 # client-patch arm + a plain restart instead.
-                rebreq=true
+                # `mmarked` is the REAL outcome of the marker write, kept
+                # separate from `rebreq` on purpose (Task 2, mirrors Rust
+                # `install_cpp`): a module whose marker could not be written
+                # still NEEDS a rebuild -- flipping rebuild_required to a
+                # comforting false there would trade one lie for a worse one.
+                # Only the db-import advisory below rides on `mmarked`.
+                rebreq=true; mmarked=false
                 if [[ "$mkey" == mod-arac ]]; then
                   rebreq=false
                   ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
                 else
                   _rebuild_pending_add "$sdir" "$mkey"
+                  if _rebuild_pending_has "$sdir" "$mkey"; then
+                    mmarked=true
+                  else
+                    ndjson_line warn "could not write $(_rebuild_pending_file "$sdir") -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this module stays uncompiled."
+                  fi
                 fi
                 # Auto-activate the module's own conf (Modules-page round,
                 # Task 1) -- mirrors Rust `install_cpp`'s call to
@@ -5535,7 +5546,15 @@ case "$cmd" in
                 if [[ -n "$actconf" ]]; then
                   ndjson_line info "Activated $actconf with defaults -- tune it on the Modules page."
                 fi
-                ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                # The db-import advisory is only TRUE for a module that will
+                # actually be compiled in -- db-import runs as part of the
+                # rebuild the marker asks for. mod-arac never rebuilds, so it
+                # gets the opposite (and correct) instruction instead.
+                if [[ "$mmarked" == true ]]; then
+                  ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                elif [[ "$mkey" == mod-arac ]]; then
+                  ndjson_line info "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel)."
+                fi
                 ndjson_section_end module-install ok
                 ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":$rebreq}"
                 ;;
@@ -6453,20 +6472,47 @@ case "$cmd" in
             uchanged=false; upend=false
             if [[ "$_WOW_PULL_CHANGED" == true ]]; then
               uchanged=true
+              # Update honesty (Modules-page round, Task 2 -- mirrors Rust
+              # `update_module`). Two claims used to be made blind:
+              #   * pending_rebuild:true came from the mere INTENT to mark, so
+              #     a marker write that failed still told the launcher "the
+              #     rebuild banner is up". It wasn't, and the freshly pulled
+              #     module silently never compiled.
+              #   * the db-import advisory was said on EVERY changed update,
+              #     mod-arac included. Arac never rebuilds, so its db-import
+              #     never runs and its new SQL is NOT applied -- the
+              #     reassurance was exactly backwards for the one module that
+              #     needs manual work.
               # mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- same
               # sanctioned skip as the install path above: never mark it
               # rebuild-pending, point at client-patch + restart instead.
               if [[ "$ukey" == mod-arac ]]; then
                 ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
+                ndjson_line info "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel)."
               else
                 _rebuild_pending_add "$sdir" "$ukey"
-                upend=true
-                ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on the Modules page."
+                if _rebuild_pending_has "$sdir" "$ukey"; then
+                  upend=true
+                  ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on the Modules page."
+                  ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                else
+                  ndjson_line warn "could not write $(_rebuild_pending_file "$sdir") -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this update stays uncompiled."
+                fi
               fi
-              ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
             fi
+            # `rebuild_required` is ADDITIVE (Task 2) and is NOT the same
+            # question as pending_rebuild: it says whether this module needs
+            # compiling at all (everything but data-only mod-arac does), while
+            # pending_rebuild says whether the banner was actually armed. They
+            # disagree exactly when the marker write failed -- and without the
+            # pair the launcher's summary reads that failure as good news.
+            # (`if` rather than `[[ … ]] && …`: under the global `set -e` a
+            # false one-liner test is itself a failing command and would end
+            # the run right here.)
+            ureq=true
+            if [[ "$ukey" == mod-arac ]]; then ureq=false; fi
             ndjson_section_end module-update ok
-            ndjson_done "{\"key\":\"$(json_escape "$ukey")\",\"changed\":$uchanged,\"before\":\"$(json_escape "$ubefore")\",\"after\":\"$(json_escape "$uafter")\",\"pending_rebuild\":$upend}"
+            ndjson_done "{\"key\":\"$(json_escape "$ukey")\",\"changed\":$uchanged,\"before\":\"$(json_escape "$ubefore")\",\"after\":\"$(json_escape "$uafter")\",\"pending_rebuild\":$upend,\"rebuild_required\":$ureq}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"

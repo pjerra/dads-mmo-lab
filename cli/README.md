@@ -416,15 +416,26 @@ silently ignored (treated as if omitted), rather than rejected.
   Playerbots server not installed).
 
 - `dml wow module update --key <mod-key> --json` → NDJSON stream, terminal
-  `done` data `{"key","changed","before","after","pending_rebuild"}` — the
-  Modules page's per-module Update button (offered only once
+  `done` data
+  `{"key","changed","before","after","pending_rebuild","rebuild_required"}`
+  — the Modules page's per-module Update button (offered only once
   `update-check` reports it behind): the same patch-backup + stash +
   ff-only-pull + stash-pop idiom as the server-level `wow update`, with
   every gate (key shape, installed, has `.git`, has an origin remote)
-  checked before any mutation. No automatic rebuild — a changed pull marks
+  checked before any mutation. The patch backup is `git diff --binary HEAD`,
+  so a STAGED edit is captured too (a bare `git diff` backed those up as an
+  empty patch while the stash carried them off). No automatic rebuild — a
+  changed pull marks
   the module rebuild-pending (the existing rebuild banner covers compiling
   it) **except** `mod-arac`, which ships no C++ (data-only: SQL + DBC +
   MPQ) and instead needs a client-patch + restart, never a rebuild.
+  `pending_rebuild` reports whether that marker was REALLY written (a failed
+  write warns and stays `false`); `rebuild_required` — additive — says
+  whether the module needs compiling at all, so the two together separate
+  "nothing to compile" (arac) from "nobody queued it". The db-import
+  advisory ("module SQL … is applied automatically … on next start") is
+  emitted only when the marker landed; `mod-arac` is told the opposite,
+  since its SQL is never auto-applied.
   `mod-playerbots` always refuses (`BAD_ARG`) — it tracks the custom
   AzerothCore fork and updates together with the server core via `wow
   update`, never on its own. Errors: `BAD_ARG` (invalid/refused key),

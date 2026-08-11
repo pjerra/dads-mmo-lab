@@ -116,6 +116,27 @@ src() {
   echo "$output" | grep -q '"event":"done"'
 }
 
+@test "module install cpp: marker write fails -> warn, no db-import promise, rebuild_required stays true" {
+  # A DIRECTORY where the marker FILE belongs. The install still succeeds (the
+  # marker is advisory) but the rebuild banner will never light up, so the
+  # "db-import applies your SQL on next start" reassurance would be false.
+  mkdir -p "$SDIR/.dml-rebuild-pending"
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"rebuild_required":true'
+  [ "$(echo "$output" | grep -c 'the rebuild banner will NOT light up')" = 1 ]
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
+}
+
+@test "module install cpp: mod-arac is told its SQL is NOT auto-applied" {
+  run bash "$DML" wow module install --family cpp --key mod-arac --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"rebuild_required":false'
+  [ ! -f "$SDIR/.dml-rebuild-pending" ]
+  [ "$(echo "$output" | grep -c 'new SQL is NOT auto-applied')" = 1 ]
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
+}
+
 @test "module install cpp: already installed -> git pull (update)" {
   mkdir -p "$SDIR/modules/mod-aoe-loot/.git"
   export DML_STUB_GIT_LOG="$FIXTURE/git.log"
