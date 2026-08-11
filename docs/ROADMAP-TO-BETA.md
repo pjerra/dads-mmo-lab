@@ -371,11 +371,20 @@ Three verified facts make this work, and each one was checked, not assumed:
    there, so containers an installer creates are the same ones native mode
    manages afterwards. That is the whole trick — no docker-in-docker, no socket
    forwarding.
-2. **No sudo is needed.** `install_docker()` in
-   `guides/wow-wotlk/install-wow-wotlk-ubuntu.sh` returns 0 immediately when
-   docker and the compose plugin are both present, and EVERY `sudo` in that
-   script sits inside the path that check skips. The sudo-password problem that
-   would otherwise sink this simply does not arise.
+2. **The Docker-install sudo is skipped — but a sudo PROMPT still happens.**
+   (Corrected 2026-08-11; the original claim "no sudo is needed" was too
+   strong and was already wrong when written.) `install_docker()` in
+   `guides/wow-wotlk/install-wow-wotlk-ubuntu.sh` does return 0 before any
+   `sudo` when docker and the compose plugin are both present — that half
+   holds, verified again against upstream's 2026-08 rework. But the script's
+   TOP-LEVEL flow runs an unconditional `sudo -v` (with a keep-alive loop)
+   and ABORTS if credentials cannot be cached, regardless of whether Docker
+   is present. The 2026-08-01 verification read `install_docker()` and
+   missed the main flow. Consequence for the runner: the streamed terminal
+   is interactive anyway (the script opens with an ask_yes_no), so the user
+   can type their password — but a password prompt IS part of the flow, and
+   a fully unattended run is not possible without patching the script or
+   pre-caching sudo in the distro.
 3. **Vanilla and TBC are CMaNGOS, not AzerothCore** (`cmangos/mangos-classic`,
    `cmangos/mangos-tbc`, `cmangos/playerbots`). Different build, different DB,
    different containers — so `install_native.rs`, which is AzerothCore-shaped
