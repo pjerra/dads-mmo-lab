@@ -5527,6 +5527,14 @@ case "$cmd" in
                 else
                   _rebuild_pending_add "$sdir" "$mkey"
                 fi
+                # Auto-activate the module's own conf (Modules-page round,
+                # Task 1) -- mirrors Rust `install_cpp`'s call to
+                # `moduletail::conf_activate`. Advisory: an existing conf is
+                # never overwritten and a failure is silent.
+                actconf="$(_module_conf_auto_activate "$sdir" "$mkey" || true)"
+                if [[ -n "$actconf" ]]; then
+                  ndjson_line info "Activated $actconf with defaults -- tune it on the Modules page."
+                fi
                 ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
                 ndjson_section_end module-install ok
                 ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":$rebreq}"

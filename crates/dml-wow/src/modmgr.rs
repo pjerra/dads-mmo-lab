@@ -1617,6 +1617,17 @@ pub fn install_cpp(
         let _ = rebuild_pending_add(sdir, &mkey);
         true
     };
+    // Auto-activate the module's own conf (Modules-page round, Task 1): a
+    // freshly cloned module whose repo already ships a `.conf.dist` gets it
+    // copied into the active dir so the server actually reads its settings
+    // instead of silently running stock defaults. STRICTLY ADVISORY -- an
+    // existing conf is never overwritten (the user's edits win) and every
+    // non-`Activated` outcome, errors included, is silent: an install must
+    // not fail over a conf nicety. Modules whose `.dist` only appears after
+    // a rebuild get picked up by the launcher's catch-up pass instead.
+    if let Ok(crate::moduletail::ConfActivateOutcome::Activated(cname)) = crate::moduletail::conf_activate(sdir, &mkey, false) {
+        emit(line_event("info", format!("Activated {cname} with defaults -- tune it on the Modules page.")));
+    }
     emit(line_event("info", "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"));
     Ok(serde_json::json!({"key": mkey, "action": action, "rebuild_required": rebuild_required}))
 }
@@ -3649,6 +3660,129 @@ mod tests {
 
         // The guard never ran the config probe at all for a lua install.
         assert!(!calls.contains("config"), "no config probe expected for a lua install:\n{calls}");
+    }
+
+    // -- install_cpp: auto-activate the module's conf (Modules-page round,
+    // Task 1) --------------------------------------------------------------
+    //
+    // These drive `install_cpp` DIRECTLY (not through
+    // `module_install_stream_with`) because the thing under test is the
+    // clone's aftermath, and the stream wrapper's build-config guard needs a
+    // fake docker that has nothing to say about it. The `git` here is a fake
+    // that materialises the clone -- optionally carrying a `conf/<name>.dist`
+    // the way a real module repo does after a rebuild.
+
+    /// A stand-in `git` whose only real behaviour is `clone`: it creates
+    /// `<dest>/.git` (so `cpp_installed` answers yes afterwards) and, when
+    /// `FAKE_CLONE_CONF` is set, `<dest>/conf/<FAKE_CLONE_CONF>.dist` with a
+    /// known body. Per-platform per the test-portability rule.
+    #[cfg(windows)]
+    fn write_fake_clone_git(dir: &Path) -> PathBuf {
+        let p = dir.join("fake-git-clone.cmd");
+        let script = "@echo off\r\n\
+            if not \"%1\"==\"clone\" exit /b 0\r\n\
+            set DEST=\r\n\
+            :nextarg\r\n\
+            if \"%~1\"==\"\" goto gotdest\r\n\
+            set DEST=%~1\r\n\
+            shift\r\n\
+            goto nextarg\r\n\
+            :gotdest\r\n\
+            mkdir \"%DEST%\\.git\" 2>nul\r\n\
+            if not defined FAKE_CLONE_CONF exit /b 0\r\n\
+            mkdir \"%DEST%\\conf\" 2>nul\r\n\
+            >\"%DEST%\\conf\\%FAKE_CLONE_CONF%.dist\" echo DIST DEFAULTS\r\n\
+            exit /b 0\r\n";
+        std::fs::write(&p, script).unwrap();
+        p
+    }
+    #[cfg(not(windows))]
+    fn write_fake_clone_git(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-git-clone.sh");
+        let script = "#!/bin/sh\n\
+            [ \"$1\" = clone ] || exit 0\n\
+            for a in \"$@\"; do dest=\"$a\"; done\n\
+            mkdir -p \"$dest/.git\"\n\
+            if [ -n \"${FAKE_CLONE_CONF:-}\" ]; then\n\
+            \x20 mkdir -p \"$dest/conf\"\n\
+            \x20 printf 'DIST DEFAULTS\\n' > \"$dest/conf/$FAKE_CLONE_CONF.dist\"\n\
+            fi\n\
+            exit 0\n";
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// Drives `install_cpp` with [`write_fake_clone_git`]. `preexisting`
+    /// seeds `env/dist/etc/modules/<conf_name>` before the install.
+    /// Returns `(events, active_conf_contents)`.
+    fn run_install_cpp_direct(
+        tag: &str,
+        key: &str,
+        conf_name: Option<&str>,
+        clone_carries_dist: bool,
+        preexisting: Option<&str>,
+    ) -> (Vec<serde_json::Value>, Option<String>) {
+        let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let d = tmp_dir(&format!("autoconf-{tag}"));
+        let git = write_fake_clone_git(&d);
+        match (conf_name, clone_carries_dist) {
+            (Some(c), true) => std::env::set_var("FAKE_CLONE_CONF", c),
+            _ => std::env::remove_var("FAKE_CLONE_CONF"),
+        }
+        let active = d.join("env").join("dist").join("etc").join("modules");
+        if let (Some(body), Some(c)) = (preexisting, conf_name) {
+            std::fs::create_dir_all(&active).unwrap();
+            std::fs::write(active.join(c), body).unwrap();
+        }
+
+        let events = std::cell::RefCell::new(Vec::new());
+        let _ = install_cpp(git.as_os_str(), &d, Some(key), None, None, &|v| events.borrow_mut().push(v));
+
+        std::env::remove_var("FAKE_CLONE_CONF");
+        let contents = conf_name.and_then(|c| std::fs::read_to_string(active.join(c)).ok());
+        let events = events.into_inner();
+        let _ = std::fs::remove_dir_all(&d);
+        (events, contents)
+    }
+
+    fn has_info_containing(events: &[serde_json::Value], needle: &str) -> bool {
+        events
+            .iter()
+            .any(|e| e["event"] == "line" && e["text"].as_str().unwrap_or("").contains(needle))
+    }
+
+    #[test]
+    fn a_install_cpp_activates_the_conf_it_just_cloned() {
+        let (events, contents) = run_install_cpp_direct("fresh", "mod-solocraft", Some("Solocraft.conf"), true, None);
+        assert_eq!(contents.as_deref().map(str::trim), Some("DIST DEFAULTS"), "{events:#?}");
+        assert!(
+            has_info_containing(&events, "Activated Solocraft.conf with defaults"),
+            "expected the activation note:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_install_cpp_leaves_an_existing_conf_byte_identical() {
+        let (events, contents) =
+            run_install_cpp_direct("keep", "mod-solocraft", Some("Solocraft.conf"), true, Some("USER EDIT\n"));
+        assert_eq!(contents.as_deref(), Some("USER EDIT\n"), "{events:#?}");
+        assert!(
+            !has_info_containing(&events, "Activated Solocraft.conf"),
+            "no activation note when nothing was activated:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_install_cpp_says_nothing_when_the_clone_carries_no_dist() {
+        let (events, contents) = run_install_cpp_direct("nodist", "mod-solocraft", Some("Solocraft.conf"), false, None);
+        assert_eq!(contents, None, "no active conf should have appeared:\n{events:#?}");
+        assert!(!has_info_containing(&events, "Activated"), "{events:#?}");
+        // The install itself still succeeded -- auto-activation is advisory.
+        assert!(events.iter().any(|e| e["event"] == "line" && e["text"] == "cloning mod-solocraft..."), "{events:#?}");
+        assert!(!events.iter().any(|e| e["event"] == "error"), "{events:#?}");
     }
 
     #[test]

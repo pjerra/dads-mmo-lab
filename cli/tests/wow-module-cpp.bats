@@ -89,6 +89,33 @@ src() {
   echo "$output" | grep -q '"rebuild_required":true'
 }
 
+@test "module install cpp: activates the conf the clone carried" {
+  export DML_STUB_GIT_CLONE_CONF=mod_aoe_loot.conf
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ -f "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf" ]
+  [ "$(cat "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf")" = "DIST DEFAULTS" ]
+  echo "$output" | grep -q 'Activated mod_aoe_loot.conf with defaults'
+}
+
+@test "module install cpp: an existing conf is left byte-identical" {
+  mkdir -p "$SDIR/env/dist/etc/modules"
+  printf 'USER EDIT\n' > "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf"
+  export DML_STUB_GIT_CLONE_CONF=mod_aoe_loot.conf
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ "$(cat "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf")" = "USER EDIT" ]
+  [ "$(echo "$output" | grep -c 'Activated mod_aoe_loot.conf')" = 0 ]
+}
+
+@test "module install cpp: no .conf.dist in the clone -> no note, install still ok" {
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf" ]
+  [ "$(echo "$output" | grep -c 'Activated')" = 0 ]
+  echo "$output" | grep -q '"event":"done"'
+}
+
 @test "module install cpp: already installed -> git pull (update)" {
   mkdir -p "$SDIR/modules/mod-aoe-loot/.git"
   export DML_STUB_GIT_LOG="$FIXTURE/git.log"

@@ -282,6 +282,27 @@ _module_conf_dist() {
     return 0
 }
 
+# Auto-activate a cpp module's conf after install (Modules-page round, Task
+# 1; mirrors Rust `moduletail::conf_activate` with force=false): copy the
+# clone's .conf.dist into the active dir IFF no active conf exists, so the
+# server actually reads the module's settings instead of silently running
+# stock defaults. STRICTLY ADVISORY -- it never overwrites a user's edited
+# conf and never fails the install (exit 0 always). Echoes the conf name (no
+# trailing newline) when it activated, nothing otherwise. Modules whose
+# .conf.dist only appears after a rebuild activate on the NEXT install/the
+# launcher's catch-up pass instead.
+_module_conf_auto_activate() {
+    local sdir="$1" mkey="$2" cname dist active
+    _module_conf_name_var "$mkey"; cname="$REPLY"
+    [[ -z "$cname" ]] && return 0
+    active="$sdir/env/dist/etc/modules/$cname"
+    [[ -f "$active" ]] && return 0
+    dist="$(_module_conf_dist "$sdir" "$mkey")"
+    [[ -z "$dist" ]] && return 0
+    mkdir -p "$(dirname "$active")" && cp "$dist" "$active" && printf '%s' "$cname"
+    return 0
+}
+
 # --- lua/sql state (list-only in C1; installers land in plan C2) -----------
 # Deployed check per lua key (mirrors the manager's ale_lua_is_deployed).
 _lua_deployed() {
