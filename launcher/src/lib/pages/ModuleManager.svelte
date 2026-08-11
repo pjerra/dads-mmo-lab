@@ -64,6 +64,7 @@
   import { moduleListCache } from "$lib/page-cache.svelte";
   import { canBuild } from "$lib/module-canbuild";
   import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
+  import { requestConfFile, requestTuning } from "$lib/module-nav.svelte";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -238,7 +239,42 @@
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
     try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
   }
-  onMount(refresh);
+
+  // Auto-conf catch-up (Modules-page round, Task 4): a server whose modules
+  // were installed by an older launcher/CLI (before install auto-activated a
+  // module's conf -- Task 1) can still have installed cpp modules sitting at
+  // conf === "ready". One pass, once per page mount, activates every such
+  // conf so the tuning cards aren't hidden behind a manual "Activate conf"
+  // click the user has no reason to know about. Advisory only: a raced
+  // EXISTS/NEEDS_REBUILD from wowModuleConfActivate is swallowed per-module,
+  // never surfaced as a page error.
+  let catchupDone = false;
+  async function autoConfCatchup() {
+    if (catchupDone || busy) return;
+    catchupDone = true;
+    const candidates = (list?.families.cpp ?? []).filter((m) => m.installed && m.conf === "ready");
+    if (candidates.length === 0) return;
+    const activated: string[] = [];
+    for (const m of candidates) {
+      try {
+        const r = await wowModuleConfActivate(m.key);
+        if (r.activated) activated.push(r.conf_name);
+      } catch {
+        // Advisory catch-up -- a race (already active / needs rebuild) is
+        // not an error worth interrupting the page load over.
+      }
+    }
+    if (activated.length > 0) {
+      note = `Activated default configs: ${activated.join(", ")}`;
+      await refresh();
+    }
+  }
+  onMount(() => {
+    void (async () => {
+      await refresh();
+      await autoConfCatchup();
+    })();
+  });
 
   // Streamed operations (install/remove/rebuild) use the sawDone/streamErr
   // contract: the outcome is derived from events captured inside the event
@@ -650,7 +686,15 @@
     <div class="row mrow">
       <div class="mhead">
         <span class="mtitle">
-          <strong class="mname">{m.name}</strong>
+          {#if m.installed}
+            <button
+              class="mname-link"
+              onclick={() => { requestTuning(m.key); tab = "tuning"; }}
+              title="Open this module's tuning card"
+            >{m.name}</button>
+          {:else}
+            <strong class="mname">{m.name}</strong>
+          {/if}
           {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
         </span>
         {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
@@ -668,6 +712,13 @@
         </button>
       {:else if m.conf === "active"}
         <span class="muted">conf active</span>
+      {/if}
+      {#if m.installed && m.conf_name}
+        <button
+          class="conf-link"
+          onclick={() => { requestConfFile(m.conf_name ?? ""); tab = "files"; }}
+          title="Open {m.conf_name} in Module files"
+        >{m.conf_name}</button>
       {/if}
       <span class="spacer"></span>
       {#if !m.installed}
@@ -837,7 +888,15 @@
     <div class="row mrow" class:needs-ale={!aleReady}>
       <div class="mhead">
         <span class="mtitle">
-          <strong class="mname">{m.name}</strong>
+          {#if m.cloned || m.deployed}
+            <button
+              class="mname-link"
+              onclick={() => { requestTuning(m.key); tab = "tuning"; }}
+              title="Open this module's tuning card"
+            >{m.name}</button>
+          {:else}
+            <strong class="mname">{m.name}</strong>
+          {/if}
           {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
         </span>
         {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
@@ -1264,6 +1323,20 @@
   .mhead { display: flex; flex-direction: column; gap: 2px; min-width: 260px; max-width: 460px; }
   .mtitle { display: flex; gap: 8px; align-items: baseline; }
   .mname { min-width: 0; }
+  /* Click-to-open (Modules-page round, Task 4): installed rows' name opens
+     the Tuning tab at that module's card; a known conf filename opens Module
+     files preselected to it. Plain buttons styled as text-with-hover-underline
+     so they read as labels, not chrome. */
+  .mname-link, .conf-link {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font: inherit;
+  }
+  .mname-link { color: #c9d1d9; font-weight: 600; }
+  .conf-link { color: #58a6ff; font-size: 12px; font-family: Consolas, monospace; }
+  .mname-link:hover, .conf-link:hover { text-decoration: underline; }
   .mdesc { color: #8b949e; font-size: 12px; line-height: 1.35; }
   /* Installed clone's last commit (sha · date), from the list arm's additive
      head/head_date fields -- muted version line under the description. */

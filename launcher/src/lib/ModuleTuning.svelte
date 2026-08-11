@@ -40,6 +40,7 @@
   import { applyEvent } from "$lib/terminal-state";
   import { restartState, noteApplyNeeded } from "$lib/restart-state.svelte";
   import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
+  import { takeTuning } from "$lib/module-nav.svelte";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -145,6 +146,23 @@
     aleNote = null;
     liveNote = false;
     note = null;
+  });
+
+  // Click-to-open catch-up (Modules-page round, Task 4): a pending tuning
+  // target set on the Modules tab is consumed here once the server-module
+  // list is actually loaded (takeTuning() clears it, so a later re-activation
+  // of this tab is a no-op). Depends on `active` AND `smLoaded` -- if the
+  // list is still loading when the tab first activates, `smLoaded` flipping
+  // true re-runs this effect and the target is still there to consume.
+  $effect(() => {
+    if (!active || !smLoaded) return;
+    const k = takeTuning();
+    if (!k) return;
+    const m = smModules.find((mm) => mm.key === k);
+    if (!m) return;
+    mtExpand[m.conf] = true;
+    if (!ckLoaded[m.conf]) void loadConfKeys(m.conf);
+    queueMicrotask(() => document.getElementById(`tune-${k}`)?.scrollIntoView({ block: "start" }));
   });
 
   async function loadConfKeys(conf: string) {
@@ -398,7 +416,7 @@
         {@const cpp = cppByKey.get(m.key)}
         {@const ver = versionLabel(cpp?.head, cpp?.head_date)}
         {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
-        <div class="card mod-card">
+        <div class="card mod-card" id="tune-{m.key}">
           <button
             class="mod-head"
             aria-expanded={!!mtExpand[m.conf]}
