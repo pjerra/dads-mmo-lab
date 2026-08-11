@@ -63,6 +63,7 @@
   import ModuleFiles from "$lib/ModuleFiles.svelte";
   import { moduleListCache } from "$lib/page-cache.svelte";
   import { canBuild } from "$lib/module-canbuild";
+  import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -84,6 +85,25 @@
   // this tab's buttons, and vice versa -- the tabs would otherwise race two
   // CLI mutations on the same server checkout.
   const busy = $derived(moduleBusy.busy);
+
+  // Installed/Available split (Modules-page round, Task 3): each family
+  // card's "Available" catalog collapses once anything in that family is
+  // installed, expands on a fresh server with nothing installed yet. The
+  // default is computed ONCE, the first time the list loads -- a $derived
+  // would recompute (and silently re-collapse an Available section the user
+  // just expanded) on every later refresh(), which install/remove trigger
+  // constantly.
+  let cppExpanded = $state(false);
+  let luaExpanded = $state(false);
+  let sqlExpanded = $state(false);
+  let expansionInited = false;
+  $effect(() => {
+    if (expansionInited || !list) return;
+    expansionInited = true;
+    cppExpanded = defaultExpanded(list.families.cpp.filter((m) => m.installed).length);
+    luaExpanded = defaultExpanded(list.families.lua.filter((m) => m.cloned || m.deployed).length);
+    sqlExpanded = defaultExpanded(list.families.sql.filter((m) => m.installed).length);
+  });
 
   let confirmingRebuild = $state(false);
   let backupChecked = $state(true); // "Back up the server first" defaults ON
@@ -624,186 +644,287 @@
     </div>
   {/if}
 
+  {#snippet cppRow(m: CppModule)}
+    {@const ver = versionLabel(m.head, m.head_date)}
+    {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
+    <div class="row mrow">
+      <div class="mhead">
+        <span class="mtitle">
+          <strong class="mname">{m.name}</strong>
+          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+        </span>
+        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+        {#if ver}<span class="mver">{ver}</span>{/if}
+      </div>
+      <span class="badge {statusClass(m)}">{statusText(m)}</span>
+      {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
+      {#if m.conf === "ready"}
+        <button
+          onclick={() => activateConf(m.key)}
+          disabled={busy || featureLocked("modules-conf")}
+          title={featureLocked("modules-conf") ? LOCKED_HINT : undefined}
+        >
+          Activate conf
+        </button>
+      {:else if m.conf === "active"}
+        <span class="muted">conf active</span>
+      {/if}
+      <span class="spacer"></span>
+      {#if !m.installed}
+        <button
+          class="primary"
+          onclick={() => install(m.key, null, m.name)}
+          disabled={busy || featureLocked("modules-cpp")}
+          title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
+        >
+          Install
+        </button>
+      {:else}
+        <!-- The per-module Update replaces the old always-there reinstall
+             button (module-update round): it appears only when the check
+             above reported the module behind, and streams the stash-safe
+             `module update` instead of install's plain pull. -->
+        {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
+          <button
+            class="primary"
+            onclick={() => updateModule(m)}
+            disabled={busy || featureLocked("module-update")}
+            title={featureLocked("module-update")
+              ? LOCKED_HINT
+              : "Pull the module's latest source — a rebuild compiles it afterwards"}
+          >
+            Update
+          </button>
+        {:else if updatesWithServer(m.key)}
+          <span class="muted">updates with the server — use the Server update card below</span>
+        {/if}
+        {#if m.key === "mod-arac"}
+          <button
+            onclick={() => applyClientPatch(m)}
+            disabled={busy || featureLocked("arac-client-patch")}
+            title={featureLocked("arac-client-patch")
+              ? LOCKED_HINT
+              : clientPath?.path
+                ? "Copies ARAC's server DBC files into the data volume and Patch-A.MPQ into your WoW client"
+                : "Copies the server DBC files now — set your WoW client folder (card below) first to also install Patch-A.MPQ"}
+          >
+            Apply client patch
+          </button>
+        {/if}
+        {#if PLACE_NPC_KEYS.has(m.key)}
+          <button
+            onclick={() => placeNpc(m.key, m.name)}
+            disabled={busy || featureLocked("place-npc")}
+            title={featureLocked("place-npc")
+              ? LOCKED_HINT
+              : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+          >
+            Place NPC in capitals
+          </button>
+        {/if}
+        <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
+        <button
+          onclick={() => removeModule(m)}
+          disabled={busy || featureLocked("modules-cpp")}
+          title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
+        >
+          {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
+        </button>
+      {/if}
+    </div>
+    {#if repairOpen === m.key}
+      <div class="repair-panel">
+        {#if repairError}<p class="inline-error">{repairError}</p>{/if}
+        {#if tracking}
+          {#each DB_ORDER as dbName (dbName)}
+            {@const dbData = tracking.dbs[dbName]}
+            <div class="repair-db">
+              <strong class="db-name">{dbName}</strong>
+              {#if dbData.files.length === 0 && dbData.tracked_rows.length === 0}
+                <p class="muted">nothing found</p>
+              {:else}
+                {#if dbData.files.length > 0}
+                  <div class="row">
+                    {#each dbData.files as f (f.name)}
+                      <span class="chip {f.tracked ? 'tracked' : 'untracked'}">{f.name}</span>
+                    {/each}
+                  </div>
+                {/if}
+                {#if dbData.tracked_rows.length > 0}
+                  <div class="row">
+                    {#each dbData.tracked_rows as name (name)}
+                      <span class="muted">{name}</span>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/each}
+
+          <div class="row">
+            <label class="row">
+              DB
+              <select bind:value={repairDb} onchange={disarmRepair} disabled={busy}>
+                <option value="world">world</option>
+                <option value="characters">characters</option>
+                <option value="auth">auth</option>
+              </select>
+            </label>
+            <label class="row">
+              Mode
+              <select bind:value={repairMode} onchange={disarmRepair} disabled={busy}>
+                <option value="mark">Mark as applied — fixes "Table already exists" on start</option>
+                <option value="clear">Clear tracking — makes the server re-apply the SQL (only safe if the SQL is re-runnable)</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            {#if !confirmingRepair}
+              <button
+                class="primary"
+                onclick={() => applyRepair(m)}
+                disabled={busy || featureLocked("module-repair")}
+                title={featureLocked("module-repair") ? LOCKED_HINT : undefined}
+              >
+                Apply
+              </button>
+            {:else}
+              <span>This edits the database's update-tracking records. Continue?</span>
+              <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
+              <button onclick={() => (confirmingRepair = false)} disabled={busy}>Cancel</button>
+            {/if}
+          </div>
+
+          {#if repairResult}
+            <div class="repair-results">
+              {#each repairResult.results as r (r.file)}
+                <div class="row">
+                  <span>{r.file}</span>
+                  <span class="badge {resultClass(r.result)}">{humanizeResult(r.result)}</span>
+                </div>
+              {/each}
+              <p class="muted">Restart the server to apply.</p>
+            </div>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+  {/snippet}
+
   <div class="card">
     <h3>C++ modules</h3>
     {#if list}
-      {#each list.families.cpp as m (m.key)}
-        {@const ver = versionLabel(m.head, m.head_date)}
-        {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
-        <div class="row mrow">
-          <div class="mhead">
-            <span class="mtitle">
-              <strong class="mname">{m.name}</strong>
-              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-            </span>
-            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-            {#if ver}<span class="mver">{ver}</span>{/if}
-          </div>
-          <span class="badge {statusClass(m)}">{statusText(m)}</span>
-          {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
-          {#if m.conf === "ready"}
-            <button
-              onclick={() => activateConf(m.key)}
-              disabled={busy || featureLocked("modules-conf")}
-              title={featureLocked("modules-conf") ? LOCKED_HINT : undefined}
-            >
-              Activate conf
-            </button>
-          {:else if m.conf === "active"}
-            <span class="muted">conf active</span>
-          {/if}
-          <span class="spacer"></span>
-          {#if !m.installed}
-            <button
-              class="primary"
-              onclick={() => install(m.key, null, m.name)}
-              disabled={busy || featureLocked("modules-cpp")}
-              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-            >
-              Install
-            </button>
-          {:else}
-            <!-- The per-module Update replaces the old always-there reinstall
-                 button (module-update round): it appears only when the check
-                 above reported the module behind, and streams the stash-safe
-                 `module update` instead of install's plain pull. -->
-            {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
-              <button
-                class="primary"
-                onclick={() => updateModule(m)}
-                disabled={busy || featureLocked("module-update")}
-                title={featureLocked("module-update")
-                  ? LOCKED_HINT
-                  : "Pull the module's latest source — a rebuild compiles it afterwards"}
-              >
-                Update
-              </button>
-            {:else if updatesWithServer(m.key)}
-              <span class="muted">updates with the server — use the Server update card below</span>
-            {/if}
-            {#if m.key === "mod-arac"}
-              <button
-                onclick={() => applyClientPatch(m)}
-                disabled={busy || featureLocked("arac-client-patch")}
-                title={featureLocked("arac-client-patch")
-                  ? LOCKED_HINT
-                  : clientPath?.path
-                    ? "Copies ARAC's server DBC files into the data volume and Patch-A.MPQ into your WoW client"
-                    : "Copies the server DBC files now — set your WoW client folder (card below) first to also install Patch-A.MPQ"}
-              >
-                Apply client patch
-              </button>
-            {/if}
-            {#if PLACE_NPC_KEYS.has(m.key)}
-              <button
-                onclick={() => placeNpc(m.key, m.name)}
-                disabled={busy || featureLocked("place-npc")}
-                title={featureLocked("place-npc")
-                  ? LOCKED_HINT
-                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Place NPC in capitals
-              </button>
-            {/if}
-            <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
-            <button
-              onclick={() => removeModule(m)}
-              disabled={busy || featureLocked("modules-cpp")}
-              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-            >
-              {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
-            </button>
-          {/if}
-        </div>
-        {#if repairOpen === m.key}
-          <div class="repair-panel">
-            {#if repairError}<p class="inline-error">{repairError}</p>{/if}
-            {#if tracking}
-              {#each DB_ORDER as dbName (dbName)}
-                {@const dbData = tracking.dbs[dbName]}
-                <div class="repair-db">
-                  <strong class="db-name">{dbName}</strong>
-                  {#if dbData.files.length === 0 && dbData.tracked_rows.length === 0}
-                    <p class="muted">nothing found</p>
-                  {:else}
-                    {#if dbData.files.length > 0}
-                      <div class="row">
-                        {#each dbData.files as f (f.name)}
-                          <span class="chip {f.tracked ? 'tracked' : 'untracked'}">{f.name}</span>
-                        {/each}
-                      </div>
-                    {/if}
-                    {#if dbData.tracked_rows.length > 0}
-                      <div class="row">
-                        {#each dbData.tracked_rows as name (name)}
-                          <span class="muted">{name}</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  {/if}
-                </div>
-              {/each}
-
-              <div class="row">
-                <label class="row">
-                  DB
-                  <select bind:value={repairDb} onchange={disarmRepair} disabled={busy}>
-                    <option value="world">world</option>
-                    <option value="characters">characters</option>
-                    <option value="auth">auth</option>
-                  </select>
-                </label>
-                <label class="row">
-                  Mode
-                  <select bind:value={repairMode} onchange={disarmRepair} disabled={busy}>
-                    <option value="mark">Mark as applied — fixes "Table already exists" on start</option>
-                    <option value="clear">Clear tracking — makes the server re-apply the SQL (only safe if the SQL is re-runnable)</option>
-                  </select>
-                </label>
-              </div>
-              <div class="row">
-                {#if !confirmingRepair}
-                  <button
-                    class="primary"
-                    onclick={() => applyRepair(m)}
-                    disabled={busy || featureLocked("module-repair")}
-                    title={featureLocked("module-repair") ? LOCKED_HINT : undefined}
-                  >
-                    Apply
-                  </button>
-                {:else}
-                  <span>This edits the database's update-tracking records. Continue?</span>
-                  <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
-                  <button onclick={() => (confirmingRepair = false)} disabled={busy}>Cancel</button>
-                {/if}
-              </div>
-
-              {#if repairResult}
-                <div class="repair-results">
-                  {#each repairResult.results as r (r.file)}
-                    <div class="row">
-                      <span>{r.file}</span>
-                      <span class="badge {resultClass(r.result)}">{humanizeResult(r.result)}</span>
-                    </div>
-                  {/each}
-                  <p class="muted">Restart the server to apply.</p>
-                </div>
-              {/if}
-            {/if}
-          </div>
-        {/if}
+      {@const parts = splitInstalled(list.families.cpp, (m) => m.installed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render cppRow(m)}
       {/each}
+      <button class="avail-toggle" onclick={() => (cppExpanded = !cppExpanded)}>
+        {cppExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if cppExpanded}
+        {#each parts.available as m (m.key)}
+          {@render cppRow(m)}
+        {/each}
+      {/if}
     {/if}
   </div>
+
+  {#snippet luaRow(m: LuaModule, aleReady: boolean)}
+    <div class="row mrow" class:needs-ale={!aleReady}>
+      <div class="mhead">
+        <span class="mtitle">
+          <strong class="mname">{m.name}</strong>
+          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+        </span>
+        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+      </div>
+      <span class="badge {luaStatus(m) === 'installed' ? 'on' : luaStatus(m) === 'cloned' ? 'warn' : 'off'}">{luaStatusLabel(luaStatus(m))}</span>
+      <span class="spacer"></span>
+      {#if m.has_sql}
+        <label class="row">
+          <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
+          Back up first (recommended)
+        </label>
+      {/if}
+      {#if m.key === "battlepass" && m.deployed}
+        <!-- Batch 3 F13b: the upstream battlepass SQL ships no vendor
+             NPC -- this places entry 90100 in both capitals. -->
+        <button
+          onclick={fixitBattlepassNpc}
+          disabled={busy || featureLocked("module-fixit")}
+          title={featureLocked("module-fixit")
+            ? LOCKED_HINT
+            : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+        >
+          Fix missing NPC
+        </button>
+      {/if}
+      {#if PLACE_NPC_KEYS.has(m.key) && m.deployed}
+        <!-- Batch 2 (overnight): spawn the mod's NPC (e.g. BMAH
+             Auctioneer) in both capitals from its coord block. -->
+        <button
+          onclick={() => placeNpc(m.key, m.name)}
+          disabled={busy || featureLocked("place-npc")}
+          title={featureLocked("place-npc")
+            ? LOCKED_HINT
+            : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+        >
+          Place NPC in capitals
+        </button>
+      {/if}
+      <button
+        class="primary"
+        onclick={() => installLua(m)}
+        disabled={busy || !aleReady || featureLocked("modules-lua")}
+        title={featureLocked("modules-lua")
+          ? LOCKED_HINT
+          : !aleReady
+            ? "Install the ALE module first"
+            : undefined}
+      >
+        Install
+      </button>
+      <button
+        onclick={() => removeLua(m)}
+        disabled={busy || !aleReady || featureLocked("modules-lua")}
+        title={featureLocked("modules-lua")
+          ? LOCKED_HINT
+          : !aleReady
+            ? "Install the ALE module first"
+            : undefined}
+      >
+        {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
+      </button>
+    </div>
+    {#if m.warn}
+      <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
+           `.test` command), shown only when the CLI reports it. -->
+      <p class="mod-warn">⚠ {m.warn}</p>
+    {/if}
+  {/snippet}
 
   <div class="card">
     <h3>Lua scripts (ALE)</h3>
     {#if list}
+      {@const parts = splitInstalled(list.families.lua, (m) => m.cloned || m.deployed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render luaRow(m, list.ale_ready)}
+      {/each}
       {#if !list.ale_ready}
         {@const offer = aleInstallOffer(list.families.cpp, list.ale_ready)}
         <!-- Deliberately NOT hiding the list: it's a catalog of what you
              could install, so hiding it hides the reason to install ALE at
-             all. Rows render disabled beneath this note instead. -->
+             all. Rows render disabled beneath this note instead. Placed
+             above the Available section (Task 3): that's the catalog it's
+             explaining. -->
         <div class="ale-note">
           <p class="muted">
             These scripts need the ALE module (mod-ale) — the Eluna engine that runs
@@ -823,142 +944,93 @@
           {/if}
         </div>
       {/if}
-      {#each list.families.lua as m (m.key)}
-          <div class="row mrow" class:needs-ale={!list.ale_ready}>
-            <div class="mhead">
-              <span class="mtitle">
-                <strong class="mname">{m.name}</strong>
-                {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-              </span>
-              {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-            </div>
-            <span class="badge {m.cloned ? 'on' : 'off'}">Cloned</span>
-            <span class="badge {m.deployed ? 'on' : 'off'}">Deployed</span>
-            <span class="spacer"></span>
-            {#if m.has_sql}
-              <label class="row">
-                <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
-                Back up first (recommended)
-              </label>
-            {/if}
-            {#if m.key === "battlepass" && m.deployed}
-              <!-- Batch 3 F13b: the upstream battlepass SQL ships no vendor
-                   NPC -- this places entry 90100 in both capitals. -->
-              <button
-                onclick={fixitBattlepassNpc}
-                disabled={busy || featureLocked("module-fixit")}
-                title={featureLocked("module-fixit")
-                  ? LOCKED_HINT
-                  : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Fix missing NPC
-              </button>
-            {/if}
-            {#if PLACE_NPC_KEYS.has(m.key) && m.deployed}
-              <!-- Batch 2 (overnight): spawn the mod's NPC (e.g. BMAH
-                   Auctioneer) in both capitals from its coord block. -->
-              <button
-                onclick={() => placeNpc(m.key, m.name)}
-                disabled={busy || featureLocked("place-npc")}
-                title={featureLocked("place-npc")
-                  ? LOCKED_HINT
-                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Place NPC in capitals
-              </button>
-            {/if}
-            <button
-              class="primary"
-              onclick={() => installLua(m)}
-              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua")
-                ? LOCKED_HINT
-                : !list.ale_ready
-                  ? "Install the ALE module first"
-                  : undefined}
-            >
-              Install
-            </button>
-            <button
-              onclick={() => removeLua(m)}
-              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua")
-                ? LOCKED_HINT
-                : !list.ale_ready
-                  ? "Install the ALE module first"
-                  : undefined}
-            >
-              {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-            </button>
-          </div>
-          {#if m.warn}
-            <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
-                 `.test` command), shown only when the CLI reports it. -->
-            <p class="mod-warn">⚠ {m.warn}</p>
-          {/if}
+      <button class="avail-toggle" onclick={() => (luaExpanded = !luaExpanded)}>
+        {luaExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if luaExpanded}
+        {#each parts.available as m (m.key)}
+          {@render luaRow(m, list.ale_ready)}
         {/each}
+      {/if}
     {/if}
   </div>
+
+  {#snippet sqlRow(m: SqlModule)}
+    <div class="row mrow">
+      <div class="mhead">
+        <span class="mtitle">
+          <strong class="mname">{m.name}</strong>
+          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+        </span>
+        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
+      </div>
+      <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
+      {#if m.key === "hearthstone-cd"}
+        <label class="row">
+          Cooldown
+          <select bind:value={hearthstoneVariant} disabled={busy}>
+            <option value="1sec">1sec</option>
+            <option value="1min">1min</option>
+            <option value="5min">5min</option>
+            <option value="15min">15min</option>
+            <option value="30min">30min</option>
+          </select>
+        </label>
+      {:else if m.key === "npc-teleporter"}
+        <label class="row">
+          Level
+          <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
+        </label>
+      {/if}
+      <span class="spacer"></span>
+      <label class="row">
+        <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
+        Back up first (recommended)
+      </label>
+      <button
+        class="primary"
+        onclick={() => installSql(m)}
+        disabled={busy || featureLocked("modules-sql")}
+        title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
+      >
+        Install
+      </button>
+      {#if m.key === "rare-drops"}
+        <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
+      {:else}
+        <button
+          onclick={() => removeSql(m)}
+          disabled={busy || featureLocked("modules-sql")}
+          title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
+        >
+          {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
+        </button>
+      {/if}
+    </div>
+    {#if m.type === "tweak_world"}
+      <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
+    {/if}
+  {/snippet}
 
   <div class="card">
     <h3>SQL mods</h3>
     {#if list}
-      {#each list.families.sql as m (m.key)}
-        <div class="row mrow">
-          <div class="mhead">
-            <span class="mtitle">
-              <strong class="mname">{m.name}</strong>
-              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-            </span>
-            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-          </div>
-          <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
-          {#if m.key === "hearthstone-cd"}
-            <label class="row">
-              Cooldown
-              <select bind:value={hearthstoneVariant} disabled={busy}>
-                <option value="1sec">1sec</option>
-                <option value="1min">1min</option>
-                <option value="5min">5min</option>
-                <option value="15min">15min</option>
-                <option value="30min">30min</option>
-              </select>
-            </label>
-          {:else if m.key === "npc-teleporter"}
-            <label class="row">
-              Level
-              <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
-            </label>
-          {/if}
-          <span class="spacer"></span>
-          <label class="row">
-            <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
-            Back up first (recommended)
-          </label>
-          <button
-            class="primary"
-            onclick={() => installSql(m)}
-            disabled={busy || featureLocked("modules-sql")}
-            title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-          >
-            Install
-          </button>
-          {#if m.key === "rare-drops"}
-            <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
-          {:else}
-            <button
-              onclick={() => removeSql(m)}
-              disabled={busy || featureLocked("modules-sql")}
-              title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-            >
-              {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-            </button>
-          {/if}
-        </div>
-        {#if m.type === "tweak_world"}
-          <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
-        {/if}
+      {@const parts = splitInstalled(list.families.sql, (m) => m.installed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render sqlRow(m)}
       {/each}
+      <button class="avail-toggle" onclick={() => (sqlExpanded = !sqlExpanded)}>
+        {sqlExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if sqlExpanded}
+        {#each parts.available as m (m.key)}
+          {@render sqlRow(m)}
+        {/each}
+      {/if}
     {/if}
   </div>
 
@@ -1155,7 +1227,20 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
   .card h3 { margin: 0; font-size: 15px; color: #58a6ff; }
+  .card h4 { margin: 4px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e; }
   .card p { margin: 0; }
+  /* Installed/Available split (Modules-page round): the toggle reads as a
+     row of its own, not a button competing with the module action buttons. */
+  .avail-toggle {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: #8b949e;
+    font-size: 12px;
+    padding: 4px 0;
+    cursor: pointer;
+  }
+  .avail-toggle:hover { color: #c9d1d9; }
   .warn-card { border-color: #d29922; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .mrow { padding: 6px 0; border-top: 1px solid #21262d; }
