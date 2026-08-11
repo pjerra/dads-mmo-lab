@@ -57,7 +57,19 @@ a post-rebuild advisory names modules whose SQL is still unledgered. Known
 limitation the advisory surfaces by design: modules' `playerbots/updates`
 SQL is outside db-import's reach (mod-playerbots' own updater owns that
 schema) — mod-city-bots' roster file reports as 1 unledgered file forever;
-cosmetic, table exists.
+cosmetic, table exists. **Postscript 2026-08-11: the backlog pass REVERTED
+the 19-mage repair** — `2026_07_25_02_sync_stage_cast_identity_to_roster.sql`
+applies after `07_16_08` in filename order and copies race/class back from
+`acore_playerbots.citizen_roster`, which still held the invalid pairs
+(`07_16_08` fixed characters only, never the source roster). Re-fixed at the
+roster + re-synced characters (19+19 rows, verified 0 unloadable pairs
+server-wide); fix shipped as module update
+`2026_08_11_01_sync_citizen_roster_race_classes.sql` + a patched roster seed,
+both landed on the VM, and the whole module (which had NO version control
+anywhere) now lives in the private GitHub repo `pjerra/mod-city-bots`
+(commit surface is this laptop, not the VM). Lesson: a data fix applied
+downstream of a sync is dead the moment the sync re-runs — fix the sync's
+SOURCE table.
 
 ### Rust CLI workspace
 
