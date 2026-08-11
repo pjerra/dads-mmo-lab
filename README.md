@@ -1,4 +1,4 @@
-# ⚙️ Dad's MMO Lab — Steam Deck Offline MMO Server Project
+# ⚙️ Dad's MMO Lab — Offline MMO Server Project
 
 > *"The games we grew up with deserve to live forever. This project makes that possible on a single handheld device."*
 
@@ -8,7 +8,7 @@
 
 ## 🎯 What Is This?
 
-This is a collection of **step-by-step guides, Docker scripts, and automated installers** for running classic MMO private servers **completely offline** on a Steam Deck, any Linux machine, or Windows 10/11 (via WSL2).
+This is a collaborative collection of **step-by-step guides, Docker scripts, and automated installers** for running classic MMO private servers **completely offline** on a Steam Deck, any Linux machine, or Windows 10/11 (via WSL2). See the Guides folder!
 
 No subscription. No internet required. No servers getting shut down. Just you and the games you love — forever.
 
@@ -258,8 +258,8 @@ All WoW installers ship with **Playerbots** pre-configured — bots that roam th
 | | Vanilla | TBC | WotLK | WotLK Unbound |
 |---|---|---|---|---|
 | **Bot engine** | CMaNGOS Playerbots | CMaNGOS Playerbots | AzerothCore Playerbots | AzerothCore Playerbots |
-| **Bot count** | 600–800 active | 600–800 active | 600–800 active | 600–800 active |
-| **Level range** | Endgame 50–60 | Outlands 57–70 | Full 1–80 (syncs to player) | Full 1–80 (syncs to player) |
+| **Bot count** | 600-800 active | 600-800 active | 600-800 active | 600-800 active |
+| **Level range** | Endgame 50-60 | Outlands 57-70 | Full 1-80 (syncs to player) | Full 1-80 (syncs to player) |
 | **Auction House** | Stocked | Stocked | Stocked | Stocked |
 | **Install time** | ~30 min | ~30 min | ~30 min | ~30 min |
 

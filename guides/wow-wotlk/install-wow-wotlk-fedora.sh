@@ -5,7 +5,7 @@
 #
 #  https://github.com/DadsMmoLab/dads-mmo-lab
 #
-#  Version: 1.3.5 - Fedora
+#  Version: 1.3.6 - Fedora
 #
 #  Usage:
 #    chmod +x install-wow.sh
@@ -20,6 +20,13 @@
 #    6. Sets up the Gaming Mode launcher
 #
 #  Changelog:
+#    1.3.6 — Preflight dependency check
+#      - Added preflight_check(): inspects docker daemon, docker compose,
+#        docker buildx, git, and curl before the install begins
+#      - Prints a visual status table (✅/❌) for each dependency
+#      - Auto-installs missing deps via dnf (standard Fedora) or
+#        rpm-ostree (immutable/Bazzite); respects FEDORA_IMMUTABLE
+#      - Re-verifies all deps after install; exits with clear error if any fail
 #    1.3.5 — docker.socket failed-state recovery (Bazzite)
 #      - Root cause: on Bazzite, docker.socket can be left in a failed state
 #        from a prior run; docker.service then fails with "dependency failed"
@@ -107,7 +114,7 @@
 #      - Heredoc launcher synced with standalone launcher scripts
 # ============================================================
 
-WIZARD_VERSION="1.3.4 - Fedora"
+WIZARD_VERSION="1.3.6 - Fedora"
 
 set -o pipefail
 
@@ -314,9 +321,13 @@ install_docker() {
                 #    session works transparently. User can remove the file after
                 #    their first logout:  sudo rm /etc/sudoers.d/docker-nopasswd
                 print_info "Setting up Docker permissions for this session..."
-                echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-                    sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-                sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+                if [[ -n "$USER" ]]; then
+                    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+                        sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+                    sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+                else
+                    print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
+                fi
                 if ! docker ps &>/dev/null 2>&1; then
                     function docker() { sudo docker "$@"; }
                     export -f docker 2>/dev/null || true
@@ -494,9 +505,13 @@ install_docker() {
     # Add passwordless sudo for docker so it works immediately
     # without requiring logout — fixes "permission denied" on docker socket
     print_info "Setting up Docker permissions..."
-    echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
-        sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
-    sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    if [[ -n "$USER" ]]; then
+        echo "$USER ALL=(ALL) NOPASSWD: /usr/bin/docker" | \
+            sudo tee /etc/sudoers.d/docker-nopasswd > /dev/null 2>&1 || true
+        sudo chmod 0440 /etc/sudoers.d/docker-nopasswd 2>/dev/null || true
+    else
+        print_warning "Could not determine current user — skipping sudoers entry. Docker may require a logout to work without sudo."
+    fi
 
     # If docker still not accessible without sudo — wrap it
     if ! docker ps &>/dev/null 2>&1; then
@@ -570,6 +585,151 @@ install_git() {
             print_info "Try manually: sudo dnf install -y git"
         fi
     fi
+}
+
+# ─────────────────────────────────────────
+# PREFLIGHT CHECK — SYSTEM DEPENDENCIES
+# ─────────────────────────────────────────
+preflight_check() {
+    print_step "Preflight Check — System Dependencies"
+
+    local docker_ok=false docker_compose_ok=false docker_buildx_ok=false
+    local git_ok=false curl_ok=false all_ok=true _pf_reboot_needed=false
+
+    # ── docker daemon ────────────────────────────────────────────────
+    # Require unprivileged access — install_docker handles permission setup
+    # when the daemon is running but the user isn't in the docker group yet.
+    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+        docker_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker compose plugin ────────────────────────────────────────
+    # Only accept the plugin subcommand (`docker compose`); the legacy
+    # standalone `docker-compose` binary is never used by this script.
+    if docker compose version &>/dev/null 2>&1; then
+        docker_compose_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── docker buildx ────────────────────────────────────────────────
+    if docker buildx version &>/dev/null 2>&1; then
+        docker_buildx_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── git ──────────────────────────────────────────────────────────
+    if command -v git &>/dev/null; then
+        git_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── curl ─────────────────────────────────────────────────────────
+    if command -v curl &>/dev/null; then
+        curl_ok=true
+    else
+        all_ok=false
+    fi
+
+    # ── Print status table ───────────────────────────────────────────
+    echo ""
+    printf "  ${WHITE}${BOLD}%-28s %s${NC}\n" "Dependency" "Status"
+    echo -e "  ${DIM}──────────────────────────────────────${NC}"
+    local _label _status _entry
+    for _entry in \
+        "docker (daemon):$docker_ok" \
+        "docker compose:$docker_compose_ok" \
+        "docker buildx:$docker_buildx_ok" \
+        "git:$git_ok" \
+        "curl:$curl_ok"; do
+        _label="${_entry%%:*}"
+        _status="${_entry##*:}"
+        if [[ "$_status" == "true" ]]; then
+            printf "  ${GREEN}✅${NC}  %-26s ${GREEN}OK${NC}\n" "$_label"
+        else
+            printf "  ${RED}❌${NC}  %-26s ${RED}MISSING${NC}\n" "$_label"
+        fi
+    done
+    echo ""
+
+    if [[ "$all_ok" == "true" ]]; then
+        print_success "All dependencies satisfied — ready to build!"
+        return 0
+    fi
+
+    print_info "Some dependencies are missing — installing now..."
+    echo ""
+
+    # ── Install Docker + Compose + Buildx if needed ──────────────────
+    if [[ "$docker_ok" == "false" || "$docker_compose_ok" == "false" || \
+          "$docker_buildx_ok" == "false" ]]; then
+        install_docker
+    fi
+
+    # ── Install Git if needed ────────────────────────────────────────
+    if [[ "$git_ok" == "false" ]]; then
+        install_git
+        # On immutable systems, rpm-ostree layers the package into the next
+        # deployment — git won't be on $PATH until after a reboot.
+        if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]] && \
+           ! command -v git &>/dev/null 2>&1; then
+            _pf_reboot_needed=true
+        fi
+    fi
+
+    # ── Install curl if needed (dnf / rpm-ostree) ────────────────────
+    if [[ "$curl_ok" == "false" ]]; then
+        print_info "Installing curl..."
+        if [[ "${FEDORA_IMMUTABLE:-false}" == "true" ]]; then
+            if ! sudo rpm-ostree install -y --idempotent curl; then
+                print_error "Failed to install curl. Run manually: sudo rpm-ostree install curl"
+                exit 1
+            fi
+            _pf_reboot_needed=true
+            print_success "curl layered via rpm-ostree."
+        else
+            if ! sudo dnf -y install curl; then
+                print_error "Failed to install curl. Run manually: sudo dnf install -y curl"
+                exit 1
+            fi
+            print_success "curl installed!"
+        fi
+    fi
+
+    # ── Reboot if rpm-ostree changes are pending ─────────────────────
+    # rpm-ostree layers packages into the next deployment; they are not
+    # available on $PATH until after a reboot. Trigger one now — consistent
+    # with how install_docker handles the compose plugin on immutable systems.
+    if [[ "$_pf_reboot_needed" == "true" ]]; then
+        echo ""
+        print_warning "New packages were layered via rpm-ostree and require a reboot."
+        print_info "Re-run this script after rebooting to continue the install."
+        print_info "Rebooting in 10 seconds — Ctrl+C to cancel."
+        sleep 10
+        sudo systemctl reboot
+        exit 0
+    fi
+
+    # ── Re-verify after install ──────────────────────────────────────
+    print_info "Verifying all dependencies are now available..."
+    local failed=()
+    command -v docker &>/dev/null || failed+=("docker")
+    docker compose version &>/dev/null 2>&1 || failed+=("docker compose")
+    docker buildx version &>/dev/null 2>&1 || failed+=("docker buildx")
+    command -v git &>/dev/null || failed+=("git")
+    command -v curl &>/dev/null || failed+=("curl")
+
+    if [[ ${#failed[@]} -gt 0 ]]; then
+        print_error "The following dependencies could not be installed: ${failed[*]}"
+        print_info "Install them manually and re-run this script."
+        exit 1
+    fi
+
+    print_success "All dependencies installed and verified!"
 }
 
 # ─────────────────────────────────────────
@@ -990,9 +1150,9 @@ REALMLIST (in your WoW client folder):
   Set to: set realmlist 127.0.0.1
 
 USEFUL COMMANDS:
-  Start:   cd ${SERVER_DIR} && docker compose up -d
-  Stop:    cd ${SERVER_DIR} && docker compose down
-  Logs:    cd ${SERVER_DIR} && docker compose logs -f
+  Start:   cd "${SERVER_DIR}" && docker compose up -d
+  Stop:    cd "${SERVER_DIR}" && docker compose down
+  Logs:    cd "${SERVER_DIR}" && docker compose logs -f
   Console: docker attach \$(docker ps --format '{{.Names}}' | grep worldserver | head -1)
     (Exit safely: Ctrl+P then Ctrl+Q. NOT Ctrl+C.)
 
@@ -1011,6 +1171,58 @@ INFO
 # ─────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────
+# ─────────────────────────────────────────
+# POST-INSTALL RESOURCES
+# ─────────────────────────────────────────
+post_install_resources() {
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${WHITE}${BOLD} STEP D — Resources & Server Management${NC}"
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}The README covers everything you need next:${NC}"
+    echo -e "    • Networking (LAN / online play / port forwarding)"
+    echo -e "    • Server commands and GM tools"
+    echo -e "    • Playerbot configuration"
+    echo -e "    • Troubleshooting and FAQ"
+    echo ""
+    echo -e "  ${CYAN}${BOLD}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+    echo ""
+    if ask_yes_no "Open the GitHub README in your browser now?"; then
+        if command -v xdg-open &>/dev/null; then
+            xdg-open "https://github.com/DadsMmoLab/dads-mmo-lab" &>/dev/null &
+            print_success "Opening browser..."
+        else
+            print_info "Open this URL in your browser:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+    echo -e "${GOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    echo -e "  ${WHITE}${BOLD}wow-manage.sh${NC} is a post-install management tool:"
+    echo -e "    • Start / stop / restart the server"
+    echo -e "    • View live server logs"
+    echo -e "    • Add or remove modules (AH Bot, Solocraft, Transmog…)"
+    echo -e "    • Attach to the worldserver console"
+    echo ""
+    echo -e "  After downloading, run it any time with:"
+    echo -e "  ${GREEN}bash ~/wow-manage.sh${NC}"
+    echo ""
+    if ask_yes_no "Download wow-manage.sh to your home folder now?"; then
+        local manage_url="https://raw.githubusercontent.com/DadsMmoLab/dads-mmo-lab/main/guides/wow-wotlk/wow-manage.sh"
+        if curl -fsSL "$manage_url" -o "$HOME/wow-manage.sh"; then
+            chmod +x "$HOME/wow-manage.sh"
+            print_success "Downloaded to ~/wow-manage.sh"
+            print_info "Run it any time with: bash ~/wow-manage.sh"
+        else
+            print_error "Download failed. Get it manually from:"
+            echo -e "  ${CYAN}https://github.com/DadsMmoLab/dads-mmo-lab${NC}"
+        fi
+    fi
+    echo ""
+}
+
 show_completion() {
     echo ""
     echo -e "${GOLD}${BOLD}╔══════════════════════════════════════════════════╗${NC}"
@@ -1130,9 +1342,11 @@ fi
 SUDO_KEEPALIVE_PID=$!
 trap "kill $SUDO_KEEPALIVE_PID 2>/dev/null; exit" EXIT INT TERM
 
+preflight_check
 show_summary
 install_server
 wait_for_server
 create_accounts
 setup_gaming_mode
 show_completion
+post_install_resources
