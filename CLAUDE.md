@@ -14,15 +14,23 @@ exhaustive everything-ever-asked-for backlog. Three documents, three jobs.
 NATIVE backend, and Wrath Unbound is IN the v0.1.0 cut** (the roadmap carries
 the amendment). Vanilla/TBC move to v0.2 behind the `.sh`-in-a-distro runner.
 
-**`feat/core-family` is the active line** (2026-08-06→): the core-family seam
-(Task 6/12, schema-name resolution both surfaces), the module-rebuild fix
-round below, the VM acceptance round-2 fixes, and the 2026-08-10 launcher
-picker fixes (bot identity incl. citizens, direct-MySQL accounts routing).
-Pushed to origin; parked on the VM acceptance run, then the merge-into-
-`rust-main` decision. `rust-main` (renamed from `feat/rust-cli-workspace`
-2026-07-28) is the base integration line under it; `spike/docker-desktop-native`
-and `feat/round2-launcher-batch` are historical refs only — do not start new
-work on them. Standing policy: NO merge to `main`.
+**`feat/core-family` MERGED into `rust-main` 2026-08-11** (fast-forward,
+after all its live gates passed): the core-family seam (Task 6/12,
+schema-name resolution both surfaces), the module-rebuild fix round below,
+the VM acceptance round-2 fixes, and the 2026-08-10 launcher picker fixes
+(bot identity incl. citizens, direct-MySQL accounts routing). **`rust-main`
+is the active integration line again** — start new work there. Same day,
+upstream's guide updates (`main` @ ff12240, 19 commits) were merged into
+`rust-main` (`fadb5f6`): the `.sh` installers auto-merged with our patches
+intact (games/-dir convention, no bot-count env keys — the shadowing rule),
+`wow-manage.sh` kept our menu items 7/8, and the three DML-Windows/WotLK
+`.ps1` installers were whole-file conflicts resolved by KEEPING OURS —
+upstream's parallel rework of those three is recorded fork divergence for
+the installer-sync job. Verified after the merge: cargo workspace 30
+targets 1747/0, vitest 782/782, bats (dml-arch) 865/0.
+`spike/docker-desktop-native` and `feat/round2-launcher-batch` are
+historical refs only — do not start new work on them. Standing policy: NO
+merge to `main`.
 
 ### Module-rebuild fix round (feat/core-family, 2026-08-09/10) — SHIPPED + LIVE-VERIFIED
 
