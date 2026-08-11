@@ -1,0 +1,64 @@
+{
+  "runId": "run2-ready-timing",
+  "label": "run2",
+  "takenUtc": "2026-08-05T12:32:58Z/2026-08-05T12:37:53Z",
+  "purpose": "Re-measurement of start -> world-ready ONLY. The run1 sitting recorded ready:null in all 20 sample records; the boot figures printed in docs/backend-comparison-2026-08.md (28.6 s / 24.6 s) had no supporting sample and are superseded by this file.",
+  "method": {
+    "definition": "product's own: docker inspect -f {{.State.StartedAt}} ac-worldserver, then docker logs -t --since <started> ac-worldserver, case-insensitive scan for 'world initialized in' (mirrors crates/dml-wow/src/status.rs::world_ready)",
+    "derivation": "TIMESTAMP-DERIVED. T0 recorded immediately before 'docker compose up -d'; the ready instant is the marker line's OWN log timestamp from 'docker logs -t', not the moment a poll loop noticed it.",
+    "whyNotTheHarness": "scripts/Measure-BackendFootprint.ps1 -TimeReady returns MarkerSeconds as poll-derived elapsed on a 5 s sleep loop, and it does not start the server itself (it prints 'Trigger the start NOW'). A single foreground script was used instead so T0 and the start are the same event.",
+    "ordering": "all-Desktop, then a mandatory 'wsl --shutdown' crossing (verified: both distros Stopped, vmmemWSL absent, 0 Docker Desktop processes), then all-Arch. Never alternated.",
+    "archSessionNote": "the entire Arch half ran inside ONE wsl.exe session, so WSL's ~15 s post-session distro termination could not fire mid-measurement. No separate holder process was needed.",
+    "imageSafety": "both halves used 'docker compose up -d --no-build --pull never' so no moving tag could be resolved. Desktop stack is pinned to dml.local/ac-wotlk-*:migrated-20260720; the Arch stack carries build: sections and moving acore/ac-wotlk-*:master tags, which is why --pull never is mandatory there."
+  },
+  "desktop": {
+    "t0Utc": "2026-08-05T12:32:58.2881273Z",
+    "worldserverStartedAtUtc": "2026-08-05T12:33:06.373565486Z",
+    "markerLoggedUtc": "2026-08-05T12:33:31.353271095Z",
+    "markerLogLine": "2026-08-05T12:33:31.353271095Z WORLD: World Initialized In 0 Minutes 23 Seconds",
+    "t0ToStartedAtSec": 8.1,
+    "t0ToWorldReadySec": 33.1,
+    "startedAtToReadySec": 25.0,
+    "worldserverSelfReport": "0 Minutes 23 Seconds",
+    "tcp8085FirstAcceptSec": 8.2,
+    "tcp8085Derivation": "poll-derived (~0.9 s granularity), NOT timestamp-derived",
+    "composeUpReturnedSec": 8.2,
+    "composeDownSec": 10.1,
+    "engineStartSec": 8.5,
+    "containersBefore": 0,
+    "containersAfter": 0,
+    "hostMachineAtReady": { "availableMB": 926.0, "inUseMB": 31010.5, "committedMB": 53069.2, "processes": 336, "compilerProcesses": 2 },
+    "hostMachineBefore": { "availableMB": 7176.7, "inUseMB": 24759.8, "committedMB": 42880.1, "processes": 299, "compilerProcesses": 2 }
+  },
+  "arch": {
+    "t0Utc": "2026-08-05T12:37:29.683329823Z",
+    "worldserverStartedAtUtc": "2026-08-05T12:37:36.906398893Z",
+    "markerLoggedUtc": "2026-08-05T12:37:53.154777189Z",
+    "markerLogLine": "2026-08-05T12:37:53.154777189Z WORLD: World Initialized In 0 Minutes 15 Seconds",
+    "t0ToStartedAtSec": 7.2,
+    "t0ToWorldReadySec": 23.5,
+    "startedAtToReadySec": 16.2,
+    "worldserverSelfReport": "0 Minutes 15 Seconds",
+    "tcp8085FirstAcceptSec": null,
+    "tcp8085Derivation": "NOT CAPTURED: bc(1) is absent in dml-arch, so the in-guest script's arithmetic failed. The raw timestamps above were unaffected because they are strings; only the derived seconds were lost, and they were recomputed on the Windows side.",
+    "composeUpReturnedSec": null,
+    "composeDownSec": null,
+    "containersBefore": 0,
+    "containersAfter": 0,
+    "guestMemoryAtReadyMB": { "total": 15994, "used": 4102, "available": 11891 },
+    "hostMachineAtReady": "NOT SAMPLED - asymmetry with the desktop half, stated as a limit rather than filled in"
+  },
+  "result": {
+    "desktopT0ToReadySec": 33.1,
+    "archT0ToReadySec": 23.5,
+    "archFasterBySec": 9.6,
+    "corroboration": "the worldserver's own self-reported world-load time agrees with the log-derived figure on both sides (Desktop 23 s vs 25.0 s StartedAt->ready; Arch 15 s vs 16.2 s), which is an independent check on the arithmetic, not on the comparison.",
+    "cheapProbeGap": "Desktop TCP 8085 accepted at 8.2 s against a true 33.1 s: the port figure is 25% of the real one, i.e. 75% SHORTER. Confirms the method's warning."
+  },
+  "limits": [
+    "n=1 per backend. One boot each, not a distribution.",
+    "NOT a controlled comparison. The two servers are configured differently (Desktop 100 bots, Arch 1600-2000 via compose override) - the same defect that makes the run1 'server' phase incomparable. Bots log in AFTER world-ready, so the effect on this figure is smaller than on the RAM rows, but it is not zero.",
+    "The host was NOT quiet and was not equally loaded across the two halves. Two compiler processes (a concurrent agent's Rust build in a separate worktree) ran throughout; host available RAM fell to 926 MB during the Desktop boot. Host memory was not sampled during the Arch boot, so the two halves cannot be said to have run under equal pressure.",
+    "Page-cache warmth differs: the Arch distro had been booted by two brief wslpath probe sessions shortly before its measurement. Engine/dockerd startup is excluded from T0 on both sides."
+  ]
+}
