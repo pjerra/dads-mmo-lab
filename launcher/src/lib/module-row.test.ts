@@ -89,4 +89,28 @@ describe("buildModuleRow", () => {
     const cat = buildModuleRow(cpp({ installed: false }), ctx());
     expect(cat.actions[0].label).toBe("Install");
   });
+
+  // Round 2, Task 2: the setup chip is now the click target itself, and a
+  // failed conf-activation outcome rides in ready-made from the ctx.
+  it("needsSetup ctx flag adds a clickable setup chip", () => {
+    const row = buildModuleRow(cpp(), ctx({ needsSetup: true }));
+    expect(row.chips).toEqual([{ id: "setup", kind: "setup", label: "Needs setup", clickable: true }]);
+  });
+
+  it("no needsSetup ctx flag -- no setup chip", () => {
+    const row = buildModuleRow(cpp(), ctx({ needsSetup: false }));
+    expect(row.chips).toEqual([]);
+  });
+
+  it("confFailChip ctx value is passed through into chips", () => {
+    const chip = { id: "conf-activation", kind: "conf-failed" as const, label: "conf not activated", clickable: true };
+    const row = buildModuleRow(cpp(), ctx({ confFailChip: chip }));
+    expect(row.chips).toEqual([chip]);
+  });
+
+  it("needsSetup and confFailChip can both be present, setup first", () => {
+    const chip = { id: "conf-activation", kind: "conf-failed" as const, label: "conf not activated", clickable: true };
+    const row = buildModuleRow(cpp(), ctx({ needsSetup: true, confFailChip: chip }));
+    expect(row.chips.map((c) => c.id)).toEqual(["setup", chip.id]);
+  });
 });

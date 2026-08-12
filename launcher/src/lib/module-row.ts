@@ -46,6 +46,15 @@ export interface RowCtx {
   family: ModuleFamily;
   // rare-drops: no automated reversal, the Remove action renders disabled.
   removeDisabled?: boolean;
+  // Round 2, Task 2: this module has a setup-catalog entry that hasn't been
+  // dismissed yet. ModuleManager.svelte computes this (setupFor() +
+  // localStorage) and passes the bool through -- module-row.ts stays free of
+  // that dependency, it just slots the resulting chip in.
+  needsSetup?: boolean;
+  // Round 2, Task 2: this module's auto-activation catch-up failed.
+  // ModuleManager.svelte derives the chip via conf-activation-chip.ts's
+  // confActivationChip() and passes it straight through.
+  confFailChip?: RowChip | null;
 }
 
 function isInstalled(m: RowModule, family: ModuleFamily): boolean {
@@ -75,14 +84,23 @@ export function buildModuleRow(m: RowModule, ctx: RowCtx): ModuleRow {
       ...(ctx.removeDisabled ? { disabled: true } : {}),
     });
   }
+  // Round 2, Task 2: the setup chip IS the click target (no more separate
+  // badge + text-link pair) and a failed conf-activation chip rides in
+  // ready-made from the ctx -- both are real buttons in the Svelte side
+  // (RowChip.clickable), never ad-hoc markup.
+  const chips: RowChip[] = [];
+  if (ctx.needsSetup) {
+    chips.push({ id: "setup", kind: "setup", label: "Needs setup", clickable: true });
+  }
+  if (ctx.confFailChip) {
+    chips.push(ctx.confFailChip);
+  }
   return {
     key: m.key,
     title: m.name,
     family: ctx.family,
     installed,
-    // Empty by default -- Task 2 (setup / conf-failed) and later rounds add
-    // chips through this builder.
-    chips: [],
+    chips,
     actions,
   };
 }

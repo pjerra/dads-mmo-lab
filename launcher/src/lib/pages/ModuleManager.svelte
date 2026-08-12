@@ -66,7 +66,8 @@
   import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
   import { requestConfFile, requestTuning } from "$lib/module-nav.svelte";
   import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
-  import { buildModuleRow, type ModuleRow, type RowActionId } from "$lib/module-row";
+  import { buildModuleRow, type ModuleRow, type RowActionId, type RowChip } from "$lib/module-row";
+  import { confActivationChip, outcomeFromErrorCode } from "$lib/conf-activation-chip";
   import type { Snippet } from "svelte";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
@@ -264,6 +265,27 @@
     setupCopied = null;
   }
 
+  // Conf-activation failure chips (round 2, Task 2): the auto-catchup below
+  // no longer swallows a failed activation -- it turns into a clickable
+  // "conf not activated" chip on that module's row (module-row.ts's
+  // confFailChip ctx slot), keyed by module key. confFailReason holds the
+  // CmdError's message + hint for the small panel the chip opens; both are
+  // cleared for a key that activates successfully on a later pass.
+  let confFailChips: Record<string, RowChip> = $state({});
+  let confFailReason: Record<string, { message: string; hint?: string }> = $state({});
+  let confFailOpen: string | null = $state(null);
+
+  function toggleConfFail(key: string) {
+    confFailOpen = confFailOpen === key ? null : key;
+  }
+
+  // Chip-as-action dispatch (round 2, Task 2): shared between cpp/lua rows --
+  // the chip IS the click target, wired through RowUi.onChip.
+  function onChipClick(chip: RowChip, key: string) {
+    if (chip.id === "setup") toggleSetup(key);
+    else if (chip.id === "conf-activation") toggleConfFail(key);
+  }
+
   function markSetupDone(key: string) {
     try {
       localStorage.setItem(setupDoneKey(SETUP_SERVER, key), "1");
@@ -327,29 +349,35 @@
   // module's conf -- Task 1) can still have installed cpp modules sitting at
   // conf === "ready". One pass, once per page mount, activates every such
   // conf so the tuning cards aren't hidden behind a manual "Activate conf"
-  // click the user has no reason to know about. Advisory only: a raced
-  // EXISTS/NEEDS_REBUILD from wowModuleConfActivate is swallowed per-module,
-  // never surfaced as a page error.
+  // click the user has no reason to know about. Silent on success (round 2,
+  // Task 2) -- activation still happens and still logs to the console
+  // stream, but no page note. The only surfaced case is failure: a raced
+  // EXISTS/NEEDS_REBUILD (or a genuine error) now shows a "conf not
+  // activated" chip on that module's row via confActivationChip(), instead
+  // of vanishing into a swallowed catch{} the way round 1 left it.
   let catchupDone = false;
   async function autoConfCatchup() {
     if (catchupDone || busy) return;
     catchupDone = true;
     const candidates = (list?.families.cpp ?? []).filter((m) => m.installed && m.conf === "ready");
     if (candidates.length === 0) return;
-    const activated: string[] = [];
+    let anyActivated = false;
     for (const m of candidates) {
       try {
         const r = await wowModuleConfActivate(m.key);
-        if (r.activated) activated.push(r.conf_name);
-      } catch {
-        // Advisory catch-up -- a race (already active / needs rebuild) is
-        // not an error worth interrupting the page load over.
+        if (r.activated) anyActivated = true;
+        delete confFailChips[m.key];
+        delete confFailReason[m.key];
+      } catch (e) {
+        const err = e as { code?: string; message?: string; hint?: string };
+        const chip = confActivationChip(outcomeFromErrorCode(err.code));
+        if (chip) {
+          confFailChips[m.key] = chip;
+          confFailReason[m.key] = { message: err.message ?? "Conf activation failed.", hint: err.hint };
+        }
       }
     }
-    if (activated.length > 0) {
-      note = `Activated default configs: ${activated.join(", ")}`;
-      await refresh();
-    }
+    if (anyActivated) await refresh();
   }
   onMount(() => {
     void (async () => {
@@ -639,6 +667,9 @@
     dim?: boolean;
     // Installed rows: the module name is a button opening its tuning card.
     onName?: () => void;
+    // Round 2, Task 2: the chip IS the click target -- setup/conf-failed
+    // chips dispatch here instead of a separate text-link row.
+    onChip?: (chip: RowChip) => void;
     onAction: (id: RowActionId) => void;
     actionDisabled?: (id: RowActionId) => boolean;
     actionTitle?: (id: RowActionId) => string | undefined;
@@ -835,19 +866,11 @@
     </div>
   {/if}
 
-  <!-- Needs-setup chip + panel (Modules-page round, Task 5), shared between
+  <!-- Needs-setup panel (Modules-page round, Task 5; the chip itself moved
+       into buildModuleRow's chips list -- round 2, Task 2), shared between
        the cpp and lua rows below -- both families have catalog entries
        (mod-ahbot/mod-arac are cpp; battlepass/bmah/mod-1v1-arena/
        mod-npc-beastmaster/mod-transmog can be lua). -->
-  {#snippet setupChip(key: string)}
-    {#if setupFor(key)}
-      {#if needsSetup(key)}<span class="badge warn">Needs setup</span>{/if}
-      <button class="setup-link" onclick={() => toggleSetup(key)}>
-        {needsSetup(key) ? "Setup…" : "Setup"}
-      </button>
-    {/if}
-  {/snippet}
-
   {#snippet setupPanel(key: string)}
     {#if setupOpen === key}
       {@const setup = setupFor(key)}
@@ -875,6 +898,18 @@
     {/if}
   {/snippet}
 
+  <!-- Conf-not-activated panel (round 2, Task 2): the chip's own click
+       target -- the reason (CmdError.message) and the manual conf-activate
+       hint (CmdError.hint), same visual pattern as setupPanel above. -->
+  {#snippet confFailPanel(key: string)}
+    {#if confFailOpen === key && confFailReason[key]}
+      <div class="setup-panel">
+        <p>{confFailReason[key].message}</p>
+        {#if confFailReason[key].hint}<p class="muted">{confFailReason[key].hint}</p>{/if}
+      </div>
+    {/if}
+  {/snippet}
+
   <!-- One row skeleton for every section (round 2, Task 1): name+status
        left, chips after the status badge, actions in a fixed right-aligned
        column (same order: tune · repair · remove / install). The family
@@ -898,7 +933,11 @@
       <div class="mmid">
         <span class="badge {ui.statusCls}">{ui.statusText}</span>
         {#each row.chips as chip (chip.id)}
-          <span class="mchip {chip.kind}">{chip.label}</span>
+          {#if chip.clickable}
+            <button class="mchip {chip.kind}" onclick={() => ui.onChip?.(chip)}>{chip.label}</button>
+          {:else}
+            <span class="mchip {chip.kind}">{chip.label}</span>
+          {/if}
         {/each}
         {#if chips}{@render chips()}{/if}
       </div>
@@ -922,7 +961,6 @@
     {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
     {#snippet cppChips()}
       {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
-      {#if m.installed}{@render setupChip(m.key)}{/if}
     {/snippet}
     {#snippet cppControls()}
       {#if m.conf === "ready"}
@@ -982,7 +1020,11 @@
       {/if}
     {/snippet}
     {@render moduleRow(
-      buildModuleRow(m, { family: "cpp" }),
+      buildModuleRow(m, {
+        family: "cpp",
+        needsSetup: m.installed && needsSetup(m.key),
+        confFailChip: confFailChips[m.key] ?? null,
+      }),
       {
         url: m.url,
         desc: m.desc,
@@ -990,6 +1032,7 @@
         statusCls: statusClass(m),
         statusText: statusText(m),
         onName: m.installed ? () => openTuning(m.key) : undefined,
+        onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => cppAction(id, m),
         actionDisabled: cppActionDisabled,
         actionTitle: cppActionTitle,
@@ -1000,6 +1043,7 @@
       cppControls,
     )}
     {@render setupPanel(m.key)}
+    {@render confFailPanel(m.key)}
     {#if repairOpen === m.key}
       <div class="repair-panel">
         {#if repairError}<p class="inline-error">{repairError}</p>{/if}
@@ -1102,10 +1146,7 @@
   </div>
 
   {#snippet luaRow(m: LuaModule, aleReady: boolean)}
-    {@const row = buildModuleRow(m, { family: "lua" })}
-    {#snippet luaChips()}
-      {#if m.deployed}{@render setupChip(m.key)}{/if}
-    {/snippet}
+    {@const row = buildModuleRow(m, { family: "lua", needsSetup: m.deployed && needsSetup(m.key) })}
     {#snippet luaControls()}
       {#if m.has_sql}
         <label class="row">
@@ -1149,13 +1190,14 @@
         statusText: luaStatusLabel(luaStatus(m)),
         dim: !aleReady,
         onName: row.installed ? () => openTuning(m.key) : undefined,
+        onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => luaAction(id, m),
         actionDisabled: (id) => luaActionDisabled(id, aleReady),
         actionTitle: (id) => luaActionTitle(id, aleReady),
         actionLabel: (id) =>
           id === "remove" && confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
       },
-      luaChips,
+      undefined,
       luaControls,
     )}
     {#if m.deployed}{@render setupPanel(m.key)}{/if}
@@ -1602,18 +1644,10 @@
   .chip.tracked { color: #3fb950; border-color: #3fb950; }
   .chip.untracked { color: #8b949e; }
   .repair-results { display: flex; flex-direction: column; gap: 6px; }
-  /* Needs-setup notices (Modules-page round, Task 5): "Setup…"/"Setup" reads
-     as a text label like .conf-link, not a full button; the panel reuses
-     the repair-panel's visual pattern. */
-  .setup-link {
-    background: none;
-    border: none;
-    color: #d29922;
-    font-size: 12px;
-    padding: 0;
-    cursor: pointer;
-  }
-  .setup-link:hover { text-decoration: underline; }
+  /* Needs-setup / conf-not-activated panels (Modules-page round, Task 5;
+     round 2, Task 2): the chip itself is the click target now (.mchip,
+     rendered as a real <button> -- see the moduleRow snippet); this is just
+     the panel that click opens. */
   .setup-panel { margin: 0 0 6px 0; padding: 10px 12px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; }
   .setup-panel ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
   .usage { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; margin: 0; font-size: 12px; color: #8b949e; overflow-x: auto; white-space: pre; }
