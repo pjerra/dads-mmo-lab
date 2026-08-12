@@ -158,10 +158,10 @@ local function ShowTooltip(cell)
     end
 
     GameTooltip:AddLine(" ")
-    if entry.placeholder then
+    if entry.gmMacro then
         GameTooltip:AddLine(
-            "The client cannot read this server-side spell.",
-            1, 0.55, 0.25
+            "Click: create /cast macro and pick it up.",
+            0.3, 1, 0.3
         )
     else
         GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
@@ -225,10 +225,10 @@ local function RefreshUI()
                 entry.icon or "Interface\\Icons\\INV_Misc_QuestionMark"
             )
 
-            -- Passives and unreadable placeholders render dimmed so the
-            -- active abilities read first; cells are reused, so the bright
-            -- state must be reset explicitly.
-            if entry.passive or entry.placeholder then
+            -- Passives render dimmed so the active abilities read first;
+            -- cells are reused, so the bright state must be reset
+            -- explicitly.
+            if entry.passive then
                 cell.icon:SetVertexColor(0.5, 0.5, 0.5)
                 cell.nameText:SetTextColor(0.62, 0.62, 0.62)
             else
@@ -461,6 +461,14 @@ for index = 1, ENTRIES_PER_PAGE do
     end)
     cell:SetScript("OnDragStart", function(self)
         USB:PickupEntry(self.entry)
+    end)
+    -- GM-tab entries have no reachable spellbook slot, so their
+    -- action-bar route is click -> macro pickup (see PickupGMEntry).
+    -- Other entries keep drag-only, matching the native book.
+    cell:SetScript("OnClick", function(self)
+        if self.entry and self.entry.gmMacro then
+            USB:PickupEntry(self.entry)
+        end
     end)
 
     spellCells[index] = cell

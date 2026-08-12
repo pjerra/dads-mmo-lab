@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: Unbound Spellbook
-## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages. Adds three spellbook-driven tabs: General (class-list spells and lower ranks filtered out), Professions, and a merged GM tab for server-side tabs.
+## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages. Adds three spellbook-driven tabs: General (class-list spells and lower ranks filtered out), Professions, and a GM tab (skill line 769, macro-based action-bar pickup).
 ## Author: OpenAI
-## Version: 0.8
+## Version: 0.9
 ## SavedVariables: UnboundSpellbookDB
 
 ClassData.lua

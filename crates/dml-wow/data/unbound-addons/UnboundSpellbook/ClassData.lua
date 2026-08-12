@@ -264,24 +264,17 @@ USB.PROFESSION_SPELL_IDS = {
     31252,      -- Prospecting
 }
 
--- The 30 WotLK class school/tree spellbook-tab names (enUS -- the same
--- tradeoff as the profession names below; duplicates such as Frost,
--- Protection, Restoration and Holy across classes collapse fine in a
--- flat set), plus "General". ScanBookTabs hides any extra spellbook tab
--- carrying one of these names: the server injects a school-tab set per
--- unlocked class, and the class tabs already cover those spells.
-USB.SCHOOL_TAB_NAMES = {
-    ["General"] = true,
-    ["Arms"] = true, ["Fury"] = true, ["Protection"] = true,           -- Warrior
-    ["Holy"] = true, ["Retribution"] = true,                           -- Paladin (+Protection)
-    ["Beast Mastery"] = true, ["Marksmanship"] = true, ["Survival"] = true, -- Hunter
-    ["Assassination"] = true, ["Combat"] = true, ["Subtlety"] = true,  -- Rogue
-    ["Discipline"] = true, ["Shadow"] = true,                          -- Priest (+Holy)
-    ["Blood"] = true, ["Frost"] = true, ["Unholy"] = true,             -- Death Knight
-    ["Elemental"] = true, ["Enhancement"] = true, ["Restoration"] = true, -- Shaman
-    ["Arcane"] = true, ["Fire"] = true,                                -- Mage (+Frost)
-    ["Affliction"] = true, ["Demonology"] = true, ["Destruction"] = true, -- Warlock
-    ["Balance"] = true, ["Feral Combat"] = true,                       -- Druid (+Restoration)
+-- The GM tab: skill line 769 "Internal", extracted from the server's
+-- SkillLineAbility.dbc (2026-08-13). All standard WotLK spell IDs, so
+-- they resolve client-side by ID -- but the client's spellbook slot
+-- array is hard-capped at 1024 slots (General alone reports 1013) and
+-- these sit entirely past it, so slot access can never reach them; the
+-- tab is driven by this list, the same way the class tabs are.
+USB.GM_SPELL_IDS = {
+    5, 265, 1908, 6560, 7482, 8295, 10073, 11821, 18209, 18210,
+    18389, 19901, 23789, 25565, 26368, 27254, 27255, 27258, 27261,
+    33153, 35182, 35886, 35912, 36356, 38505, 38734, 39258, 45645,
+    45646, 45647, 45648, 45649, 45650, 45659, 45813,
 }
 
 -- Fallback for spellbook slots whose link (and so spell ID) the client

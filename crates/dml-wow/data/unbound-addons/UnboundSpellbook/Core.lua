@@ -237,32 +237,25 @@ function USB:GetEntries(tabKey)
 end
 
 -- Spellbook-driven tabs -- always at most three, fixed: General,
--- Professions, GM. This server grants entire class sets (all ranks) into
--- spellbook tab 1 and injects whole school-tab sets per unlocked class,
--- so a raw mirror is unusable noise. General keeps only tab 1's spells
--- that are neither professions nor in any class ID list, collapsed to
--- their highest known rank; Professions is split out of tab 1; every
--- remaining non-school tab merges into the one GM tab, whatever the
--- server calls its internal tabs (school tabs are recognised by their
--- enUS names, with a conservative content tiebreaker for unknown names).
--- Runs from FinalizeScan, so the existing SPELLS_CHANGED wiring keeps
--- these live; a tab with nothing to show is simply not kept.
+-- Professions, GM. This server grants entire class sets (all ranks)
+-- into spellbook tab 1, so a raw mirror is unusable noise: General
+-- keeps only tab 1's spells that are neither professions nor in any
+-- class ID list, collapsed to their highest known rank, and Professions
+-- is split out of tab 1. The GM tab is a static ID list (ClassData's
+-- GM_SPELL_IDS) checked with IsSpellKnown, exactly like the class tabs:
+-- the client's spellbook slot array is hard-capped at 1024 and General
+-- alone reports 1013, so the server's "Internal" tab sits entirely past
+-- the cap and slot access can never reach it. Runs from FinalizeScan,
+-- so the existing SPELLS_CHANGED wiring keeps these live; a tab with
+-- nothing to show is simply not kept.
 
 -- On this client an invalid slot makes GetSpellName THROW instead of
--- returning nil, and unreadable slots show up in TWO ways: GM tab sizes
--- overshoot the real array (failures at the tail), and server-granted
--- spells missing from the client's DBCs throw MID-tab (found live: a
--- first-failure break hid everything sorted after them, professions
--- included). So a failed slot is SKIPPED, and only a long unbroken run
--- of failures is treated as the end of the array.
+-- returning nil (the slot array is hard-capped at 1024, and individual
+-- slots can be unreadable mid-tab as well as past the end -- found
+-- live: a first-failure break hid everything sorted after them,
+-- professions included). So a failed slot is SKIPPED, and only a long
+-- unbroken run of failures is treated as the end of the array.
 local BOOK_SLOT_MISS_LIMIT = 50
-
--- A tab whose every slot is unlistable still renders -- as honest
--- "Unknown spell" placeholder rows (such spells exist only server-side,
--- so each slot read throws). Reported sizes overshoot for exactly these
--- tabs, so the placeholder row count cannot trust spellCount blindly;
--- the cap is a shared budget across everything merged into the GM tab.
-local BOOK_PLACEHOLDER_CAP = 48
 
 function USB:ScanBookTabs()
     self.bookTabs = {}
@@ -279,12 +272,6 @@ function USB:ScanBookTabs()
         end
 
         table.sort(entries, function(a, b)
-            if a.placeholder ~= b.placeholder then
-                return not a.placeholder    -- readable entries first
-            end
-            if a.placeholder then
-                return a.slot < b.slot      -- placeholders in book order
-            end
             if a.passive ~= b.passive then
                 return not a.passive        -- actives read before passives
             end
@@ -303,28 +290,23 @@ function USB:ScanBookTabs()
         self.bookTabsByKey[bookTab.key] = bookTab
     end
 
-    local tabCount = GetNumSpellTabs() or 0
-
     local generalName = "General"
     local generalByName = {}
     local professions = {}
-    local gmEntries = {}
-    local gmPlaceholderCount = 0
-    local gmReadableCount = 0
-    local suspectTabs = {}
 
-    for tabIndex = 1, tabCount do
-        local tabName, _, offset, spellCount = GetSpellTabInfo(tabIndex)
+    -- Only tab 1 is slot-scanned: General and Professions come from it,
+    -- and the GM tab is built by ID below. Extra tabs (school-tab sets,
+    -- the server's own "Internal") are never slot-walked any more.
+    if (GetNumSpellTabs() or 0) >= 1 then
+        local tabName, _, offset, spellCount = GetSpellTabInfo(1)
         offset = offset or 0
         spellCount = spellCount or 0
 
-        if tabName and tabName ~= "" and spellCount > 0 then
-            if tabIndex == 1 then
-                generalName = tabName
-            end
+        if tabName and tabName ~= "" then
+            generalName = tabName
+        end
 
-            local entries = {}
-            local classHits = 0
+        if spellCount > 0 then
             local misses = 0
 
             for slot = offset + 1, offset + spellCount do
@@ -381,86 +363,50 @@ function USB:ScanBookTabs()
                             passive = passive,
                         }
 
-                        if tabIndex == 1 then
-                            if IsProfessionSpell(spellID, spellName) then
-                                entry.bookTabName = "Professions"
-                                table.insert(professions, entry)
-                            elseif spellID and CLASS_ID_SET[spellID] then
-                                -- Class ability: the class tabs already list
-                                -- it. This is the bulk of the General-tab
-                                -- noise on a server that grants whole class
-                                -- sets there.
-                            elseif BetterBookRank(generalByName[spellName], entry) then
-                                -- Collapse to the highest known rank, the
-                                -- same way the class tabs do.
-                                generalByName[spellName] = entry
-                            end
-                        else
-                            table.insert(entries, entry)
-                            if spellID and CLASS_ID_SET[spellID] then
-                                classHits = classHits + 1
-                            end
+                        if IsProfessionSpell(spellID, spellName) then
+                            entry.bookTabName = "Professions"
+                            table.insert(professions, entry)
+                        elseif spellID and CLASS_ID_SET[spellID] then
+                            -- Class ability: the class tabs already list
+                            -- it. This is the bulk of the General-tab
+                            -- noise on a server that grants whole class
+                            -- sets there.
+                        elseif BetterBookRank(generalByName[spellName], entry) then
+                            -- Collapse to the highest known rank, the
+                            -- same way the class tabs do.
+                            generalByName[spellName] = entry
                         end
                     end
                 end
             end
 
-            if tabIndex > 1 then
-                -- School-tab sets are recognised by NAME first (the enUS
-                -- set in ClassData): the server injects one per unlocked
-                -- class, and the class tabs already cover those spells.
-                -- Content is only a tiebreaker for UNKNOWN names, and a
-                -- conservative one: a real school tab is essentially 100%
-                -- class-list spells, so anything under 90% class hits
-                -- keeps its entries.
-                if USB.SCHOOL_TAB_NAMES and USB.SCHOOL_TAB_NAMES[tabName] then
-                    -- School tab: hidden.
-                elseif #entries == 0 then
-                    -- Nothing listable in the whole tab: its spells
-                    -- exist only server-side. Represent it with honest
-                    -- placeholders; the tooltip still tries the slot.
-                    local room = BOOK_PLACEHOLDER_CAP - gmPlaceholderCount
-                    local placeholderCount = spellCount
-                    if placeholderCount > room then
-                        placeholderCount = room
-                    end
-
-                    for index = 1, placeholderCount do
-                        local slot = offset + index
-                        gmPlaceholderCount = gmPlaceholderCount + 1
-                        table.insert(gmEntries, {
-                            bookTabName = tabName,
-                            slot = slot,
-                            name = "Unknown spell (slot " .. slot .. ")",
-                            rankText = "",
-                            rankNumber = 0,
-                            icon = "Interface\\Icons\\INV_Misc_QuestionMark",
-                            passive = false,
-                            placeholder = true,
-                        })
-                    end
-                elseif classHits * 10 >= #entries * 9 then
-                    -- Unknown name but overwhelmingly class spells: a
-                    -- suspected school tab. Held back rather than dropped
-                    -- -- see the guard below the tab loop.
-                    table.insert(suspectTabs, entries)
-                else
-                    for _, entry in ipairs(entries) do
-                        table.insert(gmEntries, entry)
-                    end
-                    gmReadableCount = gmReadableCount + #entries
-                end
-            end
         end
     end
 
-    -- Final guard: the content tiebreaker must NEVER leave the GM tab
-    -- without a single readable entry -- better one suspicious tab shown
-    -- than the user's GM spells vanishing.
-    if gmReadableCount == 0 and #suspectTabs > 0 then
-        for _, suspect in ipairs(suspectTabs) do
-            for _, entry in ipairs(suspect) do
-                table.insert(gmEntries, entry)
+    -- GM tab: the static ID list from ClassData (skill line 769
+    -- "Internal"), resolved BY ID exactly like the class tabs -- slot
+    -- access can never reach these spells, they sit past the 1024-slot
+    -- book cap.
+    local gmEntries = {}
+    for _, spellID in ipairs(USB.GM_SPELL_IDS or {}) do
+        local okKnown, isKnown = pcall(IsSpellKnown, spellID)
+        if okKnown and isKnown then
+            local spellName, rankText, icon = GetSpellInfo(spellID)
+            if spellName and spellName ~= "" then
+                table.insert(gmEntries, {
+                    bookTabName = "GM",
+                    spellID = spellID,
+                    name = spellName,
+                    rankText = rankText or "",
+                    rankNumber = RankNumber(rankText),
+                    icon = icon,
+                    -- On 3.3.5 IsPassiveSpell takes a BOOK INDEX, not a
+                    -- spell ID, and these spells have no reachable book
+                    -- slot -- asking it would silently read some other
+                    -- slot's answer. No guessing: GM entries never dim.
+                    passive = false,
+                    gmMacro = true,
+                })
             end
         end
     end
@@ -532,6 +478,68 @@ function USB:FindNativeSlot(entry)
     return nameFallback
 end
 
+-- GM-tab entries live past the client's 1024-slot book cap, so
+-- PickupSpell can never hold them. The action-bar route is a
+-- per-character macro: create "/cast <name>" (reusing an existing macro
+-- of the same name) and put it on the cursor, ready to drop on a bar.
+function USB:PickupGMEntry(entry)
+    if not (CreateMacro and PickupMacro and GetMacroIndexByName) then
+        self:Error("The macro API is unavailable on this client.")
+        return
+    end
+
+    -- Macro names cap at 16 characters on 3.3.5.
+    local macroName = string.sub(entry.name, 1, 16)
+
+    local existing = GetMacroIndexByName(macroName)
+    if existing and existing > 0 then
+        local okPickup = pcall(PickupMacro, existing)
+        if okPickup then
+            self:Message(
+                "picked up macro '" .. macroName
+                .. "' -- drop it on an action bar."
+            )
+        else
+            self:Error("Could not pick up the existing '" .. macroName .. "' macro.")
+        end
+        return
+    end
+
+    if GetNumMacros then
+        local _, perCharacter = GetNumMacros()
+        if perCharacter and perCharacter >= 18 then
+            self:Error(
+                "Macro limit reached (18 per character)."
+                .. " Delete one in /macro and try again."
+            )
+            return
+        end
+    end
+
+    -- #showtooltip makes the action-bar button borrow the spell's own
+    -- icon and tooltip; macro icon index 1 (question mark) is only the
+    -- macro-frame fallback.
+    local body = "#showtooltip\n/cast " .. entry.name
+    local okCreate, macroID = pcall(CreateMacro, macroName, 1, body, nil, 1)
+    if not okCreate or not macroID then
+        self:Error("Could not create the macro (macro limit reached?). Free a slot in /macro.")
+        return
+    end
+
+    local okPickup = pcall(PickupMacro, macroID)
+    if okPickup then
+        self:Message(
+            "created macro '" .. macroName
+            .. "' -- drop it on an action bar."
+        )
+    else
+        self:Message(
+            "created macro '" .. macroName
+            .. "'. Open /macro to place it on a bar."
+        )
+    end
+end
+
 function USB:PickupEntry(entry)
     if not entry then
         return
@@ -542,8 +550,8 @@ function USB:PickupEntry(entry)
         return
     end
 
-    if entry.placeholder then
-        self:Error("The client cannot read this spell, so it cannot be dragged.")
+    if entry.gmMacro then
+        self:PickupGMEntry(entry)
         return
     end
 
