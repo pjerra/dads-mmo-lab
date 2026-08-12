@@ -113,4 +113,40 @@ describe("buildModuleRow", () => {
     const row = buildModuleRow(cpp(), ctx({ needsSetup: true, confFailChip: chip }));
     expect(row.chips.map((c) => c.id)).toEqual(["setup", chip.id]);
   });
+
+  // Round 2, Task 3: hasTuningTarget gates the tune action so a module with
+  // no real Tuning-tab destination (the round-1 uncurated-lua gap) doesn't
+  // dead-end the click. Omitted defaults to true -- every test above builds
+  // ctx() without it and still expects tune, so the flag must not change
+  // existing behaviour unless a caller explicitly opts out.
+  it("hasTuningTarget omitted defaults to true -- tune stays offered", () => {
+    const row = buildModuleRow(cpp(), ctx());
+    expect(row.actions.map((a) => a.id)).toContain("tune");
+  });
+
+  it("hasTuningTarget:false suppresses tune on an installed cpp module", () => {
+    const row = buildModuleRow(cpp(), ctx({ hasTuningTarget: false }));
+    expect(row.actions.map((a) => a.id)).toEqual(["repair", "remove"]);
+  });
+
+  it("hasTuningTarget:false suppresses tune on an installed lua module (round-1 uncurated-lua gap)", () => {
+    const row = buildModuleRow(
+      { key: "bmah", name: "BMAH", cloned: true, deployed: true },
+      ctx({ family: "lua", hasTuningTarget: false }),
+    );
+    expect(row.actions.map((a) => a.id)).toEqual(["remove"]);
+  });
+
+  it("hasTuningTarget:true keeps tune offered explicitly", () => {
+    const row = buildModuleRow(cpp(), ctx({ hasTuningTarget: true }));
+    expect(row.actions.map((a) => a.id)).toEqual(["tune", "repair", "remove"]);
+  });
+
+  it("hasTuningTarget is irrelevant for sql -- still no tune either way", () => {
+    const row = buildModuleRow(
+      { key: "rare-drops", name: "Rare drops", installed: true },
+      ctx({ family: "sql", hasTuningTarget: true }),
+    );
+    expect(row.actions.map((a) => a.id)).toEqual(["remove"]);
+  });
 });

@@ -55,6 +55,13 @@ export interface RowCtx {
   // ModuleManager.svelte derives the chip via conf-activation-chip.ts's
   // confActivationChip() and passes it straight through.
   confFailChip?: RowChip | null;
+  // Round 2, Task 3: whether a real Tuning-tab destination exists for this
+  // module (module-nav.ts's hasTuningTarget()) -- false suppresses the tune
+  // action so an uncurated module (the round-1 gap) doesn't dead-end into an
+  // empty tab. Omitted defaults to true (existing tune behaviour unchanged)
+  // -- ModuleManager.svelte opts a row OUT only when it actually knows there
+  // is nothing to tune.
+  hasTuningTarget?: boolean;
 }
 
 function isInstalled(m: RowModule, family: ModuleFamily): boolean {
@@ -76,7 +83,12 @@ export function buildModuleRow(m: RowModule, ctx: RowCtx): ModuleRow {
     }
     // Fixed order: tune - repair - remove. sql has no conf, so no tune;
     // the repair surface (update-tracking) exists for cpp modules only.
-    if (ctx.family !== "sql") actions.push({ id: "tune", label: "Config tuning" });
+    // hasTuningTarget (Round 2, Task 3) additionally suppresses tune when
+    // ModuleManager.svelte knows there is no real Tuning-tab destination --
+    // omitted defaults to true, so every other caller is unaffected.
+    if (ctx.family !== "sql" && ctx.hasTuningTarget !== false) {
+      actions.push({ id: "tune", label: "Config tuning" });
+    }
     if (ctx.family === "cpp") actions.push({ id: "repair", label: "Repair…" });
     actions.push({
       id: "remove",

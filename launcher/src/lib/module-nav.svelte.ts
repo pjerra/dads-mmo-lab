@@ -31,3 +31,17 @@ export function takeConfFile(): string | null {
   moduleNav.confFile = null;
   return f;
 }
+
+// Round 2, Task 3: a row's "tune" action (and the name-click that mirrors
+// it, since round 1) is only offered when a real Tuning-tab destination
+// exists for the module -- a curated card (guided knobs) OR the plain
+// "Open config file" fallback that card's header carries (Task 3, Step 2).
+// Without this gate, a module with NEITHER sends the user to the Tuning tab
+// with nothing to expand: a dead-end click. This was the recorded round-1
+// gap for uncurated Lua scripts (no curated card AND no conf-file fallback,
+// since a deployed .lua script isn't in the CLI's conf-file list) -- pure OR
+// so module-row.ts's buildModuleRow ctx and ModuleManager.svelte's dispatch
+// read the exact same answer.
+export function hasTuningTarget(hasCuratedCard: boolean, hasConfFallback: boolean): boolean {
+  return hasCuratedCard || hasConfFallback;
+}

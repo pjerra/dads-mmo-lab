@@ -29,6 +29,7 @@
     type ModuleRepair,
     type RepairResult,
     type UpdateCheck,
+    type ModuleTuning as ModuleTuningRow,
   } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -61,10 +62,10 @@
   } from "$lib/module-tabs";
   import ModuleTuning from "$lib/ModuleTuning.svelte";
   import ModuleFiles from "$lib/ModuleFiles.svelte";
-  import { moduleListCache } from "$lib/page-cache.svelte";
+  import { moduleListCache, moduleTuningCache } from "$lib/page-cache.svelte";
   import { canBuild } from "$lib/module-canbuild";
   import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
-  import { requestConfFile, requestTuning } from "$lib/module-nav.svelte";
+  import { hasTuningTarget, requestConfFile, requestTuning } from "$lib/module-nav.svelte";
   import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
   import { buildModuleRow, type ModuleRow, type RowActionId, type RowChip } from "$lib/module-row";
   import { confActivationChip, outcomeFromErrorCode } from "$lib/conf-activation-chip";
@@ -82,6 +83,13 @@
   // updates them in the background. The Tuning tab's server-module cards read
   // the same cache, so an install/remove here is reflected there too.
   const list = $derived<ModuleList | null>(moduleListCache.store.data);
+  // Round 2, Task 3: the tuning registry rows, read off the SAME shared cache
+  // ModuleTuning.svelte's curated cards use -- needed here only to answer
+  // "does this lua module have a curated card" for hasTuningTarget() below.
+  // Sharing the cache (not a new fetch) means a Tuning-tab visit warms this
+  // for free; refresh() below also pulls it directly so the gate is correct
+  // even if the user never opens the Tuning tab this session.
+  const mtSettings = $derived<ModuleTuningRow[]>(moduleTuningCache.store.data ?? []);
   let error: string | null = $state(null);
   let note: string | null = $state(null);
   // Single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/
@@ -342,6 +350,13 @@
     else ensureBackupDefaults();
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
     try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
+    // Round 2, Task 3: warm the tuning-registry cache for hasTuningTarget()'s
+    // lua-curated-card check below. Best-effort like the reads above --
+    // createCachedStore.refresh() never throws (it parks the failure on
+    // store.error and keeps the last-good data), and a stale/empty cache just
+    // fails the gate toward SUPPRESSING tune rather than a dead-end click, so
+    // there's nothing to surface as a page error here.
+    await moduleTuningCache.refresh();
   }
 
   // Auto-conf catch-up (Modules-page round, Task 4): a server whose modules
@@ -682,6 +697,26 @@
     tab = "tuning";
   }
 
+  // Round 2, Task 3: per-family hasTuningTarget() inputs. cpp's "curated
+  // card" is a ModuleTuning row targeting the module's own conf; its
+  // "open-config fallback" is simply having a conf at all -- the Tuning
+  // tab's Server-modules card renders (with the new "Open config file"
+  // button, Step 2) for ANY installed module with a conf_name, curated rows
+  // or not. Lua has no such fallback: a deployed .lua script isn't a `.conf`
+  // ModuleFiles can open, so an uncurated lua module gets neither signal and
+  // hasTuningTarget correctly suppresses tune (the recorded round-1 gap).
+  // Lua rows are matched by NAME, not key -- ModuleTuning.module is "plain
+  // module name; also the card heading" (api.ts), the only linkage the
+  // curated-lua registry carries.
+  function cppHasTuningTarget(m: CppModule): boolean {
+    const curated = !!m.conf_name && mtSettings.some((s) => s.backend === "conf" && s.file === m.conf_name);
+    return hasTuningTarget(curated, !!m.conf_name);
+  }
+  function luaHasTuningTarget(m: LuaModule): boolean {
+    const curated = mtSettings.some((s) => s.backend === "lua" && s.module === m.name);
+    return hasTuningTarget(curated, false);
+  }
+
   function cppAction(id: RowActionId, m: CppModule) {
     if (id === "install") void install(m.key, null, m.name);
     else if (id === "tune") openTuning(m.key);
@@ -1019,11 +1054,13 @@
         {/if}
       {/if}
     {/snippet}
+    {@const cppTuneTarget = m.installed && cppHasTuningTarget(m)}
     {@render moduleRow(
       buildModuleRow(m, {
         family: "cpp",
         needsSetup: m.installed && needsSetup(m.key),
         confFailChip: confFailChips[m.key] ?? null,
+        hasTuningTarget: cppTuneTarget,
       }),
       {
         url: m.url,
@@ -1031,7 +1068,7 @@
         ver: versionLabel(m.head, m.head_date),
         statusCls: statusClass(m),
         statusText: statusText(m),
-        onName: m.installed ? () => openTuning(m.key) : undefined,
+        onName: cppTuneTarget ? () => openTuning(m.key) : undefined,
         onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => cppAction(id, m),
         actionDisabled: cppActionDisabled,
@@ -1146,7 +1183,12 @@
   </div>
 
   {#snippet luaRow(m: LuaModule, aleReady: boolean)}
-    {@const row = buildModuleRow(m, { family: "lua", needsSetup: m.deployed && needsSetup(m.key) })}
+    {@const luaTuneTarget = luaHasTuningTarget(m)}
+    {@const row = buildModuleRow(m, {
+      family: "lua",
+      needsSetup: m.deployed && needsSetup(m.key),
+      hasTuningTarget: luaTuneTarget,
+    })}
     {#snippet luaControls()}
       {#if m.has_sql}
         <label class="row">
@@ -1189,7 +1231,7 @@
         statusCls: luaStatus(m) === "installed" ? "on" : luaStatus(m) === "cloned" ? "warn" : "off",
         statusText: luaStatusLabel(luaStatus(m)),
         dim: !aleReady,
-        onName: row.installed ? () => openTuning(m.key) : undefined,
+        onName: row.installed && luaTuneTarget ? () => openTuning(m.key) : undefined,
         onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => luaAction(id, m),
         actionDisabled: (id) => luaActionDisabled(id, aleReady),
@@ -1493,7 +1535,11 @@
   <!-- Both stay MOUNTED while hidden (display:none, not {#if}) so staged
        edits survive tab switches; `active` gates their lazy loads. -->
   <div class="panel" style:display={tab === "tuning" ? null : "none"}>
-    <ModuleTuning active={tab === "tuning"} onupdated={refresh} />
+    <ModuleTuning
+      active={tab === "tuning"}
+      onupdated={refresh}
+      onOpenFile={() => (tab = "files")}
+    />
   </div>
   <div class="panel" style:display={tab === "files" ? null : "none"}>
     <ModuleFiles active={tab === "files"} />
