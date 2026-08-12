@@ -25,7 +25,7 @@ use super::db::{count_result, db_unreachable_err};
 
 // ---------------------------------------------------------------------------
 // conf-activate / `module conf` — `_module_conf_name_var`/`_module_conf_
-// dist`/`_module_conf_state_var` (`70-modules.sh:189-244`).
+// dist`/`_module_conf_state_var` (`70-modules.sh:242-297`).
 // ---------------------------------------------------------------------------
 
 /// What [`conf_activate`] did. Only `Activated` wrote anything; the other
@@ -75,7 +75,7 @@ pub fn conf_activate(sdir: &Path, key: &str, force: bool) -> std::io::Result<Con
     Ok(ConfActivateOutcome::Activated(conf_name))
 }
 
-/// `_module_conf_name_var` (`70-modules.sh:189-211`): the verbatim table of
+/// `_module_conf_name_var` (`70-modules.sh:242-264`): the verbatim table of
 /// modules with a standard conf file. `None` for any module without one
 /// (matches the bash `*) REPLY="" ;;` fallthrough).
 pub fn module_conf_name(key: &str) -> Option<&'static str> {
@@ -135,7 +135,7 @@ fn find_first_by_name(dir: &Path, filename: &str, cur_depth: u32, max_depth: u32
     None
 }
 
-/// `_module_conf_dist` (`70-modules.sh:235-244`): the expected fixed
+/// `_module_conf_dist` (`70-modules.sh:288-297`): the expected fixed
 /// location first (`modules/<key>/conf/<name>.dist`), else a bounded
 /// (maxdepth 4) find under `modules/<key>`. `None` when the module has no
 /// standard conf name, or neither location has the `.dist`.
@@ -149,7 +149,7 @@ pub fn module_conf_dist_path(sdir: &Path, key: &str) -> Option<PathBuf> {
     find_first_by_name(&sdir.join("modules").join(key), &dist_name, 1, 4)
 }
 
-/// `_module_conf_state_var` (`70-modules.sh:221-230`): none | needs-rebuild |
+/// `_module_conf_state_var` (`70-modules.sh:274-283`): none | needs-rebuild |
 /// ready | active.
 pub fn module_conf_state(sdir: &Path, key: &str) -> &'static str {
     let Some(name) = module_conf_name(key) else { return "none" };

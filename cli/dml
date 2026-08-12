@@ -3497,9 +3497,6 @@ _rebuild_pending_json() {
     return 0
 }
 
-# Is <key> listed in the rebuild-pending file? (exit status)
-_rebuild_pending_has() { grep -qxF "$2" "$(_rebuild_pending_file "$1")" 2>/dev/null; }
-
 # NO-FORK batched variant for the module-list emitter: _rebuild_pending_load
 # scans the pending file ONCE (pure bash, zero forks) into a set, then
 # _rebuild_pending_has_mem answers per-row lookups in-process. A per-row

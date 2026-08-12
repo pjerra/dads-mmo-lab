@@ -422,7 +422,7 @@ pub fn wow_remote_ok(url: &str, expected_substr: &str) -> bool {
     url.contains(expected_substr) || url.contains("liyunfan1223")
 }
 
-/// `_WOW_PULL_SUMMARY`'s assembly (`70-modules.sh:927-931`): `"up to date"`
+/// `_WOW_PULL_SUMMARY`'s assembly (`70-modules.sh:1035-1039`): `"up to date"`
 /// when the short HEAD didn't move, else `"<before> -> <after>"`.
 pub fn pull_summary(before: &str, after: &str) -> String {
     if before == after {
@@ -1436,19 +1436,19 @@ pub fn sql_remove_tweak_world(program: &OsStr, password: &str, sdir: &Path, key:
 }
 
 // ---------------------------------------------------------------------------
-// `_wow_pull_repo` (`70-modules.sh:872-933`) — `module update`'s pull core:
+// `_wow_pull_repo` (`70-modules.sh:983-1041`) — `module update`'s pull core:
 // dirty check -> patch backup + stash -> `git pull --ff-only` -> stash pop
 // (or conflict recovery). On failure this function has ALREADY emitted its
 // own `error` event (matching the bash's `ndjson_error` + `return 1`
 // contract) — the caller only needs to close its section and stop.
 // ---------------------------------------------------------------------------
 
-/// `[[ -n "$dirty" ]]` (`70-modules.sh:886`) — pure.
+/// `[[ -n "$dirty" ]]` (`70-modules.sh:987`) — pure.
 pub fn has_dirty_changes(raw: &str) -> bool {
     !raw.is_empty()
 }
 
-/// `[[ "$before" != "$after" ]]` (`70-modules.sh:911`) — pure.
+/// `[[ "$before" != "$after" ]]` (`70-modules.sh:1019`) — pure.
 pub fn pull_changed(before: &str, after: &str) -> bool {
     before != after
 }
