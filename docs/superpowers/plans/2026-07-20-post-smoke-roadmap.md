@@ -1019,11 +1019,17 @@ verdict SHIP (advisories folded in as `4080795`).
 split, click-to-open, needs-setup chips, auto-conf catch-up) + the merge into
 `rust-main` decision.
 
+**Round 2 (2026-08-12, user click-through feedback — spec/plan on the branch,
+executing via `.claude/workflows/modules-page-round2.js`):** chip-as-action,
+conf-activation silent-on-success/chip-on-failure, uniform action column
+(Config tuning · Repair · Remove) + Tuning-tab open-config buttons, one row
+skeleton across sections, per-module disable toggle from tuning-registry
+master switches (playerbots excluded; `.dist` Enable-detection deliberately
+deferred — would need a `module list` contract field on both surfaces).
+Launcher-only by design. The round-1 Lua-row follow-up is absorbed here
+(rows only get a tune action when a tuning target exists).
+
 **Follow-ups (small, non-blocking):**
-- Lua-row click-to-open is a partial no-op for uncurated Lua modules: it
-  switches to the Tuning tab but most `family.lua` keys have no tuning card
-  to scroll to (only curated ones like Unlimited Ammo do). Either map keys →
-  curated card ids or suppress the button when no card exists.
 - `cli/README.md` has no `module install` bullet at all — the install-time
   conf auto-activation (and install generally) is undocumented there; add a
   proper bullet next time the README is touched.
