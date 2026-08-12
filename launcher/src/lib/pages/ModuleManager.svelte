@@ -70,8 +70,8 @@
   import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
   import { buildModuleRow, type ModuleRow, type RowActionId, type RowChip } from "$lib/module-row";
   import { moduleToggle, toggleIsOn, type ToggleSpec } from "$lib/module-toggle";
-  import { noteApplyNeeded } from "$lib/restart-state.svelte";
-  import { normalizeApplyNeeded } from "$lib/apply-needed";
+  import { noteApplyNeeded, restartState } from "$lib/restart-state.svelte";
+  import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
   import { confActivationChip, outcomeFromErrorCode } from "$lib/conf-activation-chip";
   import type { Snippet } from "svelte";
 
@@ -920,6 +920,13 @@
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
+  <!-- Round-2 review fix: the per-module toggle (Task 4) raises the shared
+       restart state on a conf-backend write, but this tab rendered no banner
+       -- the only visible copy sat on the co-mounted (display:none) Tuning
+       tab. Same warn-card every other raising surface shows. -->
+  {#if restartState.needed}
+    <div class="card warn-card"><p>{bannerText(restartState.apply)}</p></div>
+  {/if}
   {#if moduleUpdates.lastError}<p class="inline-error">Update check failed: {moduleUpdates.lastError}</p>{/if}
   {#if moduleUpdates.checked && !moduleUpdates.lastError && Object.keys(moduleUpdates.repos).length === 0}
     <!-- A check that found zero git module clones is a valid answer -- say
