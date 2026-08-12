@@ -347,10 +347,15 @@ function Adv2.RequestServerLearn(classId, specIndex, talentId, spellId)
     return true
 end
 
-function Adv2.OnServerLearned(classId, spellId)
+function Adv2.OnServerLearned(classId, spellId, serverRank)
     local key = classId .. ":" .. spellId
+    -- Do NOT consume the pending entry here: a multi-rank confirm sends the
+    -- same spellId several times, and the server answers each with the
+    -- AUTHORITATIVE rank it now holds (trailing field). Consuming the entry
+    -- on the first reply dropped the rest, so the local rank trailed the
+    -- server forever and every local rank/prereq check lied. The entry is
+    -- cleared on deny/reset, and overwritten by the next send.
     local pending = Adv2.pendingServerLearns[key]
-    Adv2.pendingServerLearns[key] = nil
     if not pending then return end
 
     local specIndex, talentId = pending.specIndex, pending.talentId
@@ -358,7 +363,9 @@ function Adv2.OnServerLearned(classId, spellId)
     Adv2.playerData.unboundClasses[classId] = true
     Adv2.playerData.learnedTalents[classId] = Adv2.playerData.learnedTalents[classId] or {}
     Adv2.playerData.learnedTalents[classId][specIndex] = Adv2.playerData.learnedTalents[classId][specIndex] or {}
-    local newRank = (Adv2.playerData.learnedTalents[classId][specIndex][talentId] or 0) + 1
+    local localRank = (Adv2.playerData.learnedTalents[classId][specIndex][talentId] or 0)
+    local newRank = serverRank or (localRank + 1)
+    if newRank < localRank then newRank = localRank end
     Adv2.playerData.learnedTalents[classId][specIndex][talentId] = newRank
     Adv2.SaveData()
     Adv2.UpdateUI()
@@ -374,7 +381,7 @@ function Adv2.OnServerLearnDenied(reason, classId, spellId)
     local msgByReason = {
         LOCKED   = "that class isn't unlocked. Try /mcunlock sync.",
         INVALID  = "that isn't a recognized cross-class talent.",
-        RANK     = "you must learn the lower ranks of that talent first.",
+        RANK     = "that talent is already at its maximum rank.",
         TIER     = "you need more points spent lower in that tree first.",
         PREREQ   = "a required talent below it isn't maxed yet.",
         NOPOINTS = "no talent points available (shared with your own tree).",
@@ -557,9 +564,9 @@ syncFrame:SetScript("OnEvent", function(self, event, prefix, message, channel, s
             Adv2.ApplyUnboundClassSync(payload)
             return
         end
-        local lc, ls = message:match("^LEARNED:(%d+):(%d+)$")
+        local lc, ls, lr = message:match("^LEARNED:(%d+):(%d+):?(%d*)$")
         if lc then
-            Adv2.OnServerLearned(tonumber(lc), tonumber(ls))
+            Adv2.OnServerLearned(tonumber(lc), tonumber(ls), tonumber(lr))
             return
         end
         local reason, dc, ds = message:match("^DENY:(%u+):(%d+):(%d+)$")
