@@ -62,6 +62,11 @@ export interface RowCtx {
   // -- ModuleManager.svelte opts a row OUT only when it actually knows there
   // is nothing to tune.
   hasTuningTarget?: boolean;
+  // Round 2, Task 4: the module has a registry-declared master switch
+  // (module-toggle.ts's moduleToggle() found one) -- `on` is its current
+  // state (toggleIsOn() over the same tuner rows the Tuning tab reads).
+  // Null/omitted means no toggle renders; installed rows only.
+  toggle?: { on: boolean } | null;
 }
 
 function isInstalled(m: RowModule, family: ModuleFamily): boolean {
@@ -95,6 +100,13 @@ export function buildModuleRow(m: RowModule, ctx: RowCtx): ModuleRow {
       label: "Remove",
       ...(ctx.removeDisabled ? { disabled: true } : {}),
     });
+    // Round 2, Task 4: the master-switch toggle renders in a fixed slot at
+    // the end of the action column (empty on rows without one, so buttons
+    // never shift) -- installed rows only, and only when the registry
+    // declared a switch for this module.
+    if (ctx.toggle) {
+      actions.push({ id: "toggle", label: ctx.toggle.on ? "Enabled" : "Disabled" });
+    }
   }
   // Round 2, Task 2: the setup chip IS the click target (no more separate
   // badge + text-link pair) and a failed conf-activation chip rides in

@@ -19,6 +19,7 @@
     wowUpdateCheck,
     wowServerUpdate,
     wowModuleUpdate,
+    wowConfigTuningSet,
     type ModuleList,
     type CppModule,
     type LuaModule,
@@ -68,6 +69,9 @@
   import { hasTuningTarget, requestConfFile, requestTuning } from "$lib/module-nav.svelte";
   import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
   import { buildModuleRow, type ModuleRow, type RowActionId, type RowChip } from "$lib/module-row";
+  import { moduleToggle, toggleIsOn, type ToggleSpec } from "$lib/module-toggle";
+  import { noteApplyNeeded } from "$lib/restart-state.svelte";
+  import { normalizeApplyNeeded } from "$lib/apply-needed";
   import { confActivationChip, outcomeFromErrorCode } from "$lib/conf-activation-chip";
   import type { Snippet } from "svelte";
 
@@ -690,6 +694,10 @@
     actionTitle?: (id: RowActionId) => string | undefined;
     // Two-step remove confirms override the builder's static label.
     actionLabel?: (id: RowActionId) => string | undefined;
+    // Round 2, Task 4: the master-switch toggle's current state (the action's
+    // PRESENCE comes from the builder; this is presentation state, like
+    // statusText). Undefined when the row has no toggle.
+    toggleOn?: boolean;
   };
 
   function openTuning(key: string) {
@@ -717,13 +725,65 @@
     return hasTuningTarget(curated, false);
   }
 
+  // Per-module enable/disable toggle (round 2, Task 4): a row gets one only
+  // when the tuning registry declares a master switch for it (module-toggle.ts
+  // -- mod-playerbots is refused there, no match means no toggle). The write
+  // goes through the EXISTING tuner path (wowConfigTuningSet, the same api.ts
+  // call the Tuning tab's save uses -- no new command), and the current state
+  // comes off the same tuner read (mtSettings / moduleTuningCache). Registry
+  // rows name modules by display name while this page holds keys, so the
+  // lookup tries the key first, then the catalog title.
+  let togglingKey: string | null = $state(null);
+
+  function toggleSpecFor(key: string, name: string): ToggleSpec | null {
+    return moduleToggle(key, mtSettings) ?? moduleToggle(name, mtSettings);
+  }
+
+  async function toggleModule(key: string, name: string) {
+    const spec = toggleSpecFor(key, name);
+    if (!spec) return;
+    const next = toggleIsOn(spec, mtSettings) ? "0" : "1";
+    moduleBusy.busy = true; togglingKey = key; error = null; note = null;
+    try {
+      const r = await wowConfigTuningSet(spec.settingKey, next);
+      if (r.changed) {
+        if (r.backend === "lua") {
+          // The existing lua redeploy note (the CLI's own reload hint) --
+          // lua rows apply via `.reload ale`, never a restart banner.
+          note = `Saved — ${r.reload ?? "reload the Lua scripts (Tuning tab) to apply"}.`;
+        }
+        // Conf rows: raises the existing restart banner (no-op for "none",
+        // which is what lua rows report).
+        noteApplyNeeded(normalizeApplyNeeded(r));
+      }
+      // Re-read the tuner rows so the switch reflects the value on disk.
+      await moduleTuningCache.refresh();
+    } catch (e) {
+      showErr(e);
+    } finally {
+      moduleBusy.busy = false;
+      togglingKey = null;
+    }
+  }
+
+  function toggleTitle(key: string, on: boolean): string {
+    if (togglingKey === key) return "Restart pending";
+    if (featureLocked("guided-config")) return LOCKED_HINT;
+    return on
+      ? "Turn this module off (its master switch on the Tuning tab)"
+      : "Turn this module on (its master switch on the Tuning tab)";
+  }
+
   function cppAction(id: RowActionId, m: CppModule) {
     if (id === "install") void install(m.key, null, m.name);
     else if (id === "tune") openTuning(m.key);
     else if (id === "repair") void toggleRepair(m);
     else if (id === "remove") void removeModule(m);
+    else if (id === "toggle") void toggleModule(m.key, m.name);
   }
   function cppActionDisabled(id: RowActionId): boolean {
+    // The toggle writes through the tuner path, so it shares the tuner's lock.
+    if (id === "toggle") return featureLocked("guided-config");
     return (id === "install" || id === "remove") && featureLocked("modules-cpp");
   }
   function cppActionTitle(id: RowActionId): string | undefined {
@@ -736,8 +796,11 @@
     if (id === "install") void installLua(m);
     else if (id === "tune") openTuning(m.key);
     else if (id === "remove") void removeLua(m);
+    else if (id === "toggle") void toggleModule(m.key, m.name);
   }
   function luaActionDisabled(id: RowActionId, aleReady: boolean): boolean {
+    // The toggle writes through the tuner path, so it shares the tuner's lock.
+    if (id === "toggle") return featureLocked("guided-config");
     return (id === "install" || id === "remove") && (!aleReady || featureLocked("modules-lua"));
   }
   function luaActionTitle(id: RowActionId, aleReady: boolean): string | undefined {
@@ -952,6 +1015,7 @@
        chips/controls through the two snippet slots -- the row MARKUP lives
        only here. -->
   {#snippet moduleRow(row: ModuleRow, ui: RowUi, chips?: Snippet, controls?: Snippet)}
+    {@const toggleAction = row.actions.find((a) => a.id === "toggle")}
     <div class="modrow" class:dim={ui.dim}>
       <div class="mhead">
         <span class="mtitle">
@@ -978,7 +1042,7 @@
       </div>
       <div class="mactions">
         {#if controls}{@render controls()}{/if}
-        {#each row.actions as a (a.id)}
+        {#each row.actions.filter((a) => a.id !== "toggle") as a (a.id)}
           <button
             class:primary={a.id === "install"}
             onclick={() => ui.onAction(a.id)}
@@ -988,6 +1052,26 @@
             {ui.actionLabel?.(a.id) ?? a.label}
           </button>
         {/each}
+        <!-- Round 2, Task 4: the master-switch toggle lives in a FIXED slot
+             at the end of the action column -- rows without one render the
+             slot empty, so buttons never shift out of alignment. A real
+             <button role="switch"> (keyboard focusable, labelled). -->
+        <span class="mtoggle-slot">
+          {#if toggleAction}
+            <button
+              class="mtoggle"
+              class:on={ui.toggleOn}
+              role="switch"
+              aria-checked={ui.toggleOn ?? false}
+              aria-label="{row.title}: {toggleAction.label}"
+              onclick={() => ui.onAction("toggle")}
+              disabled={busy || toggleAction.disabled || ui.actionDisabled?.("toggle")}
+              title={ui.actionTitle?.("toggle")}
+            >
+              <span class="knob"></span>
+            </button>
+          {/if}
+        </span>
       </div>
     </div>
   {/snippet}
@@ -1055,12 +1139,15 @@
       {/if}
     {/snippet}
     {@const cppTuneTarget = m.installed && cppHasTuningTarget(m)}
+    {@const cppToggle = m.installed ? toggleSpecFor(m.key, m.name) : null}
+    {@const cppToggleOn = cppToggle ? toggleIsOn(cppToggle, mtSettings) : false}
     {@render moduleRow(
       buildModuleRow(m, {
         family: "cpp",
         needsSetup: m.installed && needsSetup(m.key),
         confFailChip: confFailChips[m.key] ?? null,
         hasTuningTarget: cppTuneTarget,
+        toggle: cppToggle ? { on: cppToggleOn } : null,
       }),
       {
         url: m.url,
@@ -1072,9 +1159,11 @@
         onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => cppAction(id, m),
         actionDisabled: cppActionDisabled,
-        actionTitle: cppActionTitle,
+        actionTitle: (id) =>
+          id === "toggle" ? toggleTitle(m.key, cppToggleOn) : cppActionTitle(id),
         actionLabel: (id) =>
           id === "remove" && confirmingRemove === m.key ? removeConfirmText(m) : undefined,
+        toggleOn: cppToggleOn,
       },
       cppChips,
       cppControls,
@@ -1184,10 +1273,15 @@
 
   {#snippet luaRow(m: LuaModule, aleReady: boolean)}
     {@const luaTuneTarget = luaHasTuningTarget(m)}
+    <!-- Deployed only: a cloned-not-deployed script's registry row reads
+         not-installed and the tuner write would refuse it anyway. -->
+    {@const luaToggle = m.deployed ? toggleSpecFor(m.key, m.name) : null}
+    {@const luaToggleOn = luaToggle ? toggleIsOn(luaToggle, mtSettings) : false}
     {@const row = buildModuleRow(m, {
       family: "lua",
       needsSetup: m.deployed && needsSetup(m.key),
       hasTuningTarget: luaTuneTarget,
+      toggle: luaToggle ? { on: luaToggleOn } : null,
     })}
     {#snippet luaControls()}
       {#if m.has_sql}
@@ -1235,9 +1329,11 @@
         onChip: (chip) => onChipClick(chip, m.key),
         onAction: (id) => luaAction(id, m),
         actionDisabled: (id) => luaActionDisabled(id, aleReady),
-        actionTitle: (id) => luaActionTitle(id, aleReady),
+        actionTitle: (id) =>
+          id === "toggle" ? toggleTitle(m.key, luaToggleOn) : luaActionTitle(id, aleReady),
         actionLabel: (id) =>
           id === "remove" && confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
+        toggleOn: luaToggleOn,
       },
       undefined,
       luaControls,
@@ -1622,6 +1718,39 @@
   }
   .mchip.setup, .mchip.rebuild, .mchip.update { color: #d29922; border-color: #d29922; }
   .mchip.conf-failed { color: #f85149; border-color: #f85149; }
+
+  /* Master-switch toggle (round 2, Task 4): a FIXED slot at the end of the
+     action column so rows without a toggle keep their buttons aligned --
+     the slot renders empty, never collapses. The switch itself is a real
+     button (role="switch") styled as a pill + knob. */
+  .mtoggle-slot {
+    width: 40px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+  }
+  .mtoggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    padding: 0;
+    border-radius: 10px;
+    border: 1px solid #30363d;
+    background: #21262d;
+    cursor: pointer;
+  }
+  .mtoggle .knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #8b949e;
+    transition: left 0.15s ease, background 0.15s ease;
+  }
+  .mtoggle.on { background: #238636; border-color: #2ea043; }
+  .mtoggle.on .knob { left: 18px; background: #ffffff; }
 
   /* ALE missing: the explainer box above the lua catalog. */
   .ale-note {

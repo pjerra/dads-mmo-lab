@@ -149,4 +149,28 @@ describe("buildModuleRow", () => {
     );
     expect(row.actions.map((a) => a.id)).toEqual(["remove"]);
   });
+
+  // Round 2, Task 4: the registry-declared master-switch toggle rides in via
+  // ctx (ModuleManager derives it from module-toggle.ts's moduleToggle /
+  // toggleIsOn) -- through THIS builder, never ad-hoc markup.
+  it("toggle ctx adds a toggle action after the installed trio", () => {
+    const row = buildModuleRow(cpp(), ctx({ toggle: { on: true } }));
+    expect(row.actions.map((a) => a.id)).toEqual(["tune", "repair", "remove", "toggle"]);
+    expect(row.actions.find((a) => a.id === "toggle")?.label).toBe("Enabled");
+  });
+
+  it("toggle label reads the off state", () => {
+    const row = buildModuleRow(cpp(), ctx({ toggle: { on: false } }));
+    expect(row.actions.find((a) => a.id === "toggle")?.label).toBe("Disabled");
+  });
+
+  it("no toggle ctx (or null) -- no toggle action", () => {
+    expect(buildModuleRow(cpp(), ctx()).actions.map((a) => a.id)).not.toContain("toggle");
+    expect(buildModuleRow(cpp(), ctx({ toggle: null })).actions.map((a) => a.id)).not.toContain("toggle");
+  });
+
+  it("a catalog (not-installed) row never gets a toggle, even with the ctx set", () => {
+    const row = buildModuleRow(cpp({ installed: false }), ctx({ toggle: { on: true } }));
+    expect(row.actions.map((a) => a.id)).toEqual(["install"]);
+  });
 });
