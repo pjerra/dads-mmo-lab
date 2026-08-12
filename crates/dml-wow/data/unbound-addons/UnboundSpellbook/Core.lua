@@ -34,6 +34,27 @@ local function IsProfessionSpell(spellID, spellName)
     return false
 end
 
+-- Every class-list ID in one set: on this server tab 1 is stuffed with
+-- whole class spell sets at all ranks, and extra school-tab sets appear
+-- per unlocked class; both are recognised (and hidden) through this.
+local CLASS_ID_SET = {}
+for _, classSpellIDs in pairs(USB.CLASS_ACTIVE_SPELL_IDS or {}) do
+    for _, spellID in ipairs(classSpellIDs) do
+        CLASS_ID_SET[spellID] = true
+    end
+end
+
+-- ShouldReplace for book entries, which may lack a spell ID.
+local function BetterBookRank(existing, candidate)
+    if not existing then
+        return true
+    end
+    if candidate.rankNumber ~= existing.rankNumber then
+        return candidate.rankNumber > existing.rankNumber
+    end
+    return (candidate.spellID or 0) > (existing.spellID or 0)
+end
+
 local function ShouldReplace(existing, candidate)
     if not existing then
         return true
@@ -215,15 +236,17 @@ function USB:GetEntries(tabKey)
     return self.entriesByClass[tabKey] or {}
 end
 
--- Spellbook-driven tabs: the real "General" tab (tab 1) -- split into a
--- Professions tab and the rest -- plus any tab the server grants past the
--- class's three school tabs (GM accounts get an extra one on this realm).
--- The school tabs themselves stay out -- the class tabs already cover
--- those abilities from the ID lists. Runs from FinalizeScan, so the
--- existing SPELLS_CHANGED wiring keeps these live; a tab that reports
--- nothing at all is not kept, and an extra tab whose slots are all
--- unreadable is kept with placeholder rows (see BOOK_PLACEHOLDER_CAP).
-local BOOK_SCHOOL_TAB_COUNT = 3
+-- Spellbook-driven tabs -- always at most three, fixed: General,
+-- Professions, GM. This server grants entire class sets (all ranks) into
+-- spellbook tab 1 and injects whole school-tab sets per unlocked class,
+-- so a raw mirror is unusable noise. General keeps only tab 1's spells
+-- that are neither professions nor in any class ID list, collapsed to
+-- their highest known rank; Professions is split out of tab 1; every
+-- remaining non-school tab (school = a majority of its readable spell
+-- IDs appear in the class lists -- content, never index or name) merges
+-- into the one GM tab, whatever the server calls its internal tabs.
+-- Runs from FinalizeScan, so the existing SPELLS_CHANGED wiring keeps
+-- these live; a tab with nothing to show is simply not kept.
 
 -- On this client an invalid slot makes GetSpellName THROW instead of
 -- returning nil, and unreadable slots show up in TWO ways: GM tab sizes
@@ -235,10 +258,10 @@ local BOOK_SCHOOL_TAB_COUNT = 3
 local BOOK_SLOT_MISS_LIMIT = 50
 
 -- A tab whose every slot is unlistable still renders -- as honest
--- "Unknown spell" placeholder rows (the GM tab's spells exist only
--- server-side here, so each slot read throws). Reported sizes overshoot
--- for exactly these tabs, so the placeholder row count cannot trust
--- spellCount blindly.
+-- "Unknown spell" placeholder rows (such spells exist only server-side,
+-- so each slot read throws). Reported sizes overshoot for exactly these
+-- tabs, so the placeholder row count cannot trust spellCount blindly;
+-- the cap is a shared budget across everything merged into the GM tab.
 local BOOK_PLACEHOLDER_CAP = 48
 
 function USB:ScanBookTabs()
@@ -249,8 +272,6 @@ function USB:ScanBookTabs()
         or type(GetSpellTabInfo) ~= "function" then
         return
     end
-
-    local seenNames = {}
 
     local function KeepBookTab(name, entries)
         if #entries == 0 then
@@ -280,30 +301,28 @@ function USB:ScanBookTabs()
         }
         table.insert(self.bookTabs, bookTab)
         self.bookTabsByKey[bookTab.key] = bookTab
-        seenNames[name] = true
     end
 
     local tabCount = GetNumSpellTabs() or 0
+
+    local generalName = "General"
+    local generalByName = {}
+    local professions = {}
+    local gmEntries = {}
+    local gmPlaceholderCount = 0
 
     for tabIndex = 1, tabCount do
         local tabName, _, offset, spellCount = GetSpellTabInfo(tabIndex)
         offset = offset or 0
         spellCount = spellCount or 0
 
-        -- Indices 2..4 normally hold the class's three school tabs, which
-        -- the class tabs already cover. They are still scanned, because a
-        -- tab in that range with NO readable slot cannot be a school tab
-        -- (school spells are ordinary client-known class spells) -- if the
-        -- client ever suppresses school tabs, a server-granted extra can
-        -- sit below index 5 and is still caught.
-        local isSchoolIndex = tabIndex > 1
-            and tabIndex <= 1 + BOOK_SCHOOL_TAB_COUNT
+        if tabName and tabName ~= "" and spellCount > 0 then
+            if tabIndex == 1 then
+                generalName = tabName
+            end
 
-        if tabName and tabName ~= "" and spellCount > 0
-            and not seenNames[tabName] then
             local entries = {}
-            local professions = {}
-            local readable = 0
+            local classHits = 0
             local misses = 0
 
             for slot = offset + 1, offset + spellCount do
@@ -317,12 +336,6 @@ function USB:ScanBookTabs()
                     end
                 else
                     misses = 0
-                    readable = readable + 1
-
-                    if isSchoolIndex then
-                        -- One readable slot settles it: a real school tab.
-                        break
-                    end
 
                     local spellID = nil
                     if GetSpellLink then
@@ -366,51 +379,83 @@ function USB:ScanBookTabs()
                             passive = passive,
                         }
 
-                        if tabIndex == 1 and IsProfessionSpell(spellID, spellName) then
-                            entry.bookTabName = "Professions"
-                            table.insert(professions, entry)
+                        if tabIndex == 1 then
+                            if IsProfessionSpell(spellID, spellName) then
+                                entry.bookTabName = "Professions"
+                                table.insert(professions, entry)
+                            elseif spellID and CLASS_ID_SET[spellID] then
+                                -- Class ability: the class tabs already list
+                                -- it. This is the bulk of the General-tab
+                                -- noise on a server that grants whole class
+                                -- sets there.
+                            elseif BetterBookRank(generalByName[spellName], entry) then
+                                -- Collapse to the highest known rank, the
+                                -- same way the class tabs do.
+                                generalByName[spellName] = entry
+                            end
                         else
                             table.insert(entries, entry)
+                            if spellID and CLASS_ID_SET[spellID] then
+                                classHits = classHits + 1
+                            end
                         end
                     end
                 end
             end
 
-            if tabIndex == 1 then
-                KeepBookTab(tabName, entries)
-                KeepBookTab("Professions", professions)
-            elseif isSchoolIndex and readable > 0 then
-                -- Real school tab: covered by the class tabs, not kept.
-            else
-                if #entries == 0 then
-                    -- Nothing listable in the whole tab: its spells exist
-                    -- only server-side (the GM tab here). Keep the tab with
-                    -- honest placeholders instead of silently dropping it;
-                    -- the tooltip still tries the slot client-side.
-                    local placeholderCount = spellCount
-                    if placeholderCount > BOOK_PLACEHOLDER_CAP then
-                        placeholderCount = BOOK_PLACEHOLDER_CAP
-                    end
+            if tabIndex > 1 then
+                -- A tab whose readable entries are mostly class-list spells
+                -- is a school-tab set (the server injects one per unlocked
+                -- class, at any index) -- the class tabs cover those. Any
+                -- other extra tab feeds the single merged GM tab, whatever
+                -- the server calls it ("Internal" here).
+                local isSchoolTab = #entries > 0 and (classHits * 2 > #entries)
 
-                    for index = 1, placeholderCount do
-                        local slot = offset + index
-                        table.insert(entries, {
-                            bookTabName = tabName,
-                            slot = slot,
-                            name = "Unknown spell (slot " .. slot .. ")",
-                            rankText = "",
-                            rankNumber = 0,
-                            icon = "Interface\\Icons\\INV_Misc_QuestionMark",
-                            passive = false,
-                            placeholder = true,
-                        })
+                if not isSchoolTab then
+                    if #entries == 0 then
+                        -- Nothing listable in the whole tab: its spells
+                        -- exist only server-side. Represent it with honest
+                        -- placeholders; the tooltip still tries the slot.
+                        local room = BOOK_PLACEHOLDER_CAP - gmPlaceholderCount
+                        local placeholderCount = spellCount
+                        if placeholderCount > room then
+                            placeholderCount = room
+                        end
+
+                        for index = 1, placeholderCount do
+                            local slot = offset + index
+                            gmPlaceholderCount = gmPlaceholderCount + 1
+                            table.insert(gmEntries, {
+                                bookTabName = tabName,
+                                slot = slot,
+                                name = "Unknown spell (slot " .. slot .. ")",
+                                rankText = "",
+                                rankNumber = 0,
+                                icon = "Interface\\Icons\\INV_Misc_QuestionMark",
+                                passive = false,
+                                placeholder = true,
+                            })
+                        end
+                    else
+                        for _, entry in ipairs(entries) do
+                            table.insert(gmEntries, entry)
+                        end
                     end
                 end
-
-                KeepBookTab(tabName, entries)
             end
         end
     end
+
+    local generalEntries = {}
+    for _, entry in pairs(generalByName) do
+        table.insert(generalEntries, entry)
+    end
+
+    -- Exactly three book tabs, at most: General, Professions, GM. A tab
+    -- with nothing to show is dropped by KeepBookTab.
+    KeepBookTab(generalName, generalEntries)
+    KeepBookTab("Professions", professions)
+    KeepBookTab("GM", gmEntries)
 end
 
 function USB:FindNativeSlot(entry)

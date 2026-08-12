@@ -97,15 +97,22 @@ end
 local function UpdateTabs()
     for _, item in ipairs(tabButtons) do
         local entries = USB:GetEntries(item.tabKey)
-        local prefix = item.tabKey == selectedTab and "> " or ""
         local label = TabLabel(item.tabKey)
 
         if USB.CLASS_INFO[item.tabKey] then
             label = "|cff" .. TabColor(item.tabKey) .. label .. "|r"
         end
 
+        -- The selected tab is marked with a locked highlight, never a
+        -- text prefix -- uniform across class and book tabs.
+        if item.tabKey == selectedTab then
+            item.button:LockHighlight()
+        else
+            item.button:UnlockHighlight()
+        end
+
         item.button:SetText(
-            prefix .. label .. "  |cffaaaaaa(" .. #entries .. ")|r"
+            label .. "  |cffaaaaaa(" .. #entries .. ")|r"
         )
     end
 
@@ -370,9 +377,13 @@ function UpdateBookTabButtons()
             end
 
             item.tabKey = bookTab.key
-            local prefix = bookTab.key == selectedTab and "> " or ""
+            if bookTab.key == selectedTab then
+                item.button:LockHighlight()
+            else
+                item.button:UnlockHighlight()
+            end
             item.button:SetText(
-                prefix .. bookTab.name
+                bookTab.name
                 .. "  |cffaaaaaa(" .. #bookTab.entries .. ")|r"
             )
             item.button:Show()
@@ -381,6 +392,7 @@ function UpdateBookTabButtons()
 
     for index = shown + 1, #bookTabButtons do
         bookTabButtons[index].tabKey = nil
+        bookTabButtons[index].button:UnlockHighlight()
         bookTabButtons[index].button:Hide()
     end
 end
