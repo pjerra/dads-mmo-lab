@@ -19,6 +19,21 @@ local function RankNumber(rankText)
     return tonumber(string.match(rankText, "(%d+)")) or 0
 end
 
+local PROFESSION_ID_SET = {}
+for _, spellID in ipairs(USB.PROFESSION_SPELL_IDS or {}) do
+    PROFESSION_ID_SET[spellID] = true
+end
+
+local function IsProfessionSpell(spellID, spellName)
+    if spellID and PROFESSION_ID_SET[spellID] then
+        return true
+    end
+    if spellName and USB.PROFESSION_NAMES and USB.PROFESSION_NAMES[spellName] then
+        return true
+    end
+    return false
+end
+
 local function ShouldReplace(existing, candidate)
     if not existing then
         return true
@@ -200,13 +215,23 @@ function USB:GetEntries(tabKey)
     return self.entriesByClass[tabKey] or {}
 end
 
--- Spellbook-driven tabs: the real "General" tab (tab 1) plus any tab the
--- server grants past the class's three school tabs (GM accounts get an
--- extra one on this realm). The school tabs themselves stay out -- the
--- class tabs already cover those abilities from the ID lists. Runs from
--- FinalizeScan, so the existing SPELLS_CHANGED wiring keeps these live;
--- a tab with no spells is simply not kept.
+-- Spellbook-driven tabs: the real "General" tab (tab 1) -- split into a
+-- Professions tab and the rest -- plus any tab the server grants past the
+-- class's three school tabs (GM accounts get an extra one on this realm).
+-- The school tabs themselves stay out -- the class tabs already cover
+-- those abilities from the ID lists. Runs from FinalizeScan, so the
+-- existing SPELLS_CHANGED wiring keeps these live; a tab with no spells
+-- is simply not kept.
 local BOOK_SCHOOL_TAB_COUNT = 3
+
+-- On this client an invalid slot makes GetSpellName THROW instead of
+-- returning nil, and unreadable slots show up in TWO ways: GM tab sizes
+-- overshoot the real array (failures at the tail), and server-granted
+-- spells missing from the client's DBCs throw MID-tab (found live: a
+-- first-failure break hid everything sorted after them, professions
+-- included). So a failed slot is SKIPPED, and only a long unbroken run
+-- of failures is treated as the end of the array.
+local BOOK_SLOT_MISS_LIMIT = 50
 
 function USB:ScanBookTabs()
     self.bookTabs = {}
@@ -218,6 +243,29 @@ function USB:ScanBookTabs()
     end
 
     local seenNames = {}
+
+    local function KeepBookTab(name, entries)
+        if #entries == 0 then
+            return
+        end
+
+        table.sort(entries, function(a, b)
+            if a.name == b.name then
+                return a.rankNumber < b.rankNumber
+            end
+            return a.name < b.name
+        end)
+
+        local bookTab = {
+            key = "BOOK:" .. name,
+            name = name,
+            entries = entries,
+        }
+        table.insert(self.bookTabs, bookTab)
+        self.bookTabsByKey[bookTab.key] = bookTab
+        seenNames[name] = true
+    end
+
     local tabCount = GetNumSpellTabs() or 0
 
     for tabIndex = 1, tabCount do
@@ -228,20 +276,23 @@ function USB:ScanBookTabs()
             and (tabIndex == 1 or isExtra)
             and not seenNames[tabName] then
             local entries = {}
+            local professions = {}
+            local misses = 0
             offset = offset or 0
             spellCount = spellCount or 0
 
             for slot = offset + 1, offset + spellCount do
-                -- GM accounts report tab sizes that overshoot the real spell
-                -- array, and this client THROWS on an invalid slot instead of
-                -- returning nil. pcall + break: slots are contiguous, so the
-                -- first invalid one ends the tab.
                 local ok, spellName, rankText = pcall(GetSpellName, slot, self.BOOK_TYPE)
-                if not ok then
-                    break
-                end
 
-                if spellName and spellName ~= "" then
+                if not ok or not spellName or spellName == "" then
+                    -- Unreadable slot: skip it (see BOOK_SLOT_MISS_LIMIT).
+                    misses = misses + 1
+                    if misses >= BOOK_SLOT_MISS_LIMIT then
+                        break
+                    end
+                else
+                    misses = 0
+
                     local spellID = nil
                     if GetSpellLink then
                         local okLink, link = pcall(GetSpellLink, slot, self.BOOK_TYPE)
@@ -262,7 +313,7 @@ function USB:ScanBookTabs()
                         end
                     end
 
-                    table.insert(entries, {
+                    local entry = {
                         bookTabName = tabName,
                         slot = slot,
                         spellID = spellID,
@@ -270,26 +321,20 @@ function USB:ScanBookTabs()
                         rankText = rankText or "",
                         rankNumber = RankNumber(rankText),
                         icon = icon,
-                    })
+                    }
+
+                    if tabIndex == 1 and IsProfessionSpell(spellID, spellName) then
+                        entry.bookTabName = "Professions"
+                        table.insert(professions, entry)
+                    else
+                        table.insert(entries, entry)
+                    end
                 end
             end
 
-            if #entries > 0 then
-                table.sort(entries, function(a, b)
-                    if a.name == b.name then
-                        return a.rankNumber < b.rankNumber
-                    end
-                    return a.name < b.name
-                end)
-
-                local bookTab = {
-                    key = "BOOK:" .. tabName,
-                    name = tabName,
-                    entries = entries,
-                }
-                table.insert(self.bookTabs, bookTab)
-                self.bookTabsByKey[bookTab.key] = bookTab
-                seenNames[tabName] = true
+            KeepBookTab(tabName, entries)
+            if tabIndex == 1 then
+                KeepBookTab("Professions", professions)
             end
         end
     end
@@ -308,14 +353,20 @@ function USB:FindNativeSlot(entry)
         offset = offset or 0
         spellCount = spellCount or 0
 
+        local misses = 0
+
         for slot = offset + 1, offset + spellCount do
-            -- GM accounts report tab sizes that overshoot the real spell
-            -- array, and this client THROWS on an invalid slot instead of
-            -- returning nil. pcall + break: slots are contiguous, so the
-            -- first invalid one ends the tab.
             local ok, bookName, bookRank = pcall(GetSpellName, slot, self.BOOK_TYPE)
+
             if not ok then
-                break
+                -- Unreadable slot: skip it (see BOOK_SLOT_MISS_LIMIT).
+                bookName = nil
+                misses = misses + 1
+                if misses >= BOOK_SLOT_MISS_LIMIT then
+                    break
+                end
+            else
+                misses = 0
             end
 
             if bookName == entry.name then

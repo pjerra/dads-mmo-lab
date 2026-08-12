@@ -236,3 +236,54 @@ USB.CLASS_ACTIVE_SPELL_IDS = {
         8946,   -- Cure Poison
     },
 }
+
+-- Profession and tradeskill spells for the dedicated Professions tab:
+-- every rank (Apprentice through Grand Master) of the primary and
+-- secondary professions, plus the book-visible craft/gather spells
+-- (Smelting, Disenchant, Milling, Prospecting). The spellbook shows only
+-- the highest learned rank, but listing every rank ID keeps the tab
+-- working whatever rank a character stopped at.
+USB.PROFESSION_SPELL_IDS = {
+    2259, 3101, 3464, 11611, 28596, 51304,      -- Alchemy
+    2018, 3100, 3538, 9785, 29844, 51300,       -- Blacksmithing
+    7411, 7412, 7413, 13920, 28029, 51313,      -- Enchanting
+    4036, 4037, 4038, 12656, 30350, 51306,      -- Engineering
+    2366, 2368, 3570, 11993, 28695, 50300,      -- Herbalism
+    45357, 45358, 45359, 45360, 45361, 45363,   -- Inscription
+    25229, 25230, 28894, 28895, 28897, 51311,   -- Jewelcrafting
+    2108, 3104, 3811, 10662, 32549, 51302,      -- Leatherworking
+    2575, 2576, 3564, 10248, 29354, 50310,      -- Mining
+    8613, 8617, 8618, 10768, 32678, 50305,      -- Skinning
+    3908, 3909, 3910, 12180, 26790, 51309,      -- Tailoring
+    2550, 3102, 3413, 18260, 33359, 51296,      -- Cooking
+    3273, 3274, 7924, 10846, 27028, 45542,      -- First Aid
+    7620, 7731, 7732, 18248, 33095, 51294,      -- Fishing
+    2656,       -- Smelting
+    13262,      -- Disenchant
+    51005,      -- Milling
+    31252,      -- Prospecting
+}
+
+-- Fallback for spellbook slots whose link (and so spell ID) the client
+-- does not expose: match the visible name instead. enUS names -- this
+-- realm's client.
+USB.PROFESSION_NAMES = {
+    ["Alchemy"] = true,
+    ["Blacksmithing"] = true,
+    ["Enchanting"] = true,
+    ["Engineering"] = true,
+    ["Herbalism"] = true,
+    ["Inscription"] = true,
+    ["Jewelcrafting"] = true,
+    ["Leatherworking"] = true,
+    ["Mining"] = true,
+    ["Skinning"] = true,
+    ["Tailoring"] = true,
+    ["Cooking"] = true,
+    ["First Aid"] = true,
+    ["Fishing"] = true,
+    ["Smelting"] = true,
+    ["Disenchant"] = true,
+    ["Milling"] = true,
+    ["Prospecting"] = true,
+}
