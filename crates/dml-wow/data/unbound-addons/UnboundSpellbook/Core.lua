@@ -220,8 +220,9 @@ end
 -- class's three school tabs (GM accounts get an extra one on this realm).
 -- The school tabs themselves stay out -- the class tabs already cover
 -- those abilities from the ID lists. Runs from FinalizeScan, so the
--- existing SPELLS_CHANGED wiring keeps these live; a tab with no spells
--- is simply not kept.
+-- existing SPELLS_CHANGED wiring keeps these live; a tab that reports
+-- nothing at all is not kept, and an extra tab whose slots are all
+-- unreadable is kept with placeholder rows (see BOOK_PLACEHOLDER_CAP).
 local BOOK_SCHOOL_TAB_COUNT = 3
 
 -- On this client an invalid slot makes GetSpellName THROW instead of
@@ -232,6 +233,13 @@ local BOOK_SCHOOL_TAB_COUNT = 3
 -- included). So a failed slot is SKIPPED, and only a long unbroken run
 -- of failures is treated as the end of the array.
 local BOOK_SLOT_MISS_LIMIT = 50
+
+-- A tab whose every slot is unlistable still renders -- as honest
+-- "Unknown spell" placeholder rows (the GM tab's spells exist only
+-- server-side here, so each slot read throws). Reported sizes overshoot
+-- for exactly these tabs, so the placeholder row count cannot trust
+-- spellCount blindly.
+local BOOK_PLACEHOLDER_CAP = 48
 
 function USB:ScanBookTabs()
     self.bookTabs = {}
@@ -250,6 +258,15 @@ function USB:ScanBookTabs()
         end
 
         table.sort(entries, function(a, b)
+            if a.placeholder ~= b.placeholder then
+                return not a.placeholder    -- readable entries first
+            end
+            if a.placeholder then
+                return a.slot < b.slot      -- placeholders in book order
+            end
+            if a.passive ~= b.passive then
+                return not a.passive        -- actives read before passives
+            end
             if a.name == b.name then
                 return a.rankNumber < b.rankNumber
             end
@@ -270,16 +287,24 @@ function USB:ScanBookTabs()
 
     for tabIndex = 1, tabCount do
         local tabName, _, offset, spellCount = GetSpellTabInfo(tabIndex)
-        local isExtra = tabIndex > 1 + BOOK_SCHOOL_TAB_COUNT
+        offset = offset or 0
+        spellCount = spellCount or 0
 
-        if tabName and tabName ~= ""
-            and (tabIndex == 1 or isExtra)
+        -- Indices 2..4 normally hold the class's three school tabs, which
+        -- the class tabs already cover. They are still scanned, because a
+        -- tab in that range with NO readable slot cannot be a school tab
+        -- (school spells are ordinary client-known class spells) -- if the
+        -- client ever suppresses school tabs, a server-granted extra can
+        -- sit below index 5 and is still caught.
+        local isSchoolIndex = tabIndex > 1
+            and tabIndex <= 1 + BOOK_SCHOOL_TAB_COUNT
+
+        if tabName and tabName ~= "" and spellCount > 0
             and not seenNames[tabName] then
             local entries = {}
             local professions = {}
+            local readable = 0
             local misses = 0
-            offset = offset or 0
-            spellCount = spellCount or 0
 
             for slot = offset + 1, offset + spellCount do
                 local ok, spellName, rankText = pcall(GetSpellName, slot, self.BOOK_TYPE)
@@ -292,6 +317,12 @@ function USB:ScanBookTabs()
                     end
                 else
                     misses = 0
+                    readable = readable + 1
+
+                    if isSchoolIndex then
+                        -- One readable slot settles it: a real school tab.
+                        break
+                    end
 
                     local spellID = nil
                     if GetSpellLink then
@@ -313,28 +344,70 @@ function USB:ScanBookTabs()
                         end
                     end
 
-                    local entry = {
-                        bookTabName = tabName,
-                        slot = slot,
-                        spellID = spellID,
-                        name = spellName,
-                        rankText = rankText or "",
-                        rankNumber = RankNumber(rankText),
-                        icon = icon,
-                    }
+                    -- Degenerate slot: a non-empty name with no ID, no icon
+                    -- and no rank is this client's noise, not a spell.
+                    if spellID or icon or (rankText or "") ~= "" then
+                        local passive = false
+                        if IsPassiveSpell then
+                            local okPassive, isPassive = pcall(IsPassiveSpell, slot, self.BOOK_TYPE)
+                            if okPassive then
+                                passive = not not isPassive
+                            end
+                        end
 
-                    if tabIndex == 1 and IsProfessionSpell(spellID, spellName) then
-                        entry.bookTabName = "Professions"
-                        table.insert(professions, entry)
-                    else
-                        table.insert(entries, entry)
+                        local entry = {
+                            bookTabName = tabName,
+                            slot = slot,
+                            spellID = spellID,
+                            name = spellName,
+                            rankText = rankText or "",
+                            rankNumber = RankNumber(rankText),
+                            icon = icon,
+                            passive = passive,
+                        }
+
+                        if tabIndex == 1 and IsProfessionSpell(spellID, spellName) then
+                            entry.bookTabName = "Professions"
+                            table.insert(professions, entry)
+                        else
+                            table.insert(entries, entry)
+                        end
                     end
                 end
             end
 
-            KeepBookTab(tabName, entries)
             if tabIndex == 1 then
+                KeepBookTab(tabName, entries)
                 KeepBookTab("Professions", professions)
+            elseif isSchoolIndex and readable > 0 then
+                -- Real school tab: covered by the class tabs, not kept.
+            else
+                if #entries == 0 then
+                    -- Nothing listable in the whole tab: its spells exist
+                    -- only server-side (the GM tab here). Keep the tab with
+                    -- honest placeholders instead of silently dropping it;
+                    -- the tooltip still tries the slot client-side.
+                    local placeholderCount = spellCount
+                    if placeholderCount > BOOK_PLACEHOLDER_CAP then
+                        placeholderCount = BOOK_PLACEHOLDER_CAP
+                    end
+
+                    for index = 1, placeholderCount do
+                        local slot = offset + index
+                        table.insert(entries, {
+                            bookTabName = tabName,
+                            slot = slot,
+                            name = "Unknown spell (slot " .. slot .. ")",
+                            rankText = "",
+                            rankNumber = 0,
+                            icon = "Interface\\Icons\\INV_Misc_QuestionMark",
+                            passive = false,
+                            placeholder = true,
+                        })
+                    end
+                end
+
+                KeepBookTab(tabName, entries)
             end
         end
     end
@@ -402,6 +475,11 @@ function USB:PickupEntry(entry)
 
     if InCombatLockdown and InCombatLockdown() then
         self:Error("Leave combat before dragging a spell.")
+        return
+    end
+
+    if entry.placeholder then
+        self:Error("The client cannot read this spell, so it cannot be dragged.")
         return
     end
 

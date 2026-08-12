@@ -151,7 +151,14 @@ local function ShowTooltip(cell)
     end
 
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
+    if entry.placeholder then
+        GameTooltip:AddLine(
+            "The client cannot read this server-side spell.",
+            1, 0.55, 0.25
+        )
+    else
+        GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
+    end
     GameTooltip:Show()
 end
 
@@ -210,6 +217,18 @@ local function RefreshUI()
             cell.icon:SetTexture(
                 entry.icon or "Interface\\Icons\\INV_Misc_QuestionMark"
             )
+
+            -- Passives and unreadable placeholders render dimmed so the
+            -- active abilities read first; cells are reused, so the bright
+            -- state must be reset explicitly.
+            if entry.passive or entry.placeholder then
+                cell.icon:SetVertexColor(0.5, 0.5, 0.5)
+                cell.nameText:SetTextColor(0.62, 0.62, 0.62)
+            else
+                cell.icon:SetVertexColor(1, 1, 1)
+                cell.nameText:SetTextColor(1, 1, 1)
+            end
+
             cell.nameText:SetText(entry.name)
             cell.rankText:SetText(entry.rankText or "")
             cell:Show()
