@@ -264,6 +264,26 @@ USB.PROFESSION_SPELL_IDS = {
     31252,      -- Prospecting
 }
 
+-- The 30 WotLK class school/tree spellbook-tab names (enUS -- the same
+-- tradeoff as the profession names below; duplicates such as Frost,
+-- Protection, Restoration and Holy across classes collapse fine in a
+-- flat set), plus "General". ScanBookTabs hides any extra spellbook tab
+-- carrying one of these names: the server injects a school-tab set per
+-- unlocked class, and the class tabs already cover those spells.
+USB.SCHOOL_TAB_NAMES = {
+    ["General"] = true,
+    ["Arms"] = true, ["Fury"] = true, ["Protection"] = true,           -- Warrior
+    ["Holy"] = true, ["Retribution"] = true,                           -- Paladin (+Protection)
+    ["Beast Mastery"] = true, ["Marksmanship"] = true, ["Survival"] = true, -- Hunter
+    ["Assassination"] = true, ["Combat"] = true, ["Subtlety"] = true,  -- Rogue
+    ["Discipline"] = true, ["Shadow"] = true,                          -- Priest (+Holy)
+    ["Blood"] = true, ["Frost"] = true, ["Unholy"] = true,             -- Death Knight
+    ["Elemental"] = true, ["Enhancement"] = true, ["Restoration"] = true, -- Shaman
+    ["Arcane"] = true, ["Fire"] = true,                                -- Mage (+Frost)
+    ["Affliction"] = true, ["Demonology"] = true, ["Destruction"] = true, -- Warlock
+    ["Balance"] = true, ["Feral Combat"] = true,                       -- Druid (+Restoration)
+}
+
 -- Fallback for spellbook slots whose link (and so spell ID) the client
 -- does not expose: match the visible name instead. enUS names -- this
 -- realm's client.

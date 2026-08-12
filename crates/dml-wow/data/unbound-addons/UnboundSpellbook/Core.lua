@@ -242,9 +242,9 @@ end
 -- so a raw mirror is unusable noise. General keeps only tab 1's spells
 -- that are neither professions nor in any class ID list, collapsed to
 -- their highest known rank; Professions is split out of tab 1; every
--- remaining non-school tab (school = a majority of its readable spell
--- IDs appear in the class lists -- content, never index or name) merges
--- into the one GM tab, whatever the server calls its internal tabs.
+-- remaining non-school tab merges into the one GM tab, whatever the
+-- server calls its internal tabs (school tabs are recognised by their
+-- enUS names, with a conservative content tiebreaker for unknown names).
 -- Runs from FinalizeScan, so the existing SPELLS_CHANGED wiring keeps
 -- these live; a tab with nothing to show is simply not kept.
 
@@ -310,6 +310,8 @@ function USB:ScanBookTabs()
     local professions = {}
     local gmEntries = {}
     local gmPlaceholderCount = 0
+    local gmReadableCount = 0
+    local suspectTabs = {}
 
     for tabIndex = 1, tabCount do
         local tabName, _, offset, spellCount = GetSpellTabInfo(tabIndex)
@@ -404,44 +406,61 @@ function USB:ScanBookTabs()
             end
 
             if tabIndex > 1 then
-                -- A tab whose readable entries are mostly class-list spells
-                -- is a school-tab set (the server injects one per unlocked
-                -- class, at any index) -- the class tabs cover those. Any
-                -- other extra tab feeds the single merged GM tab, whatever
-                -- the server calls it ("Internal" here).
-                local isSchoolTab = #entries > 0 and (classHits * 2 > #entries)
-
-                if not isSchoolTab then
-                    if #entries == 0 then
-                        -- Nothing listable in the whole tab: its spells
-                        -- exist only server-side. Represent it with honest
-                        -- placeholders; the tooltip still tries the slot.
-                        local room = BOOK_PLACEHOLDER_CAP - gmPlaceholderCount
-                        local placeholderCount = spellCount
-                        if placeholderCount > room then
-                            placeholderCount = room
-                        end
-
-                        for index = 1, placeholderCount do
-                            local slot = offset + index
-                            gmPlaceholderCount = gmPlaceholderCount + 1
-                            table.insert(gmEntries, {
-                                bookTabName = tabName,
-                                slot = slot,
-                                name = "Unknown spell (slot " .. slot .. ")",
-                                rankText = "",
-                                rankNumber = 0,
-                                icon = "Interface\\Icons\\INV_Misc_QuestionMark",
-                                passive = false,
-                                placeholder = true,
-                            })
-                        end
-                    else
-                        for _, entry in ipairs(entries) do
-                            table.insert(gmEntries, entry)
-                        end
+                -- School-tab sets are recognised by NAME first (the enUS
+                -- set in ClassData): the server injects one per unlocked
+                -- class, and the class tabs already cover those spells.
+                -- Content is only a tiebreaker for UNKNOWN names, and a
+                -- conservative one: a real school tab is essentially 100%
+                -- class-list spells, so anything under 90% class hits
+                -- keeps its entries.
+                if USB.SCHOOL_TAB_NAMES and USB.SCHOOL_TAB_NAMES[tabName] then
+                    -- School tab: hidden.
+                elseif #entries == 0 then
+                    -- Nothing listable in the whole tab: its spells
+                    -- exist only server-side. Represent it with honest
+                    -- placeholders; the tooltip still tries the slot.
+                    local room = BOOK_PLACEHOLDER_CAP - gmPlaceholderCount
+                    local placeholderCount = spellCount
+                    if placeholderCount > room then
+                        placeholderCount = room
                     end
+
+                    for index = 1, placeholderCount do
+                        local slot = offset + index
+                        gmPlaceholderCount = gmPlaceholderCount + 1
+                        table.insert(gmEntries, {
+                            bookTabName = tabName,
+                            slot = slot,
+                            name = "Unknown spell (slot " .. slot .. ")",
+                            rankText = "",
+                            rankNumber = 0,
+                            icon = "Interface\\Icons\\INV_Misc_QuestionMark",
+                            passive = false,
+                            placeholder = true,
+                        })
+                    end
+                elseif classHits * 10 >= #entries * 9 then
+                    -- Unknown name but overwhelmingly class spells: a
+                    -- suspected school tab. Held back rather than dropped
+                    -- -- see the guard below the tab loop.
+                    table.insert(suspectTabs, entries)
+                else
+                    for _, entry in ipairs(entries) do
+                        table.insert(gmEntries, entry)
+                    end
+                    gmReadableCount = gmReadableCount + #entries
                 end
+            end
+        end
+    end
+
+    -- Final guard: the content tiebreaker must NEVER leave the GM tab
+    -- without a single readable entry -- better one suspicious tab shown
+    -- than the user's GM spells vanishing.
+    if gmReadableCount == 0 and #suspectTabs > 0 then
+        for _, suspect in ipairs(suspectTabs) do
+            for _, entry in ipairs(suspect) do
+                table.insert(gmEntries, entry)
             end
         end
     end
