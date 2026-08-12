@@ -158,13 +158,13 @@ local function ShowTooltip(cell)
     end
 
     GameTooltip:AddLine(" ")
-    if entry.gmMacro then
+    if USB:HasReachableSlot(entry) then
+        GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
+    else
         GameTooltip:AddLine(
             "Click: create /cast macro and pick it up.",
             0.3, 1, 0.3
         )
-    else
-        GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
     end
     GameTooltip:Show()
 end
@@ -462,12 +462,14 @@ for index = 1, ENTRIES_PER_PAGE do
     cell:SetScript("OnDragStart", function(self)
         USB:PickupEntry(self.entry)
     end)
-    -- GM-tab entries have no reachable spellbook slot, so their
-    -- action-bar route is click -> macro pickup (see PickupGMEntry).
-    -- Other entries keep drag-only, matching the native book.
+    -- Entries with no reachable spellbook slot (past the client's
+    -- 1024-slot cap -- GM entries always, most class spells too) route
+    -- click -> macro pickup (see PickupViaMacro). Entries with a real
+    -- slot keep drag-only, matching the native book.
     cell:SetScript("OnClick", function(self)
-        if self.entry and self.entry.gmMacro then
-            USB:PickupEntry(self.entry)
+        local entry = self.entry
+        if entry and not USB:HasReachableSlot(entry) then
+            USB:PickupEntry(entry)
         end
     end)
 

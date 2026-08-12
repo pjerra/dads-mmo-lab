@@ -478,11 +478,30 @@ function USB:FindNativeSlot(entry)
     return nameFallback
 end
 
--- GM-tab entries live past the client's 1024-slot book cap, so
--- PickupSpell can never hold them. The action-bar route is a
--- per-character macro: create "/cast <name>" (reusing an existing macro
--- of the same name) and put it on the cursor, ready to drop on a bar.
-function USB:PickupGMEntry(entry)
+-- Whether a native book slot can hold this entry. Entries scanned out of
+-- tab 1 carry their slot; anything else needs a book walk, so the answer
+-- is computed once per entry and cached (entries are rebuilt every scan,
+-- which keeps the cache honest across SPELLS_CHANGED).
+function USB:HasReachableSlot(entry)
+    if entry.gmMacro then
+        return false
+    end
+    if entry.slot then
+        return true
+    end
+    if entry.reachable == nil then
+        entry.reachable = self:FindNativeSlot(entry) ~= nil
+    end
+    return entry.reachable
+end
+
+-- A known spell with no reachable book slot cannot be held by
+-- PickupSpell -- and with the client's slot array hard-capped at 1024,
+-- MOST spells on this server sit past it (GM-tab entries always do).
+-- The action-bar route for all of them is a per-character macro: create
+-- "/cast <name>" (reusing an existing macro of the same name) and put
+-- it on the cursor, ready to drop on a bar.
+function USB:PickupViaMacro(entry)
     if not (CreateMacro and PickupMacro and GetMacroIndexByName) then
         self:Error("The macro API is unavailable on this client.")
         return
@@ -551,7 +570,7 @@ function USB:PickupEntry(entry)
     end
 
     if entry.gmMacro then
-        self:PickupGMEntry(entry)
+        self:PickupViaMacro(entry)
         return
     end
 
@@ -566,9 +585,10 @@ function USB:PickupEntry(entry)
     end
     slot = slot or self:FindNativeSlot(entry)
     if not slot then
-        self:Error(
-            "The ability is known, but the native client did not expose its spellbook slot."
-        )
+        -- No reachable native slot (past the 1024-slot cap): fall back
+        -- to the macro route, which works for any known spell.
+        entry.reachable = false
+        self:PickupViaMacro(entry)
         return
     end
 
