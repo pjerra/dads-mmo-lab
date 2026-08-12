@@ -66,6 +66,8 @@
   import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
   import { requestConfFile, requestTuning } from "$lib/module-nav.svelte";
   import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
+  import { buildModuleRow, type ModuleRow, type RowActionId } from "$lib/module-row";
+  import type { Snippet } from "svelte";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -623,6 +625,79 @@
     return "on";
   }
 
+  // Shared row skeleton (Modules-page round 2, Task 1): every family's rows
+  // render through ONE snippet fed by buildModuleRow (module-row.ts). RowUi
+  // carries the per-family presentation the pure builder doesn't know about
+  // -- status badge, link targets, and the action dispatch/disable/label
+  // hooks -- so the row MARKUP lives in exactly one place.
+  type RowUi = {
+    url: string | null;
+    desc?: string;
+    ver?: string | null;
+    statusCls: "on" | "warn" | "off";
+    statusText: string;
+    dim?: boolean;
+    // Installed rows: the module name is a button opening its tuning card.
+    onName?: () => void;
+    onAction: (id: RowActionId) => void;
+    actionDisabled?: (id: RowActionId) => boolean;
+    actionTitle?: (id: RowActionId) => string | undefined;
+    // Two-step remove confirms override the builder's static label.
+    actionLabel?: (id: RowActionId) => string | undefined;
+  };
+
+  function openTuning(key: string) {
+    requestTuning(key);
+    tab = "tuning";
+  }
+
+  function cppAction(id: RowActionId, m: CppModule) {
+    if (id === "install") void install(m.key, null, m.name);
+    else if (id === "tune") openTuning(m.key);
+    else if (id === "repair") void toggleRepair(m);
+    else if (id === "remove") void removeModule(m);
+  }
+  function cppActionDisabled(id: RowActionId): boolean {
+    return (id === "install" || id === "remove") && featureLocked("modules-cpp");
+  }
+  function cppActionTitle(id: RowActionId): string | undefined {
+    if ((id === "install" || id === "remove") && featureLocked("modules-cpp")) return LOCKED_HINT;
+    if (id === "tune") return "Open this module's tuning card";
+    return undefined;
+  }
+
+  function luaAction(id: RowActionId, m: LuaModule) {
+    if (id === "install") void installLua(m);
+    else if (id === "tune") openTuning(m.key);
+    else if (id === "remove") void removeLua(m);
+  }
+  function luaActionDisabled(id: RowActionId, aleReady: boolean): boolean {
+    return (id === "install" || id === "remove") && (!aleReady || featureLocked("modules-lua"));
+  }
+  function luaActionTitle(id: RowActionId, aleReady: boolean): string | undefined {
+    if (id === "install" || id === "remove") {
+      if (featureLocked("modules-lua")) return LOCKED_HINT;
+      if (!aleReady) return "Install the ALE module first";
+    }
+    if (id === "tune") return "Open this module's tuning card";
+    return undefined;
+  }
+
+  function sqlAction(id: RowActionId, m: SqlModule) {
+    if (id === "install") void installSql(m);
+    else if (id === "remove") void removeSql(m);
+  }
+  function sqlActionDisabled(id: RowActionId): boolean {
+    return (id === "install" || id === "remove") && featureLocked("modules-sql");
+  }
+  function sqlActionTitle(id: RowActionId, m: SqlModule): string | undefined {
+    if (id === "remove" && m.key === "rare-drops") {
+      return "No automated reversal — restore a backup instead.";
+    }
+    if ((id === "install" || id === "remove") && featureLocked("modules-sql")) return LOCKED_HINT;
+    return undefined;
+  }
+
   function showRepairErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
     repairError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -800,28 +875,56 @@
     {/if}
   {/snippet}
 
-  {#snippet cppRow(m: CppModule)}
-    {@const ver = versionLabel(m.head, m.head_date)}
-    {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
-    <div class="row mrow">
+  <!-- One row skeleton for every section (round 2, Task 1): name+status
+       left, chips after the status badge, actions in a fixed right-aligned
+       column (same order: tune · repair · remove / install). The family
+       wrappers below feed it via buildModuleRow and supply their extra
+       chips/controls through the two snippet slots -- the row MARKUP lives
+       only here. -->
+  {#snippet moduleRow(row: ModuleRow, ui: RowUi, chips?: Snippet, controls?: Snippet)}
+    <div class="modrow" class:dim={ui.dim}>
       <div class="mhead">
         <span class="mtitle">
-          {#if m.installed}
-            <button
-              class="mname-link"
-              onclick={() => { requestTuning(m.key); tab = "tuning"; }}
-              title="Open this module's tuning card"
-            >{m.name}</button>
+          {#if ui.onName}
+            <button class="mname-link" onclick={ui.onName} title="Open this module's tuning card">{row.title}</button>
           {:else}
-            <strong class="mname">{m.name}</strong>
+            <strong class="mname">{row.title}</strong>
           {/if}
-          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+          {#if ui.url}<button class="ghlink" onclick={() => openModUrl(ui.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
         </span>
-        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-        {#if ver}<span class="mver">{ver}</span>{/if}
+        {#if ui.desc}<span class="mdesc">{ui.desc}</span>{/if}
+        {#if ui.ver}<span class="mver">{ui.ver}</span>{/if}
       </div>
-      <span class="badge {statusClass(m)}">{statusText(m)}</span>
+      <div class="mmid">
+        <span class="badge {ui.statusCls}">{ui.statusText}</span>
+        {#each row.chips as chip (chip.id)}
+          <span class="mchip {chip.kind}">{chip.label}</span>
+        {/each}
+        {#if chips}{@render chips()}{/if}
+      </div>
+      <div class="mactions">
+        {#if controls}{@render controls()}{/if}
+        {#each row.actions as a (a.id)}
+          <button
+            class:primary={a.id === "install"}
+            onclick={() => ui.onAction(a.id)}
+            disabled={busy || a.disabled || ui.actionDisabled?.(a.id)}
+            title={ui.actionTitle?.(a.id)}
+          >
+            {ui.actionLabel?.(a.id) ?? a.label}
+          </button>
+        {/each}
+      </div>
+    </div>
+  {/snippet}
+
+  {#snippet cppRow(m: CppModule)}
+    {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
+    {#snippet cppChips()}
       {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
+      {#if m.installed}{@render setupChip(m.key)}{/if}
+    {/snippet}
+    {#snippet cppControls()}
       {#if m.conf === "ready"}
         <button
           onclick={() => activateConf(m.key)}
@@ -833,25 +936,7 @@
       {:else if m.conf === "active"}
         <span class="muted">conf active</span>
       {/if}
-      {#if m.installed && m.conf_name}
-        <button
-          class="conf-link"
-          onclick={() => { requestConfFile(m.conf_name ?? ""); tab = "files"; }}
-          title="Open {m.conf_name} in Module files"
-        >{m.conf_name}</button>
-      {/if}
-      {#if m.installed}{@render setupChip(m.key)}{/if}
-      <span class="spacer"></span>
-      {#if !m.installed}
-        <button
-          class="primary"
-          onclick={() => install(m.key, null, m.name)}
-          disabled={busy || featureLocked("modules-cpp")}
-          title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-        >
-          Install
-        </button>
-      {:else}
+      {#if m.installed}
         <!-- The per-module Update replaces the old always-there reinstall
              button (module-update round): it appears only when the check
              above reported the module behind, and streams the stash-safe
@@ -894,16 +979,26 @@
             Place NPC in capitals
           </button>
         {/if}
-        <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
-        <button
-          onclick={() => removeModule(m)}
-          disabled={busy || featureLocked("modules-cpp")}
-          title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-        >
-          {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
-        </button>
       {/if}
-    </div>
+    {/snippet}
+    {@render moduleRow(
+      buildModuleRow(m, { family: "cpp" }),
+      {
+        url: m.url,
+        desc: m.desc,
+        ver: versionLabel(m.head, m.head_date),
+        statusCls: statusClass(m),
+        statusText: statusText(m),
+        onName: m.installed ? () => openTuning(m.key) : undefined,
+        onAction: (id) => cppAction(id, m),
+        actionDisabled: cppActionDisabled,
+        actionTitle: cppActionTitle,
+        actionLabel: (id) =>
+          id === "remove" && confirmingRemove === m.key ? removeConfirmText(m) : undefined,
+      },
+      cppChips,
+      cppControls,
+    )}
     {@render setupPanel(m.key)}
     {#if repairOpen === m.key}
       <div class="repair-panel">
@@ -1007,25 +1102,11 @@
   </div>
 
   {#snippet luaRow(m: LuaModule, aleReady: boolean)}
-    <div class="row mrow" class:needs-ale={!aleReady}>
-      <div class="mhead">
-        <span class="mtitle">
-          {#if m.cloned || m.deployed}
-            <button
-              class="mname-link"
-              onclick={() => { requestTuning(m.key); tab = "tuning"; }}
-              title="Open this module's tuning card"
-            >{m.name}</button>
-          {:else}
-            <strong class="mname">{m.name}</strong>
-          {/if}
-          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-        </span>
-        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-      </div>
-      <span class="badge {luaStatus(m) === 'installed' ? 'on' : luaStatus(m) === 'cloned' ? 'warn' : 'off'}">{luaStatusLabel(luaStatus(m))}</span>
+    {@const row = buildModuleRow(m, { family: "lua" })}
+    {#snippet luaChips()}
       {#if m.deployed}{@render setupChip(m.key)}{/if}
-      <span class="spacer"></span>
+    {/snippet}
+    {#snippet luaControls()}
       {#if m.has_sql}
         <label class="row">
           <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
@@ -1058,30 +1139,25 @@
           Place NPC in capitals
         </button>
       {/if}
-      <button
-        class="primary"
-        onclick={() => installLua(m)}
-        disabled={busy || !aleReady || featureLocked("modules-lua")}
-        title={featureLocked("modules-lua")
-          ? LOCKED_HINT
-          : !aleReady
-            ? "Install the ALE module first"
-            : undefined}
-      >
-        Install
-      </button>
-      <button
-        onclick={() => removeLua(m)}
-        disabled={busy || !aleReady || featureLocked("modules-lua")}
-        title={featureLocked("modules-lua")
-          ? LOCKED_HINT
-          : !aleReady
-            ? "Install the ALE module first"
-            : undefined}
-      >
-        {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-      </button>
-    </div>
+    {/snippet}
+    {@render moduleRow(
+      row,
+      {
+        url: m.url,
+        desc: m.desc,
+        statusCls: luaStatus(m) === "installed" ? "on" : luaStatus(m) === "cloned" ? "warn" : "off",
+        statusText: luaStatusLabel(luaStatus(m)),
+        dim: !aleReady,
+        onName: row.installed ? () => openTuning(m.key) : undefined,
+        onAction: (id) => luaAction(id, m),
+        actionDisabled: (id) => luaActionDisabled(id, aleReady),
+        actionTitle: (id) => luaActionTitle(id, aleReady),
+        actionLabel: (id) =>
+          id === "remove" && confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
+      },
+      luaChips,
+      luaControls,
+    )}
     {#if m.deployed}{@render setupPanel(m.key)}{/if}
     {#if m.warn}
       <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
@@ -1139,57 +1215,47 @@
   </div>
 
   {#snippet sqlRow(m: SqlModule)}
-    <div class="row mrow">
-      <div class="mhead">
-        <span class="mtitle">
-          <strong class="mname">{m.name}</strong>
-          {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-        </span>
-        {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-      </div>
-      <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
-      {#if m.key === "hearthstone-cd"}
-        <label class="row">
-          Cooldown
-          <select bind:value={hearthstoneVariant} disabled={busy}>
-            <option value="1sec">1sec</option>
-            <option value="1min">1min</option>
-            <option value="5min">5min</option>
-            <option value="15min">15min</option>
-            <option value="30min">30min</option>
-          </select>
-        </label>
-      {:else if m.key === "npc-teleporter"}
-        <label class="row">
-          Level
-          <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
-        </label>
+    {#snippet sqlControls()}
+      {#if !m.installed}
+        {#if m.key === "hearthstone-cd"}
+          <label class="row">
+            Cooldown
+            <select bind:value={hearthstoneVariant} disabled={busy}>
+              <option value="1sec">1sec</option>
+              <option value="1min">1min</option>
+              <option value="5min">5min</option>
+              <option value="15min">15min</option>
+              <option value="30min">30min</option>
+            </select>
+          </label>
+        {:else if m.key === "npc-teleporter"}
+          <label class="row">
+            Level
+            <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
+          </label>
+        {/if}
       {/if}
-      <span class="spacer"></span>
       <label class="row">
         <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
         Back up first (recommended)
       </label>
-      <button
-        class="primary"
-        onclick={() => installSql(m)}
-        disabled={busy || featureLocked("modules-sql")}
-        title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-      >
-        Install
-      </button>
-      {#if m.key === "rare-drops"}
-        <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
-      {:else}
-        <button
-          onclick={() => removeSql(m)}
-          disabled={busy || featureLocked("modules-sql")}
-          title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-        >
-          {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-        </button>
-      {/if}
-    </div>
+    {/snippet}
+    {@render moduleRow(
+      buildModuleRow(m, { family: "sql", removeDisabled: m.key === "rare-drops" }),
+      {
+        url: m.url,
+        desc: m.desc,
+        statusCls: m.installed ? "on" : "off",
+        statusText: m.installed ? "Installed" : "Not installed",
+        onAction: (id) => sqlAction(id, m),
+        actionDisabled: sqlActionDisabled,
+        actionTitle: (id) => sqlActionTitle(id, m),
+        actionLabel: (id) =>
+          id === "remove" && confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
+      },
+      undefined,
+      sqlControls,
+    )}
     {#if m.type === "tweak_world"}
       <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
     {/if}
@@ -1426,11 +1492,50 @@
   .avail-toggle:hover { color: #c9d1d9; }
   .warn-card { border-color: #d29922; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  /* .mrow survives for the Server-update card's repo rows only -- module
+     rows all use .modrow below (round 2, Task 1). */
   .mrow { padding: 6px 0; border-top: 1px solid #21262d; }
   .mrow:first-of-type { border-top: none; }
 
-  /* ALE missing: the lua catalog stays readable (that's the point -- it shows
-     what you'd get) but reads as unavailable. */
+  /* One row skeleton for every module section (round 2, Task 1): a 3-column
+     grid -- name block | status+chips | right-aligned action column with a
+     shared min-width so the actions line up across rows and sections. One
+     row height, one separator, all families. */
+  .modrow {
+    display: grid;
+    grid-template-columns: minmax(260px, 460px) minmax(120px, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    min-height: 44px;
+    padding: 6px 0;
+    border-top: 1px solid #21262d;
+  }
+  .modrow:first-of-type { border-top: none; }
+  /* ALE missing: the lua catalog stays readable (that's the point -- it
+     shows what you'd get) but reads as unavailable. */
+  .modrow.dim { opacity: 0.55; }
+  .mmid { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .mactions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    min-width: 300px;
+  }
+  /* One chip style block (round 2, Task 1): shared size/padding/radius,
+     kind -> color token. Rendered from the builder's RowChip list, which
+     Tasks 2-4 populate. */
+  .mchip {
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid #30363d;
+  }
+  .mchip.setup, .mchip.rebuild, .mchip.update { color: #d29922; border-color: #d29922; }
+  .mchip.conf-failed { color: #f85149; border-color: #f85149; }
+
+  /* ALE missing: the explainer box above the lua catalog. */
   .ale-note {
     display: flex;
     gap: 10px;
@@ -1443,24 +1548,24 @@
     margin-bottom: 6px;
   }
   .ale-note p { margin: 0; flex: 1 1 260px; }
-  .mrow.needs-ale { opacity: 0.55; }
   .mhead { display: flex; flex-direction: column; gap: 2px; min-width: 260px; max-width: 460px; }
   .mtitle { display: flex; gap: 8px; align-items: baseline; }
   .mname { min-width: 0; }
   /* Click-to-open (Modules-page round, Task 4): installed rows' name opens
-     the Tuning tab at that module's card; a known conf filename opens Module
-     files preselected to it. Plain buttons styled as text-with-hover-underline
-     so they read as labels, not chrome. */
-  .mname-link, .conf-link {
+     the Tuning tab at that module's card. Plain button styled as
+     text-with-hover-underline so it reads as a label, not chrome. (The raw
+     .conf filename link left the rows in round 2, Task 1 -- Task 3 re-homes
+     config access on the Tuning tab.) */
+  .mname-link {
     background: none;
     border: none;
     padding: 0;
     cursor: pointer;
     font: inherit;
+    color: #c9d1d9;
+    font-weight: 600;
   }
-  .mname-link { color: #c9d1d9; font-weight: 600; }
-  .conf-link { color: #58a6ff; font-size: 12px; font-family: Consolas, monospace; }
-  .mname-link:hover, .conf-link:hover { text-decoration: underline; }
+  .mname-link:hover { text-decoration: underline; }
   .mdesc { color: #8b949e; font-size: 12px; line-height: 1.35; }
   /* Installed clone's last commit (sha · date), from the list arm's additive
      head/head_date fields -- muted version line under the description. */
