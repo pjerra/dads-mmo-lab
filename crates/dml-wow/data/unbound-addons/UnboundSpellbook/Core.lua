@@ -4,6 +4,8 @@ local USB = UnboundSpellbook
 USB.BOOK_TYPE = BOOKTYPE_SPELL or "spell"
 USB.entriesByClass = {}
 USB.allEntries = {}
+USB.bookTabs = {}
+USB.bookTabsByKey = {}
 USB.refreshCallbacks = {}
 USB.scanning = false
 USB.scanProgress = 0
@@ -98,6 +100,7 @@ local function FinalizeScan()
     end)
 
     USB.lastKnownCount = #USB.allEntries
+    USB:ScanBookTabs()
     USB.scanning = false
     USB.scanProgress = USB.scanTotal
     USB:NotifyRefresh()
@@ -188,7 +191,108 @@ function USB:GetEntries(tabKey)
     if tabKey == "ALL" then
         return self.allEntries
     end
+
+    local bookTab = self.bookTabsByKey[tabKey]
+    if bookTab then
+        return bookTab.entries
+    end
+
     return self.entriesByClass[tabKey] or {}
+end
+
+-- Spellbook-driven tabs: the real "General" tab (tab 1) plus any tab the
+-- server grants past the class's three school tabs (GM accounts get an
+-- extra one on this realm). The school tabs themselves stay out -- the
+-- class tabs already cover those abilities from the ID lists. Runs from
+-- FinalizeScan, so the existing SPELLS_CHANGED wiring keeps these live;
+-- a tab with no spells is simply not kept.
+local BOOK_SCHOOL_TAB_COUNT = 3
+
+function USB:ScanBookTabs()
+    self.bookTabs = {}
+    self.bookTabsByKey = {}
+
+    if type(GetNumSpellTabs) ~= "function"
+        or type(GetSpellTabInfo) ~= "function" then
+        return
+    end
+
+    local seenNames = {}
+    local tabCount = GetNumSpellTabs() or 0
+
+    for tabIndex = 1, tabCount do
+        local tabName, _, offset, spellCount = GetSpellTabInfo(tabIndex)
+        local isExtra = tabIndex > 1 + BOOK_SCHOOL_TAB_COUNT
+
+        if tabName and tabName ~= ""
+            and (tabIndex == 1 or isExtra)
+            and not seenNames[tabName] then
+            local entries = {}
+            offset = offset or 0
+            spellCount = spellCount or 0
+
+            for slot = offset + 1, offset + spellCount do
+                -- GM accounts report tab sizes that overshoot the real spell
+                -- array, and this client THROWS on an invalid slot instead of
+                -- returning nil. pcall + break: slots are contiguous, so the
+                -- first invalid one ends the tab.
+                local ok, spellName, rankText = pcall(GetSpellName, slot, self.BOOK_TYPE)
+                if not ok then
+                    break
+                end
+
+                if spellName and spellName ~= "" then
+                    local spellID = nil
+                    if GetSpellLink then
+                        local okLink, link = pcall(GetSpellLink, slot, self.BOOK_TYPE)
+                        if okLink and link then
+                            spellID = tonumber(string.match(link, "spell:(%d+)"))
+                        end
+                    end
+
+                    local icon = nil
+                    if spellID then
+                        local _, _, spellIcon = GetSpellInfo(spellID)
+                        icon = spellIcon
+                    end
+                    if not icon and GetSpellTexture then
+                        local okTexture, texture = pcall(GetSpellTexture, slot, self.BOOK_TYPE)
+                        if okTexture then
+                            icon = texture
+                        end
+                    end
+
+                    table.insert(entries, {
+                        bookTabName = tabName,
+                        slot = slot,
+                        spellID = spellID,
+                        name = spellName,
+                        rankText = rankText or "",
+                        rankNumber = RankNumber(rankText),
+                        icon = icon,
+                    })
+                end
+            end
+
+            if #entries > 0 then
+                table.sort(entries, function(a, b)
+                    if a.name == b.name then
+                        return a.rankNumber < b.rankNumber
+                    end
+                    return a.name < b.name
+                end)
+
+                local bookTab = {
+                    key = "BOOK:" .. tabName,
+                    name = tabName,
+                    entries = entries,
+                }
+                table.insert(self.bookTabs, bookTab)
+                self.bookTabsByKey[bookTab.key] = bookTab
+                seenNames[tabName] = true
+            end
+        end
+    end
 end
 
 function USB:FindNativeSlot(entry)
@@ -205,7 +309,14 @@ function USB:FindNativeSlot(entry)
         spellCount = spellCount or 0
 
         for slot = offset + 1, offset + spellCount do
-            local bookName, bookRank = GetSpellName(slot, self.BOOK_TYPE)
+            -- GM accounts report tab sizes that overshoot the real spell
+            -- array, and this client THROWS on an invalid slot instead of
+            -- returning nil. pcall + break: slots are contiguous, so the
+            -- first invalid one ends the tab.
+            local ok, bookName, bookRank = pcall(GetSpellName, slot, self.BOOK_TYPE)
+            if not ok then
+                break
+            end
 
             if bookName == entry.name then
                 if not nameFallback then
@@ -213,7 +324,10 @@ function USB:FindNativeSlot(entry)
                 end
 
                 if GetSpellLink then
-                    local link = GetSpellLink(slot, self.BOOK_TYPE)
+                    local okLink, link = pcall(GetSpellLink, slot, self.BOOK_TYPE)
+                    if not okLink then
+                        link = nil
+                    end
                     local linkedID = link and tonumber(string.match(link, "spell:(%d+)"))
                     if linkedID == entry.spellID then
                         return slot
@@ -240,7 +354,16 @@ function USB:PickupEntry(entry)
         return
     end
 
-    local slot = self:FindNativeSlot(entry)
+    -- Spellbook-tab entries carry their own slot; re-check it still holds
+    -- the same spell before trusting it, then fall back to the name search.
+    local slot
+    if entry.slot then
+        local ok, bookName = pcall(GetSpellName, entry.slot, self.BOOK_TYPE)
+        if ok and bookName == entry.name then
+            slot = entry.slot
+        end
+    end
+    slot = slot or self:FindNativeSlot(entry)
     if not slot then
         self:Error(
             "The ability is known, but the native client did not expose its spellbook slot."

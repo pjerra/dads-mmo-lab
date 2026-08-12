@@ -920,9 +920,15 @@ function Adv2.CollectSpellbookSpells()
         local _, _, offset, numSpells = GetSpellTabInfo(tab)
         if offset and numSpells and numSpells > 0 then
             for i = offset + 1, offset + numSpells do
-                local name, rank = GetSpellName(i, BOOKTYPE_SPELL)
+                -- GM accounts report tab sizes that overshoot the real spell
+                -- array, and this client THROWS on an invalid slot instead of
+                -- returning nil. pcall + break: slots are contiguous, so the
+                -- first invalid one ends the tab.
+                local ok, name, rank = pcall(GetSpellName, i, BOOKTYPE_SPELL)
+                if not ok then break end
                 if name and name ~= "" then
-                    local link = GetSpellLink and GetSpellLink(i, BOOKTYPE_SPELL)
+                    local okLink, link = pcall(GetSpellLink or function() end, i, BOOKTYPE_SPELL)
+                    if not okLink then link = nil end
                     local spellId = link and tonumber(link:match("spell:(%d+)"))
                     if spellId and not seen[spellId] then
                         seen[spellId] = true

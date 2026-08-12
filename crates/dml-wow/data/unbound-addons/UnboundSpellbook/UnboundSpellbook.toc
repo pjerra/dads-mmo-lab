@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: Unbound Spellbook
-## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages.
+## Notes: Directly detects known active class abilities without relying on Blizzard's capped spellbook pages. Also mirrors the real General tab and any server-granted extra spellbook tab.
 ## Author: OpenAI
-## Version: 0.3
+## Version: 0.4
 ## SavedVariables: UnboundSpellbookDB
 
 ClassData.lua

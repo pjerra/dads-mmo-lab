@@ -5,7 +5,10 @@ local selectedTab = "ALL"
 local currentPage = 1
 
 local tabButtons = {}
+local bookTabButtons = {}
 local spellCells = {}
+
+local UpdateBookTabButtons
 
 local ENTRIES_PER_PAGE = 24
 local COLUMNS = 6
@@ -57,6 +60,11 @@ local function TabLabel(tabKey)
         return "All Known"
     end
 
+    local bookTab = USB.bookTabsByKey[tabKey]
+    if bookTab then
+        return bookTab.name
+    end
+
     local info = USB.CLASS_INFO[tabKey]
     return info and info.name or tabKey
 end
@@ -100,6 +108,8 @@ local function UpdateTabs()
             prefix .. label .. "  |cffaaaaaa(" .. #entries .. ")|r"
         )
     end
+
+    UpdateBookTabButtons()
 end
 
 local function ShowTooltip(cell)
@@ -110,13 +120,36 @@ local function ShowTooltip(cell)
 
     GameTooltip:SetOwner(cell, "ANCHOR_RIGHT")
     GameTooltip:ClearLines()
-    GameTooltip:SetHyperlink("spell:" .. entry.spellID)
+
+    if entry.spellID then
+        GameTooltip:SetHyperlink("spell:" .. entry.spellID)
+    elseif entry.slot then
+        -- Slot-based tooltip for spellbook-tab entries without a link;
+        -- pcall for the same invalid-slot throw the scanners guard against.
+        local ok = pcall(GameTooltip.SetSpell, GameTooltip, entry.slot, USB.BOOK_TYPE)
+        if not ok then
+            GameTooltip:AddLine(entry.name)
+        end
+    else
+        GameTooltip:AddLine(entry.name)
+    end
+
     GameTooltip:AddLine(" ")
-    GameTooltip:AddLine(
-        USB.CLASS_INFO[entry.classKey].name .. " ability",
-        0.65, 0.82, 1
-    )
-    GameTooltip:AddLine("Spell ID: " .. entry.spellID, 0.65, 0.82, 1)
+
+    local info = entry.classKey and USB.CLASS_INFO[entry.classKey]
+    if info then
+        GameTooltip:AddLine(info.name .. " ability", 0.65, 0.82, 1)
+    elseif entry.bookTabName then
+        GameTooltip:AddLine(
+            entry.bookTabName .. " spellbook tab",
+            0.65, 0.82, 1
+        )
+    end
+
+    if entry.spellID then
+        GameTooltip:AddLine("Spell ID: " .. entry.spellID, 0.65, 0.82, 1)
+    end
+
     GameTooltip:AddLine(" ")
     GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
     GameTooltip:Show()
@@ -125,6 +158,13 @@ end
 local function RefreshUI()
     if not frame or not frame:IsShown() then
         return
+    end
+
+    -- A spellbook-driven tab disappears when a rescan finds it empty; fall
+    -- back to the aggregate view instead of rendering a dead tab.
+    if string.sub(selectedTab, 1, 5) == "BOOK:"
+        and not USB.bookTabsByKey[selectedTab] then
+        selectedTab = "ALL"
     end
 
     local entries = USB:GetEntries(selectedTab)
@@ -246,7 +286,7 @@ statusText:SetPoint("TOP", titleText, "BOTTOM", 0, -6)
 
 local classHeader = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 classHeader:SetPoint("TOPLEFT", frame, "TOPLEFT", 24, -26)
-classHeader:SetText("Class tabs")
+classHeader:SetText("Spell tabs")
 
 local divider = frame:CreateTexture(nil, "ARTWORK")
 divider:SetTexture(1, 1, 1, 0.13)
@@ -273,6 +313,57 @@ for index, tabKey in ipairs(tabs) do
         tabKey = tabKey,
         button = button,
     })
+end
+
+-- Spellbook-driven tabs (the real General tab plus any server-granted
+-- extra, e.g. the GM tab). Buttons come from a small pool below the class
+-- tabs and only show while their tab holds at least one spell.
+function UpdateBookTabButtons()
+    local shown = 0
+
+    for _, bookTab in ipairs(USB.bookTabs) do
+        if #bookTab.entries > 0 then
+            shown = shown + 1
+            local item = bookTabButtons[shown]
+
+            if not item then
+                local newItem = {}
+                local button = StandardButton(frame, "", 140, 29)
+                button:SetPoint(
+                    "TOPLEFT",
+                    frame,
+                    "TOPLEFT",
+                    20,
+                    -58 - ((#tabs + shown - 1) * 43)
+                )
+                button:SetScript("OnClick", function()
+                    if not newItem.tabKey then
+                        return
+                    end
+                    selectedTab = newItem.tabKey
+                    currentPage = 1
+                    USB:EnsureDB().selectedTab = selectedTab
+                    RefreshUI()
+                end)
+                newItem.button = button
+                bookTabButtons[shown] = newItem
+                item = newItem
+            end
+
+            item.tabKey = bookTab.key
+            local prefix = bookTab.key == selectedTab and "> " or ""
+            item.button:SetText(
+                prefix .. bookTab.name
+                .. "  |cffaaaaaa(" .. #bookTab.entries .. ")|r"
+            )
+            item.button:Show()
+        end
+    end
+
+    for index = shown + 1, #bookTabButtons do
+        bookTabButtons[index].tabKey = nil
+        bookTabButtons[index].button:Hide()
+    end
 end
 
 local gridStartX = 200
