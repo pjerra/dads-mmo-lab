@@ -400,10 +400,61 @@ pub fn git_short_head(program: &OsStr, dir: &Path) -> String {
     git_field(program, dir, &["rev-parse", "--short", "HEAD"])
 }
 
+/// The FULL `HEAD` sha. Short heads are for display; a rollback target must be
+/// unambiguous, and `""` on failure is the caller's signal not to try one.
+pub fn git_head_sha(program: &OsStr, dir: &Path) -> String {
+    git_field(program, dir, &["rev-parse", "HEAD"])
+}
+
 /// `_wow_git_branch` (`70-modules.sh:843`). `pub`: reused by
 /// `wow_update_native`'s `BRANCH_MISMATCH` gate (`90-main.sh:5688-5693`).
 pub fn git_branch(program: &OsStr, dir: &Path) -> String {
     git_field(program, dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+}
+
+/// The literal string `git rev-parse --abbrev-ref HEAD` prints for a DETACHED
+/// HEAD. Not a branch name — the absence of one.
+pub const DETACHED_HEAD: &str = "HEAD";
+
+/// Does this checkout's branch state permit a self-update? Pure.
+///
+/// TWO shapes are legitimate and the gate must accept both:
+///
+/// * attached to `expected` — what the WSL `.sh` installer leaves behind, and
+///   the only shape the original gate was written for;
+/// * DETACHED — what EVERY native install leaves behind, because
+///   `install_native` deliberately ends on `git checkout --detach <pinned
+///   sha>` (`install_native::checkout_commit_argv`, "the branch name is how
+///   the clone got here, but the COMMIT is what gets built").
+///
+/// The old gate compared `abbrev-ref`'s output against `"Playerbot"`
+/// literally, so on a native install it read `"HEAD"` and refused —
+/// `wow update` could never run on the native backend, on any machine, from
+/// the day it shipped. Found live on the VM 2026-08-14: the launcher's
+/// "Server update" answered `BRANCH_MISMATCH` with the nonsense message
+/// "on branch 'HEAD' (expected 'Playerbot')".
+///
+/// An EMPTY branch stays refused: [`git_field`] collapses every spawn
+/// failure, nonzero exit and timeout to `""`, and "git could not tell us"
+/// must never read as "safe to advance". Any OTHER named branch stays refused
+/// too — that is the check this gate always existed for, since pulling
+/// `master` here builds a core with no playerbots in it.
+pub fn update_branch_ok(branch: &str, expected: &str) -> bool {
+    branch == expected || branch == DETACHED_HEAD
+}
+
+/// `git rev-parse --is-shallow-repository` — is this a `--depth`-limited
+/// clone? Decides whether [`Advance::FetchDetach`] may pass `--depth 1`.
+///
+/// Load-bearing in BOTH directions. `install_native` clones the core WITHOUT
+/// `--depth` on purpose (AzerothCore's `genrev.cmake` reads the repository's
+/// history to stamp a build revision, so a `fetch --depth 1` against it would
+/// make a complete repository shallow and quietly break that), while the
+/// module IS a depth-1 clone, where an unbounded fetch would drag down the
+/// full history the installer deliberately skipped. Asking git which one it
+/// is beats hardcoding the answer per repo.
+pub fn is_shallow_repo(program: &OsStr, dir: &Path) -> bool {
+    git_field(program, dir, &["rev-parse", "--is-shallow-repository"]) == "true"
 }
 
 /// `_wow_remote_ok` (`70-modules.sh:850`): does a remote URL point at the
@@ -440,7 +491,9 @@ pub fn update_gate_order(
     ac_remote_ok: bool,
     pb_present: bool,
     pb_remote_ok: bool,
-    branch_is_playerbot: bool,
+    // `branch_ok` is `update_branch_ok`'s verdict — NOT "the branch is
+    // literally `Playerbot`". A detached HEAD passes; see that function.
+    branch_ok: bool,
     backup_choice: Option<bool>,
 ) -> Option<&'static str> {
     if !server_dir_exists {
@@ -455,7 +508,7 @@ pub fn update_gate_order(
     if pb_present && !pb_remote_ok {
         return Some("REMOTE_MISMATCH");
     }
-    if !branch_is_playerbot {
+    if !branch_ok {
         return Some("BRANCH_MISMATCH");
     }
     if backup_choice.is_none() {
@@ -1429,10 +1482,14 @@ pub fn sql_remove_tweak_world(program: &OsStr, password: &str, sdir: &Path, key:
 
 // ---------------------------------------------------------------------------
 // `_wow_pull_repo` (`70-modules.sh:872-933`) — `module update`'s pull core:
-// dirty check -> patch backup + stash -> `git pull --ff-only` -> stash pop
-// (or conflict recovery). On failure this function has ALREADY emitted its
-// own `error` event (matching the bash's `ndjson_error` + `return 1`
-// contract) — the caller only needs to close its section and stop.
+// dirty check -> patch backup + stash -> ADVANCE -> stash pop (or conflict
+// recovery). On failure this function has ALREADY emitted its own `error`
+// event (matching the bash's `ndjson_error` + `return 1` contract) — the
+// caller only needs to close its section and stop.
+//
+// The ADVANCE step is a parameter since 2026-08-14 ([`Advance`]) because the
+// bash oracle only ever ran against ATTACHED checkouts and `git pull` cannot
+// move a detached HEAD, which is the only shape a native install has.
 // ---------------------------------------------------------------------------
 
 /// `[[ -n "$dirty" ]]` (`70-modules.sh:886`) — pure.
@@ -1440,12 +1497,149 @@ pub fn has_dirty_changes(raw: &str) -> bool {
     !raw.is_empty()
 }
 
+/// The paths out of `git status --porcelain` (` M path`, `?? path`, …) — the
+/// two status columns and the separating space dropped. Pure.
+///
+/// Rename entries (`R  old -> new`) keep only the destination, which is the
+/// path that exists on disk and therefore the one a caller can compare against
+/// its protected list.
+pub fn dirty_paths(raw: &str) -> Vec<String> {
+    raw.lines()
+        .filter_map(|l| l.get(3..))
+        .map(|p| p.rsplit(" -> ").next().unwrap_or(p).trim_matches('"').to_string())
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
+/// Did the user have edits OUTSIDE `protect` before the advance? Pure.
+///
+/// This is what separates "a conflict that matters" from one that does not.
+/// A `protect`ed file is restored byte-for-byte whatever git does to it, so a
+/// stash-pop conflict on `docker-compose.yml` alone is fully handled — and on
+/// a native install that file is permanently, hugely dirty, so treating its
+/// conflict as data loss would roll back every update on the one server shape
+/// this whole round exists to support.
+pub fn has_unprotected_edits(dirty_raw: &str, protect: &[&str]) -> bool {
+    dirty_paths(dirty_raw).iter().any(|p| !protect.contains(&p.as_str()))
+}
+
 /// `[[ "$before" != "$after" ]]` (`70-modules.sh:911`) — pure.
 pub fn pull_changed(before: &str, after: &str) -> bool {
     before != after
 }
 
+/// How [`wow_advance_repo`] moves a checkout forward onto newer upstream code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Advance<'a> {
+    /// `git pull --ff-only` — the bash oracle's step, correct for an ATTACHED
+    /// checkout sitting on its tracking branch (the WSL `.sh` install route,
+    /// and every per-module checkout `module update` touches).
+    PullFfOnly,
+    /// `git fetch [--depth 1] origin <branch>` then
+    /// `git checkout --detach FETCH_HEAD` — the DETACHED equivalent, which is
+    /// what every native install needs.
+    ///
+    /// This is the second half of the 2026-08-14 native-update fix, and it is
+    /// the half that would have been missed: `git pull` on a detached HEAD
+    /// fails outright ("You are not currently on a branch"), so relaxing the
+    /// `BRANCH_MISMATCH` gate ALONE would have bought nothing but a different
+    /// error code. Re-detaching (rather than checking the branch out) keeps
+    /// the shape `install_native` deliberately built — the commit is what
+    /// gets built — while moving the pin to the branch tip.
+    FetchDetach { branch: &'a str },
+}
+
+/// Run the [`Advance`] step. `true` on success; the caller owns the messaging.
+fn run_advance(program: &OsStr, dir: &Path, how: &Advance<'_>) -> bool {
+    match how {
+        Advance::PullFfOnly => git_ok(program, dir, &["pull", "--ff-only"], GIT_NET_TIMEOUT),
+        Advance::FetchDetach { branch } => {
+            // Depth is decided by what the checkout ALREADY is, never by which
+            // repo it is — see `is_shallow_repo` for why both directions bite.
+            let fetched = if is_shallow_repo(program, dir) {
+                git_ok(program, dir, &["fetch", "--depth", "1", "origin", branch], GIT_NET_TIMEOUT)
+            } else {
+                git_ok(program, dir, &["fetch", "origin", branch], GIT_NET_TIMEOUT)
+            };
+            // `FETCH_HEAD` rather than `origin/<branch>`: a `--depth 1` fetch
+            // of a single branch is not guaranteed to move the remote-tracking
+            // ref, but it always writes FETCH_HEAD.
+            fetched && git_ok(program, dir, &["checkout", "--detach", "FETCH_HEAD"], GIT_PROBE_TIMEOUT)
+        }
+    }
+}
+
+/// Read `protect`'s files (relative to `dir`) so [`wow_advance_repo`] can put
+/// them back byte-for-byte afterwards. Missing/unreadable files are simply
+/// absent from the result — there is nothing to restore.
+fn snapshot_files(dir: &Path, protect: &[&str]) -> Vec<(PathBuf, Vec<u8>)> {
+    protect
+        .iter()
+        .filter_map(|rel| {
+            let p = dir.join(rel);
+            std::fs::read(&p).ok().map(|bytes| (p, bytes))
+        })
+        .collect()
+}
+
+/// Put a [`snapshot_files`] snapshot back. Best effort per file.
+fn restore_files(snapshot: &[(PathBuf, Vec<u8>)]) {
+    for (p, bytes) in snapshot {
+        let _ = std::fs::write(p, bytes);
+    }
+}
+
+/// What an advance did. `edits_conflicted` is the half that matters to a
+/// caller which cannot tolerate losing local work.
+///
+/// The conflict path below is a deliberate, inherited compromise: when the
+/// user's edits will not re-apply on top of the update it keeps the UPDATE, so
+/// the tree still builds, and points at the patch file and the stash. For a
+/// per-module update that is right. For the CORE it is not — a server's local
+/// core patches are the reason it behaves the way it does, and a rebuild that
+/// quietly drops them produces a working-looking server that has silently lost
+/// a feature. Found live 2026-08-14: the VM carries
+/// `docs/vm-patches/2026-08-15-feral-spirit-coexist.patch` (Feral Spirit
+/// wolves coexisting with the hunter pet) on two files Wrath Unbound never
+/// touches, so nothing in the Unbound machinery would have protected it.
+///
+/// So the flag is REPORTED rather than acted on here, and `update_stream`
+/// treats it as a failure for the core — which triggers the full rollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdvanceOutcome {
+    pub changed: bool,
+    pub edits_conflicted: bool,
+}
+
+/// [`wow_advance_repo`] with the bash oracle's exact behaviour: a plain
+/// `pull --ff-only`, nothing protected, and the conflict compromise kept.
+/// The `module update` call site's entry point, so that path is byte-identical
+/// to what it always was.
 pub fn wow_pull_repo(program: &OsStr, dir: &Path, label: &str, emit: &dyn Fn(Value)) -> Result<bool, ()> {
+    wow_advance_repo(program, dir, label, &Advance::PullFfOnly, &[], emit).map(|o| o.changed)
+}
+
+/// `protect` names files (relative to `dir`) whose CURRENT bytes must survive
+/// this call whatever git does — restored after the advance, on every path
+/// that reaches it.
+///
+/// It exists for one concrete, live hazard: on a native install `composegen`
+/// writes the generated `docker-compose.yml` INTO the git checkout, on top of
+/// AzerothCore's own tracked file, so that file is permanently "dirty" and
+/// wholly unlike upstream's (252 changed lines on the VM, 2026-08-14). The
+/// conflict-recovery path below deliberately ends in `reset --hard HEAD` to
+/// keep the tree buildable — which for that file means replacing the server's
+/// real compose with stock AzerothCore's and breaking the server the update
+/// was supposed to improve.
+pub fn wow_advance_repo(
+    program: &OsStr,
+    dir: &Path,
+    label: &str,
+    how: &Advance<'_>,
+    protect: &[&str],
+    emit: &dyn Fn(Value),
+) -> Result<AdvanceOutcome, ()> {
+    let protected = snapshot_files(dir, protect);
     let before = git_field(program, dir, &["rev-parse", "--short", "HEAD"]);
     let dirty_raw = git_field(program, dir, &["status", "--porcelain", "--untracked-files=no"]);
     let dirty = has_dirty_changes(&dirty_raw);
@@ -1473,26 +1667,32 @@ pub fn wow_pull_repo(program: &OsStr, dir: &Path, label: &str, emit: &dyn Fn(Val
     }
 
     emit(line_event("info", format!("updating {label}...")));
-    if !git_ok(program, dir, &["pull", "--ff-only"], GIT_NET_TIMEOUT) {
+    if !run_advance(program, dir, how) {
         if dirty {
             let _ = git_ok(program, dir, &["stash", "pop"], GIT_PROBE_TIMEOUT);
             emit(line_event("info", format!("{label}: your local changes were restored unchanged.")));
         }
-        emit(error_event(
-            "PULL_FAILED",
-            format!("git pull failed for {label} (diverged branch?)"),
-            &format!("Inspect manually: cd {} && git status", dir.display()),
-        ));
+        restore_files(&protected);
+        let (code, msg) = match how {
+            Advance::PullFfOnly => ("PULL_FAILED", format!("git pull failed for {label} (diverged branch?)")),
+            Advance::FetchDetach { branch } => {
+                ("FETCH_FAILED", format!("could not fetch origin/{branch} for {label} (network, or the branch is gone?)"))
+            }
+        };
+        emit(error_event(code, msg, &format!("Inspect manually: cd {} && git status", dir.display())));
         return Err(());
     }
 
     let after = git_field(program, dir, &["rev-parse", "--short", "HEAD"]);
     let changed = pull_changed(&before, &after);
+    let mut edits_conflicted = false;
 
     if dirty {
         if git_ok(program, dir, &["stash", "pop"], GIT_PROBE_TIMEOUT) {
             emit(line_event("info", format!("{label}: your local edits were re-applied on top of the update.")));
         } else {
+            // Only edits we did NOT already restore ourselves count as lost.
+            edits_conflicted = has_unprotected_edits(&dirty_raw, protect);
             let _ = git_ok(program, dir, &["checkout", "-f", "--", "."], GIT_PROBE_TIMEOUT);
             let _ = git_ok(program, dir, &["reset", "--hard", "HEAD"], GIT_PROBE_TIMEOUT);
             emit(line_event(
@@ -1506,7 +1706,12 @@ pub fn wow_pull_repo(program: &OsStr, dir: &Path, label: &str, emit: &dyn Fn(Val
         }
     }
 
-    Ok(changed)
+    // AFTER the conflict recovery, unconditionally: the `reset --hard` above
+    // is exactly what this exists to undo, and a clean `stash pop` can bring
+    // upstream's version of a protected file back too.
+    restore_files(&protected);
+
+    Ok(AdvanceOutcome { changed, edits_conflicted })
 }
 
 // ---------------------------------------------------------------------------
@@ -3065,6 +3270,250 @@ mod tests {
         assert!(paragon_migration_skip("some_example.sql"));
         assert!(!paragon_migration_skip("02_add_column.sql"));
         assert!(!paragon_migration_skip("01_create_database.sql")); // caller special-cases this one separately, but the predicate itself doesn't skip it
+    }
+
+    // -- update_branch_ok (native self-update fix, 2026-08-14) -----------------
+    //
+    // HALF (a) of the two-part fix, isolated — see `maint`'s test module for
+    // why each half needs its own test.
+
+    #[test]
+    fn update_branch_ok_accepts_a_detached_head() {
+        // The shape EVERY native install has: `install_native` ends on
+        // `git checkout --detach <pinned sha>`, and `rev-parse --abbrev-ref
+        // HEAD` prints this literal for it. The original gate compared it to
+        // "Playerbot" and refused, killing `wow update` on the whole native
+        // backend.
+        assert!(update_branch_ok(DETACHED_HEAD, "Playerbot"));
+        assert!(update_branch_ok("HEAD", "master"));
+    }
+
+    #[test]
+    fn update_branch_ok_accepts_the_attached_expected_branch() {
+        assert!(update_branch_ok("Playerbot", "Playerbot"));
+    }
+
+    #[test]
+    fn update_branch_ok_refuses_another_named_branch() {
+        // The check the gate always existed for: pulling `master` here builds
+        // an AzerothCore with no playerbots in it.
+        assert!(!update_branch_ok("master", "Playerbot"));
+        assert!(!update_branch_ok("Playerbot_v16", "Playerbot"));
+    }
+
+    #[test]
+    fn update_branch_ok_refuses_an_unreadable_branch() {
+        // `git_field` collapses spawn failure, nonzero exit and timeout all to
+        // "". "git could not tell us" must never read as "safe to advance".
+        assert!(!update_branch_ok("", "Playerbot"));
+    }
+
+    // -- snapshot_files / restore_files (protected compose files) --------------
+
+    #[test]
+    fn restore_files_puts_protected_bytes_back_after_git_clobbers_them() {
+        let d = std::env::temp_dir().join(format!("dml-protect-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("docker-compose.yml"), b"GENERATED BY COMPOSEGEN").unwrap();
+
+        let snap = snapshot_files(&d, &["docker-compose.yml", "docker-compose.build.yml"]);
+        // The absent file is simply not in the snapshot -- nothing to restore.
+        assert_eq!(snap.len(), 1);
+
+        // What `reset --hard` would do: upstream's tracked version comes back.
+        std::fs::write(d.join("docker-compose.yml"), b"STOCK AZEROTHCORE").unwrap();
+        restore_files(&snap);
+
+        assert_eq!(std::fs::read(d.join("docker-compose.yml")).unwrap(), b"GENERATED BY COMPOSEGEN");
+        // Restoring must not CREATE the file that was never there.
+        assert!(!d.join("docker-compose.build.yml").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -- wow_advance_repo against a REAL git repo -------------------------------
+    //
+    // These answer the question a user asked before letting the update run at
+    // all (2026-08-14): "after updating the server, do I still have my
+    // installed modules, and are my configs still mine?"
+    //
+    // On a real server both live INSIDE the core checkout and both are
+    // untracked by AzerothCore's own `.gitignore` (`/modules/*` line 8,
+    // `/env/dist/*` line 18, read off the VM). Untracked is what makes them
+    // safe — but only for as long as nothing in this path stashes with `-u`
+    // or reaches for `git clean`, either of which would delete every module
+    // and every conf while every unit test above stayed green. That is what
+    // these two pin, end to end, against real git rather than by reading the
+    // argv.
+
+    /// Run a git command in `dir`, panicking with its stderr on failure.
+    fn git_must(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").arg("-C").arg(dir).args(args).output().expect("git must be on PATH");
+        assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// A bare `origin` with one commit, plus a clone of it. Returns
+    /// `(tempdir, origin, work)`.
+    fn git_fixture(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("dml-advance-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let origin = root.join("origin.git");
+        let seed = root.join("seed");
+        let work = root.join("work");
+
+        std::fs::create_dir_all(&origin).unwrap();
+        git_must(&origin, &["-c", "init.defaultBranch=master", "init", "--bare", "--quiet"]);
+
+        std::fs::create_dir_all(&seed).unwrap();
+        git_must(&seed, &["-c", "init.defaultBranch=master", "init", "--quiet"]);
+        git_must(&seed, &["config", "user.email", "t@example.com"]);
+        git_must(&seed, &["config", "user.name", "t"]);
+        std::fs::write(seed.join("core.txt"), "v1").unwrap();
+        git_must(&seed, &["add", "-A"]);
+        git_must(&seed, &["commit", "-q", "-m", "v1"]);
+        git_must(&seed, &["remote", "add", "origin", &origin.to_string_lossy()]);
+        git_must(&seed, &["push", "-q", "origin", "master"]);
+
+        git_must(&root, &["clone", "--quiet", &origin.to_string_lossy(), &work.to_string_lossy()]);
+        git_must(&work, &["config", "user.email", "t@example.com"]);
+        git_must(&work, &["config", "user.name", "t"]);
+
+        // What a real server dir carries: an installed module tree and a live
+        // conf, both untracked, plus AzerothCore's own ignore rules.
+        std::fs::create_dir_all(work.join("modules").join("mod-city-bots")).unwrap();
+        std::fs::write(work.join("modules").join("mod-city-bots").join("roster.sql"), "MY ROSTER").unwrap();
+        std::fs::create_dir_all(work.join("env").join("dist").join("etc").join("modules")).unwrap();
+        std::fs::write(work.join("env").join("dist").join("etc").join("modules").join("playerbots.conf"), "MY SETTINGS")
+            .unwrap();
+        std::fs::write(work.join(".gitignore"), "/modules/*\n/env/dist/*\n").unwrap();
+        git_must(&work, &["add", ".gitignore"]);
+        git_must(&work, &["commit", "-q", "-m", "ignore"]);
+        git_must(&work, &["push", "-q", "origin", "master"]);
+
+        // Upstream moves on.
+        git_must(&seed, &["pull", "-q", "--ff-only", "origin", "master"]);
+        std::fs::write(seed.join("core.txt"), "v2").unwrap();
+        git_must(&seed, &["commit", "-q", "-am", "v2"]);
+        git_must(&seed, &["push", "-q", "origin", "master"]);
+
+        (root, origin, work)
+    }
+
+    fn assert_user_data_survived(work: &Path) {
+        assert_eq!(
+            std::fs::read_to_string(work.join("modules").join("mod-city-bots").join("roster.sql")).unwrap(),
+            "MY ROSTER",
+            "an installed module was destroyed by the update"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.join("env").join("dist").join("etc").join("modules").join("playerbots.conf"))
+                .unwrap(),
+            "MY SETTINGS",
+            "a live server config was destroyed by the update"
+        );
+    }
+
+    #[test]
+    fn advance_keeps_installed_modules_and_configs_on_the_attached_path() {
+        let (root, _origin, work) = git_fixture("attached");
+        let changed = wow_advance_repo(OsStr::new("git"), &work, "test", &Advance::PullFfOnly, &[], &|_| {}).unwrap();
+        assert!(changed.changed, "the fixture's upstream commit should have been picked up");
+        assert!(!changed.edits_conflicted, "a clean fixture must not report a conflict");
+        assert_eq!(std::fs::read_to_string(work.join("core.txt")).unwrap(), "v2", "the update did not actually land");
+        assert_user_data_survived(&work);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn advance_updates_a_detached_checkout_and_keeps_modules_configs_and_protected_files() {
+        let (root, _origin, work) = git_fixture("detached");
+
+        // Exactly the shape `install_native` leaves behind, and the shape the
+        // old code could not update at all: detached, plus a generated
+        // docker-compose.yml written over the tracked one.
+        git_must(&work, &["checkout", "--quiet", "--detach", "HEAD"]);
+        assert_eq!(git_branch(OsStr::new("git"), &work), DETACHED_HEAD);
+        std::fs::write(work.join("core.txt"), "LOCALLY EDITED").unwrap();
+
+        let changed = wow_advance_repo(
+            OsStr::new("git"),
+            &work,
+            "test",
+            &Advance::FetchDetach { branch: "master" },
+            &["core.txt"],
+            &|_| {},
+        )
+        .unwrap();
+
+        assert!(changed.changed, "a detached checkout must still be able to move to the branch tip");
+        // The edit DID conflict with git's stash pop -- but the only dirty
+        // file was a PROTECTED one, which we restore byte-for-byte ourselves.
+        // Nothing was lost, so nothing must be reported as lost: on a native
+        // install `docker-compose.yml` is permanently and hugely dirty, and
+        // reporting its conflict as data loss would roll back every single
+        // update on the exact server shape this round exists to support.
+        assert!(!changed.edits_conflicted, "a conflict confined to protected files is not data loss");
+        assert_eq!(git_branch(OsStr::new("git"), &work), DETACHED_HEAD, "it must stay detached, not check out a branch");
+        assert_eq!(
+            std::fs::read_to_string(work.join("core.txt")).unwrap(),
+            "LOCALLY EDITED",
+            "a protected file's bytes must survive whatever git did to it"
+        );
+        assert_user_data_survived(&work);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_local_edit_that_cannot_be_re_applied_is_REPORTED_not_swallowed() {
+        // The VM's own case, in miniature: a hand patch on a core file that
+        // upstream also changed. The inherited conflict path keeps the UPDATE
+        // and puts the edit in a patch file -- correct for one module, silent
+        // data loss for the core. `update_stream` turns this flag into a
+        // failure and rolls the whole update back; if the flag ever stops
+        // being set, that rollback never fires and nothing else notices.
+        let (root, _origin, work) = git_fixture("conflict");
+
+        // Edit the SAME line the fixture's upstream commit changed, so the
+        // stash cannot pop back on top of it.
+        std::fs::write(work.join("core.txt"), "MY HAND PATCH").unwrap();
+
+        let out = wow_advance_repo(OsStr::new("git"), &work, "test", &Advance::PullFfOnly, &[], &|_| {}).unwrap();
+        assert!(out.changed, "the update itself still landed");
+        assert!(out.edits_conflicted, "a dropped local edit must be reported to the caller");
+        // And the evidence the user is pointed at must really exist.
+        let patches: Vec<_> = std::fs::read_dir(&work)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("local-changes-"))
+            .collect();
+        assert_eq!(patches.len(), 1, "the dropped edit must be recoverable from a patch file");
+        assert!(
+            std::fs::read_to_string(patches[0].path()).unwrap().contains("MY HAND PATCH"),
+            "the patch file must actually contain the edit"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dirty_paths_strips_the_status_columns_and_keeps_rename_destinations() {
+        let raw = " M docker-compose.yml\n?? logs/\nR  old/a.cpp -> src/b.cpp\nAM src/c.cpp";
+        assert_eq!(
+            dirty_paths(raw),
+            vec!["docker-compose.yml".to_string(), "logs/".to_string(), "src/b.cpp".to_string(), "src/c.cpp".to_string()]
+        );
+    }
+
+    #[test]
+    fn has_unprotected_edits_separates_a_conflict_that_matters_from_one_that_does_not() {
+        let protect = ["docker-compose.yml", "docker-compose.override.yml"];
+        // The native install's steady state: only the generated compose is
+        // dirty, and we restore it ourselves.
+        assert!(!has_unprotected_edits(" M docker-compose.yml\n", &protect));
+        // The VM's real state after the Feral Spirit patch: a hand-edited core
+        // file that nothing else protects.
+        assert!(has_unprotected_edits(" M docker-compose.yml\n M src/server/game/Spells/Spell.cpp\n", &protect));
+        assert!(!has_unprotected_edits("", &protect));
     }
 
     // -- wow_remote_ok / pull_summary (Chunk 3b self-update primitives) ---------
