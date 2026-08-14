@@ -75,3 +75,4 @@ crates/dml-wow/data/unbound/** text eol=lf
 # whether a given checkout normalised line endings. Readable diffs are worth
 # less here than a payload that is identical on every machine.
 crates/dml-wow/data/unbound-addons/** -text
+*.patch text eol=lf
