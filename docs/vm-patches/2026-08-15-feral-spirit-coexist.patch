@@ -1,0 +1,40 @@
+diff --git a/src/server/game/Entities/Creature/TemporarySummon.cpp b/src/server/game/Entities/Creature/TemporarySummon.cpp
+index 1111111..2222222 100644
+--- a/src/server/game/Entities/Creature/TemporarySummon.cpp
++++ b/src/server/game/Entities/Creature/TemporarySummon.cpp
+@@ -394,6 +394,11 @@ Unit* Minion::GetOwner() const
+
+ bool Minion::IsGuardianPet() const
+ {
++    // Unbound multiclass: Feral Spirit wolves are pure guardians and must never
++    // claim the pet summon slot - a multiclass owner can have a real pet out.
++    if (GetEntry() == NPC_FERAL_SPIRIT)
++        return false;
++
+     return IsPet() || (m_Properties && m_Properties->Category == SUMMON_CATEGORY_PET);
+ }
+
+diff --git a/src/server/game/Spells/Spell.cpp b/src/server/game/Spells/Spell.cpp
+index 3333333..4444444 100644
+--- a/src/server/game/Spells/Spell.cpp
++++ b/src/server/game/Spells/Spell.cpp
+@@ -3799,7 +3799,8 @@
+     // Xinef: implement attribute SPELL_ATTR1_DISMISS_PET_FIRST, on spell cast current pet is dismissed and charms are removed
+     if (m_spellInfo->HasAttribute(SPELL_ATTR1_DISMISS_PET_FIRST))
+     {
+-        if (m_caster->IsPlayer() && !m_spellInfo->HasEffect(SPELL_EFFECT_SUMMON_PET))
++        // Unbound multiclass: Feral Spirit (51533) coexists with the hunter pet
++        if (m_caster->IsPlayer() && !m_spellInfo->HasEffect(SPELL_EFFECT_SUMMON_PET) && m_spellInfo->Id != 51533)
+             if (Pet* pet = m_caster->ToPlayer()->GetPet())
+                 m_caster->ToPlayer()->RemovePet(pet, PET_SAVE_AS_CURRENT);
+
+@@ -6404,7 +6405,8 @@
+                     switch (SummonProperties->Category)
+                     {
+                         case SUMMON_CATEGORY_PET:
+-                            if (m_caster->GetPetGUID())
++                            // Unbound multiclass: Feral Spirit may be cast with a pet out
++                            if (m_spellInfo->Id != 51533 && m_caster->GetPetGUID())
+                                 return SPELL_FAILED_ALREADY_HAVE_SUMMON;
+                             [[fallthrough]];
+                         case SUMMON_CATEGORY_PUPPET:
