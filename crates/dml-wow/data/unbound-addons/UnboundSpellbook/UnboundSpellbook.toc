@@ -4,6 +4,7 @@
 ## Author: OpenAI
 ## Version: 1.0
 ## SavedVariables: UnboundSpellbookDB
+## OptionalDeps: multiclass-talents-ui
 
 ClassData.lua
 Core.lua

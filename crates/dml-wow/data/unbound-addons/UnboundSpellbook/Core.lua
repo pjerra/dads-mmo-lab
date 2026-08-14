@@ -130,23 +130,115 @@ local allMap = {}
 -- cases. UnitClass does, and it cannot be capped out, so the native class is
 -- always confirmed. Every other unlocked class is far from the boundary
 -- (Rogue, the thinnest, still scores 22).
+-- Spell IDs that exist ONLY as a talent reward, harvested from the sibling
+-- multiclass-talents-ui addon's own tables rather than from memory: its
+-- talent `id` and `ranks` ARE spell IDs (Adrenaline Rush is
+-- {id=13750, ranks={13750}}) and this addon's class lists carry the same
+-- numbers. Shape: Adv2.Data.Talents[classID][specIndex] = { talent, ... }.
+-- If that addon is not loaded the set is empty and nothing is hidden.
+local function TalentSpellSet()
+    local set = {}
+    local byClass = Adv2 and Adv2.Data and Adv2.Data.Talents
+    if type(byClass) ~= "table" then
+        return set
+    end
+
+    for _, specs in pairs(byClass) do
+        for _, talents in pairs(specs or {}) do
+            for _, talent in pairs(talents or {}) do
+                if type(talent) == "table" then
+                    if talent.id then
+                        set[talent.id] = true
+                    end
+                    for _, rankID in ipairs(talent.ranks or {}) do
+                        set[rankID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    return set
+end
+
+local CLASS_KEY_TO_ID = {
+    WARRIOR = 1, PALADIN = 2, HUNTER = 3, ROGUE = 4, PRIEST = 5,
+    DEATHKNIGHT = 6, SHAMAN = 7, MAGE = 8, WARLOCK = 9, DRUID = 11,
+}
+
+-- Has the character actually spent points in this class? The native class
+-- goes through Blizzard's own talent UI, the unlocked ones through
+-- multiclass-talents-ui, which records every purchase in its saved
+-- variables. NEITHER reads the capped spell array, so both stay reliable
+-- exactly where IsSpellKnown does not.
+local function ClassHasAnyTalents(classKey, nativeClass)
+    if classKey == nativeClass then
+        if type(GetNumTalents) == "function" and type(GetTalentInfo) == "function" then
+            for tab = 1, 3 do
+                for i = 1, (GetNumTalents(tab) or 0) do
+                    local _, _, _, _, rank = GetTalentInfo(tab, i)
+                    if (rank or 0) > 0 then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local classID = CLASS_KEY_TO_ID[classKey]
+    local learned = Adv2 and Adv2.playerData and Adv2.playerData.learnedTalents
+    if not classID or type(learned) ~= "table" or type(learned[classID]) ~= "table" then
+        return false
+    end
+
+    for _, talents in pairs(learned[classID]) do
+        for _, rank in pairs(talents or {}) do
+            if (rank or 0) > 0 then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
 local function FinalizeScan()
     USB.entriesByClass = {}
     allMap = {}
 
     local _, nativeClass = UnitClass("player")
+    local talentSpells = TalentSpellSet()
 
     for _, classKey in ipairs(USB.CLASS_ORDER) do
         local entries = {}
 
         if classConfirmed[classKey] or classKey == nativeClass then
-            for _, entry in pairs(classMaps[classKey]) do
-                table.insert(entries, entry)
+            -- A class with ZERO points spent cannot have earned ANY of its
+            -- talent-granted abilities, so those are dropped -- that is the
+            -- one over-report fail-open otherwise produces (Adrenaline Rush
+            -- listed for a character who never specced Rogue). Deliberately
+            -- class-level rather than per-talent: it can only ever hide
+            -- spells belonging to a class the character has spent nothing
+            -- in, so it can never hide a rotation ability like Bloodthirst
+            -- or Crusader Strike, which come from classes that DO have
+            -- points. A positively confirmed spell is never hidden either.
+            local hideTalents = not ClassHasAnyTalents(classKey, nativeClass)
 
-                -- The ALL tab is built HERE, from surviving classes only, so
-                -- a locked class never leaks its spells into it.
-                if ShouldReplace(allMap[entry.name], entry) then
-                    allMap[entry.name] = entry
+            for _, entry in pairs(classMaps[classKey]) do
+                local isUnearnedTalent = hideTalents
+                    and entry.spellID
+                    and talentSpells[entry.spellID]
+                    and not entry.confirmed
+
+                if not isUnearnedTalent then
+                    table.insert(entries, entry)
+
+                    -- The ALL tab is built HERE, from surviving classes only,
+                    -- so a locked class never leaks its spells into it.
+                    if ShouldReplace(allMap[entry.name], entry) then
+                        allMap[entry.name] = entry
+                    end
                 end
             end
         end
@@ -220,6 +312,9 @@ scanFrame:SetScript("OnUpdate", function(self)
                 rankText = rankText or "",
                 rankNumber = RankNumber(rankText),
                 icon = icon,
+                -- Kept per entry so the talent filter below can never hide a
+                -- spell the client positively confirmed.
+                confirmed = (okKnown and isKnown) and true or false,
             }
 
             local currentClassEntry = classMaps[job.classKey][spellName]
