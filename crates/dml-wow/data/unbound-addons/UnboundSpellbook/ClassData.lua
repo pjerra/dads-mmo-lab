@@ -48,6 +48,12 @@ USB.CLASS_ACTIVE_SPELL_IDS = {
         355,    -- Taunt
         7386, 7405, 8380, 11596, 11597, 25225, 47467,   -- Sunder Armor, ranks 1-7
         34428,  -- Victory Rush
+        2457,   -- Battle Stance. Found live 2026-08-14: Defensive (71) and
+                -- Berserker (2458) were both here but Battle Stance was not,
+                -- so it fell through to the General tab, which by design
+                -- keeps exactly those tab-1 spells that are in NO class list.
+                -- A stray spell in General is the visible symptom of a hole
+                -- in this table -- worth checking whenever one shows up.
     },
     PALADIN = {
         465, 498, 633, 635, 639, 642, 643, 647, 853, 879, 1022, 1026, 1032, 1038, 1042, 1044,

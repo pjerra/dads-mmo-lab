@@ -111,16 +111,46 @@ end
 local scanJobs = {}
 local scanIndex = 1
 local classMaps = {}
+local classConfirmed = {}
 local allMap = {}
 
+-- An UNLOCKED class lands dozens of confirmations across its ~200-ID list,
+-- because only part of a multiclass character's spells fall inside the
+-- client's reachable slot array. Measured live 2026-08-14 on a Blood Elf
+-- Paladin with eight extra classes unlocked:
+--
+--   Mage 228/301  Shaman 203/292  Warlock 165/256  Priest 131/257
+--   Hunter 120/187  Druid 98/317  Warrior 27/153  Rogue 22/130
+--   PALADIN 0/195   DeathKnight 0/102
+--
+-- So one confirmation keeps a class -- but zero does NOT mean locked, and
+-- that mistake shipped once: the character's OWN class scored zero, exactly
+-- like the one class they do not have, so gating on confirmations alone
+-- emptied their main spellbook. Nothing in IsSpellKnown separates those two
+-- cases. UnitClass does, and it cannot be capped out, so the native class is
+-- always confirmed. Every other unlocked class is far from the boundary
+-- (Rogue, the thinnest, still scores 22).
 local function FinalizeScan()
     USB.entriesByClass = {}
+    allMap = {}
+
+    local _, nativeClass = UnitClass("player")
 
     for _, classKey in ipairs(USB.CLASS_ORDER) do
         local entries = {}
-        for _, entry in pairs(classMaps[classKey]) do
-            table.insert(entries, entry)
+
+        if classConfirmed[classKey] or classKey == nativeClass then
+            for _, entry in pairs(classMaps[classKey]) do
+                table.insert(entries, entry)
+
+                -- The ALL tab is built HERE, from surviving classes only, so
+                -- a locked class never leaks its spells into it.
+                if ShouldReplace(allMap[entry.name], entry) then
+                    allMap[entry.name] = entry
+                end
+            end
         end
+
         table.sort(entries, function(a, b)
             return a.name < b.name
         end)
@@ -162,28 +192,39 @@ scanFrame:SetScript("OnUpdate", function(self)
         processed = processed + 1
         USB.scanProgress = scanIndex - 1
 
-        if IsSpellKnown(job.spellID) then
-            local spellName, rankText, icon = GetSpellInfo(job.spellID)
+        -- IsSpellKnown is a POSITIVE-ONLY signal here, and treating its false
+        -- as "not known" is what hid whole classes. It reads the client's
+        -- spell array, which is hard-capped around 1024 slots while a
+        -- multiclass character knows thousands (5721 on the character this
+        -- was found on). Measured live 2026-08-14: Power Word: Fortitude
+        -- rank 8 (48161) casts fine yet answers FALSE, while Battle Stance
+        -- answers true purely because it landed inside the cap. The two
+        -- obvious alternatives were tested and are worse -- GetSpellInfo(name)
+        -- returns nil past the cap, and GetSpellLink answers for spells the
+        -- character does NOT own (it is a DBC lookup, verified against a
+        -- Death Knight spell on a character with Death Knight locked). So no
+        -- client API can answer per spell: false means "cannot tell", every
+        -- listed spell is kept, and the class is judged as a whole above.
+        local okKnown, isKnown = pcall(IsSpellKnown, job.spellID)
+        if okKnown and isKnown then
+            classConfirmed[job.classKey] = true
+        end
 
-            if spellName and spellName ~= "" then
-                local entry = {
-                    classKey = job.classKey,
-                    spellID = job.spellID,
-                    name = spellName,
-                    rankText = rankText or "",
-                    rankNumber = RankNumber(rankText),
-                    icon = icon,
-                }
+        local spellName, rankText, icon = GetSpellInfo(job.spellID)
 
-                local currentClassEntry = classMaps[job.classKey][spellName]
-                if ShouldReplace(currentClassEntry, entry) then
-                    classMaps[job.classKey][spellName] = entry
-                end
+        if spellName and spellName ~= "" then
+            local entry = {
+                classKey = job.classKey,
+                spellID = job.spellID,
+                name = spellName,
+                rankText = rankText or "",
+                rankNumber = RankNumber(rankText),
+                icon = icon,
+            }
 
-                local currentAllEntry = allMap[spellName]
-                if ShouldReplace(currentAllEntry, entry) then
-                    allMap[spellName] = entry
-                end
+            local currentClassEntry = classMaps[job.classKey][spellName]
+            if ShouldReplace(currentClassEntry, entry) then
+                classMaps[job.classKey][spellName] = entry
             end
         end
     end
@@ -201,6 +242,7 @@ function USB:StartDirectScan()
 
     scanJobs = {}
     classMaps = {}
+    classConfirmed = {}
     allMap = {}
 
     for _, classKey in ipairs(self.CLASS_ORDER) do
