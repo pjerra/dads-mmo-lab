@@ -70,10 +70,50 @@ pub struct AutoShutdownCtl {
     pub enabled: bool,
 }
 
+/// How many long, mutating server operations are in flight (rebuild, server
+/// update, unbound install/uninstall). A DEPTH counter rather than a bool for
+/// the same reason `taskbar.ts` uses one: two overlapping ops must not have
+/// the first to finish clear the flag out from under the second.
+///
+/// Read by [`auto_shutdown_watcher`], which must never stop the server — and
+/// on native, via the default-on "Stop Docker Desktop when the server stops"
+/// toggle, the DOCKER ENGINE — while one of these is running. See
+/// [`verdict_worth_auto_stopping`] for the incident that produced both guards.
+/// This one is the belt to that one's braces: the verdict narrowing covers the
+/// long compile (where the stack reads `soap_unreachable`), while this covers
+/// the minutes at either end when the server is still, or already, `online`.
+pub type MaintenanceDepth = Arc<std::sync::atomic::AtomicUsize>;
+
+/// RAII: increments on construction, decrements on drop. A guard rather than
+/// paired calls because every one of these operations has early-return paths,
+/// and a leaked increment would silently disable auto-shutdown for the rest of
+/// the session.
+pub struct MaintenanceGuard(MaintenanceDepth);
+
+impl MaintenanceGuard {
+    pub fn new(depth: MaintenanceDepth) -> Self {
+        depth.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(depth)
+    }
+}
+
+impl Drop for MaintenanceGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// True while any long mutating operation holds a [`MaintenanceGuard`].
+pub fn maintenance_in_flight(depth: &MaintenanceDepth) -> bool {
+    depth.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 pub struct AppState {
     pub runner: std::sync::Arc<DmlRunner>,
     pub install: Arc<Mutex<Option<InstallSlot>>>,
     pub auto_shutdown: Arc<Mutex<AutoShutdownCtl>>,
+    /// See [`MaintenanceDepth`].
+    pub maintenance: MaintenanceDepth,
     /// Serializes every native-mode SOAP call (Task A2b, carried forward from
     /// the A1 review): the worldserver's SOAP listener runs on the single
     /// world thread, and `dml` (bash) already serializes its own SOAP calls
@@ -221,6 +261,35 @@ fn verdict_needs_stop(verdict: Option<&str>) -> bool {
     )
 }
 
+/// Is this verdict worth an UNATTENDED, automatic stop? Deliberately much
+/// narrower than [`verdict_needs_stop`], and it must stay a separate predicate
+/// rather than a narrowing of that one — the two callers have OPPOSITE risk
+/// profiles. The `wsl --shutdown` path is about to power-kill the VM, so
+/// there "don't stop" risks a worldserver dying without a saveall and it
+/// deliberately errs toward stopping. The auto-shutdown watcher errs the other
+/// way, because of what it costs when it is wrong.
+///
+/// FOUND LIVE, 2026-08-15, and it cost a 90-minute build: `module rebuild`
+/// stops ONLY `ac-worldserver` and then compiles for an hour with `ac-database`
+/// and `ac-authserver` still up. `server-detail` reports that partial stack as
+/// `soap_unreachable` — which the wide predicate counts as "needs stopping".
+/// The player closed WoW mid-compile, the watcher fired, ran `games stop`, and
+/// because "Stop Docker Desktop when the server stops" is default-ON in native
+/// mode that stop took the ENGINE down with it. The build died at step
+/// 1246/1952 and Docker Desktop was left wedged answering 500s.
+///
+/// The asymmetry is the whole argument. Declining to fire on a server that
+/// really was idle costs some idle RAM until the user presses Stop. Firing on
+/// a server that is mid-maintenance destroys an hour of compute and can leave
+/// the engine unusable. So this fires ONLY on `online` — the one verdict that
+/// unambiguously means "the stack is up and healthy and nobody is playing".
+///
+/// `starting` is excluded for the same reason: it is also what a rebuild's own
+/// `compose up -d` looks like on the way back.
+fn verdict_worth_auto_stopping(verdict: Option<&str>) -> bool {
+    matches!(verdict, Some("online"))
+}
+
 /// Read the server verdict once. `Some(v)` when server-detail answered ok;
 /// `None` when the read failed (docker/WSL hiccup) -- callers decide how to
 /// treat "don't know".
@@ -248,6 +317,7 @@ fn auto_shutdown_watcher(
     my_gen: u64,
     ctl: Arc<Mutex<AutoShutdownCtl>>,
     runner: Arc<DmlRunner>,
+    maintenance: MaintenanceDepth,
     app: tauri::AppHandle,
 ) {
     use tauri::Emitter;
@@ -271,6 +341,13 @@ fn auto_shutdown_watcher(
                 let _ = app
                     .emit("auto-shutdown", serde_json::json!({"kind": "state", "state": "armed"}));
             }
+            // A rebuild/update/unbound run is in flight. Do NOT stop the
+            // server -- on native that also stops the Docker engine the build
+            // is running inside. Stay armed: the machine re-fires on the next
+            // WoW-closed transition, and the debounce state is untouched.
+            watch::WatchAction::Fire if maintenance_in_flight(&maintenance) => {
+                eprintln!("auto-shutdown: suppressed -- a long server operation is in flight");
+            }
             watch::WatchAction::Fire => {
                 // Read the server state once. Three honest outcomes so the
                 // card never claims success on a failed stop or "wasn't
@@ -281,7 +358,7 @@ fn auto_shutdown_watcher(
                 //   unknown     -- server-detail could not be read
                 let verdict = read_server_verdict(&runner);
                 let outcome = match verdict.as_deref() {
-                    Some(v) if verdict_needs_stop(Some(v)) => {
+                    Some(v) if verdict_worth_auto_stopping(Some(v)) => {
                         // Same CLI verb as the Home Stop button (bounded:
                         // saveall + compose stop -t 180). Judge it by effect
                         // -- run_captured is Ok on any CLI exit code.
@@ -536,7 +613,8 @@ fn set_auto_shutdown(
     if enabled {
         let ctl = state.auto_shutdown.clone();
         let runner = state.runner.clone();
-        std::thread::spawn(move || auto_shutdown_watcher(my_gen, ctl, runner, app));
+        let maintenance = state.maintenance.clone();
+        std::thread::spawn(move || auto_shutdown_watcher(my_gen, ctl, runner, maintenance, app));
     }
     Ok(())
 }
@@ -896,11 +974,21 @@ async fn wow_module_remove_native(
 /// [`dml_wow::modmgr::module_rebuild_stream`]. Native mode only — WSL keeps
 /// calling `wow_module_rebuild`.
 #[tauri::command]
-async fn wow_module_rebuild_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+async fn wow_module_rebuild_native(
+    backup: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
     require_native_backend()?;
     let db_cfg = dml_wow::db::DbConfig::from_env();
     let ch = on_event.clone();
+    // Held for the whole compile: this stops the worldserver and leaves the
+    // rest of the stack up for an hour, which the auto-shutdown watcher would
+    // otherwise read as a server worth stopping -- taking the Docker engine,
+    // and this build, down with it. See `verdict_worth_auto_stopping`.
+    let depth = state.maintenance.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _maintenance = MaintenanceGuard::new(depth);
         dml_wow::modmgr::module_rebuild_stream(backup, db_cfg, |v| {
             let _ = ch.send(v);
         });
@@ -6317,7 +6405,9 @@ async fn wow_unbound_install(
     }
     let slot = state.install.clone();
     let ch = on_event.clone();
+    let depth = state.maintenance.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _maintenance = MaintenanceGuard::new(depth);
         let mut opts =
             dml_wow::unbound::UnboundOpts::new(dml_core::compose::games_dir_from_env());
         // Consent is COLLECTED BY THE CALLER and merely carried here. The
@@ -6362,7 +6452,9 @@ async fn wow_unbound_uninstall(
     }
     let slot = state.install.clone();
     let ch = on_event.clone();
+    let depth = state.maintenance.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        let _maintenance = MaintenanceGuard::new(depth);
         let mut opts =
             dml_wow::unbound::UnboundOpts::new(dml_core::compose::games_dir_from_env());
         opts.accept_data_changes = accept_data_changes;
@@ -7187,10 +7279,16 @@ async fn run_games_lifecycle_native(
 /// passes an explicit `true`/`false`, matching WSL's plain-`bool` sibling —
 /// `None` only reaches a future/alternate caller that omits the choice).
 #[tauri::command]
-async fn wow_update_native(backup: Option<bool>, on_event: Channel<serde_json::Value>) -> Result<(), CmdError> {
+async fn wow_update_native(
+    backup: Option<bool>,
+    on_event: Channel<serde_json::Value>,
+    state: State<'_, AppState>,
+) -> Result<(), CmdError> {
     require_native_backend()?;
     let ch = on_event.clone();
+    let depth = state.maintenance.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _maintenance = MaintenanceGuard::new(depth);
         dml_wow::maint::update_stream(backup, |v| {
             let _ = ch.send(v);
         });
@@ -7226,6 +7324,7 @@ pub fn run() {
             )),
             install: Arc::new(Mutex::new(None)),
             auto_shutdown: Arc::new(Mutex::new(AutoShutdownCtl { generation: 0, enabled: false })),
+            maintenance: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             soap_lock: Arc::new(Mutex::new(())),
             config_lock: Arc::new(Mutex::new(())),
             last_status_push: Arc::new(Mutex::new(None)),
@@ -7581,6 +7680,64 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- the 2026-08-15 engine-killed-the-build incident ---------------------
+
+    #[test]
+    fn a_mid_rebuild_stack_is_not_worth_auto_stopping() {
+        // `module rebuild` stops ONLY ac-worldserver and then compiles for an
+        // hour with ac-database and ac-authserver still up; server-detail
+        // reports that partial stack as `soap_unreachable`. The watcher fired
+        // on it, ran `games stop`, and because "Stop Docker Desktop when the
+        // server stops" is default-on in native mode, that took the ENGINE
+        // down mid-compile -- build dead at 1246/1952, Docker left wedged.
+        assert!(!verdict_worth_auto_stopping(Some("soap_unreachable")));
+        // Also what a rebuild's own `compose up -d` looks like on the way back.
+        assert!(!verdict_worth_auto_stopping(Some("starting")));
+        // An unattended stop of an already-broken server buys nothing and can
+        // land in the middle of someone recovering it by hand.
+        assert!(!verdict_worth_auto_stopping(Some("crashed")));
+        assert!(!verdict_worth_auto_stopping(Some("offline")));
+        assert!(!verdict_worth_auto_stopping(None));
+    }
+
+    #[test]
+    fn an_online_server_is_still_auto_stopped() {
+        // The feature must still DO its job -- the narrowing above is
+        // worthless if it also broke the case the feature exists for.
+        assert!(verdict_worth_auto_stopping(Some("online")));
+    }
+
+    #[test]
+    fn the_two_stop_predicates_stay_separate() {
+        // They must NOT be unified. The `wsl --shutdown` path is about to
+        // power-kill the VM, so for IT "don't stop" risks a worldserver dying
+        // without a saveall -- it deliberately errs toward stopping, and still
+        // must. Narrowing the shared helper instead of adding a second one
+        // would have silently introduced that data-loss bug.
+        for v in ["soap_unreachable", "crashed", "starting"] {
+            assert!(verdict_needs_stop(Some(v)), "the shutdown path must still stop on {v}");
+            assert!(!verdict_worth_auto_stopping(Some(v)), "the watcher must not fire on {v}");
+        }
+    }
+
+    #[test]
+    fn the_maintenance_guard_counts_depth_and_releases_on_drop() {
+        let d: MaintenanceDepth = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        assert!(!maintenance_in_flight(&d));
+        {
+            let _a = MaintenanceGuard::new(d.clone());
+            assert!(maintenance_in_flight(&d));
+            {
+                // Two overlapping ops: the first to finish must NOT clear the
+                // flag out from under the second.
+                let _b = MaintenanceGuard::new(d.clone());
+                assert!(maintenance_in_flight(&d));
+            }
+            assert!(maintenance_in_flight(&d), "the inner guard's drop released the outer one's flag");
+        }
+        assert!(!maintenance_in_flight(&d));
+    }
 
     // -- native_title_is_usable ---------------------------------------------
     //
@@ -9102,6 +9259,41 @@ pub(crate) mod stop_outcome_scan_tests {
                  re-read that decides the outcome. Anything else means the outcome came \
                  from somewhere that cannot know whether the world actually went down — \
                  and both of these call sites then TELL THE USER it did. Found: {tail:?}"
+            );
+        }
+    }
+
+
+    /// The auto-shutdown watcher must consult the maintenance flag BEFORE it
+    /// stops anything. Belt to `verdict_worth_auto_stopping`'s braces: that
+    /// covers the long compile (stack reads `soap_unreachable`), this covers
+    /// the minutes at either end when the server still reads `online`.
+    /// Source-scanned because the watcher is an infinite loop holding a
+    /// `tauri::AppHandle` and no unit test can reach it.
+    #[test]
+    fn the_watcher_checks_the_maintenance_flag_before_it_stops_anything() {
+        let body = body_of(&production_half(include_str!("lib.rs")), "fn auto_shutdown_watcher(");
+        assert!(
+            body.contains("maintenance_in_flight("),
+            "the auto-shutdown watcher must refuse to fire while a rebuild/update is in              flight -- on native, stopping the server also stops the Docker engine the              build is running inside: {body:?}"
+        );
+    }
+
+    /// One guard per long mutating op. A new one added without it can have the
+    /// engine pulled out from under it by the watcher.
+    #[test]
+    fn every_long_server_operation_holds_the_maintenance_guard() {
+        let src = production_half(include_str!("lib.rs"));
+        for f in [
+            "async fn wow_module_rebuild_native(",
+            "async fn wow_update_native(",
+            "async fn wow_unbound_install(",
+            "async fn wow_unbound_uninstall(",
+        ] {
+            let body = body_of(&src, f);
+            assert!(
+                body.contains("MaintenanceGuard::new("),
+                "{f} runs for tens of minutes and must hold a MaintenanceGuard: {body:?}"
             );
         }
     }
