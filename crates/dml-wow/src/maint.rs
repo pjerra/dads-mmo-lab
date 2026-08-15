@@ -556,15 +556,41 @@ fn prepare_unbound(
             "Wrath Unbound's core patch failed to revert after a clean check -- skipping the AzerothCore update.".to_string(),
         );
     }
-    // Believe the FILES, not git's exit code -- the same rule the installer
-    // applies after its forward apply.
-    if crate::unbound::probe_patch_presence(sdir) != crate::unbound::PatchPresence::None {
-        // Put it back rather than leave a half-reverted tree behind.
-        let _ = git_ok_in(program, sdir, &["apply", UNBOUND_PATCH_TMP], GIT_PATCH_TIMEOUT);
+    // Believe the FILES, not git's exit code -- but ask the question that
+    // actually matters, which is NOT "is the symbol gone from all six files".
+    //
+    // That was the first version, and it refused a healthy server (found live
+    // on the VM 2026-08-15, on the very first real run). Its `Player.cpp`
+    // carries TWO `UnboundClassMask` references: the one this patch owns
+    // (trainer spell visibility) and a separate hand edit that lets multiclass
+    // characters learn talents from an unlocked class. A symbol-absence probe
+    // cannot tell "our patch is still applied" from "someone else's edit also
+    // mentions it", so a correct, complete revert still read as a failure.
+    //
+    // Extra local edits that merely REFERENCE the symbol are ordinary local
+    // work, and `wow_advance_repo`'s stash carries them across exactly like
+    // any other (the VM's Feral Spirit patch takes that same route). What this
+    // step must establish is narrower and entirely about OUR patch: it is off
+    // the tree, and it can go back on. A forward `--check` proves both at once
+    // -- it can only succeed if the lines the patch adds are absent.
+    if !git_ok_in(program, sdir, &["apply", "--check", UNBOUND_PATCH_TMP], GIT_PATCH_TIMEOUT) {
+        // Put it back rather than leave a half-reverted tree behind. The
+        // reverse-apply already passed its own `--check` and `git apply` is
+        // atomic, so this restore is the same operation in reverse and should
+        // not fail -- if it does, say so, because a tree with Unbound half
+        // off is the one state nobody can recover from by guessing.
+        if git_ok_in(program, sdir, &["apply", UNBOUND_PATCH_TMP], GIT_PATCH_TIMEOUT) {
+            let _ = std::fs::remove_file(sdir.join(UNBOUND_PATCH_TMP));
+            return UnboundPrep::Refused(
+                "Wrath Unbound's core patch reverted but will not re-apply -- skipping the AzerothCore update. It has been put back and the server is unchanged.".to_string(),
+            );
+        }
         let _ = std::fs::remove_file(sdir.join(UNBOUND_PATCH_TMP));
-        return UnboundPrep::Refused(
-            "Wrath Unbound's symbols survived a reverse-apply that reported success -- skipping the AzerothCore update.".to_string(),
-        );
+        return UnboundPrep::Refused(format!(
+            "Wrath Unbound's core patch was reverted and could NOT be put back. Do not rebuild. Restore by hand: cd {} && git checkout -- {}",
+            sdir.display(),
+            crate::unbound::PATCHED_FILES.join(" ")
+        ));
     }
     UnboundPrep::Reverted
 }
@@ -1219,6 +1245,41 @@ mod tests {
         // patch must not undo the core update it was carried across.
         let one = std::fs::read_to_string(sdir.join(crate::unbound::PATCHED_FILES[0])).unwrap();
         assert!(one.contains("NEW upstream line"), "the core update was lost: {one}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_extra_hand_edit_mentioning_the_symbol_does_not_block_the_update() {
+        // THE VM's OWN CASE, 2026-08-15, first real run. Its `Player.cpp`
+        // carries two `UnboundClassMask` references: the one the shipped patch
+        // owns, and a separate hand edit allowing multiclass talent learning.
+        // The first version of this check asked "is the symbol gone from all
+        // six files?" and so refused a server whose revert had worked
+        // perfectly -- a symbol-absence probe cannot tell "our patch is still
+        // applied" from "someone else also mentions it".
+        let (root, sdir, patch) = unbound_fixture("handedit");
+
+        // A second, independent reference the shipped patch knows nothing
+        // about -- in a file the patch DOES touch, which is what made this
+        // indistinguishable from a failed revert.
+        let victim = sdir.join(crate::unbound::PATCHED_FILES[2]);
+        let body = std::fs::read_to_string(&victim).unwrap();
+        std::fs::write(&victim, format!("{body}int hand_edit() {{ return UnboundClassMask; }}\n")).unwrap();
+        git_must(&sdir, &["commit", "-q", "-am", "someone's own talent fix"]);
+
+        let prep = prepare_unbound(OsStr::new("git"), &sdir, &crate::unbound::probe_patch_presence(&sdir), &patch, &|_| {});
+        assert_eq!(prep, UnboundPrep::Reverted, "a healthy server with its own extra edit must not be refused");
+
+        // The hand edit is untouched -- it was never ours to revert.
+        assert!(
+            std::fs::read_to_string(&victim).unwrap().contains("int hand_edit()"),
+            "the update must not disturb an edit the shipped patch does not own"
+        );
+
+        // And the patch still goes back on afterwards.
+        simulate_core_update(&sdir, false);
+        reapply_unbound(OsStr::new("git"), &sdir).expect("the patch must still re-apply alongside the hand edit");
+        assert_eq!(crate::unbound::probe_patch_presence(&sdir), crate::unbound::PatchPresence::All);
         let _ = std::fs::remove_dir_all(&root);
     }
 

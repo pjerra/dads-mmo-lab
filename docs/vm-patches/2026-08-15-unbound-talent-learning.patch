@@ -1,0 +1,33 @@
+Unbound Wrath Edition — allow talent learning for unlocked classes
+
+Found on the VM 2026-08-15, during the first real `wow update` run. This hunk
+is NOT part of the shipped `unbound-core-access.patch`: `Player::LearnTalent`
+has xinef's anti-cheat gate rejecting any talent whose tab does not match the
+character's class mask, so a multiclass character could unlock a class through
+the Mentor, learn its spells, and still be refused its talents.
+
+Recorded here because it was undocumented local work living only in the VM's
+working tree. `wow update` carries it across on git's stash like any other
+local edit (the shipped Unbound patch is reverted and re-applied separately),
+but an edit that exists in exactly one place, uncommitted, on one machine, is
+one `git checkout --` away from gone.
+
+Sibling of `2026-08-15-feral-spirit-coexist.patch`, same reasoning.
+
+NB this hunk is why the first `wow update` refused the core: the post-revert
+check asked "is `UnboundClassMask` gone from all six files?", and this second,
+independent reference kept answering no even though the revert had worked
+perfectly. The check now asks whether the shipped patch itself can re-apply,
+which is the question that was always meant.
+
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -14293,7 +14295,7 @@ void Player::LearnTalent(uint32 talentId, uint32 talentRank, bool command /*= fa
+
+     // xinef: prevent learn talent for different class (cheating)
+-    if ((getClassMask() & talentTabInfo->ClassMask) == 0)
++    if (((getClassMask() | GetUnboundClassMask()) & talentTabInfo->ClassMask) == 0)
+         return;
+
+     // xinef: find current talent rank
