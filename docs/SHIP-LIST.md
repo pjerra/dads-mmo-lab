@@ -50,6 +50,50 @@ THREE THINGS THIS RUN DID NOT PROVE, so none of them may be assumed:
    worldserver link survived, but got lucky rather than proven; the compose
    templates still pass no `-j` limit.
 
+## The server self-update is PROVEN on native (2026-08-15)
+
+The VM took **151 core commits and 34 mod-playerbots commits** in one run,
+rebuilt, and came back with bots logging in (`1088/1500` and climbing) and
+every local core edit intact. That is the first time `wow update` has ever
+worked on the native backend — see the root `CLAUDE.md` gotcha for why it
+could not, and what the two-halves fix was.
+
+The tree the VM now runs, which supersedes the SHA-pin table above **for that
+machine only** (`install_native.rs`'s pins are unchanged and still name the
+2026-07-31 tree, which is correct: a pin is for a FRESH install, and bumping
+it means re-running that 21-minute proof):
+
+| repo | SHA |
+|---|---|
+| core (`mod-playerbots/azerothcore-wotlk`, branch `Playerbot`) | `efe123fab` |
+| module (`mod-playerbots`) | `8d9f6aa6` |
+
+What this run proved that no test could:
+
+* **Wrath Unbound survives a core update.** Its patch is reverted, the core
+  advances, the patch goes back on, and no database is touched — so nothing a
+  player earned is at risk. The alternative anyone would reach for first,
+  `unbound uninstall` + reinstall, DROPs `unbound_character_unlocks` and
+  strips every character's cross-class spells at next login.
+* **Ordinary local core patches survive too**, on git's stash — the VM's Feral
+  Spirit hunk and its undocumented `LearnTalent` hunk both came through.
+* **A rebuild swaps an image the container never picked up.** The Feral Spirit
+  worldserver image had been built hours earlier and was still not running;
+  the update's rebuild is what made it live.
+
+Two things it did NOT prove, so neither may be assumed:
+
+1. **The Modules page has never been clicked through by a human.** Its 12
+   commits are code-complete, self-reviewed and now merged up to date
+   (`018c359`), and the launcher carrying them is deployed — but round 2 of
+   that plan exists precisely because round 1 needed click-through feedback.
+2. **The original engine death is unexplained.** A 90-minute rebuild died at
+   step 1246/1952 with BuildKit reporting `unexpected EOF` — it lost the
+   daemon. Docker Desktop had a 4.85.0 → 4.86.0 auto-update downloading across
+   exactly that window, which is suggestive and unproven. Turning off Docker
+   Desktop's auto-update on any box that compiles for an hour is cheap
+   insurance either way.
+
 ## Known flake (found 2026-07-30, NOT investigated)
 
 `cli/tests/soap.bats` test 6, "wow soap-exec returns result envelope on success",
