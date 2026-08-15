@@ -899,6 +899,33 @@ fn cmd_unbound(cmd: UnboundCmd) -> i32 {
         return emit_ok(serde_json::to_value(status).unwrap_or_default());
     }
 
+    // Progress export: read-only, DB only -- no games dir, no docker, no
+    // stream. Writes a file only when asked; otherwise the snapshot IS the
+    // envelope, so `dml-wow unbound export | jq` works like every other read.
+    if let UnboundCmd::Export { out } = &cmd {
+        let cfg = DbConfig::from_env();
+        let snapshot = match dml_wow::unbound_export::export(&cfg) {
+            Ok(v) => v,
+            Err(e) => return emit_err(e.code(), &e.to_string(), "Is the server running?"),
+        };
+        if let Some(path) = out {
+            let body = match serde_json::to_string_pretty(&snapshot) {
+                Ok(b) => b,
+                Err(e) => return emit_err("WRITE_FAILED", &e.to_string(), ""),
+            };
+            if let Err(e) = std::fs::write(path, body) {
+                return emit_err("WRITE_FAILED", &format!("could not write {path}: {e}"), "Check the folder is writable.");
+            }
+            return emit_ok(json!({
+                "file": path,
+                "characters": snapshot.get("characters").cloned().unwrap_or(Value::Null),
+                "unlocks": snapshot.get("unlocks").and_then(|u| u.as_array()).map(|a| a.len()).unwrap_or(0),
+                "cross_class_spells": snapshot.get("cross_class_spells").and_then(|u| u.as_array()).map(|a| a.len()).unwrap_or(0),
+            }));
+        }
+        return emit_ok(snapshot);
+    }
+
     // The CLIENT addons: no games dir, no docker, no server at all.
     if let UnboundCmd::Addons { cmd } = cmd {
         use dml_wow::unbound_addons;
@@ -957,7 +984,9 @@ fn cmd_unbound(cmd: UnboundCmd) -> i32 {
         UnboundCmd::Uninstall { id, accept_data_changes, force } => {
             (id, accept_data_changes, false, force, true)
         }
-        UnboundCmd::Status { .. } | UnboundCmd::Addons { .. } => unreachable!("handled above"),
+        UnboundCmd::Status { .. } | UnboundCmd::Addons { .. } | UnboundCmd::Export { .. } => {
+            unreachable!("handled above")
+        }
     };
     if !valid_game_id(&id) {
         let e = bad_id(&id);

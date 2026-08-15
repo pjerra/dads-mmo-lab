@@ -4,6 +4,8 @@ local USB = UnboundSpellbook
 USB.BOOK_TYPE = BOOKTYPE_SPELL or "spell"
 USB.entriesByClass = {}
 USB.allEntries = {}
+USB.bookTabs = {}
+USB.bookTabsByKey = {}
 USB.refreshCallbacks = {}
 USB.scanning = false
 USB.scanProgress = 0
@@ -15,6 +17,42 @@ local function RankNumber(rankText)
         return 0
     end
     return tonumber(string.match(rankText, "(%d+)")) or 0
+end
+
+local PROFESSION_ID_SET = {}
+for _, spellID in ipairs(USB.PROFESSION_SPELL_IDS or {}) do
+    PROFESSION_ID_SET[spellID] = true
+end
+
+local function IsProfessionSpell(spellID, spellName)
+    if spellID and PROFESSION_ID_SET[spellID] then
+        return true
+    end
+    if spellName and USB.PROFESSION_NAMES and USB.PROFESSION_NAMES[spellName] then
+        return true
+    end
+    return false
+end
+
+-- Every class-list ID in one set: on this server tab 1 is stuffed with
+-- whole class spell sets at all ranks, and extra school-tab sets appear
+-- per unlocked class; both are recognised (and hidden) through this.
+local CLASS_ID_SET = {}
+for _, classSpellIDs in pairs(USB.CLASS_ACTIVE_SPELL_IDS or {}) do
+    for _, spellID in ipairs(classSpellIDs) do
+        CLASS_ID_SET[spellID] = true
+    end
+end
+
+-- ShouldReplace for book entries, which may lack a spell ID.
+local function BetterBookRank(existing, candidate)
+    if not existing then
+        return true
+    end
+    if candidate.rankNumber ~= existing.rankNumber then
+        return candidate.rankNumber > existing.rankNumber
+    end
+    return (candidate.spellID or 0) > (existing.spellID or 0)
 end
 
 local function ShouldReplace(existing, candidate)
@@ -73,16 +111,138 @@ end
 local scanJobs = {}
 local scanIndex = 1
 local classMaps = {}
+local classConfirmed = {}
 local allMap = {}
+
+-- An UNLOCKED class lands dozens of confirmations across its ~200-ID list,
+-- because only part of a multiclass character's spells fall inside the
+-- client's reachable slot array. Measured live 2026-08-14 on a Blood Elf
+-- Paladin with eight extra classes unlocked:
+--
+--   Mage 228/301  Shaman 203/292  Warlock 165/256  Priest 131/257
+--   Hunter 120/187  Druid 98/317  Warrior 27/153  Rogue 22/130
+--   PALADIN 0/195   DeathKnight 0/102
+--
+-- So one confirmation keeps a class -- but zero does NOT mean locked, and
+-- that mistake shipped once: the character's OWN class scored zero, exactly
+-- like the one class they do not have, so gating on confirmations alone
+-- emptied their main spellbook. Nothing in IsSpellKnown separates those two
+-- cases. UnitClass does, and it cannot be capped out, so the native class is
+-- always confirmed. Every other unlocked class is far from the boundary
+-- (Rogue, the thinnest, still scores 22).
+-- Spell IDs that exist ONLY as a talent reward, harvested from the sibling
+-- multiclass-talents-ui addon's own tables rather than from memory: its
+-- talent `id` and `ranks` ARE spell IDs (Adrenaline Rush is
+-- {id=13750, ranks={13750}}) and this addon's class lists carry the same
+-- numbers. Shape: Adv2.Data.Talents[classID][specIndex] = { talent, ... }.
+-- If that addon is not loaded the set is empty and nothing is hidden.
+local function TalentSpellSet()
+    local set = {}
+    local byClass = Adv2 and Adv2.Data and Adv2.Data.Talents
+    if type(byClass) ~= "table" then
+        return set
+    end
+
+    for _, specs in pairs(byClass) do
+        for _, talents in pairs(specs or {}) do
+            for _, talent in pairs(talents or {}) do
+                if type(talent) == "table" then
+                    if talent.id then
+                        set[talent.id] = true
+                    end
+                    for _, rankID in ipairs(talent.ranks or {}) do
+                        set[rankID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    return set
+end
+
+local CLASS_KEY_TO_ID = {
+    WARRIOR = 1, PALADIN = 2, HUNTER = 3, ROGUE = 4, PRIEST = 5,
+    DEATHKNIGHT = 6, SHAMAN = 7, MAGE = 8, WARLOCK = 9, DRUID = 11,
+}
+
+-- Has the character actually spent points in this class? The native class
+-- goes through Blizzard's own talent UI, the unlocked ones through
+-- multiclass-talents-ui, which records every purchase in its saved
+-- variables. NEITHER reads the capped spell array, so both stay reliable
+-- exactly where IsSpellKnown does not.
+local function ClassHasAnyTalents(classKey, nativeClass)
+    if classKey == nativeClass then
+        if type(GetNumTalents) == "function" and type(GetTalentInfo) == "function" then
+            for tab = 1, 3 do
+                for i = 1, (GetNumTalents(tab) or 0) do
+                    local _, _, _, _, rank = GetTalentInfo(tab, i)
+                    if (rank or 0) > 0 then
+                        return true
+                    end
+                end
+            end
+        end
+        return false
+    end
+
+    local classID = CLASS_KEY_TO_ID[classKey]
+    local learned = Adv2 and Adv2.playerData and Adv2.playerData.learnedTalents
+    if not classID or type(learned) ~= "table" or type(learned[classID]) ~= "table" then
+        return false
+    end
+
+    for _, talents in pairs(learned[classID]) do
+        for _, rank in pairs(talents or {}) do
+            if (rank or 0) > 0 then
+                return true
+            end
+        end
+    end
+
+    return false
+end
 
 local function FinalizeScan()
     USB.entriesByClass = {}
+    allMap = {}
+
+    local _, nativeClass = UnitClass("player")
+    local talentSpells = TalentSpellSet()
 
     for _, classKey in ipairs(USB.CLASS_ORDER) do
         local entries = {}
-        for _, entry in pairs(classMaps[classKey]) do
-            table.insert(entries, entry)
+
+        if classConfirmed[classKey] or classKey == nativeClass then
+            -- A class with ZERO points spent cannot have earned ANY of its
+            -- talent-granted abilities, so those are dropped -- that is the
+            -- one over-report fail-open otherwise produces (Adrenaline Rush
+            -- listed for a character who never specced Rogue). Deliberately
+            -- class-level rather than per-talent: it can only ever hide
+            -- spells belonging to a class the character has spent nothing
+            -- in, so it can never hide a rotation ability like Bloodthirst
+            -- or Crusader Strike, which come from classes that DO have
+            -- points. A positively confirmed spell is never hidden either.
+            local hideTalents = not ClassHasAnyTalents(classKey, nativeClass)
+
+            for _, entry in pairs(classMaps[classKey]) do
+                local isUnearnedTalent = hideTalents
+                    and entry.spellID
+                    and talentSpells[entry.spellID]
+                    and not entry.confirmed
+
+                if not isUnearnedTalent then
+                    table.insert(entries, entry)
+
+                    -- The ALL tab is built HERE, from surviving classes only,
+                    -- so a locked class never leaks its spells into it.
+                    if ShouldReplace(allMap[entry.name], entry) then
+                        allMap[entry.name] = entry
+                    end
+                end
+            end
         end
+
         table.sort(entries, function(a, b)
             return a.name < b.name
         end)
@@ -98,6 +258,7 @@ local function FinalizeScan()
     end)
 
     USB.lastKnownCount = #USB.allEntries
+    USB:ScanBookTabs()
     USB.scanning = false
     USB.scanProgress = USB.scanTotal
     USB:NotifyRefresh()
@@ -123,28 +284,42 @@ scanFrame:SetScript("OnUpdate", function(self)
         processed = processed + 1
         USB.scanProgress = scanIndex - 1
 
-        if IsSpellKnown(job.spellID) then
-            local spellName, rankText, icon = GetSpellInfo(job.spellID)
+        -- IsSpellKnown is a POSITIVE-ONLY signal here, and treating its false
+        -- as "not known" is what hid whole classes. It reads the client's
+        -- spell array, which is hard-capped around 1024 slots while a
+        -- multiclass character knows thousands (5721 on the character this
+        -- was found on). Measured live 2026-08-14: Power Word: Fortitude
+        -- rank 8 (48161) casts fine yet answers FALSE, while Battle Stance
+        -- answers true purely because it landed inside the cap. The two
+        -- obvious alternatives were tested and are worse -- GetSpellInfo(name)
+        -- returns nil past the cap, and GetSpellLink answers for spells the
+        -- character does NOT own (it is a DBC lookup, verified against a
+        -- Death Knight spell on a character with Death Knight locked). So no
+        -- client API can answer per spell: false means "cannot tell", every
+        -- listed spell is kept, and the class is judged as a whole above.
+        local okKnown, isKnown = pcall(IsSpellKnown, job.spellID)
+        if okKnown and isKnown then
+            classConfirmed[job.classKey] = true
+        end
 
-            if spellName and spellName ~= "" then
-                local entry = {
-                    classKey = job.classKey,
-                    spellID = job.spellID,
-                    name = spellName,
-                    rankText = rankText or "",
-                    rankNumber = RankNumber(rankText),
-                    icon = icon,
-                }
+        local spellName, rankText, icon = GetSpellInfo(job.spellID)
 
-                local currentClassEntry = classMaps[job.classKey][spellName]
-                if ShouldReplace(currentClassEntry, entry) then
-                    classMaps[job.classKey][spellName] = entry
-                end
+        if spellName and spellName ~= "" then
+            local entry = {
+                classKey = job.classKey,
+                spellID = job.spellID,
+                name = spellName,
+                rankText = rankText or "",
+                rankNumber = RankNumber(rankText),
+                icon = icon,
+                -- Kept per entry so the talent filter below can never hide a
+                -- spell the client positively confirmed.
+                confirmed = (okKnown and isKnown) and true or false,
+            }
 
-                local currentAllEntry = allMap[spellName]
-                if ShouldReplace(currentAllEntry, entry) then
-                    allMap[spellName] = entry
-                end
+            local currentClassEntry = classMaps[job.classKey][spellName]
+            if ShouldReplace(currentClassEntry, entry) then
+                classMaps[job.classKey][spellName] = entry
             end
         end
     end
@@ -162,6 +337,7 @@ function USB:StartDirectScan()
 
     scanJobs = {}
     classMaps = {}
+    classConfirmed = {}
     allMap = {}
 
     for _, classKey in ipairs(self.CLASS_ORDER) do
@@ -188,7 +364,200 @@ function USB:GetEntries(tabKey)
     if tabKey == "ALL" then
         return self.allEntries
     end
+
+    local bookTab = self.bookTabsByKey[tabKey]
+    if bookTab then
+        return bookTab.entries
+    end
+
     return self.entriesByClass[tabKey] or {}
+end
+
+-- Spellbook-driven tabs -- always at most three, fixed: General,
+-- Professions, GM. This server grants entire class sets (all ranks)
+-- into spellbook tab 1, so a raw mirror is unusable noise: General
+-- keeps only tab 1's spells that are neither professions nor in any
+-- class ID list, collapsed to their highest known rank, and Professions
+-- is split out of tab 1. The GM tab is a static ID list (ClassData's
+-- GM_SPELL_IDS) checked with IsSpellKnown, exactly like the class tabs:
+-- the client's spellbook slot array is hard-capped at 1024 and General
+-- alone reports 1013, so the server's "Internal" tab sits entirely past
+-- the cap and slot access can never reach it. Runs from FinalizeScan,
+-- so the existing SPELLS_CHANGED wiring keeps these live; a tab with
+-- nothing to show is simply not kept.
+
+-- On this client an invalid slot makes GetSpellName THROW instead of
+-- returning nil (the slot array is hard-capped at 1024, and individual
+-- slots can be unreadable mid-tab as well as past the end -- found
+-- live: a first-failure break hid everything sorted after them,
+-- professions included). So a failed slot is SKIPPED, and only a long
+-- unbroken run of failures is treated as the end of the array.
+local BOOK_SLOT_MISS_LIMIT = 50
+
+function USB:ScanBookTabs()
+    self.bookTabs = {}
+    self.bookTabsByKey = {}
+
+    if type(GetNumSpellTabs) ~= "function"
+        or type(GetSpellTabInfo) ~= "function" then
+        return
+    end
+
+    local function KeepBookTab(name, entries)
+        if #entries == 0 then
+            return
+        end
+
+        table.sort(entries, function(a, b)
+            if a.passive ~= b.passive then
+                return not a.passive        -- actives read before passives
+            end
+            if a.name == b.name then
+                return a.rankNumber < b.rankNumber
+            end
+            return a.name < b.name
+        end)
+
+        local bookTab = {
+            key = "BOOK:" .. name,
+            name = name,
+            entries = entries,
+        }
+        table.insert(self.bookTabs, bookTab)
+        self.bookTabsByKey[bookTab.key] = bookTab
+    end
+
+    local generalName = "General"
+    local generalByName = {}
+    local professions = {}
+
+    -- Only tab 1 is slot-scanned: General and Professions come from it,
+    -- and the GM tab is built by ID below. Extra tabs (school-tab sets,
+    -- the server's own "Internal") are never slot-walked any more.
+    if (GetNumSpellTabs() or 0) >= 1 then
+        local tabName, _, offset, spellCount = GetSpellTabInfo(1)
+        offset = offset or 0
+        spellCount = spellCount or 0
+
+        if tabName and tabName ~= "" then
+            generalName = tabName
+        end
+
+        if spellCount > 0 then
+            local misses = 0
+
+            for slot = offset + 1, offset + spellCount do
+                local ok, spellName, rankText = pcall(GetSpellName, slot, self.BOOK_TYPE)
+
+                if not ok or not spellName or spellName == "" then
+                    -- Unreadable slot: skip it (see BOOK_SLOT_MISS_LIMIT).
+                    misses = misses + 1
+                    if misses >= BOOK_SLOT_MISS_LIMIT then
+                        break
+                    end
+                else
+                    misses = 0
+
+                    local spellID = nil
+                    if GetSpellLink then
+                        local okLink, link = pcall(GetSpellLink, slot, self.BOOK_TYPE)
+                        if okLink and link then
+                            spellID = tonumber(string.match(link, "spell:(%d+)"))
+                        end
+                    end
+
+                    local icon = nil
+                    if spellID then
+                        local _, _, spellIcon = GetSpellInfo(spellID)
+                        icon = spellIcon
+                    end
+                    if not icon and GetSpellTexture then
+                        local okTexture, texture = pcall(GetSpellTexture, slot, self.BOOK_TYPE)
+                        if okTexture then
+                            icon = texture
+                        end
+                    end
+
+                    -- Degenerate slot: a non-empty name with no ID, no icon
+                    -- and no rank is this client's noise, not a spell.
+                    if spellID or icon or (rankText or "") ~= "" then
+                        local passive = false
+                        if IsPassiveSpell then
+                            local okPassive, isPassive = pcall(IsPassiveSpell, slot, self.BOOK_TYPE)
+                            if okPassive then
+                                passive = not not isPassive
+                            end
+                        end
+
+                        local entry = {
+                            bookTabName = tabName,
+                            slot = slot,
+                            spellID = spellID,
+                            name = spellName,
+                            rankText = rankText or "",
+                            rankNumber = RankNumber(rankText),
+                            icon = icon,
+                            passive = passive,
+                        }
+
+                        if IsProfessionSpell(spellID, spellName) then
+                            entry.bookTabName = "Professions"
+                            table.insert(professions, entry)
+                        elseif spellID and CLASS_ID_SET[spellID] then
+                            -- Class ability: the class tabs already list
+                            -- it. This is the bulk of the General-tab
+                            -- noise on a server that grants whole class
+                            -- sets there.
+                        elseif BetterBookRank(generalByName[spellName], entry) then
+                            -- Collapse to the highest known rank, the
+                            -- same way the class tabs do.
+                            generalByName[spellName] = entry
+                        end
+                    end
+                end
+            end
+
+        end
+    end
+
+    -- GM tab: the static ID list from ClassData (skill line 769
+    -- "Internal"), resolved BY ID exactly like the class tabs -- slot
+    -- access can never reach these spells, they sit past the 1024-slot
+    -- book cap.
+    local gmEntries = {}
+    for _, spellID in ipairs(USB.GM_SPELL_IDS or {}) do
+        local okKnown, isKnown = pcall(IsSpellKnown, spellID)
+        if okKnown and isKnown then
+            local spellName, rankText, icon = GetSpellInfo(spellID)
+            if spellName and spellName ~= "" then
+                table.insert(gmEntries, {
+                    bookTabName = "GM",
+                    spellID = spellID,
+                    name = spellName,
+                    rankText = rankText or "",
+                    rankNumber = RankNumber(rankText),
+                    icon = icon,
+                    -- On 3.3.5 IsPassiveSpell takes a BOOK INDEX, not a
+                    -- spell ID, and these spells have no reachable book
+                    -- slot -- asking it would silently read some other
+                    -- slot's answer. No guessing: GM entries never dim.
+                    passive = false,
+                    gmMacro = true,
+                })
+            end
+        end
+    end
+
+    local generalEntries = {}
+    for _, entry in pairs(generalByName) do
+        table.insert(generalEntries, entry)
+    end
+
+    -- Exactly three book tabs, at most: General, Professions, GM. A tab
+    -- with nothing to show is dropped by KeepBookTab.
+    KeepBookTab(generalName, generalEntries)
+    KeepBookTab("Professions", professions)
+    KeepBookTab("GM", gmEntries)
 end
 
 function USB:FindNativeSlot(entry)
@@ -204,8 +573,21 @@ function USB:FindNativeSlot(entry)
         offset = offset or 0
         spellCount = spellCount or 0
 
+        local misses = 0
+
         for slot = offset + 1, offset + spellCount do
-            local bookName, bookRank = GetSpellName(slot, self.BOOK_TYPE)
+            local ok, bookName, bookRank = pcall(GetSpellName, slot, self.BOOK_TYPE)
+
+            if not ok then
+                -- Unreadable slot: skip it (see BOOK_SLOT_MISS_LIMIT).
+                bookName = nil
+                misses = misses + 1
+                if misses >= BOOK_SLOT_MISS_LIMIT then
+                    break
+                end
+            else
+                misses = 0
+            end
 
             if bookName == entry.name then
                 if not nameFallback then
@@ -213,7 +595,10 @@ function USB:FindNativeSlot(entry)
                 end
 
                 if GetSpellLink then
-                    local link = GetSpellLink(slot, self.BOOK_TYPE)
+                    local okLink, link = pcall(GetSpellLink, slot, self.BOOK_TYPE)
+                    if not okLink then
+                        link = nil
+                    end
                     local linkedID = link and tonumber(string.match(link, "spell:(%d+)"))
                     if linkedID == entry.spellID then
                         return slot
@@ -230,6 +615,87 @@ function USB:FindNativeSlot(entry)
     return nameFallback
 end
 
+-- Whether a native book slot can hold this entry. Entries scanned out of
+-- tab 1 carry their slot; anything else needs a book walk, so the answer
+-- is computed once per entry and cached (entries are rebuilt every scan,
+-- which keeps the cache honest across SPELLS_CHANGED).
+function USB:HasReachableSlot(entry)
+    if entry.gmMacro then
+        return false
+    end
+    if entry.slot then
+        return true
+    end
+    if entry.reachable == nil then
+        entry.reachable = self:FindNativeSlot(entry) ~= nil
+    end
+    return entry.reachable
+end
+
+-- A known spell with no reachable book slot cannot be held by
+-- PickupSpell -- and with the client's slot array hard-capped at 1024,
+-- MOST spells on this server sit past it (GM-tab entries always do).
+-- The action-bar route for all of them is a per-character macro: create
+-- "/cast <name>" (reusing an existing macro of the same name) and put
+-- it on the cursor, ready to drop on a bar.
+function USB:PickupViaMacro(entry)
+    if not (CreateMacro and PickupMacro and GetMacroIndexByName) then
+        self:Error("The macro API is unavailable on this client.")
+        return
+    end
+
+    -- Macro names cap at 16 characters on 3.3.5.
+    local macroName = string.sub(entry.name, 1, 16)
+
+    local existing = GetMacroIndexByName(macroName)
+    if existing and existing > 0 then
+        local okPickup = pcall(PickupMacro, existing)
+        if okPickup then
+            self:Message(
+                "picked up macro '" .. macroName
+                .. "' -- drop it on an action bar."
+            )
+        else
+            self:Error("Could not pick up the existing '" .. macroName .. "' macro.")
+        end
+        return
+    end
+
+    if GetNumMacros then
+        local _, perCharacter = GetNumMacros()
+        if perCharacter and perCharacter >= 18 then
+            self:Error(
+                "Macro limit reached (18 per character)."
+                .. " Delete one in /macro and try again."
+            )
+            return
+        end
+    end
+
+    -- #showtooltip makes the action-bar button borrow the spell's own
+    -- icon and tooltip; macro icon index 1 (question mark) is only the
+    -- macro-frame fallback.
+    local body = "#showtooltip\n/cast " .. entry.name
+    local okCreate, macroID = pcall(CreateMacro, macroName, 1, body, nil, 1)
+    if not okCreate or not macroID then
+        self:Error("Could not create the macro (macro limit reached?). Free a slot in /macro.")
+        return
+    end
+
+    local okPickup = pcall(PickupMacro, macroID)
+    if okPickup then
+        self:Message(
+            "created macro '" .. macroName
+            .. "' -- drop it on an action bar."
+        )
+    else
+        self:Message(
+            "created macro '" .. macroName
+            .. "'. Open /macro to place it on a bar."
+        )
+    end
+end
+
 function USB:PickupEntry(entry)
     if not entry then
         return
@@ -240,11 +706,26 @@ function USB:PickupEntry(entry)
         return
     end
 
-    local slot = self:FindNativeSlot(entry)
+    if entry.gmMacro then
+        self:PickupViaMacro(entry)
+        return
+    end
+
+    -- Spellbook-tab entries carry their own slot; re-check it still holds
+    -- the same spell before trusting it, then fall back to the name search.
+    local slot
+    if entry.slot then
+        local ok, bookName = pcall(GetSpellName, entry.slot, self.BOOK_TYPE)
+        if ok and bookName == entry.name then
+            slot = entry.slot
+        end
+    end
+    slot = slot or self:FindNativeSlot(entry)
     if not slot then
-        self:Error(
-            "The ability is known, but the native client did not expose its spellbook slot."
-        )
+        -- No reachable native slot (past the 1024-slot cap): fall back
+        -- to the macro route, which works for any known spell.
+        entry.reachable = false
+        self:PickupViaMacro(entry)
         return
     end
 

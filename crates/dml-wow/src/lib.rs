@@ -54,6 +54,7 @@ pub mod status;
 pub mod tuning;
 pub mod unbound;
 pub mod unbound_addons;
+pub mod unbound_export;
 pub mod unbound_payload;
 
 pub use dml_core::util::{dml_home_dir, home_dir};

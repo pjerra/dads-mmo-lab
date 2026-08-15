@@ -1006,6 +1006,34 @@ start apply the nine modules' SQL backlog and ledger it, resolve any
 non-re-runnable hand-applied file on the spot (expected zero to two), then
 confirm the advisory reports nothing.
 
+## Modules-page round (2026-08-11/12) — BUILT, mirror-review SHIP; user gates open
+
+Executed overnight 2026-08-12 via the 5-agent workflow on
+`feat/modules-page-round` (6 commits incl. the review-advisory cleanup;
+pushed). Spec/plan: `docs/superpowers/specs/2026-08-11-modules-page-round-design.md`,
+`docs/superpowers/plans/2026-08-11-modules-page-round.md`. Suites after:
+cargo 1764/0, vitest 800/800, bats 868/0, svelte-check clean. Mirror review
+verdict SHIP (advisories folded in as `4080795`).
+
+**USER GATES:** launcher click-through of the new Modules page (installed-first
+split, click-to-open, needs-setup chips, auto-conf catch-up) + the merge into
+`rust-main` decision.
+
+**Round 2 (2026-08-12, user click-through feedback — spec/plan on the branch,
+executing via `.claude/workflows/modules-page-round2.js`):** chip-as-action,
+conf-activation silent-on-success/chip-on-failure, uniform action column
+(Config tuning · Repair · Remove) + Tuning-tab open-config buttons, one row
+skeleton across sections, per-module disable toggle from tuning-registry
+master switches (playerbots excluded; `.dist` Enable-detection deliberately
+deferred — would need a `module list` contract field on both surfaces).
+Launcher-only by design. The round-1 Lua-row follow-up is absorbed here
+(rows only get a tune action when a tuning target exists).
+
+**Follow-ups (small, non-blocking):**
+- `cli/README.md` has no `module install` bullet at all — the install-time
+  conf auto-activation (and install generally) is undocumented there; add a
+  proper bullet next time the README is touched.
+
 ## Round 6 — Merge + housekeeping
 
 - Decide when the 394 commits land on `main`.

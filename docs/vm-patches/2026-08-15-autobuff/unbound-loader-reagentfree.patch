@@ -1,0 +1,14 @@
+diff --git a/modules/mod-unbound/src/UnboundSystem_loader.cpp b/modules/mod-unbound/src/UnboundSystem_loader.cpp
+--- a/modules/mod-unbound/src/UnboundSystem_loader.cpp
++++ b/modules/mod-unbound/src/UnboundSystem_loader.cpp
+@@ -1,8 +1,10 @@
+ void AddUnboundScripts();
+ void AddUnboundMulticlassBridge();
++void AddUnboundReagentFree();
+
+ void Addmod_unboundScripts()
+ {
+     AddUnboundScripts();
+     AddUnboundMulticlassBridge();
++    AddUnboundReagentFree();
+ }

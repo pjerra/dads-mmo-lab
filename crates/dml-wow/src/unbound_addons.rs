@@ -137,14 +137,21 @@ pub fn addons_fingerprint() -> u64 {
 mod tests {
     use super::*;
 
-    /// Pinned for WrathUnbound-Addons.zip as supplied 2026-08-02.
-    const FINGERPRINT: u64 = 0x66e3_26f9_bded_cccc;
+    /// Re-baselined 2026-08-14. The original value pinned
+    /// WrathUnbound-Addons.zip as supplied 2026-08-02, but UnboundSpellbook
+    /// has been deliberately hand-edited in seven rounds since, and the pin
+    /// was never moved with them -- so this test had been RED on the branch
+    /// for six commits and was protecting nothing. It no longer means "byte
+    /// identical to the upstream zip" (that stopped being true at round 1);
+    /// it means "the payload changed only when someone meant it to". Move it
+    /// deliberately with each edit, or it silently rots back to useless.
+    const FINGERPRINT: u64 = 0x4693_1ef8_7627_7733;
 
     #[test]
     fn the_addon_payload_is_byte_pinned() {
         assert_eq!(ADDON_FILES.len(), 43, "addon file count changed");
         let total: usize = ADDON_FILES.iter().map(|f| f.body.len()).sum();
-        assert_eq!(total, 642_819, "addon total byte count changed");
+        assert_eq!(total, 672_076, "addon total byte count changed");
         assert_eq!(
             addons_fingerprint(),
             FINGERPRINT,

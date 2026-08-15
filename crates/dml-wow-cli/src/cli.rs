@@ -471,6 +471,24 @@ pub enum UnboundCmd {
         #[command(subcommand)]
         cmd: AddonsCmd,
     },
+    /// READ-ONLY snapshot of what players have EARNED through the add-on:
+    /// their class unlocks and the cross-class spells they bought.
+    ///
+    /// Insurance for the one case that would otherwise lose it: `uninstall`
+    /// DROPS `unbound_character_unlocks` and restores
+    /// `ValidateSkillLearnedBySpells` to AzerothCore's default, which strips
+    /// every character's cross-class spells at their next login. An ordinary
+    /// `wow update` never needs this — it carries the core patch across and
+    /// touches no database at all.
+    ///
+    /// Content (the price ladder, the spell catalog) is deliberately NOT
+    /// exported: `unbound install` recreates it.
+    Export {
+        /// Where to write the snapshot. Defaults to stdout as the usual
+        /// `ok` envelope, so it composes with the rest of the CLI.
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 /// `dml-wow unbound addons …` — `dml_wow::unbound_addons`.
