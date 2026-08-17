@@ -1,129 +1,163 @@
--- dml_autobuff.lua — ALE (Eluna-family) server-side auto-buffer for dad's server.
+-- dml_autobuff.lua v2 — ALE server-side auto-buffer for dad's server.
 --
--- Opt-in per character: type  #buffs on  in any chat. Every 10s the script
--- re-applies missing buffs to the player and every summon they own nearby, as
--- DIRECT AURAS (Unit:AddAura) — no cast, no mana, no reagents, auto-renews on
--- expiry. Exclusive groups (paladin aura, hunter aspect, mage armor, warlock
--- armor, shaman shield) apply the character's saved choice; everything
--- stackable applies at the highest rank the character has learned.
+-- #buffs on              enable   (per character, persisted)
+-- #buffs off             disable
+-- #buffs                 status: every toggle + every group choice
+-- #buffs <buff> on|off   toggle one buff line (fort, motw, kings, ...)
+-- #buffs <group> <pick>  choose in an exclusive group (shout, seal, aura,
+--                        aspect, magearmor, lockarmor, shield, magic, mh, oh)
+--                        every group accepts "none"
+-- #buffs reagents on|off keeper reagent kit (see below)
 --
--- Deliberately NOT auto-applied: seals, stances, presences, druid forms —
--- the player's own macros manage those.
+-- Buffs are applied as DIRECT AURAS every 10s to the player and every summon
+-- they own within 45y: free, no reagents, auto-renew. Weapon imbues are
+-- applied as temp enchants (ids extracted from this server's Spell.dbc).
 --
--- Opt-in doubles as the bot filter: playerbots/citizens never type #buffs,
--- so the loop skips the ~1400 bot Players entirely.
+-- KEEPER REAGENT KIT: the CLIENT checks reagents from its own Spell.dbc
+-- before it sends a cast, so server-side reagent stripping alone cannot free
+-- manual casts (voidwalker, Greater Blessings, prayers...). While enabled we
+-- keep exactly ONE of each casting reagent in the bags — the client sees it
+-- and allows the cast; the server (reagent-strip patch) never consumes it.
 --
--- Persistence: acore_characters.dml_autobuff (created below; sanctioned write
--- surface, user-approved 2026-08-15). Choices come only from the KEYWORD
--- tables here, never raw user text, so nothing user-typed reaches SQL.
+-- Deliberately NOT auto-applied: stances, presences, druid forms.
+-- Seals ARE offered (group 'seal', default none) per user request 2026-08-16.
 --
--- ALE quirks honoured: no SetData/GetData (state kept in Lua tables + DB),
--- AddAura/GetCreaturesInRange wrapped in pcall with CastSpell fallback.
+-- Opt-in doubles as the bot filter; persisted in acore_characters
+-- .dml_autobuff_kv (sanctioned write surface, user-approved 2026-08-15).
+-- Values written to SQL come only from the controlled vocabularies below.
 
-local UPDATE_MS   = 10000
-local SUMMON_YDS  = 45
+local UPDATE_MS  = 10000
+local SUMMON_YDS = 45
 
--- ---------------------------------------------------------------- buff data
--- Chains are TOP RANK FIRST; the first HasSpell hit wins.
+-- ------------------------------------------------------------- toggle lines
+-- ids: TOP RANK FIRST, first HasSpell hit wins. shared=false -> player only.
 
-local SHARED = { -- player + all owned summons
-  { name = "Power Word: Fortitude", ids = {48161,25389,10938,10937,2791,1245,1244,1243} },
-  { name = "Divine Spirit",         ids = {48073,25312,27841,14819,14818,14752} },
-  { name = "Shadow Protection",     ids = {48169,25433,10958,10957,976} },
-  { name = "Mark of the Wild",      ids = {48469,26990,9885,9884,8907,5234,6756,5232,1126} },
-  { name = "Thorns",                ids = {53307,26992,9910,9756,8914,1075,782,467} },
-  { name = "Arcane Intellect",      ids = {42995,27126,10157,10156,1461,1460,1459} },
-  { name = "Blessing of Kings",     ids = {20217} },
-  { name = "Blessing of Might",     ids = {48932,48931,27140,25291,19838,19837,19836,19835,19834,19740} },
-  { name = "Blessing of Wisdom",    ids = {48936,48935,27142,25290,19854,19853,19852,19850,19742} },
-  { name = "Blessing of Sanctuary", ids = {20911} },
-  { name = "Battle Shout",          ids = {47436,2048,25289,11551,11550,11549,6192,5242,6673} },
-  { name = "Commanding Shout",      ids = {47440,47439,469} },
-  { name = "Horn of Winter",        ids = {57623,57330} },
+local TOGGLES = {
+  { key="fort",       name="PW: Fortitude",     shared=true,  def=true,  ids={48161,25389,10938,10937,2791,1245,1244,1243} },
+  { key="spirit",     name="Divine Spirit",     shared=true,  def=true,  ids={48073,25312,27841,14819,14818,14752} },
+  { key="shadowprot", name="Shadow Protection", shared=true,  def=true,  ids={48169,25433,10958,10957,976} },
+  { key="motw",       name="Mark of the Wild",  shared=true,  def=true,  ids={48469,26990,9885,9884,8907,5234,6756,5232,1126} },
+  { key="thorns",     name="Thorns",            shared=true,  def=true,  ids={53307,26992,9910,9756,8914,1075,782,467} },
+  { key="intellect",  name="Arcane Intellect",  shared=true,  def=true,  ids={42995,27126,10157,10156,1461,1460,1459} },
+  { key="kings",      name="Blessing of Kings", shared=true,  def=true,  ids={20217} },
+  { key="might",      name="Blessing of Might", shared=true,  def=true,  ids={48932,48931,27140,25291,19838,19837,19836,19835,19834,19740} },
+  { key="wisdom",     name="Blessing of Wisdom",shared=true,  def=true,  ids={48936,48935,27142,25290,19854,19853,19852,19850,19742} },
+  { key="sanctuary",  name="Blessing of Sanctuary", shared=true, def=false, ids={20911} },
+  { key="horn",       name="Horn of Winter",    shared=true,  def=true,  ids={57623,57330} },
+  { key="trueshot",   name="Trueshot Aura",     shared=true,  def=true,  ids={19506} },
+  { key="innerfire",  name="Inner Fire",        shared=false, def=true,  ids={48168,48040,25431,10952,10951,1006,602,7128,588} },
+  { key="fearward",   name="Fear Ward",         shared=false, def=true,  ids={6346} },
+  { key="rfury",      name="Righteous Fury",    shared=false, def=false, ids={25780} },
 }
 
-local PLAYER_ONLY = {
-  { name = "Inner Fire", ids = {48168,48040,25431,10952,10951,1006,602,7128,588} },
-}
+-- --------------------------------------------------------- exclusive groups
+-- Spell groups apply the pick to the player; mh/oh apply a weapon enchant.
 
--- Exclusive groups: one choice per group, player-only targets.
 local GROUPS = {
-  aura = {
-    label = "Paladin aura", default = "retribution",
-    choices = { devotion = 48942, retribution = 54043, concentration = 19746,
-                crusader = 32223, shadowresist = 48943, frostresist = 48945,
-                fireresist = 48947 },
-  },
-  aspect = {
-    label = "Hunter aspect", default = "dragonhawk",
-    choices = { dragonhawk = 61847, hawk = 27044, monkey = 13163, cheetah = 5118,
-                pack = 13159, viper = 34074, wild = 49071 },
-  },
-  magearmor = {
-    label = "Mage armor", default = "molten",
-    choices = { molten = 43046, mage = 43024, ice = 43008, frost = 168 },
-  },
-  lockarmor = {
-    label = "Warlock armor", default = "fel",
-    choices = { fel = 47893, demon = 47889 },
-  },
-  shield = {
-    label = "Shaman shield", default = "lightning",
-    choices = { lightning = 49281, water = 57960, earth = 49284 },
-  },
+  shout     = { label="Warrior shout", def="battle",
+                choices={ battle=47436, commanding=47440 } },
+  seal      = { label="Paladin seal", def="none",
+                choices={ righteousness=21084, command=20375, vengeance=31801,
+                          corruption=53736, justice=20164 } },
+  aura      = { label="Paladin aura", def="retribution",
+                choices={ devotion=48942, retribution=54043, concentration=19746,
+                          crusader=32223, shadowresist=48943, frostresist=48945,
+                          fireresist=48947 } },
+  aspect    = { label="Hunter aspect", def="dragonhawk",
+                choices={ dragonhawk=61847, hawk=27044, monkey=13163, cheetah=5118,
+                          pack=13159, viper=34074, wild=49071 } },
+  magearmor = { label="Mage armor", def="molten",
+                choices={ molten=43046, mage=43024, ice=43008, frost=168 } },
+  lockarmor = { label="Warlock armor", def="fel",
+                choices={ fel=47893, demon=47889 } },
+  shield    = { label="Shaman shield", def="lightning",
+                choices={ lightning=49281, water=57960, earth=49284 } },
+  magic     = { label="Amplify/Dampen Magic", def="none",
+                choices={ amplify=43017, dampen=43015 } },
+  mh        = { label="Main-hand imbue", def="windfury", enchant=true,
+                choices={ windfury={spell=58804,ench=3787}, flametongue={spell=58790,ench=3781},
+                          frostbrand={spell=58796,ench=3784}, earthliving={spell=51994,ench=3350} } },
+  oh        = { label="Off-hand imbue", def="flametongue", enchant=true,
+                choices={ windfury={spell=58804,ench=3787}, flametongue={spell=58790,ench=3781},
+                          frostbrand={spell=58796,ench=3784}, earthliving={spell=51994,ench=3350} } },
 }
 
-local GROUP_ORDER = { "aura", "aspect", "magearmor", "lockarmor", "shield" }
+local GROUP_ORDER = { "shout","seal","aura","aspect","magearmor","lockarmor","shield","magic","mh","oh" }
+
+-- One of each casting reagent, kept in the bags so the CLIENT allows the
+-- cast; the server-side reagent strip means they are never consumed.
+local KEEPER_ITEMS = {
+  6265,  -- Soul Shard
+  21177, -- Symbol of Kings
+  17029, -- Sacred Candle
+  17028, -- Holy Candle
+  44615, -- Devout Candle
+  17020, -- Arcane Powder
+  17031, -- Rune of Teleportation
+  17032, -- Rune of Portals
+  17030, -- Ankh
+  22147, -- Flintweed Seed
+  44614, -- Starleaf Seed
+  22148, -- Wild Quillvine
+  44605, -- Wild Spineleaf
+  37201, -- Corpse Dust
+  5565,  -- Infernal Stone
+  16583, -- Demonic Figurine
+}
+
+local EQ_MAINHAND, EQ_OFFHAND = 15, 16
+local TEMP_ENCHANT_SLOT = 1
 
 -- ---------------------------------------------------------------- state + db
 
-local state = {} -- [guidLow] = { enabled=bool, aura=key, aspect=key, ... }
+local state = {} -- [guidLow] = { enabled, reagents, t={key=bool}, g={key=choice} }
 
 local function defaultState()
-  local s = { enabled = false }
-  for key, grp in pairs(GROUPS) do s[key] = grp.default end
+  local s = { enabled=false, reagents=true, t={}, g={} }
+  for _, line in ipairs(TOGGLES) do s.t[line.key] = line.def end
+  for key, grp in pairs(GROUPS) do s.g[key] = grp.def end
   return s
 end
 
 CharDBExecute([[
-CREATE TABLE IF NOT EXISTS `dml_autobuff` (
-  `guid`      INT UNSIGNED NOT NULL PRIMARY KEY,
-  `enabled`   TINYINT      NOT NULL DEFAULT 0,
-  `aura`      VARCHAR(24)  NOT NULL DEFAULT 'retribution',
-  `aspect`    VARCHAR(24)  NOT NULL DEFAULT 'dragonhawk',
-  `magearmor` VARCHAR(24)  NOT NULL DEFAULT 'molten',
-  `lockarmor` VARCHAR(24)  NOT NULL DEFAULT 'fel',
-  `shield`    VARCHAR(24)  NOT NULL DEFAULT 'lightning'
+CREATE TABLE IF NOT EXISTS `dml_autobuff_kv` (
+  `guid` INT UNSIGNED NOT NULL,
+  `k`    VARCHAR(32)  NOT NULL,
+  `v`    VARCHAR(16)  NOT NULL,
+  PRIMARY KEY (`guid`, `k`)
 )
 ]])
 
 local function loadState(guid)
   local s = defaultState()
-  local q = CharDBQuery("SELECT enabled, aura, aspect, magearmor, lockarmor, shield FROM dml_autobuff WHERE guid = " .. guid)
+  local q = CharDBQuery("SELECT k, v FROM dml_autobuff_kv WHERE guid = " .. guid)
   if q then
-    s.enabled  = q:GetUInt32(0) == 1
-    local cols = { "aura", "aspect", "magearmor", "lockarmor", "shield" }
-    for i, key in ipairs(cols) do
-      local v = q:GetString(i)
-      if GROUPS[key].choices[v] then s[key] = v end
-    end
+    repeat
+      local k, v = q:GetString(0), q:GetString(1)
+      if k == "enabled" then s.enabled = v == "1"
+      elseif k == "reagents" then s.reagents = v == "1"
+      elseif k:sub(1,2) == "t_" then
+        local key = k:sub(3)
+        if s.t[key] ~= nil then s.t[key] = v == "1" end
+      elseif k:sub(1,2) == "g_" then
+        local key = k:sub(3)
+        if GROUPS[key] and (v == "none" or GROUPS[key].choices[v]) then s.g[key] = v end
+      end
+    until not q:NextRow()
   end
   state[guid] = s
   return s
 end
 
-local function saveState(guid)
-  local s = state[guid]
-  if not s then return end
-  -- every value below comes from our own tables (booleans + validated keys)
+local function saveKV(guid, k, v)
+  -- k and v come only from the controlled vocabularies above
   CharDBExecute(string.format(
-    "REPLACE INTO dml_autobuff (guid, enabled, aura, aspect, magearmor, lockarmor, shield) VALUES (%d, %d, '%s', '%s', '%s', '%s', '%s')",
-    guid, s.enabled and 1 or 0, s.aura, s.aspect, s.magearmor, s.lockarmor, s.shield))
+    "REPLACE INTO dml_autobuff_kv (guid, k, v) VALUES (%d, '%s', '%s')", guid, k, v))
 end
 
 local function getState(player)
   local guid = player:GetGUIDLow()
-  return state[guid] or loadState(guid)
+  return state[guid] or loadState(guid), guid
 end
 
 -- ---------------------------------------------------------------- buffing
@@ -132,7 +166,6 @@ local function applyAura(caster, target, spellId)
   if target:HasAura(spellId) then return end
   local ok = pcall(function() caster:AddAura(spellId, target) end)
   if not ok then
-    -- ALE build without AddAura: triggered cast is still free/instant
     pcall(function() caster:CastSpell(target, spellId, true) end)
   end
 end
@@ -155,29 +188,60 @@ local function ownedSummons(player)
   return out
 end
 
+local function keepReagents(player)
+  for _, item in ipairs(KEEPER_ITEMS) do
+    local ok, n = pcall(function() return player:GetItemCount(item) end)
+    if ok and n == 0 then
+      pcall(function() player:AddItem(item, 1) end)
+    end
+  end
+end
+
+local function applyImbue(player, grpKey, slot)
+  local s = getState(player)
+  local choice = s.g[grpKey]
+  if choice == "none" then return end
+  local pick = GROUPS[grpKey].choices[choice]
+  if not pick or not player:HasSpell(pick.spell) then return end
+  pcall(function()
+    local item = player:GetItemByPos(255, slot)
+    if item and item:GetEnchantmentId(TEMP_ENCHANT_SLOT) ~= pick.ench then
+      item:SetEnchantment(pick.ench, TEMP_ENCHANT_SLOT)
+    end
+  end)
+end
+
 local function buffPlayer(player)
   if player:IsDead() then return end
   local s = getState(player)
 
+  if s.reagents then keepReagents(player) end
+
   local targets = { player }
   for _, c in ipairs(ownedSummons(player)) do targets[#targets + 1] = c end
 
-  for _, line in ipairs(SHARED) do
-    local id = highestKnown(player, line.ids)
-    if id then
-      for _, t in ipairs(targets) do applyAura(player, t, id) end
+  for _, line in ipairs(TOGGLES) do
+    if s.t[line.key] then
+      local id = highestKnown(player, line.ids)
+      if id then
+        if line.shared then
+          for _, t in ipairs(targets) do applyAura(player, t, id) end
+        else
+          applyAura(player, player, id)
+        end
+      end
     end
   end
 
-  for _, line in ipairs(PLAYER_ONLY) do
-    local id = highestKnown(player, line.ids)
-    if id then applyAura(player, player, id) end
+  for key, grp in pairs(GROUPS) do
+    if not grp.enchant then
+      local id = grp.choices[s.g[key]]
+      if id and player:HasSpell(id) then applyAura(player, player, id) end
+    end
   end
 
-  for key, grp in pairs(GROUPS) do
-    local id = grp.choices[s[key]]
-    if id and player:HasSpell(id) then applyAura(player, player, id) end
-  end
+  applyImbue(player, "mh", EQ_MAINHAND)
+  applyImbue(player, "oh", EQ_OFFHAND)
 end
 
 CreateLuaEvent(function()
@@ -197,16 +261,28 @@ local function msgTo(player, text)
   player:SendBroadcastMessage("|cff33ff99[autobuff]|r " .. text)
 end
 
+local function sortedKeys(t)
+  local out = {}
+  for k in pairs(t) do out[#out + 1] = k end
+  table.sort(out)
+  return out
+end
+
 local function showStatus(player)
   local s = getState(player)
-  msgTo(player, "auto-buff is " .. (s.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r") .. "  (#buffs on / #buffs off)")
+  msgTo(player, "auto-buff " .. (s.enabled and "|cff00ff00ON|r" or "|cffff0000OFF|r")
+    .. ", keeper reagents " .. (s.reagents and "on" or "off")
+    .. "  (#buffs on/off, #buffs reagents on/off)")
+  local on, off = {}, {}
+  for _, line in ipairs(TOGGLES) do
+    if s.t[line.key] then on[#on + 1] = line.key else off[#off + 1] = line.key end
+  end
+  msgTo(player, "buffs ON: |cff00ff00" .. table.concat(on, " ") .. "|r")
+  msgTo(player, "buffs OFF: |cff888888" .. table.concat(off, " ") .. "|r  (#buffs <name> on/off)")
   for _, key in ipairs(GROUP_ORDER) do
     local grp = GROUPS[key]
-    local opts = {}
-    for k in pairs(grp.choices) do opts[#opts + 1] = k end
-    table.sort(opts)
-    msgTo(player, string.format("%s: |cffffff00%s|r  (#buffs %s <%s>)",
-      grp.label, s[key], key, table.concat(opts, "|")))
+    msgTo(player, string.format("%s = |cffffff00%s|r  (#buffs %s <%s|none>)",
+      grp.label, s.g[key], key, table.concat(sortedKeys(grp.choices), "|")))
   end
 end
 
@@ -215,36 +291,54 @@ local function onChat(event, player, msg)
   if not cmd then return end
   cmd = cmd:lower()
 
-  local s = getState(player)
-  local guid = player:GetGUIDLow()
+  local s, guid = getState(player)
 
   if cmd == "" or cmd == "list" or cmd == "status" then
     showStatus(player)
   elseif cmd == "on" then
     s.enabled = true
-    saveState(guid)
+    saveKV(guid, "enabled", "1")
     msgTo(player, "ON — buffing you and your summons every " .. (UPDATE_MS / 1000) .. "s.")
     pcall(buffPlayer, player)
   elseif cmd == "off" then
     s.enabled = false
-    saveState(guid)
+    saveKV(guid, "enabled", "0")
     msgTo(player, "OFF.")
+  elseif cmd == "reagents on" then
+    s.reagents = true
+    saveKV(guid, "reagents", "1")
+    msgTo(player, "keeper reagent kit ON — one of each casting reagent stays in your bags.")
+    pcall(keepReagents, player)
+  elseif cmd == "reagents off" then
+    s.reagents = false
+    saveKV(guid, "reagents", "0")
+    msgTo(player, "keeper reagent kit OFF (items left in bags are yours to delete).")
   else
-    local group, choice = cmd:match("^(%S+)%s+(%S+)$")
-    if group and GROUPS[group] then
-      if GROUPS[group].choices[choice] then
-        s[group] = choice
-        saveState(guid)
-        msgTo(player, GROUPS[group].label .. " -> " .. choice)
+    local word, arg = cmd:match("^(%S+)%s+(%S+)$")
+    if not word then
+      msgTo(player, "usage: #buffs | #buffs on/off | #buffs <buff> on/off | #buffs <group> <choice|none> | #buffs reagents on/off")
+      return false
+    end
+    local isToggle = false
+    for _, line in ipairs(TOGGLES) do
+      if line.key == word then isToggle = true break end
+    end
+    if isToggle and (arg == "on" or arg == "off") then
+      s.t[word] = arg == "on"
+      saveKV(guid, "t_" .. word, arg == "on" and "1" or "0")
+      msgTo(player, word .. " -> " .. arg)
+      if s.enabled then pcall(buffPlayer, player) end
+    elseif GROUPS[word] then
+      if arg == "none" or GROUPS[word].choices[arg] then
+        s.g[word] = arg
+        saveKV(guid, "g_" .. word, arg)
+        msgTo(player, GROUPS[word].label .. " -> " .. arg)
         if s.enabled then pcall(buffPlayer, player) end
       else
-        local opts = {}
-        for k in pairs(GROUPS[group].choices) do opts[#opts + 1] = k end
-        table.sort(opts)
-        msgTo(player, "unknown choice. options: " .. table.concat(opts, ", "))
+        msgTo(player, "options: " .. table.concat(sortedKeys(GROUPS[word].choices), ", ") .. ", none")
       end
     else
-      msgTo(player, "usage: #buffs | #buffs on | #buffs off | #buffs <aura|aspect|magearmor|lockarmor|shield> <choice>")
+      msgTo(player, "unknown buff/group '" .. word .. "' — #buffs for the list")
     end
   end
   return false -- suppress the chat line
@@ -262,4 +356,4 @@ RegisterPlayerEvent(PLAYER_EVENT_ON_LOGOUT, function(event, player)
   state[player:GetGUIDLow()] = nil
 end)
 
-print("[dml_autobuff] loaded — opt in with #buffs on")
+print("[dml_autobuff] v2 loaded — opt in with #buffs on")

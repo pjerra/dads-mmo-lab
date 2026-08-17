@@ -42,6 +42,9 @@ namespace
         37201, // Corpse Dust
         17057, // Shiny Fish Scales
         17058, // Fish Oil
+        44605, // Wild Spineleaf   (WotLK Gift of the Wild top rank)
+        44614, // Starleaf Seed    (WotLK Rebirth top rank)
+        44615, // Devout Candle    (WotLK Prayer of Fortitude top rank)
     };
 }
 
