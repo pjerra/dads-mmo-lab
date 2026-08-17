@@ -560,7 +560,12 @@ function USB:ScanBookTabs()
     KeepBookTab("GM", gmEntries)
 end
 
-function USB:FindNativeSlot(entry)
+-- strict = accept ONLY an ID-verified slot. Used for entries we resolved
+-- by spell ID rather than by walking the book (the GM tab): there, a
+-- same-named spell in a reachable slot is not the spell the user clicked,
+-- and picking it up would put the WRONG ability on the bar with nothing in
+-- the tooltip to say so.
+function USB:FindNativeSlot(entry, strict)
     if not entry or not GetNumSpellTabs or not GetSpellTabInfo then
         return nil
     end
@@ -605,11 +610,16 @@ function USB:FindNativeSlot(entry)
                     end
                 end
 
-                if entry.rankText == "" or bookRank == entry.rankText then
+                if not strict
+                    and (entry.rankText == "" or bookRank == entry.rankText) then
                     return slot
                 end
             end
         end
+    end
+
+    if strict then
+        return nil
     end
 
     return nameFallback
@@ -620,70 +630,270 @@ end
 -- is computed once per entry and cached (entries are rebuilt every scan,
 -- which keeps the cache honest across SPELLS_CHANGED).
 function USB:HasReachableSlot(entry)
-    if entry.gmMacro then
-        return false
-    end
     if entry.slot then
         return true
     end
     if entry.reachable == nil then
-        entry.reachable = self:FindNativeSlot(entry) ~= nil
+        -- GM entries were assumed unreachable and hardcoded to the macro
+        -- route. That assumption was measured on ONE book size and can
+        -- only ever get more wrong: ask, do not assume -- and ask
+        -- strictly, since a GM entry has no book walk behind it.
+        entry.reachable = self:FindNativeSlot(entry, entry.gmMacro) ~= nil
     end
     return entry.reachable
 end
 
+-- ---------------------------------------------------------------------
+-- The macro pool
+--
 -- A known spell with no reachable book slot cannot be held by
--- PickupSpell -- and with the client's slot array hard-capped at 1024,
--- MOST spells on this server sit past it (GM-tab entries always do).
--- The action-bar route for all of them is a per-character macro: create
--- "/cast <name>" (reusing an existing macro of the same name) and put
--- it on the cursor, ready to drop on a bar.
+-- PickupSpell, and on this server MOST spells sit past the client's
+-- 1024-slot cap (measured 2026-08-17: the book reports 1738 slots). The
+-- only action-bar route for those is a "/cast <name>" macro -- and 3.3.5
+-- gives a character 18 per-character + 36 account macro OBJECTS, total,
+-- forever. The old code created one per spell and reclaimed none, so
+-- dragging eighteen capped spells ended the feature and the user had to
+-- start deleting macros by hand.
+--
+-- So macros are POOLED: reclaimed and rewritten in place instead of
+-- accumulating. Three rules, and every one of them exists to protect
+-- macros the addon did not write:
+--
+--   1. NEVER DeleteMacro. Reclaiming is EditMacro on the SAME index, so
+--      every action-bar button pointing at it keeps working. Deleting
+--      would blank that button AND shift every later macro's index
+--      underneath the bars -- the one failure that loses real work.
+--   2. Only macros this addon recorded in its saved variables are
+--      touchable, and only while the recorded name still resolves to a
+--      macro whose body is byte-for-byte the one we wrote. A rename, a
+--      hand edit, or a macro we never made is the user's, permanently.
+--   3. A pool macro is reclaimable only when NO action slot references
+--      it. A macro sitting on a bar is in use by definition.
+--
+-- Rule 2 has a deliberate cost: macros created before this pool existed
+-- carry no record, so they are never reclaimed. `/usbk adopt` is the
+-- opt-in that hands them over, and it shows the list before it acts.
+-- ---------------------------------------------------------------------
+
+local MACRO_NAME_MAX = 16
+local MAX_ACCOUNT_MACROS = 36
+local MAX_CHARACTER_MACROS = 18
+local ACTION_SLOTS = 120
+
+local function Trim(text)
+    if type(text) ~= "string" then
+        return ""
+    end
+    if type(strtrim) == "function" then
+        return strtrim(text)
+    end
+    return (string.gsub(text, "^%s*(.-)%s*$", "%1"))
+end
+
+-- Trim + collapse runs of whitespace, so "adopt  confirm" is the same
+-- command as "adopt confirm".
+function USB:NormalizeCommand(text)
+    return string.lower((string.gsub(Trim(text), "%s+", " ")))
+end
+
+function USB:MacroBody(spellName)
+    -- #showtooltip makes the action-bar button borrow the spell's own
+    -- icon and tooltip; macro icon index 1 (question mark) is only the
+    -- macro-frame fallback.
+    return "#showtooltip\n/cast " .. spellName
+end
+
+-- Per CHARACTER, because 18 of the 54 macro objects are: a name recorded
+-- on one character resolves to a different macro (or none) on another,
+-- and the saved variables are account-wide.
+function USB:MacroPool()
+    local db = self:EnsureDB()
+
+    if type(db.macroPool) ~= "table" then
+        db.macroPool = {}
+    end
+
+    local key = (UnitName("player") or "?") .. "-" .. (GetRealmName() or "?")
+    if type(db.macroPool[key]) ~= "table" then
+        db.macroPool[key] = {}
+    end
+
+    return db.macroPool[key]
+end
+
+-- Resolve a pool record to a live macro index, or nil. Both halves are
+-- load-bearing: the name may now belong to something else, and the body
+-- may have been edited -- in either case the macro is no longer ours.
+function USB:ResolvePoolMacro(name, record)
+    if not (GetMacroIndexByName and GetMacroBody) or type(record) ~= "table" then
+        return nil
+    end
+
+    local okIndex, index = pcall(GetMacroIndexByName, name)
+    if not okIndex or not index or index == 0 then
+        return nil
+    end
+
+    local okBody, body = pcall(GetMacroBody, index)
+    if not okBody or not body then
+        return nil
+    end
+
+    if Trim(body) ~= Trim(record.body or "") then
+        return nil
+    end
+
+    return index
+end
+
+-- Which macro indices an action bar is currently pointing at. A macro in
+-- here is in use, whatever the pool thinks.
+function USB:MacroIndicesOnBars()
+    local used = {}
+
+    if type(GetActionInfo) ~= "function" then
+        return used
+    end
+
+    for slot = 1, ACTION_SLOTS do
+        local ok, actionType, id = pcall(GetActionInfo, slot)
+        if ok and actionType == "macro" and id then
+            used[id] = true
+        end
+    end
+
+    return used
+end
+
+-- A free macro name, 16 chars or fewer. `allowName` is the name we are
+-- already holding (a reclaim keeps its own name rather than colliding
+-- with itself).
+local function UniqueMacroName(spellName, allowName)
+    local base = string.sub(spellName, 1, MACRO_NAME_MAX)
+    local candidate = base
+
+    for n = 2, 99 do
+        if candidate == allowName then
+            return candidate
+        end
+
+        local ok, index = pcall(GetMacroIndexByName, candidate)
+        if not ok or not index or index == 0 then
+            return candidate
+        end
+
+        local suffix = tostring(n)
+        candidate = string.sub(base, 1, MACRO_NAME_MAX - string.len(suffix)) .. suffix
+    end
+
+    return candidate
+end
+
+function USB:MacroCounts()
+    if type(GetNumMacros) ~= "function" then
+        return 0, 0
+    end
+
+    local ok, account, character = pcall(GetNumMacros)
+    if not ok then
+        return 0, 0
+    end
+
+    return account or 0, character or 0
+end
+
 function USB:PickupViaMacro(entry)
     if not (CreateMacro and PickupMacro and GetMacroIndexByName) then
         self:Error("The macro API is unavailable on this client.")
         return
     end
 
-    -- Macro names cap at 16 characters on 3.3.5.
-    local macroName = string.sub(entry.name, 1, 16)
+    local pool = self:MacroPool()
+    local body = self:MacroBody(entry.name)
 
-    local existing = GetMacroIndexByName(macroName)
-    if existing and existing > 0 then
-        local okPickup = pcall(PickupMacro, existing)
-        if okPickup then
-            self:Message(
-                "picked up macro '" .. macroName
-                .. "' -- drop it on an action bar."
-            )
-        else
-            self:Error("Could not pick up the existing '" .. macroName .. "' macro.")
+    -- 1. This spell already has a live pool macro. Body, not spell ID, is
+    --    the identity: book-tab entries can carry no ID at all, and the
+    --    body is what actually gets cast.
+    for name, record in pairs(pool) do
+        if record.body == body then
+            local index = self:ResolvePoolMacro(name, record)
+            if index then
+                if pcall(PickupMacro, index) then
+                    self:Message(
+                        "picked up '" .. name .. "' -- drop it on an action bar."
+                    )
+                else
+                    self:Error("Could not pick up the existing '" .. name .. "' macro.")
+                end
+                return
+            end
         end
+    end
+
+    -- 2. Reclaim a pool macro no action bar is using. Same index, so
+    --    nothing on any bar moves or changes.
+    local onBars = self:MacroIndicesOnBars()
+    for name, record in pairs(pool) do
+        local index = self:ResolvePoolMacro(name, record)
+        if index and not onBars[index] then
+            local newName = UniqueMacroName(entry.name, name)
+            if pcall(EditMacro, index, newName, 1, body) then
+                pool[name] = nil
+                pool[newName] = { spellID = entry.spellID, body = body }
+
+                if pcall(PickupMacro, index) then
+                    self:Message(
+                        "reused free macro slot as '" .. newName
+                        .. "' -- drop it on an action bar."
+                    )
+                else
+                    self:Message(
+                        "reused free macro slot as '" .. newName
+                        .. "'. Open /macro to place it on a bar."
+                    )
+                end
+                return
+            end
+        end
+    end
+
+    -- 3. Nothing to reclaim: take a fresh slot if the client has one.
+    local account, character = self:MacroCounts()
+    if character >= MAX_CHARACTER_MACROS and account >= MAX_ACCOUNT_MACROS then
+        self:Error(
+            "All " .. (MAX_CHARACTER_MACROS + MAX_ACCOUNT_MACROS)
+            .. " macro slots are full and every pooled one is on an action bar."
+        )
+        self:Error(
+            "Clear a spell off a bar and drag again, or see /usbk macros."
+        )
         return
     end
 
-    if GetNumMacros then
-        local _, perCharacter = GetNumMacros()
-        if perCharacter and perCharacter >= 18 then
-            self:Error(
-                "Macro limit reached (18 per character)."
-                .. " Delete one in /macro and try again."
-            )
-            return
-        end
+    local macroName = UniqueMacroName(entry.name)
+    -- Per-character first (18 of them), account tab as the overflow (36).
+    local perCharacter = nil
+    if character < MAX_CHARACTER_MACROS then
+        perCharacter = 1
     end
 
-    -- #showtooltip makes the action-bar button borrow the spell's own
-    -- icon and tooltip; macro icon index 1 (question mark) is only the
-    -- macro-frame fallback.
-    local body = "#showtooltip\n/cast " .. entry.name
-    local okCreate, macroID = pcall(CreateMacro, macroName, 1, body, nil, 1)
+    -- 3.3.5 builds disagree on whether the per-character flag is
+    -- CreateMacro's 4th or 5th argument, and getting it wrong silently
+    -- spends the OTHER pool's slots -- then fails outright once that pool
+    -- is full while eighteen slots sit unused. So try the documented
+    -- shape, and on failure try the other one before giving up.
+    local okCreate, macroID = pcall(CreateMacro, macroName, 1, body, nil, perCharacter)
     if not okCreate or not macroID then
-        self:Error("Could not create the macro (macro limit reached?). Free a slot in /macro.")
+        okCreate, macroID = pcall(CreateMacro, macroName, 1, body, perCharacter, nil)
+    end
+    if not okCreate or not macroID then
+        self:Error("Could not create the macro. Free a slot in /macro, or see /usbk macros.")
         return
     end
 
-    local okPickup = pcall(PickupMacro, macroID)
-    if okPickup then
+    pool[macroName] = { spellID = entry.spellID, body = body }
+
+    if pcall(PickupMacro, macroID) then
         self:Message(
             "created macro '" .. macroName
             .. "' -- drop it on an action bar."
@@ -694,6 +904,99 @@ function USB:PickupViaMacro(entry)
             .. "'. Open /macro to place it on a bar."
         )
     end
+end
+
+-- What the pool holds right now, as counts plus the reclaimable names.
+-- Read-only: it never edits, creates or forgets anything.
+function USB:MacroPoolReport()
+    local pool = self:MacroPool()
+    local onBars = self:MacroIndicesOnBars()
+
+    local live, placed, free, stale = 0, 0, 0, 0
+    local freeNames = {}
+
+    for name, record in pairs(pool) do
+        local index = self:ResolvePoolMacro(name, record)
+        if index then
+            live = live + 1
+            if onBars[index] then
+                placed = placed + 1
+            else
+                free = free + 1
+                table.insert(freeNames, name)
+            end
+        else
+            stale = stale + 1
+        end
+    end
+
+    table.sort(freeNames)
+
+    local account, character = self:MacroCounts()
+
+    return {
+        live = live,
+        placed = placed,
+        free = free,
+        stale = stale,
+        freeNames = freeNames,
+        account = account,
+        character = character,
+    }
+end
+
+-- Hand pre-pool macros over to the pool. Adoption RECORDS, it never
+-- edits: the macro keeps its name, its index, its body and its place on
+-- your bars, and all that changes is that a later drag may reclaim it
+-- once it is on no bar. Candidates must match a body this addon would
+-- itself have written for a spell it can see -- anything else is a macro
+-- you wrote, and it is left alone.
+function USB:AdoptMacros(apply)
+    local pool = self:MacroPool()
+
+    -- `or false`, never nil: a book-tab entry can have no spell ID, and a
+    -- nil value would drop the spell out of its own lookup table.
+    local knownSpells = {}
+    for _, entry in ipairs(self.allEntries or {}) do
+        if entry.name then
+            knownSpells[entry.name] = entry.spellID or false
+        end
+    end
+
+    local found = {}
+
+    if type(GetMacroInfo) == "function" then
+        for index = 1, MAX_ACCOUNT_MACROS + MAX_CHARACTER_MACROS do
+            local ok, name, _, body = pcall(GetMacroInfo, index)
+            if ok and name and body and not pool[name] then
+                -- Match the exact shape this addon writes, then require
+                -- the spell to be one it can actually see. A macro with
+                -- any other line in it is not ours, however similar.
+                local spellName = string.match(
+                    Trim(body), "^#showtooltip%s+/cast%s+(.+)$"
+                )
+                if spellName and knownSpells[spellName] ~= nil then
+                    table.insert(found, {
+                        name = name,
+                        spellName = spellName,
+                        spellID = knownSpells[spellName],
+                        body = self:MacroBody(spellName),
+                    })
+                end
+            end
+        end
+    end
+
+    if apply then
+        for _, candidate in ipairs(found) do
+            pool[candidate.name] = {
+                spellID = candidate.spellID,
+                body = candidate.body,
+            }
+        end
+    end
+
+    return found
 end
 
 function USB:PickupEntry(entry)
@@ -707,7 +1010,16 @@ function USB:PickupEntry(entry)
     end
 
     if entry.gmMacro then
-        self:PickupViaMacro(entry)
+        -- Resolved by ID with no book walk behind it, so only an
+        -- ID-verified slot counts. Usually there is none and this falls
+        -- through to a macro -- but spending a macro slot on a spell the
+        -- client can hold directly is the waste this round exists to end.
+        local gmSlot = self:FindNativeSlot(entry, true)
+        if gmSlot and PickupSpell then
+            PickupSpell(gmSlot, self.BOOK_TYPE)
+        else
+            self:PickupViaMacro(entry)
+        end
         return
     end
 

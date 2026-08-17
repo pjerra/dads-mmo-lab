@@ -162,8 +162,12 @@ local function ShowTooltip(cell)
         GameTooltip:AddLine("Drag to an action bar.", 0.3, 1, 0.3)
     else
         GameTooltip:AddLine(
-            "Click: create /cast macro and pick it up.",
+            "Click: put a /cast macro on the cursor.",
             0.3, 1, 0.3
+        )
+        GameTooltip:AddLine(
+            "Reuses a free pooled macro before taking a new slot.",
+            0.7, 0.7, 0.7
         )
     end
     GameTooltip:Show()
@@ -528,9 +532,80 @@ local function ToggleFrame()
     end
 end
 
+local function ReportMacros()
+    local report = USB:MacroPoolReport()
+
+    USB:Message(
+        "macro slots in use: " .. report.character .. "/18 character, "
+        .. report.account .. "/36 account."
+    )
+    USB:Message(
+        "pooled by this addon: " .. report.live .. " ("
+        .. report.placed .. " on action bars, "
+        .. report.free .. " free to reuse)."
+    )
+
+    if report.free > 0 then
+        USB:Message("reusable now: " .. table.concat(report.freeNames, ", "))
+    end
+
+    if report.stale > 0 then
+        USB:Message(
+            report.stale .. " pooled macro(s) were renamed, edited or"
+            .. " deleted by hand -- left alone from now on."
+        )
+    end
+
+    USB:Message(
+        "macros made before pooling are not reused until you run"
+        .. " /usbk adopt. Nothing is ever deleted."
+    )
+end
+
+local function AdoptMacros(apply)
+    local found = USB:AdoptMacros(apply)
+
+    if #found == 0 then
+        USB:Message("no pre-pool /cast macros found to adopt.")
+        return
+    end
+
+    local names = {}
+    for _, candidate in ipairs(found) do
+        table.insert(names, candidate.name)
+    end
+
+    if apply then
+        USB:Message("adopted " .. #found .. " macro(s): " .. table.concat(names, ", "))
+        USB:Message(
+            "unchanged and still on your bars -- they can now be reused"
+            .. " once nothing points at them."
+        )
+        return
+    end
+
+    USB:Message("would adopt " .. #found .. " macro(s): " .. table.concat(names, ", "))
+    USB:Message(
+        "adoption only RECORDS them -- no rename, no edit, no delete."
+        .. " Type: /usbk adopt confirm"
+    )
+end
+
 SLASH_UNBOUNDSPELLBOOK1 = "/usbk"
 SLASH_UNBOUNDSPELLBOOK2 = "/unboundspellbook"
-SlashCmdList["UNBOUNDSPELLBOOK"] = ToggleFrame
+SlashCmdList["UNBOUNDSPELLBOOK"] = function(input)
+    local command = USB:NormalizeCommand(input or "")
+
+    if command == "macros" then
+        ReportMacros()
+    elseif command == "adopt" then
+        AdoptMacros(false)
+    elseif command == "adopt confirm" then
+        AdoptMacros(true)
+    else
+        ToggleFrame()
+    end
+end
 
 -- Make the spellbook button / key open this window instead of Blizzard's
 -- capped spellbook. Hold SHIFT to fall through to the original (pet book,
@@ -551,4 +626,4 @@ if type(origToggleSpellBook) == "function" then
     end
 end
 
-USB:Message("direct-scan edition loaded. Type /usbk")
+USB:Message("direct-scan edition loaded. /usbk to open, /usbk macros for macro slots.")

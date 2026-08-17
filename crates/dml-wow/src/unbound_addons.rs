@@ -145,13 +145,16 @@ mod tests {
     /// identical to the upstream zip" (that stopped being true at round 1);
     /// it means "the payload changed only when someone meant it to". Move it
     /// deliberately with each edit, or it silently rots back to useless.
-    const FINGERPRINT: u64 = 0x4693_1ef8_7627_7733;
+    /// Moved 2026-08-17 for the macro-pool round: UnboundSpellbook now
+    /// reclaims its own /cast macros in place instead of spending one
+    /// client macro slot per capped spell and never taking it back.
+    const FINGERPRINT: u64 = 0x4d7e_2665_b272_ba5f;
 
     #[test]
     fn the_addon_payload_is_byte_pinned() {
         assert_eq!(ADDON_FILES.len(), 43, "addon file count changed");
         let total: usize = ADDON_FILES.iter().map(|f| f.body.len()).sum();
-        assert_eq!(total, 672_076, "addon total byte count changed");
+        assert_eq!(total, 685_375, "addon total byte count changed");
         assert_eq!(
             addons_fingerprint(),
             FINGERPRINT,

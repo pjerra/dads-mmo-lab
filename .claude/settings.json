@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "scp -i ~/.ssh/dml_vm *"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=$(git status --porcelain 2>/dev/null | grep -c .); u=$(git log --oneline @{u}..HEAD 2>/dev/null | grep -c .); if [ \"$d\" = 0 ] && [ \"$u\" = 0 ]; then exit 0; fi; printf '{\"systemMessage\":\"git: %s uncommitted file(s), %s unpushed commit(s) on %s - commit and push before you lose it\"}\\n' \"$d\" \"$u\" \"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
