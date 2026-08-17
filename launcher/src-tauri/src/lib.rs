@@ -1129,29 +1129,36 @@ async fn wow_module_conf_activate_native(
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let sdir = dml_wow::maint::require_server_dir("")?;
-        let Some(conf_name) = dml_wow::moduletail::module_conf_name(&key) else {
-            return Err(CmdError { code: "NO_CONF".into(), message: format!("{key} has no standard conf file"), hint: String::new() });
-        };
-        let active = sdir.join("env").join("dist").join("etc").join("modules").join(conf_name);
-        if active.is_file() && !force {
-            return Err(CmdError {
-                code: "EXISTS".into(),
-                message: format!("Active conf already exists: {conf_name}"),
-                hint: "Pass --force to overwrite with defaults.".into(),
-            });
+        // The copy itself lives in `moduletail::conf_activate` (ONE resolver,
+        // shared with `modmgr::install_cpp`'s auto-activation -- Task 1 of
+        // the Modules-page round). This arm's ERROR CONTRACT is unchanged:
+        // the three quiet outcomes map back onto the codes the UI already
+        // branches on (NO_CONF / EXISTS / NEEDS_REBUILD).
+        use dml_wow::moduletail::ConfActivateOutcome as Out;
+        match dml_wow::moduletail::conf_activate(&sdir, &key, force).map_err(io_internal_err)? {
+            Out::Activated(conf_name) => Ok(serde_json::json!({"key": key, "activated": true, "conf_name": conf_name})),
+            Out::NoConf => Err(CmdError {
+                code: "NO_CONF".into(),
+                message: format!("{key} has no standard conf file"),
+                hint: String::new(),
+            }),
+            Out::AlreadyActive => {
+                let conf_name = dml_wow::moduletail::module_conf_name(&key).unwrap_or_default();
+                Err(CmdError {
+                    code: "EXISTS".into(),
+                    message: format!("Active conf already exists: {conf_name}"),
+                    hint: "Pass --force to overwrite with defaults.".into(),
+                })
+            }
+            Out::NoDistYet => {
+                let conf_name = dml_wow::moduletail::module_conf_name(&key).unwrap_or_default();
+                Err(CmdError {
+                    code: "NEEDS_REBUILD".into(),
+                    message: format!("No {conf_name}.dist yet"),
+                    hint: "The .dist appears after a worldserver rebuild with the module present.".into(),
+                })
+            }
         }
-        let Some(dist) = dml_wow::moduletail::module_conf_dist_path(&sdir, &key) else {
-            return Err(CmdError {
-                code: "NEEDS_REBUILD".into(),
-                message: format!("No {conf_name}.dist yet"),
-                hint: "The .dist appears after a worldserver rebuild with the module present.".into(),
-            });
-        };
-        if let Some(parent) = active.parent() {
-            std::fs::create_dir_all(parent).map_err(io_internal_err)?;
-        }
-        std::fs::copy(&dist, &active).map_err(io_internal_err)?;
-        Ok(serde_json::json!({"key": key, "activated": true, "conf_name": conf_name}))
     })
     .await
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?

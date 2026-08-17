@@ -549,6 +549,13 @@ fi
 if [[ "${1:-}" == "clone" ]]; then
   dest="${!#}"
   mkdir -p "$dest/.git"
+  # DML_STUB_GIT_CLONE_CONF=<conf name>: the cloned repo carries
+  # conf/<name>.dist, the way a real module repo does once its .conf.dist
+  # exists -- the seam the auto-conf-activation tests need.
+  if [[ -n "${DML_STUB_GIT_CLONE_CONF:-}" ]]; then
+    mkdir -p "$dest/conf"
+    printf 'DIST DEFAULTS\n' > "$dest/conf/${DML_STUB_GIT_CLONE_CONF}.dist"
+  fi
   exit 0
 fi
 if [[ "${1:-}" == "remote" && "${2:-}" == "get-url" ]]; then

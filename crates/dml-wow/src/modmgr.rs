@@ -371,11 +371,19 @@ fn git_ok(program: &OsStr, dir: &Path, args: &[&str], timeout: Duration) -> bool
     matches!(output_bounded_draining(cmd, timeout), Some(out) if out.status.success())
 }
 
-/// `git -C <dir> diff`'s raw stdout bytes on success, `None` on failure —
-/// used for the local-edits patch backup in [`wow_pull_repo`].
+/// `git -C <dir> diff --binary HEAD`'s raw stdout bytes on success, `None` on
+/// failure — used for the local-edits patch backup in [`wow_pull_repo`].
+///
+/// `HEAD` (not a bare `git diff`) is load-bearing: a bare `git diff` shows the
+/// worktree against the INDEX, so an edit the user had already `git add`ed was
+/// backed up as an EMPTY patch while the stash carried it away — the backup
+/// promise ("your edits are safe in two places") was false for exactly the
+/// user who was mid-commit. `--binary` keeps a modified binary asset (DBC/MPQ
+/// blobs live in some module repos) re-appliable instead of degrading to a
+/// "Binary files differ" stub.
 fn git_diff_capture(program: &OsStr, dir: &Path) -> Option<Vec<u8>> {
     let mut cmd = Command::new(program);
-    cmd.arg("-C").arg(dir).arg("diff");
+    cmd.arg("-C").arg(dir).arg("diff").arg("--binary").arg("HEAD");
     windows_no_window(&mut cmd);
     match output_bounded_draining(cmd, GIT_PROBE_TIMEOUT) {
         Some(out) if out.status.success() => Some(out.stdout),
@@ -465,7 +473,7 @@ pub fn wow_remote_ok(url: &str, expected_substr: &str) -> bool {
     url.contains(expected_substr) || url.contains("liyunfan1223")
 }
 
-/// `_WOW_PULL_SUMMARY`'s assembly (`70-modules.sh:927-931`): `"up to date"`
+/// `_WOW_PULL_SUMMARY`'s assembly (`70-modules.sh:1035-1039`): `"up to date"`
 /// when the short HEAD didn't move, else `"<before> -> <after>"`.
 pub fn pull_summary(before: &str, after: &str) -> String {
     if before == after {
@@ -1481,7 +1489,7 @@ pub fn sql_remove_tweak_world(program: &OsStr, password: &str, sdir: &Path, key:
 }
 
 // ---------------------------------------------------------------------------
-// `_wow_pull_repo` (`70-modules.sh:872-933`) — `module update`'s pull core:
+// `_wow_pull_repo` (`70-modules.sh:983-1041`) — `module update`'s pull core:
 // dirty check -> patch backup + stash -> ADVANCE -> stash pop (or conflict
 // recovery). On failure this function has ALREADY emitted its own `error`
 // event (matching the bash's `ndjson_error` + `return 1` contract) — the
@@ -1492,7 +1500,7 @@ pub fn sql_remove_tweak_world(program: &OsStr, password: &str, sdir: &Path, key:
 // move a detached HEAD, which is the only shape a native install has.
 // ---------------------------------------------------------------------------
 
-/// `[[ -n "$dirty" ]]` (`70-modules.sh:886`) — pure.
+/// `[[ -n "$dirty" ]]` (`70-modules.sh:987`) — pure.
 pub fn has_dirty_changes(raw: &str) -> bool {
     !raw.is_empty()
 }
@@ -1523,7 +1531,7 @@ pub fn has_unprotected_edits(dirty_raw: &str, protect: &[&str]) -> bool {
     dirty_paths(dirty_raw).iter().any(|p| !protect.contains(&p.as_str()))
 }
 
-/// `[[ "$before" != "$after" ]]` (`70-modules.sh:911`) — pure.
+/// `[[ "$before" != "$after" ]]` (`70-modules.sh:1019`) — pure.
 pub fn pull_changed(before: &str, after: &str) -> bool {
     before != after
 }
@@ -1812,6 +1820,13 @@ pub fn install_cpp(
 
     // mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- a rebuild would
     // be a 30-90 minute no-op, so it never joins the rebuild-pending list.
+    // `marked` is the REAL outcome of the marker write, kept separate from
+    // `rebuild_required` on purpose (Task 2): a module whose marker could not
+    // be written still needs a rebuild -- flipping `rebuild_required` to false
+    // there would trade one lie for a worse one. Only the db-import advisory
+    // below rides on `marked`, because that advisory is a claim about the
+    // rebuild the banner was supposed to ask for.
+    let mut marked = false;
     let rebuild_required = if mkey == "mod-arac" {
         emit(line_event(
             "info",
@@ -1819,10 +1834,41 @@ pub fn install_cpp(
         ));
         false
     } else {
-        let _ = rebuild_pending_add(sdir, &mkey);
+        marked = rebuild_pending_add(sdir, &mkey).is_ok();
+        if !marked {
+            emit(line_event(
+                "warn",
+                format!(
+                    "could not write {} -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this module stays uncompiled.",
+                    sdir.join(".dml-rebuild-pending").display()
+                ),
+            ));
+        }
         true
     };
-    emit(line_event("info", "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"));
+    // Auto-activate the module's own conf (Modules-page round, Task 1): a
+    // freshly cloned module whose repo already ships a `.conf.dist` gets it
+    // copied into the active dir so the server actually reads its settings
+    // instead of silently running stock defaults. STRICTLY ADVISORY -- an
+    // existing conf is never overwritten (the user's edits win) and every
+    // non-`Activated` outcome, errors included, is silent: an install must
+    // not fail over a conf nicety. Modules whose `.dist` only appears after
+    // a rebuild get picked up by the launcher's catch-up pass instead.
+    if let Ok(crate::moduletail::ConfActivateOutcome::Activated(cname)) = crate::moduletail::conf_activate(sdir, &mkey, false) {
+        emit(line_event("info", format!("Activated {cname} with defaults -- tune it on the Modules page.")));
+    }
+    // Update honesty (Task 2): the db-import advisory is only TRUE for a
+    // module that will actually be compiled in -- db-import runs as part of
+    // the rebuild the marker asks for. mod-arac never rebuilds, so it gets the
+    // opposite (and correct) instruction instead.
+    if marked {
+        emit(line_event("info", "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"));
+    } else if mkey == "mod-arac" {
+        emit(line_event(
+            "info",
+            "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel).",
+        ));
+    }
     Ok(serde_json::json!({"key": mkey, "action": action, "rebuild_required": rebuild_required}))
 }
 
@@ -2193,6 +2239,18 @@ pub fn update_module(git_program: &OsStr, sdir: &Path, key: &str, emit: &dyn Fn(
     };
     let uafter = git_short_head(git_program, &umdir);
 
+    // Update honesty (Modules-page round, Task 2). Two things this block used
+    // to assert without knowing:
+    //   * `pending_rebuild: true` was emitted from the mere INTENT to mark
+    //     (`let _ = rebuild_pending_add(...)`), so a marker write that failed
+    //     — an unwritable server dir, a stray directory at the marker path —
+    //     still told the launcher "the rebuild banner is up". It wasn't, and
+    //     the user's freshly pulled module silently never compiled.
+    //   * the db-import advisory was emitted on EVERY changed update, mod-arac
+    //     included. Arac never joins the rebuild list, so its db-import never
+    //     runs and its new SQL is NOT applied — the reassurance was exactly
+    //     backwards for the one module that needs manual work.
+    // Both now follow the real outcome of the marker write.
     let mut pending_rebuild = false;
     if changed {
         if key == "mod-arac" {
@@ -2200,15 +2258,41 @@ pub fn update_module(git_program: &OsStr, sdir: &Path, key: &str, emit: &dyn Fn(
                 "info",
                 "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart.",
             ));
-        } else {
-            let _ = rebuild_pending_add(sdir, key);
+            emit(line_event(
+                "info",
+                "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel).",
+            ));
+        } else if rebuild_pending_add(sdir, key).is_ok() {
             pending_rebuild = true;
             emit(line_event("info", "Rebuild required to compile the update -- use the rebuild banner on the Modules page."));
+            emit(line_event("info", "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"));
+        } else {
+            emit(line_event(
+                "warn",
+                format!(
+                    "could not write {} -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this update stays uncompiled.",
+                    sdir.join(".dml-rebuild-pending").display()
+                ),
+            ));
         }
-        emit(line_event("info", "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"));
     }
 
-    Ok(serde_json::json!({"key": key, "changed": changed, "before": ubefore, "after": uafter, "pending_rebuild": pending_rebuild}))
+    // `rebuild_required` is ADDITIVE (Task 2) and deliberately NOT the same
+    // question as `pending_rebuild`: it says whether this module needs
+    // compiling at all (everything but data-only mod-arac does), while
+    // `pending_rebuild` says whether the banner was actually armed. The two
+    // disagree exactly when the marker write failed -- and without the pair,
+    // the launcher's own summary line ("no rebuild needed") reads that failure
+    // as good news. Same field name and meaning as `install_cpp`'s.
+    let rebuild_required = key != "mod-arac";
+    Ok(serde_json::json!({
+        "key": key,
+        "changed": changed,
+        "before": ubefore,
+        "after": uafter,
+        "pending_rebuild": pending_rebuild,
+        "rebuild_required": rebuild_required
+    }))
 }
 
 /// Shared cpp-family guard: can this server ever compile a C++ module? Runs
@@ -4098,6 +4182,201 @@ mod tests {
 
         // The guard never ran the config probe at all for a lua install.
         assert!(!calls.contains("config"), "no config probe expected for a lua install:\n{calls}");
+    }
+
+    // -- install_cpp: auto-activate the module's conf (Modules-page round,
+    // Task 1) --------------------------------------------------------------
+    //
+    // These drive `install_cpp` DIRECTLY (not through
+    // `module_install_stream_with`) because the thing under test is the
+    // clone's aftermath, and the stream wrapper's build-config guard needs a
+    // fake docker that has nothing to say about it. The `git` here is a fake
+    // that materialises the clone -- optionally carrying a `conf/<name>.dist`
+    // the way a real module repo does after a rebuild.
+
+    /// A stand-in `git` whose only real behaviour is `clone`: it creates
+    /// `<dest>/.git` (so `cpp_installed` answers yes afterwards) and, when
+    /// `FAKE_CLONE_CONF` is set, `<dest>/conf/<FAKE_CLONE_CONF>.dist` with a
+    /// known body. Per-platform per the test-portability rule.
+    #[cfg(windows)]
+    fn write_fake_clone_git(dir: &Path) -> PathBuf {
+        let p = dir.join("fake-git-clone.cmd");
+        let script = "@echo off\r\n\
+            if not \"%1\"==\"clone\" exit /b 0\r\n\
+            set DEST=\r\n\
+            :nextarg\r\n\
+            if \"%~1\"==\"\" goto gotdest\r\n\
+            set DEST=%~1\r\n\
+            shift\r\n\
+            goto nextarg\r\n\
+            :gotdest\r\n\
+            mkdir \"%DEST%\\.git\" 2>nul\r\n\
+            if not defined FAKE_CLONE_CONF exit /b 0\r\n\
+            mkdir \"%DEST%\\conf\" 2>nul\r\n\
+            >\"%DEST%\\conf\\%FAKE_CLONE_CONF%.dist\" echo DIST DEFAULTS\r\n\
+            exit /b 0\r\n";
+        std::fs::write(&p, script).unwrap();
+        p
+    }
+    #[cfg(not(windows))]
+    fn write_fake_clone_git(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("fake-git-clone.sh");
+        let script = "#!/bin/sh\n\
+            [ \"$1\" = clone ] || exit 0\n\
+            for a in \"$@\"; do dest=\"$a\"; done\n\
+            mkdir -p \"$dest/.git\"\n\
+            if [ -n \"${FAKE_CLONE_CONF:-}\" ]; then\n\
+            \x20 mkdir -p \"$dest/conf\"\n\
+            \x20 printf 'DIST DEFAULTS\\n' > \"$dest/conf/$FAKE_CLONE_CONF.dist\"\n\
+            fi\n\
+            exit 0\n";
+        std::fs::write(&p, script).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    /// Drives `install_cpp` with [`write_fake_clone_git`]. `preexisting`
+    /// seeds `env/dist/etc/modules/<conf_name>` before the install.
+    /// Returns `(events, active_conf_contents)`.
+    fn run_install_cpp_direct(
+        tag: &str,
+        key: &str,
+        conf_name: Option<&str>,
+        clone_carries_dist: bool,
+        preexisting: Option<&str>,
+    ) -> (Vec<serde_json::Value>, Option<String>) {
+        let (events, contents, _) = run_install_cpp_direct_ex(tag, key, conf_name, clone_carries_dist, preexisting, false);
+        (events, contents)
+    }
+
+    /// [`run_install_cpp_direct`] plus the two things the update-honesty tests
+    /// need: `block_marker` puts a DIRECTORY where `.dml-rebuild-pending`
+    /// belongs (so `rebuild_pending_add`'s append-open fails on every
+    /// platform), and the third return slot carries `install_cpp`'s own
+    /// `Result` so the done payload can be asserted.
+    fn run_install_cpp_direct_ex(
+        tag: &str,
+        key: &str,
+        conf_name: Option<&str>,
+        clone_carries_dist: bool,
+        preexisting: Option<&str>,
+        block_marker: bool,
+    ) -> (Vec<serde_json::Value>, Option<String>, Result<serde_json::Value, ()>) {
+        let _guard = REBUILD_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let d = tmp_dir(&format!("autoconf-{tag}"));
+        let git = write_fake_clone_git(&d);
+        match (conf_name, clone_carries_dist) {
+            (Some(c), true) => std::env::set_var("FAKE_CLONE_CONF", c),
+            _ => std::env::remove_var("FAKE_CLONE_CONF"),
+        }
+        let active = d.join("env").join("dist").join("etc").join("modules");
+        if let (Some(body), Some(c)) = (preexisting, conf_name) {
+            std::fs::create_dir_all(&active).unwrap();
+            std::fs::write(active.join(c), body).unwrap();
+        }
+        if block_marker {
+            std::fs::create_dir_all(d.join(".dml-rebuild-pending")).unwrap();
+        }
+
+        let events = std::cell::RefCell::new(Vec::new());
+        let res = install_cpp(git.as_os_str(), &d, Some(key), None, None, &|v| events.borrow_mut().push(v));
+
+        std::env::remove_var("FAKE_CLONE_CONF");
+        let contents = conf_name.and_then(|c| std::fs::read_to_string(active.join(c)).ok());
+        let events = events.into_inner();
+        let _ = std::fs::remove_dir_all(&d);
+        (events, contents, res)
+    }
+
+    fn has_info_containing(events: &[serde_json::Value], needle: &str) -> bool {
+        events
+            .iter()
+            .any(|e| e["event"] == "line" && e["text"].as_str().unwrap_or("").contains(needle))
+    }
+
+    #[test]
+    fn a_install_cpp_activates_the_conf_it_just_cloned() {
+        let (events, contents) = run_install_cpp_direct("fresh", "mod-solocraft", Some("Solocraft.conf"), true, None);
+        assert_eq!(contents.as_deref().map(str::trim), Some("DIST DEFAULTS"), "{events:#?}");
+        assert!(
+            has_info_containing(&events, "Activated Solocraft.conf with defaults"),
+            "expected the activation note:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_install_cpp_leaves_an_existing_conf_byte_identical() {
+        let (events, contents) =
+            run_install_cpp_direct("keep", "mod-solocraft", Some("Solocraft.conf"), true, Some("USER EDIT\n"));
+        assert_eq!(contents.as_deref(), Some("USER EDIT\n"), "{events:#?}");
+        assert!(
+            !has_info_containing(&events, "Activated Solocraft.conf"),
+            "no activation note when nothing was activated:\n{events:#?}"
+        );
+    }
+
+    #[test]
+    fn a_install_cpp_says_nothing_when_the_clone_carries_no_dist() {
+        let (events, contents) = run_install_cpp_direct("nodist", "mod-solocraft", Some("Solocraft.conf"), false, None);
+        assert_eq!(contents, None, "no active conf should have appeared:\n{events:#?}");
+        assert!(!has_info_containing(&events, "Activated"), "{events:#?}");
+        // The install itself still succeeded -- auto-activation is advisory.
+        assert!(events.iter().any(|e| e["event"] == "line" && e["text"] == "cloning mod-solocraft..."), "{events:#?}");
+        assert!(!events.iter().any(|e| e["event"] == "error"), "{events:#?}");
+    }
+
+    // -- install_cpp: the db-import advisory may only be said when the module
+    // really joined the rebuild-pending list (Modules-page round, Task 2) ----
+
+    const DB_IMPORT_ADVISORY: &str =
+        "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand";
+
+    fn has_line_exactly(events: &[serde_json::Value], text: &str) -> bool {
+        events.iter().any(|e| e["event"] == "line" && e["text"] == text)
+    }
+
+    #[test]
+    fn b_install_cpp_advisory_rides_on_the_rebuild_pending_mark() {
+        let (events, _, res) = run_install_cpp_direct_ex("advisory-ok", "mod-solocraft", None, false, None, false);
+        assert!(has_line_exactly(&events, DB_IMPORT_ADVISORY), "{events:#?}");
+        assert_eq!(res.unwrap()["rebuild_required"], true);
+    }
+
+    #[test]
+    fn b_install_cpp_drops_the_advisory_and_warns_when_the_marker_cannot_be_written() {
+        let (events, _, res) = run_install_cpp_direct_ex("advisory-nomark", "mod-solocraft", None, false, None, true);
+        assert!(
+            !has_line_exactly(&events, DB_IMPORT_ADVISORY),
+            "db-import never runs for a module that never joined the rebuild list:\n{events:#?}"
+        );
+        assert!(
+            events.iter().any(|e| e["event"] == "line"
+                && e["level"] == "warn"
+                && e["text"].as_str().unwrap_or("").contains(".dml-rebuild-pending")),
+            "expected a warn naming the marker path:\n{events:#?}"
+        );
+        // The module still NEEDS a rebuild -- only the banner's bookkeeping
+        // failed, so `rebuild_required` must not flip to a comforting false.
+        assert_eq!(res.unwrap()["rebuild_required"], true, "{events:#?}");
+    }
+
+    #[test]
+    fn b_install_arac_says_its_sql_is_not_auto_applied() {
+        let (events, _, res) = run_install_cpp_direct_ex("advisory-arac", "mod-arac", None, false, None, false);
+        assert!(
+            has_line_exactly(
+                &events,
+                "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel)."
+            ),
+            "{events:#?}"
+        );
+        assert!(
+            !has_line_exactly(&events, DB_IMPORT_ADVISORY),
+            "the db-import advisory is a lie for the one module that never rebuilds:\n{events:#?}"
+        );
+        assert_eq!(res.unwrap()["rebuild_required"], false, "{events:#?}");
     }
 
     #[test]

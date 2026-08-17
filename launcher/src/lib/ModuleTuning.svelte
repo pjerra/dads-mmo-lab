@@ -40,6 +40,7 @@
   import { applyEvent } from "$lib/terminal-state";
   import { restartState, noteApplyNeeded } from "$lib/restart-state.svelte";
   import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
+  import { requestConfFile, takeTuning } from "$lib/module-nav.svelte";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -53,7 +54,15 @@
   // `onupdated` lets the owning Modules page refresh its own module list
   // after a successful per-module update, so the rebuild banner / pending
   // chips light up over there without a manual Refresh.
-  let { active = false, onupdated }: { active?: boolean; onupdated?: () => void } = $props();
+  // `onOpenFile` (round 2, Task 3) lets the "Open config file" button below
+  // switch the owning Modules page's tab strip to Files -- `tab` is
+  // ModuleManager.svelte's own state, not something this component can
+  // reach directly, so it's a plain callback prop (same shape as onupdated).
+  let {
+    active = false,
+    onupdated,
+    onOpenFile,
+  }: { active?: boolean; onupdated?: () => void; onOpenFile?: () => void } = $props();
 
   // Opens the module's project page in the system browser -- same helper as
   // the Modules tab (registry-sourced https url, never user input).
@@ -62,6 +71,17 @@
     openUrl(url).catch(() => {
       // Best-effort -- a failed browser launch shouldn't break the page.
     });
+  }
+
+  // Round 2, Task 3: the per-card "Open config file" fallback -- reuses the
+  // SAME one-shot nav target + Files-tab click-to-open effect the Modules
+  // tab's rows already drive (module-nav.svelte's requestConfFile ->
+  // ModuleFiles.svelte's takeConfFile effect), just triggered from here
+  // instead. Files outside the raw-write allowlist already open read-only
+  // on that surface -- this reuses it verbatim, no new write path.
+  function openConfigFile(conf: string) {
+    requestConfFile(conf);
+    onOpenFile?.();
   }
 
   const PB_RENDER_CAP = 200;
@@ -145,6 +165,23 @@
     aleNote = null;
     liveNote = false;
     note = null;
+  });
+
+  // Click-to-open catch-up (Modules-page round, Task 4): a pending tuning
+  // target set on the Modules tab is consumed here once the server-module
+  // list is actually loaded (takeTuning() clears it, so a later re-activation
+  // of this tab is a no-op). Depends on `active` AND `smLoaded` -- if the
+  // list is still loading when the tab first activates, `smLoaded` flipping
+  // true re-runs this effect and the target is still there to consume.
+  $effect(() => {
+    if (!active || !smLoaded) return;
+    const k = takeTuning();
+    if (!k) return;
+    const m = smModules.find((mm) => mm.key === k);
+    if (!m) return;
+    mtExpand[m.conf] = true;
+    if (!ckLoaded[m.conf]) void loadConfKeys(m.conf);
+    queueMicrotask(() => document.getElementById(`tune-${k}`)?.scrollIntoView({ block: "start" }));
   });
 
   async function loadConfKeys(conf: string) {
@@ -398,7 +435,7 @@
         {@const cpp = cppByKey.get(m.key)}
         {@const ver = versionLabel(cpp?.head, cpp?.head_date)}
         {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
-        <div class="card mod-card">
+        <div class="card mod-card" id="tune-{m.key}">
           <button
             class="mod-head"
             aria-expanded={!!mtExpand[m.conf]}
@@ -431,11 +468,22 @@
           {/if}
           {#if mtExpand[m.conf]}
             {#if m.desc}<p class="muted mod-desc">{m.desc}</p>{/if}
-            {#if cpp?.url}
-              <div class="row">
+            <div class="row">
+              {#if cpp?.url}
                 <button class="ghlink" onclick={() => openModUrl(cpp?.url ?? null)} title="Open the project page in your browser">GitHub ↗</button>
-              </div>
-            {/if}
+              {/if}
+              <!-- Round 2, Task 3: the raw-edit fallback -- every card gets
+                   this regardless of whether it has curated rows below, so
+                   an installed module with nothing but "All settings" is
+                   still one click from its conf. -->
+              <button
+                class="ghlink"
+                onclick={() => openConfigFile(m.conf)}
+                title="Edit {m.conf} directly on the Module files tab"
+              >
+                Open config file
+              </button>
+            </div>
 
             {#each curated as s (s.key)}
               <div class="setting" class:dirty={mtEdits[s.key] !== undefined && mtEdits[s.key] !== s.value}>

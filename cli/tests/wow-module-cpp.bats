@@ -89,6 +89,54 @@ src() {
   echo "$output" | grep -q '"rebuild_required":true'
 }
 
+@test "module install cpp: activates the conf the clone carried" {
+  export DML_STUB_GIT_CLONE_CONF=mod_aoe_loot.conf
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ -f "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf" ]
+  [ "$(cat "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf")" = "DIST DEFAULTS" ]
+  echo "$output" | grep -q 'Activated mod_aoe_loot.conf with defaults'
+}
+
+@test "module install cpp: an existing conf is left byte-identical" {
+  mkdir -p "$SDIR/env/dist/etc/modules"
+  printf 'USER EDIT\n' > "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf"
+  export DML_STUB_GIT_CLONE_CONF=mod_aoe_loot.conf
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ "$(cat "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf")" = "USER EDIT" ]
+  [ "$(echo "$output" | grep -c 'Activated mod_aoe_loot.conf')" = 0 ]
+}
+
+@test "module install cpp: no .conf.dist in the clone -> no note, install still ok" {
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  [ ! -f "$SDIR/env/dist/etc/modules/mod_aoe_loot.conf" ]
+  [ "$(echo "$output" | grep -c 'Activated')" = 0 ]
+  echo "$output" | grep -q '"event":"done"'
+}
+
+@test "module install cpp: marker write fails -> warn, no db-import promise, rebuild_required stays true" {
+  # A DIRECTORY where the marker FILE belongs. The install still succeeds (the
+  # marker is advisory) but the rebuild banner will never light up, so the
+  # "db-import applies your SQL on next start" reassurance would be false.
+  mkdir -p "$SDIR/.dml-rebuild-pending"
+  run bash "$DML" wow module install --family cpp --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"rebuild_required":true'
+  [ "$(echo "$output" | grep -c 'the rebuild banner will NOT light up')" = 1 ]
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
+}
+
+@test "module install cpp: mod-arac is told its SQL is NOT auto-applied" {
+  run bash "$DML" wow module install --family cpp --key mod-arac --json
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"rebuild_required":false'
+  [ ! -f "$SDIR/.dml-rebuild-pending" ]
+  [ "$(echo "$output" | grep -c 'new SQL is NOT auto-applied')" = 1 ]
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
+}
+
 @test "module install cpp: already installed -> git pull (update)" {
   mkdir -p "$SDIR/modules/mod-aoe-loot/.git"
   export DML_STUB_GIT_LOG="$FIXTURE/git.log"

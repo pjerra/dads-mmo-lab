@@ -19,6 +19,7 @@
     wowUpdateCheck,
     wowServerUpdate,
     wowModuleUpdate,
+    wowConfigTuningSet,
     type ModuleList,
     type CppModule,
     type LuaModule,
@@ -29,6 +30,7 @@
     type ModuleRepair,
     type RepairResult,
     type UpdateCheck,
+    type ModuleTuning as ModuleTuningRow,
   } from "$lib/api";
   import { applyEvent } from "$lib/terminal-state";
   import Terminal from "$lib/Terminal.svelte";
@@ -61,8 +63,17 @@
   } from "$lib/module-tabs";
   import ModuleTuning from "$lib/ModuleTuning.svelte";
   import ModuleFiles from "$lib/ModuleFiles.svelte";
-  import { moduleListCache } from "$lib/page-cache.svelte";
+  import { moduleListCache, moduleTuningCache } from "$lib/page-cache.svelte";
   import { canBuild } from "$lib/module-canbuild";
+  import { defaultExpanded, luaStatus, luaStatusLabel, splitInstalled } from "$lib/module-split";
+  import { hasTuningTarget, requestConfFile, requestTuning } from "$lib/module-nav.svelte";
+  import { setupDoneKey, setupFor, type SetupAction } from "$lib/setup-catalog";
+  import { buildModuleRow, type ModuleRow, type RowActionId, type RowChip } from "$lib/module-row";
+  import { moduleToggle, toggleIsOn, type ToggleSpec } from "$lib/module-toggle";
+  import { noteApplyNeeded, restartState } from "$lib/restart-state.svelte";
+  import { bannerText, normalizeApplyNeeded } from "$lib/apply-needed";
+  import { confActivationChip, outcomeFromErrorCode } from "$lib/conf-activation-chip";
+  import type { Snippet } from "svelte";
 
   // In-page tab strip (module-update round): the old ModuleManager content is
   // the Modules tab; the Tuning/Config files tabs host the views extracted
@@ -76,6 +87,13 @@
   // updates them in the background. The Tuning tab's server-module cards read
   // the same cache, so an install/remove here is reflected there too.
   const list = $derived<ModuleList | null>(moduleListCache.store.data);
+  // Round 2, Task 3: the tuning registry rows, read off the SAME shared cache
+  // ModuleTuning.svelte's curated cards use -- needed here only to answer
+  // "does this lua module have a curated card" for hasTuningTarget() below.
+  // Sharing the cache (not a new fetch) means a Tuning-tab visit warms this
+  // for free; refresh() below also pulls it directly so the gate is correct
+  // even if the user never opens the Tuning tab this session.
+  const mtSettings = $derived<ModuleTuningRow[]>(moduleTuningCache.store.data ?? []);
   let error: string | null = $state(null);
   let note: string | null = $state(null);
   // Single flag: disables every Install/Update/Remove/Rebuild/Activate/Save/
@@ -84,6 +102,25 @@
   // this tab's buttons, and vice versa -- the tabs would otherwise race two
   // CLI mutations on the same server checkout.
   const busy = $derived(moduleBusy.busy);
+
+  // Installed/Available split (Modules-page round, Task 3): each family
+  // card's "Available" catalog collapses once anything in that family is
+  // installed, expands on a fresh server with nothing installed yet. The
+  // default is computed ONCE, the first time the list loads -- a $derived
+  // would recompute (and silently re-collapse an Available section the user
+  // just expanded) on every later refresh(), which install/remove trigger
+  // constantly.
+  let cppExpanded = $state(false);
+  let luaExpanded = $state(false);
+  let sqlExpanded = $state(false);
+  let expansionInited = false;
+  $effect(() => {
+    if (expansionInited || !list) return;
+    expansionInited = true;
+    cppExpanded = defaultExpanded(list.families.cpp.filter((m) => m.installed).length);
+    luaExpanded = defaultExpanded(list.families.lua.filter((m) => m.cloned || m.deployed).length);
+    sqlExpanded = defaultExpanded(list.families.sql.filter((m) => m.installed).length);
+  });
 
   let confirmingRebuild = $state(false);
   let backupChecked = $state(true); // "Back up the server first" defaults ON
@@ -207,6 +244,106 @@
     }
   }
 
+  // Needs-setup notices (Modules-page round, Task 5): installed rows whose
+  // key has a setup-catalog entry get an amber "Needs setup" chip + a panel
+  // (summary, steps, guided actions, "Mark as done"). Dismissal is stored in
+  // localStorage (recorded deviation #2 in the plan header, not
+  // launcher.json) keyed by server dir + module key -- SETUP_SERVER is a
+  // literal placeholder because nothing on this page currently exposes the
+  // real server identity; a later round can thread the real one through
+  // without changing setupDoneKey's signature.
+  const SETUP_SERVER = "native";
+  let setupOpen: string | null = $state(null);
+  let setupCopied: string | null = $state(null);
+  // localStorage reads inside needsSetup() aren't tracked by Svelte's
+  // reactivity -- bumping this on every dismissal forces `needsSetup` (and
+  // anything that calls it in a template) to re-evaluate.
+  let setupDismissals = $state(0);
+
+  function needsSetup(key: string): boolean {
+    setupDismissals;
+    if (!setupFor(key)) return false;
+    try {
+      return !localStorage.getItem(setupDoneKey(SETUP_SERVER, key));
+    } catch {
+      // Storage can be unavailable (e.g. locked down webview) -- fail open
+      // so the notice still shows rather than silently vanishing.
+      return true;
+    }
+  }
+
+  function toggleSetup(key: string) {
+    setupOpen = setupOpen === key ? null : key;
+    setupCopied = null;
+  }
+
+  // Conf-activation failure chips (round 2, Task 2): the auto-catchup below
+  // no longer swallows a failed activation -- it turns into a clickable
+  // "conf not activated" chip on that module's row (module-row.ts's
+  // confFailChip ctx slot), keyed by module key. confFailReason holds the
+  // CmdError's message + hint for the small panel the chip opens; both are
+  // cleared for a key that activates successfully on a later pass.
+  let confFailChips: Record<string, RowChip> = $state({});
+  let confFailReason: Record<string, { message: string; hint?: string }> = $state({});
+  let confFailOpen: string | null = $state(null);
+
+  function toggleConfFail(key: string) {
+    confFailOpen = confFailOpen === key ? null : key;
+  }
+
+  // Chip-as-action dispatch (round 2, Task 2): shared between cpp/lua rows --
+  // the chip IS the click target, wired through RowUi.onChip.
+  function onChipClick(chip: RowChip, key: string) {
+    if (chip.id === "setup") toggleSetup(key);
+    else if (chip.id === "conf-activation") toggleConfFail(key);
+  }
+
+  function markSetupDone(key: string) {
+    try {
+      localStorage.setItem(setupDoneKey(SETUP_SERVER, key), "1");
+    } catch {
+      // Best-effort -- the chip just won't stay dismissed across reloads.
+    }
+    setupDismissals++;
+    setupOpen = null;
+  }
+
+  async function copySetupCommand(command: string) {
+    try {
+      await navigator.clipboard.writeText(command);
+      setupCopied = command;
+      setTimeout(() => {
+        if (setupCopied === command) setupCopied = null;
+      }, 2000);
+    } catch {
+      // Clipboard access can be denied -- the action just won't flash "copied".
+    }
+  }
+
+  // Dispatches a setup action to whichever existing machinery it wraps --
+  // no new mutation surfaces (plan Task 5 interface).
+  function runSetupAction(a: SetupAction) {
+    switch (a.type) {
+      case "open-tuner":
+        requestTuning(a.key);
+        tab = "tuning";
+        break;
+      case "open-files":
+        requestConfFile(a.file);
+        tab = "files";
+        break;
+      case "place-npc":
+        void placeNpc(a.key, a.label);
+        break;
+      case "fixit":
+        void fixitBattlepassNpc();
+        break;
+      case "copy-command":
+        void copySetupCommand(a.command);
+        break;
+    }
+  }
+
   async function refresh() {
     error = null; confirmingRebuild = false; confirmingRemove = null;
     confirmingLuaRemove = null; confirmingSqlRemove = null;
@@ -217,8 +354,56 @@
     else ensureBackupDefaults();
     try { clientPath = await wowClientPathGet(); } catch (e) { showErr(e); }
     try { dockerUsage = (await wowDockerUsage()).lines; dockerUsageError = null; } catch (e) { dockerUsageErr(e); }
+    // Round 2, Task 3: warm the tuning-registry cache for hasTuningTarget()'s
+    // lua-curated-card check below. Best-effort like the reads above --
+    // createCachedStore.refresh() never throws (it parks the failure on
+    // store.error and keeps the last-good data), and a stale/empty cache just
+    // fails the gate toward SUPPRESSING tune rather than a dead-end click, so
+    // there's nothing to surface as a page error here.
+    await moduleTuningCache.refresh();
   }
-  onMount(refresh);
+
+  // Auto-conf catch-up (Modules-page round, Task 4): a server whose modules
+  // were installed by an older launcher/CLI (before install auto-activated a
+  // module's conf -- Task 1) can still have installed cpp modules sitting at
+  // conf === "ready". One pass, once per page mount, activates every such
+  // conf so the tuning cards aren't hidden behind a manual "Activate conf"
+  // click the user has no reason to know about. Silent on success (round 2,
+  // Task 2) -- activation still happens and still logs to the console
+  // stream, but no page note. The only surfaced case is failure: a raced
+  // EXISTS/NEEDS_REBUILD (or a genuine error) now shows a "conf not
+  // activated" chip on that module's row via confActivationChip(), instead
+  // of vanishing into a swallowed catch{} the way round 1 left it.
+  let catchupDone = false;
+  async function autoConfCatchup() {
+    if (catchupDone || busy) return;
+    catchupDone = true;
+    const candidates = (list?.families.cpp ?? []).filter((m) => m.installed && m.conf === "ready");
+    if (candidates.length === 0) return;
+    let anyActivated = false;
+    for (const m of candidates) {
+      try {
+        const r = await wowModuleConfActivate(m.key);
+        if (r.activated) anyActivated = true;
+        delete confFailChips[m.key];
+        delete confFailReason[m.key];
+      } catch (e) {
+        const err = e as { code?: string; message?: string; hint?: string };
+        const chip = confActivationChip(outcomeFromErrorCode(err.code));
+        if (chip) {
+          confFailChips[m.key] = chip;
+          confFailReason[m.key] = { message: err.message ?? "Conf activation failed.", hint: err.hint };
+        }
+      }
+    }
+    if (anyActivated) await refresh();
+  }
+  onMount(() => {
+    void (async () => {
+      await refresh();
+      await autoConfCatchup();
+    })();
+  });
 
   // Streamed operations (install/remove/rebuild) use the sawDone/streamErr
   // contract: the outcome is derived from events captured inside the event
@@ -487,6 +672,161 @@
     return "on";
   }
 
+  // Shared row skeleton (Modules-page round 2, Task 1): every family's rows
+  // render through ONE snippet fed by buildModuleRow (module-row.ts). RowUi
+  // carries the per-family presentation the pure builder doesn't know about
+  // -- status badge, link targets, and the action dispatch/disable/label
+  // hooks -- so the row MARKUP lives in exactly one place.
+  type RowUi = {
+    url: string | null;
+    desc?: string;
+    ver?: string | null;
+    statusCls: "on" | "warn" | "off";
+    statusText: string;
+    dim?: boolean;
+    // Installed rows: the module name is a button opening its tuning card.
+    onName?: () => void;
+    // Round 2, Task 2: the chip IS the click target -- setup/conf-failed
+    // chips dispatch here instead of a separate text-link row.
+    onChip?: (chip: RowChip) => void;
+    onAction: (id: RowActionId) => void;
+    actionDisabled?: (id: RowActionId) => boolean;
+    actionTitle?: (id: RowActionId) => string | undefined;
+    // Two-step remove confirms override the builder's static label.
+    actionLabel?: (id: RowActionId) => string | undefined;
+    // Round 2, Task 4: the master-switch toggle's current state (the action's
+    // PRESENCE comes from the builder; this is presentation state, like
+    // statusText). Undefined when the row has no toggle.
+    toggleOn?: boolean;
+  };
+
+  function openTuning(key: string) {
+    requestTuning(key);
+    tab = "tuning";
+  }
+
+  // Round 2, Task 3: per-family hasTuningTarget() inputs. cpp's "curated
+  // card" is a ModuleTuning row targeting the module's own conf; its
+  // "open-config fallback" is simply having a conf at all -- the Tuning
+  // tab's Server-modules card renders (with the new "Open config file"
+  // button, Step 2) for ANY installed module with a conf_name, curated rows
+  // or not. Lua has no such fallback: a deployed .lua script isn't a `.conf`
+  // ModuleFiles can open, so an uncurated lua module gets neither signal and
+  // hasTuningTarget correctly suppresses tune (the recorded round-1 gap).
+  // Lua rows are matched by NAME, not key -- ModuleTuning.module is "plain
+  // module name; also the card heading" (api.ts), the only linkage the
+  // curated-lua registry carries.
+  function cppHasTuningTarget(m: CppModule): boolean {
+    const curated = !!m.conf_name && mtSettings.some((s) => s.backend === "conf" && s.file === m.conf_name);
+    return hasTuningTarget(curated, !!m.conf_name);
+  }
+  function luaHasTuningTarget(m: LuaModule): boolean {
+    const curated = mtSettings.some((s) => s.backend === "lua" && s.module === m.name);
+    return hasTuningTarget(curated, false);
+  }
+
+  // Per-module enable/disable toggle (round 2, Task 4): a row gets one only
+  // when the tuning registry declares a master switch for it (module-toggle.ts
+  // -- mod-playerbots is refused there, no match means no toggle). The write
+  // goes through the EXISTING tuner path (wowConfigTuningSet, the same api.ts
+  // call the Tuning tab's save uses -- no new command), and the current state
+  // comes off the same tuner read (mtSettings / moduleTuningCache). Registry
+  // rows name modules by display name while this page holds keys, so the
+  // lookup tries the key first, then the catalog title.
+  let togglingKey: string | null = $state(null);
+
+  function toggleSpecFor(key: string, name: string): ToggleSpec | null {
+    return moduleToggle(key, mtSettings) ?? moduleToggle(name, mtSettings);
+  }
+
+  async function toggleModule(key: string, name: string) {
+    const spec = toggleSpecFor(key, name);
+    if (!spec) return;
+    const next = toggleIsOn(spec, mtSettings) ? "0" : "1";
+    moduleBusy.busy = true; togglingKey = key; error = null; note = null;
+    try {
+      const r = await wowConfigTuningSet(spec.settingKey, next);
+      if (r.changed) {
+        if (r.backend === "lua") {
+          // The existing lua redeploy note (the CLI's own reload hint) --
+          // lua rows apply via `.reload ale`, never a restart banner.
+          note = `Saved — ${r.reload ?? "reload the Lua scripts (Tuning tab) to apply"}.`;
+        }
+        // Conf rows: raises the existing restart banner (no-op for "none",
+        // which is what lua rows report).
+        noteApplyNeeded(normalizeApplyNeeded(r));
+      }
+      // Re-read the tuner rows so the switch reflects the value on disk.
+      await moduleTuningCache.refresh();
+    } catch (e) {
+      showErr(e);
+    } finally {
+      moduleBusy.busy = false;
+      togglingKey = null;
+    }
+  }
+
+  function toggleTitle(key: string, on: boolean): string {
+    if (togglingKey === key) return "Restart pending";
+    if (featureLocked("guided-config")) return LOCKED_HINT;
+    return on
+      ? "Turn this module off (its master switch on the Tuning tab)"
+      : "Turn this module on (its master switch on the Tuning tab)";
+  }
+
+  function cppAction(id: RowActionId, m: CppModule) {
+    if (id === "install") void install(m.key, null, m.name);
+    else if (id === "tune") openTuning(m.key);
+    else if (id === "repair") void toggleRepair(m);
+    else if (id === "remove") void removeModule(m);
+    else if (id === "toggle") void toggleModule(m.key, m.name);
+  }
+  function cppActionDisabled(id: RowActionId): boolean {
+    // The toggle writes through the tuner path, so it shares the tuner's lock.
+    if (id === "toggle") return featureLocked("guided-config");
+    return (id === "install" || id === "remove") && featureLocked("modules-cpp");
+  }
+  function cppActionTitle(id: RowActionId): string | undefined {
+    if ((id === "install" || id === "remove") && featureLocked("modules-cpp")) return LOCKED_HINT;
+    if (id === "tune") return "Open this module's tuning card";
+    return undefined;
+  }
+
+  function luaAction(id: RowActionId, m: LuaModule) {
+    if (id === "install") void installLua(m);
+    else if (id === "tune") openTuning(m.key);
+    else if (id === "remove") void removeLua(m);
+    else if (id === "toggle") void toggleModule(m.key, m.name);
+  }
+  function luaActionDisabled(id: RowActionId, aleReady: boolean): boolean {
+    // The toggle writes through the tuner path, so it shares the tuner's lock.
+    if (id === "toggle") return featureLocked("guided-config");
+    return (id === "install" || id === "remove") && (!aleReady || featureLocked("modules-lua"));
+  }
+  function luaActionTitle(id: RowActionId, aleReady: boolean): string | undefined {
+    if (id === "install" || id === "remove") {
+      if (featureLocked("modules-lua")) return LOCKED_HINT;
+      if (!aleReady) return "Install the ALE module first";
+    }
+    if (id === "tune") return "Open this module's tuning card";
+    return undefined;
+  }
+
+  function sqlAction(id: RowActionId, m: SqlModule) {
+    if (id === "install") void installSql(m);
+    else if (id === "remove") void removeSql(m);
+  }
+  function sqlActionDisabled(id: RowActionId): boolean {
+    return (id === "install" || id === "remove") && featureLocked("modules-sql");
+  }
+  function sqlActionTitle(id: RowActionId, m: SqlModule): string | undefined {
+    if (id === "remove" && m.key === "rare-drops") {
+      return "No automated reversal — restore a backup instead.";
+    }
+    if ((id === "install" || id === "remove") && featureLocked("modules-sql")) return LOCKED_HINT;
+    return undefined;
+  }
+
   function showRepairErr(e: unknown) {
     const err = e as { message?: string; hint?: string };
     repairError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
@@ -580,6 +920,13 @@
   </header>
 
   {#if error}<div class="error-card"><p>{error}</p></div>{/if}
+  <!-- Round-2 review fix: the per-module toggle (Task 4) raises the shared
+       restart state on a conf-backend write, but this tab rendered no banner
+       -- the only visible copy sat on the co-mounted (display:none) Tuning
+       tab. Same warn-card every other raising surface shows. -->
+  {#if restartState.needed}
+    <div class="card warn-card"><p>{bannerText(restartState.apply)}</p></div>
+  {/if}
   {#if moduleUpdates.lastError}<p class="inline-error">Update check failed: {moduleUpdates.lastError}</p>{/if}
   {#if moduleUpdates.checked && !moduleUpdates.lastError && Object.keys(moduleUpdates.repos).length === 0}
     <!-- A check that found zero git module clones is a valid answer -- say
@@ -624,186 +971,406 @@
     </div>
   {/if}
 
+  <!-- Needs-setup panel (Modules-page round, Task 5; the chip itself moved
+       into buildModuleRow's chips list -- round 2, Task 2), shared between
+       the cpp and lua rows below -- both families have catalog entries
+       (mod-ahbot/mod-arac are cpp; battlepass/bmah/mod-1v1-arena/
+       mod-npc-beastmaster/mod-transmog can be lua). -->
+  {#snippet setupPanel(key: string)}
+    {#if setupOpen === key}
+      {@const setup = setupFor(key)}
+      {#if setup}
+        <div class="setup-panel">
+          <p>{setup.summary}</p>
+          <ol>
+            {#each setup.steps as step (step)}
+              <li>{step}</li>
+            {/each}
+          </ol>
+          {#if setup.actions.length > 0}
+            <div class="row">
+              {#each setup.actions as action (action.label)}
+                <button onclick={() => runSetupAction(action)} disabled={busy}>{action.label}</button>
+              {/each}
+            </div>
+          {/if}
+          {#if setupCopied}<p class="muted">Copied to clipboard.</p>{/if}
+          <div class="row">
+            <button onclick={() => markSetupDone(key)}>Mark as done</button>
+          </div>
+        </div>
+      {/if}
+    {/if}
+  {/snippet}
+
+  <!-- Conf-not-activated panel (round 2, Task 2): the chip's own click
+       target -- the reason (CmdError.message) and the manual conf-activate
+       hint (CmdError.hint), same visual pattern as setupPanel above. -->
+  {#snippet confFailPanel(key: string)}
+    {#if confFailOpen === key && confFailReason[key]}
+      <div class="setup-panel">
+        <p>{confFailReason[key].message}</p>
+        {#if confFailReason[key].hint}<p class="muted">{confFailReason[key].hint}</p>{/if}
+      </div>
+    {/if}
+  {/snippet}
+
+  <!-- One row skeleton for every section (round 2, Task 1): name+status
+       left, chips after the status badge, actions in a fixed right-aligned
+       column (same order: tune · repair · remove / install). The family
+       wrappers below feed it via buildModuleRow and supply their extra
+       chips/controls through the two snippet slots -- the row MARKUP lives
+       only here. -->
+  {#snippet moduleRow(row: ModuleRow, ui: RowUi, chips?: Snippet, controls?: Snippet)}
+    {@const toggleAction = row.actions.find((a) => a.id === "toggle")}
+    <div class="modrow" class:dim={ui.dim}>
+      <div class="mhead">
+        <span class="mtitle">
+          {#if ui.onName}
+            <button class="mname-link" onclick={ui.onName} title="Open this module's tuning card">{row.title}</button>
+          {:else}
+            <strong class="mname">{row.title}</strong>
+          {/if}
+          {#if ui.url}<button class="ghlink" onclick={() => openModUrl(ui.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
+        </span>
+        {#if ui.desc}<span class="mdesc">{ui.desc}</span>{/if}
+        {#if ui.ver}<span class="mver">{ui.ver}</span>{/if}
+      </div>
+      <div class="mmid">
+        <span class="badge {ui.statusCls}">{ui.statusText}</span>
+        {#each row.chips as chip (chip.id)}
+          {#if chip.clickable}
+            <button class="mchip {chip.kind}" onclick={() => ui.onChip?.(chip)}>{chip.label}</button>
+          {:else}
+            <span class="mchip {chip.kind}">{chip.label}</span>
+          {/if}
+        {/each}
+        {#if chips}{@render chips()}{/if}
+      </div>
+      <div class="mactions">
+        {#if controls}{@render controls()}{/if}
+        {#each row.actions.filter((a) => a.id !== "toggle") as a (a.id)}
+          <button
+            class:primary={a.id === "install"}
+            onclick={() => ui.onAction(a.id)}
+            disabled={busy || a.disabled || ui.actionDisabled?.(a.id)}
+            title={ui.actionTitle?.(a.id)}
+          >
+            {ui.actionLabel?.(a.id) ?? a.label}
+          </button>
+        {/each}
+        <!-- Round 2, Task 4: the master-switch toggle lives in a FIXED slot
+             at the end of the action column -- rows without one render the
+             slot empty, so buttons never shift out of alignment. A real
+             <button role="switch"> (keyboard focusable, labelled). -->
+        <span class="mtoggle-slot">
+          {#if toggleAction}
+            <button
+              class="mtoggle"
+              class:on={ui.toggleOn}
+              role="switch"
+              aria-checked={ui.toggleOn ?? false}
+              aria-label="{row.title}: {toggleAction.label}"
+              onclick={() => ui.onAction("toggle")}
+              disabled={busy || toggleAction.disabled || ui.actionDisabled?.("toggle")}
+              title={ui.actionTitle?.("toggle")}
+            >
+              <span class="knob"></span>
+            </button>
+          {/if}
+        </span>
+      </div>
+    </div>
+  {/snippet}
+
+  {#snippet cppRow(m: CppModule)}
+    {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
+    {#snippet cppChips()}
+      {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
+    {/snippet}
+    {#snippet cppControls()}
+      {#if m.conf === "ready"}
+        <button
+          onclick={() => activateConf(m.key)}
+          disabled={busy || featureLocked("modules-conf")}
+          title={featureLocked("modules-conf") ? LOCKED_HINT : undefined}
+        >
+          Activate conf
+        </button>
+      {:else if m.conf === "active"}
+        <span class="muted">conf active</span>
+      {/if}
+      {#if m.installed}
+        <!-- The per-module Update replaces the old always-there reinstall
+             button (module-update round): it appears only when the check
+             above reported the module behind, and streams the stash-safe
+             `module update` instead of install's plain pull. -->
+        {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
+          <button
+            class="primary"
+            onclick={() => updateModule(m)}
+            disabled={busy || featureLocked("module-update")}
+            title={featureLocked("module-update")
+              ? LOCKED_HINT
+              : "Pull the module's latest source — a rebuild compiles it afterwards"}
+          >
+            Update
+          </button>
+        {:else if updatesWithServer(m.key)}
+          <span class="muted">updates with the server — use the Server update card below</span>
+        {/if}
+        {#if m.key === "mod-arac"}
+          <button
+            onclick={() => applyClientPatch(m)}
+            disabled={busy || featureLocked("arac-client-patch")}
+            title={featureLocked("arac-client-patch")
+              ? LOCKED_HINT
+              : clientPath?.path
+                ? "Copies ARAC's server DBC files into the data volume and Patch-A.MPQ into your WoW client"
+                : "Copies the server DBC files now — set your WoW client folder (card below) first to also install Patch-A.MPQ"}
+          >
+            Apply client patch
+          </button>
+        {/if}
+        {#if PLACE_NPC_KEYS.has(m.key)}
+          <button
+            onclick={() => placeNpc(m.key, m.name)}
+            disabled={busy || featureLocked("place-npc")}
+            title={featureLocked("place-npc")
+              ? LOCKED_HINT
+              : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+          >
+            Place NPC in capitals
+          </button>
+        {/if}
+      {/if}
+    {/snippet}
+    {@const cppTuneTarget = m.installed && cppHasTuningTarget(m)}
+    {@const cppToggle = m.installed ? toggleSpecFor(m.key, m.name) : null}
+    {@const cppToggleOn = cppToggle ? toggleIsOn(cppToggle, mtSettings) : false}
+    {@render moduleRow(
+      buildModuleRow(m, {
+        family: "cpp",
+        needsSetup: m.installed && needsSetup(m.key),
+        confFailChip: confFailChips[m.key] ?? null,
+        hasTuningTarget: cppTuneTarget,
+        toggle: cppToggle ? { on: cppToggleOn } : null,
+      }),
+      {
+        url: m.url,
+        desc: m.desc,
+        ver: versionLabel(m.head, m.head_date),
+        statusCls: statusClass(m),
+        statusText: statusText(m),
+        onName: cppTuneTarget ? () => openTuning(m.key) : undefined,
+        onChip: (chip) => onChipClick(chip, m.key),
+        onAction: (id) => cppAction(id, m),
+        actionDisabled: cppActionDisabled,
+        actionTitle: (id) =>
+          id === "toggle" ? toggleTitle(m.key, cppToggleOn) : cppActionTitle(id),
+        actionLabel: (id) =>
+          id === "remove" && confirmingRemove === m.key ? removeConfirmText(m) : undefined,
+        toggleOn: cppToggleOn,
+      },
+      cppChips,
+      cppControls,
+    )}
+    {@render setupPanel(m.key)}
+    {@render confFailPanel(m.key)}
+    {#if repairOpen === m.key}
+      <div class="repair-panel">
+        {#if repairError}<p class="inline-error">{repairError}</p>{/if}
+        {#if tracking}
+          {#each DB_ORDER as dbName (dbName)}
+            {@const dbData = tracking.dbs[dbName]}
+            <div class="repair-db">
+              <strong class="db-name">{dbName}</strong>
+              {#if dbData.files.length === 0 && dbData.tracked_rows.length === 0}
+                <p class="muted">nothing found</p>
+              {:else}
+                {#if dbData.files.length > 0}
+                  <div class="row">
+                    {#each dbData.files as f (f.name)}
+                      <span class="chip {f.tracked ? 'tracked' : 'untracked'}">{f.name}</span>
+                    {/each}
+                  </div>
+                {/if}
+                {#if dbData.tracked_rows.length > 0}
+                  <div class="row">
+                    {#each dbData.tracked_rows as name (name)}
+                      <span class="muted">{name}</span>
+                    {/each}
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/each}
+
+          <div class="row">
+            <label class="row">
+              DB
+              <select bind:value={repairDb} onchange={disarmRepair} disabled={busy}>
+                <option value="world">world</option>
+                <option value="characters">characters</option>
+                <option value="auth">auth</option>
+              </select>
+            </label>
+            <label class="row">
+              Mode
+              <select bind:value={repairMode} onchange={disarmRepair} disabled={busy}>
+                <option value="mark">Mark as applied — fixes "Table already exists" on start</option>
+                <option value="clear">Clear tracking — makes the server re-apply the SQL (only safe if the SQL is re-runnable)</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            {#if !confirmingRepair}
+              <button
+                class="primary"
+                onclick={() => applyRepair(m)}
+                disabled={busy || featureLocked("module-repair")}
+                title={featureLocked("module-repair") ? LOCKED_HINT : undefined}
+              >
+                Apply
+              </button>
+            {:else}
+              <span>This edits the database's update-tracking records. Continue?</span>
+              <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
+              <button onclick={() => (confirmingRepair = false)} disabled={busy}>Cancel</button>
+            {/if}
+          </div>
+
+          {#if repairResult}
+            <div class="repair-results">
+              {#each repairResult.results as r (r.file)}
+                <div class="row">
+                  <span>{r.file}</span>
+                  <span class="badge {resultClass(r.result)}">{humanizeResult(r.result)}</span>
+                </div>
+              {/each}
+              <p class="muted">Restart the server to apply.</p>
+            </div>
+          {/if}
+        {/if}
+      </div>
+    {/if}
+  {/snippet}
+
   <div class="card">
     <h3>C++ modules</h3>
     {#if list}
-      {#each list.families.cpp as m (m.key)}
-        {@const ver = versionLabel(m.head, m.head_date)}
-        {@const badge = checkBadge(moduleUpdates.checked, moduleUpdates.repos[m.key])}
-        <div class="row mrow">
-          <div class="mhead">
-            <span class="mtitle">
-              <strong class="mname">{m.name}</strong>
-              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-            </span>
-            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-            {#if ver}<span class="mver">{ver}</span>{/if}
-          </div>
-          <span class="badge {statusClass(m)}">{statusText(m)}</span>
-          {#if badge}<span class="badge {badge.cls}">{badge.text}</span>{/if}
-          {#if m.conf === "ready"}
-            <button
-              onclick={() => activateConf(m.key)}
-              disabled={busy || featureLocked("modules-conf")}
-              title={featureLocked("modules-conf") ? LOCKED_HINT : undefined}
-            >
-              Activate conf
-            </button>
-          {:else if m.conf === "active"}
-            <span class="muted">conf active</span>
-          {/if}
-          <span class="spacer"></span>
-          {#if !m.installed}
-            <button
-              class="primary"
-              onclick={() => install(m.key, null, m.name)}
-              disabled={busy || featureLocked("modules-cpp")}
-              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-            >
-              Install
-            </button>
-          {:else}
-            <!-- The per-module Update replaces the old always-there reinstall
-                 button (module-update round): it appears only when the check
-                 above reported the module behind, and streams the stash-safe
-                 `module update` instead of install's plain pull. -->
-            {#if canOfferUpdate(m.key, moduleUpdates.repos[m.key]?.behind)}
-              <button
-                class="primary"
-                onclick={() => updateModule(m)}
-                disabled={busy || featureLocked("module-update")}
-                title={featureLocked("module-update")
-                  ? LOCKED_HINT
-                  : "Pull the module's latest source — a rebuild compiles it afterwards"}
-              >
-                Update
-              </button>
-            {:else if updatesWithServer(m.key)}
-              <span class="muted">updates with the server — use the Server update card below</span>
-            {/if}
-            {#if m.key === "mod-arac"}
-              <button
-                onclick={() => applyClientPatch(m)}
-                disabled={busy || featureLocked("arac-client-patch")}
-                title={featureLocked("arac-client-patch")
-                  ? LOCKED_HINT
-                  : clientPath?.path
-                    ? "Copies ARAC's server DBC files into the data volume and Patch-A.MPQ into your WoW client"
-                    : "Copies the server DBC files now — set your WoW client folder (card below) first to also install Patch-A.MPQ"}
-              >
-                Apply client patch
-              </button>
-            {/if}
-            {#if PLACE_NPC_KEYS.has(m.key)}
-              <button
-                onclick={() => placeNpc(m.key, m.name)}
-                disabled={busy || featureLocked("place-npc")}
-                title={featureLocked("place-npc")
-                  ? LOCKED_HINT
-                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Place NPC in capitals
-              </button>
-            {/if}
-            <button onclick={() => toggleRepair(m)} disabled={busy}>Repair…</button>
-            <button
-              onclick={() => removeModule(m)}
-              disabled={busy || featureLocked("modules-cpp")}
-              title={featureLocked("modules-cpp") ? LOCKED_HINT : undefined}
-            >
-              {confirmingRemove === m.key ? removeConfirmText(m) : "Remove"}
-            </button>
-          {/if}
-        </div>
-        {#if repairOpen === m.key}
-          <div class="repair-panel">
-            {#if repairError}<p class="inline-error">{repairError}</p>{/if}
-            {#if tracking}
-              {#each DB_ORDER as dbName (dbName)}
-                {@const dbData = tracking.dbs[dbName]}
-                <div class="repair-db">
-                  <strong class="db-name">{dbName}</strong>
-                  {#if dbData.files.length === 0 && dbData.tracked_rows.length === 0}
-                    <p class="muted">nothing found</p>
-                  {:else}
-                    {#if dbData.files.length > 0}
-                      <div class="row">
-                        {#each dbData.files as f (f.name)}
-                          <span class="chip {f.tracked ? 'tracked' : 'untracked'}">{f.name}</span>
-                        {/each}
-                      </div>
-                    {/if}
-                    {#if dbData.tracked_rows.length > 0}
-                      <div class="row">
-                        {#each dbData.tracked_rows as name (name)}
-                          <span class="muted">{name}</span>
-                        {/each}
-                      </div>
-                    {/if}
-                  {/if}
-                </div>
-              {/each}
-
-              <div class="row">
-                <label class="row">
-                  DB
-                  <select bind:value={repairDb} onchange={disarmRepair} disabled={busy}>
-                    <option value="world">world</option>
-                    <option value="characters">characters</option>
-                    <option value="auth">auth</option>
-                  </select>
-                </label>
-                <label class="row">
-                  Mode
-                  <select bind:value={repairMode} onchange={disarmRepair} disabled={busy}>
-                    <option value="mark">Mark as applied — fixes "Table already exists" on start</option>
-                    <option value="clear">Clear tracking — makes the server re-apply the SQL (only safe if the SQL is re-runnable)</option>
-                  </select>
-                </label>
-              </div>
-              <div class="row">
-                {#if !confirmingRepair}
-                  <button
-                    class="primary"
-                    onclick={() => applyRepair(m)}
-                    disabled={busy || featureLocked("module-repair")}
-                    title={featureLocked("module-repair") ? LOCKED_HINT : undefined}
-                  >
-                    Apply
-                  </button>
-                {:else}
-                  <span>This edits the database's update-tracking records. Continue?</span>
-                  <button class="primary" onclick={() => applyRepair(m)} disabled={busy}>Confirm</button>
-                  <button onclick={() => (confirmingRepair = false)} disabled={busy}>Cancel</button>
-                {/if}
-              </div>
-
-              {#if repairResult}
-                <div class="repair-results">
-                  {#each repairResult.results as r (r.file)}
-                    <div class="row">
-                      <span>{r.file}</span>
-                      <span class="badge {resultClass(r.result)}">{humanizeResult(r.result)}</span>
-                    </div>
-                  {/each}
-                  <p class="muted">Restart the server to apply.</p>
-                </div>
-              {/if}
-            {/if}
-          </div>
-        {/if}
+      {@const parts = splitInstalled(list.families.cpp, (m) => m.installed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render cppRow(m)}
       {/each}
+      <button class="avail-toggle" onclick={() => (cppExpanded = !cppExpanded)}>
+        {cppExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if cppExpanded}
+        {#each parts.available as m (m.key)}
+          {@render cppRow(m)}
+        {/each}
+      {/if}
     {/if}
   </div>
+
+  {#snippet luaRow(m: LuaModule, aleReady: boolean)}
+    {@const luaTuneTarget = luaHasTuningTarget(m)}
+    <!-- Deployed only: a cloned-not-deployed script's registry row reads
+         not-installed and the tuner write would refuse it anyway. -->
+    {@const luaToggle = m.deployed ? toggleSpecFor(m.key, m.name) : null}
+    {@const luaToggleOn = luaToggle ? toggleIsOn(luaToggle, mtSettings) : false}
+    {@const row = buildModuleRow(m, {
+      family: "lua",
+      needsSetup: m.deployed && needsSetup(m.key),
+      hasTuningTarget: luaTuneTarget,
+      toggle: luaToggle ? { on: luaToggleOn } : null,
+    })}
+    {#snippet luaControls()}
+      {#if m.has_sql}
+        <label class="row">
+          <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
+          Back up first (recommended)
+        </label>
+      {/if}
+      {#if m.key === "battlepass" && m.deployed}
+        <!-- Batch 3 F13b: the upstream battlepass SQL ships no vendor
+             NPC -- this places entry 90100 in both capitals. -->
+        <button
+          onclick={fixitBattlepassNpc}
+          disabled={busy || featureLocked("module-fixit")}
+          title={featureLocked("module-fixit")
+            ? LOCKED_HINT
+            : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+        >
+          Fix missing NPC
+        </button>
+      {/if}
+      {#if PLACE_NPC_KEYS.has(m.key) && m.deployed}
+        <!-- Batch 2 (overnight): spawn the mod's NPC (e.g. BMAH
+             Auctioneer) in both capitals from its coord block. -->
+        <button
+          onclick={() => placeNpc(m.key, m.name)}
+          disabled={busy || featureLocked("place-npc")}
+          title={featureLocked("place-npc")
+            ? LOCKED_HINT
+            : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
+        >
+          Place NPC in capitals
+        </button>
+      {/if}
+    {/snippet}
+    {@render moduleRow(
+      row,
+      {
+        url: m.url,
+        desc: m.desc,
+        statusCls: luaStatus(m) === "installed" ? "on" : luaStatus(m) === "cloned" ? "warn" : "off",
+        statusText: luaStatusLabel(luaStatus(m)),
+        dim: !aleReady,
+        onName: row.installed && luaTuneTarget ? () => openTuning(m.key) : undefined,
+        onChip: (chip) => onChipClick(chip, m.key),
+        onAction: (id) => luaAction(id, m),
+        actionDisabled: (id) => luaActionDisabled(id, aleReady),
+        actionTitle: (id) =>
+          id === "toggle" ? toggleTitle(m.key, luaToggleOn) : luaActionTitle(id, aleReady),
+        actionLabel: (id) =>
+          id === "remove" && confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
+        toggleOn: luaToggleOn,
+      },
+      undefined,
+      luaControls,
+    )}
+    {#if m.deployed}{@render setupPanel(m.key)}{/if}
+    {#if m.warn}
+      <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
+           `.test` command), shown only when the CLI reports it. -->
+      <p class="mod-warn">⚠ {m.warn}</p>
+    {/if}
+  {/snippet}
 
   <div class="card">
     <h3>Lua scripts (ALE)</h3>
     {#if list}
+      {@const parts = splitInstalled(list.families.lua, (m) => m.cloned || m.deployed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render luaRow(m, list.ale_ready)}
+      {/each}
       {#if !list.ale_ready}
         {@const offer = aleInstallOffer(list.families.cpp, list.ale_ready)}
         <!-- Deliberately NOT hiding the list: it's a catalog of what you
              could install, so hiding it hides the reason to install ALE at
-             all. Rows render disabled beneath this note instead. -->
+             all. Rows render disabled beneath this note instead. Placed
+             above the Available section (Task 3): that's the catalog it's
+             explaining. -->
         <div class="ale-note">
           <p class="muted">
             These scripts need the ALE module (mod-ale) — the Eluna engine that runs
@@ -823,142 +1390,83 @@
           {/if}
         </div>
       {/if}
-      {#each list.families.lua as m (m.key)}
-          <div class="row mrow" class:needs-ale={!list.ale_ready}>
-            <div class="mhead">
-              <span class="mtitle">
-                <strong class="mname">{m.name}</strong>
-                {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-              </span>
-              {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-            </div>
-            <span class="badge {m.cloned ? 'on' : 'off'}">Cloned</span>
-            <span class="badge {m.deployed ? 'on' : 'off'}">Deployed</span>
-            <span class="spacer"></span>
-            {#if m.has_sql}
-              <label class="row">
-                <input type="checkbox" bind:checked={luaBackup[m.key]} disabled={busy} />
-                Back up first (recommended)
-              </label>
-            {/if}
-            {#if m.key === "battlepass" && m.deployed}
-              <!-- Batch 3 F13b: the upstream battlepass SQL ships no vendor
-                   NPC -- this places entry 90100 in both capitals. -->
-              <button
-                onclick={fixitBattlepassNpc}
-                disabled={busy || featureLocked("module-fixit")}
-                title={featureLocked("module-fixit")
-                  ? LOCKED_HINT
-                  : "Place the missing Battle Pass NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Fix missing NPC
-              </button>
-            {/if}
-            {#if PLACE_NPC_KEYS.has(m.key) && m.deployed}
-              <!-- Batch 2 (overnight): spawn the mod's NPC (e.g. BMAH
-                   Auctioneer) in both capitals from its coord block. -->
-              <button
-                onclick={() => placeNpc(m.key, m.name)}
-                disabled={busy || featureLocked("place-npc")}
-                title={featureLocked("place-npc")
-                  ? LOCKED_HINT
-                  : "Spawn this NPC in Stormwind + Orgrimmar (needs a world restart to appear)"}
-              >
-                Place NPC in capitals
-              </button>
-            {/if}
-            <button
-              class="primary"
-              onclick={() => installLua(m)}
-              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua")
-                ? LOCKED_HINT
-                : !list.ale_ready
-                  ? "Install the ALE module first"
-                  : undefined}
-            >
-              Install
-            </button>
-            <button
-              onclick={() => removeLua(m)}
-              disabled={busy || !list.ale_ready || featureLocked("modules-lua")}
-              title={featureLocked("modules-lua")
-                ? LOCKED_HINT
-                : !list.ale_ready
-                  ? "Install the ALE module first"
-                  : undefined}
-            >
-              {confirmingLuaRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-            </button>
-          </div>
-          {#if m.warn}
-            <!-- Batch 6 A: read-only advisory (e.g. Paragon's unguarded
-                 `.test` command), shown only when the CLI reports it. -->
-            <p class="mod-warn">⚠ {m.warn}</p>
-          {/if}
+      <button class="avail-toggle" onclick={() => (luaExpanded = !luaExpanded)}>
+        {luaExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if luaExpanded}
+        {#each parts.available as m (m.key)}
+          {@render luaRow(m, list.ale_ready)}
         {/each}
+      {/if}
     {/if}
   </div>
+
+  {#snippet sqlRow(m: SqlModule)}
+    {#snippet sqlControls()}
+      {#if !m.installed}
+        {#if m.key === "hearthstone-cd"}
+          <label class="row">
+            Cooldown
+            <select bind:value={hearthstoneVariant} disabled={busy}>
+              <option value="1sec">1sec</option>
+              <option value="1min">1min</option>
+              <option value="5min">5min</option>
+              <option value="15min">15min</option>
+              <option value="30min">30min</option>
+            </select>
+          </label>
+        {:else if m.key === "npc-teleporter"}
+          <label class="row">
+            Level
+            <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
+          </label>
+        {/if}
+      {/if}
+      <label class="row">
+        <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
+        Back up first (recommended)
+      </label>
+    {/snippet}
+    {@render moduleRow(
+      buildModuleRow(m, { family: "sql", removeDisabled: m.key === "rare-drops" }),
+      {
+        url: m.url,
+        desc: m.desc,
+        statusCls: m.installed ? "on" : "off",
+        statusText: m.installed ? "Installed" : "Not installed",
+        onAction: (id) => sqlAction(id, m),
+        actionDisabled: sqlActionDisabled,
+        actionTitle: (id) => sqlActionTitle(id, m),
+        actionLabel: (id) =>
+          id === "remove" && confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : undefined,
+      },
+      undefined,
+      sqlControls,
+    )}
+    {#if m.type === "tweak_world"}
+      <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
+    {/if}
+  {/snippet}
 
   <div class="card">
     <h3>SQL mods</h3>
     {#if list}
-      {#each list.families.sql as m (m.key)}
-        <div class="row mrow">
-          <div class="mhead">
-            <span class="mtitle">
-              <strong class="mname">{m.name}</strong>
-              {#if m.url}<button class="ghlink" onclick={() => openModUrl(m.url)} title="Open the project page in your browser">GitHub ↗</button>{/if}
-            </span>
-            {#if m.desc}<span class="mdesc">{m.desc}</span>{/if}
-          </div>
-          <span class="badge {m.installed ? 'on' : 'off'}">Installed</span>
-          {#if m.key === "hearthstone-cd"}
-            <label class="row">
-              Cooldown
-              <select bind:value={hearthstoneVariant} disabled={busy}>
-                <option value="1sec">1sec</option>
-                <option value="1min">1min</option>
-                <option value="5min">5min</option>
-                <option value="15min">15min</option>
-                <option value="30min">30min</option>
-              </select>
-            </label>
-          {:else if m.key === "npc-teleporter"}
-            <label class="row">
-              Level
-              <input type="number" min="1" max="80" bind:value={npcTeleporterLevel} disabled={busy} />
-            </label>
-          {/if}
-          <span class="spacer"></span>
-          <label class="row">
-            <input type="checkbox" bind:checked={sqlBackup[m.key]} disabled={busy} />
-            Back up first (recommended)
-          </label>
-          <button
-            class="primary"
-            onclick={() => installSql(m)}
-            disabled={busy || featureLocked("modules-sql")}
-            title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-          >
-            Install
-          </button>
-          {#if m.key === "rare-drops"}
-            <button disabled title="No automated reversal — restore a backup instead.">Remove</button>
-          {:else}
-            <button
-              onclick={() => removeSql(m)}
-              disabled={busy || featureLocked("modules-sql")}
-              title={featureLocked("modules-sql") ? LOCKED_HINT : undefined}
-            >
-              {confirmingSqlRemove === m.key ? `Remove ${m.name} — sure?` : "Remove"}
-            </button>
-          {/if}
-        </div>
-        {#if m.type === "tweak_world"}
-          <p class="muted">Tweaks replace each other — installing one removes the active one.</p>
-        {/if}
+      {@const parts = splitInstalled(list.families.sql, (m) => m.installed)}
+      <h4>Installed ({parts.installed.length})</h4>
+      {#if parts.installed.length === 0}
+        <p class="muted">Nothing installed yet — browse Available below.</p>
+      {/if}
+      {#each parts.installed as m (m.key)}
+        {@render sqlRow(m)}
       {/each}
+      <button class="avail-toggle" onclick={() => (sqlExpanded = !sqlExpanded)}>
+        {sqlExpanded ? "▾" : "▸"} Available ({parts.available.length})
+      </button>
+      {#if sqlExpanded}
+        {#each parts.available as m (m.key)}
+          {@render sqlRow(m)}
+        {/each}
+      {/if}
     {/if}
   </div>
 
@@ -1130,7 +1638,11 @@
   <!-- Both stay MOUNTED while hidden (display:none, not {#if}) so staged
        edits survive tab switches; `active` gates their lazy loads. -->
   <div class="panel" style:display={tab === "tuning" ? null : "none"}>
-    <ModuleTuning active={tab === "tuning"} onupdated={refresh} />
+    <ModuleTuning
+      active={tab === "tuning"}
+      onupdated={refresh}
+      onOpenFile={() => (tab = "files")}
+    />
   </div>
   <div class="panel" style:display={tab === "files" ? null : "none"}>
     <ModuleFiles active={tab === "files"} />
@@ -1155,14 +1667,99 @@
   .bar h2 { margin: 0; font-size: 18px; }
   .card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
   .card h3 { margin: 0; font-size: 15px; color: #58a6ff; }
+  .card h4 { margin: 4px 0 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #8b949e; }
   .card p { margin: 0; }
+  /* Installed/Available split (Modules-page round): the toggle reads as a
+     row of its own, not a button competing with the module action buttons. */
+  .avail-toggle {
+    align-self: flex-start;
+    background: none;
+    border: none;
+    color: #8b949e;
+    font-size: 12px;
+    padding: 4px 0;
+    cursor: pointer;
+  }
+  .avail-toggle:hover { color: #c9d1d9; }
   .warn-card { border-color: #d29922; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  /* .mrow survives for the Server-update card's repo rows only -- module
+     rows all use .modrow below (round 2, Task 1). */
   .mrow { padding: 6px 0; border-top: 1px solid #21262d; }
   .mrow:first-of-type { border-top: none; }
 
-  /* ALE missing: the lua catalog stays readable (that's the point -- it shows
-     what you'd get) but reads as unavailable. */
+  /* One row skeleton for every module section (round 2, Task 1): a 3-column
+     grid -- name block | status+chips | right-aligned action column with a
+     shared min-width so the actions line up across rows and sections. One
+     row height, one separator, all families. */
+  .modrow {
+    display: grid;
+    grid-template-columns: minmax(260px, 460px) minmax(120px, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    min-height: 44px;
+    padding: 6px 0;
+    border-top: 1px solid #21262d;
+  }
+  .modrow:first-of-type { border-top: none; }
+  /* ALE missing: the lua catalog stays readable (that's the point -- it
+     shows what you'd get) but reads as unavailable. */
+  .modrow.dim { opacity: 0.55; }
+  .mmid { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .mactions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    min-width: 300px;
+  }
+  /* One chip style block (round 2, Task 1): shared size/padding/radius,
+     kind -> color token. Rendered from the builder's RowChip list, which
+     Tasks 2-4 populate. */
+  .mchip {
+    font-size: 12px;
+    padding: 2px 10px;
+    border-radius: 10px;
+    border: 1px solid #30363d;
+  }
+  .mchip.setup, .mchip.rebuild, .mchip.update { color: #d29922; border-color: #d29922; }
+  .mchip.conf-failed { color: #f85149; border-color: #f85149; }
+
+  /* Master-switch toggle (round 2, Task 4): a FIXED slot at the end of the
+     action column so rows without a toggle keep their buttons aligned --
+     the slot renders empty, never collapses. The switch itself is a real
+     button (role="switch") styled as a pill + knob. */
+  .mtoggle-slot {
+    width: 40px;
+    flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+  }
+  .mtoggle {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    padding: 0;
+    border-radius: 10px;
+    border: 1px solid #30363d;
+    background: #21262d;
+    cursor: pointer;
+  }
+  .mtoggle .knob {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #8b949e;
+    transition: left 0.15s ease, background 0.15s ease;
+  }
+  .mtoggle.on { background: #238636; border-color: #2ea043; }
+  .mtoggle.on .knob { left: 18px; background: #ffffff; }
+
+  /* ALE missing: the explainer box above the lua catalog. */
   .ale-note {
     display: flex;
     gap: 10px;
@@ -1175,10 +1772,24 @@
     margin-bottom: 6px;
   }
   .ale-note p { margin: 0; flex: 1 1 260px; }
-  .mrow.needs-ale { opacity: 0.55; }
   .mhead { display: flex; flex-direction: column; gap: 2px; min-width: 260px; max-width: 460px; }
   .mtitle { display: flex; gap: 8px; align-items: baseline; }
   .mname { min-width: 0; }
+  /* Click-to-open (Modules-page round, Task 4): installed rows' name opens
+     the Tuning tab at that module's card. Plain button styled as
+     text-with-hover-underline so it reads as a label, not chrome. (The raw
+     .conf filename link left the rows in round 2, Task 1 -- Task 3 re-homes
+     config access on the Tuning tab.) */
+  .mname-link {
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    font: inherit;
+    color: #c9d1d9;
+    font-weight: 600;
+  }
+  .mname-link:hover { text-decoration: underline; }
   .mdesc { color: #8b949e; font-size: 12px; line-height: 1.35; }
   /* Installed clone's last commit (sha · date), from the list arm's additive
      head/head_date fields -- muted version line under the description. */
@@ -1215,6 +1826,12 @@
   .chip.tracked { color: #3fb950; border-color: #3fb950; }
   .chip.untracked { color: #8b949e; }
   .repair-results { display: flex; flex-direction: column; gap: 6px; }
+  /* Needs-setup / conf-not-activated panels (Modules-page round, Task 5;
+     round 2, Task 2): the chip itself is the click target now (.mchip,
+     rendered as a real <button> -- see the moduleRow snippet); this is just
+     the panel that click opens. */
+  .setup-panel { margin: 0 0 6px 0; padding: 10px 12px; background: #161b22; border: 1px solid #21262d; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; }
+  .setup-panel ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
   .usage { background: #161b22; border: 1px solid #21262d; border-radius: 6px; padding: 8px 10px; margin: 0; font-size: 12px; color: #8b949e; overflow-x: auto; white-space: pre; }
   /* Check-for-updates busy spinner (Tools page's doctor-button pattern). */
   .spinner {

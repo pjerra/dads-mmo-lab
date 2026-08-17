@@ -148,6 +148,7 @@ origin_gains_commit() {
   [ "$(echo "$done_line" | jq -r '.data.key')" = "mod-aoe-loot" ]
   [ "$(echo "$done_line" | jq -r '.data.changed')" = "true" ]
   [ "$(echo "$done_line" | jq -r '.data.pending_rebuild')" = "true" ]
+  [ "$(echo "$done_line" | jq -r '.data.rebuild_required')" = "true" ]
   [ "$(echo "$done_line" | jq -r '.data.before')" = "$before" ]
   after="$(git -C "$SDIR/modules/mod-aoe-loot" log -1 --format=%h)"
   [ "$(echo "$done_line" | jq -r '.data.after')" = "$after" ]
@@ -179,6 +180,57 @@ origin_gains_commit() {
   grep -q 'local-edit' "$SDIR/modules/mod-aoe-loot/b.txt"   # stash popped
   grep -q 'two' "$SDIR/modules/mod-aoe-loot/a.txt"          # update landed
   echo "$output" | grep -q '"changed":true'
+}
+
+@test "module update: a STAGED local edit lands in the backup patch too" {
+  # The dirty-worktree test above covers an UNSTAGED edit. A bare `git diff`
+  # is worktree-vs-index, so a user who had already `git add`ed their edit got
+  # an EMPTY patch while the stash carried the edit away -- the patch half of
+  # "your edits are safe in two places" was a lie for exactly that user.
+  make_module_repo mod-aoe-loot
+  origin_gains_commit mod-aoe-loot
+  echo local-edit >> "$SDIR/modules/mod-aoe-loot/b.txt"
+  git -C "$SDIR/modules/mod-aoe-loot" add b.txt
+  run bash "$DML" wow module update --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  patch="$(ls "$SDIR/modules/mod-aoe-loot"/local-changes-*.patch 2>/dev/null | head -1)"
+  [ -n "$patch" ]
+  [ -s "$patch" ]
+  grep -q 'local-edit' "$patch"
+}
+
+@test "module update: marker write fails -> pending_rebuild:false + warn, no db-import promise" {
+  make_module_repo mod-aoe-loot
+  origin_gains_commit mod-aoe-loot
+  # A DIRECTORY where the marker FILE belongs: the append can never succeed,
+  # so the rebuild banner will never light up for this pull.
+  mkdir -p "$SDIR/.dml-rebuild-pending"
+  run bash "$DML" wow module update --key mod-aoe-loot --json
+  [ "$status" -eq 0 ]
+  done_line="$(echo "$output" | grep '"event":"done"')"
+  [ "$(echo "$done_line" | jq -r '.data.changed')" = "true" ]
+  [ "$(echo "$done_line" | jq -r '.data.pending_rebuild')" = "false" ]
+  # …but the module still needs compiling: the additive rebuild_required is
+  # what stops the launcher reading this failure as "no rebuild needed".
+  [ "$(echo "$done_line" | jq -r '.data.rebuild_required')" = "true" ]
+  [ "$(echo "$output" | grep -c 'the rebuild banner will NOT light up')" = 1 ]
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
+}
+
+@test "module update: mod-arac is told its SQL is NOT auto-applied" {
+  make_module_repo mod-arac
+  origin_gains_commit mod-arac
+  run bash "$DML" wow module update --key mod-arac --json
+  [ "$status" -eq 0 ]
+  done_line="$(echo "$output" | grep '"event":"done"')"
+  [ "$(echo "$done_line" | jq -r '.data.changed')" = "true" ]
+  [ "$(echo "$done_line" | jq -r '.data.pending_rebuild')" = "false" ]
+  [ "$(echo "$done_line" | jq -r '.data.rebuild_required')" = "false" ]
+  [ ! -f "$SDIR/.dml-rebuild-pending" ]
+  [ "$(echo "$output" | grep -c 'new SQL is NOT auto-applied')" = 1 ]
+  # arac never rebuilds, so its db-import never runs: the blanket promise
+  # would be exactly backwards here.
+  [ "$(echo "$output" | grep -c 'db-import on next start')" = 0 ]
 }
 
 @test "module update: mod-playerbots refused with the Server-update hint, nothing pulled" {

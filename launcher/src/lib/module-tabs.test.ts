@@ -56,8 +56,21 @@ describe("updateDoneNote", () => {
   });
 
   it("skips the rebuild wording for data-only changes (mod-arac)", () => {
+    expect(updateDoneNote({ changed: true, pending_rebuild: false, rebuild_required: false })).toBe(
+      "Updated — no rebuild needed.",
+    );
+    // An older CLI sends no rebuild_required at all -- keep the old wording.
     expect(updateDoneNote({ changed: true, pending_rebuild: false })).toBe(
       "Updated — no rebuild needed.",
+    );
+  });
+
+  it("does not congratulate a compiled module whose rebuild was never queued", () => {
+    // changed + !pending_rebuild + rebuild_required = the marker write failed:
+    // this module will NOT compile on its own, so "no rebuild needed" would be
+    // the exact opposite of the truth.
+    expect(updateDoneNote({ changed: true, pending_rebuild: false, rebuild_required: true })).toBe(
+      "Updated — but the rebuild could not be queued. Start Server rebuild yourself.",
     );
   });
 

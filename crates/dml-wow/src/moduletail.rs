@@ -25,10 +25,57 @@ use super::db::{count_result, db_unreachable_err};
 
 // ---------------------------------------------------------------------------
 // conf-activate / `module conf` — `_module_conf_name_var`/`_module_conf_
-// dist`/`_module_conf_state_var` (`70-modules.sh:189-244`).
+// dist`/`_module_conf_state_var` (`70-modules.sh:242-297`).
 // ---------------------------------------------------------------------------
 
-/// `_module_conf_name_var` (`70-modules.sh:189-211`): the verbatim table of
+/// What [`conf_activate`] did. Only `Activated` wrote anything; the other
+/// three are QUIET outcomes, not errors — the auto-activation on install is
+/// advisory and must never fail an install (the launcher's `conf-activate`
+/// command maps them back onto its own error codes, see
+/// `launcher/src-tauri/src/lib.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfActivateOutcome {
+    /// The `.conf.dist` was copied to the active dir; carries the conf name.
+    Activated(&'static str),
+    /// An active conf already exists and `force` was false — left untouched.
+    AlreadyActive,
+    /// The module has a standard conf name but no `.conf.dist` on disk yet
+    /// (it appears after a worldserver rebuild with the module present).
+    NoDistYet,
+    /// The module has no standard conf file at all.
+    NoConf,
+}
+
+/// Copies a cpp module's `.conf.dist` into the server's active module-conf
+/// dir (`env/dist/etc/modules/<conf_name>`), creating parents. ONE resolver
+/// shared by the launcher's `module conf-activate` command and the
+/// auto-activation on install (`modmgr::install_cpp`) — the launcher's
+/// inline copy used to be the only copy.
+///
+/// `force == false` + an existing active file is [`ConfActivateOutcome::
+/// AlreadyActive`], NOT an error: a user's edited conf is never overwritten
+/// unless they ask. Mirrors bash `_module_conf_auto_activate`
+/// (`70-modules.sh`) and the `conf-activate)` arm's copy step
+/// (`90-main.sh`).
+pub fn conf_activate(sdir: &Path, key: &str, force: bool) -> std::io::Result<ConfActivateOutcome> {
+    let Some(conf_name) = module_conf_name(key) else {
+        return Ok(ConfActivateOutcome::NoConf);
+    };
+    let active = sdir.join("env").join("dist").join("etc").join("modules").join(conf_name);
+    if active.is_file() && !force {
+        return Ok(ConfActivateOutcome::AlreadyActive);
+    }
+    let Some(dist) = module_conf_dist_path(sdir, key) else {
+        return Ok(ConfActivateOutcome::NoDistYet);
+    };
+    if let Some(parent) = active.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&dist, &active)?;
+    Ok(ConfActivateOutcome::Activated(conf_name))
+}
+
+/// `_module_conf_name_var` (`70-modules.sh:242-264`): the verbatim table of
 /// modules with a standard conf file. `None` for any module without one
 /// (matches the bash `*) REPLY="" ;;` fallthrough).
 pub fn module_conf_name(key: &str) -> Option<&'static str> {
@@ -88,7 +135,7 @@ fn find_first_by_name(dir: &Path, filename: &str, cur_depth: u32, max_depth: u32
     None
 }
 
-/// `_module_conf_dist` (`70-modules.sh:235-244`): the expected fixed
+/// `_module_conf_dist` (`70-modules.sh:288-297`): the expected fixed
 /// location first (`modules/<key>/conf/<name>.dist`), else a bounded
 /// (maxdepth 4) find under `modules/<key>`. `None` when the module has no
 /// standard conf name, or neither location has the `.dist`.
@@ -102,7 +149,7 @@ pub fn module_conf_dist_path(sdir: &Path, key: &str) -> Option<PathBuf> {
     find_first_by_name(&sdir.join("modules").join(key), &dist_name, 1, 4)
 }
 
-/// `_module_conf_state_var` (`70-modules.sh:221-230`): none | needs-rebuild |
+/// `_module_conf_state_var` (`70-modules.sh:274-283`): none | needs-rebuild |
 /// ready | active.
 pub fn module_conf_state(sdir: &Path, key: &str) -> &'static str {
     let Some(name) = module_conf_name(key) else { return "none" };
@@ -711,6 +758,85 @@ mod tests {
         let found = module_conf_dist_path(&dir, "mod-transmog");
         assert_eq!(found, Some(nested.join("transmog.conf.dist")));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -- conf_activate -------------------------------------------------------
+    //
+    // Fixture shape copied from `module_conf_state_ready_when_dist_present_
+    // but_not_active` above (`std::env::temp_dir()` + a per-test unique name
+    // -- `tempfile` is NOT a dependency of this crate). Key is `mod-ah-bot`,
+    // the real registry key whose conf is `mod_ahbot.conf`.
+
+    #[test]
+    fn a_conf_activate_copies_dist_when_ready() {
+        let sdir = std::env::temp_dir().join(format!("dml-mtail-act-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sdir);
+        let dist = sdir.join("modules").join("mod-ah-bot").join("conf");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(dist.join("mod_ahbot.conf.dist"), "Key = 1\n").unwrap();
+        let out = conf_activate(&sdir, "mod-ah-bot", false).unwrap();
+        assert!(matches!(out, ConfActivateOutcome::Activated("mod_ahbot.conf")), "{out:?}");
+        let active = sdir.join("env").join("dist").join("etc").join("modules").join("mod_ahbot.conf");
+        assert_eq!(std::fs::read_to_string(active).unwrap(), "Key = 1\n");
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[test]
+    fn a_conf_activate_never_overwrites_an_existing_conf() {
+        let sdir = std::env::temp_dir().join(format!("dml-mtail-act-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sdir);
+        std::fs::create_dir_all(sdir.join("modules").join("mod-ah-bot").join("conf")).unwrap();
+        std::fs::write(sdir.join("modules").join("mod-ah-bot").join("conf").join("mod_ahbot.conf.dist"), "DEFAULT\n").unwrap();
+        std::fs::create_dir_all(sdir.join("env").join("dist").join("etc").join("modules")).unwrap();
+        std::fs::write(sdir.join("env").join("dist").join("etc").join("modules").join("mod_ahbot.conf"), "USER EDIT\n").unwrap();
+        let out = conf_activate(&sdir, "mod-ah-bot", false).unwrap();
+        assert!(matches!(out, ConfActivateOutcome::AlreadyActive), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(sdir.join("env").join("dist").join("etc").join("modules").join("mod_ahbot.conf")).unwrap(),
+            "USER EDIT\n"
+        );
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[test]
+    fn a_conf_activate_force_overwrites_an_existing_conf() {
+        // The launcher arm's `--force` contract: the ONLY way the active
+        // file is replaced. Isolates the `force` half of the guard from the
+        // `active.is_file()` half (a single sequence test would let either
+        // half satisfy it -- the recorded two-halves lesson).
+        let sdir = std::env::temp_dir().join(format!("dml-mtail-act-force-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sdir);
+        std::fs::create_dir_all(sdir.join("modules").join("mod-ah-bot").join("conf")).unwrap();
+        std::fs::write(sdir.join("modules").join("mod-ah-bot").join("conf").join("mod_ahbot.conf.dist"), "DEFAULT\n").unwrap();
+        std::fs::create_dir_all(sdir.join("env").join("dist").join("etc").join("modules")).unwrap();
+        std::fs::write(sdir.join("env").join("dist").join("etc").join("modules").join("mod_ahbot.conf"), "USER EDIT\n").unwrap();
+        let out = conf_activate(&sdir, "mod-ah-bot", true).unwrap();
+        assert!(matches!(out, ConfActivateOutcome::Activated("mod_ahbot.conf")), "{out:?}");
+        assert_eq!(
+            std::fs::read_to_string(sdir.join("env").join("dist").join("etc").join("modules").join("mod_ahbot.conf")).unwrap(),
+            "DEFAULT\n"
+        );
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[test]
+    fn a_conf_activate_no_dist_is_a_quiet_outcome_not_an_error() {
+        let sdir = std::env::temp_dir().join(format!("dml-mtail-act-nodist-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sdir);
+        std::fs::create_dir_all(sdir.join("modules").join("mod-ah-bot")).unwrap();
+        let out = conf_activate(&sdir, "mod-ah-bot", false).unwrap();
+        assert!(matches!(out, ConfActivateOutcome::NoDistYet), "{out:?}");
+        let _ = std::fs::remove_dir_all(&sdir);
+    }
+
+    #[test]
+    fn a_conf_activate_no_conf_name_is_no_conf() {
+        let sdir = std::env::temp_dir().join(format!("dml-mtail-act-noconf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sdir);
+        std::fs::create_dir_all(sdir.join("modules").join("mod-junk-to-gold")).unwrap();
+        let out = conf_activate(&sdir, "mod-junk-to-gold", false).unwrap();
+        assert!(matches!(out, ConfActivateOutcome::NoConf), "{out:?}");
+        let _ = std::fs::remove_dir_all(&sdir);
     }
 
     // -- valid_module_sql_filename -------------------------------------------------

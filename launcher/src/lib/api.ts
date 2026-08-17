@@ -556,7 +556,11 @@ export async function wowModuleUpdateCheck(): Promise<ModuleUpdateCheck> {
   return mode === "native" ? invoke("wow_module_update_check_native") : invoke("wow_module_update_check");
 }
 // Per-module source pull (patch backup + stash + ff-only, no auto rebuild).
-// Done event data: { key, changed, before, after, pending_rebuild }. Native
+// Done event data: { key, changed, before, after, pending_rebuild,
+// rebuild_required }. The last two are NOT synonyms: `rebuild_required` says
+// the module needs compiling at all (false only for data-only mod-arac),
+// `pending_rebuild` says the rebuild-pending marker really got written; they
+// disagree when that write failed -- see `updateDoneNote`. Native
 // mode runs this fully in Rust (no `dml` subprocess) via `dml::modmgr::
 // update_module` -- same Channel signature either way.
 export const wowModuleUpdate = async (

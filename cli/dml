@@ -3458,11 +3458,28 @@ _cpp_installed() { [[ -d "$1/modules/$2/.git" ]]; }
 
 _rebuild_pending_file() { echo "$1/.dml-rebuild-pending"; }
 
+# Advisory: the trailing `2>/dev/null || true` on the append is load-bearing
+# under the global `set -e`. A `||` list only protects the command BEFORE the
+# final `||`, so an append that fails (unwritable server dir, or a directory
+# sitting at the marker path) used to kill the whole install/update mid-flow
+# -- the caller's `return 0` never ran. The marker is a convenience for the
+# rebuild banner; it must never take the operation down with it. Callers that
+# report on it must ask `_rebuild_pending_has` instead of trusting this exit.
 _rebuild_pending_add() {
     local f; f="$(_rebuild_pending_file "$1")"
-    grep -qxF "$2" "$f" 2>/dev/null || printf '%s\n' "$2" >> "$f"
+    grep -qxF "$2" "$f" 2>/dev/null || printf '%s\n' "$2" >> "$f" 2>/dev/null || true
     return 0
 }
+
+# Did the marker file REALLY end up recording this key? `_rebuild_pending_add`
+# above always returns 0 on purpose (an unguarded call must never kill the
+# script under the global `set -e`), so its exit status says nothing about
+# whether the append happened -- an unwritable server dir, or a stray
+# directory sitting at the marker path, fails silently there. Callers that
+# report "the rebuild banner is up" must read the file back through this
+# helper instead. Mirrors Rust `rebuild_pending_add(...).is_ok()`
+# (crates/dml-wow/src/modmgr.rs). Exit status IS the signal.
+_rebuild_pending_has() { grep -qxF "$2" "$(_rebuild_pending_file "$1")" 2>/dev/null; }
 
 _rebuild_pending_clear() { rm -f "$(_rebuild_pending_file "$1")"; return 0; }
 
@@ -3479,9 +3496,6 @@ _rebuild_pending_json() {
     printf '[%s]' "$out"
     return 0
 }
-
-# Is <key> listed in the rebuild-pending file? (exit status)
-_rebuild_pending_has() { grep -qxF "$2" "$(_rebuild_pending_file "$1")" 2>/dev/null; }
 
 # NO-FORK batched variant for the module-list emitter: _rebuild_pending_load
 # scans the pending file ONCE (pure bash, zero forks) into a set, then
@@ -3590,6 +3604,27 @@ _module_conf_dist() {
     if [[ -f "$p" ]]; then printf '%s' "$p"; return 0; fi
     p="$(find "$sdir/modules/$key" -maxdepth 4 -type f -name "$name.dist" 2>/dev/null | head -n1)" || p=""
     [[ -n "$p" ]] && printf '%s' "$p"
+    return 0
+}
+
+# Auto-activate a cpp module's conf after install (Modules-page round, Task
+# 1; mirrors Rust `moduletail::conf_activate` with force=false): copy the
+# clone's .conf.dist into the active dir IFF no active conf exists, so the
+# server actually reads the module's settings instead of silently running
+# stock defaults. STRICTLY ADVISORY -- it never overwrites a user's edited
+# conf and never fails the install (exit 0 always). Echoes the conf name (no
+# trailing newline) when it activated, nothing otherwise. Modules whose
+# .conf.dist only appears after a rebuild activate on the NEXT install/the
+# launcher's catch-up pass instead.
+_module_conf_auto_activate() {
+    local sdir="$1" mkey="$2" cname dist active
+    _module_conf_name_var "$mkey"; cname="$REPLY"
+    [[ -z "$cname" ]] && return 0
+    active="$sdir/env/dist/etc/modules/$cname"
+    [[ -f "$active" ]] && return 0
+    dist="$(_module_conf_dist "$sdir" "$mkey")"
+    [[ -z "$dist" ]] && return 0
+    mkdir -p "$(dirname "$active")" && cp "$dist" "$active" && printf '%s' "$cname"
     return 0
 }
 
@@ -4263,7 +4298,14 @@ _wow_pull_repo() {
     if [[ -n "$dirty" ]]; then
         stamp="$(date -u +%Y%m%d-%H%M%S)"
         patch="$dir/local-changes-$stamp.patch"
-        if ! (cd "$dir" && git diff) > "$patch" 2>/dev/null; then
+        # `--binary HEAD`, not a bare `git diff` (mirrors Rust
+        # `git_diff_capture`): a bare diff is worktree-vs-INDEX, so an edit the
+        # user had already `git add`ed was backed up as an EMPTY patch while
+        # the stash below carried it away -- the "your edits are safe in two
+        # places" promise was false for exactly the user who was mid-commit.
+        # `--binary` keeps a modified binary asset (DBC/MPQ blobs ship in some
+        # module repos) re-appliable instead of a "Binary files differ" stub.
+        if ! (cd "$dir" && git diff --binary HEAD) > "$patch" 2>/dev/null; then
             rm -f "$patch"
             ndjson_error EDIT_BACKUP_FAILED "$label: could not back up local changes -- aborting" "Nothing was pulled."
             return 1
@@ -9966,14 +10008,41 @@ case "$cmd" in
                 # the rebuild-pending list (Batch 5 F2, sanctioned deviation
                 # from the generic cpp path). Its follow-up step is the
                 # client-patch arm + a plain restart instead.
-                rebreq=true
+                # `mmarked` is the REAL outcome of the marker write, kept
+                # separate from `rebreq` on purpose (Task 2, mirrors Rust
+                # `install_cpp`): a module whose marker could not be written
+                # still NEEDS a rebuild -- flipping rebuild_required to a
+                # comforting false there would trade one lie for a worse one.
+                # Only the db-import advisory below rides on `mmarked`.
+                rebreq=true; mmarked=false
                 if [[ "$mkey" == mod-arac ]]; then
                   rebreq=false
                   ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
                 else
                   _rebuild_pending_add "$sdir" "$mkey"
+                  if _rebuild_pending_has "$sdir" "$mkey"; then
+                    mmarked=true
+                  else
+                    ndjson_line warn "could not write $(_rebuild_pending_file "$sdir") -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this module stays uncompiled."
+                  fi
                 fi
-                ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                # Auto-activate the module's own conf (Modules-page round,
+                # Task 1) -- mirrors Rust `install_cpp`'s call to
+                # `moduletail::conf_activate`. Advisory: an existing conf is
+                # never overwritten and a failure is silent.
+                actconf="$(_module_conf_auto_activate "$sdir" "$mkey" || true)"
+                if [[ -n "$actconf" ]]; then
+                  ndjson_line info "Activated $actconf with defaults -- tune it on the Modules page."
+                fi
+                # The db-import advisory is only TRUE for a module that will
+                # actually be compiled in -- db-import runs as part of the
+                # rebuild the marker asks for. mod-arac never rebuilds, so it
+                # gets the opposite (and correct) instruction instead.
+                if [[ "$mmarked" == true ]]; then
+                  ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                elif [[ "$mkey" == mod-arac ]]; then
+                  ndjson_line info "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel)."
+                fi
                 ndjson_section_end module-install ok
                 ndjson_done "{\"key\":\"$mkey\",\"action\":\"$action\",\"rebuild_required\":$rebreq}"
                 ;;
@@ -10891,20 +10960,47 @@ case "$cmd" in
             uchanged=false; upend=false
             if [[ "$_WOW_PULL_CHANGED" == true ]]; then
               uchanged=true
+              # Update honesty (Modules-page round, Task 2 -- mirrors Rust
+              # `update_module`). Two claims used to be made blind:
+              #   * pending_rebuild:true came from the mere INTENT to mark, so
+              #     a marker write that failed still told the launcher "the
+              #     rebuild banner is up". It wasn't, and the freshly pulled
+              #     module silently never compiled.
+              #   * the db-import advisory was said on EVERY changed update,
+              #     mod-arac included. Arac never rebuilds, so its db-import
+              #     never runs and its new SQL is NOT applied -- the
+              #     reassurance was exactly backwards for the one module that
+              #     needs manual work.
               # mod-arac ships NO C++ (data-only: SQL + DBC + MPQ) -- same
               # sanctioned skip as the install path above: never mark it
               # rebuild-pending, point at client-patch + restart instead.
               if [[ "$ukey" == mod-arac ]]; then
                 ndjson_line info "mod-arac is data-only: no rebuild needed. Next: Apply client patch (Modules page), then restart."
+                ndjson_line info "mod-arac is data-only: new SQL is NOT auto-applied -- re-run Apply client patch / apply its SQL manually (Repair panel)."
               else
                 _rebuild_pending_add "$sdir" "$ukey"
-                upend=true
-                ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on the Modules page."
+                if _rebuild_pending_has "$sdir" "$ukey"; then
+                  upend=true
+                  ndjson_line info "Rebuild required to compile the update -- use the rebuild banner on the Modules page."
+                  ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
+                else
+                  ndjson_line warn "could not write $(_rebuild_pending_file "$sdir") -- the rebuild banner will NOT light up. Start a rebuild yourself (Modules page) or this update stays uncompiled."
+                fi
               fi
-              ndjson_line info "module SQL (if any) is applied automatically by the server's db-import on next start -- never by hand"
             fi
+            # `rebuild_required` is ADDITIVE (Task 2) and is NOT the same
+            # question as pending_rebuild: it says whether this module needs
+            # compiling at all (everything but data-only mod-arac does), while
+            # pending_rebuild says whether the banner was actually armed. They
+            # disagree exactly when the marker write failed -- and without the
+            # pair the launcher's summary reads that failure as good news.
+            # (`if` rather than `[[ … ]] && …`: under the global `set -e` a
+            # false one-liner test is itself a failing command and would end
+            # the run right here.)
+            ureq=true
+            if [[ "$ukey" == mod-arac ]]; then ureq=false; fi
             ndjson_section_end module-update ok
-            ndjson_done "{\"key\":\"$(json_escape "$ukey")\",\"changed\":$uchanged,\"before\":\"$(json_escape "$ubefore")\",\"after\":\"$(json_escape "$uafter")\",\"pending_rebuild\":$upend}"
+            ndjson_done "{\"key\":\"$(json_escape "$ukey")\",\"changed\":$uchanged,\"before\":\"$(json_escape "$ubefore")\",\"after\":\"$(json_escape "$uafter")\",\"pending_rebuild\":$upend,\"rebuild_required\":$ureq}"
             ;;
           *)
             json_err UNKNOWN_COMMAND "Unknown module subcommand: $msub" "Try: dml wow module list --json"

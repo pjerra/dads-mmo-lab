@@ -21,6 +21,7 @@
   import { applyEvent } from "$lib/terminal-state";
   import { restartState, noteApplyNeeded, clearApplyNeeded } from "$lib/restart-state.svelte";
   import { bannerText } from "$lib/apply-needed";
+  import { takeConfFile } from "$lib/module-nav.svelte";
   import Terminal from "$lib/Terminal.svelte";
   import { termBuf, beginRun, clearBuf } from "$lib/term-store.svelte";
   import { featureLocked, LOCKED_HINT } from "$lib/features.svelte";
@@ -80,6 +81,19 @@
     confirmingReset = false;
     lintConfirm = false;
     aleNote = null;
+  });
+  // Click-to-open catch-up (Modules-page round, Task 4): a pending conf-file
+  // target set on the Modules tab (an installed cpp row's conf filename) is
+  // consumed once this tab activates -- takeConfFile() clears it, so a later
+  // re-activation is a no-op. Selects the file and loads it via the same
+  // path the picker's own "Open" button uses.
+  $effect(() => {
+    if (!active) return;
+    const f = takeConfFile();
+    if (!f) return;
+    file = f;
+    onFileSelect();
+    void loadFile();
   });
 
   const currentFileMeta = $derived(confFiles.find((f) => f.name === file));
