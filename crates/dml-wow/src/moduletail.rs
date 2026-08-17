@@ -932,7 +932,16 @@ mod tests {
         let specs = npc_coord_specs("mod-transmog");
         assert_eq!(specs.len(), 2);
         assert_eq!(specs[0], NpcSpec { map: 0, entry: 190010, x: -8831.3, y: 628.2, z: 94.1, o: 3.7 });
-        assert_eq!(specs[1], NpcSpec { map: 1, entry: 190010, x: 1597.2, y: -4415.7, z: 17.5, o: 4.5 });
+        // Orgrimmar z corrected 2026-08-17: this used to pin `z: 17.5`, which
+        // is the upper city's height while the x/y sit in the Valley of
+        // Strength (floor 6.5-9.2) -- the NPC spawned ~10 yards in the air,
+        // visible but out of interaction range. The test happily pinned the
+        // bug, which is what a value-echo assertion does: it proves the parser
+        // read the constant, never that the constant is right. The check that
+        // can tell the difference is `commands::tests::
+        // every_shipped_npc_spawn_stands_on_the_floor`, which measures every
+        // shipped line against the real floor.
+        assert_eq!(specs[1], NpcSpec { map: 1, entry: 190010, x: 1595.0, y: -4401.5, z: 6.9, o: 4.5 });
     }
 
     #[test]

@@ -2160,7 +2160,7 @@ _cmd_block_for() {
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 999991 0 -8828.3 630.2 94.1 3.7   — Stormwind Arena Battlemaster (Alliance)' \
-                'npc add 999991 1 1600.2 -4413.7 17.5 4.5  — Orgrimmar Arena Battlemaster (Horde)'
+                'npc add 999991 1 1592.5 -4401.5 6.6 4.5  — Orgrimmar Arena Battlemaster (Horde)'
             ;;
         mod-arac)
             printf '%s\n' \
@@ -2263,7 +2263,7 @@ _cmd_block_for() {
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 190010 0 -8831.3 628.2 94.1 3.7   — Transmogrifier NPC, Stormwind (Alliance)' \
-                'npc add 190010 1 1597.2 -4415.7 17.5 4.5  — Transmogrifier NPC, Orgrimmar (Horde)'
+                'npc add 190010 1 1595.0 -4401.5 6.9 4.5  — Transmogrifier NPC, Orgrimmar (Horde)'
             ;;
         mod-talentbutton)
             printf '%s\n' \
@@ -2305,7 +2305,7 @@ _cmd_block_for() {
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 601026 0 -8825.3 632.2 94.1 3.7   — White Fang (Beastmaster), Stormwind (Alliance)' \
-                'npc add 601026 1 1603.2 -4411.7 17.5 4.5  — White Fang (Beastmaster), Orgrimmar (Horde)'
+                'npc add 601026 1 1597.0 -4402.0 7.3 4.5  — White Fang (Beastmaster), Orgrimmar (Horde)'
             ;;
         mod-quest-loot-party)
             printf '%s\n' \
@@ -2363,7 +2363,7 @@ _cmd_block_for() {
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 90100 0 -8819.3 636.2 94.1 3.7   — Battle Pass NPC, Stormwind (Alliance)' \
-                'npc add 90100 1 1609.2 -4407.7 17.5 4.5  — Battle Pass NPC, Orgrimmar (Horde)'
+                'npc add 90100 1 1594.5 -4404.0 6.8 4.5  — Battle Pass NPC, Orgrimmar (Horde)'
             ;;
         paragon)
             printf '%s\n' \
@@ -2382,7 +2382,7 @@ _cmd_block_for() {
                 '' \
                 'NPC Spawn Commands (worldserver console; prefix with . for in-game GM):' \
                 'npc add 2069430 0 -8816.3 638.2 94.1 3.7   — Black Market AH Auctioneer, Stormwind (Alliance)' \
-                'npc add 2069430 1 1612.2 -4405.7 17.5 4.5  — Black Market AH Auctioneer, Orgrimmar (Horde)'
+                'npc add 2069430 1 1597.5 -4404.5 7.5 4.5  — Black Market AH Auctioneer, Orgrimmar (Horde)'
             ;;
         lootpet)
             printf '%s\n' \

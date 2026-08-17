@@ -38,7 +38,7 @@ teardown() { teardown_fixture; }
   # both capital coordinates from the transmog cheat-sheet block landed.
   grep -q 'INSERT INTO creature (id, map' "$FIXTURE/q.log"
   grep -q -- '190010, 0, -8831.3, 628.2, 94.1, 3.7' "$FIXTURE/q.log"
-  grep -q -- '190010, 1, 1597.2, -4415.7, 17.5, 4.5' "$FIXTURE/q.log"
+  grep -q -- '190010, 1, 1595.0, -4401.5, 6.9, 4.5' "$FIXTURE/q.log"
 }
 
 @test "place-npc mod-transmog: per-map idempotence -- only the empty map is inserted" {
@@ -52,7 +52,7 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.maps[1].placed')" = "false" ]
   # only the Stormwind (map 0) coords were inserted; Orgrimmar's were not.
   grep -q -- '190010, 0, -8831.3, 628.2, 94.1, 3.7' "$FIXTURE/q.log"
-  run grep -- '190010, 1, 1597.2, -4415.7, 17.5, 4.5' "$FIXTURE/q.log"
+  run grep -- '190010, 1, 1595.0, -4401.5, 6.9, 4.5' "$FIXTURE/q.log"
   [ "$status" -ne 0 ]
 }
 
@@ -115,5 +115,5 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.data.entry')" = "2069430" ]
   [ "$(echo "$output" | jq -r '.data.spawns_placed')" = "2" ]
   grep -q -- '2069430, 0, -8816.3, 638.2, 94.1, 3.7' "$FIXTURE/q.log"
-  grep -q -- '2069430, 1, 1612.2, -4405.7, 17.5, 4.5' "$FIXTURE/q.log"
+  grep -q -- '2069430, 1, 1597.5, -4404.5, 7.5, 4.5' "$FIXTURE/q.log"
 }

@@ -39,7 +39,7 @@ pub fn cmd_block_for(key: &str) -> Option<String> {
             "",
             "NPC Spawn Commands (worldserver console; prefix with . for in-game GM):",
             "npc add 999991 0 -8828.3 630.2 94.1 3.7   — Stormwind Arena Battlemaster (Alliance)",
-            "npc add 999991 1 1600.2 -4413.7 17.5 4.5  — Orgrimmar Arena Battlemaster (Horde)",
+            "npc add 999991 1 1592.5 -4401.5 6.6 4.5  — Orgrimmar Arena Battlemaster (Horde)",
         ],
         "mod-arac" => &[
             "All Races All Classes (ARAC)",
@@ -135,7 +135,7 @@ pub fn cmd_block_for(key: &str) -> Option<String> {
             "",
             "NPC Spawn Commands (worldserver console; prefix with . for in-game GM):",
             "npc add 190010 0 -8831.3 628.2 94.1 3.7   — Transmogrifier NPC, Stormwind (Alliance)",
-            "npc add 190010 1 1597.2 -4415.7 17.5 4.5  — Transmogrifier NPC, Orgrimmar (Horde)",
+            "npc add 190010 1 1595.0 -4401.5 6.9 4.5  — Transmogrifier NPC, Orgrimmar (Horde)",
         ],
         "mod-talentbutton" => &[
             "Talent Button",
@@ -173,7 +173,7 @@ pub fn cmd_block_for(key: &str) -> Option<String> {
             "",
             "NPC Spawn Commands (worldserver console; prefix with . for in-game GM):",
             "npc add 601026 0 -8825.3 632.2 94.1 3.7   — White Fang (Beastmaster), Stormwind (Alliance)",
-            "npc add 601026 1 1603.2 -4411.7 17.5 4.5  — White Fang (Beastmaster), Orgrimmar (Horde)",
+            "npc add 601026 1 1597.0 -4402.0 7.3 4.5  — White Fang (Beastmaster), Orgrimmar (Horde)",
         ],
         "mod-quest-loot-party" => &[
             "Quest Loot Party",
@@ -226,7 +226,7 @@ pub fn cmd_block_for(key: &str) -> Option<String> {
             "",
             "NPC Spawn Commands (worldserver console; prefix with . for in-game GM):",
             "npc add 90100 0 -8819.3 636.2 94.1 3.7   — Battle Pass NPC, Stormwind (Alliance)",
-            "npc add 90100 1 1609.2 -4407.7 17.5 4.5  — Battle Pass NPC, Orgrimmar (Horde)",
+            "npc add 90100 1 1594.5 -4404.0 6.8 4.5  — Battle Pass NPC, Orgrimmar (Horde)",
         ],
         "paragon" => &[
             "Paragon Anniversary (ALE)",
@@ -243,7 +243,7 @@ pub fn cmd_block_for(key: &str) -> Option<String> {
             "",
             "NPC Spawn Commands (worldserver console; prefix with . for in-game GM):",
             "npc add 2069430 0 -8816.3 638.2 94.1 3.7   — Black Market AH Auctioneer, Stormwind (Alliance)",
-            "npc add 2069430 1 1612.2 -4405.7 17.5 4.5  — Black Market AH Auctioneer, Orgrimmar (Horde)",
+            "npc add 2069430 1 1597.5 -4404.5 7.5 4.5  — Black Market AH Auctioneer, Orgrimmar (Horde)",
         ],
         "lootpet" => &[
             "Loot Pet (ALE)",
@@ -467,6 +467,64 @@ mod tests {
         assert!(text.contains("Stormwind Arena Battlemaster (Alliance)"));
         // No trailing newline (command-substitution semantics).
         assert!(!text.ends_with('\n'));
+    }
+
+    /// Every shipped `npc add` line must put the NPC on the FLOOR.
+    ///
+    /// Found live 2026-08-17, and it had shipped in every one of these blocks:
+    /// all five Orgrimmar spawns used `z = 17.5`, which is the height of the
+    /// upper city (the Drag) while their x/y sit in the Valley of Strength,
+    /// where the floor is 6.5-9.1. The NPC spawned 7-10 yards in the air --
+    /// visible, out of interaction range, so right-clicking it did nothing.
+    /// The Stormwind lines were correct all along (94.1 matches that floor),
+    /// which is what made the bug look like a per-module fault rather than
+    /// one wrong constant repeated five times.
+    ///
+    /// The bug reached users twice over: `moduletail::npc_coord_specs` parses
+    /// these same lines for the "Place NPC in capitals" button, AND the block
+    /// is shown on the Commands page for people to type by hand. One wrong
+    /// number, two broken paths.
+    ///
+    /// The floors below are measured, not chosen: each is the range of
+    /// `creature.position_z` for real Blizzard NPCs standing in that capital's
+    /// service area on the live server. A spawn more than 3 yards above the
+    /// TOP of that range is airborne; more than 3 below the bottom is buried.
+    #[test]
+    fn every_shipped_npc_spawn_stands_on_the_floor() {
+        // (map, floor_low, floor_high) — map 0 = Stormwind trade district,
+        // map 1 = Orgrimmar Valley of Strength.
+        const FLOORS: [(u32, f64, f64); 2] = [(0, 94.1, 95.7), (1, 6.5, 9.2)];
+        const SLACK: f64 = 3.0;
+
+        let keys = [
+            "mod-1v1-arena", "mod-arac", "mod-dungeon-master", "mod-ah-bot", "mod-autobalance",
+            "mod-challenge-modes", "mod-solocraft", "mod-transmog", "mod-talentbutton",
+            "mod-individual-progression", "mod-player-bot-level-brackets", "mod-npc-beastmaster",
+            "mod-quest-loot-party", "mod-aoe-loot", "mod-learn-spells", "mod-junk-to-gold",
+            "battlepass", "paragon", "bmah", "lootpet",
+        ];
+        let mut checked = 0;
+        for key in keys {
+            let Some(block) = cmd_block_for(key) else { continue };
+            for line in block.lines() {
+                let t: Vec<&str> = line.split_whitespace().collect();
+                // Same shape npc_coord_specs requires: `npc add <entry> <map> <x> <y> <z> <o>`.
+                if t.len() < 8 || t[0] != "npc" || t[1] != "add" {
+                    continue;
+                }
+                let (Ok(map), Ok(z)) = (t[3].parse::<u32>(), t[6].parse::<f64>()) else { continue };
+                let Some(&(_, lo, hi)) = FLOORS.iter().find(|(m, _, _)| *m == map) else { continue };
+                assert!(
+                    z >= lo - SLACK && z <= hi + SLACK,
+                    "{key}: spawn z={z} on map {map} is off the floor ({lo}..{hi}). \
+                     Airborne NPCs are visible but un-right-clickable, which reads as \
+                     'the module is broken'. Line: {line}"
+                );
+                checked += 1;
+            }
+        }
+        // A guard that silently checked nothing would pass forever.
+        assert!(checked >= 10, "expected to check many spawn lines, only saw {checked}");
     }
 
     #[test]
