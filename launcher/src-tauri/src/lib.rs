@@ -1681,27 +1681,34 @@ pub fn backend_status_with(
 /// program that does not exist is a failure that says nothing about the engine.
 fn native_facts() -> dml_core::setup::NativeFacts {
     use dml_core::setup::Tri;
-    let program = dml_core::engine::docker_desktop_program();
-    let docker_installed = if program.is_some() { Tri::Yes } else { Tri::No };
-    let engine_running = match &program {
-        // BOUNDED, and that matters more here than almost anywhere else. This
-        // runs on the path that gates Home on every app start, and the screen
-        // it feeds is the one with no other repair on it -- a wedged docker
-        // daemon would leave `probing` true forever and disable the single
-        // button the user has. `dml_core::engine::engine_running` calls
-        // `Command::status()` with no deadline at all; `maint::docker_engine_up`
-        // exists precisely because of that and says so in its own doc comment.
-        Some(_) => {
-            if dml_wow::maint::docker_engine_up(
-                &dml_core::engine::docker_program(),
-                dml_wow::maint::PROBE_TIMEOUT,
-            ) {
-                Tri::Yes
-            } else {
-                Tri::No
-            }
-        }
-        None => Tri::Unknown,
+    // ONE probe answers both questions, and it asks about the docker CLI --
+    // not the Docker DESKTOP GUI, which is what this asked until 2026-08-19.
+    // Same fault as `startup.rs`'s `docker_present`, in a second place: on
+    // Linux docker exists WITHOUT Docker Desktop, so `docker_desktop_program()`
+    // answered None, `docker_installed` became No, and `derive_native` produced
+    // the NoDocker screen on a machine with a working, running engine. Found
+    // by clicking through the launcher on Ubuntu 22.04 after the first fix
+    // landed -- fixing detection alone just moved the wrong screen.
+    //
+    // BOUNDED, which this path requires: `engine_presence` goes through
+    // `run_bounded_outcome` with DEFAULT_PROBE_TIMEOUT. The old code called
+    // `maint::docker_engine_up` for exactly that reason; this keeps the
+    // deadline and drops the second spawn.
+    //
+    // The tri-state mapping is the honest one: a DOWN engine still means
+    // docker is installed (the launcher can start it), and only CliMissing
+    // means absent. `CouldNotTell` reads as Down inside `engine_presence`, so
+    // a probe that blew its deadline never claims docker is missing.
+    let presence = dml_core::engine::engine_presence(&dml_core::engine::docker_program());
+    let docker_installed = match presence {
+        dml_core::engine::EnginePresence::CliMissing => Tri::No,
+        _ => Tri::Yes,
+    };
+    let engine_running = match presence {
+        dml_core::engine::EnginePresence::Up => Tri::Yes,
+        dml_core::engine::EnginePresence::Down => Tri::No,
+        // No CLI: the engine question was never actually asked.
+        dml_core::engine::EnginePresence::CliMissing => Tri::Unknown,
     };
     dml_core::setup::NativeFacts { docker_installed, engine_running, titles: native_title_count() }
 }
@@ -9310,6 +9317,27 @@ pub(crate) mod stop_outcome_scan_tests {
     /// The test above is satisfied by a `stop_confirmed_down` that returns
     /// `runner.run_captured(&["games","stop",…]).is_ok()`, or `true`. Then the
     /// effect check is a rubber stamp and every assertion above still passes.
+    /// "Is docker usable?" must be asked of the docker CLI, never of the
+    /// Docker DESKTOP GUI.
+    ///
+    /// Both probes that gate the first-run experience got this wrong and both
+    /// were invisible on Windows, where the two questions coincide:
+    /// `startup.rs`'s `docker_present` routed a whole Ubuntu box to the WSL
+    /// backend, and `native_facts` then told the same box that Docker was not
+    /// installed while its engine was up and serving. Fixing the first alone
+    /// only moved the wrong screen.
+    ///
+    /// Source-scanned because neither function is reachable from a unit test:
+    /// both spawn real processes and read the real machine. `docker_desktop_
+    /// program` stays correct ELSEWHERE -- starting the GUI genuinely needs
+    /// the GUI -- so this pins the two deciding probes, not the whole file.
+    #[test]
+    fn the_docker_usability_probes_ask_the_cli_not_the_desktop_gui() {
+        let body = body_of(&production_half(include_str!("lib.rs")), "fn native_facts(");
+        assert!(body.contains("engine_presence("), "native_facts must ask the docker CLI: {body:?}");
+        assert!(!body.contains("docker_desktop_program("), "native_facts must NOT decide docker-installed from the Desktop GUI exe -- on Linux docker exists without it: {body:?}");
+    }
+
     #[test]
     fn stop_confirmed_down_asks_the_server_again() {
         let body = body_of(&production_half(include_str!("lib.rs")), "fn stop_confirmed_down(");
