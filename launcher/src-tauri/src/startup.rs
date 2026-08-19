@@ -99,8 +99,29 @@ pub fn backend_value_to_export(
 
 /// The conventional native install location, used when neither the
 /// environment nor `launcher.json` names one.
+///
+/// PER-PLATFORM, and it has to be: this read `USERPROFILE` only until
+/// 2026-08-19, which is a Windows variable. On Linux it was therefore always
+/// None, so `resolve_and_export` exported no `DML_GAMES_DIR` -- and
+/// `install_native::games_dir_for_install`, which REFUSES rather than guesses
+/// (it clones gigabytes), answered NO_GAMES_DIR. Pressing Install on Ubuntu
+/// created an empty games directory and stopped, with the launcher's own
+/// process environment carrying no DML_ vars at all -- which is how it was
+/// finally caught.
+///
+/// `$HOME/games` matches what `dml_core::compose::games_dir_from_env`'s own
+/// non-Windows fallback already resolves to, so the exporter and the readers
+/// name the SAME directory. They disagreed before, and that is exactly the
+/// shape of bug that leaves a half-installed server in a place nobody looks.
 pub fn default_games_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("dml-native"))
+    #[cfg(windows)]
+    {
+        std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("dml-native"))
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("games"))
+    }
 }
 
 /// Resolve the backend and the three paths, then export whatever the user has
@@ -283,6 +304,50 @@ fn bundled_cli_script() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The exporter and the readers must name the SAME games directory.
+    ///
+    /// `default_games_dir` read only `USERPROFILE` until 2026-08-19 -- a
+    /// Windows variable -- so on Linux it was always None, no DML_GAMES_DIR was
+    /// exported, and `install_native::games_dir_for_install` refused with
+    /// NO_GAMES_DIR. Pressing Install on Ubuntu made an empty directory and
+    /// stopped. The launcher's own /proc/<pid>/environ carried no DML_ vars,
+    /// which is what finally identified it.
+    #[test]
+    fn default_games_dir_is_answerable_on_this_platform() {
+        // Whatever platform the suite runs on, the variable this consults must
+        // be the one that platform actually sets.
+        #[cfg(windows)]
+        let home = std::env::var_os("USERPROFILE");
+        #[cfg(not(windows))]
+        let home = std::env::var_os("HOME");
+        if home.is_none() {
+            return; // no home at all: nothing to assert, and nothing to export
+        }
+        let got = default_games_dir();
+        assert!(
+            got.is_some(),
+            "a machine WITH a home directory must get a default games dir; \
+             returning None here means the install refuses with NO_GAMES_DIR"
+        );
+    }
+
+    /// ...and it must agree with what the READERS fall back to, or an install
+    /// lands somewhere nothing later looks.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_exported_default_matches_the_reader_fallback_off_windows() {
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let reader = dml_core::compose::games_dir_from(
+            None,
+            dml_core::compose::home_fallback(false, Some(home)),
+        );
+        assert_eq!(
+            default_games_dir().expect("HOME is set"),
+            reader,
+            "the exporter and the reader must name the same directory"
+        );
+    }
     use super::*;
 
     /// What `backend::selected()` answers AFTER `resolve_and_export` has run
