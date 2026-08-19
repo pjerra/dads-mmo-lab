@@ -297,10 +297,45 @@ pub fn resolve_and_export() {
 /// placement) — and on Windows tauri's `resource_dir()` returns exactly that
 /// directory anyway, so the two agree.
 fn bundled_cli_script() -> Option<String> {
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let script = crate::payload::paths(&exe_dir).cli_script;
-    script.is_file().then(|| script.to_string_lossy().into_owned())
+    resource_dir_candidates()
+        .into_iter()
+        .map(|d| crate::payload::paths(&d).cli_script)
+        .find(|s| s.is_file())
+        .map(|s| s.to_string_lossy().into_owned())
 }
+
+/// Where the bundled payload might be, most specific first.
+///
+/// On Windows tauri puts resources NEXT TO the exe, which is why this used
+/// to be `exe_dir` alone. A `.deb`/AppImage does not: the binary lands in
+/// `usr/bin/` and its resources in `usr/lib/<productName>/`. So on Ubuntu the
+/// lookup asked for `/usr/bin/cli/dml`, found nothing, exported no
+/// `DML_SCRIPT`, and `DmlRunner::native()` fell back to a bare `dml` -- which
+/// is not on PATH there. Every command that still shells the bash CLI then
+/// failed with `bash: dml: No such file or directory`, including the whole
+/// Library tab. The payload was installed correctly the entire time; only
+/// the search path was wrong.
+///
+/// Cannot use tauri's `resource_dir()`: this runs BEFORE the app is built
+/// (see `resolve_and_export`'s placement). Candidates are probed for the
+/// file itself rather than guessed at, so a dev build with no payload still
+/// falls through exactly as before.
+fn resource_dir_candidates() -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else { return Vec::new() };
+    let Some(dir) = exe.parent() else { return Vec::new() };
+    let mut out = vec![dir.to_path_buf()];
+    // usr/bin/<exe>  ->  usr/lib/<productName>/ (deb, rpm and AppImage all
+    // use this layout).
+    if let Some(prefix) = dir.parent() {
+        out.push(prefix.join("lib").join(PRODUCT_NAME));
+    }
+    out
+}
+
+/// `productName` from tauri.conf.json -- the directory name tauri's Linux
+/// bundlers use under `usr/lib/`. Kept in sync by
+/// `the_product_name_matches_tauri_conf`.
+const PRODUCT_NAME: &str = "DML Launcher";
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +348,35 @@ mod tests {
     /// NO_GAMES_DIR. Pressing Install on Ubuntu made an empty directory and
     /// stopped. The launcher's own /proc/<pid>/environ carried no DML_ vars,
     /// which is what finally identified it.
+    /// PRODUCT_NAME is a hand-copied duplicate of tauri.conf.json's
+    /// `productName`, and it decides where the Linux payload is looked for.
+    /// If someone renames the product and not this, the launcher silently
+    /// stops finding its bundled `cli/dml` on Linux and every bash-backed
+    /// command fails with 'dml: No such file or directory' -- the exact
+    /// failure this constant was added to fix.
+    #[test]
+    fn the_product_name_matches_tauri_conf() {
+        let conf = include_str!("../tauri.conf.json");
+        let want = format!("\"productName\": \"{PRODUCT_NAME}\"");
+        assert!(
+            conf.contains(&want),
+            "PRODUCT_NAME ({PRODUCT_NAME:?}) is not tauri.conf.json's productName"
+        );
+    }
+
+    /// The exe's own directory must stay FIRST: on Windows and in a dev
+    /// build that is where the payload really is, and a Linux-shaped guess
+    /// winning there would break the platform that already worked.
+    #[test]
+    fn the_exe_directory_is_probed_first() {
+        let c = resource_dir_candidates();
+        if c.is_empty() {
+            return; // current_exe() unavailable; nothing to assert
+        }
+        let exe_dir = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+        assert_eq!(c[0], exe_dir);
+    }
+
     #[test]
     fn default_games_dir_is_answerable_on_this_platform() {
         // Whatever platform the suite runs on, the variable this consults must
