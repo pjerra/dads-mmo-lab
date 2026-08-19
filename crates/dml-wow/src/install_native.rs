@@ -191,6 +191,15 @@ impl Stage {
     }
 }
 
+/// How many times a clone is attempted before the stage fails.
+///
+/// Three, because the failure this exists for is a transient transport
+/// reset on a download that takes tens of minutes -- losing all of it to one
+/// dropped stream and making the user press the button again is the whole
+/// complaint. Not unbounded: a genuinely unreachable GitHub should fail
+/// promptly and say so, not loop.
+pub const CLONE_ATTEMPTS: u32 = 3;
+
 /// A git repository to clone: where from, which branch, and how deep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRef {
@@ -752,8 +761,46 @@ pub fn valid_title_id(id: &str) -> bool {
 /// checkout with `autocrlf=true` hands CRLF shell scripts to a Linux build
 /// container. `-c` would apply to the clone process and be forgotten afterwards,
 /// so every later `git pull` in that tree would reintroduce the problem.
+/// The git SUBCOMMAND in an argv, skipping git's global flags.
+///
+/// `git` takes `-c <cfg>` and `-C <dir>` BEFORE the subcommand, so
+/// `args[0]` is not reliably the verb -- and assuming it was cost a real
+/// regression: adding `-c http.version=HTTP/1.1` to the clone (see
+/// [`clone_argv`]) silently stopped the install test double recognising a
+/// clone at all, so it no longer created the `.git` it models, and a resume
+/// test failed several stages later with a confusing 'directory not empty'.
+/// The double was right; the caller's assumption was not.
+pub fn git_subcommand(args: &[String]) -> Option<&str> {
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            // Flags that consume the NEXT argument.
+            "-c" | "-C" | "--git-dir" | "--work-tree" | "--namespace" => i += 2,
+            // Any other leading flag stands alone.
+            a if a.starts_with('-') => i += 1,
+            a => return Some(a),
+        }
+    }
+    None
+}
+
 pub fn clone_argv(repo: &RepoRef, dest: &Path) -> Vec<String> {
     let mut argv = vec![
+        // Force HTTP/1.1 for THIS invocation only.
+        //
+        // A 1.3 GB clone over HTTP/2 dies with `RPC failed; curl 92 HTTP/2
+        // stream 0 was not closed cleanly: CANCEL (err 8)` -- seen killing a
+        // real install at 9% on Ubuntu 22.04 (2026-08-19) over a link with 0%
+        // packet loss and 640 KB/s to spare, so it is a protocol reset, not a
+        // bad connection. The error it surfaces (`early EOF`, `fetch-pack:
+        // invalid index-pack output`) reads like broken internet, which sends
+        // the user off fixing the wrong thing.
+        //
+        // `-c` scopes it to this one git process: the alternative fix people
+        // find online is `git config --global http.version HTTP/1.1`, and an
+        // installer has no business rewriting a user's global git config.
+        "-c".to_string(),
+        "http.version=HTTP/1.1".to_string(),
         "clone".to_string(),
         // Git suppresses its counter entirely when stdout is not a terminal,
         // and ours never is. Without this flag the download is silent for the
@@ -1660,8 +1707,11 @@ impl<'a> Engine<'a> {
 
         self.line("info", format!("cloning {what} ({}, branch {})...", repo.url, repo.branch));
         let argv = clone_argv(repo, &dest);
-        let mut progress = CloneProgress::default();
-        let outcome = self.run_echo_with(&self.git_clone(argv), None, &mut |l| {
+        let mut attempt = 0;
+        let outcome = loop {
+            attempt += 1;
+            let mut progress = CloneProgress::default();
+            let outcome = self.run_echo_with(&self.git_clone(argv.clone()), None, &mut |l| {
             match progress.observe(l) {
                 Some(pct) => {
                     (self.emit)(pct_event(pct));
@@ -1673,7 +1723,26 @@ impl<'a> Engine<'a> {
                 // is not a redraw at all is real output and always shown.
                 None => !is_clone_progress_line(l),
             }
-        });
+            });
+            if outcome.is_ok() || attempt >= CLONE_ATTEMPTS {
+                break outcome;
+            }
+            // git removes its own half-written directory on failure (verified
+            // on the 2026-08-19 Ubuntu run: the failed clone left NOTHING
+            // behind), so the next attempt starts clean. Belt and braces if a
+            // future git changes that -- a leftover directory would turn a
+            // retry into the 'folder is not empty' refusal above.
+            if dest.exists() {
+                let _ = std::fs::remove_dir_all(&dest);
+            }
+            self.line(
+                "warn",
+                format!(
+                    "clone of {what} failed ({}) -- retrying ({attempt} of {CLONE_ATTEMPTS})...",
+                    outcome.detail()
+                ),
+            );
+        };
         if outcome.is_ok() {
             if let Some(sha) = repo.commit.clone() {
                 self.apply_pin(&dest, &sha, what)?;
@@ -2336,7 +2405,7 @@ mod tests {
             // the state file was allowed to skip the stage before the disk was
             // ever consulted; removing that authority exposed it.)
             if call.program == Program::Git
-                && call.args.first().map(String::as_str) == Some("clone")
+                && git_subcommand(&call.args) == Some("clone")
                 && outcome.is_ok()
             {
                 if let Some(dest) = call.args.last() {
@@ -2633,11 +2702,49 @@ mod tests {
     // -- pure argv -----------------------------------------------------------
 
     #[test]
+    fn git_subcommand_skips_the_global_flags_git_takes_before_the_verb() {
+        let s = |v: &[&str]| {
+            let owned: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+            git_subcommand(&owned).map(str::to_string)
+        };
+        assert_eq!(s(&["clone", "url"]).as_deref(), Some("clone"));
+        assert_eq!(s(&["-c", "http.version=HTTP/1.1", "clone", "url"]).as_deref(), Some("clone"));
+        assert_eq!(s(&["-C", "/some/dir", "remote", "get-url"]).as_deref(), Some("remote"));
+        // `-c` consumes its VALUE: a value that happens to look like a verb
+        // must not be mistaken for one.
+        assert_eq!(s(&["-c", "clone", "fetch"]).as_deref(), Some("fetch"));
+        assert_eq!(s(&["--progress", "status"]).as_deref(), Some("status"));
+        assert_eq!(s(&[]), None);
+        assert_eq!(s(&["-c"]), None);
+    }
+
+    /// The clone must force HTTP/1.1: over HTTP/2 a 1.3 GB clone dies with
+    /// `RPC failed; curl 92 ... CANCEL`, which surfaces as `early EOF` and
+    /// reads like broken internet. Seen killing a real install at 9% on a link
+    /// with 0% packet loss (Ubuntu 22.04, 2026-08-19).
+    #[test]
+    fn the_clone_forces_http_1_1_scoped_to_its_own_process() {
+        let argv = clone_argv(&default_core_repo(), Path::new("/games/t"));
+        let joined = argv.join(" ");
+        assert!(joined.contains("-c http.version=HTTP/1.1"), "{joined}");
+        // Scoped with `-c`, never a global config write: an installer has no
+        // business rewriting the user's ~/.gitconfig.
+        assert!(!joined.contains("config --global"), "{joined}");
+        assert_eq!(git_subcommand(&argv), Some("clone"), "{joined}");
+    }
+
+    #[test]
     fn the_core_clone_pins_autocrlf_input_and_the_playerbot_branch_and_is_not_shallow() {
         let dest = Path::new("/games/wow-server-playerbots");
         let argv = clone_argv(&default_core_repo(), dest);
         let joined = argv.join(" ");
-        assert_eq!(argv.first().map(String::as_str), Some("clone"), "{argv:?}");
+        // `-c http.version=HTTP/1.1` now precedes the subcommand (a 1.3 GB
+        // clone over HTTP/2 dies with a stream reset -- see clone_argv), so
+        // `clone` is no longer argv[0]. Assert it is THE SUBCOMMAND rather
+        // than merely present, or a stray `clone` in a URL would satisfy this.
+        assert_eq!(argv.first().map(String::as_str), Some("-c"), "{argv:?}");
+        assert_eq!(argv.get(1).map(String::as_str), Some("http.version=HTTP/1.1"), "{argv:?}");
+        assert_eq!(argv.get(2).map(String::as_str), Some("clone"), "{argv:?}");
         assert!(
             joined.contains("--config core.autocrlf=input"),
             "a Windows-side checkout must keep LF or the Linux build chokes: {joined}"
