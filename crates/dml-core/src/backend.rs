@@ -218,6 +218,11 @@ mod tests {
         assert_eq!(detect(false, true, Tri::No), Backend::Native);
     }
 
+    // WINDOWS-ONLY: detection can no longer answer Wsl off Windows, where
+    // that backend cannot exist. The BEHAVIOUR this pins is still real and
+    // still Windows' -- see detect_never_picks_wsl_off_windows for the other
+    // platform's contract.
+    #[cfg(windows)]
     #[test]
     fn a_working_wsl_user_is_left_where_they_are() {
         // They have a distro and no native server: moving them would point the
@@ -230,6 +235,11 @@ mod tests {
     /// Unknown as absence would flip a working WSL user to Native the first
     /// time `wsl.exe` was slow or busy. Staying put costs a distro-less user one
     /// extra click; the other direction costs a working user their server.
+    // WINDOWS-ONLY: detection can no longer answer Wsl off Windows, where
+    // that backend cannot exist. The BEHAVIOUR this pins is still real and
+    // still Windows' -- see detect_never_picks_wsl_off_windows for the other
+    // platform's contract.
+    #[cfg(windows)]
     #[test]
     fn a_probe_that_could_not_answer_is_not_evidence_of_no_distro() {
         assert_eq!(detect(false, true, Tri::Unknown), Backend::Wsl);
@@ -257,7 +267,11 @@ mod tests {
         // straight through would silently mean Wsl and defeat detection.
         assert_eq!(resolve(None, Some("auto"), true, true, Tri::Yes), Backend::Native);
         assert_eq!(resolve(None, Some("  AUTO "), true, true, Tri::Yes), Backend::Native);
-        assert_eq!(resolve(None, Some("auto"), false, false, Tri::Yes), Backend::Wsl);
+        // Windows-only: off Windows detection never yields Wsl.
+        #[cfg(windows)]
+        {
+            assert_eq!(resolve(None, Some("auto"), false, false, Tri::Yes), Backend::Wsl);
+        }
     }
 
     #[test]
@@ -275,7 +289,11 @@ mod tests {
         // so writing it into the env is entirely plausible.
         assert_eq!(resolve(Some("auto"), None, true, true, Tri::Yes), Backend::Native);
         assert_eq!(resolve(Some("  AUTO "), Some("wsl"), true, true, Tri::Yes), Backend::Native);
-        assert_eq!(resolve(Some("auto"), None, false, false, Tri::Yes), Backend::Wsl);
+        // Windows-only: off Windows detection never yields Wsl.
+        #[cfg(windows)]
+        {
+            assert_eq!(resolve(Some("auto"), None, false, false, Tri::Yes), Backend::Wsl);
+        }
     }
 
     #[test]
