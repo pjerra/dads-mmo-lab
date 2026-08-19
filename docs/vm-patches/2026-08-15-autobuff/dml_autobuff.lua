@@ -1,12 +1,12 @@
--- dml_autobuff.lua v2 — ALE server-side auto-buffer for dad's server.
+-- dml_autobuff.lua v3 — ALE server-side auto-buffer for dad's server.
 --
 -- #buffs on              enable   (per character, persisted)
 -- #buffs off             disable
 -- #buffs                 status: every toggle + every group choice
--- #buffs <buff> on|off   toggle one buff line (fort, motw, kings, ...)
--- #buffs <group> <pick>  choose in an exclusive group (shout, seal, aura,
---                        aspect, magearmor, lockarmor, shield, magic, mh, oh)
---                        every group accepts "none"
+-- #buffs <buff> on|off   toggle one buff line (fort, motw, thorns, ...)
+-- #buffs <group> <pick>  choose in an exclusive group (shout, blessing, seal,
+--                        aura, aspect, magearmor, lockarmor, shield, magic,
+--                        mh, oh) — every group accepts "none"
 -- #buffs reagents on|off keeper reagent kit (see below)
 --
 -- Buffs are applied as DIRECT AURAS every 10s to the player and every summon
@@ -39,10 +39,6 @@ local TOGGLES = {
   { key="motw",       name="Mark of the Wild",  shared=true,  def=true,  ids={48469,26990,9885,9884,8907,5234,6756,5232,1126} },
   { key="thorns",     name="Thorns",            shared=true,  def=true,  ids={53307,26992,9910,9756,8914,1075,782,467} },
   { key="intellect",  name="Arcane Intellect",  shared=true,  def=true,  ids={42995,27126,10157,10156,1461,1460,1459} },
-  { key="kings",      name="Blessing of Kings", shared=true,  def=true,  ids={20217} },
-  { key="might",      name="Blessing of Might", shared=true,  def=true,  ids={48932,48931,27140,25291,19838,19837,19836,19835,19834,19740} },
-  { key="wisdom",     name="Blessing of Wisdom",shared=true,  def=true,  ids={48936,48935,27142,25290,19854,19853,19852,19850,19742} },
-  { key="sanctuary",  name="Blessing of Sanctuary", shared=true, def=false, ids={20911} },
   { key="horn",       name="Horn of Winter",    shared=true,  def=true,  ids={57623,57330} },
   { key="trueshot",   name="Trueshot Aura",     shared=true,  def=true,  ids={19506} },
   { key="innerfire",  name="Inner Fire",        shared=false, def=true,  ids={48168,48040,25431,10952,10951,1006,602,7128,588} },
@@ -56,6 +52,17 @@ local TOGGLES = {
 local GROUPS = {
   shout     = { label="Warrior shout", def="battle",
                 choices={ battle=47436, commanding=47440 } },
+  -- Same-caster blessings are mutually exclusive in 3.3.5 (Might knocks off
+  -- Kings, Wisdom knocks off Might...), so blessings are a GROUP, not toggles
+  -- — the old kings/might/wisdom toggles fought each other every tick and
+  -- only the last one applied survived. Chains TOP RANK FIRST like TOGGLES.
+  -- NB Kings (20217) is a Protection TALENT on 3.3.5 — a paladin without the
+  -- talent point silently gets nothing; pick might/wisdom there.
+  blessing  = { label="Paladin blessing", def="might", shared=true,
+                choices={ kings={20217},
+                          might={48932,48931,27140,25291,19838,19837,19836,19835,19834,19740},
+                          wisdom={48936,48935,27142,25290,19854,19853,19852,19850,19742},
+                          sanctuary={20911} } },
   seal      = { label="Paladin seal", def="none",
                 choices={ righteousness=21084, command=20375, vengeance=31801,
                           corruption=53736, justice=20164 } },
@@ -82,7 +89,7 @@ local GROUPS = {
                           frostbrand={spell=58796,ench=3784}, earthliving={spell=51994,ench=3350} } },
 }
 
-local GROUP_ORDER = { "shout","seal","aura","aspect","magearmor","lockarmor","shield","magic","mh","oh" }
+local GROUP_ORDER = { "shout","blessing","seal","aura","aspect","magearmor","lockarmor","shield","magic","mh","oh" }
 
 -- One of each casting reagent, kept in the bags so the CLIENT allows the
 -- cast; the server-side reagent strip means they are never consumed.
@@ -236,7 +243,14 @@ local function buffPlayer(player)
   for key, grp in pairs(GROUPS) do
     if not grp.enchant then
       local id = grp.choices[s.g[key]]
-      if id and player:HasSpell(id) then applyAura(player, player, id) end
+      if type(id) == "table" then id = highestKnown(player, id) end -- rank chain
+      if id and player:HasSpell(id) then
+        if grp.shared then
+          for _, t in ipairs(targets) do applyAura(player, t, id) end
+        else
+          applyAura(player, player, id)
+        end
+      end
     end
   end
 
@@ -356,4 +370,4 @@ RegisterPlayerEvent(PLAYER_EVENT_ON_LOGOUT, function(event, player)
   state[player:GetGUIDLow()] = nil
 end)
 
-print("[dml_autobuff] v2 loaded — opt in with #buffs on")
+print("[dml_autobuff] v3 loaded — opt in with #buffs on")
