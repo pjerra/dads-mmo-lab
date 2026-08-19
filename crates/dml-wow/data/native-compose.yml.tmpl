@@ -68,6 +68,66 @@ services:
     image: {{IMAGE_PREFIX}}client-data:${IMAGE_TAG:-{{IMAGE_TAG}}}
     volumes:
       - client-data:/azerothcore/env/dist/data
+    # UPSTREAM'S DOWNLOADER CANNOT RESUME, so a flaky link never finishes.
+    # `inst_download_client_data` is `curl -L <url> > data.zip`: no --retry, no
+    # -C -, and `>` TRUNCATES -- so every attempt restarts at byte zero. Found
+    # live on the Ubuntu box 2026-08-19, where it died at 66 MB of 1140 MB with
+    # `curl: (56) Recv failure: Connection reset by peer` and left
+    # ac-worldserver stuck in `Created` with no map data to load.
+    #
+    # RETRYING THE CONTAINER IS NOT A FIX: from-zero retries over a link that
+    # drops every few minutes never converge, however many times you press
+    # Install. Resume is the property that matters, so we replace the fetch.
+    #
+    # The VERSION is READ FROM UPSTREAM's own source rather than pinned here,
+    # so an upstream bump follows automatically and cannot drift. If it cannot
+    # be read we call upstream's own function -- never worse than before.
+    #
+    # NB EVERY `$` IS DOUBLED. Compose interpolates this string before the
+    # container sees it, so `$$var` is how a shell variable survives; a single
+    # `$` would be eaten by compose and reach the shell empty.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -eu
+        data=/azerothcore/env/dist/data
+        fns=/azerothcore/apps/installer/includes/functions.sh
+        ver=$$(sed -n 's/^[[:space:]]*local VERSION=//p' "$$fns" 2>/dev/null | head -1 | tr -d "\"' ")
+        case "$${ver:-}" in
+          v[0-9]*) ;;
+          *)
+            echo "dml: cannot read client-data VERSION from $$fns -- using upstream downloader"
+            . "$$fns"
+            inst_download_client_data
+            exit $$?
+            ;;
+        esac
+        mkdir -p "$$data"
+        if [ -f "$$data/data-version" ] && grep -qx "INSTALLED_VERSION=$$ver" "$$data/data-version"; then
+          echo "dml: client data $$ver already installed"
+          exit 0
+        fi
+        # Version-keyed name: a partial left by an OLDER version must never be
+        # resumed into a newer one -- that would splice two archives together.
+        zip="$$data/data-$$ver.zip"
+        retry_all=--retry-all-errors
+        curl --help all 2>/dev/null | grep -q -- --retry-all-errors || retry_all=
+        echo "dml: downloading client data $$ver (resumable)"
+        if ! curl -L --fail --retry 30 --retry-delay 10 $$retry_all --continue-at - \
+             -o "$$zip" "https://github.com/wowgaming/client-data/releases/download/$$ver/data.zip"; then
+          # A COMPLETE file makes the server answer 416, which --fail reports as
+          # an error. "Already finished" must not read as "failed".
+          echo "dml: fetch returned non-zero -- testing whether the archive is complete"
+          unzip -t "$$zip" >/dev/null 2>&1 || { echo "dml: client-data download FAILED"; exit 1; }
+        fi
+        # Refuse to extract a truncated archive: a half-unzipped data dir boots
+        # a silently wrong server, which every check we have would call healthy.
+        unzip -t "$$zip" >/dev/null
+        echo "dml: extracting client data $$ver"
+        unzip -q -o "$$zip" -d "$$data/"
+        rm -f "$$zip"
+        echo "INSTALLED_VERSION=$$ver" > "$$data/data-version"
+        echo "dml: client data $$ver installed"
 
   ac-authserver:
     container_name: ac-authserver

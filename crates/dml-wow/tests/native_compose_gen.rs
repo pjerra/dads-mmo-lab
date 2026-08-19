@@ -510,6 +510,96 @@ fn worldserver_waits_for_the_database_the_schema_import_and_the_client_data() {
     );
 }
 
+/// The client-data command, as one string, straight out of the base file.
+fn client_data_command(text: &str) -> String {
+    let doc = parse(text);
+    service(&doc, "ac-client-data-init")
+        .get("command")
+        .and_then(Value::as_sequence)
+        .expect("ac-client-data-init must carry a command override")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Upstream's `inst_download_client_data` is `curl -L <url> > data.zip` — no
+/// `--retry`, no `-C -`, and `>` truncates, so every attempt restarts at byte
+/// zero. On the Ubuntu box (2026-08-19) that died at 66 MB of 1140 MB and left
+/// ac-worldserver in `Created` forever; retrying the container cannot fix it,
+/// because from-zero retries over a link that drops every few minutes never
+/// converge. RESUME is the load-bearing property, not retry.
+#[test]
+fn client_data_fetch_resumes_instead_of_restarting_from_zero() {
+    let cmd = client_data_command(&composegen::render_base(&title(), &ComposeOpts::default()).unwrap());
+    assert!(
+        cmd.contains("--continue-at -"),
+        "the fetch must resume a partial download, or a flaky link never finishes: {cmd}"
+    );
+    assert!(cmd.contains("--retry 30"), "the fetch must retry: {cmd}");
+    assert!(
+        !cmd.contains("> \"$$zip\"") && !cmd.contains("> $$zip"),
+        "a `>` redirect truncates on every attempt — that is the bug being fixed: {cmd}"
+    );
+}
+
+/// THE TRAP THIS GUARDS: compose interpolates `${...}` and `$var` in the YAML
+/// BEFORE the container sees the string, so a single-`$` shell variable is
+/// eaten by compose and reaches the shell empty — the script would then run
+/// with `data=`, `ver=` and happily `rm -f` and write in the wrong place. Every
+/// `$` in the command must therefore be doubled. Cheap to get wrong on any
+/// future edit, and silent when it is.
+#[test]
+fn client_data_command_doubles_every_dollar_for_compose_interpolation() {
+    let cmd = client_data_command(&composegen::render_base(&title(), &ComposeOpts::default()).unwrap());
+    let bytes: Vec<char> = cmd.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '$' {
+            assert_eq!(
+                bytes.get(i + 1),
+                Some(&'$'),
+                "un-doubled `$` at byte {i} — compose will eat it before the shell runs:\n{cmd}"
+            );
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// The version is read from upstream's own source so an upstream bump follows
+/// automatically. When that read fails we must call upstream's function rather
+/// than guess a version or fail the install — the fast path is an optimisation,
+/// so its worst case has to be "exactly what happened before".
+#[test]
+fn client_data_falls_back_to_upstreams_own_downloader_when_version_is_unreadable() {
+    let cmd = client_data_command(&composegen::render_base(&title(), &ComposeOpts::default()).unwrap());
+    assert!(
+        cmd.contains("inst_download_client_data"),
+        "no fallback to upstream's downloader: {cmd}"
+    );
+    assert!(
+        cmd.contains("local VERSION="),
+        "the version must be read from upstream, not pinned here: {cmd}"
+    );
+}
+
+/// A truncated archive that gets extracted anyway produces a half-populated
+/// data dir, and the worldserver boots on it — the recorded "boots a silently
+/// wrong server" class that every health check we have would call healthy.
+/// `unzip -t` must gate the extraction.
+#[test]
+fn client_data_verifies_the_archive_before_extracting_it() {
+    let cmd = client_data_command(&composegen::render_base(&title(), &ComposeOpts::default()).unwrap());
+    let test_at = cmd.find("unzip -t").expect("archive must be integrity-tested");
+    let extract_at = cmd.find("unzip -q -o").expect("archive must be extracted");
+    assert!(
+        test_at < extract_at,
+        "the integrity test must gate extraction, not follow it: {cmd}"
+    );
+}
+
 /// A service that is told to write its logs to `AC_LOGS_DIR` must have that
 /// exact container path bound back to the host, or the logs live only inside
 /// the container and a `compose down` (which recreates it) destroys them —
