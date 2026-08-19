@@ -219,13 +219,13 @@ mod tests {
     /// the commit message. Proven non-vacuous when written for 1.2.2 (flipping
     /// one byte of `02_fix_catalog_req_level.sql` turned it red), and it earned
     /// the keep again on the 1.4.0 re-extraction, which moved it.
-    const FINGERPRINT: u64 = 0x900f_d971_3f34_2982;
+    const FINGERPRINT: u64 = 0x1996_a52f_7d74_8909;
 
     #[test]
     fn the_payload_is_byte_pinned() {
         assert_eq!(MANIFEST.len(), 26, "payload file count changed");
         let total: usize = MANIFEST.iter().map(|f| f.body.len()).sum();
-        assert_eq!(total, 171_748, "payload total byte count changed");
+        assert_eq!(total, 174_399, "payload total byte count changed");
         assert_eq!(
             manifest_fingerprint(),
             FINGERPRINT,
