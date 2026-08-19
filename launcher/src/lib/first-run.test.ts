@@ -7,6 +7,7 @@ import {
   PROJECT_URL,
   type BackendStatusReport,
   type FirstRunState,
+  isLinuxPlatform,
 } from "./first-run";
 
 // SHIP-LIST 4.4. A stranger who installs the launcher lands on Home and sees a
@@ -83,6 +84,43 @@ describe("firstRunState — when NOT to take over Home", () => {
     expect(got?.action.kind).toBe("link");
   });
 
+  it("on Linux the no-docker screen never mentions Docker Desktop or a .ps1", () => {
+    // THE 2026-08-19 BUG, in one assertion. A fresh Ubuntu box reached the
+    // first-run screen and was told to run an elevated PowerShell script.
+    // On Linux the engine comes from the distro repos and Docker Desktop is
+    // an optional GUI -- both are advice the user cannot act on.
+    const got = firstRunState({
+      report: report({ state: "no_docker", backend_mode: "native" }),
+      everReady: false,
+      linux: true,
+    });
+    expect(got?.kind).toBe("no-docker");
+    const text = `${got?.title} ${got?.body} ${got?.action.kind === "link" ? got.action.url : ""}`;
+    expect(text).not.toMatch(/Install-DML\.ps1/i);
+    expect(text).not.toMatch(/Docker Desktop/i);
+    // ...and it must say the thing that actually unblocks them: the group
+    // change only applies to sessions started after it.
+    expect(got?.body).toMatch(/usermod -aG docker/);
+    expect(got?.body).toMatch(/log out and back in/i);
+  });
+
+  it("the Windows wording is unchanged when the linux flag is absent", () => {
+    // The flag is optional on purpose: every existing caller and test must
+    // keep the Windows screen, so a missing flag can never mean Linux.
+    const got = firstRunState({
+      report: report({ state: "no_docker", backend_mode: "native" }),
+      everReady: false,
+    });
+    expect(got?.title).toMatch(/Docker Desktop/);
+  });
+
+  it("isLinuxPlatform reads the UA and is not fooled by Android", () => {
+    expect(isLinuxPlatform("Mozilla/5.0 (X11; Linux x86_64) WebKit")).toBe(true);
+    expect(isLinuxPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe(false);
+    expect(isLinuxPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X)")).toBe(false);
+    // Android is Linux-kernel but not a desktop we ship to.
+    expect(isLinuxPlatform("Mozilla/5.0 (Linux; Android 14)")).toBe(false);
+  });
   /**
    * A stopped engine does NOT take over Home. User's call, 2026-08-03, and it
    * generalises past the button they pointed at: both paths that need the

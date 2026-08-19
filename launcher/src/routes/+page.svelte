@@ -35,7 +35,7 @@
   import ServerRequired from "$lib/ServerRequired.svelte";
   import { requiresServer, serverGate } from "$lib/server-gate";
   import FirstRun from "$lib/FirstRun.svelte";
-  import { firstRunState, firstRunNeedsProbe, type BackendStatusReport } from "$lib/first-run";
+  import { firstRunState, firstRunNeedsProbe, isLinuxPlatform, type BackendStatusReport } from "$lib/first-run";
   import SoapBootstrap from "$lib/SoapBootstrap.svelte";
   import {
     soapSetupState,
@@ -108,7 +108,14 @@
   }
 
   let firstRun = $derived(
-    firstRunState({ report: backend, error: backendErr, everReady: backendEverReady }),
+    firstRunState({
+      report: backend,
+      error: backendErr,
+      everReady: backendEverReady,
+      // Linux gets a package-install remedy instead of a Docker Desktop
+      // download; see first-run.ts's no_docker branch.
+      linux: typeof navigator !== "undefined" && isLinuxPlatform(navigator.userAgent),
+    }),
   );
 
   // Polling is idempotent (module-level flag) and lives here so it starts

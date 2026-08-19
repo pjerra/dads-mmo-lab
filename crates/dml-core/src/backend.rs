@@ -79,6 +79,19 @@ pub fn selected() -> Backend {
 /// is not theirs. Staying put costs a user with no distro one extra click; the
 /// other direction costs a working user their server.
 pub fn detect(native_dir_exists: bool, docker_present: bool, wsl_usable: Tri) -> Backend {
+    // WSL is a WINDOWS-ONLY backend, so off Windows no combination of the
+    // signals below can make it the right answer. Without this arm the
+    // `!docker_present` fall-through returned Wsl on Linux, and a fresh
+    // Ubuntu box was told to run an elevated PowerShell script it cannot
+    // execute (found live 2026-08-19). The honest answer there is Native
+    // plus a 'install docker' first-run screen -- which is what the native
+    // chain already produces via `derive_native`'s NoDocker state.
+    #[cfg(not(windows))]
+    {
+        let _ = (native_dir_exists, docker_present, wsl_usable);
+        return Backend::Native;
+    }
+    #[cfg(windows)]
     if !docker_present {
         return Backend::Wsl;
     }
@@ -147,6 +160,9 @@ mod tests {
         assert_eq!(from_override(Some("wsl")), Backend::Wsl);
     }
 
+    // WINDOWS-ONLY: off Windows there is no WSL to fall back TO, so the
+    // no-docker answer differs by platform. See the sibling test below.
+    #[cfg(windows)]
     #[test]
     fn detect_never_picks_native_without_docker() {
         // Native cannot start anything without an engine, so no other signal
@@ -154,6 +170,32 @@ mod tests {
         for dir in [true, false] {
             for wsl in [Tri::Yes, Tri::No, Tri::Unknown] {
                 assert_eq!(detect(dir, false, wsl), Backend::Wsl, "dir={dir} wsl={wsl:?}");
+            }
+        }
+    }
+
+    /// Off Windows, WSL is not a backend that can exist -- so NOTHING may
+    /// select it, including the no-docker case that selects it on Windows.
+    ///
+    /// This is the test that would have caught the 2026-08-19 bug: a fresh
+    /// Ubuntu box was routed to the WSL backend and shown a first-run screen
+    /// telling it to run an elevated PowerShell script. The launcher reached
+    /// that state because it probed for the Docker DESKTOP GUI rather than
+    /// the docker CLI, so `docker_present` was false -- but the deeper fault
+    /// is that `false` had anywhere to fall to. On Linux the honest answer to
+    /// 'no docker' is Native plus an install-docker screen, never WSL.
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_never_picks_wsl_off_windows() {
+        for dir in [true, false] {
+            for docker in [true, false] {
+                for wsl in [Tri::Yes, Tri::No, Tri::Unknown] {
+                    assert_eq!(
+                        detect(dir, docker, wsl),
+                        Backend::Native,
+                        "dir={dir} docker={docker} wsl={wsl:?}"
+                    );
+                }
             }
         }
     }

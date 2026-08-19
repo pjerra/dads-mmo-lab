@@ -141,6 +141,18 @@ export const PROJECT_URL = "https://github.com/DadsMmoLab/dads-mmo-lab";
  */
 export const DOCKER_URL = "https://www.docker.com/products/docker-desktop/";
 
+/** Where Docker's own Linux install instructions live. NOT the Desktop
+ *  download: on Linux the engine runs natively and Docker Desktop is an
+ *  optional GUI nobody needs to run a server. */
+export const DOCKER_LINUX_URL = "https://docs.docker.com/engine/install/ubuntu/";
+
+/** Is the webview running on Linux? Pure, so the screen copy is testable
+ *  without a browser. Reads the UA rather than pulling in @tauri-apps/
+ *  plugin-os, which would be a new dependency for one boolean. */
+export function isLinuxPlatform(ua: string): boolean {
+  return /linux/i.test(ua) && !/android/i.test(ua);
+}
+
 /**
  * The diagnostics line, made readable by a human.
  *
@@ -298,6 +310,10 @@ export function firstRunState(o: {
   report: BackendStatusReport | null;
   error?: string | null;
   everReady: boolean;
+  /** True on Linux, where the no-docker remedy is a package install
+   *  rather than a Docker Desktop download. Optional so every existing
+   *  caller and test keeps the Windows wording unchanged. */
+  linux?: boolean;
 }): FirstRunState | null {
   if (o.everReady) return null;
 
@@ -346,6 +362,21 @@ export function firstRunState(o: {
       return couldNotTell(r.blocked_at, r.distro, r.detail ?? o.error ?? "");
 
     case "no_docker":
+      // On Linux the engine IS the product -- `docker` from the distro
+      // repos is all a server needs, and Docker Desktop is an optional
+      // GUI. Sending a Linux user to the Desktop download (or worse, to
+      // an elevated .ps1) is advice they cannot act on.
+      if (o.linux) {
+        return {
+          kind: "no-docker",
+          title: "Docker isn't set up on this PC yet",
+          body:
+            "Your server runs in Docker. Install it, add yourself to the docker group, then log out and back in so the group applies: " +
+            "curl -fsSL https://get.docker.com | sh   then   sudo usermod -aG docker $USER",
+          action: { kind: "link", label: "Docker install docs ↗", url: DOCKER_LINUX_URL },
+          detail: "",
+        };
+      }
       return {
         kind: "no-docker",
         title: "Docker Desktop isn't installed on this PC yet",

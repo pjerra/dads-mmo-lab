@@ -169,9 +169,26 @@ pub fn resolve_and_export() {
             g.join("wow-server-playerbots").join(dml_wow::composegen::BASE_FILE).is_file()
         })
         .unwrap_or(false);
-    // `docker_desktop_program` has NO bare-name fallback, so `Some` means a
-    // real Docker Desktop executable was found on disk.
-    let docker_present = dml_core::engine::docker_desktop_program().is_some();
+    // "Can this machine run docker?" -- NOT "is Docker Desktop installed?".
+    //
+    // This asked `docker_desktop_program()` until 2026-08-19, which probes for
+    // the Docker DESKTOP GUI executable and has no bare-name fallback. On
+    // Windows the two questions coincide, so the bug was invisible. On Linux
+    // Docker exists WITHOUT Docker Desktop, so it answered None -> the
+    // `!docker_present` arm of `backend::detect` returned Wsl -> a fresh
+    // Ubuntu box was shown a first-run screen telling it to run an elevated
+    // PowerShell script. Found by running the launcher on a real Ubuntu 22.04
+    // machine; the CLI on the SAME box already answered `native`, because it
+    // asks `docker_program()`, which falls back to bare `docker`.
+    //
+    // `engine_presence` is the honest probe: it runs the docker CLI and
+    // distinguishes CliMissing from a merely stopped engine. A STOPPED engine
+    // still means docker is present -- the launcher can start it -- so only
+    // `CliMissing` counts as absent here.
+    let docker_present = !matches!(
+        dml_core::engine::engine_presence(&dml_core::engine::docker_program()),
+        dml_core::engine::EnginePresence::CliMissing
+    );
     // "Could the WSL backend work at all here?" Without this, detection could
     // never select Native on a fresh machine: its other signal is "a native
     // server directory exists", which only becomes true AFTER a native install
