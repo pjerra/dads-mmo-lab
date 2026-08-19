@@ -148,13 +148,15 @@ mod tests {
     /// Moved 2026-08-17 for the macro-pool round: UnboundSpellbook now
     /// reclaims its own /cast macros in place instead of spending one
     /// client macro slot per capped spell and never taking it back.
-    const FINGERPRINT: u64 = 0x4d7e_2665_b272_ba5f;
+    /// Moved 2026-08-19: a reused macro is picked up a frame AFTER the
+    /// edit, so the cursor cannot carry the slot's previous spell.
+    const FINGERPRINT: u64 = 0x7c9e_212c_8677_c3c1;
 
     #[test]
     fn the_addon_payload_is_byte_pinned() {
         assert_eq!(ADDON_FILES.len(), 43, "addon file count changed");
         let total: usize = ADDON_FILES.iter().map(|f| f.body.len()).sum();
-        assert_eq!(total, 685_375, "addon total byte count changed");
+        assert_eq!(total, 687_927, "addon total byte count changed");
         assert_eq!(
             addons_fingerprint(),
             FINGERPRINT,

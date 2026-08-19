@@ -802,6 +802,98 @@ function USB:MacroCounts()
     return account or 0, character or 0
 end
 
+-- PickupMacro straight after EditMacro handed the CURSOR the macro's
+-- PREVIOUS contents on a real client (found live 2026-08-19: the first
+-- drag of a reused slot placed the old spell on the bar, and dragging
+-- the same spell again placed the right one). The client had not caught
+-- up with the edit yet, and nothing in the output said so -- the chat
+-- line named the spell the user asked for either way.
+--
+-- So a pickup now READS THE MACRO BACK first and only puts it on the
+-- cursor once the body it finds is the body we wrote. If the client is
+-- still behind, it retries on the next frame rather than handing over
+-- something stale. Giving up is loud, because "nothing happened" and
+-- "you got the wrong spell" must not look the same.
+local PICKUP_MAX_FRAMES = 20
+
+local pickupFrame = CreateFrame("Frame")
+pickupFrame:Hide()
+local pickupJob = nil
+
+local function DeliverPickup()
+    local job = pickupJob
+    local index = USB:ResolvePoolMacro(job.name, { body = job.body })
+
+    if not index then
+        return false
+    end
+
+    -- Whatever the cursor held, it is not what the user just dragged.
+    if type(ClearCursor) == "function" then
+        pcall(ClearCursor)
+    end
+
+    if not pcall(PickupMacro, index) then
+        USB:Error("Could not put '" .. job.name .. "' on the cursor.")
+        USB:Message("It exists in /macro -- place it on a bar from there.")
+        return true
+    end
+
+    USB:Message(job.message)
+    return true
+end
+
+pickupFrame:SetScript("OnUpdate", function(self)
+    if not pickupJob then
+        self:Hide()
+        return
+    end
+
+    pickupJob.frames = pickupJob.frames + 1
+
+    -- A macro we just wrote is never delivered on the same frame we wrote
+    -- it: the readback below can answer with the new body while the
+    -- CURSOR still snapshots the old icon and tooltip, which is the whole
+    -- bug -- the chat line named the right spell and the bar got the
+    -- wrong one. One frame lets the client finish the edit first.
+    if pickupJob.frames > pickupJob.minFrames and DeliverPickup() then
+        pickupJob = nil
+        self:Hide()
+        return
+    end
+
+    if pickupJob.frames >= PICKUP_MAX_FRAMES then
+        USB:Error(
+            "'" .. pickupJob.name .. "' did not read back as the spell you"
+            .. " dragged, so nothing was put on the cursor."
+        )
+        USB:Message("Check /macro, then try the drag again.")
+        pickupJob = nil
+        self:Hide()
+    end
+end)
+
+-- name/body identify the macro we just wrote; message is what to say on
+-- success. Never picks up a macro whose body does not match.
+-- justWritten: this call follows an EditMacro/CreateMacro, so the pickup
+-- waits a frame. A macro we only looked up needs no wait.
+function USB:PickupWrittenMacro(name, body, message, justWritten)
+    pickupJob = {
+        name = name,
+        body = body,
+        message = message,
+        frames = 0,
+        minFrames = justWritten and 1 or 0,
+    }
+
+    if pickupJob.minFrames == 0 and DeliverPickup() then
+        pickupJob = nil
+        return
+    end
+
+    pickupFrame:Show()
+end
+
 function USB:PickupViaMacro(entry)
     if not (CreateMacro and PickupMacro and GetMacroIndexByName) then
         self:Error("The macro API is unavailable on this client.")
@@ -818,13 +910,10 @@ function USB:PickupViaMacro(entry)
         if record.body == body then
             local index = self:ResolvePoolMacro(name, record)
             if index then
-                if pcall(PickupMacro, index) then
-                    self:Message(
-                        "picked up '" .. name .. "' -- drop it on an action bar."
-                    )
-                else
-                    self:Error("Could not pick up the existing '" .. name .. "' macro.")
-                end
+                self:PickupWrittenMacro(
+                    name, body,
+                    "picked up '" .. name .. "' -- drop it on an action bar."
+                )
                 return
             end
         end
@@ -841,17 +930,12 @@ function USB:PickupViaMacro(entry)
                 pool[name] = nil
                 pool[newName] = { spellID = entry.spellID, body = body }
 
-                if pcall(PickupMacro, index) then
-                    self:Message(
-                        "reused free macro slot as '" .. newName
-                        .. "' -- drop it on an action bar."
-                    )
-                else
-                    self:Message(
-                        "reused free macro slot as '" .. newName
-                        .. "'. Open /macro to place it on a bar."
-                    )
-                end
+                self:PickupWrittenMacro(
+                    newName, body,
+                    "reused free macro slot as '" .. newName
+                    .. "' -- drop it on an action bar.",
+                    true
+                )
                 return
             end
         end
@@ -893,17 +977,11 @@ function USB:PickupViaMacro(entry)
 
     pool[macroName] = { spellID = entry.spellID, body = body }
 
-    if pcall(PickupMacro, macroID) then
-        self:Message(
-            "created macro '" .. macroName
-            .. "' -- drop it on an action bar."
-        )
-    else
-        self:Message(
-            "created macro '" .. macroName
-            .. "'. Open /macro to place it on a bar."
-        )
-    end
+    self:PickupWrittenMacro(
+        macroName, body,
+        "created macro '" .. macroName .. "' -- drop it on an action bar.",
+        true
+    )
 end
 
 -- What the pool holds right now, as counts plus the reclaimable names.
