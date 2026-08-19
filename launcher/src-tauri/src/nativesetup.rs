@@ -151,6 +151,16 @@ mod tests {
         assert_eq!(strip_cr("\r\r"), "");
     }
 
+    // WINDOWS-ONLY: the inputs are Git-for-Windows paths and the feature
+    // they serve (a Defender exclusion) has no meaning elsewhere. On Linux
+    // `std::path::Path` does not treat a backslash as a separator, so
+    // `ancestors()` never yields a `Git` component and the function
+    // correctly answers None -- the ASSERTIONS are what is Windows-specific
+    // here, not the code. Found on the first-ever Linux run of this suite
+    // (2026-08-19, Ubuntu 22.04), where it was the ONLY failure out of
+    // ~1800. Same rule the workspace already records: never hardcode a
+    // drive-letter Path literal in an ungated test.
+    #[cfg(windows)]
     #[test]
     fn git_root_found_in_both_bash_layouts() {
         assert_eq!(
