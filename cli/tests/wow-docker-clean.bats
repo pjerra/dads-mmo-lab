@@ -81,8 +81,14 @@ _done_data() { echo "$1" | grep '"event":"done"' | tail -1; }
   [ "$(echo "$d" | jq -r '.data.cleaned')" = "true" ]
 }
 
-@test "docker-clean level 3: prunes unused images" {
+@test "docker-clean level 3: prunes DANGLING images only -- never -a" {
+  # `image prune -af` deletes every image no RUNNING container uses, and a
+  # STOPPED server's images are exactly that: stage 3 with the stack down
+  # deleted all four tagged dml.local images on a real box (2026-08-20). The
+  # -a must never come back.
   run bash "$DML" wow docker-clean --level 3 --json
   [ "$status" -eq 0 ]
-  grep -q '^image prune -af$' "$DML_STUB_CALL_LOG"
+  grep -q '^image prune -f$' "$DML_STUB_CALL_LOG"
+  [ "$(grep -c 'image prune -af' "$DML_STUB_CALL_LOG")" = 0 ]
+  [ "$(grep -c 'image prune.*-a\b' "$DML_STUB_CALL_LOG")" = 0 ]
 }

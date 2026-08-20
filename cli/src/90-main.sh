@@ -2264,9 +2264,15 @@ case "$cmd" in
           fi
         fi
         if [[ "$dclevel" -ge 3 ]]; then
-          ndjson_line info "pruning unused images..."
+          # DANGLING only -- never -a. `image prune -af` means "delete every
+          # image no RUNNING container uses", and a STOPPED server's images
+          # are exactly that: stage 3 with the stack down deleted all four
+          # tagged dml.local images on a real box (2026-08-20), leaving a
+          # server that could not start. Dangling-only still reclaims the
+          # real garbage -- every rebuild strips the old image of its tag.
+          ndjson_line info "pruning dangling images..."
           dcirc=0
-          if dciout="$(docker image prune -af 2>&1)"; then :; else dcirc=$?; fi
+          if dciout="$(docker image prune -f 2>&1)"; then :; else dcirc=$?; fi
           if [[ -n "$dciout" ]]; then
             while IFS= read -r dcl || [[ -n "$dcl" ]]; do
               [[ -n "$dcl" ]] && ndjson_line info "$dcl"

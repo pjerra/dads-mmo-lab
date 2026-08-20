@@ -61,7 +61,7 @@ pub use dml_core::proc::{CapturedRun, run_captured, drain_lines, run_streamed_un
 /// `maint::PROBE_TIMEOUT`'s "quick local read" budget, just a little more
 /// generous since these are mutations, not pure reads.
 pub const QUICK_OP_TIMEOUT: Duration = Duration::from_secs(30);
-/// `docker builder prune -af` / `docker image prune -af` walk and delete
+/// `docker builder prune -af` / `docker image prune -f` walk and delete
 /// potentially many cache layers/images — more budget than
 /// [`QUICK_OP_TIMEOUT`], but still bounded (best-effort: a timeout here
 /// degrades to a warn line, never aborts the rest of `docker-clean`).
@@ -712,8 +712,15 @@ pub fn docker_clean_stream(level: u8, emit: impl Fn(serde_json::Value)) {
     }
 
     if level >= 3 {
-        emit(modmgr::line_event("info", "pruning unused images..."));
-        let image_run = destructive::run_captured(&docker_program, &["image", "prune", "-af"], destructive::PRUNE_TIMEOUT);
+        // DANGLING only -- never -a. `image prune -af` means "delete every
+        // image no RUNNING container uses", and a STOPPED server's images are
+        // exactly that: stage 3 with the stack down deleted all four tagged
+        // dml.local images on a real box (2026-08-20), leaving a server that
+        // could not start until a full image rebuild. Dangling-only still
+        // reclaims the real garbage -- every rebuild strips the old image of
+        // its tag. Mirrors the bash arm word for word.
+        emit(modmgr::line_event("info", "pruning dangling images..."));
+        let image_run = destructive::run_captured(&docker_program, &["image", "prune", "-f"], destructive::PRUNE_TIMEOUT);
         for line in &image_run.lines {
             emit(modmgr::line_event("info", line.clone()));
         }
