@@ -7959,7 +7959,18 @@ case "$cmd" in
             # every *.conf / *.conf.dist basename found under modules/
             # (deduped; the fixed names win if a module conf shadows them).
             # Powers the GUI file picker instead of its old hardcoded list.
-            _cfg_preamble
+            #
+            # NOT _cfg_preamble: this arm is a pure directory listing and
+            # never touches yq, but the preamble demands it anyway -- which
+            # made the launcher's Module tuning page open with MISSING_DEP on
+            # native Linux, where no yq exists (found live 2026-08-20; the
+            # native route is fixed too, this keeps the bash surface honest).
+            # Only the preamble's OTHER half is needed: cfg_sdir.
+            cfg_sdir="$(_wow_server_dir)"
+            if [[ -z "$cfg_sdir" ]]; then
+              json_err NOT_FOUND "WoW Playerbots server not installed" "Install it first, then re-run."
+              exit 1
+            fi
             moddir="$cfg_sdir/env/dist/etc/modules"
             dynnames="$(ls -1 "$moddir" 2>/dev/null | sed 's/\.dist$//' | grep -E '^[A-Za-z0-9_.-]+\.conf$' | grep -vE '^(worldserver|authserver)\.conf$' | sort -u)" || dynnames=""
             first=1; out='['
@@ -8265,8 +8276,35 @@ case "$cmd" in
         [[ "$DML_JSON" == 1 ]] && ndjson_line info "deploying bridge scripts..."
         changed="$(_bridge_deploy_scripts "$sdir")"
         ch=false; [[ "$changed" == changed ]] && ch=true   # bare (top-level dispatch, no `local`)
+        [[ "$DML_JSON" == 1 ]] && ndjson_line info "scripts deployed (changed=$ch)"
+        # Deployed scripts ALE never reads are the silent-bridge bug (found
+        # live on Ubuntu 2026-08-20): mod_ale.conf ships a RELATIVE
+        # ALE.ScriptPath ("lua_scripts") that the worldserver resolves against
+        # its cwd (/azerothcore), where nothing is -- every bridge command
+        # answers "Command does not exist" while the deploy reports success.
+        # Enforce the same two keys the Unbound installer enforces (enabled +
+        # the absolute container path); the other keys stay the user's.
+        # Mirrors crates/dml-wow/src/bridge.rs::ensure_ale_conf.
+        bs_ale_conf="$sdir/env/dist/etc/modules/mod_ale.conf"
+        bs_conf_fixed=false
+        if [[ -f "$bs_ale_conf" ]]; then
+          CFG_CHANGED=false
+          _cfg_conf_write "$bs_ale_conf" "ALE.Enabled" "1" || true
+          _cfg_conf_write "$bs_ale_conf" "ALE.ScriptPath" "\"/azerothcore/env/dist/etc/modules/lua_scripts\"" || true
+          [[ "$CFG_CHANGED" == true ]] && bs_conf_fixed=true
+          if [[ "$DML_JSON" == 1 ]]; then
+            if [[ "$bs_conf_fixed" == true ]]; then
+              ndjson_line info "mod_ale.conf repaired (ALE enabled, absolute script path) -- restart the world server to load the bridges."
+            else
+              ndjson_line info "mod_ale.conf checked (ALE enabled, script path ok)."
+            fi
+          fi
+        else
+          [[ "$DML_JSON" == 1 ]] && ndjson_line warn "mod_ale.conf not found -- the bridges will not run until mod-ale is installed (Modules page) and the server rebuilt."
+        fi
+        # A conf repair needs the same world-restart a script change does.
+        [[ "$bs_conf_fixed" == true ]] && ch=true
         if [[ "$DML_JSON" == 1 ]]; then
-          ndjson_line info "scripts deployed (changed=$ch)"
           ndjson_section_end bridge-setup ok
           # apply_needed=world-restart: the deploy writes lua scripts into the
           # bind-mounted title dir, which Eluna loads when the WORLD process

@@ -185,8 +185,82 @@ pub fn bridge_setup_stream(soap_lock: Arc<Mutex<()>>, emit: impl Fn(serde_json::
         }
     };
     emit(bs_event_line("info", format!("scripts deployed (changed={changed})")));
+
+    // Deployed scripts ALE never reads are the silent-bridge bug (found live
+    // on Ubuntu 2026-08-20): mod_ale.conf ships `ALE.ScriptPath =
+    // "lua_scripts"`, a RELATIVE path the worldserver resolves against its
+    // cwd (/azerothcore), where nothing is -- so every bridge command answers
+    // "Command does not exist" while the deploy reports success. Enforce the
+    // same two keys the Unbound installer enforces (enabled + the absolute
+    // container path); the other seven stay the user's.
+    let conf_fixed = match ensure_ale_conf(&sdir) {
+        AleConf::NoConf => {
+            emit(bs_event_line(
+                "warn",
+                "mod_ale.conf not found -- the bridges will not run until mod-ale is installed (Modules page) and the server rebuilt.",
+            ));
+            false
+        }
+        AleConf::Ok => {
+            emit(bs_event_line("info", "mod_ale.conf checked (ALE enabled, script path ok)."));
+            false
+        }
+        AleConf::Fixed => {
+            emit(bs_event_line(
+                "info",
+                "mod_ale.conf repaired (ALE enabled, absolute script path) -- restart the world server to load the bridges.",
+            ));
+            true
+        }
+        AleConf::WriteFailed(e) => {
+            emit(bs_event_section_end("error"));
+            emit(bs_event_error("WRITE_FAILED", format!("Could not repair mod_ale.conf: {e}"), ""));
+            return;
+        }
+    };
+
     emit(bs_event_section_end("ok"));
-    emit(bs_event_done(changed));
+    // A conf repair needs the same world-restart a script change does: both
+    // only take effect when ALE next loads.
+    emit(bs_event_done(changed || conf_fixed));
+}
+
+/// Outcome of [`ensure_ale_conf`].
+pub enum AleConf {
+    /// No `mod_ale.conf` at all -- mod-ale is not installed (or its conf never
+    /// activated), and lua files without the engine are inert. NOT an error:
+    /// the deploy is still worth doing (the files are ready the moment the
+    /// module lands), but the caller must say so out loud.
+    NoConf,
+    /// Both required keys already held the required values.
+    Ok,
+    /// At least one key was rewritten.
+    Fixed,
+    /// The conf exists but could not be written.
+    WriteFailed(String),
+}
+
+/// Enforce the two load-bearing `mod_ale.conf` keys on an EXISTING conf:
+/// `ALE.Enabled = 1` and the ABSOLUTE in-container script path. Exactly
+/// [`crate::unbound::ALE_CONF_REQUIRED`] keys, same values, same writer as the
+/// Unbound installer's conf stage -- the two call sites must never disagree
+/// about what a working ALE conf looks like. A missing conf is reported, not
+/// created: inventing one here would claim mod-ale is set up on a server that
+/// does not have the module.
+pub fn ensure_ale_conf(sdir: &Path) -> AleConf {
+    use crate::unbound::{ALE_CONF_DEFAULTS, ALE_CONF_REQUIRED};
+    let conf = sdir.join("env").join("dist").join("etc").join("modules").join("mod_ale.conf");
+    if !conf.is_file() {
+        return AleConf::NoConf;
+    }
+    let mut fixed = false;
+    for (key, value) in &ALE_CONF_DEFAULTS[..ALE_CONF_REQUIRED] {
+        match dml_core::conf::conf_write(&conf, key, value) {
+            Ok(changed) => fixed = fixed || changed,
+            Err(e) => return AleConf::WriteFailed(e.to_string()),
+        }
+    }
+    if fixed { AleConf::Fixed } else { AleConf::Ok }
 }
 
 #[cfg(test)]
@@ -231,6 +305,85 @@ mod tests {
     fn lua_root_from_script_falls_back_on_a_bare_filename_with_no_parent() {
         // A bare "dml" (find_dml_script's own fallback) has an empty parent.
         assert_eq!(lua_root_from_script(Some(Path::new("dml"))), PathBuf::from("lua"));
+    }
+
+    // -- ensure_ale_conf ----------------------------------------------------
+
+    fn server_with_ale_conf(name: &str, conf_body: &str) -> PathBuf {
+        let sdir = tmp_dir(name);
+        let mdir = sdir.join("env").join("dist").join("etc").join("modules");
+        std::fs::create_dir_all(&mdir).unwrap();
+        std::fs::write(mdir.join("mod_ale.conf"), conf_body).unwrap();
+        sdir
+    }
+
+    fn ale_conf_text(sdir: &Path) -> String {
+        std::fs::read_to_string(
+            sdir.join("env").join("dist").join("etc").join("modules").join("mod_ale.conf"),
+        )
+        .unwrap()
+    }
+
+    /// THE LIVE SHAPE (Ubuntu m910q, 2026-08-20): enabled already true, but
+    /// the RELATIVE default ScriptPath, which the worldserver resolves against
+    /// /azerothcore where nothing is. Every bridge command answered "Command
+    /// does not exist" while deploy reported success. The repair must rewrite
+    /// the path to the absolute in-container constant.
+    #[test]
+    fn ensure_ale_conf_fixes_the_relative_script_path_the_conf_ships_with() {
+        let sdir = server_with_ale_conf(
+            "ale_relative",
+            "[worldserver]\n# keep me\nALE.Enabled = true\nALE.ScriptPath = \"lua_scripts\"\nALE.AutoReload = false\n",
+        );
+        assert!(matches!(ensure_ale_conf(&sdir), AleConf::Fixed));
+        let text = ale_conf_text(&sdir);
+        assert!(
+            text.contains(crate::unbound::ALE_SCRIPT_PATH),
+            "the ABSOLUTE container path must be written: {text}"
+        );
+        assert!(!text.contains("= \"lua_scripts\""), "the relative path must be gone: {text}");
+        // The repair touches ONLY its two keys: comments and the user's other
+        // settings survive byte-for-byte.
+        assert!(text.contains("# keep me"), "comments must survive: {text}");
+        assert!(text.contains("ALE.AutoReload = false"), "unrelated keys must survive: {text}");
+    }
+
+    /// Idempotence: a conf already in the required shape reports Ok, not
+    /// Fixed — bridge-setup folds Fixed into restart_required, and a repair
+    /// that always reports Fixed would demand a world restart on every run.
+    #[test]
+    fn ensure_ale_conf_is_idempotent() {
+        let sdir = server_with_ale_conf(
+            "ale_idem",
+            "ALE.Enabled = true\nALE.ScriptPath = \"lua_scripts\"\n",
+        );
+        assert!(matches!(ensure_ale_conf(&sdir), AleConf::Fixed));
+        assert!(matches!(ensure_ale_conf(&sdir), AleConf::Ok), "second run must change nothing");
+    }
+
+    /// A disabled engine is the OTHER half of the silent-bridge bug: ALE's
+    /// compiled-in default for `ALE.Enabled` is FALSE (the conf's own comment
+    /// claims true — the code wins), so a conf missing the key entirely runs
+    /// no scripts at all.
+    #[test]
+    fn ensure_ale_conf_enables_a_disabled_engine() {
+        let sdir = server_with_ale_conf("ale_disabled", "ALE.ScriptPath = \"lua_scripts\"\n");
+        assert!(matches!(ensure_ale_conf(&sdir), AleConf::Fixed));
+        let text = ale_conf_text(&sdir);
+        assert!(text.contains("ALE.Enabled = 1"), "the engine must be enabled: {text}");
+    }
+
+    /// No conf at all = mod-ale is not installed. That is a fact to report,
+    /// never a file to invent: creating the conf here would make `conf:
+    /// active` claim a module the server does not have.
+    #[test]
+    fn ensure_ale_conf_reports_a_missing_conf_instead_of_creating_it() {
+        let sdir = tmp_dir("ale_noconf");
+        assert!(matches!(ensure_ale_conf(&sdir), AleConf::NoConf));
+        assert!(
+            !sdir.join("env").join("dist").join("etc").join("modules").join("mod_ale.conf").exists(),
+            "the conf must not be invented"
+        );
     }
 
     // -- dest_dir -----------------------------------------------------------
