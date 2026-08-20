@@ -969,8 +969,18 @@ export async function wowConfigConfKeys(
     ? await invoke("wow_config_conf_keys_native", { file })
     : await invoke("wow_config_conf_keys", { file });
 }
+// Routed like wowConfigRawRead below: the native Rust read has existed since
+// Task 11, but this fn never routed to it, so native mode shelled the bash CLI
+// -- whose `_cfg_preamble` demands yq for EVERY `wow config` subcommand, files
+// included, though the listing never uses it. Windows native passed by
+// accident (startup exports the bundled tools\yq.exe); on Linux the Module
+// tuning page opened with "yq is required for wow config" (live, 2026-08-20).
 export async function wowConfigFiles(): Promise<ConfFile[]> {
-  const data = await invoke<{ files: ConfFile[] }>("wow_config_files");
+  const mode = await resolveBackendMode();
+  const data =
+    mode === "native"
+      ? await invoke<{ files: ConfFile[] }>("wow_config_files_native")
+      : await invoke<{ files: ConfFile[] }>("wow_config_files");
   return data.files;
 }
 

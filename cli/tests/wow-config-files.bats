@@ -94,3 +94,16 @@ teardown() { teardown_fixture; }
   [ "$(echo "$output" | jq -r '.error.code')" = "NOT_FOUND" ]
   [ "$(cat "$MODS/transmog.conf")" = "t" ]
 }
+
+@test "config files works WITHOUT yq -- it is a pure listing and must not inherit the preamble's dep" {
+  # The launcher's Module tuning page opened with MISSING_DEP on native Linux
+  # (no yq exists there) because this arm ran _cfg_preamble, whose yq check is
+  # for the yaml-backed config arms -- a listing of conf files needs none of
+  # it. DML_YQ_BIN pointed at a nonexistent binary reproduces "no yq on PATH"
+  # without touching the test host's real installation.
+  printf 'w\n' > "$ETC/worldserver.conf"
+  DML_YQ_BIN="/nonexistent/yq-not-here" run bash "$DML" wow config files --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.ok == true' >/dev/null
+  echo "$output" | jq -e '.data.files | map(.name) | index("worldserver.conf") != null' >/dev/null
+}

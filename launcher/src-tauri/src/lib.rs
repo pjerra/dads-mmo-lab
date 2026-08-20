@@ -3124,6 +3124,26 @@ async fn wow_config_raw_reset_native(
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// NATIVE-MODE `config files` — see [`dml_wow::config::config_files`].
+///
+/// The Rust read has existed since Task 11 (the standalone CLI ships it), but
+/// the launcher never grew this command, so `wowConfigFiles()` shelled the
+/// bundled bash CLI even in native mode. On Windows that worked by accident
+/// (startup exports the bundled `tools\yq.exe`, so bash's `_cfg_preamble`
+/// passed); on Linux there is no yq anywhere, and the Module tuning page
+/// opened with `MISSING_DEP: yq is required for wow config` — found live on
+/// the Ubuntu box, 2026-08-20, by logging the launcher's CLI spawns.
+#[tauri::command]
+async fn wow_config_files_native() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let title_dir = dml_wow::config::ConfigReader::title_dir_from_env();
+        dml_wow::config::config_files(&title_dir)
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// NATIVE-MODE `config raw-read` — see [`dml_wow::config::raw_read`].
 #[tauri::command]
 async fn wow_config_raw_read_native(file: String) -> Result<serde_json::Value, CmdError> {
@@ -7564,6 +7584,7 @@ pub fn run() {
             wow_config_conf_keys,
             wow_config_conf_keys_native,
             wow_config_raw_read,
+            wow_config_files_native,
             wow_config_raw_read_native,
             wow_config_pb_keys,
             wow_config_pb_keys_native,
