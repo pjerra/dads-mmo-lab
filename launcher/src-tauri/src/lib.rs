@@ -6026,19 +6026,24 @@ fn start_docker_desktop() -> Result<serde_json::Value, CmdError> {
             hint: "Start it with: sudo systemctl start docker".into(),
         });
     }
-    #[cfg(windows)]
-    let exe = dml_wow::native::docker_desktop_program().ok_or_else(|| {
-        bad_arg("Could not find Docker Desktop.exe -- is Docker Desktop installed?")
-    })?;
-    let mut cmd = std::process::Command::new(&exe);
+    // The whole Windows arm lives in ONE cfg block -- a bare `#[cfg(windows)]
+    // let exe` with un-gated code after it compiles on Windows and fails on
+    // Linux with E0425 (the binding never exists there), which is exactly how
+    // this function broke the Ubuntu build once.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+        let exe = dml_wow::native::docker_desktop_program().ok_or_else(|| {
+            bad_arg("Could not find Docker Desktop.exe -- is Docker Desktop installed?")
+        })?;
+        let mut cmd = std::process::Command::new(&exe);
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.spawn()
+            .map_err(|e| bad_arg(format!("could not launch Docker Desktop: {e}")))?;
+        Ok(serde_json::json!({ "launched": true, "path": exe.to_string_lossy() }))
     }
-    cmd.spawn()
-        .map_err(|e| bad_arg(format!("could not launch Docker Desktop: {e}")))?;
-    Ok(serde_json::json!({ "launched": true, "path": exe.to_string_lossy() }))
 }
 
 /// Incident follow-up 1 (2026-07-21): restart the Docker DAEMON inside
