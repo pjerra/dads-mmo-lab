@@ -20,6 +20,7 @@
     type AwSubsystem,
     type LauncherSettings,
   } from "$lib/api";
+  import { isLinuxPlatform } from "$lib/first-run";
   import { configSettingsCache } from "$lib/page-cache.svelte";
   import { filterPbKeys, stagedPbChanges } from "$lib/pb-keys";
   import { dirtyKeys, requiredSaveFlags, settingsInGroups, clearSavedEdits } from "$lib/config-diff";
@@ -71,6 +72,11 @@
   let launcher: LauncherSettings | null = $state(null);
   let launcherSaving = $state(false);
   let launcherNote: string | null = $state(null);
+
+  // Windows-only rows below gate on this: autostart is a reg.exe HKCU\Run
+  // write, and the WSL backend cannot exist on Linux (no wsl.exe) -- offering
+  // either there is a button that can only error.
+  const onLinux = typeof navigator !== "undefined" && isLinuxPlatform(navigator.userAgent);
 
   let autostartOn = $state(false);
 
@@ -594,7 +600,7 @@
             >
               <option value="auto">Detect automatically</option>
               <option value="native">Docker Desktop (native)</option>
-              <option value="wsl">WSL (dml-arch distro)</option>
+              {#if !onLinux}<option value="wsl">WSL (dml-arch distro)</option>{/if}
             </select>
           </label>
           <p class="muted">
@@ -617,6 +623,7 @@
             />
             Closing the window keeps DML Launcher running in the system tray
           </label>
+          {#if !onLinux}
           <label class="row">
             <input
               type="checkbox"
@@ -626,6 +633,7 @@
             />
             Start DML Launcher when Windows starts
           </label>
+          {/if}
           {#if launcherNote}<p class="muted">{launcherNote}</p>{/if}
         </div>
       {/if}

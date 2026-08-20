@@ -1062,7 +1062,11 @@
           {/if}
         </li>
 
-        <!-- 2. yq -->
+        <!-- 2. yq -- WINDOWS ONLY. The Linux native path reads/writes every
+             config in-process Rust (config.rs deliberately has no yq
+             dependency); offering a yq download targeting tools\yq.exe on
+             Ubuntu would install a tool nothing there ever calls. -->
+        {#if !onLinux}
         <li>
           <span class="dot" class:ok={nativeStatus.yq.present} class:bad={!nativeStatus.yq.present}></span>
           <div class="check-body">
@@ -1083,6 +1087,7 @@
             </button>
           {/if}
         </li>
+        {/if}
 
         <!-- 3. SOAP creds -->
         <li>
@@ -1567,6 +1572,7 @@
 
       <div class="step">
         <strong>HeidiSQL from ANOTHER PC on your LAN</strong>
+        {#if !onLinux}
         <p class="warn-text">
           This opens your database (port {pcData.db_host_port}) to your local network. Only do
           this on a network you trust, and NEVER forward it on your router or expose it to the
@@ -1588,10 +1594,12 @@
             Script created: {pcScriptPath} — right-click it → Run with PowerShell (as admin).
           </p>
         {/if}
+        {/if}
       </div>
     {/if}
   </div>
 
+  {#if !onLinux}
   <div class="card">
     <h3>Auto-shutdown</h3>
     <p class="muted">
@@ -1617,6 +1625,7 @@
     </div>
     {#if autoShutdown.notice}<p class="notice">{autoShutdown.notice}</p>{/if}
   </div>
+  {/if}
 
   <div class="card">
     <h3>Wrath Unbound addon</h3>

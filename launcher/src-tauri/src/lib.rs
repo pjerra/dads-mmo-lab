@@ -5072,7 +5072,21 @@ fn candidate_tailscale_paths() -> Vec<std::path::PathBuf> {
     if let Some(pf) = std::env::var_os("ProgramW6432") {
         out.push(std::path::PathBuf::from(&pf).join("Tailscale").join("tailscale.exe"));
     }
+    // Linux: the CLI installs to /usr/bin (deb/rpm) or /usr/sbin; the bare
+    // `tailscale` PATH fallback below covers anything else. Without these the
+    // whole Play-Together card answered "not installed" on a box that was
+    // ALREADY on the tailnet (the Ubuntu server reached over Tailscale itself).
+    #[cfg(not(windows))]
+    {
+        out.push(std::path::PathBuf::from("/usr/bin/tailscale"));
+        out.push(std::path::PathBuf::from("/usr/sbin/tailscale"));
+    }
     out
+}
+
+/// The bare PATH-resolved program name, per platform.
+fn tailscale_bare_name() -> &'static str {
+    if cfg!(windows) { "tailscale.exe" } else { "tailscale" }
 }
 
 /// Pure resolver: first candidate the predicate accepts, else `None`. No bare
@@ -5097,14 +5111,14 @@ fn find_tailscale_exe() -> Option<std::path::PathBuf> {
         return Some(p);
     }
     let ok = run_bounded(
-        std::ffi::OsStr::new("tailscale.exe"),
+        std::ffi::OsStr::new(tailscale_bare_name()),
         &["version"],
         std::time::Duration::from_secs(3),
     )
     .map(|(ok, _)| ok)
     .unwrap_or(false);
     if ok {
-        return Some(std::path::PathBuf::from("tailscale.exe"));
+        return Some(std::path::PathBuf::from(tailscale_bare_name()));
     }
     None
 }
@@ -6001,6 +6015,18 @@ fn docker_dashboard_set(disabled: bool) -> Result<serde_json::Value, CmdError> {
 /// once the engine settles. Errors when Docker Desktop isn't installed.
 #[tauri::command]
 fn start_docker_desktop() -> Result<serde_json::Value, CmdError> {
+    // Linux runs the docker ENGINE as a system service -- there is no Desktop
+    // GUI to launch, and starting the service needs root. Answer with the
+    // command instead of hunting for an exe that cannot exist.
+    #[cfg(not(windows))]
+    {
+        return Err(CmdError {
+            code: "NO_DESKTOP".into(),
+            message: "Docker runs as a system service on Linux".into(),
+            hint: "Start it with: sudo systemctl start docker".into(),
+        });
+    }
+    #[cfg(windows)]
     let exe = dml_wow::native::docker_desktop_program().ok_or_else(|| {
         bad_arg("Could not find Docker Desktop.exe -- is Docker Desktop installed?")
     })?;
@@ -7126,15 +7152,32 @@ async fn games_install_cancel(state: State<'_, AppState>) -> Result<(), CmdError
             }
         }
     };
-    let mut cmd = std::process::Command::new("taskkill");
-    cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
+    // Windows: taskkill /T fells the whole tree. Linux has no tree flag --
+    // fell the direct children first (the git/docker helpers doing the actual
+    // work), then the engine process itself. A grandchild orphaned by this is
+    // the docker CLI's problem, not a leak of ours: the engine's children are
+    // git and docker, whose own children die with the daemon call.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()]);
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000);
+        }
+        cmd.output()
+            .map_err(|e| CmdError { code: "KILL".into(), message: e.to_string(), hint: String::new() })?;
     }
-    cmd.output()
-        .map_err(|e| CmdError { code: "KILL".into(), message: e.to_string(), hint: String::new() })?;
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("pkill")
+            .args(["-KILL", "-P", &pid.to_string()])
+            .output();
+        std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .output()
+            .map_err(|e| CmdError { code: "KILL".into(), message: e.to_string(), hint: String::new() })?;
+    }
     Ok(())
 }
 
