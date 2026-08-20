@@ -89,18 +89,24 @@ pub fn detect(native_dir_exists: bool, docker_present: bool, wsl_usable: Tri) ->
     #[cfg(not(windows))]
     {
         let _ = (native_dir_exists, docker_present, wsl_usable);
-        return Backend::Native;
+        Backend::Native
     }
+    // The whole Windows decision tree lives inside one cfg block (not just the
+    // first `if`), so the Linux build compiles it out entirely instead of
+    // leaving it dangling after the early return above -- which rustc rightly
+    // flagged as unreachable in every Ubuntu build.
     #[cfg(windows)]
-    if !docker_present {
-        return Backend::Wsl;
-    }
-    if native_dir_exists {
-        return Backend::Native;
-    }
-    match wsl_usable {
-        Tri::No => Backend::Native,
-        Tri::Yes | Tri::Unknown => Backend::Wsl,
+    {
+        if !docker_present {
+            return Backend::Wsl;
+        }
+        if native_dir_exists {
+            return Backend::Native;
+        }
+        match wsl_usable {
+            Tri::No => Backend::Native,
+            Tri::Yes | Tri::Unknown => Backend::Wsl,
+        }
     }
 }
 
