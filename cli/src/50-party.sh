@@ -44,7 +44,7 @@ _bridge_deploy_scripts() {
 
 # Online player's guid, or empty if not online (online-guard).
 _party_online_guid() {
-    db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$1")' AND online=1 LIMIT 1;" 2>/dev/null
+    db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$(_canon_charname "$1")")' AND online=1 LIMIT 1;" 2>/dev/null
     return 0
 }
 

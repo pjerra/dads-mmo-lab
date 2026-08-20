@@ -595,7 +595,10 @@ pub fn not_online_err(player: &str) -> CmdError {
 /// a separate DB_UNREACHABLE branch -- this mirrors that swallow rather than
 /// inventing a new error path the oracle doesn't have.
 pub fn char_is_online(cfg: &crate::db::DbConfig, player: &str) -> bool {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(player)];
+    // Canonical stored form -- characters.name is utf8mb4_bin, see
+    // db::canon_char_name. Without this, `gm gold testa` answered NOT_ONLINE
+    // for an online `Testa` before SOAP was ever consulted.
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(crate::db::canon_char_name(player))];
     crate::db::query_with_params(
         cfg,
         crate::db::Database::Characters,

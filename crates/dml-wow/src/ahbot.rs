@@ -174,7 +174,8 @@ pub fn ahbot_repair_stream(
 
     emit(ar_event_line("info", format!("looking up character {char_name}...")));
     let db_cfg = db::DbConfig::from_env();
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(char_name.as_str())];
+    // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(db::canon_char_name(char_name.as_str()))];
     let res = match db::query_with_params(
         &db_cfg,
         db::Database::Characters,

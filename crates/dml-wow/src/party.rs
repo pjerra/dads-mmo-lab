@@ -444,7 +444,8 @@ pub fn preset_dir_or_internal_err() -> Result<std::path::PathBuf, CmdError> {
 /// connection. Any query failure reads as "not online" (`None`), matching
 /// the bash's own `2>/dev/null` swallow — same doctrine as `char_is_online`.
 pub fn party_online_guid(cfg: &crate::db::DbConfig, name: &str) -> Option<i64> {
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
+    // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(crate::db::canon_char_name(name))];
     crate::db::query_with_params(cfg, crate::db::Database::Characters, crate::party::ONLINE_GUID_SQL, params)
         .ok()
         .and_then(|res| sql_row_int(res.rows.first().and_then(|r| r.first())))

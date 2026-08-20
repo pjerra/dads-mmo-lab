@@ -3536,7 +3536,9 @@ async fn wow_teleport_coords_native(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = dml_wow::db::DbConfig::from_env();
-        let params: Vec<mysql::Value> = vec![mysql::Value::from(char_name.as_str())];
+        // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
+        let params: Vec<mysql::Value> =
+            vec![mysql::Value::from(dml_wow::db::canon_char_name(char_name.as_str()))];
         let res = dml_wow::db::query_with_params(
             &cfg,
             dml_wow::db::Database::Characters,
@@ -4603,7 +4605,9 @@ async fn wow_gm_return_home_native(
     let lock = state.soap_lock.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
         let cfg = dml_wow::db::DbConfig::from_env();
-        let params: Vec<mysql::Value> = vec![mysql::Value::from(player.as_str())];
+        // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
+        let params: Vec<mysql::Value> =
+            vec![mysql::Value::from(dml_wow::db::canon_char_name(player.as_str()))];
         let res = dml_wow::db::query_with_params(
             &cfg,
             dml_wow::db::Database::Characters,

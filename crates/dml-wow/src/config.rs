@@ -1038,7 +1038,9 @@ pub fn config_set_curated(
 
         if key == "ahbot.character" {
             let db_cfg = crate::db::DbConfig::from_env();
-            let params: Vec<mysql::Value> = vec![mysql::Value::from(value.as_str())];
+            // utf8mb4_bin lookup -- canonical form or nothing.
+            let params: Vec<mysql::Value> =
+                vec![mysql::Value::from(crate::db::canon_char_name(value.as_str()))];
             let res = crate::db::query_with_params(
                 &db_cfg,
                 crate::db::Database::Characters,

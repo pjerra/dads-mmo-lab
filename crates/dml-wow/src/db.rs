@@ -31,6 +31,31 @@
 
 use dml_core::error::CmdError;
 
+/// WoW's canonical stored character-name form: first letter uppercase, the
+/// rest lowercase — AzerothCore normalizes every name to this shape at
+/// creation, and `characters.name` is `utf8mb4_bin`, so a lookup that does
+/// not match it BYTE for byte finds nothing. `paperdoll testa` answered
+/// NOT_FOUND on a server whose only character was `Testa` (found live on the
+/// Ubuntu box, 2026-08-20) while the SOAP-backed commands worked — the game
+/// server normalizes names itself, our direct DB reads did not. Every
+/// characters-table name lookup (exact or prefix) canonicalizes through
+/// here; the world-DB searches (items, teleports) deliberately do NOT — those
+/// tables collate case-insensitively, proven by lowercase searches working
+/// live.
+///
+/// ASCII-only on purpose: AC's own normalization is ASCII-case-based, and
+/// rewriting non-ASCII bytes here could turn a valid exotic name into a
+/// different string than the one stored.
+pub fn canon_char_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut chars = name.chars();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+        out.extend(chars.map(|c| c.to_ascii_lowercase()));
+    }
+    out
+}
+
 /// Loopback host the native stack publishes MySQL on.
 pub const DB_HOST: &str = "127.0.0.1";
 /// The only DB user the stack (and `dml`) authenticates as.
@@ -606,6 +631,23 @@ pub fn count_result(res: crate::db::QueryResult) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The live find: `testa` typed for a stored `Testa`. Every input case
+    /// shape must land on the one canonical form, an already-canonical name
+    /// must pass through unchanged, and non-ASCII bytes must never be
+    /// rewritten (AC's own normalization is ASCII-case-based; inventing a
+    /// unicode case-fold here could miss the stored bytes).
+    #[test]
+    fn canon_char_name_lands_every_case_shape_on_the_stored_form() {
+        assert_eq!(canon_char_name("testa"), "Testa");
+        assert_eq!(canon_char_name("TESTA"), "Testa");
+        assert_eq!(canon_char_name("tEsTa"), "Testa");
+        assert_eq!(canon_char_name("Testa"), "Testa");
+        assert_eq!(canon_char_name("t"), "T");
+        assert_eq!(canon_char_name(""), "");
+        // Non-ASCII passthrough: ASCII neighbours still fold, the é does not.
+        assert_eq!(canon_char_name("aéB"), "Aéb");
+    }
 
     /// The value is `host;port;user;pass;dbname` — the schema is the LAST
     /// field, and the password may itself contain anything, so split from the

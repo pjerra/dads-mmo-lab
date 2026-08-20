@@ -2658,7 +2658,7 @@ case "$cmd" in
         _valid_coord "$y" || { json_err BAD_ARG "Invalid coordinate: $y" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
         _valid_coord "$z" || { json_err BAD_ARG "Invalid coordinate: $z" "Coordinates are plain numbers with a magnitude of 20000 or less."; exit 1; }
         _db_names_require
-        row="$(db_chars_query "SELECT guid, online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+        row="$(db_chars_query "SELECT guid, online FROM characters WHERE name='$(sql_escape "$(_canon_charname "$char")")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
         [[ -n "$row" ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
         IFS=$'\t' read -r guid online <<< "$row"
@@ -2812,7 +2812,7 @@ case "$cmd" in
         # Guarded so it can never break the paperdoll: offline characters
         # (and chars the lookup can't resolve) skip it entirely, and a down
         # SOAP falls through silently (|| true) to the last-saved data.
-        pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;" 2>/dev/null)" || pd_online=""
+        pd_online="$(db_chars_query "SELECT online FROM characters WHERE name='$(sql_escape "$(_canon_charname "$char")")' LIMIT 1;" 2>/dev/null)" || pd_online=""
         if [[ "${pd_online%%$'\n'*}" == "1" ]]; then
           # Review follow-up (live impact): `saveall` serializes EVERY online
           # player on the world thread -- with the ambient bot population that
@@ -2897,7 +2897,7 @@ case "$cmd" in
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
         _db_names_require
-        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$(_canon_charname "$char")")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
         atrow="$(db_chars_query "SELECT activeTalentGroup, talentGroupsCount FROM characters WHERE guid=$cguid;")" \
@@ -2936,7 +2936,7 @@ case "$cmd" in
         [[ "${1:-}" == "--char" ]] && { _need_flag_val "$1" $#; char="$2"; shift 2; }
         _valid_charname "$char" || { json_err BAD_ARG "Invalid character name: $char" ""; exit 1; }
         _db_names_require
-        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$char")' LIMIT 1;")" \
+        cguid="$(db_chars_query "SELECT guid FROM characters WHERE name='$(sql_escape "$(_canon_charname "$char")")' LIMIT 1;")" \
           || { json_err DB_UNREACHABLE "Could not reach the characters database" ""; exit 1; }
         [[ "$cguid" =~ ^[0-9]+$ ]] || { json_err NOT_FOUND "No such character: $char" ""; exit 1; }
         aearned='['; first=1
@@ -3285,7 +3285,7 @@ case "$cmd" in
                 # (companion write below) -- same resolution the old env
                 # route did, now landing in mod_ahbot.conf.
                 _db_names_require
-                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$value")' LIMIT 1;")" \
+                crow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$(_canon_charname "$value")")' LIMIT 1;")" \
                   || { json_err DB_UNREACHABLE "Could not look up the character" "Is ac-database running?"; exit 1; }
                 [[ -n "$crow" ]] || { json_err NOT_FOUND "No such character: $value" ""; exit 1; }
                 IFS=$'\t' read -r cguid cacct <<< "$crow"
@@ -4482,7 +4482,7 @@ case "$cmd" in
             # place-npc capital spawn points (Stormwind map 0, Orgrimmar
             # map 1).
             _db_names_require
-            rh_row="$(db_chars_query "SELECT guid, race, online FROM characters WHERE name='$(sql_escape "$player")' LIMIT 1;")" \
+            rh_row="$(db_chars_query "SELECT guid, race, online FROM characters WHERE name='$(sql_escape "$(_canon_charname "$player")")' LIMIT 1;")" \
               || { json_err DB_UNREACHABLE "Could not reach the characters database" "Is ac-database running?"; exit 1; }
             [[ -n "$rh_row" ]] || { json_err NOT_FOUND "No such character: $player" ""; exit 1; }
             IFS=$'\t' read -r rh_guid rh_race rh_online <<< "$rh_row"
@@ -4794,6 +4794,7 @@ case "$cmd" in
             # that can never occur in a valid charname and declare it via ESCAPE.
             # sql_escape still runs afterwards for string-literal safety.
             if [[ -n "$btname" ]]; then
+              btname="$(_canon_charname "$btname")"
               btlike="${btname//%/!%}"; btlike="${btlike//_/!_}"
               btwhere+=" AND c.name LIKE '$(sql_escape "$btlike")%' ESCAPE '!'"
             fi
@@ -5203,7 +5204,7 @@ case "$cmd" in
             fi
             _db_names_require_stream ahbot-repair
             [[ "$DML_JSON" == 1 ]] && ndjson_line info "looking up character $ahchar..."
-            if ahrow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$ahchar")' LIMIT 1;")"; then :; else
+            if ahrow="$(db_chars_query "SELECT guid, account FROM characters WHERE name='$(sql_escape "$(_canon_charname "$ahchar")")' LIMIT 1;")"; then :; else
               if [[ "$DML_JSON" == 1 ]]; then
                 ndjson_section_end ahbot-repair error
                 ndjson_error DB_UNREACHABLE "Could not look up the character" "Is the server (ac-database) running?"

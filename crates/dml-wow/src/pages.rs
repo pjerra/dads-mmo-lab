@@ -174,7 +174,9 @@ pub fn bots_where(f: &BotFilters, bot_prefix: &str, names: &crate::db::DatabaseN
     let mut w = crate::botid::bot_clause("c.account", bot_prefix, &names.auth, names.playerbots.as_deref());
     let mut params: Vec<mysql::Value> = Vec::new();
     if let Some(name) = f.name.as_deref().filter(|n| !n.is_empty()) {
-        let like = name.replace('%', "!%").replace('_', "!_");
+        // Prefix of the canonical stored form (characters.name is
+        // utf8mb4_bin): a lowercase prefix the user typed must still match.
+        let like = crate::db::canon_char_name(name).replace('%', "!%").replace('_', "!_");
         w.push_str(" AND c.name LIKE ? ESCAPE '!'");
         params.push(mysql::Value::from(format!("{like}%")));
     }
@@ -710,11 +712,12 @@ pub fn assemble_char_progress(
 /// layer); the caller is expected to have already validated `name` with
 /// [`super::soap_cmds::valid_charname`].
 pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
+    // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
     let guid_res = db::query_with_params(
         cfg,
         Database::Characters,
         CHAR_GUID_SQL,
-        vec![mysql::Value::from(name)],
+        vec![mysql::Value::from(db::canon_char_name(name))],
     )?;
     let Some(guid) = extract_char_guid(&guid_res) else {
         return Ok(None);
@@ -771,11 +774,12 @@ pub fn read_char_progress(cfg: &DbConfig, name: &str) -> Result<Option<Value>, D
 /// (NOT_FOUND at the command layer), same convention as
 /// [`read_char_progress`].
 pub fn read_achievements(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
+    // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name).
     let guid_res = db::query_with_params(
         cfg,
         Database::Characters,
         CHAR_GUID_SQL,
-        vec![mysql::Value::from(name)],
+        vec![mysql::Value::from(db::canon_char_name(name))],
     )?;
     let Some(guid) = extract_char_guid(&guid_res) else {
         return Ok(None);

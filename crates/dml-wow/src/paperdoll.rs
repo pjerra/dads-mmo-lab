@@ -199,7 +199,10 @@ fn equipped_item(row: &[String], base: usize) -> Value {
 /// `name` must already be [`valid_charname`]-validated by the caller.
 pub fn read_paperdoll(cfg: &DbConfig, name: &str) -> Result<Option<Value>, DbError> {
     let names = cfg.names()?;
-    let params: Vec<mysql::Value> = vec![mysql::Value::from(name)];
+    // utf8mb4_bin lookup -- canonical form or nothing (db::canon_char_name):
+    // `paperdoll testa` on a server whose character is `Testa` was the live
+    // find that exposed this whole class.
+    let params: Vec<mysql::Value> = vec![mysql::Value::from(crate::db::canon_char_name(name))];
     match db::query_with_params(cfg, Database::Characters, &new_schema_sql(&names.world), params.clone()) {
         Ok(res) => Ok(assemble_new(&res)),
         Err(DbError::Query(_)) => {

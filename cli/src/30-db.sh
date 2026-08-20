@@ -295,6 +295,19 @@ _chars_write_stmt() {
     _db_write_stmt "$DB_NAME_CHARS" "$1"
 }
 
+# WoW's canonical stored character-name form: first letter uppercase, rest
+# lowercase -- AzerothCore normalizes every name to this at creation, and
+# characters.name is utf8mb4_bin, so a lookup that does not match it BYTE for
+# byte finds nothing (`paperdoll testa` answered NOT_FOUND for `Testa`, live
+# 2026-08-20). Every characters-table name lookup canonicalizes through here;
+# world-DB searches (items, teleports) deliberately do NOT -- those tables
+# collate case-insensitively. ASCII-only, matching AC's own normalization.
+# Mirrors crates/dml-wow/src/db.rs::canon_char_name.
+_canon_charname() {
+    local lower="${1,,}"
+    printf '%s' "${lower^}"
+}
+
 sql_escape() {
     local s="${1-}"
     s=${s//\\/\\\\}
