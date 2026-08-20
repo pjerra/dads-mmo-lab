@@ -131,6 +131,64 @@ pub fn assemble_docker_usage(raw: &str) -> Value {
     json!({ "lines": parse_docker_usage_lines(raw) })
 }
 
+/// One row of `docker stats --no-stream` for a stack container, verbatim
+/// strings from docker (locale-formatted percentages and sizes; the UI
+/// renders text, so parsing the numbers here would only add a way to be
+/// wrong).
+///
+/// Parse the TAB-separated `{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}`
+/// format, keeping ONLY the stack's own `ac-*` containers — the same
+/// name-contract every other docker surface in this repo addresses the stack
+/// by. Malformed lines are skipped, not errors: `docker stats` may interleave
+/// a warning on stderr and the caller combines streams.
+pub fn parse_container_stats(raw: &str) -> Vec<Value> {
+    raw.lines()
+        .filter_map(|l| {
+            let l = l.trim_end_matches('\r');
+            let mut it = l.split('\t');
+            let (name, cpu, mem, mem_pct) = (it.next()?, it.next()?, it.next()?, it.next()?);
+            if !name.starts_with("ac-") {
+                return None;
+            }
+            Some(json!({
+                "name": name,
+                "cpu": cpu.trim(),
+                "mem": mem.trim(),
+                "mem_pct": mem_pct.trim(),
+            }))
+        })
+        .collect()
+}
+
+/// Live per-container CPU/memory for the "Server resources" card: a `docker
+/// info` gate like [`read_docker_usage`], then one bounded
+/// `docker stats --no-stream` (it SAMPLES for ~2s by design, hence the same
+/// generous bound as the usage read). Timeout on the stats call degrades to
+/// an empty `rows` array — the card then says "no rows" rather than erroring
+/// a page whose other cards are fine.
+pub fn read_container_stats(program: &OsStr) -> Result<Value, ()> {
+    if !docker_engine_up(program, PROBE_TIMEOUT) {
+        return Err(());
+    }
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}",
+    ]);
+    windows_no_window(&mut cmd);
+    let combined = match output_bounded_draining(cmd, DOCKER_USAGE_TIMEOUT) {
+        Some(out) => {
+            let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&out.stderr));
+            s
+        }
+        None => String::new(),
+    };
+    Ok(json!({ "rows": parse_container_stats(&combined) }))
+}
+
 /// Live `docker-usage` read: a `docker info` gate (`Err(())` on failure,
 /// matching the arm's own `json_err DOCKER_DOWN`/`exit 1` — unlike
 /// `server-detail`, this verb treats "down" as a hard error, not data),
@@ -1364,6 +1422,29 @@ mod tests {
     }
 
     // -- parse_docker_usage_lines / assemble_docker_usage --------------------
+
+    /// Real `docker stats --no-stream` output from the Ubuntu box (locale
+    /// decimals and all) — only the stack's `ac-*` rows survive, a foreign
+    /// container on the same engine does not, and a stderr warning line
+    /// interleaved by the combined read is skipped rather than fatal.
+    #[test]
+    fn parse_container_stats_keeps_ac_rows_and_skips_foreign_and_malformed() {
+        let raw = "ac-worldserver\t102.87%\t4.827GiB / 15.51GiB\t31.12%\r\n\
+                   ac-database\t0.82%\t890.1MiB / 15.51GiB\t5.60%\n\
+                   someones-nginx\t0.01%\t10MiB / 15.51GiB\t0.06%\n\
+                   WARNING: something docker printed\n";
+        let got = parse_container_stats(raw);
+        assert_eq!(got.len(), 2, "exactly the two ac-* rows: {got:?}");
+        assert_eq!(got[0]["name"], "ac-worldserver");
+        assert_eq!(got[0]["cpu"], "102.87%");
+        assert_eq!(got[0]["mem"], "4.827GiB / 15.51GiB");
+        assert_eq!(got[1]["mem_pct"], "5.60%");
+    }
+
+    #[test]
+    fn parse_container_stats_empty_input_is_empty() {
+        assert!(parse_container_stats("").is_empty());
+    }
 
     #[test]
     fn parse_docker_usage_lines_splits_and_drops_empties() {

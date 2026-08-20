@@ -2361,6 +2361,28 @@ async fn wow_docker_usage_read() -> Result<serde_json::Value, CmdError> {
     .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
 }
 
+/// Live per-container CPU/memory for the Tools page's "Server resources"
+/// card (`{"rows":[{name,cpu,mem,mem_pct}]}`) — one bounded
+/// `docker stats --no-stream`, `ac-*` rows only. Native mode only: it exists
+/// because on Linux there is no WSL VM and no `.wslconfig` ceiling — the
+/// containers share the whole host — so the honest answer to "how much can
+/// the server use" is live usage, not a config file. See
+/// [`dml_wow::maint::read_container_stats`].
+#[tauri::command]
+async fn wow_container_stats() -> Result<serde_json::Value, CmdError> {
+    require_native_backend()?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, CmdError> {
+        let program = dml_wow::native::docker_program();
+        dml_wow::maint::read_container_stats(&program).map_err(|_| CmdError {
+            code: "DOCKER_DOWN".into(),
+            message: "Docker is not running".into(),
+            hint: "Start the server (or the Docker engine), then retry.".into(),
+        })
+    })
+    .await
+    .map_err(|e| CmdError { code: "INTERNAL".into(), message: e.to_string(), hint: String::new() })?
+}
+
 /// NATIVE-MODE fast read of the Tools/LAN port diagnostic: same envelope
 /// shape as `wow_port_check`, via direct bounded `docker port` probes plus
 /// a `.env` read instead of shelling `dml`. Gates mirror the CLI arm:
@@ -7563,6 +7585,7 @@ pub fn run() {
             wow_server_detail_read,
             wow_console_tail_read,
             wow_docker_usage_read,
+            wow_container_stats,
             wow_port_check_read,
             wow_update_check_read,
             wow_commands_read,

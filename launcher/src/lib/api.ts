@@ -355,6 +355,19 @@ export async function wowDockerUsage(): Promise<{ lines: string[] }> {
   const mode = await resolveBackendMode();
   return mode === "native" ? invoke("wow_docker_usage_read") : invoke("wow_docker_usage");
 }
+// Live per-container CPU/memory (Tools "Server resources" card). Native mode
+// only -- in WSL mode the resource ceiling IS .wslconfig, and that card covers
+// it; this card is the native answer, where containers share the whole host.
+export interface ContainerStat {
+  name: string;
+  cpu: string;
+  mem: string;
+  mem_pct: string;
+}
+export async function wowContainerStats(): Promise<ContainerStat[]> {
+  const data = await invoke<{ rows: ContainerStat[] }>("wow_container_stats");
+  return data.rows;
+}
 // Native-mode routing (Chunk 4a): `wow_docker_clean_native` drives `docker
 // compose`/`docker builder|image prune`/`docker volume` directly (no `dml`
 // shell-out) -- same level/Channel contract either way.

@@ -43,8 +43,11 @@
   dockerDashboardGet,
   dockerDashboardSet,
   type DockerDashboardSetting,
+  wowContainerStats,
+  type ContainerStat,
 } from "$lib/api";
   import { parseLanStatus } from "$lib/transitions";
+  import { isLinuxPlatform } from "$lib/first-run";
   import {
     DOCKER_RESTART_CONFIRM,
     dockerRestartButtonDisabled,
@@ -135,6 +138,9 @@
       // Only meaningful once the backend is known -- the unbound probe is
       // native-only and would just throw WRONG_BACKEND on WSL.
       await refreshUnbound();
+      // Same gating: the resources card is native-only, and at onMount time
+      // nativeStatus is still null, so this is the load that arms it.
+      if (nativeStatus.native && !resLoaded && !resBusy) void refreshResources();
     } catch (e) {
       nsError = fmtErr(e);
     } finally {
@@ -721,6 +727,36 @@
   // .wslconfig editor + restart WSL + shrink-disk script + Defender hint.
   // All Windows-side (native Rust commands); mutating cards ride the
   // disk-tools flag.
+  //
+  // WINDOWS-ONLY CARDS ARE GATED on this flag (2026-08-20, found live on the
+  // Ubuntu box): the .wslconfig editor opened with "USERPROFILE is not set"
+  // there, and Restart WSL / shrink-disk / Defender / DML shell all drive
+  // machinery that does not exist on Linux. A card whose button cannot work
+  // is not "harmless clutter" -- its error message reads as a broken app.
+  const onLinux = typeof navigator !== "undefined" && isLinuxPlatform(navigator.userAgent);
+
+  // --- Server resources (live docker stats; native mode, both OSes) -----
+  // On Linux there is no WSL VM and no .wslconfig ceiling -- the containers
+  // share the whole host -- so the honest answer to "how much can the server
+  // use" is live usage. Shown on Windows native too: the numbers are just as
+  // useful there, .wslconfig only explains where the ceiling comes from.
+  let resRows: ContainerStat[] = $state([]);
+  let resError: string | null = $state(null);
+  let resBusy = $state(false);
+  let resLoaded = $state(false);
+  async function refreshResources() {
+    resBusy = true;
+    resError = null;
+    try {
+      resRows = await wowContainerStats();
+      resLoaded = true;
+    } catch (e) {
+      resError = fmtErr(e);
+    } finally {
+      resBusy = false;
+    }
+  }
+
   let wc: WslConfigState | null = $state(null);
   let wcMemory = $state("");
   let wcProcessors = $state("");
@@ -741,16 +777,21 @@
   let defCopied = $state(false);
 
   onMount(() => {
-    wslconfigRead()
-      .then((s) => {
-        wc = s;
-        wcMemory = s.memory ?? "";
-        wcProcessors = s.processors ?? "";
-      })
-      .catch((e) => (wcError = fmtErr(e)));
-    defenderHint()
-      .then((d) => (defCmd = d.command))
-      .catch(() => {});
+    // Windows-only probes stay un-run on Linux -- wslconfigRead() answers
+    // "USERPROFILE is not set" there, and parking that in wcError just moves
+    // the broken-card problem from the markup into the mount.
+    if (!onLinux) {
+      wslconfigRead()
+        .then((s) => {
+          wc = s;
+          wcMemory = s.memory ?? "";
+          wcProcessors = s.processors ?? "";
+        })
+        .catch((e) => (wcError = fmtErr(e)));
+      defenderHint()
+        .then((d) => (defCmd = d.command))
+        .catch(() => {});
+    }
   });
 
   async function saveWslconfig() {
@@ -1699,6 +1740,43 @@
 
   <h3 class="section-head">Disk &amp; performance</h3>
 
+  {#if nativeStatus?.native}
+    <div class="card">
+      <h3>Server resources</h3>
+      <p class="muted">
+        Live CPU and memory per server container.
+        {#if onLinux}
+          On Linux the containers share the whole machine — there is no separate
+          cap to configure; what you see here is what they use.
+        {:else}
+          The memory ceiling they share is the Docker Desktop VM's — see the
+          WSL memory &amp; CPU card below to change it.
+        {/if}
+      </p>
+      {#if resError}<p class="inline-error">{resError}</p>{/if}
+      <div class="row">
+        <button onclick={refreshResources} disabled={resBusy}>
+          {resBusy ? "Measuring… (takes a few seconds)" : "Refresh"}
+        </button>
+      </div>
+      {#if resLoaded}
+        {#if resRows.length === 0}
+          <p class="muted">No server containers running — start the server from Home first.</p>
+        {:else}
+          <table class="res-table">
+            <thead><tr><th>Container</th><th>CPU</th><th>Memory</th><th>Mem %</th></tr></thead>
+            <tbody>
+              {#each resRows as r (r.name)}
+                <tr><td>{r.name}</td><td>{r.cpu}</td><td>{r.mem}</td><td>{r.mem_pct}</td></tr>
+              {/each}
+            </tbody>
+          </table>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+
+  {#if !onLinux}
   <div class="card">
     <h3>WSL memory &amp; CPU (.wslconfig)</h3>
     <p class="muted">
@@ -1740,6 +1818,7 @@
       {#if wcNote}<span class="notice">{wcNote}</span>{/if}
     </div>
   </div>
+  {/if}
 
   {#if dockerRestartCardVisible(nativeStatus)}
     <div class="card">
@@ -1778,6 +1857,7 @@
     </div>
   {/if}
 
+  {#if !onLinux}
   <div class="card">
     <h3>Restart WSL</h3>
     <p class="muted">
@@ -1845,6 +1925,7 @@
       </p>
     {/if}
   </div>
+  {/if}
 
   <div class="card">
     <h3>Cache maintenance</h3>
@@ -1895,6 +1976,7 @@
     {#if doctorOutput}<pre class="usage">{doctorOutput}</pre>{/if}
   </div>
 
+  {#if !onLinux}
   <div class="card">
     <h3>DML shell</h3>
     <p class="muted">
@@ -1906,6 +1988,7 @@
       <button onclick={launchShell} disabled={shellBusy}>Open shell</button>
     </div>
   </div>
+  {/if}
 </section>
 
 <style>
@@ -1921,6 +2004,9 @@
      different machine from everything else on this card. */
   .addon-row { border-top: 1px solid #21262d; padding-top: 10px; margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
   .warn-text { color: #d29922; font-size: 13px; margin: 0; }
+  .res-table { border-collapse: collapse; font-size: 13px; }
+  .res-table th, .res-table td { text-align: left; padding: 4px 14px 4px 0; border-bottom: 1px solid #21262d; }
+  .res-table th { color: #8b949e; font-weight: 600; }
   .section-head { margin: 8px 0 0; font-size: 14px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.06em; }
   .fld { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: #8b949e; }
   .fld input { min-width: 110px; }
