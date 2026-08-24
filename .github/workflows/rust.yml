@@ -1,7 +1,7 @@
 name: rust
 on:
   push:
-    branches: ["rust-main", "feat/**", "spike/**"]
+    branches: ["rust-main", "release/**", "feat/**", "spike/**"]
   pull_request:
     paths: ["crates/**", "launcher/src-tauri/**", "Cargo.*", ".github/workflows/rust.yml"]
 jobs:

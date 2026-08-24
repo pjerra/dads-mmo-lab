@@ -27,7 +27,7 @@ be enabled on the host or WSL2 cannot start.
 **As a developer — from source.**
 
 ```
-git clone --branch rust-main https://github.com/pjerra/dads-mmo-lab.git
+git clone --branch release/dml-launcher https://github.com/pjerra/dads-mmo-lab.git
 cd dads-mmo-lab\launcher
 npm install
 npm run tauri dev

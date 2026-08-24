@@ -584,8 +584,8 @@
           Enable untested features (for smoke testing)
         </label>
         <p class="muted">
-          Untested features stay disabled until their smoke test passes. The checklist lives in
-          docs/SMOKE-TESTS.md.
+          Untested features stay disabled until they have been smoke-tested. Turn this on to try
+          them anyway.
         </p>
       </div>
       {#if launcher}

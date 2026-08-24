@@ -128,7 +128,7 @@ export const ONBOARDING_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 export const LOCKED_HINT =
-  "Untested — enable untested features in Settings to try it (see docs/SMOKE-TESTS.md)";
+  "Untested — enable untested features in Settings to try it";
 
 const STORAGE_KEY = "dml.testingMode";
 

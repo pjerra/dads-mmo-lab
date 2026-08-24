@@ -13,7 +13,7 @@ Active development, **pre-release**. The app's core is being rewritten to native
 ## Getting it
 > _hypeer: keep whichever line applies — a built installer you send, or build-from-source._
 - **Installer:** run the `DML Launcher` setup I send you.
-- **From source:** clone the repo (branch `rust-main` — that is the branch everything lives on now), then in `launcher/`: `npm install` → `npm run tauri dev` (or `npm run tauri build` for an installer).
+- **From source:** clone the repo (branch `release/dml-launcher` — the launcher-only branch; see the root README for prerequisites), then in `launcher/`: `npm install` → `npm run tauri dev` (or `npm run tauri build` for an installer).
 
 **Requirements:**
 - **Docker Desktop** (Windows). The first server install pulls AzerothCore's official images (a few GB) — one-time.
