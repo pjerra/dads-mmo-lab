@@ -100,6 +100,18 @@ describe("Home can start the server in the state where you most need it to", () 
     expect(home).not.toMatch(/startDockerEngine|ensureEngine\s*\(/);
   });
 
+  it("a not-installed title is an empty state that points at Library, never the error card", () => {
+    // On a fresh machine `games status` answers NOT_FOUND: nothing is wrong,
+    // nothing is installed. Drawing that as "Couldn't reach the DML backend"
+    // with a CLI hint was the first thing a new user saw (VM run, 2026-08-25).
+    expect(home).toMatch(/err\.code\s*===\s*["']NOT_FOUND["']/);
+    const branch = branchAround(home, "No server installed yet");
+    expect(branch).toMatch(/onnav\?\.\(\s*["']library["']\s*\)/);
+    expect(branch).not.toContain("Couldn't reach the DML backend");
+    // And the branch order: the empty state is tested BEFORE the error card.
+    expect(home.indexOf("No server installed yet")).toBeLessThan(home.indexOf("Couldn't reach the DML backend"));
+  });
+
   it("the branch matcher can actually fail", () => {
     // Non-vacuity: branchAround must not return the whole file (which would
     // make every assertion above pass regardless of where the button lives).

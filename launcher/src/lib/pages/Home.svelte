@@ -51,6 +51,10 @@
   let unbound: UnboundStatus | null = $state(null);
   const unboundTag = $derived.by(() => unboundBadge(unbound));
   let statusError: string | null = $state(null);
+  // The WoW title is simply not installed (status answered NOT_FOUND). A fresh
+  // machine's normal state -- not a backend failure, so it must not be drawn
+  // as one: the first thing a new user saw was a red card quoting a CLI hint.
+  let notInstalled = $state(false);
   let refreshing = $state(false);
   let expanded = $state(false);
 
@@ -116,6 +120,7 @@
     try {
       containerState = (await gamesStatus(WOW_ID)).state;
       statusError = null;
+      notInstalled = false;
       // Deliberately after the status call and deliberately swallowed: the
       // add-on badge is a nicety, and it must never be able to turn a healthy
       // server card into an error card.
@@ -124,8 +129,11 @@
         () => (unbound = null),
       );
     } catch (e) {
-      const err = e as { message?: string; hint?: string };
-      statusError = `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
+      const err = e as { code?: string; message?: string; hint?: string };
+      notInstalled = err.code === "NOT_FOUND";
+      statusError = notInstalled
+        ? null
+        : `${err.message ?? String(e)}${err.hint ? ` — ${err.hint}` : ""}`;
       containerState = null;
     }
     await refreshServerStatus();
@@ -484,7 +492,16 @@
   {#if restartState.needed}
     <div class="warn-card"><p>{bannerText(restartState.apply)}</p></div>
   {/if}
-  {#if statusError}
+  {#if notInstalled}
+    <div class="card empty-card">
+      <strong>No server installed yet.</strong>
+      <p class="muted">
+        Install one from the Library -- start with <em>WoW WotLK Playerbots</em>. The first
+        install builds the server from source and takes a while.
+      </p>
+      <button class="primary" onclick={() => onnav?.("library")}>Open Library</button>
+    </div>
+  {:else if statusError}
     <!--
       A DEAD END UNTIL 2026-08-02. `games status` needs a live Docker engine,
       so a stopped Docker Desktop -- the single most common state on a machine
@@ -727,5 +744,6 @@
   .muted { color: #8b949e; margin: 0; }
   .refresh-warn { font-size: 12.5px; }
   .error-card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 12px 16px; }
+  .empty-card { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
   .warn-card { background: #161b22; border: 1px solid #d29922; border-radius: 8px; padding: 12px 16px; }
 </style>
