@@ -13,16 +13,15 @@ modules and backups — all from one window, no terminal needed.
 
 **As a user — no repo, no Rust, no Node.**
 
-1. Run `Install-DML.ps1` once from an elevated PowerShell. It enables WSL2 and
-   creates the `dml-arch` distro; that step needs admin, so it stays a script.
-2. Install the launcher (`DML Launcher_x.y.z_x64-setup.exe`). It is unsigned,
-   so SmartScreen will warn — *More info* then *Run anyway*.
-3. Open it. The first-run screen walks the rest: it ships the `dml` CLI, the
-   lua bridges and the title installers inside it, and provisions them into the
-   distro from a **Set up backend** button. There is no `dev-install.ps1` step.
+1. Unpack `DML-Launcher-x.y.z-portable-x64.zip` anywhere.
+2. Run `Setup-DML.bat` once (asks for Administrator): installs WSL2, Docker
+   Desktop, Git for Windows and WebView2, and adds a Start-menu shortcut.
+3. Run `launcher.exe`. It is unsigned, so SmartScreen will warn — *More info*
+   then *Run anyway*. **Library** → install a server.
 
-Requirements: Windows 10/11 (WSL2 capable). In a VM, nested virtualization must
-be enabled on the host or WSL2 cannot start.
+Requirements: Windows 10/11 with CPU virtualization enabled. In a VM, nested
+virtualization must be enabled on the host or WSL2 cannot start. Full guide in
+the root README.
 
 **As a developer — from source.**
 

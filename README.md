@@ -31,17 +31,28 @@ The first server install pulls AzerothCore's official images (a few GB) — one 
 
 ## 2. Run it (users)
 
-### Windows — native mode (recommended)
+### Windows — portable zip (recommended)
 
-1. Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and
-   [Git for Windows](https://git-scm.com/download/win). Start Docker Desktop once.
-2. Optional check: run `guides\DML-Windows\Install-DML-Native.ps1` in PowerShell —
-   it verifies Docker Desktop and Git Bash and tells you what is missing.
-3. Get `DML Launcher_x.y.z_x64-setup.exe` (from a Release, or build it — section 3).
-   It is unsigned: SmartScreen will warn → *More info* → *Run anyway*.
-4. Open **DML Launcher** → **Library** → install *WoW WotLK Playerbots* and answer
-   the installer's questions in the built-in terminal.
+No installer. One folder, one setup script, one exe.
+
+1. Download `DML-Launcher-x.y.z-portable-x64.zip` (from a Release, or build it —
+   section 3) and unpack it anywhere, e.g. `C:\DML Launcher\`.
+2. Double-click **`Setup-DML.bat`** once. It asks for Administrator and installs
+   everything the launcher needs: WSL2 (restart if asked — it resumes by itself),
+   Docker Desktop, Git for Windows, WebView2, and `yq`. It also adds a Start-menu
+   shortcut. About 10–20 minutes, mostly downloads.
+3. Double-click **`launcher.exe`** (unsigned: SmartScreen → *More info* → *Run anyway*).
+4. **Library** → install *WoW WotLK Playerbots* and answer the installer's
+   questions in the built-in terminal. The first install builds from source and
+   takes hours.
 5. Point your 3.3.5a client's `realmlist.wtf` at `127.0.0.1` and log in.
+
+Keep the folder together: `launcher.exe` reads `cli\` and `installers\` from
+next to itself.
+
+Prefer a classic installer? `DML Launcher_x.y.z_x64-setup.exe` does the same as
+the zip; run `guides\DML-Windows\Install-DML-Native.ps1 -All` for the
+prerequisites (`Setup-DML.ps1` in the zip is that same script).
 
 ### Windows — WSL2 mode (alternative)
 
@@ -77,7 +88,14 @@ git clone --branch release/dml-launcher https://github.com/pjerra/dads-mmo-lab.g
 cd dads-mmo-lab/launcher
 npm install
 npm run tauri dev          # dev mode with hot reload
-npm run tauri build        # installers land in ../target/release/bundle/
+npm run tauri build        # NSIS/MSI installers land in ../target/release/bundle/
+```
+
+Portable zip (what users get):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-portable.ps1
+# -> target\release\DML-Launcher-<version>-portable-x64.zip
 ```
 
 On Windows you can also double-click `start-launcher.bat` at the repo root to
@@ -104,6 +122,7 @@ not `cli/dml`. Its `--json` contract is in [docs/cli-contract.md](docs/cli-contr
 | `crates/` | Rust workspace: `dml-core`, `dml-wow` (server driver), `dml-wow-cli` |
 | `cli/` | The bash `dml` CLI used by the WSL2 backend, plus the Eluna Lua bridges |
 | `guides/` | Upstream title installers (`install-*.sh`) bundled into the launcher, and the Windows setup/uninstall scripts |
+| `scripts/build-portable.ps1` | Builds the portable zip (exe + payload + `Setup-DML.bat`) |
 | `scripts/install-dml.sh` | Linux prerequisites installer |
 | `docs/` | Feature list, tester notes, CLI contract |
 

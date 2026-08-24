@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Prepares a Windows PC to run Dad's MMO Lab on Docker Desktop -- no WSL
     distro, no Arch, no bash CLI.
@@ -42,6 +42,20 @@
     no such threshold, so this switch exists purely so an unattended run on a bare
     machine can complete -- which is what the native gate tests.
 
+.PARAMETER InstallWebView2
+    Install the WebView2 Evergreen Runtime via winget instead of only checking
+    for it. Opt-in like the others. Windows 11 ships it; a bare Windows 10 may not.
+
+.PARAMETER All
+    Shorthand for -InstallDocker -InstallGit -InstallWebView2: install every
+    prerequisite this script knows about. This is what the portable zip's
+    Setup-DML.bat passes. Enabling WSL still needs an Administrator window.
+
+.PARAMETER LauncherDir
+    Use a launcher that is ALREADY on disk (the portable zip, unpacked) instead
+    of downloading one. Must contain launcher.exe. A Start-menu shortcut is
+    created for it, and no installer is fetched.
+
 .PARAMETER NoLauncher
     Skip installing the DML Launcher. It is installed BY DEFAULT, unlike Docker
     and Git: those are third-party products whose licences are the user's
@@ -67,6 +81,9 @@ param(
     [string]$GamesDir = (Join-Path $env:USERPROFILE 'dml-native'),
     [switch]$InstallDocker,
     [switch]$InstallGit,
+    [switch]$InstallWebView2,
+    [switch]$All,
+    [string]$LauncherDir,
     [switch]$NoLauncher,
     [string]$LauncherTag,
     [switch]$DryRun
@@ -74,6 +91,14 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# -All is sugar, expanded HERE so every branch below keeps testing the one
+# switch it is about (and the queued resume carries the expanded switches).
+if ($All) {
+    $InstallDocker   = $true
+    $InstallGit      = $true
+    $InstallWebView2 = $true
+}
 
 # --------------------------------------------------------------------------
 # Pins. A download with no hash is a download you cannot trust twice.
@@ -169,6 +194,8 @@ function Register-Resume {
     $argList = @('-NoExit', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
     if ($InstallDocker) { $argList += '-InstallDocker' }
     if ($InstallGit)    { $argList += '-InstallGit' }
+    if ($InstallWebView2) { $argList += '-InstallWebView2' }
+    if ($LauncherDir)   { $argList += @('-LauncherDir', ('"{0}"' -f $LauncherDir)) }
     # Only when it differs from the default, so the queued command stays as
     # close to what the user actually typed as possible.
     if ($GamesDir -ne (Join-Path $env:USERPROFILE 'dml-native')) {
@@ -270,6 +297,21 @@ function Resolve-LauncherAsset([string]$Tag) {
         Url  = $asset.browser_download_url
         Size = $asset.size
     }
+}
+
+# A Start-menu shortcut for a portable launcher, so "open it from the Start
+# menu" is true for the zip route as well as the installer route.
+function New-LauncherShortcut([string]$ExePath) {
+    $programs = [Environment]::GetFolderPath('Programs')
+    $lnk = Join-Path $programs 'DML Launcher.lnk'
+    Invoke-Change "create Start-menu shortcut $lnk" {
+        $shell = New-Object -ComObject WScript.Shell
+        $sc = $shell.CreateShortcut($lnk)
+        $sc.TargetPath = $ExePath
+        $sc.WorkingDirectory = Split-Path -Parent $ExePath
+        $sc.Description = 'DML Launcher'
+        $sc.Save()
+    } | Out-Null
 }
 
 #Is the launcher already on this machine? Checked before downloading 7 MB.
@@ -745,10 +787,27 @@ if (Test-CommandExists 'git') {
 Step 'Checking WebView2 (the launcher window)'
 if (Test-WebView2Installed) {
     Ok 'WebView2 runtime present'
+} elseif ($InstallWebView2) {
+    if (-not (Test-CommandExists 'winget')) {
+        $problems.Add('WebView2 is missing and winget is not available to install it. Get the Evergreen Runtime from https://developer.microsoft.com/microsoft-edge/webview2/ and re-run.')
+        Fail 'winget not available'
+    } else {
+        Invoke-Change 'install the WebView2 runtime via winget' {
+            Say '    WebView2 Evergreen Runtime: a small bootstrapper, then ~150 MB.' 'DarkGray'
+            $proc = Start-Process -FilePath 'winget' -NoNewWindow -Wait -PassThru `
+                -ArgumentList @('install', '--id', 'Microsoft.EdgeWebView2Runtime',
+                                '--accept-package-agreements', '--accept-source-agreements')
+            $script:WebViewWingetOk = Test-WingetOk $proc.ExitCode 'WebView2 runtime'
+        } | Out-Null
+        if (-not $DryRun -and -not $script:WebViewWingetOk) {
+            $problems.Add('The WebView2 runtime failed to install via winget.')
+        }
+    }
 } else {
     Warn 'WebView2 runtime not detected'
     Info 'Windows 11 ships it; a freshly imaged Windows 10 may not.'
     Info 'Get the Evergreen Runtime: https://developer.microsoft.com/microsoft-edge/webview2/'
+    Info 'Or re-run this script with -InstallWebView2 to install it via winget.'
     # Deliberately NOT fatal: the detection reads registry keys that a managed
     # or unusual install may not populate, and refusing on a maybe would block
     # a machine that works.
@@ -778,8 +837,17 @@ Step 'Installing the DML Launcher'
 if ($NoLauncher) {
     Info 'Skipped (-NoLauncher). Get it from https://github.com/pjerra/dads-mmo-lab/releases'
 } else {
+    $portable = if ($LauncherDir) { Join-Path $LauncherDir 'launcher.exe' } else { $null }
     $have = Get-InstalledLauncher
-    if ($have) {
+    if ($portable -and (Test-Path -LiteralPath $portable)) {
+        # The portable zip: the launcher is already unpacked next to this
+        # script, so there is nothing to download -- just make it findable.
+        Ok "using the portable launcher at $portable"
+        New-LauncherShortcut $portable
+    } elseif ($portable) {
+        Fail "-LauncherDir was given but $portable does not exist"
+        $problems.Add("No launcher.exe in $LauncherDir. Unpack the whole zip, then run Setup-DML.bat from inside it.")
+    } elseif ($have) {
         Ok "already installed at $have"
     } else {
         $asset = Resolve-LauncherAsset $LauncherTag
@@ -876,6 +944,7 @@ if ($NoLauncher) {
     Say '    https://github.com/pjerra/dads-mmo-lab/releases' 'Yellow'
 } else {
     Say '  The DML Launcher is installed -- open it from the Start menu.' 'Gray'
+    if ($LauncherDir) { Say "  (portable: it runs from $LauncherDir -- keep that folder)" 'DarkGray' }
 }
 if ($DryRun) { Say '' ; Say '  (Dry run -- nothing was actually changed.)' 'Yellow' }
 exit 0
