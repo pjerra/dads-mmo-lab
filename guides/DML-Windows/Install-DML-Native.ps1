@@ -219,51 +219,42 @@ function Register-Resume {
 # keyboard on a machine that may still be scrolling installer output.
 $RestartCountdownSeconds = 60
 
-# Count down, then restart -- unless a key is pressed.
+# Count down, then restart. A keypress restarts NOW; otherwise the restart
+# happens when the countdown ends. (User decision 2026-08-25: the previous
+# version treated a keypress as CANCEL and refused to restart at all where no
+# keypress could be read -- which is every SSH / scheduled run -- so the one
+# step the whole setup hinges on was the one step it would not take.)
 #
-# Returns $true if it restarted (in practice it never returns then), $false if
-# the user cancelled or a restart was not attempted.
-#
-# THE CANCEL IS NOT A COURTESY, IT IS THE FEATURE. Where a keypress cannot be
-# read -- redirected stdin, a non-interactive host, ISE -- there is no way to
-# stop the countdown, and an unstoppable automatic restart is a different and
-# much worse thing than the one asked for. So an unreadable console means no
-# restart at all, and the user is told to do it themselves.
+# Where a keypress cannot be read (redirected stdin, non-interactive host) the
+# countdown simply runs to the end and restarts; the user was told, in the
+# summary above, that this is coming.
 function Invoke-RestartCountdown {
-    # Can we actually offer the escape hatch? Asked BEFORE anything counts
-    # down, so we never start a clock we cannot stop.
-    $canCancel = $false
+    $canRead = $false
     try {
         if ([Environment]::UserInteractive) {
             $null = [Console]::KeyAvailable   # throws on hosts without a real console
-            $canCancel = $true
+            $canRead = $true
         }
     } catch {
-        $canCancel = $false
-    }
-
-    if (-not $canCancel) {
-        Say ''
-        Say '  This session cannot read a keypress, so the PC will NOT restart itself.' 'Yellow'
-        Say '  Restart it yourself; this script continues automatically afterwards.' 'Yellow'
-        return $false
+        $canRead = $false
     }
 
     # Drain anything already buffered, so a stray keystroke typed minutes ago
-    # does not instantly "cancel" a countdown the user never saw.
-    while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) }
+    # does not instantly restart a machine the user was still reading.
+    if ($canRead) { while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) } }
 
     Say ''
     $left = $RestartCountdownSeconds
     while ($left -gt 0) {
-        Write-Host ("`r  Restarting in {0,3}s -- press any key to cancel and restart later. " -f $left) `
-                   -NoNewline -ForegroundColor Yellow
-        if ([Console]::KeyAvailable) {
-            $null = [Console]::ReadKey($true)
-            Write-Host ''
-            Say '  Cancelled -- restart this PC yourself when you are ready.' 'Yellow'
-            Say '  This script continues automatically after the restart.' 'DarkGray'
-            return $false
+        if ($canRead) {
+            Write-Host ("`r  Restarting in {0,3}s -- press any key to restart now. " -f $left) `
+                       -NoNewline -ForegroundColor Yellow
+            if ([Console]::KeyAvailable) {
+                $null = [Console]::ReadKey($true)
+                break
+            }
+        } else {
+            Write-Host ("`r  Restarting in {0,3}s. " -f $left) -NoNewline -ForegroundColor Yellow
         }
         Start-Sleep -Seconds 1
         $left--
@@ -907,9 +898,9 @@ if ($problems.Count -gt 0) {
         # complaint, and because "fix those and re-run" reads as optional
         # advice next to a restart that is not.
         if ($script:ResumeQueued) {
-            Say '  RESTART THIS PC. This script then continues automatically.' 'Yellow'
+            Say '  This PC will RESTART. The script then continues automatically.' 'Yellow'
         } else {
-            Say '  RESTART THIS PC, then run this script again.' 'Yellow'
+            Say '  This PC will RESTART. Run this script again afterwards.' 'Yellow'
         }
         # NEVER under -DryRun. The test harness runs this script with -DryRun on
         # a developer's machine; without this guard the suite would hang for a

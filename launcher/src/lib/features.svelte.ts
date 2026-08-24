@@ -144,11 +144,13 @@ function hasStorage(): boolean {
   }
 }
 
+// DEFAULT ON (user decision 2026-08-25): untested features are available
+// unless the user has explicitly switched them off. Only a stored "0" locks.
 function readStored(): boolean {
   try {
-    return hasStorage() && localStorage.getItem(STORAGE_KEY) === "1";
+    return !(hasStorage() && localStorage.getItem(STORAGE_KEY) === "0");
   } catch {
-    return false;
+    return true;
   }
 }
 

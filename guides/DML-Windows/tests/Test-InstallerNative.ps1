@@ -389,38 +389,22 @@ foreach ($c in $cdCalls) {
         "the countdown at line $($c.Extent.StartLineNumber) is guarded by -DryRun"
 }
 
-# GUARD 3: the cancel is not a courtesy, it IS the feature. Where a keypress
-# cannot be read, an unstoppable restart is a different and much worse thing
-# than the one that was asked for -- so the function must consult both
-# UserInteractive and KeyAvailable, and must be able to return without
-# restarting.
+# GUARD 3: a keypress restarts NOW, and the countdown restarts at the end
+# regardless (user decision 2026-08-25). Where no keypress can be read the
+# countdown still runs to the end -- it must not silently refuse to restart.
 if ($cd) {
     $body = $cd.Extent.Text
-    Assert-True ($body -match 'UserInteractive') 'the countdown checks the session is interactive'
-    Assert-True ($body -match 'KeyAvailable') 'the countdown checks for a keypress'
-
-    # REACHABILITY, not presence. An earlier version only asserted these strings
-    # appeared, so a mutation that replaced the whole guard with `if ($false)`
-    # left them in place and passed -- the third time in two days that counting
-    # a construct proved it was written rather than that it runs. What must hold
-    # is that some branch INSIDE this function is conditioned on whether a
-    # cancel is possible.
-    $condHasCanCancel = $false
-    foreach ($ifAst in $cd.FindAll({
-        param($n) $n -is [System.Management.Automation.Language.IfStatementAst]
-    }, $true)) {
-        foreach ($clause in $ifAst.Clauses) {
-            if ($clause.Item1.Extent.Text -match 'canCancel') { $condHasCanCancel = $true }
-        }
-    }
-    Assert-True $condHasCanCancel `
-        'a branch is conditioned on whether a cancel can actually be offered'
-    Assert-True ($body -match 'ReadKey') 'a keypress is consumed, so it registers as a cancel'
-    # The restart must come AFTER the cancel loop, never before it.
-    $keyIdx = $body.IndexOf('KeyAvailable')
+    Assert-True ($body -match 'UserInteractive') 'the countdown checks whether a keypress can be read'
+    Assert-True ($body -match 'KeyAvailable') 'the countdown polls for a keypress'
+    Assert-True ($body -match 'ReadKey') 'a keypress is consumed'
+    # A keypress must lead to the restart, never around it: the ONLY early exit
+    # from the loop is `break`, and there is no `return` before Restart-Computer.
     $rebootIdx = $body.IndexOf('Restart-Computer')
-    Assert-True ($keyIdx -ge 0 -and $rebootIdx -gt $keyIdx) `
-        'the cancel check precedes the restart'
+    $firstReturn = $body.IndexOf('return')
+    Assert-True ($rebootIdx -ge 0 -and ($firstReturn -lt 0 -or $firstReturn -gt $rebootIdx)) `
+        'nothing returns from the countdown before Restart-Computer (no cancel path)'
+    Assert-True ($body -match 'Start-Sleep') 'the countdown actually waits'
+    Assert-True (-not ($body -match 'Cancelled')) 'no cancel wording remains'
 }
 
 # --------------------------------------------------------------------------
