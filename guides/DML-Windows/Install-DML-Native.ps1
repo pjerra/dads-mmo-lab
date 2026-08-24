@@ -542,7 +542,6 @@ $problems = New-Object System.Collections.Generic.List[string]
 # assignment on the happy path where WSL was already present.
 $script:RebootRequired = $false
 $script:ResumeQueued   = $false
-$script:WslInstallCode = 0
 
 # Before anything: a queued resume from a previous run is now redundant -- we
 # ARE the run it was queued for, or the user started one by hand.
@@ -589,100 +588,100 @@ if ($virtOk -eq $true) {
 
 Step 'Checking WSL2 (Docker Desktop''s engine)'
 $wsl = Get-WslState
+# WSL is "installed" only when BOTH halves are there: the two Windows features
+# (Microsoft-Windows-Subsystem-Linux + VirtualMachinePlatform) AND the WSL
+# package itself. `wsl --status` answers 0 only for the second, so it is the
+# one probe that covers both.
+#
+# WHY NOT `wsl --install --no-distribution` (2026-08-25, proven on a clean
+# Win11 26200 VM): when the WSL package is absent, C:\Windows\System32\wsl.exe
+# is an inbox STUB that rejects EVERY flag -- --no-distribution, --update,
+# --version, --inbox -- with "WSL is not installed. You can install by running
+# 'wsl.exe --install'", exit 1. The only thing it accepts is a bare --install,
+# which also downloads Ubuntu. And this script used to treat that exit 1 as
+# "nothing to say" and print Ready. So the package comes from winget
+# (Microsoft.WSL, the same MSI the Store ships) and the features from DISM,
+# neither of which depends on the stub's mood.
 if ($wsl -eq $true) {
     Ok 'WSL is installed'
-} elseif ($null -eq $wsl -and $InstallDocker -and (Test-IsElevated)) {
-    # Could not tell, and we are about to install something that RUNS on it.
-    #
-    # A shrug is the right default -- a probe that cannot answer is evidence of
-    # nothing -- but not here: `wsl --install --no-distribution` is idempotent
-    # and harmless on a machine that already has WSL, so trying it settles the
-    # question in the one way a probe could not. Observed on a real VM
-    # (2026-08-04): the state read as unknown and Docker's install then aborted.
-    Info 'Could not read the WSL state; enabling it anyway (harmless if already present).'
-    Invoke-Change 'enable WSL (wsl --install --no-distribution)' {
-        wsl.exe --install --no-distribution | Out-Host
-        $script:WslInstallCode = $LASTEXITCODE
+} elseif ($InstallDocker -and (Test-IsElevated)) {
+    # Could not tell, or genuinely missing -- either way we are about to
+    # install something that RUNS on it, and every step below is idempotent,
+    # so trying settles the question in the one way a probe could not.
+    if ($null -eq $wsl) { Info 'Could not read the WSL state; setting it up anyway (harmless if already present).' }
+    $script:WslFeatureRestart = $false
+    $script:WslFeatureOk = $true
+    Invoke-Change 'enable the WSL and Virtual Machine Platform Windows features' {
+        foreach ($f in @('Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform')) {
+            try {
+                $r = Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart -ErrorAction Stop
+                if ($r.RestartNeeded) { $script:WslFeatureRestart = $true }
+                Ok "$f enabled"
+            } catch {
+                Fail "$f could not be enabled: $($_.Exception.Message)"
+                $script:WslFeatureOk = $false
+            }
+        }
     } | Out-Null
-    if (-not $DryRun -and $script:WslInstallCode -eq 0) {
-        Ok 'WSL enabled'
-        $script:RebootRequired = $true
-        $script:ResumeQueued = Register-Resume
-        if ($script:ResumeQueued) {
-            $problems.Add('WSL was just enabled -- RESTART; this script continues by itself afterwards.')
-        } else {
-            $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+    if (-not (Test-CommandExists 'winget')) {
+        $problems.Add('WSL is missing and winget is not available to install it. Run "wsl --install" as Administrator, reboot, and re-run this script.')
+        Fail 'winget not available'
+    } else {
+        Invoke-Change 'install the WSL package via winget (Microsoft.WSL)' {
+            Say '    WSL is ~200 MB. winget shows its own progress below.' 'DarkGray'
+            $proc = Start-Process -FilePath 'winget' -NoNewWindow -Wait -PassThru `
+                -ArgumentList @('install', '--id', 'Microsoft.WSL',
+                                '--accept-package-agreements', '--accept-source-agreements')
+            $script:WslWingetOk = Test-WingetOk $proc.ExitCode 'WSL'
+        } | Out-Null
+        if (-not $DryRun) {
+            if ($script:WslWingetOk -and $script:WslFeatureOk) {
+                # A REBOOT IS REQUIRED when a feature was just switched on, so
+                # this run must not end in "Ready." A machine that needs
+                # restarting is not ready, and a script that says otherwise
+                # sends the user to open a launcher that cannot work.
+                if ($script:WslFeatureRestart) {
+                    $script:RebootRequired = $true
+                    # Queue ourselves so the user does not have to remember.
+                    $script:ResumeQueued = Register-Resume
+                    if ($script:ResumeQueued) {
+                        $problems.Add('WSL was just enabled -- RESTART; this script continues by itself afterwards.')
+                    } else {
+                        $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
+                    }
+                } else {
+                    # Features were already on; the package alone needs no reboot.
+                    # Prove it rather than assume it.
+                    if ((Get-WslState) -eq $true) { Ok 'WSL is installed' }
+                    else {
+                        Fail 'WSL still does not report as installed'
+                        $problems.Add('WSL did not come up after install; reboot and re-run this script.')
+                    }
+                }
+            } else {
+                Fail 'WSL could not be set up'
+                $problems.Add('WSL could not be set up automatically; run "wsl --install" as Administrator, reboot, and re-run this script.')
+            }
         }
     }
+} elseif ($InstallDocker) {
+    # We can install Docker but cannot enable the feature it needs. This
+    # script is designed to run WITHOUT Administrator, so a missing privilege
+    # is REPORTED with the exact command, never a crash and never a silent skip.
+    Fail 'WSL is not installed, and enabling it needs Administrator'
+    Info 'Run this script again from an ADMIN PowerShell (or use Setup-DML.bat, which asks for it).'
+    $problems.Add('WSL is not installed; re-run this script as Administrator.')
 } elseif ($null -eq $wsl) {
     # Could not tell, and nothing here depends on the answer yet.
     Info 'Could not determine whether WSL is installed; Docker Desktop will say so on first run.'
 } else {
-    # WSL is genuinely missing.
-    #
-    # We only ACT when -InstallDocker was used, and the distinction is the whole
-    # point. A user who installed Docker Desktop themselves ran its interactive
-    # setup, which enables WSL -- that is why this script deliberately does not
-    # switch Windows features. But `-InstallDocker` runs winget silently, which
-    # SKIPS that setup, so Docker arrives on a machine with no WSL and stops
-    # (observed on a bare VM, 2026-08-04). Having bypassed Docker's own setup,
-    # we owe the user the step it would have taken.
-    # The POSITIVE case leads, and each arm's condition states its own
-    # precondition. An earlier version put the install in a bare `else` --
-    # logically guarded, but Test-InstallerNative rejected it, correctly: that
-    # guard refuses to reason about logic precisely because reasoning about
-    # logic is what once let a call slip into the unguarded else of the very
-    # statement being checked.
-    if ($InstallDocker -and (Test-IsElevated)) {
-        Invoke-Change 'enable WSL (wsl --install --no-distribution)' {
-            # --no-distribution: Docker Desktop supplies its own docker-desktop
-            # distro. Installing Ubuntu here would add tens of GB nobody asked
-            # for and a first-run account prompt this script cannot answer.
-            wsl.exe --install --no-distribution | Out-Host
-            $script:WslInstallCode = $LASTEXITCODE
-        } | Out-Null
-        if (-not $DryRun) {
-            if ($script:WslInstallCode -eq 0) {
-                Ok 'WSL enabled'
-                # A REBOOT IS REQUIRED, so this run must not end in "Ready."
-                # A machine that needs restarting is not ready, and a script
-                # that says otherwise sends the user to open a launcher that
-                # cannot work.
-                $script:RebootRequired = $true
-                # Queue ourselves so the user does not have to remember. The
-                # message below adapts to whether this actually worked -- a
-                # promise of automation that silently failed is worse than
-                # telling someone to re-run it.
-                $script:ResumeQueued = Register-Resume
-                if ($script:ResumeQueued) {
-                    $problems.Add('WSL was just enabled -- RESTART; this script continues by itself afterwards.')
-                } else {
-                    $problems.Add('WSL was just enabled -- REBOOT, then run this script again.')
-                }
-            } else {
-                Fail "WSL could not be enabled (exit $script:WslInstallCode)"
-                $problems.Add('WSL could not be enabled automatically; run "wsl --install --no-distribution" as Administrator.')
-            }
-        }
-    } elseif ($InstallDocker) {
-        # We installed Docker but cannot enable the feature it needs. This
-        # script is designed to run WITHOUT Administrator, so a missing
-        # privilege is REPORTED with the exact command, never a crash and never
-        # a silent skip.
-        Fail 'WSL is not installed, and enabling it needs Administrator'
-        Info 'Run this in an ADMIN PowerShell, reboot, then re-run this script:'
-        Info '    wsl --install --no-distribution'
-        Info '(--no-distribution on purpose: Docker Desktop brings its own distro; an extra Ubuntu is tens of GB of nothing.)'
-        $problems.Add('WSL is not installed; run "wsl --install --no-distribution" as Administrator and reboot.')
-    } else {
-        # We did NOT install Docker, so its own interactive setup will enable
-        # WSL -- which is why this script deliberately does not switch Windows
-        # features on the default path.
-        Warn 'WSL is not installed -- Docker Desktop needs it for its engine.'
-        Info 'Docker Desktop enables it during its own setup; run Docker Desktop once and let it finish.'
-        Info 'Or enable it yourself in an ADMIN PowerShell: wsl --install --no-distribution'
-        $problems.Add('WSL is not installed (Docker Desktop cannot run without it).')
-    }
+    # We did NOT install Docker, so its own interactive setup will enable
+    # WSL -- which is why this script deliberately does not switch Windows
+    # features on the default path.
+    Warn 'WSL is not installed -- Docker Desktop needs it for its engine.'
+    Info 'Docker Desktop enables it during its own setup; run Docker Desktop once and let it finish.'
+    Info 'Or re-run this script as Administrator with -InstallDocker (or -All) to set it up here.'
+    $problems.Add('WSL is not installed (Docker Desktop cannot run without it).')
 }
 
 Step 'Checking Docker Desktop'
