@@ -408,6 +408,28 @@ if ($cd) {
 }
 
 # --------------------------------------------------------------------------
+Say "`n== Self-elevation ==" 'White'
+# The .bat elevates, but the RunOnce resume relaunches the ps1 UNELEVATED and a
+# user may run the ps1 directly -- so the script must re-elevate itself, or the
+# resumed run silently skips the admin-only steps (Defender exclusion did).
+Assert-True ($src -match 'Start-Process[\s\S]{0,160}-Verb RunAs') 'the script self-elevates via RunAs'
+# It MUST be guarded three ways, and the -DryRun guard is load-bearing: the
+# harness runs the whole script with -DryRun, and a relaunch there would spawn
+# UAC prompts on the developer's box during `Test`.
+$selfElevAst = $ast.FindAll({
+    param($n)
+    $n -is [System.Management.Automation.Language.IfStatementAst] -and
+    $n.Extent.Text -match 'RunAs'
+}, $true)
+Assert-True ($selfElevAst.Count -ge 1) 'the RunAs relaunch lives in a guarded if'
+if ($selfElevAst.Count -ge 1) {
+    $cond = $selfElevAst[0].Clauses[0].Item1.Extent.Text
+    Assert-True ($cond -match 'DryRun')       'self-elevation is skipped under -DryRun'
+    Assert-True ($cond -match 'Test-IsElevated') 'self-elevation is skipped when already admin'
+    Assert-True ($cond -match 'Install')      'self-elevation only when asked to install something'
+}
+
+# --------------------------------------------------------------------------
 Say "`n== The launcher is installed, and proven installed ==" 'White'
 #The recorded beta blocker was that this script prepared a PC and then left the
 #user to go and find the product. It now installs it.

@@ -520,6 +520,43 @@ function Write-LauncherConfig([string]$Path, [string]$Games, [string]$YqBin) {
 # Main
 # --------------------------------------------------------------------------
 
+# Self-elevate. Setup genuinely needs Administrator -- enabling the WSL/VM
+# Windows features, machine-wide winget installs, and the Defender exclusion
+# all require it. Setup-DML.bat already elevates, so on that path this is a
+# no-op; this block is what makes the OTHER two entry points work elevated too:
+#   * the RunOnce auto-resume after a WSL-enable reboot (RunOnce launches us
+#     UNELEVATED, which is why the resumed run used to skip the Defender
+#     exclusion), and
+#   * a user running Setup-DML.ps1 directly with -All.
+# Only when we were actually asked to install something, never under -DryRun
+# (the test harness runs the whole script that way), and never if already
+# elevated. One UAC prompt; the elevated copy keeps the window open (-NoExit).
+if (-not $DryRun -and -not (Test-IsElevated) -and
+    ($InstallDocker -or $InstallGit -or $InstallWebView2)) {
+    $relaunch = @('-NoExit', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                  '-File', ('"{0}"' -f $PSCommandPath))
+    if ($InstallDocker)   { $relaunch += '-InstallDocker' }
+    if ($InstallGit)      { $relaunch += '-InstallGit' }
+    if ($InstallWebView2) { $relaunch += '-InstallWebView2' }
+    if ($LauncherDir)     { $relaunch += @('-LauncherDir', ('"{0}"' -f $LauncherDir)) }
+    if ($GamesDir -ne (Join-Path $env:USERPROFILE 'dml-native')) {
+        $relaunch += @('-GamesDir', ('"{0}"' -f $GamesDir))
+    }
+    try {
+        Say ''
+        Say '  Setup needs Administrator -- please accept the prompt.' 'Yellow'
+        Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') `
+                      -Verb RunAs -ArgumentList $relaunch -ErrorAction Stop
+        exit 0
+    } catch {
+        # The user declined the UAC prompt (or it could not be shown). Do NOT
+        # silently continue unelevated and half-do the job -- say what happened.
+        Warn 'Administrator was declined; cannot continue.'
+        Info 'Re-run Setup-DML.bat (or this script) and accept the prompt.'
+        exit 1
+    }
+}
+
 Say ''
 Say '  Dad''s MMO Lab -- native (Docker Desktop) setup' 'White'
 Say '  No WSL distro, no Arch, no tray app.' 'DarkGray'
