@@ -69,6 +69,17 @@ jobs:
             artifact: exe
           - os: macos-latest
             artifact: dmg
+          # TEST-ONLY (workflow_dispatch): a second macOS build on an INTEL
+          # runner, so the .dmg can be launched on an x86_64 Mac. PyInstaller
+          # cannot cross-compile and universal2 is not available to us —
+          # PySide6 ships universal2 wheels but pydantic-core ships only
+          # separate macosx_10_12_x86_64 / macosx_11_0_arm64 wheels, so
+          # target_arch="universal2" cannot resolve. Hence two native builds.
+          # `macos-15-intel` is a LARGER runner and is billed even on public
+          # repos, which is why this is not (yet) part of a tagged release.
+          - os: macos-15-intel
+            artifact: dmg-x86_64
+            dmgsuffix: -x86_64
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -236,14 +247,17 @@ jobs:
 
       # ---------------------------------------------------------- macOS
       - name: Package dmg
-        if: matrix.os == 'macos-latest'
+        if: startsWith(matrix.os, 'macos')
+        env:
+          # Empty for the arm64 entry, so its released filename is unchanged.
+          DMG_SUFFIX: ${{ matrix.dmgsuffix }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release dmgroot
           cp -R dist/Yulon.app dmgroot/
           ln -s /Applications dmgroot/Applications
-          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos.dmg"
+          hdiutil create -volname "Yu'lon" -srcfolder dmgroot -ov -format UDZO "release/Yulon-${YULON_REF}-macos${DMG_SUFFIX:-}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
