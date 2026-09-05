@@ -8,7 +8,8 @@ generator and therefore IS the thread doing the install. On `yulon-win11-gate` t
 press said so once and installed unheld.
 
 This folder holds the before-and-after on the same box, the same install folder and the same
-harness, plus the four mutations run on `yulon-fedora`.
+harness, plus the four mutations run on `yulon-fedora` at `0ad9d99a` and a fifth, added at
+`aa6ab59e` after the round-1 review, that pins the seam the app itself defaults to.
 
 Fix at `lane/b43` `0ad9d99a`: `main.py` calls `platform.declare_gui_thread()` beside
 `QApplication(sys.argv)`, and the Windows branch refuses `platform.gui_thread()` by identity.
@@ -119,6 +120,54 @@ and the tree restored with `git checkout -- .` afterwards. 4 of 4 killed, each r
 | M4 | the INFO line dropped from `_keep_awake_windows()` | `test_keep_awake_on_windows_says_in_the_log_that_the_assertion_was_taken` | `assert 'holding this machine awake for the build: SetThreadExecutionState' in ''` |
 
 The five tests passed together on the unmutated clone first (`5 passed in 0.93s`).
+
+Two things a reader re-deriving those transcripts hits, found by the round-1 review and left in the
+files as they ran rather than re-run. First, the M1 block inside `mutations-yulon-fedora.txt`
+(lines 9-16) ran no tests at all: `mutate.sh`'s `run_mut` was handed M1's two test ids as ONE
+quoted argument, so pytest answered `ERROR: not found: …` and `no tests ran in 0.16s`. That is why
+M1 was re-run on its own by `mutate-m1.sh`, whose transcript `mutation-m1-yulon-fedora.txt` carries
+M1's actual red at lines 53-56 (`2 failed in 0.69s`, `==== M1 pytest exit=1 ====`). Second,
+`mutate.sh`'s `######## exit=N (pytest above)` footer (script line 18) prints `$?` of the `tail` at
+the end of the pipeline, not pytest's, so EVERY block in that transcript reads `exit=0` — including
+M2, M3 and M4, which did fail. The reds in that file are the pytest summary lines, never the
+footers. `mutate-m1.sh` used `${PIPESTATUS[0]}` instead and its `exit=1` is pytest's own.
+
+## The default `keep_awake` seam
+
+Added 2026-09-05 after the round-1 review: `tests/test_families_azerothcore.py::test_every_seam_defaults_to_the_real_function_it_stands_in_for`
+now also asserts `real.keep_awake is platform.keep_awake`. Both §43 tests reach the real function
+through an INJECTED seam (`test_install_wiring.py` passes `partial(platform.keep_awake,
+platform_id=...)`; the Recorder in `support_native.py` defaults the seam to `nullcontext`), so
+before that assert nothing read `Seams.keep_awake`'s default.
+
+The mutation is `native.py:1225` `= platform.keep_awake` → `= ExitStack` — an install that holds
+nothing — and it was run twice on `yulon-fedora` on 2026-09-05, against two checkouts of one fresh
+`/tmp/b43r2` `git clone --shared`, `__pycache__` purged under the clone and under `~/dads-mmo-lab`
+before and after every pytest, the tree restored with `git checkout -- .` between runs.
+
+`mutate-seam-default.sh` → `mutation-seam-default-yulon-fedora.txt` (21:20:10 UTC box-local, Python
+3.13.15), the pinning test alone:
+
+- at `aa6ab59e` (the assert present) KILLED, lines 29-38: `E AssertionError: assert <class
+  'contextlib.ExitStack'> is <function keep_awake at 0x…>` at
+  `tests/test_families_azerothcore.py:226`, `1 failed in 0.95s`, `mutated pytest exit=1`;
+- at `547b4c02`, this lane's previous tip, the assert is absent (`(absent)`, line 43) and the same
+  mutation SURVIVES — lines 52-55, `1 passed in 0.49s`, `mutated pytest exit=0`.
+
+`mutate-seam-default-suite.sh` → `mutation-seam-default-suite-yulon-fedora.txt` (21:23:30 UTC
+box-local), the same mutation against the WHOLE narrow suite (`-m "not integration" -n 4`), so
+"nothing in the suite read the default" is a measurement of the suite and not of five files:
+
+- at `547b4c02`: `2792 passed, 4 skipped in 26.90s`, `exit=0` (lines 18-19) — survived everything;
+- at `aa6ab59e`: `1 failed, 2791 passed, 4 skipped in 27.65s`, `exit=1` (lines 34-35), the one red
+  being this assert.
+
+Both baselines passed unmutated first in the single-test run (lines 13 and 48). Purge readbacks: the
+suite run printed `0` and `0` (clone, and project sources outside `.venv`); the earlier single-test
+run printed `0` for the clone and `7` for `~/dads-mmo-lab`, and those seven were
+`.venv/lib/python3.13/site-packages` directories (`shiboken6`, `yaml`, `pygments/…`, `pluggy`,
+`iniconfig`, `certifi`) recreated by another lane's run on the same box — a re-check with
+`-not -path "*/.venv/*"` printed `0`, so no project-source bytecode survived either run.
 
 ## Suite
 

@@ -217,12 +217,16 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # bug-checklist §43's tests drive the real `platform.keep_awake` by INJECTING
     # it (`test_install_wiring.py` passes `partial(platform.keep_awake,
     # platform_id=...)`, and `support_native.py`'s Recorder defaults the seam to
-    # `nullcontext`), so on 2026-09-05 on yulon-fedora, at `547b4c02` in a fresh
-    # `git clone --shared`, changing this dataclass default to `ExitStack` left
-    # the whole narrow suite green — `2792 passed, 4 skipped in 30.13s`. Nothing
-    # in the suite read the default, so a refactor that unhooked it from
-    # production would have looked like a no-op while no install on Windows ever
-    # held the machine awake again.
+    # `nullcontext`), so nothing read this default. Measured on yulon-fedora,
+    # 2026-09-05, in a fresh `git clone --shared` with `__pycache__` purged on
+    # both sides: with `native.py`'s default changed to `ExitStack`, the whole
+    # narrow suite at `547b4c02` (this line absent) printed `2792 passed, 4
+    # skipped in 26.90s`, exit 0 — the mutation survived. At `aa6ab59e` (this
+    # line present) the same mutation printed `1 failed, 2791 passed, 4 skipped`,
+    # exit 1. Transcript:
+    # `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`.
+    # Without it, a refactor that unhooked the seam from production would have
+    # looked like a no-op while no Windows install ever held the machine awake.
     assert real.keep_awake is platform.keep_awake
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
 

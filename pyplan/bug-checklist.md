@@ -3201,7 +3201,7 @@ ever produce. Corrected the same day to read the database and the transcript ins
 - [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
 - [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `pyplan/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
 
-### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, CLOSED
+### 43. `keep_awake()` refuses the headless harness's own thread — **CLOSED 2026-09-05 at `0ad9d99a`**
 
 Found in the first headless log §42 produced, `yulon-win11-gate` 2026-09-05 05:12:16 box-local,
 the TBC second press at `745307ad`:
@@ -3232,16 +3232,31 @@ sleeps; a laptop running a scripted Windows install is not held awake, and the l
 - [x] A test that drives `install_wiring` on Windows (`platform.detect` pinned) and asserts the
       assertion was taken, and one that still refuses the GUI thread's claim on a worker's behalf.
       — `test_install_wiring.py::test_the_harness_holds_a_windows_machine_awake_on_its_own_main_thread`
-      runs the real `AzerothCoreInstaller` through the real `main()` on the test's own main thread
-      with the real `platform.keep_awake` seam, and asserts the flags reached
+      runs the real `AzerothCoreInstaller` through the real `main()` on the test's own main thread,
+      driving the real function as an INJECTED seam (`partial(platform.keep_awake,
+      platform_id=...)`, because the test must pin the platform), and asserts the flags reached
       `SetThreadExecutionState` and came back: `[ES_CONTINUOUS|ES_SYSTEM_REQUIRED, ES_CONTINUOUS]`.
+      What the app itself defaults that seam to is pinned separately, by
+      `test_families_azerothcore.py::test_every_seam_defaults_to_the_real_function_it_stands_in_for`
+      (`assert real.keep_awake is platform.keep_awake`), added 2026-09-05 after the round-1 review
+      named the gap and measured on `yulon-fedora` that day: with `native.py`'s default changed to
+      `ExitStack`, the whole narrow suite at `547b4c02` printed `2792 passed, 4 skipped in 26.90s`,
+      exit 0, and at `aa6ab59e` printed `1 failed, 2791 passed, 4 skipped in 27.65s`, exit 1.
       `test_platform.py::test_keep_awake_on_windows_refuses_the_declared_gui_thread` is the other
       half, and `test_main.py::test_the_launcher_declares_which_thread_is_its_gui_thread` starts
       the real entry point in a child process so the declaration that refusal reads cannot go
       missing in silence. Four mutations, 4/4 killed on `yulon-fedora` from a `git clone --shared`
-      at `0ad9d99a` — including the original rule restored — with each red shown in
-      `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutations-yulon-fedora.txt` and
-      `mutation-m1-yulon-fedora.txt`.
+      at `0ad9d99a` — including the original rule restored — plus the seam-default mutation above,
+      killed at `aa6ab59e` and shown surviving at `547b4c02`, the tip before the assert existed.
+      The reds are in `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutations-yulon-fedora.txt`
+      (M2/M3/M4), `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-m1-yulon-fedora.txt`
+      (M1) and `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`
+      (the seam default; the single-test run of it is `mutation-seam-default-yulon-fedora.txt`
+      beside it). Read the first two with the README's caveat:
+      `mutations-yulon-fedora.txt`'s own M1 block handed pytest two test ids as one
+      argument and ran nothing (`no tests ran in 0.16s`), which is why M1 was re-run by
+      `mutate-m1.sh`; and `mutate.sh`'s `exit=` footer prints the status of the `tail` in its
+      pipeline, so every block there reads `exit=0` including the three that failed.
 - [x] The gate: a headless run on `yulon-win11-gate` whose `yulon.log` carries no `not holding
       this machine awake` line. — Met 2026-09-05: the press at `0ad9d99a` (task `dml-b43`,
       `C:\gate\run-b43.cmd`, into the same `C:\gate\tbc-server`) left thirty-four lines in
