@@ -3905,10 +3905,17 @@ def _windows_execution_state(flags: int) -> int:
 def _keep_awake_windows() -> Iterator[None]:
     """Assert `ES_SYSTEM_REQUIRED` on THIS thread, and clear it on the way out.
 
-    Unverified against a real `SetThreadExecutionState` by this project
-    (roadmap 6.3's gate owns that). A failure to set it is logged and the block
-    still runs: an install that would have completed must not be refused
-    because a power API said no.
+    Executed against a real `SetThreadExecutionState` for the first time on
+    2026-09-05: a headless `install_wiring` press on `yulon-win11-gate` logged
+    `holding this machine awake for the build: SetThreadExecutionState(
+    ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` at 13:30:21 box-local, so the call
+    resolved and Windows answered non-zero
+    (`pyplan/gates/bug43-keepawake-win11-2026-09-05/`). What the OS then DOES
+    with the assertion — that an idle machine really stays awake for hours —
+    is still unmeasured; roadmap 6.3's gate owns that half.
+
+    A failure to set it is logged and the block still runs: an install that
+    would have completed must not be refused because a power API said no.
 
     The success is logged too, at INFO. It is the only positive evidence a gate
     box can read afterwards — absence of the warning proves nothing about a
