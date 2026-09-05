@@ -46,9 +46,10 @@ Read against sweep2.log (CEST):
 The `22:10:25` start is the one row above that no file in this folder logs. It was the lane agent
 putting the live containers back by hand with `stopstart.py start` (`Controller.start()`) after
 the aborted no-docker-group run — the action README.md's trap section records at its "left with
-auth and world down until `Controller.start()` put them back" — but that call's output went to
-`containers-start.txt`, which the install half's own start at `22:47:56` later overwrote, so this
-docker stamp is the only surviving trace of it. Every other row is cited to a committed log
+auth and world down until `Controller.start()` put them back" — no log of that call is in this
+folder: `containers-start.txt` holds only the `22:47:56` start (its only writers are
+`run-710-cancel.sh:89`, `run-710-cancel2.sh:104` and `run-710-cancel3.sh:104`), so this docker
+stamp is the one record of the `22:10:25` start. Every other row is cited to a committed log
 beside it. The reading below does not rest on who started it: the timings that carry it are the
 world's own `World Initialized` stamp at `22:11:19.83` and `sweep2.log`'s two.
 
