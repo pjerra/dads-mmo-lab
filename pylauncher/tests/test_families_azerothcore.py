@@ -213,6 +213,17 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # provisioning function, so a future refactor silently swapping it out
     # cannot look like a no-op.
     assert real.ensure_docker is platform.ensure_docker
+    # `keep_awake` is pinned here for a measured reason, not a symmetric one.
+    # bug-checklist §43's tests drive the real `platform.keep_awake` by INJECTING
+    # it (`test_install_wiring.py` passes `partial(platform.keep_awake,
+    # platform_id=...)`, and `support_native.py`'s Recorder defaults the seam to
+    # `nullcontext`), so on 2026-09-05 on yulon-fedora, at `547b4c02` in a fresh
+    # `git clone --shared`, changing this dataclass default to `ExitStack` left
+    # the whole narrow suite green — `2792 passed, 4 skipped in 30.13s`. Nothing
+    # in the suite read the default, so a refactor that unhooked it from
+    # production would have looked like a no-op while no install on Windows ever
+    # held the machine awake again.
+    assert real.keep_awake is platform.keep_awake
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
 
 
