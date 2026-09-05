@@ -29,7 +29,9 @@ Read against sweep2.log (CEST):
 
   22:08:12  Halting process...                          the aborted no-docker-group run's
                                                         `sudo docker stop` reached the worldserver
-  22:10:25  Starting worldserver...                     Controller.start() after the abort
+                                                        (`aborted-nodockergroup/sweep3.log:79`)
+  22:10:25  Starting worldserver...                     put back by hand after the aborted run —
+                                                        see the note under this table
   22:11:06  sweep_driver2.py started                    (sweep2.log:2) — 41 s after that start
   22:11:09  console -> ac-worldserver ['server','info'] (sweep2.log:6)  — 44 s after that start
   22:11:12  sweep_driver2.py finished                   (run.log; 6 s elapsed)
@@ -40,6 +42,15 @@ Read against sweep2.log (CEST):
   22:11:47  Halting process...                          sweep_driver3.py's backup/restore half
   22:12:12  Starting worldserver...                     sweep_driver3.py's start
   22:12:48  World Initialized In 0 Minutes 34 Seconds
+
+The `22:10:25` start is the one row above that no file in this folder logs. It was the lane agent
+putting the live containers back by hand with `stopstart.py start` (`Controller.start()`) after
+the aborted no-docker-group run — the action README.md's trap section records at its "left with
+auth and world down until `Controller.start()` put them back" — but that call's output went to
+`containers-start.txt`, which the install half's own start at `22:47:56` later overwrote, so this
+docker stamp is the only surviving trace of it. Every other row is cited to a committed log
+beside it. The reading below does not rest on who started it: the timings that carry it are the
+world's own `World Initialized` stamp at `22:11:19.83` and `sweep2.log`'s two.
 
 So the empty reply is a sequencing fact of this run, not a broken console: the sweep asked a
 worldserver whose world had not finished loading, `prompted=False` says the console had no prompt

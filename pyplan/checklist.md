@@ -2129,7 +2129,8 @@
     **What is NOT claimed.** That copy arriving as a modal from a cancelled **`wow-wotlk`**
     install on the merged engine. With the live 7.2 install's `ac-*` containers stopped through
     the app, preflight refused nothing — six `[pass]` and two `[warn]` (compiler jobs vs memory;
-    free space, 51 GB against the comfortable 75 GB), no `[refuse]`, and *"[pass] the server's
+    free space, 51 GB against the comfortable 75 GB — preflight prints GiB under the label "GB",
+    `pylauncher/yulon/catalog/preflight.py:53`, `:659`), no `[refuse]`, and *"[pass] the server's
     ports: nothing else is using them"* among the passes — and the engine then refused on the
     container-name guard —
     *"A container called ac-database already exists and belongs to another install
@@ -2137,8 +2138,12 @@
     remove those containers, which this lane may not do. `wow-wotlk` is the only shipped game
     that clones into the server dir itself, so no other game reproduces the shape. It needs a box
     with no AzerothCore containers on it. Also not re-run and cited instead: the free-space
-    preflight refusal (this box had 54.5 GB against a 48 GB floor, so the port-conflict refusal
-    was driven through the widget in its place) and the staged/resumable install, which needs a
+    preflight refusal (the `54.5 GB` the driver printed at `22:15:15` (`widget-run.log:69`) is
+    decimal GB = `50.8 GiB`, the same reading preflight rendered as `51 GB` at `22:24:38`
+    (`widget-cancel-wotlk-refused.log:31`) and the unit its 48 GB refusal floor is in
+    (`pyplan/gates/7.1-ubuntu-2026-09-04/press1.log:21`) — 2.8 GiB of headroom, above the floor,
+    so the port-conflict refusal was driven through the widget in its place) and the
+    staged/resumable install, which needs a
     build. `keep_awake()` was **taken** here (`widget-cancel-tbc.log:22`) but its **release is
     cited, not re-earned**: the after-probe is `systemd-inhibit --list | tail -5`
     (`run-710-cancel3.sh:83`) of a list whose own last line says `8 inhibitors listed.`, so

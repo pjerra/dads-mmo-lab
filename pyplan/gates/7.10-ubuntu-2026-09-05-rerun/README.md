@@ -187,7 +187,8 @@ The lane's plan was to stop the live install's containers through the app to fre
 cancel a `wow-wotlk` install. **Stopping is not enough, and that is a measured refusal rather
 than a guess.** With all three `ac-*` containers stopped through `Controller.stop()`
 (`containers-stop.txt`), preflight **refused nothing** — its panel dump is six `[pass]` and two
-`[warn]` (compiler jobs vs memory; free space, 51 GB against the comfortable 75 GB) with no
+`[warn]` (compiler jobs vs memory; free space, 51 GB against the comfortable 75 GB — preflight's
+"GB" is GiB, `preflight.py:53` `GIB = 1024**3` and `:659` `gigabytes = free / GIB`) with no
 `[refuse]` line at all, and the check the stop was for is one of the passes: *"[pass] the
 server's ports: nothing else is using them"* (`widget-cancel-wotlk-refused.log:35`; the two warns
 are `:30-31`, and because the panel is dumped twice `grep -c 'warn]'` on the file is 4). The
@@ -271,15 +272,23 @@ record-mismatch refusals (`:1875` a different `install_id`, `:1881` a different 
 `:1886` a different family) all compare against a record this same install of this same game
 wrote into this same folder. `cancelled_install_message()`'s two "the app will refuse it"
 branches (`pylauncher/yulon/catalog/installer.py:607` and `:611`) are likewise the
-no-`.yulon-install.json` case. Install was pressed on `/home/pk/p7-cancel-install-tbc` exactly
-once, the modal was clicked away, and the folder was removed at cleanup (`final-state.txt`), so
-no second press was driven here and none is claimed.
+no-`.yulon-install.json` case. Install was pressed on the path
+`/home/pk/p7-cancel-install-tbc` **twice** in this run, but never twice on the same folder
+contents: at `22:32:00` (attempt 2, the first `wow-tbc` press,
+`widget-cancel-tbc-refused-client.log:17`), where preflight
+refused the press because the driver had passed that same path as the *client* folder and it has
+no `Data` directory (`native.py:1787-1790`), and at `22:45:38` (attempt 3, the cancel,
+`widget-cancel-tbc.log:18`, with `/home/pk/p7-fake-tbc-client` as the client folder). The path
+was emptied between them — `run-710-cancel2.sh:103` at the end of attempt 2 and again at
+`run-710-cancel3.sh:37` before attempt 3 — so the folder that *survived the cancel* was never
+pressed again: its modal was clicked away and it was removed at cleanup (`final-state.txt`). No
+second press on a cancelled folder was driven here and none is claimed.
 
 ## What is CITED from earlier runs, not re-run
 
 | 6.5 install-half item | Cited from | Why not re-run |
 |---|---|---|
-| preflight floors **refusing**, not warning, on free space | `7.1-ubuntu-2026-09-04/press1.log:15-26`, and `7.10-gaps/README.md`'s widget-driven refusal | this box had **54.5 GB** free at the Install click against a 48 GB floor (`widget-run.log`), so the space refusal is not reachable here. The refusal this box IS under — the port conflict — was driven through the widget instead and is asserted in its place; the driver's diff records the swap and why |
+| preflight floors **refusing**, not warning, on free space | `7.1-ubuntu-2026-09-04/press1.log:15-26`, and `7.10-gaps/README.md`'s widget-driven refusal | this box had **54.5 GB** free at the Install click (`widget-run.log:69`, `22:15:15`; the driver prints decimal GB, `drivers/widget_driver.py:309` `f_bavail * f_frsize / 1e9`) = **50.8 GiB**, and preflight's own reading nine minutes later was `51 GB` (`widget-cancel-wotlk-refused.log:31`, `22:24:38`) — the same scale, because preflight's "GB" is GiB (`preflight.py:53`, `:659`) and so is its 48 GB refusal floor (`7.1-ubuntu-2026-09-04/press1.log:21` *"the install needs 48 GB"*). The margin over the floor is therefore **2.8 GiB**, not the 6.5 the decimal figure reads as — still above it, so the space refusal is not reachable here. The refusal this box IS under — the port conflict — was driven through the widget instead and is asserted in its place; the driver's diff records the swap and why |
 | staged / resumable install | `7.1-ubuntu-2026-09-04/press2.log`, `press3.log`, `kill-record.txt`, `ccache-stats.txt` | a resume needs a build, and a build compiles for hours |
 | `keep_awake()` **released** | `7.10-gaps/README.md:22` → `7.1-ubuntu-2026-09-04/kill-record.txt:41` | taken again here (`widget-cancel-tbc.log:22`), but NOT re-earned: the after-probe is `systemd-inhibit --list \| tail -5` (`run-710-cancel3.sh:83`) of an 8-row list, so `cancel-folder-after-tbc.txt:53-57` would print the same three GNOME rows whether Yu'lon's inhibitor was still held or not |
 
@@ -336,8 +345,12 @@ count a call as passing when it returns without raising, whatever it returns.
 lines=(), prompted=False)` — no lines at all, passed anyway. Not a broken console:
 `worldserver-boot-2210.txt` holds the worldserver's own stamps for that window (captured
 read-only from `docker logs -t ac-worldserver` on 2026-09-05 at 23:48 CEST). The aborted run's
-`sudo docker stop` halted the world at `22:08:12`; `Controller.start()` after the abort started
-it at `22:10:25`; `sweep_driver2.py` started at `22:11:06` and sent `server info` at `22:11:09`,
+`sudo docker stop` halted the world at `22:08:12` (`aborted-nodockergroup/sweep3.log:79`); it
+was started again at `22:10:25` — by hand, with `stopstart.py start` (`Controller.start()`),
+the action the paragraph above records, though no log of that call survives in this folder
+(`containers-start.txt` was overwritten by the install half's own `22:47:56` start), so the
+docker stamp is the only trace of it; `sweep_driver2.py` started at `22:11:06`, which
+`sweep2.log:2` does log, and sent `server info` at `22:11:09`,
 44 s after that start; `WORLD: World Initialized In 0 Minutes 53 Seconds` landed at
 `22:11:19.83` — 10.8 s after the call, and 7.8 s after the driver had already exited at
 `22:11:12`. `prompted=False` says the console had no prompt yet, and the world then consumed the
