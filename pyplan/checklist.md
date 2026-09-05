@@ -2072,7 +2072,99 @@
     whatever `detect_lan_ip()` returned on the server's own box, so an install on a machine with
     more than one network path can hand out the wrong one — worth an explicit choice rather than
     a detection, whenever networking is revisited.
-- [ ] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
+- [x] 7.10 Cross-server regression pass — re-run WotLK's 6.5 coverage gate after 7.1–7.9 land to confirm shared layers (`docker.py`, base `Controller`, `runner.py`, `platform.py`, `networking.py`) weren't regressed (was 7.4)
+  - **Ticked 2026-09-05 on the re-run against the MERGED engine, `yulon-ubuntu`:
+    `pyplan/gates/7.10-ubuntu-2026-09-05-rerun/README.md`. 88 checks, 88 OK, 0 FAIL, seven
+    drivers, at `cfb4c04f367536375abf6382694a1f800c468b8a` on Python 3.12.3 / PySide6 6.11.2.**
+    One of the 88 asserts nothing and the folder says so: `sweep2.log:32-33` passes
+    `send_console('server info')` on an empty `ConsoleReply(… lines=(), prompted=False)`, because
+    the sweep asked 44 s after a restart and the world initialized 10.8 s after the call
+    (`worldserver-boot-2210.txt`, `ac-worldserver`'s own stamps) while the 2026-08-28 drivers
+    count any return that does not raise. The console claim rests on `widget-run.log:20-28`
+    instead — read that line of the headline as 87 + 1.
+    The 2026-09-04 sweep and its widget follow-up ran at `81d7311e`, and
+    `git diff --stat 81d7311e cfb4c04f -- pylauncher` is 64 files, 23,102 insertions, 773
+    deletions — `networking.py` +3,028, `runner.py` +153, `docker.py` +28, `controller.py` +16 —
+    so re-running it was the point rather than a formality. **Both things the 09-04 runs left
+    open are closed, and each by a named change rather than by not happening again.**
+    (1) `sweep_driver2.py` exited **134 (SIGABRT)** on 09-04 after all seven checks passed;
+    on `cfb4c04f` the same driver exits **0** (`README.md` §1, `run.log`, `sweep2.log`), because
+    `runner.py::stream()` is no longer byte-identical to the 08-28 code — `d2b963d5` registers
+    every generator in `_LIVE_STREAMS` and closes what is left at `atexit`
+    (`pylauncher/yulon/runner.py:56`, `:79`, `:152`), while `docker.py::follow_logs()` still is
+    byte-identical. That "because" is a mutation rather than a correlation:
+    `mutation-atexit-close.txt` ran an abandoned-`stream()` probe three times on `yulon-fedora`
+    from a throwaway `git clone --shared` at `cfb4c04f`, `__pycache__` purged on both sides of
+    every transition — as shipped **exit 0**, with `runner.py:152` changed to
+    `atexit.register(lambda: None)` the 09-04 `Fatal Python error: _enter_buffered_busy …
+    Aborted (core dumped)`, **exit 134**, restored **exit 0**.
+    (2) The LAN plan no longer carries `('ufw','--force','enable')` at all: read
+    before anything applied it, in two environments, it is two `ufw allow` commands plus a
+    warning naming §39 (`ufw-plan-probe-interactive.txt`,
+    `ufw-plan-probe-systemd-run.txt`), `network_apply('lan')` reports it as `skipped`, and
+    `ufw status` after the apply is still `inactive` (`sweep4.log`). The same warning renders in
+    the Networking tab (`widget-run.log`).
+    **The 7.10-gaps widget driver re-ran green on the merged engine: 32 OK / 0 FAIL**
+    (`widget-run.log`), six real `QTest.mouseClick` round-trips with `status_poll_ms=0` and
+    `Apply` asserted disabled and never pressed.
+    **A real cancelled install was driven by clicks on this engine** — `wow-tbc`, 20 OK / 0 FAIL,
+    `Stop` 20 s into `clone-sources`, `install_finished(ok=False)` **12.2 s** later, and the
+    modal's text compared to `cancelled_install_message(entry, folder)` **as strings**
+    (`widget-cancel-tbc.log`). It also measures, through the widgets, the asymmetry the
+    cancelcopy fix rests on and that had only been measured on m910q: a CMaNGOS cancel KEEPS
+    `.yulon-install.json`, so the resume the copy promises there is the true one.
+    **The two findings the 09-05 `wow-wotlk` cancel filed (the bullet below) are answered on the
+    folder shape that produced them**, not on a different one: `copy_shapes_driver.py` rebuilds
+    that folder from the same upstream repository, asserts it field by field against
+    `pyplan/gates/7.2-ubuntu-2026-09-05/widget-cancel-folder-after.txt`, reads the 09-05 modal
+    **out of** `widget-cancel.log` rather than retyping it, and renders the copy on `cfb4c04f`:
+    "nothing is lost" and the adoption offer are gone, both readings of the unmarked compose file
+    are put to the user, the resume promise is gone, and the copy now warns that the next press
+    will be refused and names *"it holds a git checkout"* — which is the refusal
+    `cycle2-pressA2-refused-existing-checkout.log:31` recorded. 16 OK / 0 FAIL
+    (`copy-shapes.log`). That is the function, not the widget; the widget half is carried by the
+    string comparison above plus a one-hunk `git diff 4c959d70 cfb4c04f --
+    pylauncher/yulon/ui/catalog_view.py`, which changes only `.name` to the entry inside the same
+    `QMessageBox.information(self, "Install cancelled", note)`.
+    **What is NOT claimed.** That copy arriving as a modal from a cancelled **`wow-wotlk`**
+    install on the merged engine. With the live 7.2 install's `ac-*` containers stopped through
+    the app, preflight refused nothing — six `[pass]` and two `[warn]` (compiler jobs vs memory;
+    free space, 51 GB against the comfortable 75 GB — preflight prints GiB under the label "GB",
+    `pylauncher/yulon/catalog/preflight.py:53`, `:654`), no `[refuse]`, and *"[pass] the server's
+    ports: nothing else is using them"* among the passes — and the engine then refused on the
+    container-name guard —
+    *"A container called ac-database already exists and belongs to another install
+    (yulon-wow-wotlk-243c46e3)"* (`widget-cancel-wotlk-refused.log`) — and its remedy is to
+    remove those containers, which this lane may not do. `wow-wotlk` is the only shipped game
+    that clones into the server dir itself, so no other game reproduces the shape. It needs a box
+    with no AzerothCore containers on it. Also not re-run and cited instead: the free-space
+    preflight refusal (the `54.5 GB` the driver printed at `22:15:15` (`widget-run.log:69`) is
+    decimal GB = `50.8 GiB`, the same scale as the `51 GB` preflight itself read nine minutes later at `22:24:38`
+    (`widget-cancel-wotlk-refused.log:31`) and the unit its 48 GB refusal floor is in
+    (`pyplan/gates/7.1-ubuntu-2026-09-04/press1.log:21`) — 2.8 GiB of headroom, above the floor,
+    so the port-conflict refusal was driven through the widget in its place) and the
+    staged/resumable install, which needs a
+    build. `keep_awake()` was **taken** here (`widget-cancel-tbc.log:22`) but its **release is
+    cited, not re-earned**: the after-probe is `systemd-inhibit --list | tail -5`
+    (`run-710-cancel3.sh:83`) of a list whose own last line says `8 inhibitors listed.`, so
+    `cancel-folder-after-tbc.txt:53-57` would read the same whether Yu'lon's inhibitor was still
+    held or not; the release evidence is `7.10-gaps/README.md:22` →
+    `7.1-ubuntu-2026-09-04/kill-record.txt:41`.
+    **The trap this run fired**, kept in `aborted-nodockergroup/`: under `systemd-run --user` the
+    drivers had no `docker` group and every docker call came back "permission denied", yet the
+    08-28 drivers printed `[OK]` for calls that returned an error object
+    (`aborted-nodockergroup/sweep1.log:44`, `sweep2.log:41`) — a green sweep from those drivers
+    is not by itself evidence. Relaunched under `sg docker -c`.
+    **What this tick widens: nothing.** Measured on yulon-fedora 2026-09-05 rather than assumed —
+    `_plans_whose_phase_the_checklist_ticks()` in `pylauncher/tests/test_docs_pins.py` selects a
+    plan by its filename prefix, and with `7.10` in the ticked set it still answers
+    `['7.2-retire-bash.md', '7.3-cmangos-family.md']`, because `pyplan/phase7-plans/` holds only
+    `7.1-`, `7.2-` and `7.3-` pages and `"7.1-spine-azerothcore-linux.md".split("-")[0]` is
+    `7.1`, not `7.10`. `tests/test_docs_pins.py` is 4 passed with the box ticked.
+    The box was left as found: `final-state.txt` — account count back to **102**, ufw inactive
+    with `/etc/ufw/user.rules` at the same sha256 as `state-before.txt`, the install's state file
+    and realmlist unchanged, all three containers up, nothing pruned, `/home/pk/p7/` kept for
+    lane b39.
   - **The honest-cancel copy was seen arriving from a REAL cancelled install, 2026-09-05, through
     the widgets** — the one install-half item `pyplan/gates/7.10-gaps/README.md` (2026-09-04) said
     could not be produced on a box that refuses every install at preflight. On `yulon-ubuntu`
