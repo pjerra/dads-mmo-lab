@@ -3720,11 +3720,45 @@ class KeepAwake(Protocol):
     def __exit__(self, *exc: object) -> None: ...
 
 
+_gui_thread: threading.Thread | None = None
+"""The thread running the window's event loop, once the GUI has named it.
+
+`None` in a process that never started a window: the headless harness
+(`yulon.install_wiring`), `--provision`, a test. That is not a missing fact —
+it is the fact that there is no GUI thread here, which is what
+`keep_awake()`'s Windows refusal reads.
+"""
+
+
+def declare_gui_thread() -> None:
+    """Record THIS thread as the one that runs the window's event loop.
+
+    Called from `main.py` beside `QApplication(sys.argv)`, and from nowhere
+    else. It is a declaration rather than a detection because detecting it
+    means asking Qt, and this module may not import Qt (style-guide §3) — and
+    because a test suite that keeps one session-wide `QApplication` on its own
+    main thread would otherwise be indistinguishable from a running launcher.
+
+    What holds `main.py` to making the call is
+    `test_the_launcher_declares_which_thread_is_its_gui_thread`, which starts
+    the real entry point in a child process and fails if the declaration did
+    not arrive.
+    """
+    global _gui_thread
+    _gui_thread = threading.current_thread()
+
+
+def gui_thread() -> threading.Thread | None:
+    """The declared GUI thread, or `None` in a process that never started a window."""
+    return _gui_thread
+
+
 @contextmanager
 def keep_awake(
     *,
     platform_id: Callable[[], PlatformId] = detect,
     spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None = None,
+    gui_thread: Callable[[], threading.Thread | None] = gui_thread,
 ) -> Iterator[None]:
     """Hold the machine awake for the duration of the block. Best effort, and it says so.
 
@@ -3747,10 +3781,23 @@ def keep_awake(
 
     Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
     which is a THREAD-scoped assertion — it must be set and cleared on the same
-    thread, and it only holds while that thread lives. That makes the worker
-    thread running the install the only correct place to call it, so calling it
-    from the main (GUI) thread is refused rather than silently doing nothing
-    useful the moment the install moves off it.
+    thread, and it only holds while that thread lives. The only correct caller
+    is therefore the thread that runs the install for its whole length, and the
+    refusal below names the one thread that provably is not that: the GUI's
+    event-loop thread, which hands every install to a `QThread`
+    (`ui/widgets/log_panel.py`) and would be claiming a guarantee the install
+    does not have.
+
+    WHICH thread that is comes from `declare_gui_thread()`, not from
+    `threading.main_thread()`. Until 2026-09-05 the test was main-thread
+    identity, and it was wrong for the entry point that needs the assertion
+    most: `install_wiring`'s headless harness iterates the engine's generator
+    on its own main thread, so that thread IS the one doing the install and
+    lives exactly as long. Measured on `yulon-win11-gate`, 2026-09-05 05:12:16
+    box-local, the TBC second press at `745307ad` logged `not holding this
+    machine awake: keep_awake() must run on the worker thread doing the
+    install` and ran the whole install unheld (bug-checklist §43). A process
+    that never started a window declares nothing, so nothing refuses it.
 
     Linux: `systemd-inhibit --what=idle:sleep ... sleep infinity`, detached,
     terminated on exit — the `caffeinate` shape. Unlike `caffeinate -w` it
@@ -3775,11 +3822,12 @@ def keep_awake(
             yield
         return
     if here == "windows":
-        if threading.current_thread() is threading.main_thread():
+        if gui_thread() is threading.current_thread():
             raise RuntimeError(
-                "keep_awake() must run on the worker thread doing the install: Windows scopes "
-                "the assertion to the thread that set it, so holding it on the GUI thread would "
-                "claim a guarantee the install does not have."
+                "keep_awake() must run on the thread doing the install, and this is the GUI "
+                "thread: Windows scopes the assertion to the thread that set it, and the GUI "
+                "thread hands the install to a worker, so holding it here would claim a "
+                "guarantee the install does not have."
             )
         with _keep_awake_windows():
             yield
@@ -3838,26 +3886,49 @@ build does not need the display, only the CPU.
 """
 
 
+def _windows_execution_state(flags: int) -> int:
+    """`SetThreadExecutionState(flags)`, as its own function so a test can stand in for it.
+
+    A seam rather than a `ctypes` patch: no box this suite runs on has a
+    Windows power API, so replacing this one call is the only way a test can
+    assert WHICH flags were asserted and that they were cleared again. Every
+    other check of the Windows branch could only ever watch it fail to find
+    `ctypes.windll`. `getattr` for the reason `_mapped_network_drive()` gives.
+    """
+    import ctypes
+
+    set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
+    return int(set_state(flags))
+
+
 @contextmanager
 def _keep_awake_windows() -> Iterator[None]:
     """Assert `ES_SYSTEM_REQUIRED` on THIS thread, and clear it on the way out.
 
-    Unverified on a real Windows box by this project (roadmap 6.3's gate owns
-    that). A failure to set it is logged and the block still runs: an install
-    that would have completed must not be refused because a power API said no.
+    Unverified against a real `SetThreadExecutionState` by this project
+    (roadmap 6.3's gate owns that). A failure to set it is logged and the block
+    still runs: an install that would have completed must not be refused
+    because a power API said no.
+
+    The success is logged too, at INFO. It is the only positive evidence a gate
+    box can read afterwards — absence of the warning proves nothing about a
+    line that might simply never have been reached — and bug-checklist §43's
+    gate is a `yulon.log` read for exactly this pair.
     """
     try:
-        import ctypes
-
-        # `getattr` for the reason `_mapped_network_drive()` gives.
-        set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
-    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows
+        held = _windows_execution_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED)
+    except (AttributeError, OSError) as exc:  # no `ctypes.windll` off Windows
         logger.warning(f"could not hold this machine awake ({exc}); the build may be interrupted")
         yield
         return
-    if not set_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED):
+    if held:
+        logger.info(
+            "holding this machine awake for the build: "
+            "SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)"
+        )
+    else:
         logger.warning("Windows refused the keep-awake assertion; the build may be interrupted")
     try:
         yield
     finally:
-        set_state(_ES_CONTINUOUS)
+        _windows_execution_state(_ES_CONTINUOUS)

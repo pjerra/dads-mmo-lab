@@ -320,6 +320,84 @@ def test_the_launcher_still_starts_when_its_config_dir_cannot_be_written(
     assert "Yu'lon launcher starting" in fallback_log.read_text(encoding="utf-8")
 
 
+# ------------------------------------------- the GUI thread, declared not inferred
+
+# A child process for the same reason `_ENTRY_POINT` above needs one: the fact
+# under test is set beside `QApplication(sys.argv)`, and a suite that already
+# holds one `QApplication` cannot build the second. In-process this could only
+# ever be a grep.
+_GUI_THREAD_ENTRY_POINT = """\
+import sys
+import threading
+
+sys.argv = ["yulon"]
+from PySide6.QtWidgets import QMainWindow
+
+import main
+from yulon import platform
+
+if platform.gui_thread() is not None:
+    raise SystemExit(f"named a GUI thread before starting one: {platform.gui_thread()!r}")
+
+main.build_window = lambda: QMainWindow()
+code = main.main()
+if code != 0:
+    raise SystemExit(f"the smoke-test start exited {code}")
+if platform.gui_thread() is not threading.main_thread():
+    raise SystemExit(
+        "main() built a QApplication without declaring its GUI thread: "
+        f"gui_thread() is {platform.gui_thread()!r}"
+    )
+"""
+
+
+def test_the_launcher_declares_which_thread_is_its_gui_thread(tmp_path: Path) -> None:
+    """bug-checklist §43: the Windows keep-awake refusal reads a declaration, so it must arrive.
+
+    `platform.keep_awake()` refuses `platform.gui_thread()` and nothing else.
+    If `main()` ever stops calling `declare_gui_thread()`, that refusal goes
+    quiet — the GUI could then hold a thread-scoped assertion on a worker's
+    behalf and no test of `platform.py` alone would notice. So this starts the
+    real entry point in a child process and fails on the missing declaration,
+    rather than grepping `main.py` for the call.
+
+    It also pins the other half: a process that has NOT started a window names
+    no GUI thread, which is what makes the headless harness's own main thread
+    allowed to hold it.
+    """
+    scratch_temp = tmp_path / "temp"
+    scratch_temp.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "APPDATA": str(home),
+            "XDG_DATA_HOME": str(home),
+            "YULON_SMOKE_TEST": "1",  # build the window, then leave; do not run an event loop
+            "QT_QPA_PLATFORM": "offscreen",
+            "TMPDIR": str(scratch_temp),
+            "TEMP": str(scratch_temp),
+            "TMP": str(scratch_temp),
+        }
+    )
+    env.pop("YULON_PROVISION", None)
+    pylauncher = Path(main.__file__).parent
+    env["PYTHONPATH"] = str(pylauncher)
+
+    done = subprocess.run(
+        [sys.executable, "-c", _GUI_THREAD_ENTRY_POINT],
+        cwd=pylauncher,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+    assert done.returncode == 0, f"{done.stdout}\n{done.stderr}"
+
+
 def test_a_log_that_had_to_move_is_told_to_the_user_and_not_only_to_the_log(
     qapp: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
