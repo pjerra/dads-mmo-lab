@@ -64,3 +64,41 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 Closed: §21, §27, §29 (both halves, `bdee23f5`), §30, §33, §40, §42 (headless log, `745307ad`, gate met on the Windows TBC second press). Filed: §43 (`keep_awake()` refuses the headless harness's own thread). Open: §39 (round 5 committed, two
 measured lockout routes left — **the LAN button is not done**), §41 (loopback realm), §42 (a headless
 install writes no log).
+
+## Handoff, 21:15 CEST — for the workflow that does "all the open ones"
+
+Tree: `yulon-phase7` at `d911d3d5`, pushed, CI green, no lane branches or worktrees. 9 of 12 boxes.
+Owner, 2026-09-05 evening: "stop at 10" (no lane gets more than ten review rounds; after ten the
+merger closes line-level findings by hand and records the rest), then "we do all the open ones in
+workflow".
+
+**The open items, in the order that unblocks the most:**
+1. **7.10 re-run** — the widget gate on `yulon-ubuntu` (the live 7.2 install; `pyplan/gates/7.10-gaps/`
+   and `7.10-ubuntu-2026-09-04/` hold the drivers) on the merged engine. The two findings it filed on
+   09-04 are what `lane/cancelcopy` fixed; the re-run is what ticks 7.10. Read-only elsewhere; this
+   box IS the gate box.
+2. **§41 loopback realm on purpose** — a third `networking.Mode`, intent persisted where a resume can
+   read it, `ready` reading it before it overwrites; gate as written in the entry. `networking.py` is
+   free now (§39's lane merged).
+3. **§39 the LAN button end to end** — the guard is merged; what 7.1 clause 15 needs is the app's own
+   LAN step pressed on a real remote Linux box with a console fallback (a throwaway VM reached through
+   `ssh vmhost` + Hyper-V console, never a box the lane is logged into by ssh alone). Two measured
+   lockouts in the record; the round-6 run on yulon-fedora applied and restored with a
+   `systemd-run` failsafe — copy that shape.
+4. **§43** — `keep_awake()` refuses the headless harness's main thread; small, Windows-measurable on
+   `yulon-win11-gate` (Off; start it, host has the headroom).
+5. **7.8 macOS** and **whether to post the CMaNGOS issue** — owner decisions, not lane work. The issue
+   draft's patch applies (`pyplan/gates/doodad-2026-09-05/apply-check.txt`).
+
+**Boxes for the lanes** (owner: "why are you not using the VMs?"): m910q (Py 3.11) and
+`yulon-fedora` (Py 3.13, SELinux Enforcing; clone + venv at `~/dads-mmo-lab`, Off now — start with
+`ssh vmhost 'Start-VM -Name yulon-fedora'`, check host free memory ≥ 12 GB after) are both
+`run-tests-vm.sh` targets (`YULON_TEST_BOX=…`). `yulon-arch` (10/11) has no clone yet. One box per
+lane; agents must never stop a VM. `yulon-ubuntu` is the 7.10 gate box, not a test box.
+
+**Round discipline that finally held:** every number/SHA/line in a record from a command in the same
+sitting, pinned to SHAs; a docstring naming a mutation as proof shows the red and which assertion;
+every present-tense claim in the diff read against a command before commit; the reviewer re-derives
+on the real shape; fable reviews the review. Rounds 6-10 of §39 were all "behaviour right, one
+sentence false in one shape" — cap at 10 and close by hand.
+
