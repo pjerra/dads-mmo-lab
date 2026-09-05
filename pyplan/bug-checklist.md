@@ -3148,32 +3148,94 @@ It matters because the Server tab's log panel is exactly a caller that starts a 
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
 close" in a bug report and gets attributed to whatever the user did last.
 
-### 41. A realm cannot be set to loopback on purpose — 2026-09-05, OPEN
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc`, **STILL OPEN: the gate's second-press clause has not run**
 
 Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
 Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
 
-`ready`'s realm step (`catalog/native.py:1969-2005`) rewrites the realmlist row unless
-`networking.advertisable()` accepts every column, and `advertisable()` refuses the loopback by
-design (§35: a realm advertising `127.0.0.1` tells every client the world server is on the CLIENT's
-machine, and the client hangs at "Connecting"). So the value a §35 fix exists to prevent by accident
-is also unreachable on purpose: set `127.0.0.1` by hand and the next install press or resume
-overwrites it, printing "players on other machines can reach this server".
+`ready`'s realm step (`StagedInstaller._advertise_realm()`, `catalog/native.py:2758` at
+`d1e41fbc`; the `catalog/native.py:1969-2005` this entry cited on 2026-09-05 was already the
+wrong range then) rewrites the realmlist row unless `networking.advertisable()` accepts every
+column, and `advertisable()` refuses the loopback by design (§35: a realm advertising `127.0.0.1`
+tells every client the world server is on the CLIENT's machine, and the client hangs at
+"Connecting"). So the value a §35 fix exists to prevent by accident is also unreachable on
+purpose: set `127.0.0.1` by hand and the next install press or resume overwrites it, printing
+"players on other machines can reach this server".
 
 `networking.Mode` is `Literal["lan", "internet"]`. The missing third mode is the small half. The
 load-bearing half is that the choice must be REMEMBERED: `ready` has to distinguish a row that is
 loopback because nobody set it from one that is loopback because the owner chose it, and only
 overwrite the first. That is recorded intent, not a value read back out of the database.
 
-- [ ] A mode that writes the loopback, reachable from the Networking tab.
-- [ ] Intent persisted where a resume can read it, and `ready` reading it before it decides.
+- [x] A mode that writes the loopback, reachable from the Networking tab. — `networking.Mode` is
+      `Literal["lan", "internet", "loopback"]` (`networking.py:194` at `d1e41fbc`), `plan()` writes
+      `LOOPBACK_ADDRESS` for it without consulting `advertisable()` (whose §35 refusal is unchanged,
+      and asserted unchanged by
+      `test_networking.py::test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip`),
+      and `NetworkPlan.ready` is True for it with no LAN address at all — a machine with no network
+      is the one whose owner wants this mode, and gating Apply on `lan_ip` would have left the
+      button dead exactly there. The control is a third `QRadioButton` in the same `QButtonGroup`,
+      labelled `LOOPBACK_CHOICE` = "Only this computer (127.0.0.1)" (`controller_view.py:607`),
+      read by `network_mode()` (`controller_view.py:1835`). Driven by `QTest.mouseClick` on the
+      real radio, not by `setChecked()`, in
+      `test_controller_view.py::test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it`
+      and on the live install in `pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`.
+- [x] Intent persisted where a resume can read it, and `ready` reading it before it decides. —
+      `.yulon-network.json` (`networking.INTENT_FILE`, `networking.py:220`) beside the server dir's
+      `.yulon-install.json` and deliberately not inside it: `native.write_state()` rebuilds its whole
+      payload from the keys the running build knows and the engine holds one `InstallState` in memory
+      for a whole run, so an intent written into that file by the Networking tab is dropped by the
+      engine's next write with nothing to notice it —
+      `test_networking.py::test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file`
+      is what catches that return. `networking.apply()` records it only after the realmlist UPDATE
+      has actually gone through, so a failed Apply cannot leave `ready` honouring a choice the
+      database never received. `_advertise_realm()` reads it at `catalog/native.py:2821`, before it
+      detects an address and before it queries the row; the two empty lists in
+      `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` are what
+      hold the reading in front.
 - [ ] The gate: choose loopback through the app, press Install again on the finished install, and the
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
-      loopback was never chosen still ends up advertising a reachable address.
+      loopback was never chosen still ends up advertising a reachable address. — **Part-met on m910q
+      2026-09-05 at `d1e41fbc`, and the missing part is the press.** The choice was made through the
+      real Networking tab widgets (`QTest.mouseClick` on the real radio, `Show plan`, `Apply`) on the
+      finished CMaNGOS Vanilla install at `/home/pk/vanilla-75b`, and `realmd.realmlist.address` went
+      from `192.168.10.134` to `127.0.0.1` read back through `docker exec … mariadb`, with
+      `{"mode": "loopback", "recorded_unix": 1788639538}` on disk (16/16 checks,
+      `pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`). The second Install press was
+      then attempted and REFUSED by the engine's own preflight, for disk and not for anything to do
+      with this entry: `[refuse] free space on Docker's disk and the server folder: 18 GB free, and
+      the install needs 40 GB` (`press-refused-by-preflight.txt`, 22:20:32 box-local; `df -h /` that
+      minute said 19G available of 117G). Reaching 40 GB meant deleting other lanes' material on a
+      shared box, and `yulon-ubuntu` — the other box with a finished install and 51 GB free — was in
+      use by lane 7.10 at that minute. What ran instead was the real `CmangosInstaller` built by
+      `install_wiring.installer_for_app()`, with its closing realm step called against the live
+      `vanilla-db`: with the intent recorded the row stayed `127.0.0.1` and one line said why; with
+      the file removed the same step on the same install put `192.168.10.134` back (12/12 checks,
+      `closing-step-output.txt`). That is the same method and the same database a press reaches, one
+      call past the preflight — what it does not show is the eight stages printing "already finished"
+      ahead of it. **To finish this box: run the press on a box with 40 GB free.**
+
+The line the install prints when it leaves the row alone (`loopback_chosen_on_purpose()`,
+`catalog/native.py:245`), as it came out of the live run:
+
+> The address this realm advertises was left exactly as it is, because this server was set to only
+> this computer (127.0.0.1) on 2026-09-05 from its Networking tab, and that choice is recorded in
+> .yulon-network.json in the server folder. Nothing here overwrote it, which means no other machine
+> can reach this server. To undo it, open this server's Networking tab, pick LAN (same Wi-Fi) or
+> Internet play, press Show plan and then Apply.
+
+**One defect this work found and fixed.** Running the new spine tests on m910q 2026-09-05 refused a
+folder this app had written every byte of: `InstallerError: …/wow is not empty and was not created by
+this app (.yulon-network.json)`. `_claim_folder()` asked "is this folder somebody else's?" with one
+file's NAME (`ignoring=STATE_FILE`) rather than with the set of files this app writes. The set now has
+a name — `native.OUR_OWN_FILES` (`catalog/native.py:92`), used at all five call sites — and
+`_listing(ignoring=)` raises `TypeError` on a bare `str`, which mypy accepts as a `Collection[str]`
+and which would have filtered the listing by character rather than by name.
 
 Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
 `catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
-another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.
+another lane owned. Decision recorded in `phase7-decisions.md` Appendix D. Both files were free by
+the time `lane/b41` took this on.
 
 ### 42. A headless install writes no log at all — 2026-09-05, FIXED 2026-09-05 on `lane/headlesslog` (merged at `9254b60a`), **CLOSED on the Windows TBC second press**
 
