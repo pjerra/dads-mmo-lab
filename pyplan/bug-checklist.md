@@ -3201,7 +3201,7 @@ ever produce. Corrected the same day to read the database and the transcript ins
 - [x] A test that fails if one entry point writes a log and the other does not. — `tests/test_install_wiring.py::test_every_entry_point_that_runs_for_a_user_leaves_the_same_log_behind` runs every module the app can be started as and fails on the disagreement; `test_the_harness_puts_the_stage_lines_it_streamed_into_the_log` pins the stage lines.
 - [x] The gate: run the CLI installer headlessly, then find the log and the stage lines in it. — Met on `yulon-win11-gate` 2026-09-05: the TBC second press through `install_wiring` at `745307ad` left `C:\Users\pk\AppData\Roaming\Yulon\yulon.log` with the twelve `Step N of 12` markers, `start_staged()`, `The server is up.` and `install of wow-tbc finished` (85 lines for the run; `pyplan/gates/7.7-win11-tbc-second-press/tbc77b-final/yulon-log-excerpt-headless-tbc.txt`). Before `745307ad` the same box's WotLK run at `a0cc9dc0` left no log at all.
 
-### 43. `keep_awake()` refuses the headless harness's own thread — **CLOSED 2026-09-05 at `0ad9d99a`**
+### 43. `keep_awake()` refuses the headless harness's own thread — 2026-09-05, **CLOSED 2026-09-05 at `0ad9d99a`**
 
 Found in the first headless log §42 produced, `yulon-win11-gate` 2026-09-05 05:12:16 box-local,
 the TBC second press at `745307ad`:

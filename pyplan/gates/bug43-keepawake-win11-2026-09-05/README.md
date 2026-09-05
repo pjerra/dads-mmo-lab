@@ -135,10 +135,13 @@ footers. `mutate-m1.sh` used `${PIPESTATUS[0]}` instead and its `exit=1` is pyte
 ## The default `keep_awake` seam
 
 Added 2026-09-05 after the round-1 review: `tests/test_families_azerothcore.py::test_every_seam_defaults_to_the_real_function_it_stands_in_for`
-now also asserts `real.keep_awake is platform.keep_awake`. Both §43 tests reach the real function
-through an INJECTED seam (`test_install_wiring.py` passes `partial(platform.keep_awake,
-platform_id=...)`; the Recorder in `support_native.py` defaults the seam to `nullcontext`), so
-before that assert nothing read `Seams.keep_awake`'s default.
+now also asserts `real.keep_awake is platform.keep_awake`. Neither §43 test reads that default, and
+they reach the real function by two different routes: the harness test in `test_install_wiring.py`
+INJECTS it (`partial(platform.keep_awake, platform_id=...)` into `native_engine(...)`, lines 332-333),
+while `test_platform.py`'s Windows tests call `platform.keep_awake(platform_id=...)` directly with no
+engine at all (e.g. line 413). The Recorder in `support_native.py` defaults the seam to `nullcontext`
+(line 528). Those four line numbers were read out of `a88b2b26` with `git show` on 2026-09-05.
+So before that assert nothing read `Seams.keep_awake`'s default.
 
 The mutation is `native.py:1225` `= platform.keep_awake` → `= ExitStack` — an install that holds
 nothing — and it was run twice on `yulon-fedora` on 2026-09-05, against two checkouts of one fresh
@@ -176,10 +179,15 @@ run printed `0` for the clone and `7` for `~/dads-mmo-lab`, and those seven were
 pressed from: `2792 passed, 4 skipped in 27.14s`, mypy clean on this platform, as Windows and as
 macOS (72 source files each), `ruff` and `black` clean.
 
-Run again at 22:47 CEST on the tree this folder's own commit records — whose only code difference
-from `0ad9d99a` is the `_keep_awake_windows()` docstring, rewritten from "Unverified" to the
-measurement above: `2792 passed, 4 skipped in 22.50s`, same three mypy passes, same `ruff` and
-`black`.
+Run again on 2026-09-05 at 21:50 CEST at `a88b2b26`, the commit immediately before this folder's own
+and the last one on `lane/b43` that touched `pylauncher/`. `git diff --stat 0ad9d99a a88b2b26 --
+pylauncher/` printed `pylauncher/tests/test_families_azerothcore.py | 16 ++…`,
+`pylauncher/yulon/platform.py | 22 ++…--…` and `2 files changed, 32 insertions(+), 6 deletions(-)`:
+the seam-default assert with its comment, plus the `_keep_awake_windows()` and `declare_gui_thread()`
+docstrings. That run printed `==> syncing lane/b43 (a88b2b26) to yulon-fedora`, `2792 passed, 4
+skipped in 21.08s`, `Success: no issues found in 72 source files` under each of its three mypy
+banners (`this platform`, `as Windows`, `as macOS`), `All checks passed!` (ruff), `140 files would be
+left unchanged.` (black) and `=== --checks: ALL GREEN ===`.
 
 ## The box, as this lane left it
 
