@@ -3734,8 +3734,9 @@ def declare_gui_thread() -> None:
     """Record THIS thread as the one that runs the window's event loop.
 
     `main.py`, beside `QApplication(sys.argv)`, is the only production caller;
-    the two tests in `test_platform.py` that drive the Windows refusal call it
-    too, because the refusal reads what this records. It is a declaration
+    the two tests in `test_platform.py` that declare a GUI thread call it too —
+    one to see that thread refused, one to see a worker beside it held —
+    because the refusal reads what this records. It is a declaration
     rather than a detection because detecting it
     means asking Qt, and this module may not import Qt (style-guide §3) — and
     because a test suite that keeps one session-wide `QApplication` on its own

@@ -225,8 +225,9 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # line present) the same mutation printed `1 failed, 2791 passed, 4 skipped`,
     # exit 1. Transcript:
     # `pyplan/gates/bug43-keepawake-win11-2026-09-05/mutation-seam-default-suite-yulon-fedora.txt`.
-    # Without it, a refactor that unhooked the seam from production would have
-    # looked like a no-op while no Windows install ever held the machine awake.
+    # Without it, a refactor that swapped the default the app hands the
+    # installer would have looked like a no-op while no Windows install ever
+    # held the machine awake.
     assert real.keep_awake is platform.keep_awake
     assert real.file_unmodified(Path("/nowhere-at-all"), "docker-compose.yml") is None
 
