@@ -3042,8 +3042,8 @@ GUI owns can ask for the enable.
 No longer true: *"the owner's 'click a button and the server's ports get forwarded' still ends at a
 plan the GUI cannot drive."* The GUI drove that plan and applied it, on this box, at 23:06:57 UTC on
 2026-09-05, and the ports it advertised carried a real client's login from another machine
-twenty-five minutes later — see the round-11 paragraph at the end of this section. What no button
-asks for is still the enable, and that is recorded there as a design fact rather than as an
+twenty-four minutes later (23:06:57 to 23:31:24 UTC) — see the round-11 paragraph at the end of
+this section. What no button asks for is still the enable, and that is recorded there as a design fact rather than as an
 unfinished repair.
 The RELOAD half is on
 the path users hit today and is guarded; the ENABLE half is what must already be true before a
