@@ -2640,7 +2640,7 @@ rather than what is observable — that no valid Yu'lon ownership record exists.
 
 ---
 
-### 39. The LAN step locks you out of a remote Linux box — 2026-09-04, OPEN
+### 39. The LAN step locks you out of a remote Linux box — 2026-09-04, **CLOSED 2026-09-05 on the press itself**
 
 Found by 7.1's own gate, the hard way: the lane that pressed it lost its ssh session and had to
 recover by driving the guest's GNOME desktop through the Hyper-V synthetic keyboard. Evidence and
@@ -3031,15 +3031,24 @@ started or stopped, nothing ran on the laptop. Evidence, command by command, in
   under `sudo -n`, **2** under `sudo -n -E`, and `/etc/sudoers:9` is `Defaults env_reset`. The
   claim holds.
 
-What keeps this section OPEN is what round 5 recorded and rounds 7, 8, 9 and 10 did not change:
-`enable_firewall` occurs in exactly two files of code — `pylauncher/yulon/networking.py` and
-`pylauncher/tests/test_networking.py` — and otherwise only in this checklist and four records under
-`pyplan/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
-`4fb61ea9`, seven files, no view, no service, no controller). So nothing the GUI owns can ask for
-the enable, and the owner's "click a button and the server's ports get forwarded" still ends at a
-plan the GUI cannot drive. The RELOAD half is on
+**What kept this section OPEN through round 10** was what round 5 recorded and rounds 7, 8, 9 and
+10 did not change — and one half of it still holds while the other does not.
+Still true: `enable_firewall` occurs in exactly two files of code — `pylauncher/yulon/networking.py`
+and `pylauncher/tests/test_networking.py` — and otherwise only in this checklist and four records
+under `pyplan/gates/bug39-ssh-lockout/` (`grep -rln enable_firewall . --exclude-dir=.git`, run at
+`4fb61ea9`, seven files, no view, no service, no controller; re-run at `cfb4c04f` on 2026-09-05 it
+answered the same seven paths, two of them code, with 14 occurrences in the module). So nothing the
+GUI owns can ask for the enable.
+No longer true: *"the owner's 'click a button and the server's ports get forwarded' still ends at a
+plan the GUI cannot drive."* The GUI drove that plan and applied it, on this box, at 23:06:57 UTC on
+2026-09-05, and the ports it advertised carried a real client's login from another machine
+twenty-five minutes later — see the round-11 paragraph at the end of this section. What no button
+asks for is still the enable, and that is recorded there as a design fact rather than as an
+unfinished repair.
+The RELOAD half is on
 the path users hit today and is guarded; the ENABLE half is what must already be true before a
-control for it exists. Nothing in rounds 7, 8, 9 or 10 ran `apply()` on any box. Round 7's own
+control for it exists. Nothing in rounds 7, 8, 9 or 10 ran `apply()` on any box; the run that did is
+round 11's, below. Round 7's own
 scoping of the neighbouring claim is restored here, because round 9 dropped it: no firewall command
 was applied on any box reached over ssh in those rounds, and the only `firewall-cmd` writes that
 executed were **inside a container** — container `b39r7` on m910q, whose `docker` zone round 7 bound
@@ -3077,13 +3086,94 @@ namespace is that namespace's init (`4fb61ea9`, round 9), where the separating r
 `/proc/1/ns/pid` was costed at uid 1000 — `EACCES` unprivileged, answered only under `sudo -n` —
 and declined on purpose. Round 10 changed no behaviour at all: it corrected five sentences and
 re-ran round 9's two mutations against the committed blob, which kill.
-NOT closed, and the reason this section is still OPEN: the LAN button. What the owner asked for is
-"click a button and the ports get forwarded", **LAN only** — and `enable_firewall` is a `plan()`
-keyword with no caller in any view, service or controller (the seven-file `grep` above), so there is
-no button to click and nothing to wire it to; the reload half is what users press today and it is
-guarded. **Not measured by any round so far:** what a LAN press does end to end on a box that then
-has the ports forwarded — every round from 7 on has been listings, probes and stand-ins, by the
-standing rule that bars applying a firewall change on a box reached over ssh.
+NOT closed at round 10, and the reason this section was still OPEN then: the LAN button. What the
+owner asked for is "click a button and the ports get forwarded", **LAN only** — and
+`enable_firewall` is a `plan()` keyword with no caller in any view, service or controller (the
+seven-file `grep` above), so no button asks for the enable and there is nothing to wire one to; the
+reload half is what users press today and it is guarded. **Not measured by any round up to 10:**
+what a LAN press does end to end on a box that then has the ports forwarded — every round from 7 on
+was listings, probes and stand-ins, by the standing rule that bars applying a firewall change on a
+box reached over ssh. That is what round 11 measured.
+
+**ROUND 11, 2026-09-05 — the button was pressed on a remote Linux box, and a client on another
+machine logged in through the ports it advertised. CLOSED.** Everything in this paragraph was
+measured between 22:57 and 23:38 UTC on 2026-09-05 (00:57-01:38 CEST on 2026-09-06) on
+**`yulon-ubuntu`**, the live 7.2 install at `/home/pk/wowserver`, against the committed tree at
+`cfb4c04f` (`git rev-parse HEAD` in `/home/pk/p7/checkout`, `git status --short` empty). Command by
+command, with every readback, in `pyplan/gates/bug39-lan-press-2026-09-05/README.md`.
+
+* **The way back in was proved BEFORE the firewall was touched, with the tools the 7.1 recovery
+  needed.** `vmshot.ps1` at 00:59:53 CEST, then `vmkeys.ps1 -OpenTerminal` and
+  `-Keys 'echo b39 console proof 0101'` — a second terminal opened on the guest's console, the line
+  typed as virtual key codes, its output on screen, the terminal closed again
+  (`console-before.png`, `console-keyboard-proof.png`, `console-after.png`). Two failsafes were
+  armed first: `systemd-run --on-active=600 --unit=b39-failsafe /usr/sbin/ufw disable`, and a
+  conditional `b39-failsafe2` at 300 s that would allow port 22 and disable ufw only if something
+  had turned it on. `b39-failsafe2` fired at 01:07:42 CEST, read ufw as inactive and ran nothing;
+  `b39-failsafe.timer` was stopped with 2 min 15 s left, and `systemctl list-units 'b39-*' --all`
+  then printed `0 loaded units listed.`
+* **The press went through the real widgets.** `press-driver.py` built the real `ControllerView`
+  over `ControllerServices.for_entry(…, /home/pk/wowserver)` — the object `main.py` builds for a
+  real install — offscreen, with `status_poll_ms=0` so no timer could fill what a click did not, and
+  pressed `Show plan` and then `Apply` with `QTest.mouseClick`. `Apply` was asserted DISABLED before
+  a plan existed and went live only when the plan arrived. The plan the widget rendered was
+  `ufw allow 3724/tcp`, `ufw allow 8085/tcp`, the realmlist UPDATE and the withheld-enable warning;
+  the command block is exactly those two commands and no enable (`press2.txt:75`).
+* **What the report said, in the four fields this section was opened on.**
+  `networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual` (`press.txt:79`). `done`
+  = the two allows and `realmlist → 172.30.55.119`; `skipped` = one entry, and it is the refusal;
+  `manual_steps` = empty; the warning names SSH and tells the user to allow their own SSH port
+  first. This section was filed on `done` carrying `ufw --force enable` with `skipped`,
+  `manual_steps` and `warnings` all empty. That is not what a press produces.
+* **The box after it, read by routes that are not the widget.** `ufw status numbered` →
+  `Status: inactive` before and after. `/etc/ufw/user.rules` went from no line mentioning either
+  port to `-A ufw-user-input -p tcp --dport 3724 -j ACCEPT` and the same for 8085 (`ufw status`
+  lists no rules at all while ufw is off, which is why the rule file is the readback that can
+  answer this). The `sshd` listener lines were identical before and after. A **new** TCP connection
+  to `172.30.55.119:22` got `SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.19` — the half the 7.1 lockout
+  killed, the established session having survived that outage too — and a new ssh **login** from
+  the laptop answered at 23:10:59 UTC. A second press two minutes later left the rule list
+  unchanged (`4 game-port lines before, 4 after`): the allows are idempotent.
+* **`SSH_CONNECTION` did not decide it.** Both presses ran over ssh, so `detect_ssh_route()` read
+  `connected=True, ports=(22,)`. With the three `SSH_*` variables stripped — the shape a launcher on
+  the box's own desktop has — the same call read `connected=False, ports=()`, and `plan()` returned
+  the **same two commands**, one refusal, no manual steps, and `_format_plan()` the same text
+  (`guishape-and-newssh.txt:6-20`). The withholding is unconditional, so the press is not an
+  artefact of the route it was made over.
+* **A client on another machine then used those ports.** Account `LANGATE` (id 104, GM 0) was made
+  by typing into the Accounts tile and clicking `Create`. A real 3.3.5a client (build 12340) on
+  `vmhost`, the Hyper-V host, with `Data\enUS\realmlist.wtf` = `set realmlist 172.30.55.119` and no
+  tunnel, logged in at 01:31:24 CEST: `RESPONSE_CONNECTED result: LOGIN_OK 172.30.55.119:3724`,
+  `COP_AUTHENTICATE code=AUTH_OK result=TRUE`, `COP_GET_CHARACTERS code=44 result=TRUE`
+  (`client-connection-20260906-0131.log:2,10,12`), and the character-selection screen for realm
+  `AzerothCore` was captured. The server's own row, read by `docker exec` + `SELECT`:
+  `104 LANGATE last_login 2026-09-05 23:31:24 last_ip 172.30.48.1 failed_logins 0`
+  (`serverside.txt:5`). **`172.30.48.1` is that host's own address on the Default Switch** — the one
+  thing the 2026-09-05 07:31 login could not show, because it went through `ssh -L` and the server
+  recorded Docker's bridge gateway `172.18.0.1`. As in both earlier logins, `Enter World` was never
+  clicked and no character was created.
+* **The bound this box puts on the press.** Those ports answered from the host before the press too.
+  ufw was `inactive` with an empty `### RULES ###` section, and after the press
+  `sudo -n iptables -S | grep -c ufw` answered **0** (`iptables-bound.txt:1`): none of ufw's chains
+  is in the live ruleset while ufw is off, so the two rules the press wrote do not filter a packet
+  on this box today. The press proves that the app writes the right rules, refuses the dangerous
+  one, keeps SSH reachable and advertises a realm another machine reaches; it does not prove that
+  opening a port *changed* reachability, because nothing was closed. **The ENABLE half was never
+  exercised, and that is a design fact rather than an omission of this run:** no view, service or
+  controller can pass `enable_firewall=True` (the seven-file `grep` above), so there is no button
+  whose press could have turned ufw on, and the standing rule bars turning it on by hand on a box
+  reached over ssh. Proving that half needs a box that arrives with its firewall already enabled.
+* **The box was put back.** The two allows were deleted. ufw had rewritten its rule file into its
+  full canonical template on the first write — 307 bytes before the press, 1479 after it, 1269 after
+  the deletes — so the pre-press bytes were restored from the copy lane 710 took at 22:06 and
+  re-hashed: `sha256 320f53e1ee90a7fd92f17b67f50b06b51cb20998cd52f01dbcb52e24160618bf`, 307 bytes,
+  and 107 bytes for `user6.rules`; `ufw status verbose` → `Status: inactive` and
+  `iptables -S | grep -c ufw` → `0`. `LANGATE`'s rows were deleted from `account`, `account_access`
+  and `realmcharacters` (`MAX(id)` back to 102). The realm row was never changed by anything here:
+  it read `1 AzerothCore 172.30.55.119 172.30.55.119 255.255.255.0 8085` before the press, after it
+  and after the cleanup — the app's UPDATE wrote the value the row already held, which is also why
+  `done` can carry `realmlist → 172.30.55.119` with nothing having moved. No `b39-*` units remain
+  and the three `ac-*` containers were `Up 3 hours`.
 
 ### 40. Abandoning `logs_source()` aborts the interpreter at exit — 2026-09-04, **CLOSED 2026-09-05 at `d2b963d5`**
 
