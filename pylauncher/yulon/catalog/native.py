@@ -2976,10 +2976,15 @@ class StagedInstaller:
         actually taken.
 
         A failure to assert it is not a reason to refuse an install: on Windows
-        the assertion is per-thread and `platform.keep_awake()` refuses the main
-        thread outright, which is right for the app (the install runs on a
-        worker) and wrong to abort a command-line run over. The engine says so
-        in its output instead of promising something it did not get.
+        the assertion is per-thread, and `platform.keep_awake()` refuses the
+        declared GUI thread, because a claim made there on a worker's behalf
+        holds nothing. `run()` is a generator, so this block is entered by
+        whichever thread resumes it — the app's `QThread`, or the headless
+        harness's own main thread — and both of those ARE the thread doing the
+        install. Until 2026-09-05 the refusal went by `threading.main_thread()`
+        identity instead, and the harness's run on `yulon-win11-gate` took this
+        `except` for that reason (bug-checklist §43). The engine says so in its
+        output instead of promising something it did not get.
 
         Written with an `ExitStack` so the `except` covers ONLY entering the
         context. Wrapping the `yield` too would have swallowed every

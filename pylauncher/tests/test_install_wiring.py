@@ -17,10 +17,13 @@ import sys
 import threading
 import traceback
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 
 import pytest
 
+from tests.support_native import Recorder
+from tests.support_native import engine as native_engine
 from yulon import docker, install_wiring, platform
 from yulon import log as log_module
 from yulon.apply import DockerSql
@@ -293,6 +296,55 @@ def test_main_hands_the_engine_a_cancel_event_of_its_own(
     monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: _Engine())
     assert install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path)]) == 0
     assert isinstance(cancels[-1], threading.Event), cancels[-1]
+
+
+def test_the_harness_holds_a_windows_machine_awake_on_its_own_main_thread(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """bug-checklist §43, end to end: the harness's main thread may hold the assertion.
+
+    The REAL `AzerothCoreInstaller` (machine doubled by `support_native`) with
+    the REAL `platform.keep_awake` seam, driven through the real
+    `install_wiring.main()`, which iterates the engine's generator on the
+    thread it was called on — this thread. Only two things are stood in for:
+    which platform `keep_awake()` thinks it is on, and
+    `SetThreadExecutionState` itself, which no box in this suite has.
+
+    `platform_id` is pinned by ARGUMENT, not by patching `platform.detect`:
+    `keep_awake`'s default binds the `detect` function object at definition
+    time, so a patched `platform.detect` would never be consulted and the test
+    would silently be about Linux. `platform.detect` is patched as well so that
+    a future default of `None` (resolve at call time) still reaches "windows".
+
+    Before this fix the same run raised `RuntimeError` inside `_held_awake()`,
+    which caught it, warned `not holding this machine awake`, and yielded the
+    "may go to sleep" sentence — measured on `yulon-win11-gate` 2026-09-05
+    05:12:16 box-local at `745307ad`.
+    """
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    flags: list[int] = []
+    monkeypatch.setattr(
+        platform, "_windows_execution_state", lambda value: (flags.append(value), 1)[1]
+    )
+
+    rec = Recorder(images=False)
+    windows_keep_awake = partial(platform.keep_awake, platform_id=lambda: "windows")
+    engine = native_engine(rec, keep_awake=windows_keep_awake)
+    monkeypatch.setattr(install_wiring, "installer_for_app", lambda entry, **_k: engine)
+
+    assert threading.current_thread() is threading.main_thread()
+    with caplog.at_level(logging.INFO):
+        rc = install_wiring.main(["wow-wotlk", "--server-dir", str(tmp_path / "wow")])
+
+    assert rc == 0, caplog.text
+    assert flags == [
+        platform._ES_CONTINUOUS | platform._ES_SYSTEM_REQUIRED,
+        platform._ES_CONTINUOUS,
+    ], "the harness's own thread did not take and release the assertion"
+    assert "not holding this machine awake" not in caplog.text
+    assert "may go to sleep" not in caplog.text
+    assert "holding this machine awake for the build: SetThreadExecutionState" in caplog.text
 
 
 def test_main_turns_a_ctrl_c_in_the_bridge_into_a_sentence_and_exit_130(

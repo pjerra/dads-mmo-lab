@@ -521,6 +521,14 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
     app = QApplication(sys.argv)
+    # THIS thread runs the event loop, so it is the one thread that must never
+    # hold the Windows keep-awake assertion: every install is handed to a
+    # `QThread` (`ui/widgets/log_panel.py`), and `SetThreadExecutionState` is
+    # scoped to the thread that set it. Declared here rather than inferred from
+    # `threading.main_thread()`, because the headless harness's main thread IS
+    # its install thread and that inference refused it on `yulon-win11-gate`
+    # (bug-checklist §43).
+    platform.declare_gui_thread()
     window = build_window()
     assert isinstance(window, QMainWindow)
     try:
