@@ -28,7 +28,7 @@ stages completed, its three `ac-*` containers up. Nothing was installed, reinsta
 | Driver | what it drives | checks | exit | elapsed | log |
 |---|---|---|---|---|---|
 | `sweep_driver.py` | base `Controller` status/import/ports | 3 OK | 0 | 1 s | `sweep1.log` |
-| `sweep_driver2.py` | modules, plans, repair refusal, update, console, log stream | 7 OK | **0** | 6 s | `sweep2.log` |
+| `sweep_driver2.py` | modules, plans, repair refusal, update, console, log stream | 7 OK (one of them vacuous — read on) | **0** | 6 s | `sweep2.log` |
 | `sweep_driver3.py` | backup → verify → restore → start | 7 OK | 0 | 60 s | `sweep3.log` |
 | `sweep_driver4.py` | `network_apply('lan')`, realmlist file, interrupted-restore | 3 OK | 0 | 2 s | `sweep4.log` |
 | `widget_driver.py` | six real buttons on `ControllerView` + `CatalogView`'s Install | 32 OK | 0 | 11 s | `widget-run.log` |
@@ -37,6 +37,15 @@ stages completed, its three `ac-*` containers up. Nothing was installed, reinsta
 
 `run.log` and `cancel-run.log` carry the same exit codes and elapsed times as the runners wrote
 them.
+
+**One of the 88 asserts nothing, and it is named rather than hidden.** `sweep2.log:32-33` prints
+`[OK] send_console('server info') -> ConsoleReply(command='server info', lines=(), prompted=False)`
+— an empty reply, passed because the 2026-08-28 drivers count any return that does not raise.
+`worldserver-boot-2210.txt` says why the reply was empty (the sweep asked 44 s after a restart,
+and the world finished initializing 10.8 s after the call), and the console claim of this run
+rests on `widget-run.log:20-28` instead, four minutes later, where the same call comes back with
+the core revision, uptime and the update-time diff. Read the console line of the headline as 87
++ 1; the trap section at the end of this file is about exactly this shape.
 
 ## The two things the 2026-09-04 run left open, both closed here
 
@@ -59,6 +68,24 @@ generator in `_LIVE_STREAMS` and closes what is left from `_close_abandoned_stre
 `atexit` (`pylauncher/yulon/runner.py:56`, `:79`, `:152` at `cfb4c04f`). `docker.py::follow_logs()`
 is still byte-identical across the two commits — so the abort went away because the shared layer
 was fixed, not because the driver was.
+
+**That "because" is a mutation, not a correlation** (`mutation-atexit-close.txt`). On
+`yulon-fedora` on 2026-09-05 at 21:48 UTC, in a throwaway `git clone --shared` checked out at
+`cfb4c04f367536375abf6382694a1f800c468b8a` with `__pycache__` purged on both sides of every
+transition, a probe that takes five lines off `runner.stream()` and `break`s without closing the
+generator was run three times on Python 3.13.15:
+
+* as shipped — `took 5 lines; abandoning the generator without close()`, **exit 0**;
+* with `runner.py:152` mutated from `atexit.register(_close_abandoned_streams)` to
+  `atexit.register(lambda: None)` (one line, `runner.py` sha256
+  `eadc94d6…` → `4b21af1d…`) — `Fatal Python error: _enter_buffered_busy: could not acquire lock
+  for <_io.BufferedReader name=5> at interpreter shutdown, possibly due to daemon threads` …
+  `File ".../yulon/runner.py", line 375 in _stream_lines`, `Aborted (core dumped)`, **exit 134**;
+* restored (sha256 back to `eadc94d6…`, worktree clean) — **exit 0**.
+
+That is the 2026-09-04 crash, reproduced on demand and removed again by that one registration.
+The throwaway clone and the probe were deleted; `~/dads-mmo-lab` on the box was left clean at
+`03262b10`.
 
 ### 2. The LAN plan no longer carries `ufw --force enable`
 
@@ -107,7 +134,8 @@ and after, equal. The same warning reaches the user through the widget:
 * **`runner.py`** — every subprocess above, plus the log stream, plus the abort that no longer
   happens.
 * **`platform.py`** — `check_for_update()` `current=0.6.59 latest=v0.6.59Public available=False
-  error=None`; `keep_awake()` taken and released around the cancelled install (see below).
+  error=None`; `keep_awake()` **taken** around the cancelled install — its release is cited, not
+  shown by this run (see below).
 * **`networking.py`** — `network_plan('lan')` and `('internet')` both `ready=True`;
   `network_apply('lan')` 3 done; `write_client_realmlist()` round-tripped
   `192.168.1.50` into `Data/enUS/realmlist.wtf`.
@@ -133,17 +161,37 @@ stood — compared as strings, both for the signal's message and for the modal's
 The folder it left (`cancel-folder-after-tbc.txt`): `.yulon-install.json` present with
 `"install_id": "6bc04447"` and `"completed": []`, `src/mangos-tbc/`, 337 MB, no `.git` and no
 compose file at the root. Nothing was left running: `docker ps` empty, no `buildx_buildkit`
-container, `docker images` unchanged from the six listed before the click, and the only
-inhibitors left are GNOME's — Yu'lon's `keep_awake()` (taken at `22:45:40`, logged in
-`widget-cancel-tbc.log`) was released.
+container, `docker images` unchanged from the six listed before the click.
+
+Yu'lon's `keep_awake()` was **taken** at `22:45:40` (`widget-cancel-tbc.log:22`, the
+`systemd-inhibit --what=idle:sleep --who=Yu'lon` line). **This run does not show it released,
+and the file that looks as if it does cannot.** `run-710-cancel3.sh:83` captured
+`systemd-inhibit --list 2>&1 | tail -5`, so `cancel-folder-after-tbc.txt:53-57` holds three rows
+of a list whose own last line reads `8 inhibitors listed.` — the three are GNOME's
+(`gsd-media-keys` twice, `gsd-power`); the other five were never captured, and a `--who=Yu'lon`
+inhibitor still held would not have to appear among the last five rows. That probe answers the
+same whether the inhibitor was released or not, so nothing is claimed from it here. The release
+is **cited**, not re-earned: `7.10-gaps/README.md:22` → `7.1-ubuntu-2026-09-04/kill-record.txt:41`
+(*"NONE: no install, no builder, no inhibitor left behind"*).
+
+A note on `widget-cancel-tbc.log:14`, the run's first check: its label reads *"the WotLK tile's
+Install"*. That wording is inherited from the driver this one was forked from
+(`drivers/widget_cancel_driver.py:210`, the `wow-wotlk` driver) and was not updated in
+`drivers/widget_cancel_driver_tbc.py:243`. The tile actually clicked is named four lines later,
+at `widget-cancel-tbc.log:18`: `started=['wow-tbc']`. The drivers are committed exactly as run
+and `drivers.diff` is their complete diff, so the label is corrected here rather than in the file.
 
 ### Why it is `wow-tbc` and not `wow-wotlk`, and what that costs
 
 The lane's plan was to stop the live install's containers through the app to free the ports and
 cancel a `wow-wotlk` install. **Stopping is not enough, and that is a measured refusal rather
 than a guess.** With all three `ac-*` containers stopped through `Controller.stop()`
-(`containers-stop.txt`), preflight passed every check including *"the server's ports: nothing
-else is using them"*, and the engine refused anyway:
+(`containers-stop.txt`), preflight **refused nothing** — its panel dump is six `[pass]` and two
+`[warn]` (compiler jobs vs memory; free space, 51 GB against the comfortable 75 GB) with no
+`[refuse]` line at all, and the check the stop was for is one of the passes: *"[pass] the
+server's ports: nothing else is using them"* (`widget-cancel-wotlk-refused.log:35`; the two warns
+are `:30-31`, and because the panel is dumped twice `grep -c 'warn]'` on the file is 4). The
+engine refused after preflight, on a different guard:
 
 > A container called ac-database already exists and belongs to another install
 > (yulon-wow-wotlk-243c46e3). Two servers cannot share that name. Remove the other install's
@@ -211,8 +259,21 @@ clones into and only `wow-wotlk` spells that destination `"."`. That was measure
 different box: `.yulon-install.json` **is** on disk after the cancel, and the copy therefore
 does promise the resume — and does **not** also warn of a refusal, which is the pair that used to
 appear together. The record's `"completed": []` is worth noting: "carries on from the last stage
-recorded" here means the engine will accept the folder and start `clone-sources` again, which is
-exactly what the 2026-09-05 `wow-wotlk` folder was promised and refused.
+recorded" would here mean starting `clone-sources` again — which is exactly what the 2026-09-05
+`wow-wotlk` folder was promised and then refused.
+
+**That the engine would accept this folder on a second press is a reading of the code, not a
+measurement of this run.** At `cfb4c04f`, `_claim_folder()` in
+`pylauncher/yulon/catalog/native.py:1812-1910` refuses a non-empty folder only when it holds no
+record of its own (`:1895` `if existing is None and server_dir.is_dir() and not (server_dir /
+".git").is_dir():` → `:1904` *"is not empty and was not created by this app"*), and its three
+record-mismatch refusals (`:1875` a different `install_id`, `:1881` a different game,
+`:1886` a different family) all compare against a record this same install of this same game
+wrote into this same folder. `cancelled_install_message()`'s two "the app will refuse it"
+branches (`pylauncher/yulon/catalog/installer.py:607` and `:611`) are likewise the
+no-`.yulon-install.json` case. Install was pressed on `/home/pk/p7-cancel-install-tbc` exactly
+once, the modal was clicked away, and the folder was removed at cleanup (`final-state.txt`), so
+no second press was driven here and none is claimed.
 
 ## What is CITED from earlier runs, not re-run
 
@@ -220,7 +281,7 @@ exactly what the 2026-09-05 `wow-wotlk` folder was promised and refused.
 |---|---|---|
 | preflight floors **refusing**, not warning, on free space | `7.1-ubuntu-2026-09-04/press1.log:15-26`, and `7.10-gaps/README.md`'s widget-driven refusal | this box had **54.5 GB** free at the Install click against a 48 GB floor (`widget-run.log`), so the space refusal is not reachable here. The refusal this box IS under — the port conflict — was driven through the widget instead and is asserted in its place; the driver's diff records the swap and why |
 | staged / resumable install | `7.1-ubuntu-2026-09-04/press2.log`, `press3.log`, `kill-record.txt`, `ccache-stats.txt` | a resume needs a build, and a build compiles for hours |
-| `keep_awake()` taken **and released** | re-earned here: taken at `22:45:40` (`widget-cancel-tbc.log`), and `cancel-folder-after-tbc.txt` shows only GNOME's inhibitors left | — |
+| `keep_awake()` **released** | `7.10-gaps/README.md:22` → `7.1-ubuntu-2026-09-04/kill-record.txt:41` | taken again here (`widget-cancel-tbc.log:22`), but NOT re-earned: the after-probe is `systemd-inhibit --list \| tail -5` (`run-710-cancel3.sh:83`) of an 8-row list, so `cancel-folder-after-tbc.txt:53-57` would print the same three GNOME rows whether Yu'lon's inhibitor was still held or not |
 
 ## The server is intact afterwards
 
@@ -268,10 +329,22 @@ world down until `Controller.start()` put them back. Second, and worse: **the dr
 `[OK] import_state() -> ImportState(state='unreadable', detail='could not list the databases:
 permission denied …')` and `sweep2.log:41` is `[OK] send_console('server info') ->
 ConsoleReply(command='server info', lines=('permission denied …',))`. The 2026-08-28 drivers
-count a call as passing when it returns without raising, whatever it returns; on the real run
-those same lines carry real values, but the shape means a green sweep is not by itself evidence.
-The re-run was relaunched under `sg docker -c`, which is what the 2026-09-05 widget-cancel run
-used for the same reason.
+count a call as passing when it returns without raising, whatever it returns.
+
+**The re-run is not immune to that shape, and one of its 88 `[OK]`s is an instance of it.**
+`sweep2.log:32-33` is `[OK] send_console('server info') -> ConsoleReply(command='server info',
+lines=(), prompted=False)` — no lines at all, passed anyway. Not a broken console:
+`worldserver-boot-2210.txt` holds the worldserver's own stamps for that window (captured
+read-only from `docker logs -t ac-worldserver` on 2026-09-05 at 23:48 CEST). The aborted run's
+`sudo docker stop` halted the world at `22:08:12`; `Controller.start()` after the abort started
+it at `22:10:25`; `sweep_driver2.py` started at `22:11:06` and sent `server info` at `22:11:09`,
+44 s after that start; `WORLD: World Initialized In 0 Minutes 53 Seconds` landed at
+`22:11:19.83` — 10.8 s after the call, and 7.8 s after the driver had already exited at
+`22:11:12`. `prompted=False` says the console had no prompt yet, and the world then consumed the
+queued command at `22:11:19.87`. So the check was made against a server that was still booting,
+and the driver's "no exception is a pass" shape reported it green. The console round-trip on this
+engine is carried by `widget-run.log:20-28` instead. The re-run was relaunched under
+`sg docker -c`, which is what the 2026-09-05 widget-cancel run used for the same reason.
 
 ## Files
 
@@ -286,6 +359,8 @@ used for the same reason.
 | `drivers.diff` | their complete diff against the committed originals |
 | `run.log`, `cancel-run.log` | provenance header + per-driver exit code and elapsed time |
 | `sweep1.log` … `sweep4.log`, `widget-run.log` | the sweep half's transcripts |
+| `mutation-atexit-close.txt` | the mutation that turns §1's "because" from a correlation into a cause: `atexit.register(_close_abandoned_streams)` neutered at `cfb4c04f` on `yulon-fedora`, exit 0 → 134 → 0 |
+| `worldserver-boot-2210.txt` | `ac-worldserver`'s own boot stamps for the window `sweep_driver2.py` ran in — why `sweep2.log:32`'s console reply was empty |
 | `widget-cancel-wotlk-refused.log` | the container-name refusal, through the widget |
 | `widget-cancel-tbc-refused-client.log` | the client-folder refusal, through the widget |
 | `widget-cancel-tbc.log`, `cancel-folder-after-tbc.txt` | the real cancelled install and what it left |

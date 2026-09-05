@@ -2076,6 +2076,12 @@
   - **Ticked 2026-09-05 on the re-run against the MERGED engine, `yulon-ubuntu`:
     `pyplan/gates/7.10-ubuntu-2026-09-05-rerun/README.md`. 88 checks, 88 OK, 0 FAIL, seven
     drivers, at `cfb4c04f367536375abf6382694a1f800c468b8a` on Python 3.12.3 / PySide6 6.11.2.**
+    One of the 88 asserts nothing and the folder says so: `sweep2.log:32-33` passes
+    `send_console('server info')` on an empty `ConsoleReply(… lines=(), prompted=False)`, because
+    the sweep asked 44 s after a restart and the world initialized 10.8 s after the call
+    (`worldserver-boot-2210.txt`, `ac-worldserver`'s own stamps) while the 2026-08-28 drivers
+    count any return that does not raise. The console claim rests on `widget-run.log:20-28`
+    instead — read that line of the headline as 87 + 1.
     The 2026-09-04 sweep and its widget follow-up ran at `81d7311e`, and
     `git diff --stat 81d7311e cfb4c04f -- pylauncher` is 64 files, 23,102 insertions, 773
     deletions — `networking.py` +3,028, `runner.py` +153, `docker.py` +28, `controller.py` +16 —
@@ -2086,7 +2092,13 @@
     `runner.py::stream()` is no longer byte-identical to the 08-28 code — `d2b963d5` registers
     every generator in `_LIVE_STREAMS` and closes what is left at `atexit`
     (`pylauncher/yulon/runner.py:56`, `:79`, `:152`), while `docker.py::follow_logs()` still is
-    byte-identical. (2) The LAN plan no longer carries `('ufw','--force','enable')` at all: read
+    byte-identical. That "because" is a mutation rather than a correlation:
+    `mutation-atexit-close.txt` ran an abandoned-`stream()` probe three times on `yulon-fedora`
+    from a throwaway `git clone --shared` at `cfb4c04f`, `__pycache__` purged on both sides of
+    every transition — as shipped **exit 0**, with `runner.py:152` changed to
+    `atexit.register(lambda: None)` the 09-04 `Fatal Python error: _enter_buffered_busy …
+    Aborted (core dumped)`, **exit 134**, restored **exit 0**.
+    (2) The LAN plan no longer carries `('ufw','--force','enable')` at all: read
     before anything applied it, in two environments, it is two `ufw allow` commands plus a
     warning naming §39 (`ufw-plan-probe-interactive.txt`,
     `ufw-plan-probe-systemd-run.txt`), `network_apply('lan')` reports it as `skipped`, and
@@ -2116,7 +2128,10 @@
     `QMessageBox.information(self, "Install cancelled", note)`.
     **What is NOT claimed.** That copy arriving as a modal from a cancelled **`wow-wotlk`**
     install on the merged engine. With the live 7.2 install's `ac-*` containers stopped through
-    the app and every preflight check `[pass]`, the engine refused on the container-name guard —
+    the app, preflight refused nothing — six `[pass]` and two `[warn]` (compiler jobs vs memory;
+    free space, 51 GB against the comfortable 75 GB), no `[refuse]`, and *"[pass] the server's
+    ports: nothing else is using them"* among the passes — and the engine then refused on the
+    container-name guard —
     *"A container called ac-database already exists and belongs to another install
     (yulon-wow-wotlk-243c46e3)"* (`widget-cancel-wotlk-refused.log`) — and its remedy is to
     remove those containers, which this lane may not do. `wow-wotlk` is the only shipped game
@@ -2124,7 +2139,12 @@
     with no AzerothCore containers on it. Also not re-run and cited instead: the free-space
     preflight refusal (this box had 54.5 GB against a 48 GB floor, so the port-conflict refusal
     was driven through the widget in its place) and the staged/resumable install, which needs a
-    build. `keep_awake()` was re-earned here, taken and released.
+    build. `keep_awake()` was **taken** here (`widget-cancel-tbc.log:22`) but its **release is
+    cited, not re-earned**: the after-probe is `systemd-inhibit --list | tail -5`
+    (`run-710-cancel3.sh:83`) of a list whose own last line says `8 inhibitors listed.`, so
+    `cancel-folder-after-tbc.txt:53-57` would read the same whether Yu'lon's inhibitor was still
+    held or not; the release evidence is `7.10-gaps/README.md:22` →
+    `7.1-ubuntu-2026-09-04/kill-record.txt:41`.
     **The trap this run fired**, kept in `aborted-nodockergroup/`: under `systemd-run --user` the
     drivers had no `docker` group and every docker call came back "permission denied", yet the
     08-28 drivers printed `[OK]` for calls that returned an error object
