@@ -529,7 +529,7 @@ def cancelled_install_message(entry: CatalogEntry, server_dir: Path) -> str:
     has_checkout = (server_dir / ".git").is_dir()
     try:
         leftovers = bool(
-            server_dir.is_dir() and native._listing(server_dir, ignoring=native.STATE_FILE)
+            server_dir.is_dir() and native._listing(server_dir, ignoring=native.OUR_OWN_FILES)
         )
     except InstallerError:
         # A folder this app cannot list is a folder `_claim_folder()` cannot

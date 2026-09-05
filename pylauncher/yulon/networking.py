@@ -173,9 +173,11 @@ users hit today, which is why it is not gated on `enable_firewall`.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
+import time
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -189,7 +191,75 @@ from yulon.log import get_logger
 
 logger = get_logger(__name__)
 
-Mode = Literal["lan", "internet"]
+Mode = Literal["lan", "internet", "loopback"]
+"""Who a realm is being set up for: this network, the internet, or this computer alone.
+
+`loopback` was added on 2026-09-05 for bug-checklist §41. The other two are
+DETECTED addresses — `plan()` asks the machine what its LAN address is, and a
+service what its public address is — and `advertisable()` sits in front of both
+so that a detector answering `127.0.0.1` cannot produce the §35 outage (a realm
+advertising the loopback tells every client the world server is on the CLIENT's
+machine). `loopback` is the one mode whose address is not detected but CHOSEN,
+which is why it is a mode rather than a value that survives the guard: the
+guard is still the right answer for everything the machine reports, and the
+choice is remembered in a file (`read_network_intent()`) instead.
+"""
+
+LOOPBACK_ADDRESS = "127.0.0.1"
+"""The address the `loopback` mode writes, and the only one it ever writes.
+
+Equal to `catalog.native.INSTALL_REALM_HOST`, which is what a fresh install's
+row already says — asserted in
+`test_networking.py::test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip`,
+because the two constants have to agree for `ready`'s auth marker (which is
+that host plus the world port) and this mode to describe the same server. Not
+imported from there: `catalog.native` imports this module, and the direction
+must not be reversed.
+"""
+
+INTENT_FILE = ".yulon-network.json"
+"""Where a chosen `Mode` is remembered, beside `.yulon-install.json` and not inside it.
+
+Two reasons, both measured rather than argued.
+
+The first is who owns the file. `native.write_state()` rebuilds its whole
+payload from the keys the running build knows and `os.replace()`s the result,
+and the install engine carries ONE `InstallState` in memory for a whole run,
+writing it back after every recorded stage. An intent written into that file by
+anyone else -- the Networking tab, which is another thread of the same app --
+is therefore dropped by the engine's next write, with no conflict for either
+side to notice. That is the same class of loss `InstallState.unknown` exists to
+prevent, and
+`test_networking.py::test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file`
+is what would catch its return.
+
+The second is what the two files are FOR. `.yulon-install.json` records what a
+run got through, and `read_claim()` refuses to open one written by a newer build
+at all rather than risk rewriting it. The mode a person chose is not a run's
+progress and must not be readable only when a run's record happens to parse.
+
+Both files live in the server directory and both are removed by a fresh
+`clone-core` (`git.py`'s seams empty a destination with no `.git`), so this
+choice buys nothing there and loses nothing either: a folder being cloned into
+for the first time has no chosen mode to lose.
+"""
+
+ONLY_THIS_COMPUTER = (
+    f"this realm will advertise {LOOPBACK_ADDRESS}, so no other machine can reach this "
+    "server: every client that logs in is told the world server is on the computer it is "
+    "running on. That is what this mode is for — a server played only on the machine it is "
+    "installed on — and the choice is remembered, so the last step of an install and every "
+    "later resume leave the row alone instead of putting a reachable address back. To undo "
+    "it, pick LAN (same Wi-Fi) or Internet play and press Show plan and then Apply."
+)
+"""The cost of the `loopback` mode, said on the plan before Apply is pressed.
+
+A `NetworkPlan.warning` rather than a refusal, because the plan is going to do
+exactly what was asked. It is here rather than in the radio's label because the
+label has room for the address and not for the consequence, and because
+`_format_plan()` renders warnings — so this is the sentence a person reads in
+the same widget, one press before it takes effect.
+"""
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 
@@ -2758,7 +2828,18 @@ class NetworkPlan:
 
     @property
     def ready(self) -> bool:
-        """False if something essential (the LAN IP, or the public IP for internet) is missing."""
+        """False if something essential (the LAN IP, or the public IP for internet) is missing.
+
+        `loopback` needs neither, and answers True on a machine with no network
+        at all. That is not a special case bolted on: the address that mode
+        writes is a constant, so there is nothing left to be missing — and a
+        machine whose LAN address cannot be read is exactly the one whose owner
+        wants "only this computer". Gating it on `lan_ip` would have left the
+        Apply button dead in the one place the mode is most useful, which is
+        bug-checklist §41 with a `Literal` added to it.
+        """
+        if self.mode == "loopback":
+            return True
         if self.lan_ip is None:
             return False
         return self.mode == "lan" or self.public_ip is not None
@@ -2827,7 +2908,11 @@ def advertisable(address: str | None) -> str | None:
       "Connecting" and says nothing useful. `detect_lan_ip()` filters `127.` on
       its local branch and its WSL branch does NOT — it takes whatever
       `Get-NetIPConfiguration` printed — so the filter has to exist somewhere
-      both branches pass through, and this is it.
+      both branches pass through, and this is it. **The way to advertise the
+      loopback ON PURPOSE is `Mode` `loopback`, not a hole in this refusal**
+      (bug-checklist §41): this predicate is asked about addresses a DETECTOR
+      produced, and widening it would hand the §35 outage back to every machine
+      whose detector answers the loopback by accident.
     * **anything `_sql_literal()` would refuse.** Asked HERE, by calling it,
       rather than restated: a caller that has been handed an address by this
       function can then build the UPDATE without a `ValueError` reaching it, and
@@ -2847,6 +2932,91 @@ def advertisable(address: str | None) -> str | None:
     except ValueError:
         return None
     return candidate
+
+
+@dataclass(frozen=True)
+class NetworkIntent:
+    """A mode somebody CHOSE for one install, and when they chose it.
+
+    Recorded intent, never a reading of the database. `catalog.native`'s
+    closing realm step has to tell a row that is `127.0.0.1` because nobody set
+    it from one that is `127.0.0.1` because the owner asked for it, and the row
+    itself cannot answer that — which is the whole of bug-checklist §41.
+
+    `recorded_unix` is carried so the sentence the install prints can say WHEN
+    the choice was made. A reader with a file full of one word and no date
+    cannot tell a decision from a leftover.
+    """
+
+    mode: Mode
+    recorded_unix: int = 0
+
+
+def read_network_intent(server_dir: Path) -> NetworkIntent | None:
+    """The mode last APPLIED to this install through the app, or None if nothing said.
+
+    None means "nobody has chosen", which is the state every install in the
+    wild is in and the one the automatic path needs: `_advertise_realm()` then
+    behaves exactly as it did before this existed.
+
+    Every unreadable shape answers None as well — a missing directory, an
+    unparseable file, a payload that is not an object, a `mode` that is not a
+    string, and a string this build does not know. Read deliberately in that
+    direction: the failure §41 sits next to is §35, a realm nobody else can
+    reach, so a damaged record must fall back to the path that puts a reachable
+    address back rather than to the one that leaves the loopback alone. The
+    unknown-mode arm is also the forward-compatible one — a fourth mode written
+    by a newer build reads as no intent here instead of as something this build
+    has to guess the meaning of.
+    """
+    path = server_dir / INTENT_FILE
+    try:
+        with path.open(encoding="utf-8") as fh:
+            parsed = json.load(fh)
+    except (OSError, ValueError) as exc:
+        logger.debug(f"no usable network intent in {server_dir}: {exc}")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    mode = parsed.get("mode")
+    if mode not in ("lan", "internet", "loopback"):
+        logger.debug(f"{path} names a mode this build does not know: {mode!r}")
+        return None
+    recorded = parsed.get("recorded_unix")
+    return NetworkIntent(mode=mode, recorded_unix=recorded if isinstance(recorded, int) else 0)
+
+
+def record_network_intent(server_dir: Path, mode: Mode) -> str:
+    """Remember that `mode` was applied to this install; `""` if it was written, else why not.
+
+    The LAST APPLIED mode and not just the loopback, because the way back is
+    the same button: a store that only ever remembered `loopback` would be a
+    one-way door — the owner picks LAN, the row is rewritten to the LAN
+    address, and the next resume reads a stale `loopback` and leaves whatever
+    it finds alone from then on.
+
+    Written atomically, for `native.write_state()`'s reason: a half-written
+    record here is read as no record at all by `read_network_intent()`, and the
+    next resume would then overwrite a loopback the owner had asked for.
+
+    It ANSWERS instead of raising, and its one caller (`apply()`) puts the
+    answer in the report. A `NetworkReport` is what a user reads after pressing
+    Apply, and an unwritable server directory means the choice will not survive
+    the next install press — which is worth a line, and is not worth turning a
+    successful realmlist UPDATE into an exception.
+    """
+    path = server_dir / INTENT_FILE
+    tmp = path.with_name(path.name + ".new")
+    payload = {"mode": mode, "recorded_unix": int(time.time())}
+    try:
+        server_dir.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8", newline="\n")
+        os.replace(tmp, path)  # atomic on POSIX and on Windows
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        logger.warning(f"could not record the chosen network mode in {path}: {exc}")
+        return str(exc)
+    return ""
 
 
 def realmlist_columns(entry: CatalogEntry) -> tuple[str, ...]:
@@ -3181,7 +3351,17 @@ def plan(
 
     sql: str | None = None
     client_realmlist: str | None = None
-    if lan is None:
+    if mode == "loopback":
+        # First, and before the LAN IP is looked at at all: this is the one mode
+        # whose address is chosen rather than detected, so a machine that could
+        # not say what its LAN address is still gets a complete, applicable plan
+        # (`NetworkPlan.ready`). `advertisable()` is deliberately not consulted
+        # — it is the guard on the DETECTED addresses and it refuses exactly
+        # this value (§35).
+        sql = realmlist_sql(entry, LOOPBACK_ADDRESS, LOOPBACK_ADDRESS)
+        client_realmlist = LOOPBACK_ADDRESS
+        warnings.append(ONLY_THIS_COMPUTER)
+    elif lan is None:
         warnings.append("could not determine this machine's LAN IP — is it on a network?")
     elif mode == "lan":
         sql = realmlist_sql(entry, lan, lan)
@@ -3257,6 +3437,7 @@ def apply(
     sql: SqlRunner | None,
     run: Runner | None = None,
     elevate: bool = True,
+    server_dir: Path | None = None,
 ) -> NetworkReport:
     """Execute the automatable part of `network_plan`; report the rest by name.
 
@@ -3274,6 +3455,17 @@ def apply(
     agree. When the plan says it read the machine with a prefix
     (`NetworkPlan.probed_elevated`) and this call will not use one, every
     command that could cut the session is refused by name — see the loop.
+
+    `server_dir` is where the applied mode is remembered (`INTENT_FILE`), and
+    it is remembered ONLY once the realmlist UPDATE has actually gone through.
+    Recording it any earlier — when the plan was shown, or before the statement
+    was sent — would leave `catalog.native`'s closing realm step honouring a
+    choice the database never received: a server whose Apply failed would go on
+    advertising a reachable address while a file said its owner had chosen the
+    loopback, and every later resume would leave that disagreement alone.
+    Defaulted to None, which records nothing, because every caller that only
+    wants the firewall half of a plan (and every test that predates §41) passes
+    no directory.
     """
     do = run if run is not None else (lambda argv: runner.run(argv))
     done: list[str] = []
@@ -3357,6 +3549,15 @@ def apply(
             else:
                 done.append(f"realmlist → {network_plan.client_realmlist}")
                 restart = True
+                if server_dir is not None:
+                    unwritten = record_network_intent(server_dir, network_plan.mode)
+                    if unwritten:
+                        skipped.append(
+                            f"the chosen mode ({network_plan.mode}) could not be remembered "
+                            f"in {server_dir / INTENT_FILE}: {unwritten}. The realm row was "
+                            "set; what was not saved is the CHOICE, so the next install press "
+                            "on this folder will work the address out for itself again."
+                        )
 
     logger.info(
         f"networking {network_plan.mode} for {network_plan.game_id}: {len(done)} done, "

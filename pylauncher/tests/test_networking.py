@@ -20,6 +20,7 @@ import pytest
 
 from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
+from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
@@ -4797,3 +4798,172 @@ def test_an_unknown_daemon_is_held_to_the_running_rule_not_the_stopped_one() -> 
     )
     assert not any("DefaultZone" in r for r in stopped.refusals)
     assert not any(networking._can_lock_out(c) for c in stopped.firewall_commands)
+
+
+# ------------------------------------------------ the loopback chosen on purpose
+#
+# bug-checklist §41. `advertisable()` refuses `127.0.0.1` by design (§35: a realm
+# advertising the loopback tells every client the world server is on the CLIENT's
+# machine), so the value the §35 fix prevents by accident was also unreachable on
+# purpose — set it by hand and the next install press or resume overwrote it. The
+# tests below are the third mode, the recorded intent, and the file it lives in.
+
+
+def test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip() -> None:
+    """The third mode: `plan()` asks for `127.0.0.1` by name, and says what it costs.
+
+    `advertisable()` is the AUTOMATIC path's guard and is asserted unchanged
+    here on purpose: a fix that widened that predicate instead of adding a mode
+    would hand every undetected-address install the §35 outage back, and would
+    pass every other test in this section.
+
+    `detect_lan=lambda: None` is in the call for the same reason. A machine with
+    no usable LAN address is precisely the one whose owner wants "only this
+    computer", and `NetworkPlan.ready` — which is what enables the Apply button —
+    refused every plan with no LAN IP. A loopback mode that could not be applied
+    there would be §41 with a new spelling.
+    """
+    assert networking.LOOPBACK_ADDRESS == native.INSTALL_REALM_HOST, (
+        "the address this mode writes and the one `ready`'s auth marker waits for have "
+        "drifted apart; they describe the same server"
+    )
+    p = networking.plan(
+        WOTLK,
+        "loopback",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: None,
+    )
+    assert p.mode == "loopback"
+    assert p.lan_ip is None
+    assert p.realmlist_sql == networking.realmlist_sql(
+        WOTLK, networking.LOOPBACK_ADDRESS, networking.LOOPBACK_ADDRESS
+    )
+    assert p.client_realmlist == networking.LOOPBACK_ADDRESS
+    assert p.ready is True, "a loopback plan needs no LAN address to be applicable"
+    assert (
+        networking.advertisable(networking.LOOPBACK_ADDRESS) is None
+    ), "§35's refusal was widened rather than added to"
+    warned = [w for w in p.warnings if "no other machine" in w]
+    assert warned, p.warnings
+    assert networking.LOOPBACK_ADDRESS in warned[0], warned[0]
+
+
+def test_the_mode_the_owner_applied_is_recorded_only_when_the_row_was_written(
+    tmp_path: Path,
+) -> None:
+    """The intent is written by the same act that writes the row, and by nothing else.
+
+    Recording it earlier — when the plan is shown, or before the UPDATE is
+    tried — would leave `ready` honouring a choice the database never received:
+    a server whose Apply failed would go on advertising a reachable address
+    while a file said the owner had chosen the loopback, and every later resume
+    would leave that mismatch exactly as it was.
+
+    The `sql=None` arm is that failure in its cheapest shape — `apply()` reports
+    the UPDATE as skipped and nothing is recorded.
+    """
+    p = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    nothing = tmp_path / "no-db"
+    nothing.mkdir()
+    networking.apply(p, sql=None, server_dir=nothing)
+    assert (
+        networking.read_network_intent(nothing) is None
+    ), "a choice the database never received was recorded as the owner's intent"
+
+    server = tmp_path / "server"
+    server.mkdir()
+    sql = _RecordingSql()
+    report = networking.apply(p, sql=sql, server_dir=server)
+    assert sql.statements == [("auth", p.realmlist_sql)]
+    assert report.restart_required is True
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "loopback"
+    assert intent.recorded_unix > 0, "an intent with no timestamp cannot say when it was chosen"
+
+
+def test_applying_a_reachable_mode_replaces_a_loopback_chosen_earlier(
+    tmp_path: Path,
+) -> None:
+    """The way BACK is the same button, so the file records the last APPLIED mode.
+
+    A store that only ever remembered the loopback would be a one-way door: the
+    owner picks LAN, the row is rewritten to the LAN address, and the next
+    resume reads a stale "loopback" and leaves whatever it finds alone forever.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    chosen = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    networking.apply(chosen, sql=_RecordingSql(), server_dir=server)
+    first = networking.read_network_intent(server)
+    assert first is not None and first.mode == "loopback"
+
+    lan = networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="none", steamos=False, wsl=False
+    )
+    networking.apply(lan, sql=_RecordingSql(), server_dir=server)
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "lan"
+
+
+def test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file(
+    tmp_path: Path,
+) -> None:
+    """Why the intent is a SIBLING of `.yulon-install.json` and not a key inside it.
+
+    `native.write_state()` rebuilds the whole payload from the keys this build
+    knows and `os.replace()`s the file. The install engine carries one
+    `InstallState` in memory for a whole run and writes it back after every
+    recorded stage, so an intent written into that file by anyone else — the
+    Networking tab, which is another thread of the same app — is dropped by the
+    engine's next write, silently and with no conflict to notice. That is the
+    same class of loss `InstallState.unknown` exists to prevent, and it is what
+    this assertion catches.
+
+    The other half of the reason is ownership: `.yulon-install.json` records what
+    a RUN got through, and `read_claim()` refuses to open one written by a newer
+    build at all. The mode a person chose is not a run's progress.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    p = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    networking.apply(p, sql=_RecordingSql(), server_dir=server)
+
+    native.write_state(
+        server, native.InstallState(game_id="wow-wotlk", install_id="abc", completed=())
+    )
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "loopback"
+
+
+@pytest.mark.parametrize(
+    "written", ["", "not json at all", "[]", '{"mode": "sideways"}', '{"mode": 7}']
+)
+def test_a_file_that_does_not_name_a_mode_this_build_knows_is_no_intent(
+    tmp_path: Path, written: str
+) -> None:
+    """An unreadable record is no record, and never "the owner chose the loopback".
+
+    Read in the direction that keeps a server reachable: the failure this whole
+    entry is about is a realm nobody else can reach, so a damaged file falls back
+    to the automatic path, which rewrites the row. `"sideways"` is the
+    forward-compatibility arm — a mode a newer build wrote — and it reads as no
+    intent here rather than as something this build has to guess at.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / networking.INTENT_FILE).write_text(written, encoding="utf-8")
+    assert networking.read_network_intent(server) is None
+
+
+def test_no_intent_file_at_all_is_no_intent(tmp_path: Path) -> None:
+    """The state every install in the wild is in, and the one the automatic path needs."""
+    assert networking.read_network_intent(tmp_path) is None
+    assert networking.read_network_intent(tmp_path / "not-a-directory") is None

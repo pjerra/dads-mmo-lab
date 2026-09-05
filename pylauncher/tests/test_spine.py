@@ -2836,6 +2836,106 @@ def test_a_row_that_is_already_reachable_is_left_alone_whatever_it_says(
     ], "a localAddress still on the loopback was read as nothing to change"
 
 
+def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
+    tmp_path: Path,
+) -> None:
+    """bug-checklist §41's first half: recorded intent beats the automatic rewrite.
+
+    The step that fixes §35 rewrites the realm row on EVERY resume, and
+    `networking.advertisable()` refuses `127.0.0.1` by design, so before this
+    an owner who set the loopback by hand had it overwritten by the next press
+    with "players on other machines can reach this server" printed over the top.
+
+    The reading is done BEFORE anything else the step does, which the two empty
+    lists here are the evidence for: with the intent recorded, no address is
+    detected, the database is never asked what the row says, and no UPDATE is
+    sent. A version that read the intent after the query would still leave the
+    row alone and would still pass a test that only looked at `sql_scripts`.
+
+    The line is asserted to name the address, the tab that set it and the way
+    back, because "left alone" with no reason is indistinguishable from the
+    step having silently failed.
+    """
+    server = tmp_path / "wow"
+    server.mkdir()
+    networking.record_network_intent(server, "loopback")
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    said = _advertising(rec, server, lan_ip=lambda: "10.1.2.3")
+
+    assert _statements(rec) == [], "a loopback the owner chose was overwritten anyway"
+    assert rec.sql_calls == [], "the row was read before the recorded choice was"
+    line = next(line for line in said if native.INSTALL_REALM_HOST in line)
+    assert "Networking tab" in line, line
+    assert "no other machine" in line, line
+    assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_a_server_whose_loopback_was_never_chosen_is_still_rewritten(
+    tmp_path: Path,
+) -> None:
+    """§41's second half, and the whole reason the intent is recorded rather than read.
+
+    Same row, same detected address, same code path — the only difference is
+    that no one chose it. A guard that asked the DATABASE whether the row was
+    the loopback (rather than asking a file whether a person had said so) would
+    leave this server unreachable from every other machine, which is §35 back
+    in full.
+
+    The `"lan"` arm is the third state: a folder whose owner applied a REACHABLE
+    mode through the tab carries an intent too, and it must not be read as a
+    reason to skip.
+    """
+    fresh = tmp_path / "never-chosen"
+    fresh.mkdir()
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    said = _advertising(rec, fresh, lan_ip=lambda: "10.1.2.3")
+    assert _statements(rec) == [networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")]
+    assert [line for line in said if "now advertises 10.1.2.3" in line], said
+
+    chose_lan = tmp_path / "chose-lan"
+    chose_lan.mkdir()
+    networking.record_network_intent(chose_lan, "lan")
+    again = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    _advertising(again, chose_lan, lan_ip=lambda: "10.1.2.3")
+    assert _statements(again) == [networking.realmlist_sql(ENTRY, "10.1.2.3", "10.1.2.3")]
+
+
+def test_a_folder_holding_only_this_apps_own_files_is_not_somebody_elses(
+    tmp_path: Path,
+) -> None:
+    """The guard's "not empty" question has to know every file this app writes itself.
+
+    Found by running the §41 tests above, 2026-09-05: `.yulon-network.json`
+    reached `_claim_folder()` as a stranger and the engine refused a folder it
+    had written every byte of —
+
+        InstallerError: ... is not empty and was not created by this app
+        (.yulon-network.json). Nothing was written.
+
+    — because the question was asked with one file's name rather than with the
+    set. So the set has a name (`OUR_OWN_FILES`), and both halves are asserted
+    here: every name in it is looked past, and a file that is NOT in it is
+    still a reason to refuse. The second half is what keeps this from becoming
+    an excuse to ignore a user's directory.
+
+    The `TypeError` arm is the trap the widening opened. `str` is a
+    `Collection[str]`, so `ignoring=STATE_FILE` type-checks and then filters by
+    CHARACTER — it would drop every one-character name in the folder and keep
+    `.yulon-install.json` itself. mypy cannot see it; this can.
+    """
+    assert native.STATE_FILE in native.OUR_OWN_FILES
+    assert networking.INTENT_FILE in native.OUR_OWN_FILES
+    for name in native.OUR_OWN_FILES:
+        (tmp_path / name).write_text("{}\n", encoding="utf-8")
+    assert native._listing(tmp_path, ignoring=native.OUR_OWN_FILES) == []
+
+    (tmp_path / "notes.txt").write_text("a user's file", encoding="utf-8")
+    assert native._listing(tmp_path, ignoring=native.OUR_OWN_FILES) == ["notes.txt"]
+
+    with pytest.raises(TypeError):
+        native._listing(tmp_path, ignoring=native.STATE_FILE)
+
+
 def _no_docker_cli(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
     raise docker.DockerCliMissingError("docker: command not found")
 

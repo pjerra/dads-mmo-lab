@@ -320,7 +320,7 @@ def _assemble(
         network_plan=lambda mode: networking.plan(
             entry, mode, bindings=_safe_bindings(wsl_distro=wsl_distro)
         ),
-        network_apply=lambda plan: networking.apply(plan, sql=sql),
+        network_apply=lambda plan: networking.apply(plan, sql=sql, server_dir=server_dir),
         create_account=create_account,
         backup=backup,
         backups_dir=lambda: wotlk_maintenance.backups_dir(server_dir),
@@ -603,6 +603,27 @@ def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
     except docker.DockerCommandError:
         return None
 
+
+LOOPBACK_CHOICE = "Only this computer (127.0.0.1)"
+"""The Networking tab's third radio, bug-checklist §41.
+
+Named for what it DOES rather than for what it is. "Loopback" is the accurate
+word and is not one a person installing a game server has any reason to know,
+so the label says the effect and carries the address in brackets — the address
+being the half a reader can match against the realm row, against
+`networking.LOOPBACK_ADDRESS`, and against the sentence the install prints when
+it leaves the row alone.
+
+The cost of the mode — that no other machine can reach the server — is NOT in
+this label. It is `networking.ONLY_THIS_COMPUTER`, which arrives as a warning
+on the plan `Show plan` renders, one press before Apply: a radio wide enough to
+hold that sentence would push the other two off the row, and a person who has
+not pressed Show plan has not yet chosen anything.
+
+Defined here rather than inline so a test can assert the label and the mode
+together without retyping the string, and placed below `_assemble()` so it does
+not move the `networking.apply(...)` call `test_controller_view.py` pins by line.
+"""
 
 REMOVE_IDLE = "Stop and remove containers…"
 REMOVE_ARMED = "Press again to remove"
@@ -1782,10 +1803,16 @@ class ControllerView(QWidget):
         box = QVBoxLayout(tab)
         self.lan_radio = QRadioButton("LAN (same Wi-Fi)", tab)
         self.internet_radio = QRadioButton("Internet play (friends elsewhere)", tab)
+        self.loopback_radio = QRadioButton(LOOPBACK_CHOICE, tab)
         self.lan_radio.setChecked(True)
         group = QButtonGroup(tab)
         group.addButton(self.lan_radio)
         group.addButton(self.internet_radio)
+        # In the same group as the other two, which is what makes them
+        # mutually exclusive: a third radio added outside it can be checked
+        # while `lan_radio` still is, and `network_mode()` would then answer
+        # whichever one it happened to ask about first.
+        group.addButton(self.loopback_radio)
         self.plan_button = QPushButton("Show plan", tab)
         self.apply_button = QPushButton("Apply", tab)
         self.apply_button.setEnabled(False)
@@ -1796,6 +1823,7 @@ class ControllerView(QWidget):
         row = QHBoxLayout()
         row.addWidget(self.lan_radio)
         row.addWidget(self.internet_radio)
+        row.addWidget(self.loopback_radio)
         row.addStretch(1)
         row.addWidget(self.plan_button)
         row.addWidget(self.apply_button)
@@ -1805,6 +1833,17 @@ class ControllerView(QWidget):
         self._plan: NetworkPlan | None = None
 
     def network_mode(self) -> Mode:
+        """Which mode the radios are asking for. `lan` is the answer to "none of them".
+
+        Asked in the order the modes cost: `loopback` first because it is the
+        only one that is a deliberate restriction, then `internet`, then `lan`
+        as the default. The three radios share one `QButtonGroup`, so at most
+        one is ever checked and the order cannot change the answer — the order
+        is here so that a future radio added outside that group produces a
+        wrong answer in a test rather than a silent one in the app.
+        """
+        if self.loopback_radio.isChecked():
+            return "loopback"
         return "internet" if self.internet_radio.isChecked() else "lan"
 
     @Slot()

@@ -512,6 +512,79 @@ def test_networking_tab_plans_and_applies(qapp: object, ps: _Ps, tmp_path: Path)
     assert "restart the server" in view.network_text.toPlainText()
 
 
+def test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """bug-checklist §41: the third mode has to be reachable from the tab, by a finger.
+
+    Driven with `QTest.mouseClick` on the real radio rather than by calling
+    `setChecked()`, because the failure §41 describes is that there is no
+    CONTROL — a mode nothing on screen can select is the same bug with a
+    `Literal` added to it. The click delivers a press and a release to the
+    widget exactly as a user's does, and `network_mode()` is then read for what
+    the view would hand `plan()`.
+
+    The view is shown and sized before the click for the reason
+    `test_catalog_view.py` records: `mouseClick` aims at the centre of the
+    widget's rect, and a control that has never been laid out has none.
+
+    The label is asserted to carry the address because "loopback" is not a word
+    a person installing a game server has any reason to know, and the whole
+    point of the mode is that its cost is legible before it is chosen. The three
+    radios are asserted mutually exclusive: two checked at once would mean the
+    new one was added outside the button group, and `network_mode()`'s answer
+    would then depend on the order it happens to ask in.
+    """
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+    view.resize(900, 700)
+    view.show()
+    view._tabs.setCurrentIndex(view._tabs.count() - 1)
+    QTest.qWait(50)
+    assert view.network_mode() == "lan"
+
+    label = view.loopback_radio.text()
+    assert "127.0.0.1" in label, label
+    assert "only this computer" in label.lower(), label
+
+    QTest.mouseClick(view.loopback_radio, Qt.MouseButton.LeftButton)
+    assert view.network_mode() == "loopback"
+    assert view.loopback_radio.isChecked() is True
+    assert view.lan_radio.isChecked() is False
+    assert view.internet_radio.isChecked() is False
+
+    QTest.mouseClick(view.lan_radio, Qt.MouseButton.LeftButton)
+    assert view.network_mode() == "lan"
+    assert view.loopback_radio.isChecked() is False
+    view.close()
+
+
+def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence the owner reads before pressing Apply, out of the real widget.
+
+    `_format_plan()` renders `NetworkPlan.warnings`, so the cost sentence
+    `plan()` attaches to a loopback plan is what has to arrive here. Asserted
+    through the view's own text rather than off the plan object, because a
+    warning the formatter dropped is a warning nobody ever reads.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: networking.plan(
+        WOTLK, mode, firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.loopback_radio.setChecked(True)
+    view.show_network_plan()
+    text = view.network_text.toPlainText()
+    assert "Mode: loopback" in text, text
+    assert "Players set realmlist to: 127.0.0.1" in text, text
+    assert "no other machine" in text, text
+    assert view.apply_button.isEnabled() is True, "a loopback plan could not be applied"
+
+
 def test_for_wotlk_builds_real_services_without_touching_docker(tmp_path: Path) -> None:
     services = ControllerServices.for_wotlk(WOTLK, tmp_path, None)
     assert services.controller.spec == WOTLK.container_spec()
