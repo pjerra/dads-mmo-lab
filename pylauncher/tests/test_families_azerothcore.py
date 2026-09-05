@@ -214,10 +214,13 @@ def test_every_seam_defaults_to_the_real_function_it_stands_in_for() -> None:
     # cannot look like a no-op.
     assert real.ensure_docker is platform.ensure_docker
     # `keep_awake` is pinned here for a measured reason, not a symmetric one.
-    # bug-checklist §43's tests drive the real `platform.keep_awake` by INJECTING
-    # it (`test_install_wiring.py` passes `partial(platform.keep_awake,
-    # platform_id=...)`, and `support_native.py`'s Recorder defaults the seam to
-    # `nullcontext`), so nothing read this default. Measured on yulon-fedora,
+    # bug-checklist §43's tests reach the real `platform.keep_awake` without
+    # this default, by two routes: `test_install_wiring.py` INJECTS
+    # `partial(platform.keep_awake, platform_id=...)` into `native_engine(...)`,
+    # and `test_platform.py`'s Windows tests call
+    # `platform.keep_awake(platform_id=...)` directly with no engine at all;
+    # `support_native.py`'s Recorder defaults the seam to `nullcontext`. So
+    # nothing read this default. Measured on yulon-fedora,
     # 2026-09-05, in a fresh `git clone --shared` with `__pycache__` purged on
     # both sides: with `native.py`'s default changed to `ExitStack`, the whole
     # narrow suite at `547b4c02` (this line absent) printed `2792 passed, 4
