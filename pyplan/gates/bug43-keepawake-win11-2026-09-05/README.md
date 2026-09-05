@@ -150,7 +150,8 @@ before and after every pytest, the tree restored with `git checkout -- .` betwee
 
 - at `aa6ab59e` (the assert present) KILLED, lines 29-38: `E AssertionError: assert <class
   'contextlib.ExitStack'> is <function keep_awake at 0x…>` at
-  `tests/test_families_azerothcore.py:226`, `1 failed in 0.95s`, `mutated pytest exit=1`;
+  that tree's `tests/test_families_azerothcore.py:226` (the assert; the comment above it grew in
+  the next commit, `bb56304e`, and the line is 230 there), `1 failed in 0.95s`, `exit=1`;
 - at `547b4c02`, this lane's previous tip, the assert is absent (`(absent)`, line 43) and the same
   mutation SURVIVES — lines 52-55, `1 passed in 0.49s`, `mutated pytest exit=0`.
 
