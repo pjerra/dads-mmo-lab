@@ -50,7 +50,7 @@ with the assertion over hours is still unmeasured (roadmap 6.3).
 
 ## The run
 
-| stamp (box-local PST; CEST = +9 h) | event | source |
+| stamp (box-local PDT = UTC−7; CEST = +9 h) | event | source |
 |---|---|---|
 | 13:17:49 | first start of task `dml-b43` | `b43-wrapper.log` |
 | 13:18:52 | **refused by preflight**: `free space on Docker's disk and the server folder: 34 GB free, and the install needs 40 GB`; errorlevel 1 | `b43-wrapper.log`, `yulon-log-b43-refused-press.txt` |
@@ -96,7 +96,10 @@ The two `mangosd` cores were deleted (`del /f /q`), taking `C:` to 49,936,990,20
 free. The eight `weston` dumps were left. Nothing else on the box was removed. The 09-05 06:16
 core is worth someone's attention on its own: it was written 54 minutes after the 7.7 press
 reported `The server is up.` at 05:22:33, and it accounts for most of the 8 GB `C:` lost between
-05:12 (preflight read 42 GB free) and 13:18 (34 GB).
+05:12 (preflight read 42 GB free) and 13:18 (34 GB). It coincides with the stack being taken down
+ahead of the guest shutdown rather than with an idle crash: on 2026-09-05 at 15:46 box-local
+`docker inspect` printed `tbc-mangosd finished=2026-09-05T13:16:29.872955764Z exit=137`, i.e.
+06:16:29 box-local, four seconds before System event 1074 recorded the shutdown at 06:16:33.
 
 To compact the Docker WSL VHDX instead — 16,331,571,200 bytes for 12.86 GB of content —
 `taskkill` and `diskpart` were both refused by this session's permission classifier, so the
@@ -202,10 +205,20 @@ would be left unchanged.` (black) and `=== --checks: ALL GREEN ===`.
 ## The box, as this lane left it
 
 `C:\gate\b43-src\b43-src\pylauncher` (the lane source, `git archive` of `0ad9d99a`) and
-`C:\gate\b43-src.tgz` are kept, as the brief allows. `C:\gate\run-b43.cmd`,
-`C:\gate\compact-b43.txt` and task `dml-b43` are spent and left in place beside the earlier
-gates' equivalents. The Docker engine is up; the press never reached `up`, so it started no container.
+`C:\gate\b43-src.tgz` are kept, as the brief allows. `C:\gate\run-b43.cmd` and task `dml-b43` are
+spent and left in place beside the earlier gates' equivalents. This lane wrote no diskpart script:
+on 2026-09-05 at 15:46 box-local `dir C:\gate\compact*.txt` printed one file, `compact-vhdx.txt`,
+133 bytes, stamped 09/05 01:50 AM — an earlier session's, 11 h 23 min before this lane's first
+line in `C:\Users\pk\claude-activity.log` (line 8, `Sat 09/05/2026 13:13:47.28`), and consistent
+with the refusal recorded above.
+The Docker engine is up; the press never reached `up`, so it started no container.
 `docker ps -a` at 13:35 box-local listed all fourteen as Exited — `tbc-realmd` `Exited (0) 7
-hours ago`, `tbc-mangosd` `Exited (137) 7 hours ago`, `tbc-db` `Exited (0) 7 hours ago` — which is
-where the VM's own power-off left them, not this lane. `C:\gate\tbc-server`,
+hours ago`, `tbc-mangosd` `Exited (137) 7 hours ago`, `tbc-db` `Exited (0) 7 hours ago`. That is
+neither this lane nor the VM going down: `docker inspect` on 2026-09-05 at 15:46 box-local
+printed `tbc-realmd finished=2026-09-05T13:11:27.621399474Z exit=0`, `tbc-db
+finished=2026-09-05T13:11:29.125722162Z exit=0` and `tbc-mangosd
+finished=2026-09-05T13:16:29.872955764Z exit=137` — 06:11:27, 06:11:29 and 06:16:29 box-local,
+before System event 1074 recorded the shutdown at 06:16:33 and event 6006 the log service stopping
+at 06:16:36; event 6005 brought the box back at 12:44:00, and this lane first touched it at
+13:13:47. `C:\gate\tbc-server`,
 `C:\gate\vanilla-server` and `C:\gate\client` were not touched. The VM was not stopped.
