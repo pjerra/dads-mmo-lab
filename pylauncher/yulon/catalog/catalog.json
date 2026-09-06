@@ -91,6 +91,25 @@
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
       },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "env/dist/etc/modules/playerbots.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": {
+            "database": "playerbots",
+            "table": "playerbots_account_type",
+            "account_column": "account_id",
+            "type_column": "account_type",
+            "types": [1, 2, 3]
+          }
+        }
+      },
       "has_manifests": true
     },
     {

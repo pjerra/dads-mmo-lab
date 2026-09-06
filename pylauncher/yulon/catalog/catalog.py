@@ -994,6 +994,74 @@ class Client(_Strict):
     notes: tuple[str, ...] = ()
 
 
+class BotRegistry(_Strict):
+    """A table this core's bot module keeps, listing which accounts are bots.
+
+    One of the two arms of the bot marker, and never the only one. On a freshly
+    built AzerothCore install this table can hold **zero rows while a thousand
+    bot characters play**: the module fills it as it goes, so a detector that
+    asks it alone reports every bot as a person and its inverse reports zero
+    bots — a failure with nothing about it that looks broken (`botid.rs:4-17`,
+    live proof 2026-08-01, recorded in `pyplan/phase8-reads/hypeer.md`).
+    """
+
+    database: Db = Field(description="Which of this entry's databases the table lives in.")
+    table: str = Field(min_length=1)
+    account_column: str = Field(min_length=1)
+    type_column: str = Field(min_length=1)
+    types: tuple[int, ...] = Field(min_length=1, description="The type values that mean `bot`.")
+
+
+class BotMarker(_Strict):
+    """How this tree tells a bot character from a person's.
+
+    `account_prefix` is the module's own compiled default, not the value in
+    force: an install may have been given a prefix of its own, so the live value
+    is read from `prefix_conf_file` and this is the fallback the server itself
+    would use if the key is absent. Which of the two answered is reported to the
+    user rather than smoothed over.
+    """
+
+    account_prefix: str = Field(
+        min_length=1,
+        description=(
+            "The module's compiled default prefix. Never empty: an empty prefix becomes "
+            "`LIKE '%'`, which classifies every account — and so every human — as a bot "
+            "(`botid.rs:33-38`)."
+        ),
+    )
+    prefix_conf_file: str = Field(
+        min_length=1, description="Where the live prefix lives, relative to the server dir."
+    )
+    prefix_conf_key: str = Field(min_length=1)
+    registry: BotRegistry | None = None
+
+
+class CharacterTable(_Strict):
+    """The columns of this core's `characters` table that 8.1a reads.
+
+    Named per tree rather than assumed. Tortoise keeps its characters in
+    `tw_char`, and a column spelling that is right for one core is a guess about
+    every other one.
+    """
+
+    table: str = Field(default="characters", min_length=1)
+    account: str = Field(default="account", min_length=1)
+    online: str = Field(default="online", min_length=1)
+
+
+class Observability(_Strict):
+    """What the dashboard needs in order to count this install's population (8.1a).
+
+    Optional on an entry, and absent until that tree's own box measures it: an
+    inherited block would be a guess wearing the shape of a fact. 8.1b, 8.1c and
+    8.1d each add their own.
+    """
+
+    characters: CharacterTable = CharacterTable()
+    bots: BotMarker
+
+
 class CatalogEntry(_Strict):
     """One installable server."""
 
@@ -1010,6 +1078,13 @@ class CatalogEntry(_Strict):
     realmlist: Realmlist = Realmlist()
     console: Console = Console()
     accounts: Accounts = Accounts()
+    observability: Observability | None = Field(
+        default=None,
+        description=(
+            "The per-tree facts the dashboard's counts need (8.1a). `None` until this tree's "
+            "own box has measured them against its own schema and its own bot module."
+        ),
+    )
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )
