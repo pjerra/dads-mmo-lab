@@ -3250,15 +3250,23 @@ def plan(
     ssh_ports: tuple[int, ...] = ()
 
     # The loopback mode asks the firewall for nothing — but NOT because the
-    # ports stop being reachable. The output fields a `NetworkPlan` carries are
-    # `firewall_commands`, `portproxy_commands`, `realmlist_sql` and
-    # `client_realmlist` — the last of those is shown, not run (`apply()` puts it
-    # in its report and the Networking tab prints it as "Players set realmlist
-    # to"). None of the four is a container port binding. Applying a plan does
-    # one thing beyond them: after a successful realmlist UPDATE it records the
-    # chosen mode in `.yulon-network.json` (`record_network_intent()`, called
-    # from `apply()`) — this branch's own feature, and not a port binding
-    # either. The loopback mode changes only the address that UPDATE hands out.
+    # ports stop being reachable. Of everything a `NetworkPlan` hands back,
+    # `apply()` RUNS the contents of three fields: `firewall_commands` and
+    # `portproxy_commands` (each entry handed to a subprocess) and
+    # `realmlist_sql` (one UPDATE through `sql.run_statement`).
+    # `client_realmlist` is shown, not run — `apply()` puts it in its report
+    # and the Networking tab prints it as "Players set realmlist to".
+    # `manual_steps`, `warnings` and `refusals` are text for the owner, and
+    # `manual_steps` is the one of those that ever carries a firewall
+    # instruction ("Windows: set the network profile to Private", appended
+    # only under the `netsh` backend and only when `wants_firewall`, so never
+    # under `loopback`). Beyond the fields, applying a plan writes one file:
+    # after a successful realmlist UPDATE it records the chosen mode in
+    # `.yulon-network.json` (`record_network_intent()`, called from
+    # `apply()`) — this branch's own feature. Nothing in that list is a
+    # container port binding: a `portproxy` rule forwards a host address to
+    # 127.0.0.1, and the UPDATE changes only the address the realm row hands
+    # out.
     # Read on yulon-ubuntu 2026-09-06 06:27:43 +02:00, on the install the
     # 04:43 loopback Apply had run against (the recorded intent has since been
     # removed and the row put back), `docker ps --format
