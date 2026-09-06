@@ -3148,7 +3148,7 @@ It matters because the Server tab's log panel is exactly a caller that starts a 
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
 close" in a bug report and gets attributed to whatever the user did last.
 
-### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc`, **CLOSED 2026-09-06: the press ran on yulon-ubuntu, gate driven at `b206ad0c`/`96251d57`**
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc` and 2026-09-06 at `30671d6e` (the firewall half), **CLOSED 2026-09-06: the press ran on yulon-ubuntu, gate driven at `b206ad0c`/`96251d57`, mutations at `30671d6e`**
 
 Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
 Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
@@ -3208,8 +3208,9 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       reach this server. It happened on a real box: the loopback Apply on yulon-ubuntu on
       2026-09-06 left both rules in `ufw show added`
       (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
-      04:43:23, right after that Apply), and `widget-loopback.log:60` prints `✓ ufw allow 3724/tcp`
-      on the line directly under that warning. `plan()` now computes no firewall commands, no SSH
+      04:43:23, right after that Apply). `widget-loopback.log` has the shape of it: line 51
+      `Firewall commands:` with the two `ufw allow` lines, line 57 the warning that no other
+      machine can reach this server, line 60 `✓ ufw allow 3724/tcp` under `Applied:`. `plan()` now computes no firewall commands, no SSH
       guard and no "allow inbound TCP … by hand" step for `mode == "loopback"` (`networking.py`,
       `wants_firewall`), asserted by
       `test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing` and

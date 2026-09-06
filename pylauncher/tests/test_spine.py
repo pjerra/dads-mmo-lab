@@ -2848,13 +2848,15 @@ def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
 
     The reading is done BEFORE anything else the step does, and `asked` — a
     detection seam that records every call — is what holds it in front. The two
-    empty SQL lists below do NOT: measured 2026-09-06 at `9f0c2fa2` on m910q,
-    a version that detected the address first and a version that read the
-    intent only after the `address is None` early return each left both lists
-    empty and this whole file green (mutations M5 and M6,
-    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). The second
-    holder is `test_the_machine_this_mode_is_for_has_no_lan_address_at_all`
-    below, which is the shape M6 actually broke.
+    empty SQL lists below do NOT: measured 2026-09-06 at `30671d6e` on m910q
+    from a fresh `git clone --shared` with `__pycache__` purged on both sides,
+    a version that detected the address first (M5) and a version that read the
+    intent only after the `address is None` early return (M6) each left both
+    lists empty, and every assertion in this file that predates round 3 passed
+    under both. What went red was `asked == []` here, and — under M6 only —
+    `test_the_machine_this_mode_is_for_has_no_lan_address_at_all` below, which
+    is the shape M6 actually broke. Transcript:
+    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
 
     The line is asserted to name the address, the tab that set it and the way
     back, because "left alone" with no reason is indistinguishable from the
@@ -2893,11 +2895,13 @@ def test_the_machine_this_mode_is_for_has_no_lan_address_at_all(tmp_path: Path) 
     leaves such a server with `REALM_ADDRESS_UNKNOWN` and no mention of the
     choice at all.
 
-    Measured 2026-09-06 at `9f0c2fa2` on m910q, before this test existed: with
-    the intent read after that return, this exact setup printed "This machine's
-    address on the local network could not be worked out …" and the whole
-    416-test file still passed
-    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`, M6).
+    Measured 2026-09-06 at `30671d6e` on m910q: with the intent read after that
+    return (mutation M6), this exact setup yielded
+    `native.REALM_ADDRESS_UNKNOWN` — "This machine's address on the local
+    network could not be worked out …" — and the `REALM_ADDRESS_UNKNOWN not in
+    said` assertion below is the one that caught it. Every assertion in this
+    file that predates round 3 passed under M6.
+    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.)
     """
     nowhere = tmp_path / "no-lan-at-all"
     nowhere.mkdir()

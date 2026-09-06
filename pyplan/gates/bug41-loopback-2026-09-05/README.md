@@ -314,3 +314,71 @@ read back from, and `$(( wc: … + 1 ))` under `set -u` exits the shell. `run.lo
 stopping there. The counter now tests for the file first, and the script takes a `part2`
 argument, which is how the rest of the gate was run (`96251d57`). Press 1 was not repeated: it
 had already finished green, and its evidence is the files above.
+
+---
+
+## Round 3 — what the record claimed and the machine did not
+
+Two things in the round-2 record were held by sentences rather than by tests, and one of them was
+a real side effect on a real firewall. Both were answered with commands; nothing was pressed, no
+container was touched, and neither box changed state.
+
+### The detection order was not held by anything
+
+Round 2's entry, the `_advertise_realm()` docstring and the spine test's own docstring all said
+the two empty SQL lists in
+`test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` were what
+kept the recorded intent read BEFORE the address was detected. They were not. Three mutations were
+run on m910q on 2026-09-06 at `30671d6e`, from a fresh `git clone --shared` of the box's reference
+clone (`/home/pk/p7-b41-r3`, detached at that commit, venv symlinked as the test runner does),
+`__pycache__` purged on both sides of each mutation, the clone removed at the end. Script:
+`mutations-round3.sh`; transcript: `mutations-round3.txt`.
+
+| | what it changes | result |
+| --- | --- | --- |
+| baseline | — | `419 passed in 4.04s` |
+| **M5** | `address = self._detected_lan_ip()` moved above the intent read | `1 failed, 418 passed` — `AssertionError: an address was detected before the recorded choice was read` |
+| **M6** | the intent read moved below the `address is None` early return | `2 failed, 417 passed` — the M5 failure plus `REALM_ADDRESS_UNKNOWN not in said` |
+| **M7** | `wants_firewall = mode != "loopback"` → `wants_firewall = True` | `2 failed, 417 passed` — `test_a_loopback_plan_asks_the_firewall_for_nothing` and `test_the_loopback_plan_in_the_tab_offers_to_open_no_ports` |
+| restored | — | `419 passed in 4.10s`, `git status --porcelain` clean but for `?? pylauncher/.venv` |
+
+Under M5 and M6 every assertion in those three files that predates round 3 passed: both empty SQL
+lists stayed empty, which is exactly the claim the record made and the reason it was worth nothing.
+What holds the order now is a `lan_ip` seam that records each call and must record none, and
+`test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all` — a server with the
+loopback recorded on a machine with no LAN address at all, which is the machine `NetworkPlan.ready`
+says the mode exists for. Under M6 that server was told "This machine's address on the local
+network could not be worked out …" and never heard about its own recorded choice.
+
+### The loopback plan opened firewall ports
+
+`plan()` built `fw_cmds` from the backend and the ports before it looked at `mode`, so the loopback
+plan carried `ufw allow 3724/tcp` and `ufw allow 8085/tcp` under its own warning that no other
+machine can reach the server. This is not a wording problem: it happened on yulon-ubuntu on
+2026-09-06. `ufw-after-apply.txt` (04:43:23, immediately after the loopback Apply) lists both rules
+under `show added`. The widget's own text has the whole shape of it (`widget-loopback.log`):
+line 51 `Firewall commands:` with the two `ufw allow` lines under it, line 56 the §39 warning
+that begins "Yu'lon opened the game ports in ufw's rule list", line 57 the `ONLY_THIS_COMPUTER`
+warning saying no other machine can reach this server, and line 60 `✓ ufw allow 3724/tcp` under
+`Applied:`. (Both rules were deleted when the box was put back; `put-back.txt` shows
+`ufw show added` → `(None)`.)
+
+`plan()` now computes no firewall commands, no SSH lock-out guard and no "allow inbound TCP … by
+hand" manual step when `mode == "loopback"` (`networking.py`, `wants_firewall`). M7 above is the
+mutation that restores the old behaviour, and it is red. Each of the two new tests carries a `lan`
+control in the same body, so a build that returned an empty command list for every mode fails them
+too.
+
+**Not decided, and not changed:** the loopback-binding warning ("ports [...] are published on
+127.0.0.1 … other machines cannot reach them") and the WSL/`netsh` portproxy commands in the same
+function still behave the same for every mode, loopback included. Nobody has ruled on what they
+should do under this mode; this round left them alone rather than guess.
+
+### The third tick, said plainly
+
+Press 1 did not produce the §41 sentence on its own. It sat in `ready` from 04:43:31 until **this
+lane ran `docker restart ac-authserver` by hand over ssh at 04:57:57**, mid-press and not through
+the app, and the sentence was printed two seconds later. `_advertise_realm()` runs after the last
+stage and outside the `try` (`catalog/native.py:1527`, argued at `1518-1526`), so a `ready` that
+ran out its window would have raised, the install would have been recorded as failed, and the
+sentence would never have appeared. The entry now says so.

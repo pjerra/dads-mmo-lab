@@ -2790,7 +2790,7 @@ class StagedInstaller:
         same eight characters either way — so the answer is recorded intent,
         written by `networking.apply()` when the Networking tab's `loopback`
         mode was applied, and read here BEFORE anything else this method does.
-        Before, and not after: on 2026-09-06 at `9f0c2fa2` two mutations of this
+        Before, and not after: on 2026-09-06 at `30671d6e` two mutations of this
         order were run on m910q from a fresh `git clone --shared` with
         `__pycache__` purged on both sides
         (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). Reading
