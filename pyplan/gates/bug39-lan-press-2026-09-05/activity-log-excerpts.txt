@@ -2,7 +2,7 @@ Activity-terminal excerpts: this lane's own lines on the two Linux boxes
 =========================================================================
 
 Why this file exists: the header of README.md dates this lane's box actions from these
-lines, and nothing else in the tree carries them. They were read in two passes: round 4
+lines (round 5's own three announcements excepted: named in prose below, they stand on the boxes as yulon-ubuntu 151-152 and m910q 405), and nothing else in the tree carries them. They were read in two passes: round 4
 read the yulon-ubuntu and m910q blocks immediately below, on 2026-09-06 between 03:22 and
 03:35 CEST; round 5 read the two ranges in the section at the end of the file, at 03:58:57
 (yulon-ubuntu) and 03:58:58 (m910q) CEST. Both passes were from the laptop and read-only

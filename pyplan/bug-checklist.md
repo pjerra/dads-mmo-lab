@@ -3100,7 +3100,7 @@ machine logged in through the ports it advertised. CLOSED.** Everything in this 
 measured between 22:59 and 23:36:36 UTC on 2026-09-05 (00:59-01:36 CEST on 2026-09-06) —
 the earliest and latest stamps **of the press** a reader can re-derive from the files
 committed with it, namely `console-before.png`'s own top-bar clock (`Sep 6 00:59` CEST)
-and `ufw-restored.txt:59` (`01:36:36` CEST). The one committed file in that folder those
+and `ufw-restored.txt:59` (`01:36:36` CEST). Besides `README.md` itself, the one committed file in that folder those
 bounds do not cover is `activity-log-excerpts.txt`, written in rounds 4 and 5 to date the
 lane's later record-keeping from the boxes' own activity logs; its stamps run to
 `04:06:03` CEST. An earlier draft of this paragraph said 22:57 and 23:38, and neither of
