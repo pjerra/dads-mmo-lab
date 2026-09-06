@@ -13,8 +13,16 @@
 # Nothing here compiles: every recorded stage of this install is already
 # completed, so the engine skips them. The press is watched for a build line and
 # killed if one appears (see the watchdog below).
+#
+# Takes one argument, `all` (the default) or `part2`. `part2` exists because
+# the first run of this script died after press 1: `wc -l` on a yulon.log that
+# did not exist yet printed its error to the same file the line count was read
+# from, and `$(( wc: ... + 1 ))` under `set -u` exits the shell. The counter
+# below was made robust and the rest of the gate was run as `part2`; press 1 was
+# not repeated, because it had already produced its evidence.
 set -u
 
+PHASE="${1:-all}"
 OUT=/home/pk/p7/out-b41
 CO=/home/pk/p7/checkout
 PY=/home/pk/p7/venv/bin/python
@@ -34,6 +42,7 @@ row() {
 echo "=== lane b41 §41 gate on yulon-ubuntu, started $(date -Is) ===" >> "$OUT/run.log"
 
 # ---------------------------------------------------------------- before ----
+if [ "$PHASE" = all ]; then
 say "lane b41: recording the WotLK realm row, ufw and the install state before anything is changed"
 {
   echo "=== before, $(date -Is)"
@@ -58,12 +67,15 @@ say "lane b41: clicking the Networking tab's new 'Only this computer (127.0.0.1)
 echo "--- exit code: $?   finished $(date -Is)" >> "$OUT/widget-loopback.log"
 { echo "=== ufw after the loopback Apply, $(date -Is)"; sudo -n ufw status 2>&1
   echo "--- show added"; sudo -n ufw show added 2>&1; } > "$OUT/ufw-after-apply.txt" 2>&1
+fi
 
 # ------------------------------------------------------------- press one ----
 press() {
   local tag="$1"
   local log="$OUT/press-$tag.log"
-  wc -l "$YLOG" > "$OUT/yulon-log-lines-before-$tag.txt" 2>&1
+  local before_lines=0
+  [ -f "$YLOG" ] && before_lines=$(wc -l < "$YLOG")
+  echo "$before_lines" > "$OUT/yulon-log-lines-before-$tag.txt"
   {
     echo "=== press $tag: $PY -m yulon.install_wiring wow-wotlk --server-dir $SERVER"
     echo "started (box local): $(date -Is)"
@@ -97,14 +109,16 @@ press() {
     echo "--- record file"; cat "$SERVER/.yulon-network.json" 2>&1
     echo "--- install state"; cat "$SERVER/.yulon-install.json" 2>&1
     echo "--- docker ps"; docker ps --format '{{.Names}}\t{{.Status}}' 2>&1
-    echo "--- new yulon.log lines since this press started"
-    tail -n +"$(( $(cut -d' ' -f1 "$OUT/yulon-log-lines-before-$tag.txt") + 1 ))" "$YLOG" 2>&1
+    echo "--- new yulon.log lines since this press started (it held $before_lines before)"
+    tail -n +"$(( before_lines + 1 ))" "$YLOG" 2>&1
   } > "$OUT/after-press-$tag.txt" 2>&1
 }
 
+if [ "$PHASE" = all ]; then
 say "lane b41: pressing Install a second time on the finished WotLK install. Every recorded stage is already completed so the engine skips them; a watchdog kills the run if any compile line appears."
 press chosen
 say "lane b41: first press finished. See /home/pk/p7/out-b41/press-chosen.log"
+fi
 
 # --------------------------------------------------- the other half ----
 say "lane b41: removing the recorded choice so the folder looks like a server whose loopback was never chosen, then pressing Install again - it should put a reachable address back"
