@@ -397,6 +397,53 @@ def create_account(
     return AccountResult(username=name, account_id=account_id, created=created, gm_level=level)
 
 
+APP_ACCOUNT_PREFIX = "YULON_"
+"""The prefix on an account this app owns, and the only one it may re-password.
+
+Not a convention: it is the guard `reset_own_password()` enforces. Every other
+account on the server belongs to a person, and a seam that can silently take one
+over is the one thing worse than a seam that refuses.
+"""
+
+
+def reset_own_password(
+    sql: SqlSeam, name: str, password: str, *, scheme: Scheme = "azerothcore"
+) -> None:
+    """Give THIS APP'S OWN account a new password. Refuses any other name.
+
+    The repair path for a credential file that has gone stale — the server
+    answers 401, the app knows the account is its own, and rather than create a
+    second one it rotates the password it already owns.
+
+    `create_account()` deliberately will not do this: re-salting a row that is
+    already there would silently change its owner's password, which is worse
+    than refusing. That rule is right, and it is why this is a separate seam
+    with a narrower target: the `WHERE` names one account and the guard above
+    makes sure it is ours.
+    """
+    if not name.startswith(APP_ACCOUNT_PREFIX) or name != name.upper():
+        raise AccountError(
+            f"{name!r} is not an account this app owns, so its password is not this app's to "
+            f"change. Only accounts named {APP_ACCOUNT_PREFIX}… are."
+        )
+    if not _valid_password(password):
+        raise AccountError("that password is not one this server would accept")
+    salt, verifier = registration_data(name, password)
+    sql.run_statement(
+        _ACCOUNTS_DB,
+        f"UPDATE account SET salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)} "
+        f"WHERE username = {_text_literal(name)};",
+    )
+    logger.info(f"rotated the password of this app's own account {name}")  # never the password
+
+
+def _valid_password(password: str) -> bool:
+    """The server's own rule, borrowed from the one place that already states it."""
+    from yulon import commands
+
+    return commands.valid_account_password(password)
+
+
 def _account_row(sql: SqlSeam, name: str, password: str, scheme: Scheme) -> tuple[int, bool]:
     """The account's id, and whether *this* call wrote its row.
 
