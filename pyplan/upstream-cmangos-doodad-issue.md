@@ -2,7 +2,11 @@
 
 Drafted 2026-09-05 by lane `doodad` from `pyplan/upstream-cmangos-doodad-drop.md` §1–§9, for the
 owner to post to `cmangos/mangos-classic` (and to `cmangos/mangos-tbc`, which carries the same
-code). **Not posted by this project.** Everything between the markers is the issue body; the
+code). **Posted 2026-09-06 by the owner's decision ("post it") as
+https://github.com/cmangos/issues/issues/4286** — CMaNGOS takes issues for every core on the
+centralised `cmangos/issues` tracker (both `mangos-classic` and `mangos-tbc` have GitHub issues
+disabled), so it is one issue naming both cores, in that tracker's bug-report shape (the body below
+as "Bug Details", then the template's fields). Everything between the markers is the issue body; the
 patch inline is byte-for-byte
 `pylauncher/catalog/installers/shared/cmangos/patches/vmap-extractor-doodad-name-case.patch`,
 which `test_the_issue_docs_fenced_diff_is_the_shipped_patch_byte_for_byte` now asserts rather

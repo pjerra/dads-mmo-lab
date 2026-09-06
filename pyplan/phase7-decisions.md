@@ -1251,3 +1251,23 @@ under it: the Fedora AppImage install spent **52 min 40 s** between `systemd-inh
 began with Docker already installed and `pk` already in the `docker` group. A cold-checkpoint run
 adds a provisioning press and a re-login before any of it, and the Arch half adds a package install
 and a second full build on a machine that has never compiled AzerothCore.
+
+## Appendix F — 7.8, the CMaNGOS issue, and the exit box (owner decisions, 2026-09-06)
+
+Asked at ~08:45 CEST, with 11 of 12 boxes ticked at `5de3c1a2` and PR #143 out of draft, as the
+three decisions the night's workflow had surfaced and not made. The owner's answers, verbatim:
+
+1. **"7.8 will be done by baerthe."** — 7.8 (macOS, all four) stays `- [ ]` and is Baerthe's, the
+   upstream developer's, on hardware they have; it is not carried as an open item on this side and
+   no Mac is rented. The 7.8 line in `checklist.md` says so.
+2. **"post it"** — the CMaNGOS vmap-extractor doodad issue. Posted the same morning from the owner's
+   GitHub account as https://github.com/cmangos/issues/issues/4286 (CMaNGOS keeps one centralised
+   tracker; `mangos-classic` and `mangos-tbc` have issues disabled), in the tracker's bug-report
+   shape with the draft's body as "Bug Details" and the pinned core/database SHAs in the template's
+   fields. The fenced diff in the post is byte-identical to the shipped patch (asserted before
+   posting). `pyplan/upstream-cmangos-doodad-issue.md` carries the URL.
+3. **"barthe decide to tick it."** — the Phase 7 exit-criteria box is Baerthe's to tick, not this
+   side's; it stays `- [ ]` with that sentence on it.
+
+What this changes: nothing in code. What it does not decide: §28, §31 and §36 in the bug checklist
+stay OPEN on their own terms.

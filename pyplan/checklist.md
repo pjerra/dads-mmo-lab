@@ -2114,7 +2114,9 @@
     indistinguishable, because 1800 × 3 no longer reaches above the floor. Recorded in that
     constant's docstring. Override by editing the margin expression, or close it with a fourth
     measurement.
-- [ ] 7.8 macOS, all four — **[blocked]** on hardware
+- [ ] 7.8 macOS, all four — **[blocked]** on hardware. **Owner, 2026-09-06: "7.8 will be done by baerthe"** —
+  the upstream developer takes it on a Mac of their own; nothing on this side waits on it
+  (`phase7-decisions.md` Appendix F).
 - [x] 7.9 Controllers — `controller_wow_tbc/`, `controller_wow_vanilla/`, `controller_wow_tortoise/` mirroring `controller_wow_wotlk/`; `mysql` → `db.client` in `apply.py`/`maintenance.py`; CMaNGOS-family account creation (was 7.1–7.3 before the scope change; still owed, now after install)
   - **TICKED 2026-09-04. The three unmeasured criteria were driven against all three live CMaNGOS
     servers, and the run found a defect on every one of them, which is why the bar was the right
@@ -2442,7 +2444,7 @@
     not. Also measured: a Stop during clone-core cannot interrupt the containerized `git`
     (`docker ps` 5 s after Stop still showed the `alpine/git` container), so five minutes between
     Stop and the dialog is what a user pays for stopping there.
-- [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.**
+- [ ] **Phase 7 exit criteria met** — all four v1 servers install through one Python engine with zero shell interaction and are managed by the app on Linux and native Windows, and on macOS once a machine exists; no `install-*.sh` remains. **Phase 8 does not start until this is fully met.** **Owner, 2026-09-06: Baerthe decides whether to tick this** — 11 of 12 boxes are ticked at `5de3c1a2`, 7.8 is Baerthe's, so the tick is theirs (`phase7-decisions.md` Appendix F).
 
 ---
 

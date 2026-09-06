@@ -6,7 +6,7 @@ which is out of draft since 04:50 CEST with a description of the whole branch. E
 
 ## Phase 7: 11 of 12 ticked
 
-Open: **7.8** (macOS, blocked on hardware) and the **Phase 7 exit-criteria box**, both owner calls.
+Open: **7.8** (macOS — Baerthe's, on their own Mac) and the **Phase 7 exit-criteria box** (Baerthe's to tick).
 
 What the night added, in merge order, each lane fix → adversarial review → review-of-review and then
 closed by hand under the owner's 2026-09-06 rule (two consecutive rounds with LINE findings only, or the
@@ -24,15 +24,11 @@ Gates on the tip: `--checks` ALL GREEN on `yulon-fedora` (Py 3.13) and `m910q` (
 4 skipped), transcripts in the session scratch; CI green by SHA on every merge (`ed642bbd`, `2b6a9c6b`,
 `f16104e4`, `249d0b94`) and on this tip once its run lands.
 
-## Owner decisions still open (nothing below was decided by the workflow)
+## Owner decisions — answered 2026-09-06 ~08:45 CEST (Appendix F)
 
-1. **7.8 macOS** — rent a Mac, or exit Phase 7 at 11 of 12 with 7.8 carried. Recommendation: carry it
-   and tick the exit box with 7.8 named as carried; the macOS engine path is mypy-checked as darwin on
-   every run and nothing else on the roadmap waits on it.
-2. **Post the CMaNGOS doodad issue upstream** — the draft's patch applies on both pinned revisions
-   (`pyplan/gates/doodad-2026-09-05/apply-check.txt`). Recommendation: post it; the shipped patch is
-   identical bytes to the draft's.
-3. **The Phase 7 exit-criteria box** — tick only if 7.8 is carried by decision 1.
+1. **7.8 macOS** — "7.8 will be done by baerthe": stays open, Baerthe's, on their own Mac.
+2. **The CMaNGOS doodad issue** — "post it": posted as https://github.com/cmangos/issues/issues/4286.
+3. **The Phase 7 exit-criteria box** — "barthe decide to tick it": stays `- [ ]`, Baerthe's to tick.
 4. Two facts surfaced by lanes and left for the owner, not filed: a 5.8 GB `mangosd` core dump on
    `yulon-win11-gate` written 54 minutes after the 7.7 TBC press reported `The server is up.` (deleted
    for space, cause not investigated); and the CMaNGOS engine's `patch-sources` stage now refuses a
