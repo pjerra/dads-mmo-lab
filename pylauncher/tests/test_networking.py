@@ -4850,6 +4850,66 @@ def test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip
     assert networking.LOOPBACK_ADDRESS in warned[0], warned[0]
 
 
+def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
+    """The mode that says no other machine can reach the server opens no ports.
+
+    Measured on yulon-ubuntu 2026-09-06, before this branch existed: applying
+    the loopback plan through the real Networking tab left `ufw allow 3724/tcp`
+    and `ufw allow 8085/tcp` in `ufw show added`
+    (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`,
+    taken 04:43:23, right after that Apply), and `widget-loopback.log:60` has
+    `✓ ufw allow 3724/tcp` printed directly under the warning saying no other
+    machine can reach this server. Holes for ports nothing outside the machine
+    was going to use.
+
+    The `lan` half of each pair is the control: without it this test would pass
+    just as well on a build where `firewall_commands` was empty for every mode,
+    which is a different bug and a worse one.
+    """
+    for backend in ("ufw", "firewalld", "netsh"):
+        # The firewalld seams are named for the reason the rest of this file
+        # names them: an unseamed firewalld plan reads the real `firewall-cmd`
+        # and answers differently on a Fedora box than on CI.
+        seams: dict[str, object] = (
+            {"detect_firewalld": lambda: "stopped", "detect_zones": lambda _d: None}
+            if backend == "firewalld"
+            else {}
+        )
+        shut = networking.plan(
+            WOTLK,
+            "loopback",
+            firewall=backend,
+            steamos=False,
+            wsl=False,
+            detect_lan=lambda: "192.168.10.134",
+            **seams,  # type: ignore[arg-type]
+        )
+        assert shut.firewall_commands == (), (backend, shut.firewall_commands)
+        assert shut.ssh_ports == (), (backend, shut.ssh_ports)
+        assert not [m for m in shut.manual_steps if "TCP" in m], (backend, shut.manual_steps)
+        open_for_lan = networking.plan(
+            WOTLK,
+            "lan",
+            firewall=backend,
+            steamos=False,
+            wsl=False,
+            detect_lan=lambda: "192.168.10.134",
+            **seams,  # type: ignore[arg-type]
+        )
+        assert open_for_lan.firewall_commands != (), backend
+
+    # `none` has no commands to drop; what it has is the "allow inbound TCP …
+    # by hand" step, which is the same instruction spelled for a person.
+    nothing = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    assert not [m for m in nothing.manual_steps if "allow inbound TCP" in m], nothing.manual_steps
+    by_hand = networking.plan(
+        WOTLK, "lan", firewall="none", steamos=False, wsl=False, detect_lan=lambda: "10.0.0.5"
+    )
+    assert [m for m in by_hand.manual_steps if "allow inbound TCP" in m], by_hand.manual_steps
+
+
 def test_the_mode_the_owner_applied_is_recorded_only_when_the_row_was_written(
     tmp_path: Path,
 ) -> None:

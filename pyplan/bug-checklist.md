@@ -3189,10 +3189,34 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `test_networking.py::test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file`
       is what catches that return. `networking.apply()` records it only after the realmlist UPDATE
       has actually gone through, so a failed Apply cannot leave `ready` honouring a choice the
-      database never received. `_advertise_realm()` reads it at `catalog/native.py:2821`, before it
-      detects an address and before it queries the row; the two empty lists in
-      `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` are what
-      hold the reading in front.
+      database never received. `_advertise_realm()` reads it before it detects an address and
+      before it queries the row. What holds that ORDER is not the two empty SQL lists in
+      `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` — an
+      earlier draft of this line said it was, and two mutations run on m910q on 2026-09-06 from a
+      fresh `git clone --shared` refuted it: detecting the address first, and reading the intent
+      only after the `address is None` early return, each left both lists empty and the whole
+      416-test file green, and the second printed `REALM_ADDRESS_UNKNOWN` instead of the §41
+      sentence on a machine with no LAN address — the machine this mode exists for. The order is
+      held by that test's call-counting `lan_ip` seam (`asked == []`) and by
+      `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`, both added in
+      round 3 and both shown red under those mutations in
+      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
+- [x] The loopback mode asks the firewall for nothing. — Not a box the entry had on 2026-09-05;
+      added in round 3, from a review finding. `plan()` built its firewall commands from the
+      backend and the ports before it looked at `mode`, so a loopback plan carried
+      `ufw allow 3724/tcp` and `ufw allow 8085/tcp` under its own warning that no other machine can
+      reach this server. It happened on a real box: the loopback Apply on yulon-ubuntu on
+      2026-09-06 left both rules in `ufw show added`
+      (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
+      04:43:23, right after that Apply), and `widget-loopback.log:60` prints `✓ ufw allow 3724/tcp`
+      on the line directly under that warning. `plan()` now computes no firewall commands, no SSH
+      guard and no "allow inbound TCP … by hand" step for `mode == "loopback"` (`networking.py`,
+      `wants_firewall`), asserted by
+      `test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing` and
+      `test_controller_view.py::test_the_loopback_plan_in_the_tab_offers_to_open_no_ports`, each
+      with a `lan` control in it so an empty list for every mode cannot pass them. Named here so it
+      is not read as decided: the loopback-binding warning and the WSL/`netsh` portproxy commands
+      in the same function were NOT changed this round and still behave the same for every mode.
 - [x] The gate: choose loopback through the app, press Install again on the finished install, and the
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
       loopback was never chosen still ends up advertising a reachable address. — **Met on
@@ -3227,18 +3251,23 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       log line matching `127\.0\.0\.1:8085` (`INSTALL_REALM_HOST`, `native.py:202`, filled at
       `native.py:2724`), read from the container's CURRENT run only. `ac-authserver` had been up
       since the row said `172.30.55.119`, so its log could not match and press 1 sat in `ready` from
-      04:43:31 until `ac-authserver` was restarted at 04:57:57, printing `The server is up.` two
-      seconds later. `up` runs `compose up -d --no-deps`, which does not recreate a running
-      container, so the press cannot clear this itself. It predates §41 (`native.py:1522-1525` argues
-      for the fixed value) and is not fixed by it. A press against a plain LAN-advertising install
-      whose auth container started under that row was NOT driven to a verdict here, and no checklist
-      entry was allocated for it — see `r2-fix-b41.json`.
+      04:43:31 until **this lane restarted `ac-authserver` by hand** — `docker restart ac-authserver`
+      over ssh at 04:57:57, mid-press, out of band and not through the app — after which the press
+      printed `The server is up.` two seconds later. So press 1 did NOT produce that sentence on its
+      own: `_advertise_realm()` runs after the last stage and OUTSIDE the `try`
+      (`catalog/native.py:1527`, with the comment arguing for it at `1518-1526`), so a `ready` that
+      ran out its window would have raised, the install would have been recorded as failed, and the
+      §41 sentence would never have been printed at all. `up` runs `compose up -d --no-deps`, which
+      does not recreate a running container, so the press could not have cleared this itself. It
+      predates §41 (`native.py:1522-1525` argues for the fixed value) and is not fixed by it. A press
+      against a plain LAN-advertising install whose auth container started under that row was NOT
+      driven to a verdict here, and no checklist entry was allocated for it — see `r2-fix-b41.json`.
 
 The line the install prints when it leaves the row alone (`loopback_chosen_on_purpose()`,
 `catalog/native.py:245`), as it came out of the live run:
 
 > The address this realm advertises was left exactly as it is, because this server was set to only
-> this computer (127.0.0.1) on 2026-09-05 from its Networking tab, and that choice is recorded in
+> this computer (127.0.0.1) on 2026-09-06 from its Networking tab, and that choice is recorded in
 > .yulon-network.json in the server folder. Nothing here overwrote it, which means no other machine
 > can reach this server. To undo it, open this server's Networking tab, pick LAN (same Wi-Fi) or
 > Internet play, press Show plan and then Apply.

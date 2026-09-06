@@ -3215,13 +3215,26 @@ def plan(
     refusals: list[str] = []
     ssh_ports: tuple[int, ...] = ()
 
-    fw_cmds = platform.firewall_commands(
-        backend, ports, rule_prefix=rule_prefix, steamos=on_steamos
+    # The loopback mode asks the firewall for nothing. Its own warning
+    # (`ONLY_THIS_COMPUTER`) says no other machine can reach this server, so a
+    # hole for the game ports is a hole nothing is going to come through.
+    # Measured on yulon-ubuntu 2026-09-06, before this branch existed: an Apply
+    # of the loopback plan through the Networking tab left `ufw allow
+    # 3724/tcp` and `ufw allow 8085/tcp` behind — see
+    # `pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`
+    # (taken 04:43:23, right after that Apply) and `widget-loopback.log:60`,
+    # where `✓ ufw allow 3724/tcp` is printed directly under the warning
+    # saying no other machine can reach the server.
+    wants_firewall = mode != "loopback"
+    fw_cmds = (
+        platform.firewall_commands(backend, ports, rule_prefix=rule_prefix, steamos=on_steamos)
+        if wants_firewall
+        else []
     )
     firewalld_daemon: FirewalldDaemon | None = None
     firewalld_zones: tuple[str, ...] | None = None
     zoning: FirewalldZoning | None = None
-    if backend == "firewalld":
+    if wants_firewall and backend == "firewalld":
         firewalld_daemon = ask_firewalld()
         zoning = ask_zones(firewalld_daemon)
         firewalld_zones = zoning.write if zoning is not None else None
@@ -3313,14 +3326,14 @@ def plan(
     # says depends on whether the reload survived the verdict, and only the
     # decision knows that.
     alf_state: platform.AlfState | None = None
-    if backend == "alf":
+    if wants_firewall and backend == "alf":
         # macOS gets a state, not a command list: its firewall is
         # per-application and has no port vocabulary at all.
         alf_state = detect_alf()
         alf_warnings, alf_manual = _alf_notes(alf_state)
         warnings.extend(alf_warnings)
         manual.extend(alf_manual)
-    elif backend == "none":
+    elif wants_firewall and backend == "none":
         manual.append(
             "No supported firewall tool (ufw/firewalld) was found; if a firewall is active, "
             f"allow inbound TCP {', '.join(map(str, ports))} by hand."

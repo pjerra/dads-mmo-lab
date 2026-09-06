@@ -2846,11 +2846,15 @@ def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
     an owner who set the loopback by hand had it overwritten by the next press
     with "players on other machines can reach this server" printed over the top.
 
-    The reading is done BEFORE anything else the step does, which the two empty
-    lists here are the evidence for: with the intent recorded, no address is
-    detected, the database is never asked what the row says, and no UPDATE is
-    sent. A version that read the intent after the query would still leave the
-    row alone and would still pass a test that only looked at `sql_scripts`.
+    The reading is done BEFORE anything else the step does, and `asked` — a
+    detection seam that records every call — is what holds it in front. The two
+    empty SQL lists below do NOT: measured 2026-09-06 at `9f0c2fa2` on m910q,
+    a version that detected the address first and a version that read the
+    intent only after the `address is None` early return each left both lists
+    empty and this whole file green (mutations M5 and M6,
+    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). The second
+    holder is `test_the_machine_this_mode_is_for_has_no_lan_address_at_all`
+    below, which is the shape M6 actually broke.
 
     The line is asserted to name the address, the tab that set it and the way
     back, because "left alone" with no reason is indistinguishable from the
@@ -2860,14 +2864,52 @@ def test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why(
     server.mkdir()
     networking.record_network_intent(server, "loopback")
     rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
-    said = _advertising(rec, server, lan_ip=lambda: "10.1.2.3")
+    asked: list[str] = []
 
+    def detect() -> str:
+        asked.append("the detection seam was called")
+        return "10.1.2.3"
+
+    said = _advertising(rec, server, lan_ip=detect)
+
+    assert asked == [], "an address was detected before the recorded choice was read"
     assert _statements(rec) == [], "a loopback the owner chose was overwritten anyway"
     assert rec.sql_calls == [], "the row was read before the recorded choice was"
     line = next(line for line in said if native.INSTALL_REALM_HOST in line)
     assert "Networking tab" in line, line
     assert "no other machine" in line, line
     assert said[-1].startswith(f"{ENTRY.name} is installed"), said[-1]
+
+
+def test_the_machine_this_mode_is_for_has_no_lan_address_at_all(tmp_path: Path) -> None:
+    """§41 on the machine `NetworkPlan.ready`'s docstring says the mode exists for.
+
+    `networking.plan()` is called with `detect_lan=lambda: None` for the
+    loopback mode on purpose: a machine that cannot say what its LAN address is
+    is precisely the one whose owner picks "only this computer", and a plan
+    that could not be applied there would be §41 with a new spelling. The
+    closing realm step has to agree, and the ORDER of its first two branches is
+    the whole of it — reading the intent after the `address is None` return
+    leaves such a server with `REALM_ADDRESS_UNKNOWN` and no mention of the
+    choice at all.
+
+    Measured 2026-09-06 at `9f0c2fa2` on m910q, before this test existed: with
+    the intent read after that return, this exact setup printed "This machine's
+    address on the local network could not be worked out …" and the whole
+    416-test file still passed
+    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`, M6).
+    """
+    nowhere = tmp_path / "no-lan-at-all"
+    nowhere.mkdir()
+    networking.record_network_intent(nowhere, "loopback")
+    rec = Recorder(realm_row=f"{native.INSTALL_REALM_HOST}\t{native.INSTALL_REALM_HOST}\n")
+    said = _advertising(rec, nowhere, lan_ip=lambda: None)
+
+    assert _statements(rec) == [], "a loopback the owner chose was overwritten anyway"
+    assert native.REALM_ADDRESS_UNKNOWN not in said, said
+    line = next(line for line in said if "Networking tab" in line)
+    assert native.INSTALL_REALM_HOST in line, line
+    assert "no other machine" in line, line
 
 
 def test_a_server_whose_loopback_was_never_chosen_is_still_rewritten(

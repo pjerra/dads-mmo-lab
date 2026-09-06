@@ -583,6 +583,47 @@ def test_the_loopback_plan_shown_in_the_tab_says_what_it_costs(
     assert "Players set realmlist to: 127.0.0.1" in text, text
     assert "no other machine" in text, text
     assert view.apply_button.isEnabled() is True, "a loopback plan could not be applied"
+    view.close()
+
+
+def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The Apply button under that warning must not also punch holes in ufw.
+
+    Measured on yulon-ubuntu 2026-09-06, before `plan()` had the branch this
+    asserts: pressing Apply on a loopback plan added `ufw allow 3724/tcp` and
+    `ufw allow 8085/tcp`
+    (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`),
+    and the driver log printed `✓ ufw allow 3724/tcp` on the line under the
+    warning saying no other machine can reach this server
+    (`widget-loopback.log:60`). Asserted through the widget's own text because
+    that is where a person sees what Apply is about to run; the `lan` half is
+    the control, so an empty command list for every mode cannot pass this.
+    """
+    services = _services(ps, tmp_path, [])
+    services.network_plan = lambda mode: networking.plan(
+        WOTLK,
+        mode,
+        firewall="ufw",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: "192.168.10.134",
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0)
+    view.loopback_radio.setChecked(True)
+    view.show_network_plan()
+    quiet = view.network_text.toPlainText()
+    assert "Mode: loopback" in quiet, quiet
+    assert "Firewall commands:" not in quiet, quiet
+    assert "ufw allow" not in quiet, quiet
+
+    view.lan_radio.setChecked(True)
+    view.show_network_plan()
+    loud = view.network_text.toPlainText()
+    assert "Mode: lan" in loud, loud
+    assert "ufw allow 3724/tcp" in loud, loud
+    view.close()
 
 
 def test_for_wotlk_builds_real_services_without_touching_docker(tmp_path: Path) -> None:

@@ -2790,11 +2790,19 @@ class StagedInstaller:
         same eight characters either way — so the answer is recorded intent,
         written by `networking.apply()` when the Networking tab's `loopback`
         mode was applied, and read here BEFORE anything else this method does.
-        Before, and not after the query: a version that read it later would
-        leave the row alone just the same while still detecting an address and
-        still asking the database what the row held, and the two empty lists in
+        Before, and not after: on 2026-09-06 at `9f0c2fa2` two mutations of this
+        order were run on m910q from a fresh `git clone --shared` with
+        `__pycache__` purged on both sides
+        (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). Reading
+        the intent after `self._detected_lan_ip()` still left the row alone, and
+        reading it after the `address is None` return printed
+        `REALM_ADDRESS_UNKNOWN` instead of the §41 sentence on a machine with no
+        LAN address — the machine this mode exists for. Both kept
+        `_statements()` and `sql_calls` empty, so the two empty lists in
         `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`
-        are what hold the reading in front.
+        hold nothing here; what holds it is that test's call-counting `lan_ip`
+        seam plus
+        `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`.
 
         * the owner CHOSE the loopback — nothing is detected, nothing is asked,
           nothing is sent, and the line says which file says so and how to undo
