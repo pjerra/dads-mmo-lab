@@ -443,8 +443,8 @@ else — of everything a `NetworkPlan` hands back, `apply()` RUNS the contents o
 `firewall_commands`, `portproxy_commands` and `realmlist_sql`, SHOWS `client_realmlist`, and leaves
 `manual_steps`, `warnings` and `refusals` as text for the owner (the firewall instructions among
 that text — the firewalld zone warnings, the backend-`none` step and the `netsh` profile step —
-were each read under a `wants_firewall` gate at `6795cbdd` — `networking.py:3298`, `:3397`, `:3481` —
-so none is emitted under `loopback`); beyond
+were each read under a `wants_firewall` gate at `6795cbdd`, `networking.py:3298`, `:3397` and
+`:3481`, so none is emitted under `loopback`); beyond
 the fields it writes `.yulon-network.json`. No container port binding is among them: a `portproxy`
 rule forwards a host address to 127.0.0.1, and the UPDATE changes only the address the realm row
 hands out. Another machine still connects and logs in, and is then told the world server is at
