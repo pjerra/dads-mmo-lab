@@ -3195,7 +3195,11 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       earlier draft of this line said it was, and two mutations run on m910q on 2026-09-06 from a
       fresh `git clone --shared` refuted it: detecting the address first, and reading the intent
       only after the `address is None` early return, each left both lists empty and the whole
-      416-test file green, and the second printed `REALM_ADDRESS_UNKNOWN` instead of the §41
+      416-test file green — that run's transcript, taken at `9f0c2fa2` before the round-3 tests
+      existed, is committed at
+      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round2-meta.txt`, where `416 passed` stands
+      at lines 25, 43, 54 and 66 (baseline, M5, M6, restore) — and the second printed
+      `REALM_ADDRESS_UNKNOWN` instead of the §41
       sentence on a machine with no LAN address — the machine this mode exists for. The order is
       held by that test's call-counting `lan_ip` seam (`asked == []`) and by
       `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`, both added in
@@ -3210,14 +3214,55 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
       04:43:23, right after that Apply). `widget-loopback.log` has the shape of it: line 51
       `Firewall commands:` with the two `ufw allow` lines, line 57 the warning that no other
-      machine can reach this server, line 60 `✓ ufw allow 3724/tcp` under `Applied:`. `plan()` now computes no firewall commands, no SSH
+      machine can reach this server, line 58 blank, line 59 `Applied:` and line 60
+      `✓ ufw allow 3724/tcp`. `plan()` now computes no firewall commands, no SSH
       guard and no "allow inbound TCP … by hand" step for `mode == "loopback"` (`networking.py`,
       `wants_firewall`), asserted by
       `test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing` and
       `test_controller_view.py::test_the_loopback_plan_in_the_tab_offers_to_open_no_ports`, each
-      with a `lan` control in it so an empty list for every mode cannot pass them. Named here so it
-      is not read as decided: the loopback-binding warning and the WSL/`netsh` portproxy commands
-      in the same function were NOT changed this round and still behave the same for every mode.
+      with a `lan` control in it so an empty list for every mode cannot pass them.
+      **Round 4 widened that to the two thirds of the branch nothing was watching.** Round 3's
+      assertions were `firewall_commands == ()`, `ssh_ports == ()` and "no manual step containing
+      TCP", all of which stay true with the guard put back on the firewalld and `alf` branches:
+      re-running the three lane test files on m910q with `if wants_firewall and backend ==
+      "firewalld"` cut back to `if backend == "firewalld"` (MR1) and the same for `"alf"` (MR3)
+      printed `419 passed` both times, while the same edit to the `none` branch printed `1 failed`
+      — one third of the branch held, two silent
+      (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`). The mutations are not
+      harmless: under MR1 a loopback firewalld plan spawns both detection probes through
+      `probe_prefix()` (i.e. sudo) and appends "firewalld's zones could not be read, so the game
+      ports were written to the DEFAULT zone" with no port written, and under MR3 a loopback `alf`
+      plan reads the macOS firewall and adds a step about it. The test now asserts what ARRIVES:
+      recording `detect_firewalld`/`detect_zones` seams with `calls == []`, a recording
+      `detect_alf` with `alf_calls == []` and `firewall_state is None`, the whole
+      `warnings == (ONLY_THIS_COMPUTER,)` and the whole `manual_steps == ()`, each against a `lan`
+      control that shows the same seams called and the same steps built. MR1 and MR3 are red at it
+      in `mutations-round4.txt`.
+      **The netsh step is now gated too, and that is a decision, not an omission.** `plan()` still
+      appended "Windows: set the network profile to Private (Settings → Network & Internet)" for a
+      loopback plan on `netsh`, and round 3's filter on the string "TCP" could not see it. The
+      network profile picks which Windows Firewall rule set is in force, so telling the owner to
+      change it is asking the firewall for something; it is now inside `wants_firewall`
+      (`networking.py`), the loopback assertion is `manual_steps == ()`, and the `netsh` `lan`
+      control asserts the step is still built there.
+      **What was reviewed and deliberately left:** the reason. "no other machine can reach this
+      server" is loose — this mode changes the address the realm row hands out, not what is bound.
+      Read on yulon-ubuntu 2026-09-06 06:09 CEST with the loopback intent recorded there,
+      `docker ps --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
+      and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN on `0.0.0.0:3724`
+      and `0.0.0.0:8085`, so another machine still connects and logs in and is then told the world
+      server is at 127.0.0.1, i.e. on itself. The code comment that gave that sentence as the REASON
+      for opening no ports ("a hole nothing is going to come through") was false and is rewritten
+      with the reading above; the two owner-visible strings — `networking.ONLY_THIS_COMPUTER` and
+      the install line from `loopback_chosen_on_purpose()` — are kept as they stand, with the
+      reading recorded in each one's docstring, because both are quoted verbatim in committed
+      records of the presses that closed this entry and the second is asserted literally by
+      `pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`; rewording them would
+      make this entry quote sentences the tree no longer prints, and no code reads either string to
+      decide anything.
+      Named here so it is not read as decided: the loopback-binding warning ("ports […] are
+      published on 127.0.0.1") and the WSL/`netsh` portproxy commands in the same function were NOT
+      changed and still behave the same for every mode.
 - [x] The gate: choose loopback through the app, press Install again on the finished install, and the
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
       loopback was never chosen still ends up advertising a reachable address. — **Met on
@@ -3256,7 +3301,7 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       over ssh at 04:57:57, mid-press, out of band and not through the app — after which the press
       printed `The server is up.` two seconds later. So press 1 did NOT produce that sentence on its
       own: `_advertise_realm()` runs after the last stage and OUTSIDE the `try`
-      (`catalog/native.py:1527`, with the comment arguing for it at `1518-1526`), so a `ready` that
+      (`catalog/native.py:1526`, with the comment arguing for it at `1518-1525`), so a `ready` that
       ran out its window would have raised, the install would have been recorded as failed, and the
       §41 sentence would never have been printed at all. `up` runs `compose up -d --no-deps`, which
       does not recreate a running container, so the press could not have cleared this itself. It

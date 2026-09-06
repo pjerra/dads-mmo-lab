@@ -379,7 +379,7 @@ should do under this mode; this round left them alone rather than guess.
 Press 1 did not produce the §41 sentence on its own. It sat in `ready` from 04:43:31 until **this
 lane ran `docker restart ac-authserver` by hand over ssh at 04:57:57**, mid-press and not through
 the app, and the sentence was printed two seconds later. `_advertise_realm()` runs after the last
-stage and outside the `try` (`catalog/native.py:1527`, argued at `1518-1526`), so a `ready` that
+stage and outside the `try` (`catalog/native.py:1526`, argued at `1518-1525`), so a `ready` that
 ran out its window would have raised, the install would have been recorded as failed, and the
 sentence would never have appeared. The entry now says so.
 

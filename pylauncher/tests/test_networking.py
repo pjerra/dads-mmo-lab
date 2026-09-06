@@ -4850,30 +4850,65 @@ def test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip
     assert networking.LOOPBACK_ADDRESS in warned[0], warned[0]
 
 
+def _recording_firewalld_seams(calls: list[str]) -> dict[str, object]:
+    """firewalld seams that answer like the real ones and write down that they were asked.
+
+    Named seams rather than the real probes for the reason the rest of this file
+    names them — an unseamed firewalld plan reads the real `firewall-cmd` and
+    answers differently on a Fedora box than on CI — and recording ones because
+    an empty `firewall_commands` tuple cannot tell a plan that asked the machine
+    nothing from one that asked it twice and then dropped the answers. Measured
+    on m910q 2026-09-06 from a fresh `git clone --shared`, mutation MR1 in
+    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`: with the
+    `wants_firewall` guard removed from the firewalld branch, the loopback plan
+    called both seams and appended `firewalld's zones could not be read, so the
+    game ports were written to the DEFAULT zone` with no port written, and the
+    assertions on the empty lists stayed green.
+    """
+
+    def firewalld() -> networking.FirewalldDaemon:
+        calls.append("detect_firewalld")
+        return "stopped"
+
+    def zones(_daemon: networking.FirewalldDaemon) -> networking.FirewalldZoning | None:
+        calls.append("detect_zones")
+        return None
+
+    return {"detect_firewalld": firewalld, "detect_zones": zones}
+
+
 def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
-    """The mode that says no other machine can reach the server opens no ports.
+    """The mode played only on this machine opens no ports and asks no probe.
 
     Measured on yulon-ubuntu 2026-09-06, before this branch existed: applying
     the loopback plan through the real Networking tab left `ufw allow 3724/tcp`
     and `ufw allow 8085/tcp` in `ufw show added`
     (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`,
-    taken 04:43:23, right after that Apply), and `widget-loopback.log:60` has
-    `✓ ufw allow 3724/tcp` printed directly under the warning saying no other
-    machine can reach this server. Holes for ports nothing outside the machine
-    was going to use.
+    taken 04:43:23, right after that Apply); in the same folder's
+    `widget-loopback.log`, line 57 is the warning saying no other machine can
+    reach this server, 58 is blank, 59 is `Applied:` and 60 is
+    `✓ ufw allow 3724/tcp`.
 
-    The `lan` half of each pair is the control: without it this test would pass
-    just as well on a build where `firewall_commands` was empty for every mode,
-    which is a different bug and a worse one.
+    Not because the ports stop being reachable — this mode changes the address
+    the realm row hands out and nothing else. On yulon-ubuntu 2026-09-06 06:09
+    CEST, with the loopback intent recorded there, `docker ps --format
+    '{{.Names}}\\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
+    and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN
+    on both. Holes for a connection that cannot end in play, on a server whose
+    owner asked for one nobody else plays on.
+
+    Three things are asserted per backend, because an empty command list alone
+    is silent about two of them: the commands, the probes that were spawned to
+    build them (`calls`), and the whole warning tuple, since a probe put back
+    brings its own warnings with it. The `lan` half of each pair is the control:
+    without it this test would pass just as well on a build where
+    `firewall_commands` was empty for every mode, which is a different bug and a
+    worse one.
     """
     for backend in ("ufw", "firewalld", "netsh"):
-        # The firewalld seams are named for the reason the rest of this file
-        # names them: an unseamed firewalld plan reads the real `firewall-cmd`
-        # and answers differently on a Fedora box than on CI.
+        calls: list[str] = []
         seams: dict[str, object] = (
-            {"detect_firewalld": lambda: "stopped", "detect_zones": lambda _d: None}
-            if backend == "firewalld"
-            else {}
+            _recording_firewalld_seams(calls) if backend == "firewalld" else {}
         )
         shut = networking.plan(
             WOTLK,
@@ -4886,7 +4921,12 @@ def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
         )
         assert shut.firewall_commands == (), (backend, shut.firewall_commands)
         assert shut.ssh_ports == (), (backend, shut.ssh_ports)
-        assert not [m for m in shut.manual_steps if "TCP" in m], (backend, shut.manual_steps)
+        assert calls == [], (backend, calls)
+        assert shut.warnings == (networking.ONLY_THIS_COMPUTER,), (backend, shut.warnings)
+        # The whole tuple, not the "TCP" steps: `netsh`'s "set the network
+        # profile to Private" is a Windows Firewall instruction with no port
+        # number in it, and a filter on "TCP" cannot see it.
+        assert shut.manual_steps == (), (backend, shut.manual_steps)
         open_for_lan = networking.plan(
             WOTLK,
             "lan",
@@ -4897,6 +4937,45 @@ def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
             **seams,  # type: ignore[arg-type]
         )
         assert open_for_lan.firewall_commands != (), backend
+        if backend == "firewalld":
+            assert calls == ["detect_firewalld", "detect_zones"], calls
+        if backend == "netsh":
+            assert [
+                m for m in open_for_lan.manual_steps if "network profile to Private" in m
+            ], open_for_lan.manual_steps
+
+    # macOS has no port vocabulary, so its branch produces a STATE rather than
+    # commands — which an assertion on `firewall_commands` cannot see at all.
+    alf_calls: list[str] = []
+
+    def _alf() -> platform.AlfState:
+        alf_calls.append("detect_alf")
+        return platform.AlfState(enabled=True, block_all=False)
+
+    mac_shut = networking.plan(
+        WOTLK,
+        "loopback",
+        firewall="alf",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: "192.168.10.134",
+        detect_alf=_alf,
+    )
+    assert alf_calls == [], alf_calls
+    assert mac_shut.firewall_state is None, mac_shut.firewall_state
+    assert mac_shut.manual_steps == (), mac_shut.manual_steps
+    assert mac_shut.warnings == (networking.ONLY_THIS_COMPUTER,), mac_shut.warnings
+    mac_open = networking.plan(
+        WOTLK,
+        "lan",
+        firewall="alf",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: "192.168.10.134",
+        detect_alf=_alf,
+    )
+    assert alf_calls == ["detect_alf"], alf_calls
+    assert mac_open.firewall_state is not None
 
     # `none` has no commands to drop; what it has is the "allow inbound TCP …
     # by hand" step, which is the same instruction spelled for a person.

@@ -595,9 +595,9 @@ def test_the_loopback_plan_in_the_tab_offers_to_open_no_ports(
     asserts: pressing Apply on a loopback plan added `ufw allow 3724/tcp` and
     `ufw allow 8085/tcp`
     (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`),
-    and the driver log printed `✓ ufw allow 3724/tcp` on the line under the
-    warning saying no other machine can reach this server
-    (`widget-loopback.log:60`). Asserted through the widget's own text because
+    and in that folder's `widget-loopback.log`, line 57 is the warning saying no
+    other machine can reach this server, 58 is blank, 59 is `Applied:` and 60 is
+    `✓ ufw allow 3724/tcp`. Asserted through the widget's own text because
     that is where a person sees what Apply is about to run; the `lan` half is
     the control, so an empty command list for every mode cannot pass this.
     """

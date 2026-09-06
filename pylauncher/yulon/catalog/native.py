@@ -258,6 +258,23 @@ def loopback_chosen_on_purpose(intent: networking.NetworkIntent) -> str:
     did and what a person did before it, both of which stay true. The sentence
     it replaced in an earlier draft said the row "is" the loopback, which stops
     being true the moment anyone presses Apply with another mode.
+
+    "no other machine can reach this server" was read against the machine on
+    2026-09-06 and kept. It is loose: the mode changes the address the row hands
+    out, not what is bound. On yulon-ubuntu at 06:09 CEST, with the loopback
+    intent recorded on that install, `docker ps --format
+    '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp` and
+    `ac-worldserver … 0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on
+    `0.0.0.0:3724` and `0.0.0.0:8085` — so another machine still connects and
+    logs in, and is then told the world server is at 127.0.0.1, i.e. on itself,
+    so it cannot play. Kept rather than reworded because this exact string is
+    what the closing-step gate driver asserts
+    (`pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`)
+    and what two committed press records of 2026-09-06 hold verbatim
+    (that folder's `closing-step-output.txt:13` and
+    `yulon-ubuntu-press/yulon-log-press-chosen.txt:12`); rewording it would make
+    the closed §41 entry quote a sentence the tree no longer prints, and no code
+    reads this string to decide anything.
     """
     # A record with no timestamp is one nothing this app wrote: `record_network_intent()`
     # always stamps it. Printing the epoch for it would put "on 1970-01-01" in

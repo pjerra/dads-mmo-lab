@@ -259,6 +259,24 @@ exactly what was asked. It is here rather than in the radio's label because the
 label has room for the address and not for the consequence, and because
 `_format_plan()` renders warnings — so this is the sentence a person reads in
 the same widget, one press before it takes effect.
+
+"reach" here means "get to this server to play on it", not "open a socket to
+it", and the wording was reviewed against the machine rather than kept by
+default. Measured on yulon-ubuntu 2026-09-06 06:09 CEST, with the loopback
+intent recorded on that install: `docker ps --format '{{.Names}}\t{{.Ports}}'`
+printed `ac-authserver 0.0.0.0:3724->3724/tcp` and `ac-worldserver …
+0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on `0.0.0.0:3724` and
+`0.0.0.0:8085` — so the mode binds nothing shut and another machine can still
+connect and log in. What it cannot do is play: the colon clause of this sentence
+is the whole mechanism, and it is what the reader is given. The sentence was
+kept as it stands rather than reworded to "play on" because it is quoted, live,
+in two committed records of the presses that closed §41
+(`pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt` lines 31 and
+52, and the same folder's `README.md:51`), and because the reason a firewall
+hole is not opened for this mode does NOT rest on this sentence: that reason is
+written where the decision is made (`plan()`, at `wants_firewall`), and it was
+this sentence being read as the reason that put a false claim in that comment
+until 2026-09-06.
 """
 
 Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
@@ -3138,20 +3156,31 @@ def plan(
     by default — see `_guard_the_way_back_in()` for the argument. A caller that
     passes True gets the enable only if SSH survives it, and `detect_ssh` is the
     seam that decides. It is consulted when an enable is asked for, and when
-    the command list reloads firewalld — which every firewalld plan against a
-    running or unreadable daemon does, `enable_firewall` or not. So an ordinary
-    ufw plan spawns no probe and asks the environment nothing, and an ordinary
-    firewalld plan asks the machine about SSH before it reloads; the sentence
-    that used to stand here said "ONLY when an enable is on the table", and
-    that is the wording under which the reload ran unguarded.
+    the command list reloads firewalld — which a firewalld plan that WANTS the
+    firewall (`wants_firewall` below: every mode except `loopback`) does against
+    a running or unreadable daemon, `enable_firewall` or not. So an ordinary ufw
+    plan spawns no probe and asks the environment nothing, and an ordinary
+    firewalld `lan` or `internet` plan asks the machine about SSH before it
+    reloads; the sentence that used to stand here said "ONLY when an enable is
+    on the table", and that is the wording under which the reload ran unguarded.
 
-    `detect_firewalld` is consulted on EVERY firewalld plan, including the
-    default one, because it decides which tool writes the ports the user
-    actually asked for. A plan that skipped it opened none of them (see
-    `detect_firewalld_daemon()`). `detect_zones` is consulted on every
-    firewalld plan for the same reason one step later: it decides WHERE the
-    ports are written, and a plan that never asked wrote them to a zone the
-    interface was not in (see `detect_firewalld_zones()`).
+    `detect_firewalld` is consulted on every firewalld plan that wants the
+    firewall, including the default one, because it decides which tool writes
+    the ports the user actually asked for. A plan that skipped it opened none of
+    them (see `detect_firewalld_daemon()`). `detect_zones` is consulted on those
+    same plans for the same reason one step later: it decides WHERE the ports
+    are written, and a plan that never asked wrote them to a zone the interface
+    was not in (see `detect_firewalld_zones()`).
+
+    A `loopback` plan reaches none of that. Measured on m910q 2026-09-06 from a
+    fresh `git clone --shared`, with seams that record every call
+    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, block P1):
+    `plan(WOTLK, "loopback", firewall="firewalld", …)` printed `seams=[] fw=[]
+    warnings=1`, against `seams=['detect_firewalld', 'detect_zones']
+    fw=['firewall-offline-cmd --add-port=3724/tcp', 'firewall-offline-cmd
+    --add-port=8085/tcp'] warnings=2` for the same call with `"lan"`; the same
+    block printed the `alf` loopback plan as `detect_alf called=False
+    firewall_state=None`.
 
     `elevate` says whether the WRITES this plan describes will run elevated,
     and every default detection seam then asks the machine with that same
@@ -3215,16 +3244,24 @@ def plan(
     refusals: list[str] = []
     ssh_ports: tuple[int, ...] = ()
 
-    # The loopback mode asks the firewall for nothing. Its own warning
-    # (`ONLY_THIS_COMPUTER`) says no other machine can reach this server, so a
-    # hole for the game ports is a hole nothing is going to come through.
-    # Measured on yulon-ubuntu 2026-09-06, before this branch existed: an Apply
-    # of the loopback plan through the Networking tab left `ufw allow
-    # 3724/tcp` and `ufw allow 8085/tcp` behind — see
+    # The loopback mode asks the firewall for nothing — but NOT because the
+    # ports stop being reachable. This mode changes the address the realm row
+    # HANDS OUT and nothing else: measured on yulon-ubuntu 2026-09-06 06:09
+    # CEST, with the loopback intent already recorded there, `docker ps
+    # --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver
+    # 0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp`,
+    # and `ss -ltn` printed LISTEN on `0.0.0.0:3724` and `0.0.0.0:8085`. So
+    # another machine still completes a TCP connect and an auth login; it is
+    # then handed 127.0.0.1 as the world address, i.e. told to look on itself.
+    # The hole is therefore a hole for a connection that cannot end in play,
+    # opened on a server whose owner asked for one nobody else plays on.
+    # What it cost before this branch existed, measured on yulon-ubuntu
+    # 2026-09-06: an Apply of the loopback plan through the Networking tab left
+    # `ufw allow 3724/tcp` and `ufw allow 8085/tcp` behind — see
     # `pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`
-    # (taken 04:43:23, right after that Apply) and `widget-loopback.log:60`,
-    # where `✓ ufw allow 3724/tcp` is printed directly under the warning
-    # saying no other machine can reach the server.
+    # (taken 04:43:23, right after that Apply) and the same folder's
+    # `widget-loopback.log`, whose line 57 is the `ONLY_THIS_COMPUTER` warning,
+    # 58 is blank, 59 is `Applied:` and 60 is `✓ ufw allow 3724/tcp`.
     wants_firewall = mode != "loopback"
     fw_cmds = (
         platform.firewall_commands(backend, ports, rule_prefix=rule_prefix, steamos=on_steamos)
@@ -3417,7 +3454,15 @@ def plan(
             "(most home routers have no hairpin NAT)."
         )
 
-    if backend == "netsh":
+    if wants_firewall and backend == "netsh":
+        # Gated with the rest of the firewall work, and for the same reason:
+        # the network profile is a Windows Firewall setting (it picks which
+        # rule set is in force), so telling the owner to change it is asking
+        # the firewall for something. A `loopback` plan asks for nothing, and
+        # this step survived the first cut of that branch because the test
+        # filtering the manual steps looked for "TCP" and this sentence has
+        # none — see `test_a_loopback_plan_asks_the_firewall_for_nothing`,
+        # which now asserts the whole tuple is empty for this backend.
         manual.append(
             "Windows: set the network profile to Private (Settings → Network & Internet)."
         )
