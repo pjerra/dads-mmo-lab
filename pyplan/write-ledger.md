@@ -54,10 +54,13 @@ descriptions are written by hand.
 | `catalog/composegen.py::write_dotenv::os.replace` | `.env` renamed into place | install time |
 | `catalog/composegen.py::write_dotenv::unlink` | the temp `.env` after a failure | install time |
 | `catalog/composegen.py::write_dotenv::write_text` | the merged `.env`, to a temp name | install time |
+| `channel_setup.py::save_credential::os.open` | **new (8.2a)** this install's channel credential, created owner-only by its open flags rather than by a later chmod | yes — it is written after the round trip answers, which is after the world is up |
 | `channel_setup.py::enable::write_text` | **new (8.2a)** the generated override, rewritten with the keys that turn this install's command channel on | **no — the press refuses while the world is running**, which is the whole shape of that step |
 | `catalog/composegen.py::write_plan::write_text` | the rendered compose files in the server dir | install time; a running stack keeps what it started with |
 | `catalog/families/conf.py::_clear::shutil.rmtree` | a staging directory being cleared | install time |
 | `catalog/families/conf.py::_clear::unlink` | a staged file being cleared | install time |
+| `catalog/families/cmangos.py::_write_secret::os.open` | **the install's generated database password**, into `<server_dir>/.env`'s companion file, owner-only at creation. Invisible to this ledger until 2026-09-07, when the walk widened | install time |
+| `catalog/families/conf.py::_write::os.open` | the replacement conf, to a temporary file beside it, owner-only at creation — the rename is the row below | yes |
 | `catalog/families/conf.py::_write::os.replace` | a conf file renamed into place | yes |
 | `catalog/families/conf.py::_write::unlink` | the temp conf file after a failure | yes |
 | `catalog/families/conf.py::materialise::os.chmod` | that conf file's mode | install time |

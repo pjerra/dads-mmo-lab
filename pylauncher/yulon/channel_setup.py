@@ -43,12 +43,14 @@ caller cannot write a credential file it has not proved.
 
 from __future__ import annotations
 
+import json
+import os
 import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import soap
+from yulon import commands, platform, soap
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
@@ -237,3 +239,129 @@ def _world_env(entry: CatalogEntry, extra: Mapping[str, str]) -> dict[str, str]:
     native = entry.install.native
     entry_env = native.azerothcore.world_env if native is not None and native.azerothcore else {}
     return {**composegen.DEFAULT_WORLD_ENV, **entry_env, **extra}
+
+
+# -- the credential file -----------------------------------------------------
+
+
+CREDENTIAL_MODE = 0o600
+"""Owner-only, and set by `os.open`'s mode rather than by a later `chmod`.
+
+A chmod afterwards is a second step, and the window before it is exactly when
+the file is world-readable. On Windows the mode argument is ignored, which is
+why the test asserts the flags the file was CREATED with rather than reading the
+mode back — a read-back test would pass there for the wrong reason.
+"""
+
+
+def credential_path(game: str, install_id: str, *, config_dir: Path | None = None) -> Path:
+    """Where this install's channel credential lives.
+
+    Named for the game AND the install, so two installs of one game keep two
+    credentials rather than one that overwrites the other.
+    """
+    root = config_dir if config_dir is not None else platform.config_dir()
+    return root / "credentials" / f"{game}-{install_id}.json"
+
+
+def save_credential(
+    verified: Verified,
+    *,
+    game: str,
+    install_id: str,
+    host: str,
+    port: int,
+    config_dir: Path | None = None,
+) -> Path:
+    """Write the credential for an account whose round trip has answered.
+
+    Takes a `Verified` and nothing else, which is how "never persist before the
+    round trip answered" is enforced: the earlier states cannot be passed here.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {
+            "account": verified.account,
+            "password": verified.password,
+            "host": host,
+            "port": port,
+        },
+        indent=2,
+    )
+    # `O_TRUNC` rather than `O_EXCL`: a rotated password has to be able to land
+    # on top of the old one, and refusing that would strand an install whose
+    # credential changed.
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, CREDENTIAL_MODE)
+    with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(payload + "\n")
+    logger.info(f"saved the command-channel credential for {game} to {path}")
+    return path
+
+
+def load_credential(
+    game: str, install_id: str, *, config_dir: Path | None = None
+) -> soap.Endpoint | None:
+    """This install's saved endpoint, or `None` if there is not a usable one.
+
+    Never raises. A stale or hand-edited file is a reason to set the channel up
+    again, not a reason the app cannot open.
+    """
+    path = credential_path(game, install_id, config_dir=config_dir)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return soap.Endpoint(
+            host=str(raw["host"]),
+            port=int(raw["port"]),
+            account=str(raw["account"]),
+            password=str(raw["password"]),
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.info(f"no usable credential at {path}: {type(exc).__name__}")
+        return None
+
+
+# -- create, verify, persist -------------------------------------------------
+
+
+def ensure(
+    *,
+    account: str,
+    password: str,
+    create: Callable[[str, str, int], object],
+    channel: object,
+    game: str,
+    install_id: str,
+    host: str,
+    port: int,
+    config_dir: Path | None = None,
+    state: State | None = None,
+    gm_level: int = 3,
+) -> State:
+    """Move the setup one step: create if it must, verify, and persist if verified.
+
+    One step per call rather than a loop, because the interesting failures are
+    between the steps and a loop hides them. The state it returns is what the
+    caller keeps and hands back next time — which is what stops a failed verify
+    turning into a second account.
+
+    `create` is the install's own account seam (the SRP6 row path this app
+    already has), and it is called only from `Idle`.
+    """
+    current = state if state is not None else Idle()
+    if isinstance(current, Verified | GaveUp):
+        return current
+    if isinstance(current, Idle):
+        create(account, password, gm_level)
+        current = current.created(account, password)
+
+    answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
+    if getattr(answer, "outcome", "") != "yes":
+        logger.info(f"the command channel for {game} did not answer yet; not saving anything")
+        return current.verify_failed()
+
+    verified = current.verified()
+    save_credential(
+        verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
+    )
+    return verified

@@ -15,6 +15,12 @@ call spellings here were chosen against a specific way of being wrong:
 * `run_statement`/`run_file` are the SQL seam's write half. `query()` is
   deliberately absent: it is the read half, and `dbreads` is allowed to call it.
 
+`os.open` counts without its flags being inspected. It is how a file gets a
+private mode at creation time, and over-inclusive is the safe direction for a
+ledger: a read that gets a row costs a line, while a write that gets none costs
+the whole guarantee. It was missing until 2026-09-07, and what found it was this
+test's OTHER direction — a hand-written row that resolved to no site.
+
 `mkdir` is deliberately NOT a write here. Creating an empty directory puts no
 content anywhere, there are twenty-odd of them, and content still needs one of
 the calls above — so nothing can hide behind one. Named rather than omitted.
@@ -37,6 +43,7 @@ _PATH_METHODS = {
 }
 _SQL_WRITE_METHODS = {"run_statement", "run_file"}
 _QUALIFIED = {
+    ("os", "open"),
     ("os", "replace"),
     ("os", "rename"),
     ("os", "remove"),

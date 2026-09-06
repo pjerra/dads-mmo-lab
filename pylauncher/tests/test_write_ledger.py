@@ -91,6 +91,24 @@ def test_deleting_is_a_write_because_the_ledger_is_about_what_can_be_lost() -> N
     assert _sites_in(source) == {"f::unlink", "f::shutil.rmtree"}
 
 
+def test_a_file_created_with_os_open_is_a_write_even_though_it_names_no_mode() -> None:
+    """The hole this walker had until 2026-09-07, found by its own other direction.
+
+    `save_credential` creates its file with `os.open(...) `+ `os.fdopen` so the
+    private mode is in the CREATION rather than in a later chmod. The walker
+    knew `os.replace` and `Path.open` and not this, so the write was invisible —
+    and what surfaced it was the ledger's second direction: a row I added by
+    hand resolved to nothing, which is the check that exists because a table can
+    outlive its code. It caught the reverse instead.
+
+    Every `os.open` counts, without inspecting its flags. Over-inclusive is the
+    safe direction for a ledger: a read that gets a row costs a line, and a
+    write that gets none costs the whole guarantee.
+    """
+    source = "import os\ndef f(p):\n    return os.open(p, os.O_WRONLY | os.O_CREAT, 0o600)\n"
+    assert _sites_in(source) == {"f::os.open"}
+
+
 def test_a_write_inside_a_nested_function_is_attributed_to_that_function() -> None:
     """Otherwise two writes in one module collapse onto one ledger row."""
     source = "def outer():\n    def inner(p):\n        p.write_text('x')\n    return inner\n"
