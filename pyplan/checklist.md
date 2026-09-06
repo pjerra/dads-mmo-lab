@@ -278,7 +278,68 @@
 > the 14.6 s figure refers to. The durations above were taken by the run that did it; what is
 > re-verified here is the geometry, the detached state, and the bytes that arrived.
 
-- [ ] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
+- [x] 7.1 Spine + `AzerothCoreInstaller`, Linux native — `StagedInstaller`/`Stage` extracted from `native.py`, WotLK stage names unchanged and pinned; the 7.1 catalog models (`EmulatorSource.dest`, `PasswordPlan`, `DbFacts`, `ReadyMarkers`, `NativeInstall.family/images/image_prefix/azerothcore`); `ask` forwarded to `ensure_docker`; once-only sudo password (`SudoSession`, `sudo -S`) in provisioning; `docker-buildx` on the dnf and pacman lists; SELinux facts + `{{BIND_LABEL}}` on every host bind line + relabel; `systemd-inhibit`; `install_wiring.py` (probe wiring + the CLI harness); `wait_ready(ReadySpec)`; the proven install's `docker compose config` committed as `tests/data/wotlk-compose-config.json`; wow-wotlk dispatches native on Linux
+  - **TICKED 2026-09-06 on an owner decision, and this bullet says what the tick rests on and
+    what it does not claim.** The owner's words, 2026-09-06 at ~01:50 CEST: *"re-scope the
+    fedora/arch sub-gate and tick 7.1"*. What he had in front of him: ten of the twelve Phase 7
+    boxes ticked (7.10 merged at `2b6a9c6b`, this lane's base), the Ubuntu gate line's clause 15
+    landed by lane `b39`, and the Fedora/Arch line open on its own terms — roughly four hours of
+    Fedora cold-checkpoint provisioning plus an Arch install, against re-scoping that line to what
+    is on evidence. He chose the re-scope. The decision, what it changes and what it leaves alone
+    are `pyplan/phase7-decisions.md`, **Appendix E**.
+    * **What the tick rests on**, by folder: the Ubuntu line's clause-by-clause grading below and
+      its artefacts — `pyplan/gates/7.1-ubuntu-2026-09-04-clean/` (the clean checkpoint, the
+      consent dialog, press 2 reaching `ready`, the account), `pyplan/gates/7.1-ubuntu-2026-08-31/`
+      (the kill mid-build at ninja edge 1314 and the ccache resume) and
+      `pyplan/gates/7.1-client-login/` (both client logins) — plus the Fedora/Arch line's
+      `pyplan/gates/7.1-fedora44-press1.log`, `pyplan/gates/7.1-fedora44-appimage.log` and
+      `pyplan/gates/7.1-arch/71-arch-appimage.log`, read under the OWNER RE-SCOPE paragraph on
+      that line.
+    * **Clause 15 is cited here, not re-graded here.** Lane `b39` graded it MET on its own branch
+      and this lane does not duplicate that grading. Read on 2026-09-06 out of
+      `git -C ../wt-b39 show`, at commit **`8f9de57f`** — the first of `lane/b39`'s commits on top
+      of `cfb4c04f`, and **not merged into `yulon-phase7`** at the commit that ticks this box. The
+      branch is not that commit and has not been since 01:55 CEST: `git -C ../wt-b39 log
+      --format='%h %ad' --date=iso cfb4c04f..lane/b39`, run at 2026-09-06T01:12:46Z (the clock
+      read by `date -u +%FT%TZ` in the same shell command, immediately before the log), printed
+      four commits — `323f738a` (03:00:51 +0200) on `30617293` (02:26:59) on `0ea57bce`
+      (01:54:55) on `8f9de57f` (01:52:39). The line numbers below are `8f9de57f`'s; the three
+      later commits move them. What those three commits did not touch is what is quoted here —
+      `git diff 8f9de57f 323f738a` over that README removes no line containing `23:31:24`,
+      `id 104`, `172.30.48.1` or `press.txt:79` (four readings, zero hits among the removed
+      lines). Of the five ranges cited below four survive to `323f738a` line for line: piping
+      `sed -n '<range>p'` of the `8f9de57f` file through `grep -vxF -f` the `323f738a` file
+      printed 0 absent lines for `:14-18`, `:74-85`, `:161-170` and `:199-219`. `:147-160` is the
+      one range that was reworked (6 of its 14 lines absent at `323f738a`), and the half
+      paraphrased below is the half they kept: at `323f738a:184-186` the measurement still reads
+      ufw `inactive` before the press and `iptables -S | grep -c ufw` = 0 after it; what they
+      retracted is the inference *"this run can prove why"*, which is not repeated here.
+      `pyplan/gates/bug39-lan-press-2026-09-05/README.md:14-18` states what the press closed;
+      `:74-85` is the press through the real `ControllerView` with `QTest.mouseClick`, whose
+      module line is `networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual` at
+      `press.txt:79`; `:161-170` is account `LANGATE`, id 104, made through the Accounts tile;
+      `:199-219` is the 3.3.5a client on `vmhost` at 23:31:24 UTC with `COP_AUTHENTICATE
+      code=AUTH_OK result=TRUE` and the server's own `last_ip 172.30.48.1`, the Hyper-V host's
+      address on the Default Switch (that gloss is at `:222-223`, three lines past the cited range); `:147-160` is the bound that record puts on itself (ufw was
+      inactive before the press and stayed inactive, so the rules it wrote filter nothing on that
+      box today). **Said plainly because it is the weak point of this tick:** those files are not
+      in this tree at the commit that ticks the box. If `lane/b39` merges, its own edit to the
+      Ubuntu line is the grading and this bullet is a pointer; if it does not, clause 15's
+      evidence is a branch away and a reader of `yulon-phase7` alone cannot follow the citation.
+    * **The citation pass the tick costs was paid in the same commit.**
+      `tests/test_docs_pins.py::test_every_test_these_pages_name_by_hand_actually_exists` widens to
+      `phase7-plans/7.1-spine-azerothcore-linux.md` the moment this box reads `- [x] 7.1 `. Before
+      the pass that page presented **141** test names as live, of which **13** resolved to nothing,
+      across **37** sites; after it, **135** live and **0** unresolved, with the thirteen each
+      carrying on its own line the commit that removed it or the words "never written". The pass is
+      a dated `CITATIONS` section at the top of that page; the before/after transcripts and the
+      name-by-name list are `pyplan/gates/7.1-tick-2026-09-06/`.
+    * **What this tick does NOT say.** It does not tick the Phase 7 exit-criteria box, which is the
+      owner's call and stays `- [ ]`. It does not close 7.8. It does not turn the three items the
+      Fedora/Arch line carries into work that was done — they are named on that line under
+      CARRIED. And it does not claim the Ubuntu gate box below: that box's own grading is lane
+      `b39`'s to land, and it is left `- [ ]` in this lane rather than ticked on files this commit
+      does not contain.
   - [ ] Gate: yulon-ubuntu clean checkpoint — **starting state captured** (`docker --version; systemctl is-active docker; id -Gn; ls -d ~/wowserver`, before press 1); press 1: consent dialog + re-login report; re-login; a later press reaches `ready`; kill mid-build, and the resume **recovers the finished objects from the ccache mount** rather than compiling them again; `docker compose config` matches a fixture minted from a DIFFERENT run; auth log `127.0.0.1:8085` read from the authserver container's log, then the realm left advertising an address another machine can REACH — read out of the DATABASE and out of `ready`'s own line in the install transcript, not from `yulon.log` (see §42: the CLI writes none); account + client login from the host after the LAN step
     - **Three clauses were reworded on 2026-09-04, after an audit of a recovered run showed the old wording could not be satisfied by anything that actually happens.** Kept here rather than silently swapped:
       * "**two presses**" → "a later press reaches `ready`". The recovered run took FOUR presses (exit 1, 137, 0, 0) and that is the honest shape of a gate that includes a kill-mid-build: the kill costs a press. Counting presses was never the property worth pinning.
@@ -400,6 +461,14 @@
         captured, under either wording. The clause is met when a run records
         `grep -c 'UPDATE' ~/.local/share/yulon/yulon.log` together with the realmlist row at
         `ready`, and shows the count is exactly the one `ready` issues rather than zero or many.
+        **RULED ON BY THE OWNER, 2026-09-06.** Ticking 7.1 accepts clauses 10-12 as recorded
+        here — the `no UPDATE` reading, reworded 2026-09-05 to what the engine does, with the
+        realmlist row and `ready`'s own transcript line standing in for a `yulon.log` count that
+        has never been captured under either wording. The owner's sentence was *"re-scope the
+        fedora/arch sub-gate and tick 7.1"*, and this is what the tick implies about these three
+        clauses; no further reason for it is recorded, and none is invented here. The
+        `yulon.log` count above stays owed and is not earned by the tick. Decision:
+        `pyplan/phase7-decisions.md`, Appendix E.
       * **"account" — MET, through the GUI's own seam.** `gate71-realm-and-account.log`, TASK 2:
         `ControllerServices.for_entry` → `services.create_account('yulon', <password>, 3)` →
         `AccountResult(username='YULON', account_id=101, created=True, gm_level=3)`, the row read
@@ -682,7 +751,95 @@
       * **A note on the edge count.** Every earlier record says 1829 ninja edges; core `413bea61a`
         has **1834**. A watcher written for `/1829]` never fired, which is why the first kill
         landed at 1226 rather than ~900. Pin the total from the log, not from a previous run.
-  - [ ] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
+  - [x] Gate: packaged artifact on clean Fedora 44 (SELinux, password sudo, moby-engine + buildx) and clean Arch (pacman + buildx)
+    - **OWNER RE-SCOPE 2026-09-06 — this box is ticked on narrower terms than the line above
+      asks for, and the original wording is kept above rather than rewritten.** The owner's
+      words, ~01:50 CEST: *"re-scope the fedora/arch sub-gate and tick 7.1"*; the alternative
+      put to him was roughly four hours of machine time (a Fedora run from the cold
+      `clean-desktop` checkpoint plus an Arch install through the artifact). Decision recorded
+      at `pyplan/phase7-decisions.md`, Appendix E.
+      * **What the line asked for:** a packaged artifact installing a server on a clean Fedora 44
+        box (SELinux, password sudo, moby-engine + buildx) **and** on a clean Arch box (pacman +
+        buildx).
+      * **What IS on evidence, by file and line, re-read on 2026-09-06 at `2b6a9c6b`:**
+        * *Fedora, the engine and the password sudo* — `pyplan/gates/7.1-fedora44-press1.log`,
+          27 lines: the consent question at `:14` answered `y` (`:15-17`, `docker group consent
+          for pk: granted`, stamped `2026-08-31 17:55:36`), **the sudo password asked at `:18`
+          and accepted at `:21`** (`sudo password accepted (attempt 1)`) — the run the *Fedora 44
+          progress, 2026-08-31* bullet on this line calls *"the first time `SudoSession` has ever
+          been exercised"*, on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop`
+          checkpoint. Password sudo there is a property of that checkpoint and not a fact about
+          the fleet: `SudoSession`'s own docstring (`pylauncher/yulon/platform.py:2432`) names
+          "clean Fedora, Arch" as password-sudo boxes, and `ssh yulon-fedora 'sudo -n -l'` at
+          2026-09-06T01:12:51Z printed `(ALL) NOPASSWD: ALL` — the running box is not the
+          checkpoint. The same log carries the dnf line at `:22`
+          (`dnf -y install moby-engine docker-compose docker-buildx`), the re-login refusal at
+          `:24-25` and `child exited 1` at `:27`. The build press is
+          `pyplan/gates/7.1-fedora44-press2.log` (5,853 lines) and the re-press is
+          `pyplan/gates/7.1-fedora44-press3.log` (58 lines).
+        * *Fedora, the packaged artifact driving a real install* —
+          `pyplan/gates/7.1-fedora44-appimage.log`, 20 lines, one line per stage:
+          `systemd-inhibit` at `:11`, the containerized clone at `:12-13` with `:z` on the bind
+          (the SELinux label this box is here for), `build_staged()` at `:15` and
+          `start_database()` at `:16` (37 minutes apart), `ac-db-import finished` at `:17`,
+          `compose up -d` at `:18`, and **`install of wow-wotlk finished` at `:19`**.
+          **A date this pass could not reconcile, recorded rather than smoothed:** every
+          timestamp in that file reads `2026-09-03` (`:19` is `2026-09-03 22:04:35`), while the
+          bullet below headed *THE APPIMAGE RUN IS DONE, 2026-09-04* dates the same run
+          2026-09-04 and quotes the same `22:04:35`. One of the two is wrong about the day;
+          which one was not determined here, and no box turns on it.
+        * *Arch, the artifact* — `pyplan/gates/7.1-arch/71-arch-appimage.log`, 24 lines: the
+          artifact and its sha256 at `:3-4`, `fuse2` and `fuse3` both absent at `:5`, the plain
+          launch refused at `:8-11` (`No suitable fusermount binary found on the $PATH` /
+          `Cannot mount AppImage`), and the same artifact under `--appimage-extract-and-run`
+          reaching the app's own update check at `:24`.
+        * *Arch, the engine* — recorded on this line as a 2026-09-01 pass (all nine stages,
+          schemas 22 / 111 / 315 / 30, compose diff PASS). **It has no committed transcript:**
+          `pyplan/gates/7.1-arch/` holds one file, the AppImage log above, and `grep -rl
+          yulon-arch pyplan/gates/` on 2026-09-06 returned only `7.4c-m910q/claude-activity.log`.
+          The Arch engine claim is therefore prose on this line, not an artefact a reader can
+          re-derive, and the re-scope does not upgrade it.
+        * *Windows, the engine* — the 2026-09-01 bullet on this line, whose own evidence log was
+          destroyed the same night by `run-gate.cmd`'s `>` redirect (the bullet after it says so).
+          It is context, not part of what this box asks for; Windows is 7.7's line and 7.7 is
+          ticked on its own evidence.
+      * **What is NOT on evidence and is CARRIED rather than re-run:**
+        1. **Fedora from a cold checkpoint, with the artifact doing the provisioning.** The
+           2026-09-04 AppImage run was made on a box cleaned by deleting the previous install,
+           so Docker was already there and `pk` was already in the `docker` group; the consent
+           dialog, the group join and the re-login belong to the 2026-08-31 CLI-harness run.
+           No single Fedora run carries both halves.
+        2. **Fedora kill-mid-build.** Never exercised on Fedora; the clause is carried on the
+           Ubuntu line by the 2026-08-31 set.
+        3. **An Arch install through the artifact.** Nothing was installed on Arch by the
+           artifact: the run stops at launch for want of `fuse2`. This item needs either that
+           package present on the box or a launcher that names it, and then a real install.
+      * **Where those three are owed, and how that was decided.** They stay on this line, in the
+        CARRIED bullet above, and are not moved to a Phase 8 line or to a `bug-checklist.md`
+        section. Decided by reading what this tree already does with gate work it has not run,
+        rather than by preference: 6.3's line (this file, line 126) keeps its own — *"Still
+        owed, and the reason the box stays unticked"*; the **Phase 6 exit criteria** line (line
+        240) says *"The items above stay owed"* after the owner lifted its gate; 6.5's macOS
+        accounts sub-box (line 218) is **ticked** and still carries *"Login through a real client is
+        still owed (needs a client install, out of scope for this pass)"* on its own line; and this
+        very line has carried a **Still owed on Fedora** bullet since 2026-09-04. Not one of those
+        was moved elsewhere, and the third shows a ticked box carrying its own leftovers.
+        `bug-checklist.md`'s numbered sections are defects and owner decisions about defects
+        (§28 packaging, §36, §39, §41), not gate coverage nobody has run; and the Phase 8
+        block is a `[blocked]` feature list with no gate entries at all. **One half of item 3 is
+        a defect and has no § of its own:** the AppImage tells an Arch user to *"check your FUSE
+        setup"* and links a wiki where the remedy is `pacman -S fuse2`, which this line has
+        recorded since 2026-09-04 without filing it. That is stated here; filing it was not part
+        of this lane and nobody has decided to.
+      * **Why this box ticks while the Ubuntu box above does not, and what the guard thinks of
+        it.** Both shapes are already in this file, so neither is new: 7.2 reads `- [x]` with its
+        own gate box still `- [ ]`, and the third gate box under 7.1 was ticked on 2026-09-03 by
+        pointing at 7.3's evidence rather than by a fresh run. `tests/test_docs_pins.py` is
+        indifferent either way: `_plans_whose_phase_the_checklist_ticks()` matches
+        `^- \[x\] (\d+\.\d+[a-z]?) ` at column 0, and every `Gate:` box is indented two spaces,
+        so the widening comes from the 7.1 line alone — checked on 2026-09-06 by running that
+        function against this file on `yulon-fedora` (it answered the three plan pages 7.1, 7.2
+        and 7.3), not by reading the regex.
     - **ARCH, 2026-09-04: the artifact does not start on a clean Arch box, and the app underneath it
       is fine.** Evidence: `pyplan/gates/7.1-arch/71-arch-appimage.log`. Same artifact as the Fedora
       run — sha256 `cb7c1b7e751da93ffd81569bd8acc671a9f81832296f6509356765074bb1bf1b`, verified on
