@@ -3256,11 +3256,12 @@ def plan(
     # `realmlist_sql` (one UPDATE through `sql.run_statement`).
     # `client_realmlist` is shown, not run — `apply()` puts it in its report
     # and the Networking tab prints it as "Players set realmlist to".
-    # `manual_steps`, `warnings` and `refusals` are text for the owner, and
-    # `manual_steps` is the one of those that ever carries a firewall
-    # instruction ("Windows: set the network profile to Private", appended
-    # only under the `netsh` backend and only when `wants_firewall`, so never
-    # under `loopback`). Beyond the fields, applying a plan writes one file:
+    # `manual_steps`, `warnings` and `refusals` are text for the owner. The
+    # firewall instructions among that text (the firewalld zone warnings, the
+    # backend-`none` "allow inbound TCP ... by hand" step, the `netsh` "set the
+    # network profile to Private" step) were each read under a `wants_firewall`
+    # gate on 2026-09-06, so none is emitted under `loopback`; no claim is made
+    # here about which field carries what else. Applying a plan writes one file:
     # after a successful realmlist UPDATE it records the chosen mode in
     # `.yulon-network.json` (`record_network_intent()`, called from
     # `apply()`) — this branch's own feature. Nothing in that list is a
