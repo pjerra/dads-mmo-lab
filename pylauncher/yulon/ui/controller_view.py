@@ -490,11 +490,27 @@ def _for_tbc(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1b, and every fact under these two is this tree's own: `characters`,
+    # `realmd`, and a bot marker that is an account prefix with no registry
+    # table behind it. The seams are the same; nothing about them is inherited.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        controller=tbc_controller.TbcController(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         # No `prompt=`: this package binds this console's prompt and the side of
         # it the answer arrives on, both from the same catalog entry. Passing

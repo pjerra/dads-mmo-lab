@@ -21,6 +21,7 @@ hands the decision to whoever wires the view.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from yulon import docker
@@ -38,6 +39,7 @@ class TbcController(Controller):
         wsl_distro: str | None = None,
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
+        pre_stop: Callable[[], object] | None = None,
     ) -> None:
         super().__init__(
             docker_ctl.SPEC,
@@ -45,6 +47,7 @@ class TbcController(Controller):
             wsl_distro=wsl_distro,
             import_probe=import_probe,
             reset_unfinished=reset_unfinished,
+            pre_stop=pre_stop,
         )
 
     def wait_ready(self, realm_host: str = "", realm_port: int = 0, **kwargs: float) -> bool:
