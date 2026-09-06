@@ -64,6 +64,9 @@ class _FakeRunner:
         if cmd[:3] == ["docker", "compose", "stop"]:
             self.ps_lines = ""  # compose really stopped them
             return _completed()
+        if cmd[:3] == ["docker", "compose", "down"]:
+            self.ps_lines = ""  # and compose really removed them
+            return _completed()
         if cmd[:5] == ["docker", "compose", "up", "-d", "--no-deps"]:
             # `start_staged()` confirms with `docker ps` that they really came
             # up; a double that stayed silent would mean "nothing started".
@@ -599,3 +602,63 @@ def test_wotlk_controller_port_conflicts_flags_foreign_bindings_on_3724_and_8085
     assert excinfo.value.ports == (3724, 8085)
     assert "3724" in str(excinfo.value)
     assert "8085" in str(excinfo.value)
+
+
+# -- the pre-stop log snapshot (Phase 8.1a) --------------------------------
+#
+# The hook is a plain callable, injected. The controller must not know where a
+# snapshot goes, what it is called or that `logsnap` exists — it knows only that
+# something wants to run before the container it is about to stop is gone.
+
+
+def test_stop_saves_the_log_before_it_stops_anything(fake_runner: _FakeRunner) -> None:
+    """Before, not after: `compose stop` is what takes the log away."""
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+    stopped_when_called: list[bool] = []
+
+    def hook() -> None:
+        stopped_when_called.append(
+            any(c[:3] == ["docker", "compose", "stop"] for c in fake_runner.calls)
+        )
+
+    Controller(SPEC, SERVER_DIR, pre_stop=hook).stop()
+
+    assert stopped_when_called == [False], "the snapshot ran after the stop, or not at all"
+
+
+def test_a_snapshot_that_raises_does_not_prevent_the_stop(fake_runner: _FakeRunner) -> None:
+    """Evidence collection may fail; the action the user asked for still happens."""
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+
+    def hook() -> None:
+        raise RuntimeError("the log driver is wedged")
+
+    assert Controller(SPEC, SERVER_DIR, pre_stop=hook).stop() is True
+    assert any(c[:3] == ["docker", "compose", "stop"] for c in fake_runner.calls)
+
+
+def test_remove_saves_the_log_too_because_it_destroys_the_container(
+    fake_runner: _FakeRunner,
+) -> None:
+    """`stop()` only stops the container; `remove()` takes the log with it."""
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+    calls: list[str] = []
+
+    Controller(SPEC, SERVER_DIR, pre_stop=lambda: calls.append("snap")).remove()
+
+    assert calls == ["snap"]
+
+
+def test_a_controller_with_no_hook_stops_exactly_as_it_did_before(
+    fake_runner: _FakeRunner,
+) -> None:
+    """Every existing caller constructs without one and must see today's behaviour."""
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+    Controller(SPEC, SERVER_DIR).stop()
+    with_hook = list(fake_runner.calls)
+
+    fake_runner.calls.clear()
+    fake_runner.ps_lines = "t-db\nt-auth\nt-world\n"
+    Controller(SPEC, SERVER_DIR, pre_stop=None).stop()
+
+    assert fake_runner.calls == with_hook

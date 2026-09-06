@@ -17,6 +17,7 @@ Phase 2.3's `modules.py`, layered on later, never stubbed in this class.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -104,6 +105,7 @@ class Controller:
         wsl_distro: str | None = None,
         import_probe: docker.ImportProbe | None = None,
         reset_unfinished: docker.ResetUnfinished | None = None,
+        pre_stop: Callable[[], object] | None = None,
     ) -> None:
         self.spec = spec
         self.server_dir = server_dir
@@ -121,6 +123,11 @@ class Controller:
         # Optional, and separate from the probe: without it `repair_import()`
         # refuses a half-written database instead of making it unimportable.
         self.reset_unfinished = reset_unfinished
+        # Runs immediately before anything that ends this install's containers.
+        # A plain callable, so this class does not learn where a log snapshot
+        # goes or that `yulon.logsnap` exists; what it does learn is the one
+        # thing only it knows — the moment before the evidence is destroyed.
+        self.pre_stop = pre_stop
 
     # -- queries ---------------------------------------------------------
 
@@ -289,6 +296,7 @@ class Controller:
             if there was nothing to stop. This used to be discarded, so the tab
             said the same thing either way (review, 2026-08-22).
         """
+        self._save_evidence()
         return docker.stop_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
 
     def remove(self) -> bool:
@@ -302,7 +310,24 @@ class Controller:
             True if this install had containers and they are now gone, False if
             there was nothing of it to remove.
         """
+        self._save_evidence()
         return docker.remove_staged(self.spec, self.server_dir, wsl_distro=self.wsl_distro)
+
+    def _save_evidence(self) -> None:
+        """Run the pre-stop hook, and never let it stand between a user and a stop.
+
+        Every exception is swallowed on purpose, including the ones a lint rule
+        would rather see narrowed. The hook's own module already answers its
+        expected failures with a message instead of raising; what is caught here
+        is the unexpected — and the alternative to catching it is a Stop button
+        that does nothing because collecting a log file went wrong.
+        """
+        if self.pre_stop is None:
+            return
+        try:
+            self.pre_stop()
+        except Exception as exc:  # noqa: BLE001 - a stop must not depend on evidence
+            logger.warning(f"the pre-stop hook failed, stopping anyway: {exc}")
 
     def import_state(self) -> docker.ImportState:
         """Ask this install's databases whether the one-shot import ever finished.
