@@ -70,7 +70,7 @@ may reorder; it may not add or remove a feature without a new owner answer):
 | 8.3 | Accounts: list, set password, GM level | all four; one box per family | Q8ii, Q3 |
 | 8.4 | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
 | 8.5 | Browse Bots | all four; one box per family | Q4 |
-| 8.6 | My Party | WotLK only, by a server-side route (the mod-ale Lua bridge over SOAP); no client addon | Q2b, Q4, Q5 |
+| 8.6 | My Party | WotLK only, by a server-side route — the mod-ale Lua bridge over SOAP, which is the only route owner answer 5 leaves and which **has never been recorded working**: the one live note about it (`bridge.rs:189-195`) records it failing on 2026-08-20 with the deploy reporting success. 8.6's first question is whether the route works at all; no client addon | Q2b, Q4, Q5 |
 | 8.7 | Module update checks; module manifests for TBC, Vanilla and Tortoise | all four | Q8iii |
 | 8.8 | Steam integration | Linux / Steam Deck only | Q2d |
 | 8.9 | Uninstall / purge, as `phase8-decisions.md` | all four; gated on WotLK and one CMaNGOS game | Q2g |
@@ -87,8 +87,11 @@ folder write (Q5); heal and summon-NPC unless the bridge 8.6 adopts covers them 
 (online-only on every tree); the Playerbot Command Server as a channel (unauthenticated, off the
 world thread); Play Together (a third-party service).
 
-**Phase 8 code may start now** (Q1), on `yulon-phase8` stacked on PR #143, before the Phase 7
-exit box is ticked; it still waits for this scoping's review cycle (the 2026-09-04 decision).
+**8.1 may start now** — answer 1 verbatim is "8.1 may start now, on yulon-phase8 stacked on #143",
+which released that step and not the whole phase, and which declined the recommendation that it
+wait for #143 to merge. It waits neither for that merge nor for the Phase 7 exit box; it still
+waits for this scoping's review cycle (the 2026-09-04 decision), and the rest of Phase 8 follows
+8.1.
 
 ---
 
@@ -183,7 +186,7 @@ preference.
 |---|---|---|
 | 1 | The enable step recreates the world with a bare `docker compose up -d <world>` | It calls **`docker.start_staged()`** (`docker.py:702`). The worldserver declares `depends_on: ac-db-import: condition: service_completed_successfully` (`base.yml.tmpl:276-277`), so a bare `up -d` evaluates that dependency; the docstring records what that did before it was fixed — "was killing the database" (`docker.py:707-711`). |
 | 2 | One press recreates a running world after a sentence | **Two presses, armed**, reusing the tab's own idiom (`ui/controller_view.py:628-646`), with the paragraph naming the disconnect and the up-to-300-second save drain. One press only when the world is down. Grafted from B. |
-| 3 | Nothing checks that the world survived being changed | **A failed SOAP bind is fatal, and differently per tree.** AzerothCore logs and calls `World::StopNow(ERROR_EXIT_CODE)` — a graceful shutdown (`ACSoap.cpp:41-46`). TBC and Vanilla call **`exit(-1)` from the SOAP worker thread** (`MaNGOSsoap.cpp:43-47`), killing the process with no character saves; both templates set `restart: unless-stopped`, so that is a restart loop. 8.1 therefore proves the port is free *before* it writes anything, and its Definition of done gains: after the recreate the world is running, the restart count has not grown, and this run's ready marker is in the log. On failure the app rolls the key back and says so. |
+| 3 | The press writes the configuration and recreates a running world, guarded by a probe that the port is free | **A failed SOAP bind is fatal, and differently per tree.** AzerothCore logs and calls `World::StopNow(ERROR_EXIT_CODE)` — a graceful shutdown (`ACSoap.cpp:41-46`). TBC and Vanilla call **`exit(-1)` from the SOAP worker thread** (`MaNGOSsoap.cpp:43-47`), killing the process with no character saves; both templates set `restart: unless-stopped`, so that is a restart loop. A probe cannot make this safe: between checking the port and binding it there is a window, and a bind fails for reasons a probe cannot see. So **the enable press requires the world stopped** — the adversarial review's remedy, and it is smaller than the guard it replaces. The configuration is written while the server is down, the user's ordinary Start brings it up through `docker.start_staged()`, and the failure becomes "the server I just started did not come up", which the app already knows how to show and which costs no running player their session. The Definition of done gains: after the start the world is running, the restart count has not grown, and this run's ready marker is in the log; on failure the app rolls the configuration back and says so. The two-press arm is then unnecessary, because there is nothing running to interrupt. |
 | 4 | The published-bindings read proves 7878 is loopback-pinned | At `7bc5ebd3` it was a **global** scan of every container's ports (`docker.py:2302`). It is filtered by compose project — the ownership proof the install guard already uses — before it can refuse anything. |
 | 5 | The bot clause takes the catalog value, with a comment about where the live one would be | The prefix is **resolved the way the server resolves it**, and the three trees differ. AzerothCore consults `AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX` in the environment and it **wins over** the file (`AC Config.cpp:540-552`). TBC and Vanilla consult `Mangosd_AiPlayerbot_RandomBotAccountPrefix` — prefix `Mangosd_` from `SetSource(configFile, "Mangosd_")` (`TBC Main.cpp:156`), dots to underscores, **case preserved** — and it also wins, applied at parse time (`Config.cpp:75-78`). Tortoise has no environment layer at all. The resolver reports which source answered, refuses an unreadable or empty prefix rather than answering, and requires a safe character set before the value reaches SQL. Grafted from B and C, and extended by the read. |
 | 6 | The CMaNGOS `account set password` rows are marked unverified | **Verified today.** All three CMaNGOS-lineage trees take three arguments: two password arguments extracted and both required (`TBC Level3.cpp:1132`, `VAN :1093`, and Tortoise's handler). The unverified flag stays in the model for what is still unread. |
@@ -219,10 +222,10 @@ for a file that is not there teaches a reader to discount the table.
 | Delivery | `channel.py` (new) | The answer type, the channel protocol, its **two** implementations — SOAP and attach (owner answer 10 refused the third) — and the ranking that picks one from the entry; one lock per install covering both transports, the Console tab's attach included; mapping a transport failure to a reason from container state. **A mutation on the attach transport is indeterminate until its own verify read answers**: that transport cannot separate a reply from the server's own asynchronous output (`console.py:10-12`, `:522-527`), so an action with no verifier is not offered there | Contain command text; retry a write after a timeout; contain UI |
 | Text | `commands.py` (new) | The command built from the entry's template; the quoting rule; argument validation; and the one predicate that both decides whether a control is drawn and supplies the sentence when it is not | Send anything; know a container name |
 | Reads | `dbreads.py` (new) | The typed reads over the existing SQL seam (`apply.py:504`): bot clause, online counts, item search, teleport targets, characters, accounts, bots, mail counts, group members | Call the write seam — asserted over the AST, not by grep |
-| Setup | `channel_setup.py` (new) | Per-tree enable, the app account's create-verify-persist state machine, the credential file under the app's config directory, and the rollback when the world does not come back | Persist before a round-trip has answered; rewrite the password of any account but its own |
+| Setup | `channel_setup.py` (new) | Per-tree enable **through `docker.start_staged()`, never a bare compose recreate** (correction 1); the app account's create-verify-persist state machine; the credential file under the app's config directory; and the rollback when the world does not come back | Persist before a round-trip has answered; rewrite the password of any account but its own |
 | Evidence | `logsnap.py` (new) | The pre-stop log snapshot: this install's world container resolved through its own compose project, a bounded tail, a partial file renamed on success, retention that never prunes the file just written | Block a stop, on failure or on a hang |
 | Verdict | `dashboard.py` (new) | Composing container state and the two counts into a verdict with three-valued fields; the poll budget | Fire a world-thread command on a timer |
-| Features | `gm.py`, `party.py`, `purge.py`, `steam.py` (new) | One feature family each, every action shaped capability, command, channel, verify read | Build SQL; write into a client folder |
+| Features | `gm.py`, `party.py`, `purge.py`, `steam.py` (new) | One feature family each, every action shaped capability, command, channel, verify read; `purge.plan()` returns the existing three-valued ownership type rather than a fourth one (correction 9) | Build SQL; write into a client folder |
 | Surface | `ui/widgets/outcome.py`, `ui/characters_view.py`, `ui/bots_view.py`, `ui/uninstall_dialog.py` (new) | Rendering an answer in all three outcomes; the two new tabs as sub-views that signal up and never reach up | Contain business logic, SQL, command text or a subprocess |
 | Changed | `controller.py`, `docker.py`, `apply.py`, `accounts.py`, `composegen.py`, `ui/controller_view.py`, `main.py` | Additive only: a pre-stop snapshot hook; a bounded log tail; a running-state seam checked inside the SQL step; a password reset for one named account; one render token and an override re-render; new service fields and tabs; one signal connection | — |
 
@@ -245,7 +248,7 @@ with a citation per value. What matters at this level is the shape of the differ
 | The command then runs as | console, no level check | console level, regardless of the caller | console level, account id 0 |
 | A failed bind | graceful shutdown | **immediate exit, no saves** | — |
 | Items per mail | 12 | TBC 12, **Vanilla 1** | **1** |
-| Set a character's level | yes | yes | **no such command** |
+| Set a character's level | yes | yes | **no console route found** — the two handler names were searched and are absent; the reader did not search that tree's whole command table, so this is "none found", not "none exists" |
 | Rename | a subcommand | a subcommand | a top-level command |
 | GM level lives in | the access table | the account row | the account row, **cached in memory** — the command route is the only one a running server sees |
 | Bot marker | registry types **or** account prefix | account prefix only | account prefix only |
@@ -267,8 +270,8 @@ provides the in-game half for WotLK after the LAN step.
 
 | Step | Delivers | Gate |
 |---|---|---|
-| **8.1a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text, read and setup modules; the password reset; the override re-render; the Server tab's channel group | WotLK on the Ubuntu VM, then native Windows on the gate box (the first command channel that has ever answered there); TBC on the test box; **Vanilla on a fresh throwaway install on the test box (answer 9), the same install 8.9 needs, so one compile serves both**; Tortoise's attach-only sentence |
-| **8.2** | Dashboard verdict and the pre-stop log snapshot | All four; the crash-loop rendering forced once |
+| **8.1** | **Observability first**: the pre-stop log snapshot, the restart-loop verdict, the dashboard's reads and the bot-marker resolver, and the interlock that disables commands on an unstable server. None of it needs the channel — the counts are database reads and the snapshot is two docker commands — and all of it is what the next step needs if that step goes wrong. The write ledger and its test land here too, with the first new write sites | All four, one box per family; the crash-loop rendering forced once |
+| **8.2a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text and setup modules; the password reset; the override re-render; the Server tab's channel group. **The enable press requires the world stopped** | WotLK on the Ubuntu VM, then native Windows on the gate box; TBC on the test box; **Vanilla on a fresh throwaway install on the test box (answer 9), the same install 8.9 needs, so one compile serves both**; Tortoise's attach-only sentence |
 | **8.3** | Accounts: list, set password, GM level | All four; the client logs in with the new password and is refused the old |
 | **8.4** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
 | **8.5** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
@@ -277,9 +280,13 @@ provides the in-game half for WotLK after the LAN step.
 | **8.8** | Steam, Linux and Steam Deck only | A machine with Steam — none exists on this side |
 | **8.9** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
 
-8.1a first; 8.2 after it; 8.3 and 8.5 after 8.2 and independent of each other; 8.4 after 8.3; 8.7
-independent after 8.1a; 8.6 after 8.5 and the rebuild; 8.9 last, because it deletes the record 8.1
-creates. Phase 7's controller-surface gate and its regression pass are re-run before the exit box,
+8.1 (observability) first, because it is what makes 8.2's failure legible; then 8.2a for WotLK and
+its lettered siblings per family; 8.3 and 8.5 after that and independent of each other; 8.4 after
+8.3; 8.7 independent once 8.2a exists; 8.6 after 8.5 and the rebuild. **No family's 8.3 to 8.7 half
+runs before that family's own 8.2 letter.** 8.9 is not last: its WotLK half runs early, on its own
+throwaway install, because a destructive recovery path validated after eight steps have mutated
+installs is validated too late; its Vanilla half consumes the shared throwaway install at the end
+of that box's sequence. Phase 7's controller-surface gate and its regression pass are re-run before the exit box,
 because the base controller and the service assembly both change.
 
 ---
@@ -394,7 +401,10 @@ a claim.
 ## What the implementer should NOT build yet
 
 - No fourth transport: no remote-access console, no playerbot command server, no Lua bridge on
-  Tortoise, **and no writer for Tortoise's command queue** — answer 10 makes its Phase 8 actions
+  Tortoise, **and no remote-access console** — `Ra.Enable` stays 0 and 8.1's gate asserts nothing
+  is listening on 3443, because a second remote channel left at its shipped default while the first
+  is deliberately opened is the same class of finding as the playerbot command server; **and no
+  writer for Tortoise's command queue** — answer 10 makes its Phase 8 actions
   Linux and macOS only, so on native Windows the tab carries the reason instead of a slower route.
   The playerbot command server is closed in the same press that opens SOAP, and its closure is
   proved from inside the container.
@@ -430,6 +440,141 @@ a claim.
 
 ---
 
+---
+
+## Review findings and what was done with them
+
+Three reviews of these four documents, run 2026-09-06 after the panel reported: an adversarial
+review by a different model family (Codex, five findings), a superpowers review (twenty-three), and
+an independent third review of the process and the record (twenty-one). Each reviewer's findings
+were then put to the other two rather than concatenated, and what follows is the reconciliation.
+**Forty-nine findings, forty-six applied, three refuted with the reason, none left unanswered.**
+
+**The reviews did not read one artefact.** The first two read `c1318c97`/`e125be06`; the third began
+at that tip and finished after `35a99953` landed fifteen corrections mid-read, which it noticed and
+said so. So a finding that reads as refuted below may instead have been fixed before it was raised;
+where that happened it is marked *closed before raised* rather than refuted.
+
+### Where the three agreed, and what it changed
+
+Three findings arrived independently from more than one reviewer. Each is applied.
+
+| Finding | Raised by | What changed |
+|---|---|---|
+| The listener's bind address was described as the container's loopback, which is the exact defect this page rejects design B for | superpowers; implied by the adversarial review's port analysis | "The cut" and Appendix A now say bound to all interfaces **inside** the container and published on the host's loopback only, and 8.2a's proof is a round-trip **from the host** |
+| Gear sets are promised on four families on an inventory join read on one | adversarial; third | 8.4b, 8.4c and 8.4d carry the read as a prerequisite; until it is done, gear sets are WotLK's alone |
+| The Steam box is mandatory for the exit and its machine does not exist | adversarial; superpowers | 8.8 carries `[blocked]` on hardware and the exit line names it as a carve-out, the way Phase 7's exit line names macOS |
+
+### The three findings that changed the shape of the phase
+
+**The observability step now comes before the command channel** (adversarial review, finding 3).
+As written, 8.1 recreated servers and could produce a save-less restart loop on two of four trees,
+while restart-loop detection, the command interlock and the pre-stop log snapshot all arrived in
+8.2 — so the first live gate would have run the highest-risk change with none of the instruments
+this page says are needed, and a rollback could have destroyed the container log that would explain
+the failure. The two steps swapped. It costs nothing: the dashboard's counts are database reads and
+the snapshot is two docker commands, and neither needs the channel.
+
+**The enable press requires the world stopped** (adversarial review, finding 2). The page had a
+probe that the port is free before writing. That is check-then-act: there is a window between the
+probe and the bind, and a bind fails for reasons a probe cannot see. Requiring the world stopped
+removes the hazard instead of warning about it, and it is *smaller* than the guard it replaced —
+the configuration is written while the server is down, the user's ordinary Start brings it up
+through the staged start that Phase 7 already proved, and the two-press arm becomes unnecessary
+because there is nothing running to interrupt.
+
+**Every step is now lettered per family** (third review, finding 3). Owner answer 3 said "one box
+per family"; it had been applied to the channel step and to no other, so six steps were single
+boxes reading "all four". The operator judge had given the operational reason and it is the
+deciding one: a coarse box cannot tick until the slowest family passes, and one family is blocked
+behind a recompile. Twenty-nine boxes, each tickable on its own evidence.
+
+### The three findings that were about this page telling an untruth
+
+Each is a correction to the record, not to the plan, and each was mine.
+
+1. **The Lua bridge was described as having run live; the note records it failing.** The comment
+   cited says the *silent-bridge bug* was found live on 2026-08-20 — the deploy reporting success
+   while every bridge command answered "Command does not exist". I wrote that the notes record it
+   "running live". That sentence was the only live evidence behind the one route owner answer 5
+   leaves for My Party. The delta and 8.6 now say what the note says, and 8.6's first question is
+   whether the route works at all, with a negative answer named as a legitimate outcome.
+2. **A could-not-ask was published in a table headed "settled by reading".** The row said the
+   AzerothCore image ships `curl` and no `iproute2`; I wrote it from a grep of the apt lines rather
+   than a read of the stage graph, while two judges had recorded that exact question as unsettled.
+   Read properly, the worldserver stage installs neither — the `curl` is in two other stages. Both
+   halves were wrong and the substitute instrument the row prescribed did not exist. Corrected at
+   `35a99953`; the third review re-read the stage graph and confirmed the correction.
+3. **Owner answer 1 was widened in one document and narrowed in two.** The owner released `8.1`,
+   on the branch stacked on the Phase 7 pull request, declining the recommendation that it wait for
+   that merge. One document released the whole phase; two re-imposed the merge condition, including
+   the text that would become the roadmap. All three now say what the owner said.
+
+### Applied without further comment
+
+Dropped judge requirements restored: the remote-access console asserted absent on 3443 alongside
+the playerbot command server (two judges had required it; only the second had landed); the
+Console-tab route removed from 8.2a and 8.2b, because the maintainer required it become its own
+sub-step behind the capability predicate and that reversal had gone unrecorded; corrections 1, 4
+and 9 carried into the architecture table rather than living only in the table of corrections.
+
+Hedges restored to their sources: Tortoise's missing set-level command is now "no console route
+found", because the read searched two handler names and not that tree's whole table; the reads
+behind the six "settled by reading" facts are being committed rather than summarised.
+
+Citation and record fixes: four citations off by a line or a range; the delta's declared path root,
+which said `pylauncher/` while most citations are relative to the package inside it; the method
+note that said eight questions when the record holds ten, two of them answered after the judging;
+an appendix that reported an answered question as open; both stated reasons for rejecting design C,
+each wider than that design's own text; and present-tense assertions about the tree pinned to the
+revision they were measured at.
+
+Scope and gate fixes: the write ledger belongs to 8.1a, where the first new write sites appear,
+rather than only to the exit criterion; every gate line names its host, because this project has
+already paid once for "the Windows box" being ambiguous between two Windows boxes; no gate restores
+a checkpoint on the VM holding the 7.2 install that six later boxes are gated against; two
+definitions of done that proved a value was declared now prove it arrived; the delivery order names
+the lettered boxes and states that no family's later half runs before its own channel box; and the
+shared throwaway install's lifetime is stated across the seven boxes that need it rather than the
+two that were named.
+
+Evidence collected and then unused, now carried: the leading-dot rule for command text, the
+case-sensitive character-name lookup that answered "not online" for an online character in the
+prior art, and the escape character that survives a stricter SQL mode — all three were read, all
+three land on paths that take typed text, and none had reached either document.
+
+### Refuted, with the reason
+
+Three findings do not hold as stated.
+
+1. **"The bot-marker warning is a two-outcome collapse."** The third review read the marker's
+   three outcomes as two. They are three and are gated: refuse when the live value cannot be read,
+   warn when it reads and matches nothing while characters exist, list when it matches — 8.1a's
+   Definition of done exercises the first two with a fixture that violates one rule each. The
+   finding was raised against the text before `35a99953`; the middle outcome was thin there and is
+   explicit now.
+2. **"Appendix B claims drain-before-stop, which lands nowhere."** Correct that it landed nowhere,
+   and it is removed from Appendix B rather than added to the design: a command in flight delaying
+   a stop the user asked for is a worse failure than a command lost to a stop, and no reviewer
+   argued otherwise. The claim was the error, not the omission.
+3. **"The interlock named in Appendix B is the one the skeptic replaced."** Half right: Appendix B
+   named the maintainer's version and the body took the skeptic's. Appendix B is corrected. The
+   underlying mechanism was never in doubt and did not change.
+
+### Still open, and named as open
+
+- **The bind address inside the container is a deduction, not a measurement.** No Yu'lon install
+  has ever run this listener. The owner's live server has, and a read of its configuration would
+  settle it without touching a gate box — but that server is the owner's and any command on it
+  needs their explicit yes, so it is an owner question, recorded in the summary and on this line,
+  not a spike this session ran.
+- **8.8 is blocked** on a machine with Steam that does not exist on this side.
+- **Owner answer 10's second half has no gate**: no box runs Tortoise on native Windows, so "the
+  tab carries the reason" is unprovable here.
+- **My Party's route has never been recorded working.** 8.6 asks that question first.
+
+---
+
 ## Appendix A — proposed `roadmap.md` §8 (not applied)
 
 To replace the Phase 8 block, from its `## Phase 8` heading through the separator before
@@ -448,8 +593,9 @@ matching edit, given below it.
 > `pyplan/phase8-decisions.md`. My Party, item mail and teleport were out of v1 scope in
 > README §9 and are a deliberate expansion, each with its own step.
 >
-> **Ordering:** Phase 8 code may start once Phase 7's install engine is merged; it does not wait
-> for the Phase 7 exit box (owner decision, 2026-09-06). Delivery is WotLK first, one box per
+> **Ordering:** 8.1 may start now, on the branch stacked on Phase 7's pull request — the owner
+> declined the recommendation that it wait for that merge. It waits neither for the merge nor for
+> the Phase 7 exit box (owner decision, 2026-09-06); the rest of Phase 8 follows 8.1. Delivery is WotLK first, one box per
 > emulator family, the way Phase 7 ran.
 
 ### 8.1 The command channel
@@ -567,8 +713,9 @@ in-client screenshot as the visible effect.
 
 **Grafts adopted from C:** the write ledger and the test that enumerates every write site in both
 directions; the applier's missing guard, placed inside the SQL step; closing the playerbot command
-server in the same press that opens SOAP, proved from inside the container; the two-way interlock
-between the console and typed commands; drain-before-stop; the bounded log snapshot; the
+server in the same press that opens SOAP, and the remote-access console asserted absent beside it;
+the one lock per install that every attach takes, the Console tab's included (the skeptic's shape,
+not a seam reading a view flag); the bounded log snapshot; the
 deliberately-wrong-credential gate step; the bot marker's refusal semantics; and "evidence before"
 on every gate.
 
