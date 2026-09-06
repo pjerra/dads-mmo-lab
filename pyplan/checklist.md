@@ -297,8 +297,19 @@
       that line.
     * **Clause 15 is cited here, not re-graded here.** Lane `b39` graded it MET on its own branch
       and this lane does not duplicate that grading. Read on 2026-09-06 out of
-      `git -C ../wt-b39 show lane/b39:...`, at `lane/b39` = **`8f9de57f`**, a commit on top of
-      `cfb4c04f` that is **not yet merged into `yulon-phase7`**:
+      `git -C ../wt-b39 show`, at commit **`8f9de57f`** — the first of `lane/b39`'s commits on top
+      of `cfb4c04f`, and **not merged into `yulon-phase7`** at the commit that ticks this box. The
+      branch is not that commit and has not been since 01:55 CEST: `git -C ../wt-b39 log
+      --format='%h %ad' --date=iso cfb4c04f..lane/b39`, run 2026-09-06 at 00:52 UTC, printed
+      `30617293` (02:26:59 +0200) on `0ea57bce` (01:54:55) on `8f9de57f` (01:52:39). The line
+      numbers below are `8f9de57f`'s; the two later commits move them. What those two commits did
+      not touch is what is quoted here — `git diff 8f9de57f 30617293` over that README removes no
+      line containing `23:31:24`, `id 104`, `172.30.48.1` or `press.txt:79` (four readings, zero
+      hits among the removed lines). `:147-160` is the one range whose section those commits did
+      rework, and the half paraphrased below is the half they kept: at `30617293:171-195` the
+      measurement still reads ufw `inactive` before the press and `iptables -S | grep -c ufw` = 0
+      after it; what they retracted is the inference *"this run can prove why"*, which is not
+      repeated here.
       `pyplan/gates/bug39-lan-press-2026-09-05/README.md:14-18` states what the press closed;
       `:74-85` is the press through the real `ControllerView` with `QTest.mouseClick`, whose
       module line is `networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual` at
@@ -320,7 +331,7 @@
       a dated `CITATIONS` section at the top of that page; the before/after transcripts and the
       name-by-name list are `pyplan/gates/7.1-tick-2026-09-06/`.
     * **What this tick does NOT say.** It does not tick the Phase 7 exit-criteria box, which is the
-      owner's call and stays `- [ ]`. It does not close 7.8. It does not turn the two items the
+      owner's call and stays `- [ ]`. It does not close 7.8. It does not turn the three items the
       Fedora/Arch line carries into work that was done — they are named on that line under
       CARRIED. And it does not claim the Ubuntu gate box below: that box's own grading is lane
       `b39`'s to land, and it is left `- [ ]` in this lane rather than ticked on files this commit
@@ -675,8 +686,14 @@
         * *Fedora, the engine and the password sudo* — `pyplan/gates/7.1-fedora44-press1.log`,
           27 lines: the consent question at `:14` answered `y` (`:15-17`, `docker group consent
           for pk: granted`, stamped `2026-08-31 17:55:36`), **the sudo password asked at `:18`
-          and accepted at `:21`** (`sudo password accepted (attempt 1)`) — the one box that can
-          exercise `SudoSession` at all — the dnf line at `:22`
+          and accepted at `:21`** (`sudo password accepted (attempt 1)`) — the run the *Fedora 44
+          progress, 2026-08-31* bullet on this line calls *"the first time `SudoSession` has ever
+          been exercised"*, on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop`
+          checkpoint. Password sudo there is a property of that checkpoint and not a fact about
+          the fleet: `SudoSession`'s own docstring (`pylauncher/yulon/platform.py:2432`) names
+          "clean Fedora, Arch" as password-sudo boxes, and `ssh yulon-fedora 'sudo -n -l'` on
+          2026-09-06 at 00:55 UTC printed `(ALL) NOPASSWD: ALL` — the running box is not the
+          checkpoint. The same log carries the dnf line at `:22`
           (`dnf -y install moby-engine docker-compose docker-buildx`), the re-login refusal at
           `:24-25` and `child exited 1` at `:27`. The build press is
           `pyplan/gates/7.1-fedora44-press2.log` (5,853 lines) and the re-press is

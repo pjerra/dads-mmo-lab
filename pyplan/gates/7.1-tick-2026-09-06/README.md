@@ -77,9 +77,39 @@ that were both live and resolving before the pass stopped being checked — that
 * **Clause 15 of the Ubuntu gate line.** It was graded MET by lane `b39`, whose record is
   `pyplan/gates/bug39-lan-press-2026-09-05/` on branch `lane/b39` at **`8f9de57f`** — a commit on
   top of `cfb4c04f` that was **not merged into `yulon-phase7`** when this folder was written. The
-  7.1 tick record cites it by path and line and says the same thing there.
+  7.1 tick record cites it by path and line and says the same thing there. `lane/b39` is not that
+  commit: `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39`, run 2026-09-06 at
+  00:52 UTC, printed `30617293` (02:26:59 +0200) on `0ea57bce` (01:54:55) on `8f9de57f` (01:52:39).
+  The citation is pinned to the commit, not to the branch, and the tick record now says so and
+  records what the two later commits did and did not change.
 * **Any machine work on Fedora or Arch.** Nothing was installed, built or pressed for this tick. The
   Fedora/Arch sub-gate was re-scoped by the owner onto the evidence that already existed
   (`pyplan/gates/7.1-fedora44-*.log`, `pyplan/gates/7.1-arch/71-arch-appimage.log`), and the three
   items that re-scope drops are named on that line under CARRIED. `yulon-fedora` was used here only
   as the test box for pytest, mypy, ruff and black.
+
+## Round 2, 2026-09-06 — four corrections after review, none to the substance
+
+Review found four sentences whose wording outran what a command prints. All four were re-derived
+here and fixed; no measurement in this folder changed, and no test citation was repointed.
+
+| what was wrong | what it says now | the command |
+|---|---|---|
+| The tick record wrote `at `lane/b39` = **`8f9de57f`**`. It was `8f9de57f` when the sentence was drafted and `0ea57bce` by the time it was committed — an equals sign between a moving branch and a fixed commit. | The SHA is pinned as *the first of `lane/b39`'s commits*, the branch's three commits are listed with their times, and the four readings the tick repeats are shown to survive the two later ones. | `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39` → `30617293` 02:26:59 +0200, `0ea57bce` 01:54:55, `8f9de57f` 01:52:39; `git diff 8f9de57f 30617293 -- pyplan/gates/bug39-lan-press-2026-09-05/README.md \| grep '^-' \| grep -c '23:31:24\|id 104\|172.30.48.1\|press.txt:79'` → **0** |
+| The tick bullet said the Fedora/Arch line carries **two** items; the CARRIED list under that line has three, and Appendix E says three twice. | *three items*. | `sed -n '/What is NOT on evidence and is CARRIED/,/Where those three are owed/p' pyplan/checklist.md \| grep -cE '^        [0-9]\. '` → **3**; `grep -n 'the two items' pyplan/checklist.md pyplan/phase7-decisions.md` → no output |
+| The plan page cited `tests/test_families_azerothcore.py:2` for the sentence "The tests of". It is on line 3 — line 2 is the blank line after the docstring's first line — at `2b6a9c6b` and at the lane tip alike. | `:3`. | `git grep -n 'The tests of' 2b6a9c6b -- pylauncher/tests/test_families_azerothcore.py` → `:3`; the same `grep -n` in the worktree → `3:` |
+| Two new sentences turned a 2026-08-31 measurement into a present-tense universal — "the one box that can exercise `SudoSession` at all" (checklist) and "the only box in this project that can exercise `SudoSession`, both other Linux boxes being passwordless" (Appendix E). The tree contradicts both. | Both name the run and the box instead: the 2026-08-31 press on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop` checkpoint, recorded on the 7.1 line as the first time `SudoSession` was ever exercised. The checklist site adds why password sudo is a property of that checkpoint. | `grep -n 'password-sudo box' pylauncher/yulon/platform.py` → `2432:    password-sudo box (clean Fedora, Arch) every step used to fail the same way.`; `ssh yulon-fedora 'sudo -n -l'` on 2026-09-06 at 00:55 UTC → `(ALL) NOPASSWD: ALL`; `grep -n 'only box in this project\|one box that can exercise' pyplan/checklist.md pyplan/phase7-decisions.md` → no output |
+
+Two things review raised that were **not** changed, and why:
+
+* The same "both other Linux boxes being passwordless" phrase appears twice in `checklist.md` in
+  text this lane did not write (`git show 2b6a9c6b:pyplan/checklist.md | grep -n 'both other Linux
+  boxes'` → base lines **288** and **636**, the "sudo dialog once" bullet and the 2026-08-31 Fedora
+  bullet). Both are pre-existing and outside this lane's diff; they are named here so the next pass
+  over that line knows they are there, and were left alone rather than rewritten under a tick.
+* The five `:range` citations into `lane/b39`'s README were kept as line ranges rather than turned
+  into heading references. They resolve exactly at the commit the sentence names — checked range by
+  range on 2026-09-06 — and a SHA-pinned range is what this tree asks a citation to be.
+
+`checks-yulon-fedora-r2.txt` is the gate re-run after these four edits, over the committed lane tip
+with nothing overlaid.

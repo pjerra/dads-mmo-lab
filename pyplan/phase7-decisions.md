@@ -1209,8 +1209,9 @@ run, and nothing was ever installed on Arch, because the AppImage will not launc
 
 1. **The Fedora/Arch sub-gate box ticks on narrower terms than its own line asks for.** The
    re-scoped terms are what is on evidence: on Fedora, the engine pass of 2026-08-31 including the
-   sudo password dialog — the only box in this project that can exercise `SudoSession`, both other
-   Linux boxes being passwordless — and the packaged artifact driving an install to a running server
+   sudo password dialog — run on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop`
+   checkpoint, and recorded on the 7.1 line as the first time `SudoSession` was ever exercised — and
+   the packaged artifact driving an install to a running server
    on an SELinux-Enforcing box; on Arch, the engine pass of 2026-09-01 and the packaged artifact
    refusing to start for want of `fuse2`. The original wording is kept above the re-scope paragraph
    rather than rewritten, and the three items the narrower terms drop are named on that line under
