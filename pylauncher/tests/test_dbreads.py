@@ -91,12 +91,53 @@ def test_a_blank_prefix_is_refused_instead_of_becoming_like_percent(tmp_path: Pa
     assert "blank" in answer.problem or "empty" in answer.problem
 
 
-def test_a_conf_that_cannot_be_read_is_refused_rather_than_defaulted(tmp_path: Path) -> None:
-    """A missing file is not evidence that the module's default is in force."""
+def test_a_module_conf_that_is_simply_not_there_means_the_compiled_default_is_in_force(
+    tmp_path: Path,
+) -> None:
+    """Measured on yulon-ubuntu, 2026-09-06, and it refuted the rule that was here.
+
+    This code used to refuse when the conf was absent, reasoning that a missing
+    file is not evidence about what the server read. The live 7.2 install says
+    otherwise, in the worldserver's own words:
+
+        > Config::LoadFile: Failed open file
+          '/azerothcore/env/dist/etc/modules/playerbots.conf'
+        > Not found modules config files
+
+    That is the path the catalog names, absent on a normal install — only
+    `playerbots.conf.dist` is shipped, and it is NOT loaded. So the server runs
+    on the module's compiled defaults, and "absent" is exactly what the default
+    being in force looks like. Refusing there would have left the tab with no
+    counts on the very install this box gates.
+    """
     answer = dbreads.resolve_marker(WOTLK, tmp_path)
 
+    assert answer.marker is not None
+    assert answer.marker.prefix == WOTLK.observability.bots.account_prefix
+    assert answer.marker.source == "default"
+
+
+def test_a_conf_that_exists_and_cannot_be_read_is_still_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The half of the old rule that survives the measurement.
+
+    A file that is THERE and will not open says nothing about what is in it, so
+    the answer is a refusal rather than the default — the distinction is between
+    "the server found no file either" and "there is a file here whose contents
+    are unknown to me".
+    """
+    server_dir = _install(tmp_path)
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("[Errno 13] Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", refuse)
+
+    answer = dbreads.resolve_marker(WOTLK, server_dir)
+
     assert answer.marker is None
-    assert answer.problem != ""
+    assert "Permission denied" in answer.problem
 
 
 def test_the_same_key_set_twice_to_different_values_is_refused(tmp_path: Path) -> None:

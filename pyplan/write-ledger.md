@@ -89,7 +89,7 @@ descriptions are written by hand.
 | `git.py::clone::shutil.rmtree` | a non-git leftover at the clone destination | install time |
 | `logsnap.py::_prune::unlink` | **new (8.1a)** older snapshots of this install, never the one just written | yes — as above |
 | `logsnap.py::capture::os.replace` | **new (8.1a)** that snapshot renamed once the bytes are down | yes — as above |
-| `logsnap.py::capture::unlink` | **new (8.1a)** the `.partial` after a failed snapshot | yes — as above |
+| `logsnap.py::_discard::unlink` | **new (8.1a)** the `.partial` after a failed snapshot, through a helper that cannot itself raise | yes — as above |
 | `logsnap.py::capture::write_text` | **new (8.1a)** the worldserver log snapshot, to a `.partial` | yes — it runs immediately before the stop |
 | `manifest_store.py::_fetch_one::replace` | that manifest renamed into place | n/a |
 | `manifest_store.py::_fetch_one::unlink` | the ETag file when the server answers without one | n/a |

@@ -124,9 +124,24 @@ def resolve_marker(entry: CatalogEntry, server_dir: Path) -> MarkerAnswer:
     conf = server_dir / bots.prefix_conf_file
     try:
         text = conf.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        # Absent is not the same as unreadable, and this half was measured on
+        # yulon-ubuntu on 2026-09-06 rather than reasoned about. A normal
+        # AzerothCore install ships `playerbots.conf.dist` and no
+        # `playerbots.conf`, and the worldserver says so itself:
+        #
+        #     > Config::LoadFile: Failed open file
+        #       '/azerothcore/env/dist/etc/modules/playerbots.conf'
+        #     > Not found modules config files
+        #
+        # It then runs on the module's compiled defaults — the `.dist` beside
+        # it is NOT loaded. So an absent file is exactly what "the default is in
+        # force" looks like on this core, and refusing here would leave the tab
+        # with no counts on an ordinary install.
+        return _checked(Marker(bots.account_prefix, "default"), bots)
     except OSError as exc:
-        # Not a fallback to the default: a file that cannot be read is not
-        # evidence that the key inside it is unset.
+        # A file that IS there and will not open says nothing about what is in
+        # it. That is the half of the old rule the measurement leaves standing.
         return MarkerAnswer(problem=f"could not read {conf}: {exc}")
     values = _conf_values(text, bots.prefix_conf_key)
     if len(set(values)) > 1:
