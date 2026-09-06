@@ -62,7 +62,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Generator, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -88,6 +88,24 @@ logger = get_logger(__name__)
 
 STATE_FILE = ".yulon-install.json"
 STATE_VERSION = 1
+
+OUR_OWN_FILES = (STATE_FILE, networking.INTENT_FILE)
+"""Every file this app writes into a server directory as its OWN bookkeeping.
+
+The set `_listing()` is asked to look past when the question is "is this folder
+somebody else's?". Anything not in it is a user's file and a reason to refuse.
+
+It was one name until 2026-09-05, and adding the second was not a tidy-up.
+`networking.apply()` writes `.yulon-network.json` into the server directory when
+a mode is applied from the Networking tab, and with `STATE_FILE` alone in the
+list, a folder holding only that file answered "not empty and was not created by
+this app" — measured that day as `InstallerError: ... is not empty and was not
+created by this app (.yulon-network.json)` from
+`test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`,
+which is a folder this app had written every byte of being refused by its own
+guard. A tuple with a name, so the next file this app learns to write is added
+in one place rather than in the five call sites that ask the question.
+"""
 
 OPENING_NOTE = (
     "You can stop this at any time. What an install writes outside the folder below is named "
@@ -222,6 +240,59 @@ It names the Networking tab and its two buttons because "configure networking"
 is not an instruction anybody can follow, and because that action already
 exists and already does this job (`networking.plan()` + `apply()`).
 """
+
+
+def loopback_chosen_on_purpose(intent: networking.NetworkIntent) -> str:
+    """Why the realm row was left on the loopback: because somebody asked for it.
+
+    bug-checklist §41's gate asks for "a log line saying why it was left alone",
+    and each clause here is one of the things a reader needs to act on it: the
+    address, so the sentence is searchable in a log next to the §35 ones; the
+    date the choice was made, because a file holding one word and no date
+    cannot be told from a leftover; the file, so the choice can be found and
+    deleted without this app; the consequence, because a person reading an
+    install log months later may not remember what they picked; and the way
+    back, spelled as the two buttons that do it.
+
+    Past tense on purpose (`was left`, `was chosen`): it records what this run
+    did and what a person did before it, both of which stay true. The sentence
+    it replaced in an earlier draft said the row "is" the loopback, which stops
+    being true the moment anyone presses Apply with another mode.
+
+    "no other machine can reach this server" was read against the machine on
+    2026-09-06 and kept. It is loose: the mode changes the address the row hands
+    out, not what is bound. On yulon-ubuntu at 06:27:43 +02:00, on the install
+    the 04:43 loopback Apply had run against, `docker ps --format
+    '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp` and
+    `ac-worldserver … 0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on
+    `0.0.0.0:3724` and `0.0.0.0:8085` — so another machine still connects and
+    logs in, and is then told the world server is at 127.0.0.1, i.e. on itself,
+    so it cannot play. Kept rather than reworded because this exact string is
+    what the closing-step gate driver asserts
+    (`pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`)
+    and what two committed press records of 2026-09-06 hold verbatim
+    (that folder's `closing-step-output.txt:13` and
+    `yulon-ubuntu-press/yulon-log-press-chosen.txt:12`); rewording it would make
+    the closed §41 entry quote a sentence the tree no longer prints, and no code
+    reads this string to decide anything.
+    """
+    # A record with no timestamp is one nothing this app wrote: `record_network_intent()`
+    # always stamps it. Printing the epoch for it would put "on 1970-01-01" in
+    # an install log, which reads as a bug in the app rather than as a file
+    # somebody edited by hand.
+    when = (
+        f"on {time.strftime('%Y-%m-%d', time.localtime(intent.recorded_unix))}"
+        if intent.recorded_unix > 0
+        else "at a time the record does not give"
+    )
+    return (
+        f"The address this realm advertises was left exactly as it is, because this server was "
+        f"set to only this computer ({networking.LOOPBACK_ADDRESS}) {when} from its "
+        f"Networking tab, and that choice is recorded in {networking.INTENT_FILE} in the server "
+        "folder. Nothing here overwrote it, which means no other machine can reach this server. "
+        "To undo it, open this server's Networking tab, pick LAN (same Wi-Fi) or Internet play, "
+        "press Show plan and then Apply."
+    )
 
 
 @dataclass(frozen=True)
@@ -1402,7 +1473,7 @@ class StagedInstaller:
         # an `InstallerError` — a refusal, from a line that is only gathering a
         # fact. A folder that is not there is as ours-to-fill as an empty one.
         started_empty = not (server_dir / STATE_FILE).is_file() and (
-            not server_dir.is_dir() or not _listing(server_dir, ignoring=STATE_FILE)
+            not server_dir.is_dir() or not _listing(server_dir, ignoring=OUR_OWN_FILES)
         )
         self._claim_before_writing(server_dir, state, started_empty)
         yield f"Using {server_dir} ({'resuming' if state.completed else 'a fresh install'})"
@@ -1898,7 +1969,7 @@ class StagedInstaller:
             # a checkout of somebody else's fork" is a far better sentence than
             # "this folder is not empty". Everything else is refused before a
             # byte is written.
-            leftovers = _listing(server_dir, ignoring=STATE_FILE)
+            leftovers = _listing(server_dir, ignoring=OUR_OWN_FILES)
             if leftovers:
                 raise InstallerError(
                     f"{server_dir} is not empty and was not created by this app "
@@ -2138,7 +2209,7 @@ class StagedInstaller:
                     "changed."
                 )
             if not has_git and dest.is_dir():
-                leftovers = _listing(dest, ignoring=STATE_FILE)
+                leftovers = _listing(dest, ignoring=OUR_OWN_FILES)
                 if leftovers:
                     raise InstallerError(
                         f"{dest} has files in it but is not a checkout of {source.url}, so it "
@@ -2727,8 +2798,33 @@ class StagedInstaller:
         **Nothing here can fail the install, and that is the whole design.**
         By the time this runs the server is built, imported, started and has
         reported ready; the user has been promised a working server and has
-        one. Four outcomes, one line each:
+        one. Five outcomes, one line each — and the first of them is a file.
 
+        bug-checklist §41: the last four all end in the row being rewritten or
+        in a reason it was not, and none of them could tell a row that says
+        `127.0.0.1` because nobody set it from one that says `127.0.0.1`
+        because the owner asked for it. The row cannot answer that — it is the
+        same eight characters either way — so the answer is recorded intent,
+        written by `networking.apply()` when the Networking tab's `loopback`
+        mode was applied, and read here BEFORE anything else this method does.
+        Before, and not after: on 2026-09-06 at `30671d6e` two mutations of this
+        order were run on m910q from a fresh `git clone --shared` with
+        `__pycache__` purged on both sides
+        (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`). Reading
+        the intent after `self._detected_lan_ip()` still left the row alone, and
+        reading it after the `address is None` return printed
+        `REALM_ADDRESS_UNKNOWN` instead of the §41 sentence on a machine with no
+        LAN address — the machine this mode exists for. Both kept
+        `_statements()` and `sql_calls` empty, so the two empty lists in
+        `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why`
+        hold nothing here; what holds it is that test's call-counting `lan_ip`
+        seam plus
+        `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`.
+
+        * the owner CHOSE the loopback — nothing is detected, nothing is asked,
+          nothing is sent, and the line says which file says so and how to undo
+          it. A server whose loopback was never chosen has no such file and
+          falls through to the four below, which is §41's other half;
         * no address — `REALM_ADDRESS_UNKNOWN`, and no SQL is attempted at all.
           A guess would be worse than the default, and a refusal would be a lie
           about what happened;
@@ -2747,6 +2843,10 @@ class StagedInstaller:
         * it worked — said, naming the address, because the address is what the
           user has to type into their client next.
         """
+        chosen = networking.read_network_intent(ctx.server_dir)
+        if chosen is not None and chosen.mode == "loopback":
+            yield loopback_chosen_on_purpose(chosen)
+            return
         address = self._detected_lan_ip()
         if address is None:
             yield REALM_ADDRESS_UNKNOWN
@@ -3091,7 +3191,7 @@ def _cancelled_message(what: str, note: str = "") -> str:
     return f"{what} was stopped. {note}".rstrip()
 
 
-def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
+def _listing(folder: Path, *, ignoring: Collection[str] = ()) -> list[str]:
     """What is in `folder`, minus `ignoring` — or a refusal, never a bare `OSError`.
 
     THE ONLY PLACE THIS ENGINE DECIDES WHETHER A FOLDER IS ITS TO WRITE INTO.
@@ -3174,8 +3274,16 @@ def _listing(folder: Path, *, ignoring: str | None = None) -> list[str]:
             folder, carries what the OS said, and is distinct from every
             "this folder has files in it" refusal above it.
     """
+    if isinstance(ignoring, str):
+        # A `str` IS a `Collection[str]`, so mypy accepts one here and the
+        # membership test below then filters by CHARACTER: `ignoring=STATE_FILE`
+        # would drop every one-character name in the folder and keep
+        # `.yulon-install.json` itself. The five callers all pass
+        # `OUR_OWN_FILES` now; this is what makes a sixth that passes a bare
+        # name fail loudly instead of quietly answering about the wrong folder.
+        raise TypeError(f"_listing(ignoring=) takes a collection of names, not {ignoring!r}")
     try:
-        return [item.name for item in folder.iterdir() if item.name != ignoring]
+        return [item.name for item in folder.iterdir() if item.name not in ignoring]
     except OSError as exc:
         raise InstallerError(
             f"{folder} could not be listed ({exc}), so this app cannot tell whether it is empty "

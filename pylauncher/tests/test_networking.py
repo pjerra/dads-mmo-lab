@@ -20,6 +20,7 @@ import pytest
 
 from yulon import docker, networking, platform, runner
 from yulon.apply import ApplyError
+from yulon.catalog import native
 from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
@@ -4797,3 +4798,316 @@ def test_an_unknown_daemon_is_held_to_the_running_rule_not_the_stopped_one() -> 
     )
     assert not any("DefaultZone" in r for r in stopped.refusals)
     assert not any(networking._can_lock_out(c) for c in stopped.firewall_commands)
+
+
+# ------------------------------------------------ the loopback chosen on purpose
+#
+# bug-checklist §41. `advertisable()` refuses `127.0.0.1` by design (§35: a realm
+# advertising the loopback tells every client the world server is on the CLIENT's
+# machine), so the value the §35 fix prevents by accident was also unreachable on
+# purpose — set it by hand and the next install press or resume overwrote it. The
+# tests below are the third mode, the recorded intent, and the file it lives in.
+
+
+def test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip() -> None:
+    """The third mode: `plan()` asks for `127.0.0.1` by name, and says what it costs.
+
+    `advertisable()` is the AUTOMATIC path's guard and is asserted unchanged
+    here on purpose: a fix that widened that predicate instead of adding a mode
+    would hand every undetected-address install the §35 outage back, and would
+    pass every other test in this section.
+
+    `detect_lan=lambda: None` is in the call for the same reason. A machine with
+    no usable LAN address is precisely the one whose owner wants "only this
+    computer", and `NetworkPlan.ready` — which is what enables the Apply button —
+    refused every plan with no LAN IP. A loopback mode that could not be applied
+    there would be §41 with a new spelling.
+    """
+    assert networking.LOOPBACK_ADDRESS == native.INSTALL_REALM_HOST, (
+        "the address this mode writes and the one `ready`'s auth marker waits for have "
+        "drifted apart; they describe the same server"
+    )
+    p = networking.plan(
+        WOTLK,
+        "loopback",
+        firewall="none",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: None,
+    )
+    assert p.mode == "loopback"
+    assert p.lan_ip is None
+    assert p.realmlist_sql == networking.realmlist_sql(
+        WOTLK, networking.LOOPBACK_ADDRESS, networking.LOOPBACK_ADDRESS
+    )
+    assert p.client_realmlist == networking.LOOPBACK_ADDRESS
+    assert p.ready is True, "a loopback plan needs no LAN address to be applicable"
+    assert (
+        networking.advertisable(networking.LOOPBACK_ADDRESS) is None
+    ), "§35's refusal was widened rather than added to"
+    warned = [w for w in p.warnings if "no other machine" in w]
+    assert warned, p.warnings
+    assert networking.LOOPBACK_ADDRESS in warned[0], warned[0]
+
+
+def _recording_firewalld_seams(calls: list[str]) -> dict[str, object]:
+    """firewalld seams that answer like the real ones and write down that they were asked.
+
+    Named seams rather than the real probes for the reason the rest of this file
+    names them — an unseamed firewalld plan reads the real `firewall-cmd` and
+    answers differently on a Fedora box than on CI — and recording ones because
+    an empty `firewall_commands` tuple cannot tell a plan that asked the machine
+    nothing from one that asked it twice and then dropped the answers. Measured
+    on m910q 2026-09-06 from a fresh `git clone --shared`, mutation MR1 in
+    `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`: with the
+    `wants_firewall` guard cut out of the firewalld branch, that file's line 58
+    reads `MUTATED-MR1 firewalld loopback: seams=['detect_firewalld',
+    'detect_zones'] fw=[] manual=[] warnings=2`, and the extra warning (line 59)
+    is "firewalld's zones could not be read, so the game ports were written to
+    the DEFAULT zone" — said about ports the same plan never wrote. The same
+    script re-ran that mutation against the round-3 tip `ccfe7f97`, where the
+    assertions were the empty lists alone, and printed `419 passed` (line 160):
+    the mutation was invisible there, which is why these seams record.
+    """
+
+    def firewalld() -> networking.FirewalldDaemon:
+        calls.append("detect_firewalld")
+        return "stopped"
+
+    def zones(_daemon: networking.FirewalldDaemon) -> networking.FirewalldZoning | None:
+        calls.append("detect_zones")
+        return None
+
+    return {"detect_firewalld": firewalld, "detect_zones": zones}
+
+
+def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
+    """The mode played only on this machine opens no ports and asks no probe.
+
+    Measured on yulon-ubuntu 2026-09-06, before this branch existed: applying
+    the loopback plan through the real Networking tab left `ufw allow 3724/tcp`
+    and `ufw allow 8085/tcp` in `ufw show added`
+    (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`,
+    taken 04:43:23, right after that Apply); in the same folder's
+    `widget-loopback.log`, line 57 is the warning saying no other machine can
+    reach this server, 58 is blank, 59 is `Applied:` and 60 is
+    `✓ ufw allow 3724/tcp`.
+
+    Not because the ports stop being reachable — this mode changes the address
+    the realm row hands out and nothing else. Read on yulon-ubuntu 2026-09-06
+    06:27:43 +02:00, on the install that Apply had run against, `docker ps
+    --format '{{.Names}}\\t{{.Ports}}'` printed `ac-authserver
+    0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and
+    `ss -ltn` printed LISTEN on `0.0.0.0:3724` and `0.0.0.0:8085`. Holes for a
+    connection that cannot end in play, on a server whose owner asked for one
+    nobody else plays on.
+
+    Three things are asserted per backend, because an empty command list alone
+    is silent about two of them: the commands, the probes that were spawned to
+    build them (`calls`), and the whole warning tuple, since a probe put back
+    brings its own warnings with it. The `lan` half of each pair is the control:
+    without it this test would pass just as well on a build where
+    `firewall_commands` was empty for every mode, which is a different bug and a
+    worse one.
+    """
+    for backend in ("ufw", "firewalld", "netsh"):
+        calls: list[str] = []
+        seams: dict[str, object] = (
+            _recording_firewalld_seams(calls) if backend == "firewalld" else {}
+        )
+        shut = networking.plan(
+            WOTLK,
+            "loopback",
+            firewall=backend,
+            steamos=False,
+            wsl=False,
+            detect_lan=lambda: "192.168.10.134",
+            **seams,  # type: ignore[arg-type]
+        )
+        assert shut.firewall_commands == (), (backend, shut.firewall_commands)
+        assert shut.ssh_ports == (), (backend, shut.ssh_ports)
+        assert calls == [], (backend, calls)
+        assert shut.warnings == (networking.ONLY_THIS_COMPUTER,), (backend, shut.warnings)
+        # The whole tuple, not the "TCP" steps: `netsh`'s "set the network
+        # profile to Private" is a Windows Firewall instruction with no port
+        # number in it, and a filter on "TCP" cannot see it.
+        assert shut.manual_steps == (), (backend, shut.manual_steps)
+        open_for_lan = networking.plan(
+            WOTLK,
+            "lan",
+            firewall=backend,
+            steamos=False,
+            wsl=False,
+            detect_lan=lambda: "192.168.10.134",
+            **seams,  # type: ignore[arg-type]
+        )
+        assert open_for_lan.firewall_commands != (), backend
+        if backend == "firewalld":
+            assert calls == ["detect_firewalld", "detect_zones"], calls
+        if backend == "netsh":
+            assert [
+                m for m in open_for_lan.manual_steps if "network profile to Private" in m
+            ], open_for_lan.manual_steps
+
+    # macOS has no port vocabulary, so its branch produces a STATE rather than
+    # commands — which an assertion on `firewall_commands` cannot see at all.
+    alf_calls: list[str] = []
+
+    def _alf() -> platform.AlfState:
+        alf_calls.append("detect_alf")
+        return platform.AlfState(enabled=True, block_all=False)
+
+    mac_shut = networking.plan(
+        WOTLK,
+        "loopback",
+        firewall="alf",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: "192.168.10.134",
+        detect_alf=_alf,
+    )
+    assert alf_calls == [], alf_calls
+    assert mac_shut.firewall_state is None, mac_shut.firewall_state
+    assert mac_shut.manual_steps == (), mac_shut.manual_steps
+    assert mac_shut.warnings == (networking.ONLY_THIS_COMPUTER,), mac_shut.warnings
+    mac_open = networking.plan(
+        WOTLK,
+        "lan",
+        firewall="alf",
+        steamos=False,
+        wsl=False,
+        detect_lan=lambda: "192.168.10.134",
+        detect_alf=_alf,
+    )
+    assert alf_calls == ["detect_alf"], alf_calls
+    assert mac_open.firewall_state is not None
+
+    # `none` has no commands to drop; what it has is the "allow inbound TCP …
+    # by hand" step, which is the same instruction spelled for a person.
+    nothing = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    assert not [m for m in nothing.manual_steps if "allow inbound TCP" in m], nothing.manual_steps
+    by_hand = networking.plan(
+        WOTLK, "lan", firewall="none", steamos=False, wsl=False, detect_lan=lambda: "10.0.0.5"
+    )
+    assert [m for m in by_hand.manual_steps if "allow inbound TCP" in m], by_hand.manual_steps
+
+
+def test_the_mode_the_owner_applied_is_recorded_only_when_the_row_was_written(
+    tmp_path: Path,
+) -> None:
+    """The intent is written by the same act that writes the row, and by nothing else.
+
+    Recording it earlier — when the plan is shown, or before the UPDATE is
+    tried — would leave `ready` honouring a choice the database never received:
+    a server whose Apply failed would go on advertising a reachable address
+    while a file said the owner had chosen the loopback, and every later resume
+    would leave that mismatch exactly as it was.
+
+    The `sql=None` arm is that failure in its cheapest shape — `apply()` reports
+    the UPDATE as skipped and nothing is recorded.
+    """
+    p = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    nothing = tmp_path / "no-db"
+    nothing.mkdir()
+    networking.apply(p, sql=None, server_dir=nothing)
+    assert (
+        networking.read_network_intent(nothing) is None
+    ), "a choice the database never received was recorded as the owner's intent"
+
+    server = tmp_path / "server"
+    server.mkdir()
+    sql = _RecordingSql()
+    report = networking.apply(p, sql=sql, server_dir=server)
+    assert sql.statements == [("auth", p.realmlist_sql)]
+    assert report.restart_required is True
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "loopback"
+    assert intent.recorded_unix > 0, "an intent with no timestamp cannot say when it was chosen"
+
+
+def test_applying_a_reachable_mode_replaces_a_loopback_chosen_earlier(
+    tmp_path: Path,
+) -> None:
+    """The way BACK is the same button, so the file records the last APPLIED mode.
+
+    A store that only ever remembered the loopback would be a one-way door: the
+    owner picks LAN, the row is rewritten to the LAN address, and the next
+    resume reads a stale "loopback" and leaves whatever it finds alone forever.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    chosen = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    networking.apply(chosen, sql=_RecordingSql(), server_dir=server)
+    first = networking.read_network_intent(server)
+    assert first is not None and first.mode == "loopback"
+
+    lan = networking.plan(
+        WOTLK, "lan", lan_ip="192.168.1.25", firewall="none", steamos=False, wsl=False
+    )
+    networking.apply(lan, sql=_RecordingSql(), server_dir=server)
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "lan"
+
+
+def test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file(
+    tmp_path: Path,
+) -> None:
+    """Why the intent is a SIBLING of `.yulon-install.json` and not a key inside it.
+
+    `native.write_state()` rebuilds the whole payload from the keys this build
+    knows and `os.replace()`s the file. The install engine carries one
+    `InstallState` in memory for a whole run and writes it back after every
+    recorded stage, so an intent written into that file by anyone else — the
+    Networking tab, which is another thread of the same app — is dropped by the
+    engine's next write, silently and with no conflict to notice. That is the
+    same class of loss `InstallState.unknown` exists to prevent, and it is what
+    this assertion catches.
+
+    The other half of the reason is ownership: `.yulon-install.json` records what
+    a RUN got through, and `read_claim()` refuses to open one written by a newer
+    build at all. The mode a person chose is not a run's progress.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    p = networking.plan(
+        WOTLK, "loopback", firewall="none", steamos=False, wsl=False, detect_lan=lambda: None
+    )
+    networking.apply(p, sql=_RecordingSql(), server_dir=server)
+
+    native.write_state(
+        server, native.InstallState(game_id="wow-wotlk", install_id="abc", completed=())
+    )
+    intent = networking.read_network_intent(server)
+    assert intent is not None and intent.mode == "loopback"
+
+
+@pytest.mark.parametrize(
+    "written", ["", "not json at all", "[]", '{"mode": "sideways"}', '{"mode": 7}']
+)
+def test_a_file_that_does_not_name_a_mode_this_build_knows_is_no_intent(
+    tmp_path: Path, written: str
+) -> None:
+    """An unreadable record is no record, and never "the owner chose the loopback".
+
+    Read in the direction that keeps a server reachable: the failure this whole
+    entry is about is a realm nobody else can reach, so a damaged file falls back
+    to the automatic path, which rewrites the row. `"sideways"` is the
+    forward-compatibility arm — a mode a newer build wrote — and it reads as no
+    intent here rather than as something this build has to guess at.
+    """
+    server = tmp_path / "server"
+    server.mkdir()
+    (server / networking.INTENT_FILE).write_text(written, encoding="utf-8")
+    assert networking.read_network_intent(server) is None
+
+
+def test_no_intent_file_at_all_is_no_intent(tmp_path: Path) -> None:
+    """The state every install in the wild is in, and the one the automatic path needs."""
+    assert networking.read_network_intent(tmp_path) is None
+    assert networking.read_network_intent(tmp_path / "not-a-directory") is None

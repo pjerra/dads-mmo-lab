@@ -25,7 +25,7 @@ from yulon.catalog.native import (
     BUILD_CANCEL_NOTE,
     DOWNLOAD_CANCEL_NOTE,
     IMPORT_CANCEL_NOTE,
-    STATE_FILE,
+    OUR_OWN_FILES,
     CallableGate,
     Stage,
     StageContext,
@@ -103,7 +103,7 @@ class AzerothCoreInstaller(StagedInstaller):
             # deletes a non-git destination before cloning, and the guard that
             # protects a user's files should still be there after somebody
             # reorders the stages.
-            leftovers = _listing(server_dir, ignoring=STATE_FILE)
+            leftovers = _listing(server_dir, ignoring=OUR_OWN_FILES)
             if leftovers:
                 raise InstallerError(
                     f"{server_dir} has files in it but is not a checkout of {source.url}, so it "

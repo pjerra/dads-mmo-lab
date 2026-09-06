@@ -1474,10 +1474,17 @@ Both families share one state filename (`STATE_FILE = ".yulon-install.json"`, no
 **after** a silent name-drop.
 
 The quiet case is a **same-family, future-version** state file: stage names the running binary does not
-know are dropped at `native.py:335` **with no log at any level**, `write_state` then persists the
+know are dropped at `native.py:406` (at `b481be54`; this sentence said `:335`, which was true at
+`cfb4c04f` and points at a bare `"""` after `lane/b41`'s edits to this file, `git diff --numstat
+cfb4c04f b481be54 -- pylauncher/yulon/catalog/native.py` → `116  8`) **with no log at any level**,
+`write_state` then persists the
 **post-filter** tuple (`:709`, `:377`), so **an older binary permanently strips the newer names from
 disk**, and the only user-facing line (`:667-669`) prints the already-filtered tuple. A downgrade is
-therefore lossy and silent in both directions.
+therefore lossy and silent in both directions. (`:709`, `:377`, `:667-669` and the `:894`/`:899`
+pair above were already stale at `cfb4c04f` — `git show cfb4c04f:pylauncher/yulon/catalog/native.py
+| sed -n '377p;667p;668p;669p;709p;894p;899p'` prints an empty line at 377, `"""` at 669 and five
+unrelated sentences (read 2026-09-06 by the merger) — so they are
+not `lane/b41`'s to re-derive and were left as found; `write_state` is at `:500` at `b481be54`.)
 
 **FIXED 2026-09-02, on the day K.8 was about to make it reachable.** `InstallState` gained `unknown` —
 the names on disk this build does not recognise. `read_state()` now SPLITS rather than filters, logs a
@@ -3076,8 +3083,14 @@ review-of-review's, quoted with their commands, not re-run by the merger except 
 **What is measured-closed, and what is not**, in past tense with the commit each was closed at.
 Closed, each on the shape it names: the DefaultZone reading and the enable being withheld by
 default (`9b0eb089`, rebased to `e72bc758` and again to `ee361035`, round 6 — `plan()` takes
-`enable_firewall: bool = False` at `networking.py:2956`, and its docstring at `:2967` calls it "the
-one knob that can turn a firewall ON"). The refusal that named a cause that was not the cause (`ef022b3a`, round 7; correct
+`enable_firewall: bool = False` at `networking.py:3145`, and its docstring at `:3156` calls it "the
+one knob that can turn a firewall ON"; both re-read on 2026-09-06 at `b481be54`, where this
+sentence's earlier 2956/2967 pointed at `@dataclass(frozen=True)` and at a sentence about
+leftovers. 2956/2967 were the merged tree's numbers at `cfb4c04f`, never those three commits':
+`git show <c>:pylauncher/yulon/networking.py | grep -n 'enable_firewall: bool = False'` printed
+`2310` at each of them. `git diff --numstat cfb4c04f b481be54 -- pylauncher/yulon/networking.py
+pylauncher/yulon/catalog/native.py` printed `306  24` and `116  8` on this lane, which is what
+moved them). The refusal that named a cause that was not the cause (`ef022b3a`, round 7; correct
 inside `sudo unshare --net`, and corrected one shape over at `cd827c0f`, round 8, after `docker run
 --network=host` was measured). The zone-breadth warning that fired on every Docker box (`cd827c0f`,
 on yulon-fedora with real subprocesses, after round 7's container stand-in had bound its `docker`
@@ -3252,32 +3265,261 @@ It matters because the Server tab's log panel is exactly a caller that starts a 
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
 close" in a bug report and gets attributed to whatever the user did last.
 
-### 41. A realm cannot be set to loopback on purpose — 2026-09-05, OPEN
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc` and 2026-09-06 at `30671d6e` (the firewall half), **CLOSED 2026-09-06: the press ran on yulon-ubuntu, gate driven at `b206ad0c`/`96251d57`, mutations at `30671d6e`**
 
 Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
 Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
 
-`ready`'s realm step (`catalog/native.py:1969-2005`) rewrites the realmlist row unless
-`networking.advertisable()` accepts every column, and `advertisable()` refuses the loopback by
-design (§35: a realm advertising `127.0.0.1` tells every client the world server is on the CLIENT's
-machine, and the client hangs at "Connecting"). So the value a §35 fix exists to prevent by accident
-is also unreachable on purpose: set `127.0.0.1` by hand and the next install press or resume
-overwrites it, printing "players on other machines can reach this server".
+`ready`'s realm step (`StagedInstaller._advertise_realm()`, `catalog/native.py:2758` at
+`d1e41fbc`; the `catalog/native.py:1969-2005` this entry cited on 2026-09-05 was already the
+wrong range then) rewrites the realmlist row unless `networking.advertisable()` accepts every
+column, and `advertisable()` refuses the loopback by design (§35: a realm advertising `127.0.0.1`
+tells every client the world server is on the CLIENT's machine, and the client hangs at
+"Connecting"). So the value a §35 fix exists to prevent by accident is also unreachable on
+purpose: set `127.0.0.1` by hand and the next install press or resume overwrites it, printing
+"players on other machines can reach this server".
 
 `networking.Mode` is `Literal["lan", "internet"]`. The missing third mode is the small half. The
 load-bearing half is that the choice must be REMEMBERED: `ready` has to distinguish a row that is
 loopback because nobody set it from one that is loopback because the owner chose it, and only
 overwrite the first. That is recorded intent, not a value read back out of the database.
 
-- [ ] A mode that writes the loopback, reachable from the Networking tab.
-- [ ] Intent persisted where a resume can read it, and `ready` reading it before it decides.
-- [ ] The gate: choose loopback through the app, press Install again on the finished install, and the
+- [x] A mode that writes the loopback, reachable from the Networking tab. — `networking.Mode` is
+      `Literal["lan", "internet", "loopback"]` (`networking.py:194` at `d1e41fbc`), `plan()` writes
+      `LOOPBACK_ADDRESS` for it without consulting `advertisable()` (whose §35 refusal is unchanged,
+      and asserted unchanged by
+      `test_networking.py::test_a_loopback_plan_writes_the_row_advertisable_refuses_and_needs_no_lan_ip`),
+      and `NetworkPlan.ready` is True for it with no LAN address at all — a machine with no network
+      is the one whose owner wants this mode, and gating Apply on `lan_ip` would have left the
+      button dead exactly there. The control is a third `QRadioButton` in the same `QButtonGroup`,
+      labelled `LOOPBACK_CHOICE` = "Only this computer (127.0.0.1)" (`controller_view.py:607` at
+      `b481be54`), read by `network_mode()` (`controller_view.py:1835` at `b481be54`). Driven by
+      `QTest.mouseClick` on the real radio, not by `setChecked()`, in
+      `test_controller_view.py::test_the_networking_tab_offers_the_loopback_and_a_real_click_selects_it`
+      and on the live install in `pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`.
+- [x] Intent persisted where a resume can read it, and `ready` reading it before it decides. —
+      `.yulon-network.json` (`networking.INTENT_FILE`, `networking.py:220` at `b481be54`) beside
+      the server dir's `.yulon-install.json` and deliberately not inside it: `native.write_state()` rebuilds its whole
+      payload from the keys the running build knows and the engine holds one `InstallState` in memory
+      for a whole run, so an intent written into that file by the Networking tab is dropped by the
+      engine's next write with nothing to notice it —
+      `test_networking.py::test_the_recorded_intent_survives_the_install_engine_rewriting_its_state_file`
+      is what catches that return. `networking.apply()` records it only after the realmlist UPDATE
+      has actually gone through, so a failed Apply cannot leave `ready` honouring a choice the
+      database never received. `_advertise_realm()` reads it before it detects an address and
+      before it queries the row. What holds that ORDER is not the two empty SQL lists in
+      `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` — an
+      earlier draft of this line said it was, and two mutations run on m910q on 2026-09-06 from a
+      fresh `git clone --shared` refuted it: detecting the address first, and reading the intent
+      only after the `address is None` early return, each left both lists empty and the whole
+      416-test file green — that run's transcript, taken at `9f0c2fa2` before the round-3 tests
+      existed, is committed at
+      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round2-meta.txt`, where `416 passed` stands
+      at lines 25, 43, 54 and 66 (baseline, M5, M6, restore) — and the second printed
+      `REALM_ADDRESS_UNKNOWN` instead of the §41
+      sentence on a machine with no LAN address — the machine this mode exists for. The order is
+      held by that test's call-counting `lan_ip` seam (`asked == []`) and by
+      `test_spine.py::test_the_machine_this_mode_is_for_has_no_lan_address_at_all`, both added in
+      round 3 and both shown red under those mutations in
+      `pyplan/gates/bug41-loopback-2026-09-05/mutations-round3.txt`.
+- [x] The loopback mode asks the firewall for nothing. — Not a box the entry had on 2026-09-05;
+      added in round 3, from a review finding. `plan()` built its firewall commands from the
+      backend and the ports before it looked at `mode`, so a loopback plan carried
+      `ufw allow 3724/tcp` and `ufw allow 8085/tcp` under its own warning that no other machine can
+      reach this server. It happened on a real box: the loopback Apply on yulon-ubuntu on
+      2026-09-06 left both rules in `ufw show added`
+      (`pyplan/gates/bug41-loopback-2026-09-05/yulon-ubuntu-press/ufw-after-apply.txt`, taken
+      04:43:23, right after that Apply). `widget-loopback.log` has the shape of it: line 51
+      `Firewall commands:` with the two `ufw allow` lines, line 57 the warning that no other
+      machine can reach this server, line 58 blank, line 59 `Applied:` and line 60
+      `✓ ufw allow 3724/tcp`. `plan()` now computes no firewall commands, no SSH
+      guard and no "allow inbound TCP … by hand" step for `mode == "loopback"` (`networking.py`,
+      `wants_firewall`), asserted by
+      `test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing` and
+      `test_controller_view.py::test_the_loopback_plan_in_the_tab_offers_to_open_no_ports`, each
+      with a `lan` control in it so an empty list for every mode cannot pass them.
+      **Round 4 widened that to the two thirds of the branch nothing was watching.** Round 3's
+      assertions were `firewall_commands == ()`, `ssh_ports == ()` and "no manual step containing
+      TCP", all of which stay true with the guard put back on the firewalld and `alf` branches.
+      Measured, not quoted: the same script that runs round 4's mutations checked the round-3 tip
+      `ccfe7f97` out in the same throwaway clone and ran the three lane test files there with
+      `if wants_firewall and backend == "firewalld"` cut back to `if backend == "firewalld"` (MR1)
+      and with the same edit to the `"alf"` branch (MR3) — `419 passed` both times, at lines 160
+      and 169 of `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, against a baseline
+      of `419 passed` at line 151. One third of the branch was held: the same edit to the `none`
+      branch (MR2) is red at line 132 of that transcript. Two were silent. The mutations are not
+      harmless:
+      under MR1 a loopback firewalld plan spawns both detection probes through `probe_prefix()`
+      (i.e. sudo) and appends "firewalld's zones could not be read, so the game ports were written
+      to the DEFAULT zone" about ports it never wrote — transcript line 58, `MUTATED-MR1 firewalld
+      loopback: seams=['detect_firewalld', 'detect_zones'] fw=[] manual=[] warnings=2` — and under
+      MR3 a loopback `alf` plan reads the macOS firewall (line 92, `detect_alf called=True`). The
+      test now asserts what ARRIVES:
+      recording `detect_firewalld`/`detect_zones` seams with `calls == []`, a recording
+      `detect_alf` with `alf_calls == []` and `firewall_state is None`, the whole
+      `warnings == (ONLY_THIS_COMPUTER,)` and the whole `manual_steps == ()`, each against a `lan`
+      control that shows the same seams called and the same steps built. At `92cacc44` all three
+      mutations are red at the named assertion, each `1 failed, 418 passed`: MR1 at transcript
+      lines 54/57 (`AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])` at
+      `test_networking.py:4929`, `assert calls == []`), MR3 at 83/86 (`AssertionError:
+      ['detect_alf']` at `:4969`) and MR4 at 111/114 (`AssertionError: ('netsh', ('Windows: set the
+      network profile to Private …',))` at `:4934`, `assert shut.manual_steps == ()`); baseline
+      `419 passed` at line 27 and after the restore at line 141. Line numbers in
+      `pylauncher/tests/` are as of `92cacc44`.
+      **The netsh step is now gated too, and that is a decision, not an omission.** `plan()` still
+      appended "Windows: set the network profile to Private (Settings → Network & Internet)" for a
+      loopback plan on `netsh`, and round 3's filter on the string "TCP" could not see it. The
+      network profile picks which Windows Firewall rule set is in force, so telling the owner to
+      change it is asking the firewall for something; it is now inside `wants_firewall`
+      (`networking.py`), the loopback assertion is `manual_steps == ()`, and the `netsh` `lan`
+      control asserts the step is still built there.
+      **What was reviewed and deliberately left:** the reason. "no other machine can reach this
+      server" is loose — this mode changes the address the realm row hands out, not what is bound.
+      Read on yulon-ubuntu 2026-09-06 06:27:43 +02:00, on the install the 04:43 loopback Apply had
+      run against (the recorded intent has since been removed and the row put back to
+      `172.30.55.119`, so this is the binding under the LAN mode as well):
+      `docker ps --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
+      and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN on `0.0.0.0:3724`
+      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: of everything a
+      `NetworkPlan` hands back, `apply()` RUNS the contents of `firewall_commands`,
+      `portproxy_commands` and `realmlist_sql`, SHOWS `client_realmlist` (it goes in the report and
+      the tab prints it), and leaves `manual_steps`, `warnings` and `refusals` as text for the owner
+      (the firewall instructions among that text — the firewalld zone warnings, the backend-`none`
+      "allow inbound TCP … by hand" step and the `netsh` profile step — were each read under a
+      `wants_firewall` gate at `6795cbdd`, `networking.py:3298`, `:3397` and `:3481`, so none is
+      emitted under `loopback`; rounds 4, 5 and 6 each wrote an exhaustive claim here that the
+      tree refuted, and the merger dropped the claim); beyond the fields it writes one file, the
+      `.yulon-network.json` this branch added. None of that is a container port binding: a
+      `portproxy` rule forwards a host address to 127.0.0.1, and the UPDATE changes only the
+      address the realm row hands out. (This sentence enumerated the dataclass's "output fields" in
+      rounds 4 and 5 and was short both times — it has 18 fields; round 6 stated what `apply()`
+      does with them instead of listing them.) So another
+      machine still connects and logs in and is then told the world
+      server is at 127.0.0.1, i.e. on itself. The code comment that gave that sentence as the REASON
+      for opening no ports ("a hole nothing is going to come through") was false and is rewritten
+      with the reading above; the two owner-visible strings — `networking.ONLY_THIS_COMPUTER` and
+      the install line from `loopback_chosen_on_purpose()` — are kept as they stand, with the
+      reading recorded in each one's docstring, because both are quoted verbatim in committed
+      records of the presses that closed this entry and the second is asserted literally by
+      `pyplan/gates/bug41-loopback-2026-09-05/closing_step_driver_b41.py:121`; rewording them would
+      make this entry quote sentences the tree no longer prints, and no code reads either string to
+      decide anything.
+      Named here so it is not read as decided: the loopback-binding warning ("ports […] are
+      published on 127.0.0.1") and the WSL/`netsh` portproxy commands in the same function were NOT
+      changed and still behave the same for every mode.
+- [x] The gate: choose loopback through the app, press Install again on the finished install, and the
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
-      loopback was never chosen still ends up advertising a reachable address.
+      loopback was never chosen still ends up advertising a reachable address. — **Met on
+      yulon-ubuntu 2026-09-06**, against the finished AzerothCore WotLK install at
+      `/home/pk/wowserver` (`install_id 243c46e3`, six recorded stages completed, `ac-*` containers
+      up, 50 GB free), from a checkout of `lane/b41` at `b206ad0c` and, for the second half,
+      `96251d57`. Whole record: `pyplan/gates/bug41-loopback-2026-09-05/README.md` §"Round 2", with
+      the files in `yulon-ubuntu-press/`.
+      **The choice, through the app:** `QTest.mouseClick` on the real radio, `Show plan`, `Apply`, on
+      the real `ControllerServices.for_entry()` wiring offscreen — 17/17 checks
+      (`yulon-ubuntu-press/widget-loopback.log`). `acore_auth.realmlist` id 1 went from
+      `172.30.55.119 / 172.30.55.119` to `127.0.0.1 / 127.0.0.1`, read through `docker exec …
+      mysql`, and `{"mode": "loopback", "recorded_unix": 1788662602}` was on disk.
+      **Press 1** (`python -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver`):
+      exit 0 in 880 s, `Already finished: clone-core, clone-modules, generate-compose, build,
+      client-data, import`, `The server is already built; skipping the compile.` — nothing compiled
+      (`press-chosen.log`). The row afterwards was still `127.0.0.1 / 127.0.0.1`, and the sentence
+      below appeared in the press's stdout AND at line 61 of `/home/pk/.local/share/yulon/yulon.log`
+      (`platform.config_dir()` on Linux; the file did not exist before this press), timestamped
+      `2026-09-06 04:57:59` (`after-press-chosen.txt`, `yulon-log-press-chosen.txt`).
+      **Press 2**, with `.yulon-network.json` removed and the row left on the loopback: exit 0 in
+      10 s, and the row came out `172.30.55.119 / 172.30.55.119` with "The realm now advertises
+      172.30.55.119, so players on other machines can reach this server" (`press-never-chosen.log`).
+      **The undo a user has:** `record_network_intent()` (`networking.py:3008` at `cdd5eba2`)
+      stores the last applied mode, so picking `LAN (same Wi-Fi)` and pressing Apply in the same
+      tab rewrites the record — driven, 5/5 checks, record `{"mode": "lan"}` and row `172.30.55.119`
+      (`widget-undo.log`). Deleting the file also works; nothing in the UI does that for you.
+      **The box was put back**: row `AzerothCore 172.30.55.119 172.30.55.119 8085`, no
+      `.yulon-network.json`, `ufw` inactive with `(None)` added, all three containers up
+      (`put-back.txt` against `before.txt`).
+      **One thing the press ran into that is not this entry's**: `ready` waits for an auth-container
+      log line matching `127\.0\.0\.1:8085` (`INSTALL_REALM_HOST`, `native.py:202`, filled at
+      `native.py:2741`; both at `cdd5eba2`), read from the container's CURRENT run only.
+      `ac-authserver` had been up
+      since the row said `172.30.55.119`, so its log could not match and press 1 sat in `ready` from
+      04:43:31 until **this lane restarted `ac-authserver` by hand** — `docker restart ac-authserver`
+      over ssh at 04:57:57, mid-press, out of band and not through the app — after which the press
+      printed `The server is up.` two seconds later. So press 1 did NOT produce that sentence on its
+      own: `_advertise_realm()` runs after the last stage and OUTSIDE the `try`
+      (`catalog/native.py:1543` at `cdd5eba2`, with the comment arguing for it at `1535-1542`), so a
+      `ready` that ran out its window would have raised, the install would have been recorded as
+      failed, and the §41 sentence would never have been printed at all. `up` runs
+      `compose up -d --no-deps`, which does not recreate a running container, so the press could not
+      have cleared this itself. It predates §41 (`native.py:1539-1542` at `cdd5eba2` argues for the
+      fixed value) and is not fixed by it. A press
+      against a plain LAN-advertising install whose auth container started under that row was NOT
+      driven to a verdict here, and no checklist entry was allocated for it — see `r2-fix-b41.json`.
+
+The line the install prints when it leaves the row alone (`loopback_chosen_on_purpose()`,
+`catalog/native.py:245` at `b481be54`), as it came out of the live run:
+
+> The address this realm advertises was left exactly as it is, because this server was set to only
+> this computer (127.0.0.1) on 2026-09-06 from its Networking tab, and that choice is recorded in
+> .yulon-network.json in the server folder. Nothing here overwrote it, which means no other machine
+> can reach this server. To undo it, open this server's Networking tab, pick LAN (same Wi-Fi) or
+> Internet play, press Show plan and then Apply.
+
+**One defect this work found and fixed.** Running the new spine tests on m910q 2026-09-05 refused a
+folder this app had written every byte of: `InstallerError: …/wow is not empty and was not created by
+this app (.yulon-network.json)`. `_claim_folder()` asked "is this folder somebody else's?" with one
+file's NAME (`ignoring=STATE_FILE`) rather than with the set of files this app writes. The set now has
+a name — `native.OUR_OWN_FILES` (`catalog/native.py:92` at `b481be54`), used at all five call
+sites — and `_listing(ignoring=)` raises `TypeError` on a bare `str`, which mypy accepts as a `Collection[str]`
+and which would have filtered the listing by character rather than by name.
+
+**Round 5 (2026-09-06) — the citations above were re-derived at the commit they name.** Eight
+source-line citations in this entry and in the gate README had drifted: `2586b913` added 17 lines to
+`catalog/native.py` and edited this file in the SAME commit, so the numbers written that round were
+already off by that commit's own docstring edit — including the round-4 "correction" of
+`catalog/native.py:1527` to `1526`, which reproduces at no commit from `2586b913` onward. Read out of
+a clean tree at `cdd5eba2`: `networking.py:2989` → `3008`, `native.py:2724` → `2741`,
+`native.py:1526` → `1543`, `native.py:1518-1525` → `1535-1542`, `native.py:1522-1525` → `1539-1542`;
+each is now written with the SHA it was read at. Round 5's own edits were split so the numbers could
+not move under themselves: commit A (`cdd5eba2`) changed only `pylauncher/`, commit B only md and
+txt. Two sentences were corrected as well: the `plan()` docstring pinned its loopback reading to
+`2586b913` while the transcript it cites says `commit: 92cacc44`, and the "only ACTIONS a
+`NetworkPlan` carries" list left out `client_realmlist` and the `.yulon-network.json` write this
+branch added. `pyplan/gates/bug41-loopback-2026-09-05/checks-green-round5.txt` is `--checks` at
+commit A with `git rev-parse HEAD` and an empty `git status --porcelain` in the same capture:
+`2805 passed, 4 skipped in 20.34s`, three mypy successes, ruff and black clean,
+`=== --checks: ALL GREEN ===`.
+
+**Round 6 (2026-09-06) — the citations this lane killed OUTSIDE this entry.** Round 5 re-pinned
+§41's own eight and declared the drift mechanism closed while looking only at §41. It was not
+closed: the same edits had moved lines that other entries cite. Three were dead at the lane tip and
+correct at `cfb4c04f` — §39's measured-closed paragraph above (`networking.py:2956` printed
+`@dataclass(frozen=True)`, `:2967` printed a sentence about leftovers) and §23
+(`native.py:335` printed a bare `"""`); they now read `3145`, `3156` and `406` at `b481be54`. The
+§39 pair had never been pinned to the three commits its own sentence names: at `9b0eb089`,
+`e72bc758` and `ee361035` the parameter is at 2310. The list was bounded by a scan committed with
+the gate — `pyplan/gates/bug41-loopback-2026-09-05/citation-scan-round6.sh` and its output
+`citation-scan-round6.txt`, 79 pairs — which prints every `networking.py:N` / `native.py:N` /
+`controller_view.py:N` citation in `pyplan/**/*.md` whose line CONTENT differs between `cfb4c04f`
+and the lane tip; each was then read against the sentence citing it, and outside §41 the only two
+the scan could see that had been true at `cfb4c04f` are `networking.py:2956` and `native.py:335`
+(`:2967` is the invisible third, below). The rest that no longer resolve were already stale
+at `cfb4c04f` and are not this lane's to rewrite. A bare `:NNN` continuation is invisible to that
+scan, which is how §39's `:2967` is written; it and §23's `:709`/`:377`/`:667-669`/`:894`/`:899`
+were checked by reading instead. Five §41
+citations that were correct but carried no SHA — `controller_view.py:607`, `:1835`,
+`networking.py:220`, `native.py:245`, `native.py:92` — now carry `at b481be54`, which is the thing
+whose absence made the three above silent. The `wants_firewall` comment's enumeration of the
+plan's "output fields" was retired rather than corrected a third time: the dataclass has 18 fields
+and both earlier lists were short, so the comment (and its twin above) now says what `apply()`
+runs, shows and writes. `pyplan/gates/bug41-loopback-2026-09-05/checks-green-round6.txt` is
+`--checks` at round 6's commit A with `git rev-parse HEAD` and an empty `git status --porcelain` in
+the same capture: `2805 passed, 4 skipped in 20.41s`, three mypy successes, ruff and black clean,
+`=== --checks: ALL GREEN ===`.
 
 Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
 `catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file
-another lane owned. Decision recorded in `phase7-decisions.md` Appendix D.
+another lane owned. Decision recorded in `phase7-decisions.md` Appendix D. Both files were free by
+the time `lane/b41` took this on.
 
 ### 42. A headless install writes no log at all — 2026-09-05, FIXED 2026-09-05 on `lane/headlesslog` (merged at `9254b60a`), **CLOSED on the Windows TBC second press**
 
