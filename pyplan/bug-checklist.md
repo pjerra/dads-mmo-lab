@@ -3263,9 +3263,11 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `172.30.55.119`, so this is the binding under the LAN mode as well):
       `docker ps --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
       and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN on `0.0.0.0:3724`
-      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: the only ACTIONS
-      a `NetworkPlan` carries are `firewall_commands`, `portproxy_commands` and `realmlist_sql`,
-      and none of them is a container port binding. So another
+      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: the output fields
+      a `NetworkPlan` carries are `firewall_commands`, `portproxy_commands`, `realmlist_sql` and
+      `client_realmlist` (the last is shown, not run — `apply()` puts it in its report and the tab
+      prints it), and applying a plan does one further thing, the `.yulon-network.json` write this
+      branch added; none of that is a container port binding. So another
       machine still connects and logs in and is then told the world
       server is at 127.0.0.1, i.e. on itself. The code comment that gave that sentence as the REASON
       for opening no ports ("a hole nothing is going to come through") was false and is rewritten
@@ -3302,26 +3304,28 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       **Press 2**, with `.yulon-network.json` removed and the row left on the loopback: exit 0 in
       10 s, and the row came out `172.30.55.119 / 172.30.55.119` with "The realm now advertises
       172.30.55.119, so players on other machines can reach this server" (`press-never-chosen.log`).
-      **The undo a user has:** `record_network_intent()` (`networking.py:2989`) stores the last
-      applied mode, so picking `LAN (same Wi-Fi)` and pressing Apply in the same tab rewrites the
-      record — driven, 5/5 checks, record `{"mode": "lan"}` and row `172.30.55.119`
+      **The undo a user has:** `record_network_intent()` (`networking.py:3008` at `cdd5eba2`)
+      stores the last applied mode, so picking `LAN (same Wi-Fi)` and pressing Apply in the same
+      tab rewrites the record — driven, 5/5 checks, record `{"mode": "lan"}` and row `172.30.55.119`
       (`widget-undo.log`). Deleting the file also works; nothing in the UI does that for you.
       **The box was put back**: row `AzerothCore 172.30.55.119 172.30.55.119 8085`, no
       `.yulon-network.json`, `ufw` inactive with `(None)` added, all three containers up
       (`put-back.txt` against `before.txt`).
       **One thing the press ran into that is not this entry's**: `ready` waits for an auth-container
       log line matching `127\.0\.0\.1:8085` (`INSTALL_REALM_HOST`, `native.py:202`, filled at
-      `native.py:2724`), read from the container's CURRENT run only. `ac-authserver` had been up
+      `native.py:2741`; both at `cdd5eba2`), read from the container's CURRENT run only.
+      `ac-authserver` had been up
       since the row said `172.30.55.119`, so its log could not match and press 1 sat in `ready` from
       04:43:31 until **this lane restarted `ac-authserver` by hand** — `docker restart ac-authserver`
       over ssh at 04:57:57, mid-press, out of band and not through the app — after which the press
       printed `The server is up.` two seconds later. So press 1 did NOT produce that sentence on its
       own: `_advertise_realm()` runs after the last stage and OUTSIDE the `try`
-      (`catalog/native.py:1526`, with the comment arguing for it at `1518-1525`), so a `ready` that
-      ran out its window would have raised, the install would have been recorded as failed, and the
-      §41 sentence would never have been printed at all. `up` runs `compose up -d --no-deps`, which
-      does not recreate a running container, so the press could not have cleared this itself. It
-      predates §41 (`native.py:1522-1525` argues for the fixed value) and is not fixed by it. A press
+      (`catalog/native.py:1543` at `cdd5eba2`, with the comment arguing for it at `1535-1542`), so a
+      `ready` that ran out its window would have raised, the install would have been recorded as
+      failed, and the §41 sentence would never have been printed at all. `up` runs
+      `compose up -d --no-deps`, which does not recreate a running container, so the press could not
+      have cleared this itself. It predates §41 (`native.py:1539-1542` at `cdd5eba2` argues for the
+      fixed value) and is not fixed by it. A press
       against a plain LAN-advertising install whose auth container started under that row was NOT
       driven to a verdict here, and no checklist entry was allocated for it — see `r2-fix-b41.json`.
 
@@ -3341,6 +3345,23 @@ file's NAME (`ignoring=STATE_FILE`) rather than with the set of files this app w
 a name — `native.OUR_OWN_FILES` (`catalog/native.py:92`), used at all five call sites — and
 `_listing(ignoring=)` raises `TypeError` on a bare `str`, which mypy accepts as a `Collection[str]`
 and which would have filtered the listing by character rather than by name.
+
+**Round 5 (2026-09-06) — the citations above were re-derived at the commit they name.** Eight
+source-line citations in this entry and in the gate README had drifted: `2586b913` added 17 lines to
+`catalog/native.py` and edited this file in the SAME commit, so the numbers written that round were
+already off by that commit's own docstring edit — including the round-4 "correction" of
+`catalog/native.py:1527` to `1526`, which reproduces at no commit from `2586b913` onward. Read out of
+a clean tree at `cdd5eba2`: `networking.py:2989` → `3008`, `native.py:2724` → `2741`,
+`native.py:1526` → `1543`, `native.py:1518-1525` → `1535-1542`, `native.py:1522-1525` → `1539-1542`;
+each is now written with the SHA it was read at. Round 5's own edits were split so the numbers could
+not move under themselves: commit A (`cdd5eba2`) changed only `pylauncher/`, commit B only md and
+txt. Two sentences were corrected as well: the `plan()` docstring pinned its loopback reading to
+`2586b913` while the transcript it cites says `commit: 92cacc44`, and the "only ACTIONS a
+`NetworkPlan` carries" list left out `client_realmlist` and the `.yulon-network.json` write this
+branch added. `pyplan/gates/bug41-loopback-2026-09-05/checks-green-round5.txt` is `--checks` at
+commit A with `git rev-parse HEAD` and an empty `git status --porcelain` in the same capture:
+`2805 passed, 4 skipped in 20.34s`, three mypy successes, ruff and black clean,
+`=== --checks: ALL GREEN ===`.
 
 Deliberately not started on 2026-09-05: `networking.py` was mid-flight in §39 round 5 and
 `catalog/native.py` in the §40/§21 lane, and two collisions that night came from editing a file

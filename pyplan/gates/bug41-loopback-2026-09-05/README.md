@@ -244,11 +244,11 @@ carries that press's whole `yulon.log` excerpt).
 ### The way back a user actually has
 
 The entry asks how the choice is undone without deleting a file by hand.
-`networking.record_network_intent()` (`pylauncher/yulon/networking.py:2989`) stores the LAST
-APPLIED mode rather than only `loopback`, so the answer is the two buttons the install log's own
-sentence names. Driven, not read: `widget_driver_b41_wotlk_undo.py` chose the loopback again
-through the tab (record `{"mode": "loopback"}`, row `127.0.0.1`), then clicked `LAN (same
-Wi-Fi)` → `Show plan` → `Apply` — **5 passed, 0 failed** (`widget-undo.log`):
+`networking.record_network_intent()` (`pylauncher/yulon/networking.py:3008` at `cdd5eba2`)
+stores the LAST APPLIED mode rather than only `loopback`, so the answer is the two buttons the
+install log's own sentence names. Driven, not read: `widget_driver_b41_wotlk_undo.py` chose the
+loopback again through the tab (record `{"mode": "loopback"}`, row `127.0.0.1`), then clicked
+`LAN (same Wi-Fi)` → `Show plan` → `Apply` — **5 passed, 0 failed** (`widget-undo.log`):
 
     the record no longer says loopback -- NetworkIntent(mode='lan', recorded_unix=1788663628)
     realm row now = '172.30.55.119   172.30.55.119'
@@ -262,9 +262,9 @@ So there is a route through the tab and it needs no file handling. Deleting
 was restarted.** The mechanism, in `why-ready-waited.txt`:
 
 * the `ready` stage waits for an auth-container log line matching `install.native.ready.auth`,
-  which is `{{REALM_HOST}}:{{WORLD_PORT}}`, filled at `native.py:2724` with
-  `INSTALL_REALM_HOST` — the fixed string `"127.0.0.1"` (`native.py:202`) — and escaped, so the
-  pattern is `127\.0\.0\.1:8085`;
+  which is `{{REALM_HOST}}:{{WORLD_PORT}}`, filled at `native.py:2741` with
+  `INSTALL_REALM_HOST` — the fixed string `"127.0.0.1"` (`native.py:202`; both at `cdd5eba2`) —
+  and escaped, so the pattern is `127\.0\.0\.1:8085`;
 * `docker.wait_ready()` reads the CURRENT run's log only (`--since` the container's `StartedAt`);
 * `ac-authserver` had been running since `2026-09-05T20:48:03Z`, and its line for that run was
   `Added realm "AzerothCore" at 172.30.55.119:8085.` — the row's value at the time it started.
@@ -277,12 +277,12 @@ restarted at 04:57:57 box-local, whereupon its current-run log said `Added realm
 127.0.0.1:8085.` and the press printed `The server is up.` at 04:57:59 — two seconds later.
 
 This is not caused by §41 and not fixed by it; `INSTALL_REALM_HOST` and the comment explaining it
-(`native.py:1522-1525`) both predate this lane. **Not measured here:** a press against a plain
-LAN-advertising install whose auth container was started under that row — the shape most finished
-installs are in. This lane restarted one container and got past it; it did not drive that case to
-a verdict, and it did not file a checklist entry for it, because allocating a number while other
-lanes are open would collide. It is reported in `r2-fix-b41.json` as a finding for the workflow
-to place.
+(`native.py:1539-1542` at `cdd5eba2`) both predate this lane. **Not measured here:** a press
+against a plain LAN-advertising install whose auth container was started under that row — the shape
+most finished installs are in. This lane restarted one container and got past it; it did not drive
+that case to a verdict, and it did not file a checklist entry for it, because allocating a number
+while other lanes are open would collide. It is reported in `r2-fix-b41.json` as a finding for the
+workflow to place.
 
 ### The box, put back
 
@@ -379,9 +379,9 @@ should do under this mode; this round left them alone rather than guess.
 Press 1 did not produce the §41 sentence on its own. It sat in `ready` from 04:43:31 until **this
 lane ran `docker restart ac-authserver` by hand over ssh at 04:57:57**, mid-press and not through
 the app, and the sentence was printed two seconds later. `_advertise_realm()` runs after the last
-stage and outside the `try` (`catalog/native.py:1526`, argued at `1518-1525`), so a `ready` that
-ran out its window would have raised, the install would have been recorded as failed, and the
-sentence would never have appeared. The entry now says so.
+stage and outside the `try` (`catalog/native.py:1543` at `cdd5eba2`, argued at `1535-1542`), so a
+`ready` that ran out its window would have raised, the install would have been recorded as failed,
+and the sentence would never have appeared. The entry now says so.
 
 ### `--checks`
 
@@ -439,9 +439,11 @@ yulon-ubuntu 2026-09-06 06:27:43 +02:00 (read-only, announced), on the install t
 Apply had run against: `docker ps --format '{{.Names}}\t{{.Ports}}'` → `ac-authserver
 0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp`; `ss -ltn` → LISTEN on
 `0.0.0.0:3724` and `0.0.0.0:8085`. The mode changes the address the realm row hands out and nothing
-else — `plan()` returns firewall commands, portproxy commands and a realmlist UPDATE, and no port
-binding. Another machine still connects and logs in, and is then told the world server is at
-127.0.0.1, i.e. on itself. The comment now says that.
+else — `plan()` returns firewall commands, portproxy commands, a realmlist UPDATE and the
+`client_realmlist` string the report shows, and `apply()` additionally records the chosen mode in
+`.yulon-network.json`; no port binding is among them (round 5 corrected this list, which had
+omitted the last two). Another machine still connects and logs in, and is then told the world
+server is at 127.0.0.1, i.e. on itself. The comment now says that.
 
 The two owner-visible strings were reviewed and KEPT: `networking.ONLY_THIS_COMPUTER` and the
 install line from `loopback_chosen_on_purpose()`. Both are quoted verbatim in committed records of
@@ -466,8 +468,66 @@ both `=== --checks: ALL GREEN ===` and exit 0: `2805 passed, 4 skipped` in 20.62
 code edits uncommitted over `ccfe7f97`) and in 20.75 s (with the corrected docstrings and these
 gate files, uncommitted over `2586b913`); `Success: no issues found in 72 source files` three times
 each (this platform, as Windows, as macOS), `All checks passed!`, `140 files would be left
-unchanged.` A third run, with the working tree CLEAN at `5bf29ec5`, and a fourth after two sentences about
-what a `NetworkPlan` carries were tightened, are at the end of the same file: `2805 passed, 4
+unchanged.` A third run at `5bf29ec5` and a fourth after two sentences about
+what a `NetworkPlan` carries were tightened are at the end of the same file: `2805 passed, 4
 skipped` in 20.32 s and in 19.62 s, the same three mypy successes each, ruff and black clean,
-`=== --checks: ALL GREEN ===`, exit 0. Run 4 is the state this lane's tip holds, minus that
-transcript and this paragraph, which no check reads.
+`=== --checks: ALL GREEN ===`, exit 0. Their headers say `==> syncing lane/b41 (<sha>)`, which the
+runner prints whether or not the tree has uncommitted edits, so "clean" is not readable from those
+four transcripts; `checks-green-round5.txt` below carries `git status --porcelain` in the same
+capture instead. None of these four runs covers the lane tip: they are at `ccfe7f97`, `2586b913`,
+`5bf29ec5` and `5bf29ec5`.
+
+## Round 5 (2026-09-06) — the citations re-derived at the commit they name
+
+Eight source-line citations in this file and in §41 had drifted. `2586b913` added 17 lines to
+`native.py` and edited `bug-checklist.md` and this README in the SAME commit, so every line number
+written into the md that round was already off by the size of that commit's own docstring edit —
+including the round-4 "correction" of `catalog/native.py:1527` to `1526`, which reproduces at no
+commit from `2586b913` onward. Re-derived at `cdd5eba2` with the tree clean:
+
+| written as | re-derived at `cdd5eba2` | the line it points at |
+| --- | --- | --- |
+| `networking.py:2989` | `networking.py:3008` | `def record_network_intent(server_dir: Path, mode: Mode) -> str:` |
+| `native.py:2724` | `native.py:2741` | `tokens = {"REALM_HOST": INSTALL_REALM_HOST, "WORLD_PORT": str(self.entry.ports.world)}` |
+| `native.py:1526` | `native.py:1543` | `yield from self._advertise_realm(replace(ctx, state=state))` |
+| `native.py:1518-1525` | `native.py:1535-1542` | the comment block that opens "OUTSIDE the `try`, and after the last stage, on purpose." |
+| `native.py:1522-1525` | `native.py:1539-1542` | the half of that comment that argues for `INSTALL_REALM_HOST` |
+
+`yulon-ubuntu-press/why-ready-waited.txt` line 5 also says `native.py:2724`, and was left alone: it
+is a capture taken 2026-09-06 05:01:58 during the press, and `git show 96251d57:…/native.py |
+sed -n 2724p` prints the `tokens = {"REALM_HOST": …}` line, so it was true of the commit the press
+ran at. At `cdd5eba2` that line is 2741.
+
+Each of the eight now carries `at cdd5eba2`, so a later edit to `native.py` or `networking.py`
+moves the line without silently invalidating the citation. `native.py:202`, `native.py:245`,
+`native.py:92`, `networking.py:194`, `networking.py:220`, `controller_view.py:607` and
+`controller_view.py:1835` were re-derived at `cdd5eba2` too and had not moved.
+
+The drift has a shape, so round 5 has a shape: commit A (`cdd5eba2`) changed only `pylauncher/`,
+and commit B changed only md and txt. The numbers in B were read out of A's files with the tree
+clean, and nothing in B can move them.
+
+Two sentences were also wrong about the code rather than about a line number. The `plan()`
+docstring pinned its firewalld/alf/netsh loopback reading to `2586b913`, while
+`mutations-round4.txt`'s own header says `commit: 92cacc44…` and `mutations-round4.sh` says
+`SHA=92cacc44…`; `networking.py` and `test_networking.py` both changed between the two commits.
+And the `wants_firewall` comment (and its twin in §41) said the only ACTIONS a `NetworkPlan`
+carries are `firewall_commands`, `portproxy_commands` and `realmlist_sql`. Measured at `cdd5eba2`:
+the dataclass also carries `client_realmlist` (`networking.py:2786`), which `apply()` puts in its
+report (`networking.py:3623`) and the Networking tab prints (`controller_view.py:1908-1909`), and
+`apply()` writes the chosen mode to `.yulon-network.json` through `record_network_intent()`
+(`networking.py:3626`) — all three at `cdd5eba2`. This branch's own feature. The conclusion the
+sentence was making is untouched: none of it is a container port binding.
+
+### `--checks`
+
+`checks-green-round5.txt` is one run of `run-tests-vm.sh --checks` on m910q, 2026-09-06 07:02,
+taken at commit A with the tree clean. Lines 1-5 are the capture's own header, written before the
+runner was called: `### date: 2026-09-06T07:02:39+02:00`, `### git rev-parse HEAD:`,
+`cdd5eba2a46abfda71e27e9ab8bf05366fbbff85`,
+`### git status --porcelain (empty means the tree is the commit):` with nothing under it, and
+`### ---`. Line 6 is `==> syncing lane/b41 (cdd5eba2) to m910q`. Then
+`2805 passed, 4 skipped in 20.34s`,
+`Success: no issues found in 72 source files` three times (this platform, as Windows, as macOS),
+`All checks passed!`, `140 files would be left unchanged.`, `=== --checks: ALL GREEN ===`, exit 0.
+Commit B adds only md and txt on top of it, which no check reads.
