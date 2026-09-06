@@ -24,16 +24,25 @@ failures are recorded (`pyplan/phase8-reads/hypeer.md`, from `botid.rs`):
 
 ## What is NOT resolved here, and is named rather than assumed
 
-On AzerothCore an environment key **shadows** the matching row in a conf file
-(`composegen.py:88-92`), so a prefix set in the generated override would beat
-the one in `playerbots.conf`. Whether `AiPlayerbot.RandomBotAccountPrefix` has
-an environment spelling at all is unmeasured here: deriving one from
-`AC_AI_PLAYERBOT_RANDOM_BOT_AUTOLOGIN` is a guess about a naming rule, and this
-phase does not publish guesses as facts. The symptom a shadowed prefix would
-produce — a marker that reads fine and matches nothing — is exactly the third
-outcome `population()` reports as a warning rather than as zero, so it surfaces
-as a question instead of a wrong number. 8.1a's gate settles it against a real
-install.
+On AzerothCore an environment variable beats both the conf file and the compiled
+default, **including for a key that is absent from the file**, and the naming
+rule is generic rather than per-key: every ini key `X` is looked up as
+`"AC_" + upper_snake(X)`, so `AiPlayerbot.RandomBotAccountPrefix` is
+`AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX`. That is measured, not derived —
+`Config.cpp:435-438` for the name, `:370-374` and `:391-394` for the transform,
+`:540-552` for env winning at read time — and the proof the rule is generic is
+that the catalog already relies on it for `AiPlayerbot.MinRandomBots`. It is all
+recorded in `pyplan/phase8-reads/azerothcore.md:119-124`.
+
+**This module does not read that layer yet**, and that is a real gap rather than
+an unknown one. It was written here as "unmeasured" until 2026-09-06, which was
+wrong about the evidence: the answer was already in the phase's own read.
+
+What the gap costs is bounded. Yu'lon's generated override sets no prefix key,
+so on an install this app made, the conf-or-default answer is the one in force.
+An install where somebody set that variable by hand produces a marker that reads
+fine and matches nothing — which `population()` reports as a **warning** rather
+than as zero, so it surfaces as a question instead of a wrong number.
 """
 
 from __future__ import annotations
