@@ -3223,21 +3223,31 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       with a `lan` control in it so an empty list for every mode cannot pass them.
       **Round 4 widened that to the two thirds of the branch nothing was watching.** Round 3's
       assertions were `firewall_commands == ()`, `ssh_ports == ()` and "no manual step containing
-      TCP", all of which stay true with the guard put back on the firewalld and `alf` branches:
-      re-running the three lane test files on m910q with `if wants_firewall and backend ==
-      "firewalld"` cut back to `if backend == "firewalld"` (MR1) and the same for `"alf"` (MR3)
-      printed `419 passed` both times, while the same edit to the `none` branch printed `1 failed`
-      — one third of the branch held, two silent
-      (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`). The mutations are not
-      harmless: under MR1 a loopback firewalld plan spawns both detection probes through
-      `probe_prefix()` (i.e. sudo) and appends "firewalld's zones could not be read, so the game
-      ports were written to the DEFAULT zone" with no port written, and under MR3 a loopback `alf`
-      plan reads the macOS firewall and adds a step about it. The test now asserts what ARRIVES:
+      TCP", all of which stay true with the guard put back on the firewalld and `alf` branches.
+      Measured, not quoted: the same script that runs round 4's mutations checked the round-3 tip
+      `ccfe7f97` out in the same throwaway clone and ran the three lane test files there with
+      `if wants_firewall and backend == "firewalld"` cut back to `if backend == "firewalld"` (MR1)
+      and with the same edit to the `"alf"` branch (MR3) — `419 passed` both times, at lines 160
+      and 169 of `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, against a baseline
+      of `419 passed` at line 151. One third of the branch was held: the same edit to the `none`
+      branch (MR2) is red at line 132 of that transcript. Two were silent. The mutations are not
+      harmless:
+      under MR1 a loopback firewalld plan spawns both detection probes through `probe_prefix()`
+      (i.e. sudo) and appends "firewalld's zones could not be read, so the game ports were written
+      to the DEFAULT zone" about ports it never wrote — transcript line 58, `MUTATED-MR1 firewalld
+      loopback: seams=['detect_firewalld', 'detect_zones'] fw=[] manual=[] warnings=2` — and under
+      MR3 a loopback `alf` plan reads the macOS firewall (line 92, `detect_alf called=True`). The
+      test now asserts what ARRIVES:
       recording `detect_firewalld`/`detect_zones` seams with `calls == []`, a recording
       `detect_alf` with `alf_calls == []` and `firewall_state is None`, the whole
       `warnings == (ONLY_THIS_COMPUTER,)` and the whole `manual_steps == ()`, each against a `lan`
-      control that shows the same seams called and the same steps built. MR1 and MR3 are red at it
-      in `mutations-round4.txt`.
+      control that shows the same seams called and the same steps built. At the new tip all three
+      mutations are red at the named assertion, each `1 failed, 418 passed`: MR1 at transcript
+      lines 54/57 (`AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])`,
+      `test_networking.py:4924`), MR3 at 83/86 (`AssertionError: ['detect_alf']`,
+      `test_networking.py:4964`) and MR4 at 111/114 (`AssertionError: ('netsh', ('Windows: set the
+      network profile to Private …',))`, `test_networking.py:4929`); baseline `419 passed` at
+      line 27 and after the restore at line 141.
       **The netsh step is now gated too, and that is a decision, not an omission.** `plan()` still
       appended "Windows: set the network profile to Private (Settings → Network & Internet)" for a
       loopback plan on `netsh`, and round 3's filter on the string "TCP" could not see it. The
@@ -3247,10 +3257,14 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       control asserts the step is still built there.
       **What was reviewed and deliberately left:** the reason. "no other machine can reach this
       server" is loose — this mode changes the address the realm row hands out, not what is bound.
-      Read on yulon-ubuntu 2026-09-06 06:09 CEST with the loopback intent recorded there,
+      Read on yulon-ubuntu 2026-09-06 06:27:43 +02:00, on the install the 04:43 loopback Apply had
+      run against (the recorded intent has since been removed and the row put back to
+      `172.30.55.119`, so this is the binding under the LAN mode as well):
       `docker ps --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
       and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN on `0.0.0.0:3724`
-      and `0.0.0.0:8085`, so another machine still connects and logs in and is then told the world
+      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: `plan()` returns
+      firewall commands, portproxy commands and a realmlist UPDATE, and nothing else. So another
+      machine still connects and logs in and is then told the world
       server is at 127.0.0.1, i.e. on itself. The code comment that gave that sentence as the REASON
       for opening no ports ("a hole nothing is going to come through") was false and is rewritten
       with the reading above; the two owner-visible strings — `networking.ONLY_THIS_COMPUTER` and

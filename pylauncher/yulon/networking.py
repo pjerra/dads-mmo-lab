@@ -262,13 +262,14 @@ the same widget, one press before it takes effect.
 
 "reach" here means "get to this server to play on it", not "open a socket to
 it", and the wording was reviewed against the machine rather than kept by
-default. Measured on yulon-ubuntu 2026-09-06 06:09 CEST, with the loopback
-intent recorded on that install: `docker ps --format '{{.Names}}\t{{.Ports}}'`
-printed `ac-authserver 0.0.0.0:3724->3724/tcp` and `ac-worldserver …
-0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on `0.0.0.0:3724` and
-`0.0.0.0:8085` — so the mode binds nothing shut and another machine can still
-connect and log in. What it cannot do is play: the colon clause of this sentence
-is the whole mechanism, and it is what the reader is given. The sentence was
+default. Read on yulon-ubuntu 2026-09-06 06:27:43 +02:00, on the install the
+04:43 loopback Apply had run against: `docker ps --format
+'{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp` and
+`ac-worldserver … 0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on
+`0.0.0.0:3724` and `0.0.0.0:8085` — so the mode binds nothing shut and another
+machine can still connect and log in. What it cannot do is play: the colon
+clause of this sentence is the whole mechanism, and it is what the reader is
+given. The sentence was
 kept as it stands rather than reworded to "play on" because it is quoted, live,
 in two committed records of the presses that closed §41
 (`pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt` lines 31 and
@@ -3172,15 +3173,19 @@ def plan(
     are written, and a plan that never asked wrote them to a zone the interface
     was not in (see `detect_firewalld_zones()`).
 
-    A `loopback` plan reaches none of that. Measured on m910q 2026-09-06 from a
-    fresh `git clone --shared`, with seams that record every call
-    (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, block P1):
-    `plan(WOTLK, "loopback", firewall="firewalld", …)` printed `seams=[] fw=[]
-    warnings=1`, against `seams=['detect_firewalld', 'detect_zones']
-    fw=['firewall-offline-cmd --add-port=3724/tcp', 'firewall-offline-cmd
-    --add-port=8085/tcp'] warnings=2` for the same call with `"lan"`; the same
-    block printed the `alf` loopback plan as `detect_alf called=False
-    firewall_state=None`.
+    A `loopback` plan reaches none of that. Measured on m910q 2026-09-06 at
+    `2586b913` from a fresh `git clone --shared`, with seams that record every
+    call (`pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`, the
+    UNMUTATED block, lines 30-38):
+
+        UNMUTATED firewalld loopback: seams=[] fw=[] manual=[] warnings=1
+        UNMUTATED firewalld lan: seams=['detect_firewalld', 'detect_zones']
+            fw=['firewall-offline-cmd --add-port=3724/tcp',
+            'firewall-offline-cmd --add-port=8085/tcp'] manual=[] warnings=2
+        UNMUTATED alf loopback: detect_alf called=False firewall_state=None
+        UNMUTATED netsh loopback: manual=[]
+
+    (the `lan` lines wrapped here; the file has each on one line).
 
     `elevate` says whether the WRITES this plan describes will run elevated,
     and every default detection seam then asks the machine with that same
@@ -3245,16 +3250,20 @@ def plan(
     ssh_ports: tuple[int, ...] = ()
 
     # The loopback mode asks the firewall for nothing — but NOT because the
-    # ports stop being reachable. This mode changes the address the realm row
-    # HANDS OUT and nothing else: measured on yulon-ubuntu 2026-09-06 06:09
-    # CEST, with the loopback intent already recorded there, `docker ps
-    # --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver
-    # 0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp`,
-    # and `ss -ltn` printed LISTEN on `0.0.0.0:3724` and `0.0.0.0:8085`. So
-    # another machine still completes a TCP connect and an auth login; it is
-    # then handed 127.0.0.1 as the world address, i.e. told to look on itself.
-    # The hole is therefore a hole for a connection that cannot end in play,
-    # opened on a server whose owner asked for one nobody else plays on.
+    # ports stop being reachable. Nothing this function returns is a port
+    # binding: it returns firewall commands, portproxy commands and a realmlist
+    # UPDATE, and the loopback mode changes only the address that UPDATE hands
+    # out. Read on yulon-ubuntu 2026-09-06 06:27:43 +02:00, on the install the
+    # 04:43 loopback Apply had run against (the recorded intent has since been
+    # removed and the row put back), `docker ps --format
+    # '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
+    # and `ac-worldserver … 0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed
+    # LISTEN on `0.0.0.0:3724` and `0.0.0.0:8085` — the compose bindings, the
+    # same under every mode. So another machine still completes a TCP connect
+    # and an auth login; it is then handed 127.0.0.1 as the world address, i.e.
+    # told to look on itself. The hole is therefore a hole for a connection
+    # that cannot end in play, opened on a server whose owner asked for one
+    # nobody else plays on.
     # What it cost before this branch existed, measured on yulon-ubuntu
     # 2026-09-06: an Apply of the loopback plan through the Networking tab left
     # `ufw allow 3724/tcp` and `ufw allow 8085/tcp` behind — see

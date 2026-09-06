@@ -391,3 +391,70 @@ one with the round-3 edits uncommitted and one with the working tree clean at `3
 times (this platform, as Windows, as macOS), `All checks passed!`, `140 files would be left
 unchanged.`, `=== --checks: ALL GREEN ===`, exit 0. The lane tip differs from `30ccbfce` only by
 that file and this paragraph, which no check reads.
+
+## Round 4 (2026-09-06) — the two thirds of the firewall branch nothing was watching
+
+Round 3's `test_a_loopback_plan_asks_the_firewall_for_nothing` asserted an empty
+`firewall_commands`, an empty `ssh_ports` and "no manual step containing TCP". All three stay true
+with the `wants_firewall` guard cut back out of the firewalld and `alf` branches, so those two
+thirds of the branch answered the same with the fix and without it. Measured here rather than
+taken on trust: `mutations-round4.sh` checks the round-3 tip `ccfe7f97` out in the same throwaway
+clone and runs the mutations there too.
+
+`mutations-round4.txt` (m910q, 2026-09-06, throwaway `git clone --shared /home/pk/dads-mmo-lab
+/home/pk/p7-b41-r4` detached at `2586b913`, `__pycache__` purged before and after every mutation,
+clone removed at the end — the last line is `ls: cannot access '/home/pk/p7-b41-r4': No such file
+or directory`):
+
+| block | line | what it printed |
+| --- | --- | --- |
+| baseline at `2586b913` | 27 | `419 passed in 4.08s` |
+| UNMUTATED probe | 30 | `UNMUTATED firewalld loopback: seams=[] fw=[] manual=[] warnings=1` |
+| UNMUTATED probe | 32 | `UNMUTATED firewalld lan: seams=['detect_firewalld', 'detect_zones'] fw=['firewall-offline-cmd --add-port=3724/tcp', 'firewall-offline-cmd --add-port=8085/tcp'] manual=[] warnings=2` |
+| UNMUTATED probe | 35 | `UNMUTATED alf loopback: detect_alf called=False firewall_state=None manual=[]` |
+| UNMUTATED probe | 37-38 | `netsh loopback: manual=[]` / `netsh lan: manual=['Windows: set the network profile to Private …']` |
+| MR1 `if backend == "firewalld"` | 54, 57 | red, `AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])` at `test_networking.py:4924`, `1 failed, 418 passed` |
+| MR1 probe | 58-59 | `seams=['detect_firewalld', 'detect_zones'] fw=[] manual=[] warnings=2`, the extra warning being "the game ports were written to the DEFAULT zone" with no port written |
+| MR3 `if backend == "alf"` | 83, 86 | red, `AssertionError: ['detect_alf']` at `test_networking.py:4964`, `1 failed, 418 passed` |
+| MR3 probe | 92 | `alf loopback: detect_alf called=True firewall_state=AlfState(enabled=True, …)` |
+| MR4 `if backend == "netsh"` | 111, 114 | red, `AssertionError: ('netsh', ('Windows: set the network profile to Private …',))` at `test_networking.py:4929`, `1 failed, 418 passed` |
+| MR2 control `elif backend == "none"` | 129, 132 | red, the "allow inbound TCP 3724, 8085 by hand" step, `1 failed, 418 passed` |
+| restore | 141 | `419 passed in 4.11s` |
+| round-3 tip `ccfe7f97` baseline | 151 | `419 passed in 4.08s` |
+| MR1 at `ccfe7f97` | 160 | `419 passed in 4.09s` — **silent** |
+| MR3 at `ccfe7f97` | 169 | `419 passed in 4.11s` — **silent** |
+| back at `2586b913` | 177 | `419 passed in 4.12s` |
+
+What changed in the code: the test's firewalld seams now record their calls (`calls == []`), an
+`alf` case with a recording `detect_alf` asserts `firewall_state is None`, and the loopback
+assertions are on the WHOLE `warnings` tuple (`== (ONLY_THIS_COMPUTER,)`) and the WHOLE
+`manual_steps` tuple (`== ()`). The netsh "set the network profile to Private" step moved inside
+`wants_firewall`, because the network profile picks which Windows Firewall rule set is in force.
+
+### The reason the branch gave for itself was false
+
+The comment above `wants_firewall` said the loopback warning means no other machine can reach the
+server, "so a hole for the game ports is a hole nothing is going to come through". Read on
+yulon-ubuntu 2026-09-06 06:27:43 +02:00 (read-only, announced), on the install the 04:43 loopback
+Apply had run against: `docker ps --format '{{.Names}}\t{{.Ports}}'` → `ac-authserver
+0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp`; `ss -ltn` → LISTEN on
+`0.0.0.0:3724` and `0.0.0.0:8085`. The mode changes the address the realm row hands out and nothing
+else — `plan()` returns firewall commands, portproxy commands and a realmlist UPDATE, and no port
+binding. Another machine still connects and logs in, and is then told the world server is at
+127.0.0.1, i.e. on itself. The comment now says that.
+
+The two owner-visible strings were reviewed and KEPT: `networking.ONLY_THIS_COMPUTER` and the
+install line from `loopback_chosen_on_purpose()`. Both are quoted verbatim in committed records of
+the presses that closed this entry (`widget-driver-output.txt` lines 31 and 52, `README.md:51`,
+`closing-step-output.txt:13`, `yulon-ubuntu-press/yulon-log-press-chosen.txt:12`) and the second is
+asserted literally by `closing_step_driver_b41.py:121`; rewording them would make the closed entry
+quote sentences the tree no longer prints, and no code reads either string to decide anything. The
+reading above is recorded in each string's docstring instead.
+
+### `mutations-round2-meta.txt`
+
+The §41 entry's "each left both lists empty and the whole 416-test file green" describes a run made
+at the round-2 tip `9f0c2fa2`, before round 3's tests existed. That transcript lived only in a
+scratch directory, so the clause had nothing a reader could re-derive; it is now committed here
+verbatim as `mutations-round2-meta.txt`, with `416 passed` at lines 25, 43, 54 and 66 (baseline,
+M5, M6, restore) and the clone's removal at line 68.

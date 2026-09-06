@@ -4860,10 +4860,14 @@ def _recording_firewalld_seams(calls: list[str]) -> dict[str, object]:
     nothing from one that asked it twice and then dropped the answers. Measured
     on m910q 2026-09-06 from a fresh `git clone --shared`, mutation MR1 in
     `pyplan/gates/bug41-loopback-2026-09-05/mutations-round4.txt`: with the
-    `wants_firewall` guard removed from the firewalld branch, the loopback plan
-    called both seams and appended `firewalld's zones could not be read, so the
-    game ports were written to the DEFAULT zone` with no port written, and the
-    assertions on the empty lists stayed green.
+    `wants_firewall` guard cut out of the firewalld branch, that file's line 58
+    reads `MUTATED-MR1 firewalld loopback: seams=['detect_firewalld',
+    'detect_zones'] fw=[] manual=[] warnings=2`, and the extra warning (line 59)
+    is "firewalld's zones could not be read, so the game ports were written to
+    the DEFAULT zone" — said about ports the same plan never wrote. The same
+    script re-ran that mutation against the round-3 tip `ccfe7f97`, where the
+    assertions were the empty lists alone, and printed `419 passed` (line 160):
+    the mutation was invisible there, which is why these seams record.
     """
 
     def firewalld() -> networking.FirewalldDaemon:
@@ -4890,12 +4894,13 @@ def test_a_loopback_plan_asks_the_firewall_for_nothing() -> None:
     `✓ ufw allow 3724/tcp`.
 
     Not because the ports stop being reachable — this mode changes the address
-    the realm row hands out and nothing else. On yulon-ubuntu 2026-09-06 06:09
-    CEST, with the loopback intent recorded there, `docker ps --format
-    '{{.Names}}\\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
-    and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN
-    on both. Holes for a connection that cannot end in play, on a server whose
-    owner asked for one nobody else plays on.
+    the realm row hands out and nothing else. Read on yulon-ubuntu 2026-09-06
+    06:27:43 +02:00, on the install that Apply had run against, `docker ps
+    --format '{{.Names}}\\t{{.Ports}}'` printed `ac-authserver
+    0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and
+    `ss -ltn` printed LISTEN on `0.0.0.0:3724` and `0.0.0.0:8085`. Holes for a
+    connection that cannot end in play, on a server whose owner asked for one
+    nobody else plays on.
 
     Three things are asserted per backend, because an empty command list alone
     is silent about two of them: the commands, the probes that were spawned to

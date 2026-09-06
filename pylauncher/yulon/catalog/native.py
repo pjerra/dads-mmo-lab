@@ -261,8 +261,8 @@ def loopback_chosen_on_purpose(intent: networking.NetworkIntent) -> str:
 
     "no other machine can reach this server" was read against the machine on
     2026-09-06 and kept. It is loose: the mode changes the address the row hands
-    out, not what is bound. On yulon-ubuntu at 06:09 CEST, with the loopback
-    intent recorded on that install, `docker ps --format
+    out, not what is bound. On yulon-ubuntu at 06:27:43 +02:00, on the install
+    the 04:43 loopback Apply had run against, `docker ps --format
     '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp` and
     `ac-worldserver … 0.0.0.0:8085->8085/tcp`, and `ss -ltn` printed LISTEN on
     `0.0.0.0:3724` and `0.0.0.0:8085` — so another machine still connects and
