@@ -111,5 +111,11 @@ Two things review raised that were **not** changed, and why:
   into heading references. They resolve exactly at the commit the sentence names — checked range by
   range on 2026-09-06 — and a SHA-pinned range is what this tree asks a citation to be.
 
-`checks-yulon-fedora-r2.txt` is the gate re-run after these four edits, over the committed lane tip
-with nothing overlaid.
+`checks-yulon-fedora-r2.txt` is the gate re-run after these four edits, 79 lines. Its own first line
+reads `==> syncing lane/b71 (987379f8) to yulon-fedora` and there is **no** `==> overlaying` line at
+all (`grep -c overlaying` → 0), so it ran over the committed tip with nothing on top of it:
+**2792 passed, 4 skipped in 20.38s**, mypy `Success: no issues found in 72 source files` three times
+(this platform, as Windows, as macOS), ruff `All checks passed!`, black `140 files would be left
+unchanged`, `=== --checks: ALL GREEN ===`, exit 0. `987379f8` is the commit carrying the four
+corrections above; this row, the transcript itself and the section it sits in are the one commit
+after it, and nothing `--checks` reads lives under `pyplan/gates/`.
