@@ -54,6 +54,7 @@ descriptions are written by hand.
 | `catalog/composegen.py::write_dotenv::os.replace` | `.env` renamed into place | install time |
 | `catalog/composegen.py::write_dotenv::unlink` | the temp `.env` after a failure | install time |
 | `catalog/composegen.py::write_dotenv::write_text` | the merged `.env`, to a temp name | install time |
+| `channel_setup.py::enable::write_text` | **new (8.2a)** the generated override, rewritten with the keys that turn this install's command channel on | **no — the press refuses while the world is running**, which is the whole shape of that step |
 | `catalog/composegen.py::write_plan::write_text` | the rendered compose files in the server dir | install time; a running stack keeps what it started with |
 | `catalog/families/conf.py::_clear::shutil.rmtree` | a staging directory being cleared | install time |
 | `catalog/families/conf.py::_clear::unlink` | a staged file being cleared | install time |

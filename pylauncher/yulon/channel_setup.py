@@ -44,10 +44,13 @@ caller cannot write a credential file it has not proved.
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from yulon import soap
+from yulon.catalog import composegen
+from yulon.catalog.catalog import CatalogEntry
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -153,3 +156,84 @@ class GaveUp:
 
 
 State = Idle | Pending | Verified | GaveUp
+
+
+# -- the enable press --------------------------------------------------------
+
+
+class EnableRefused(RuntimeError):
+    """The press declined. The message is written for a person to act on."""
+
+
+@dataclass(frozen=True)
+class Enabled:
+    """What the press did, and whether it had anything to do."""
+
+    path: Path
+    changed: bool
+
+
+def enable(
+    entry: CatalogEntry,
+    server_dir: Path,
+    *,
+    templates_root: Path,
+    world_running: bool,
+    db_password: str | None = None,
+) -> Enabled:
+    """Write this install's channel on, and only while the world is down.
+
+    **Requiring the world stopped is the whole design of this step**, and it
+    replaced a probe. The version before it checked the port was free and then
+    wrote: check-then-act, with a window between the probe and the bind, and a
+    bind that fails for reasons a probe cannot see. On the CMaNGOS trees a
+    failed SOAP bind is `exit(-1)` with no character saves.
+
+    Declining to run while there is a world to lose removes the hazard rather
+    than warning about it, and it is smaller than the guard it replaced: the
+    configuration is written while the server is down, and the user's ordinary
+    Start brings it up through `docker.start_staged()`, which Phase 7 proved.
+
+    Only the override is rewritten. The SOAP environment lives in that block
+    rather than in the install's own so that Phase 7.1's byte-identical
+    compose fixtures keep asserting what they assert.
+    """
+    operations = entry.operations
+    if operations is None:
+        raise EnableRefused(
+            f"{entry.id} has no measured command channel yet, so there is nothing to turn on"
+        )
+    if world_running:
+        raise EnableRefused(
+            "the server has to be stopped before the command channel can be turned on. Stop it, "
+            "press this again, then start it as usual — the setting is read when the world "
+            "starts, and writing it under a running world risks the world."
+        )
+
+    target = server_dir / composegen.OVERRIDE_FILE
+    before = target.read_text(encoding="utf-8") if target.exists() else ""
+    plan = composegen.render(
+        entry,
+        server_dir,
+        templates_root=templates_root,
+        world_env=_world_env(entry, operations.enable_env),
+        db_password=db_password,
+    )
+    if plan.override == before:
+        logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
+        return Enabled(path=target, changed=False)
+    target.write_text(plan.override, encoding="utf-8", newline="\n")
+    logger.info(f"wrote {entry.id}'s command channel into {target}")
+    return Enabled(path=target, changed=True)
+
+
+def _world_env(entry: CatalogEntry, extra: Mapping[str, str]) -> dict[str, str]:
+    """What the install already had, plus what the channel needs.
+
+    Merged rather than replaced: the bot population lives in this same block,
+    and an install that lost it would be a different server from the one the
+    user built.
+    """
+    native = entry.install.native
+    entry_env = native.azerothcore.world_env if native is not None and native.azerothcore else {}
+    return {**composegen.DEFAULT_WORLD_ENV, **entry_env, **extra}
