@@ -65,15 +65,15 @@ may reorder; it may not add or remove a feature without a new owner answer):
 
 | Step | Delivers | Families and platforms | Answer |
 |---|---|---|---|
-| 8.1 | The command channel: the listener bound to `0.0.0.0` **inside** the container and published on the host at `127.0.0.1` only (binding the container's own loopback is the defect this page rejects design B for), an app-owned GM-3 account verified by a round-trip **from the host**, a typed command layer with the per-tree facts as data | WotLK, TBC, Vanilla over SOAP; Tortoise stays on the attach console + MySQL reads (it has no SOAP) | Q6 |
-| 8.2 | Live dashboard (players, bots, uptime, restart-loop) and the worldserver log snapshot before every stop | all four; one box per family | Q8i, Q3 |
-| 8.3 | Accounts: list, set password, GM level | all four; one box per family | Q8ii, Q3 |
-| 8.4 | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
-| 8.5 | Browse Bots | all four; one box per family | Q4 |
+| 8.1a–d | Live dashboard (players, bots, uptime, restart-loop), the worldserver log snapshot before every stop, the bot-marker resolver and the write ledger — **first, because it is what makes the next step's failure legible** | all four; one box per family | Q8i, Q3 |
+| 8.2a–e | The command channel: the listener bound to `0.0.0.0` **inside** the container and published on the host at `127.0.0.1` only (binding the container's own loopback is the defect this page rejects design B for), an app-owned GM-3 account verified by a round-trip **from the host**, a typed command layer with the per-tree facts as data | WotLK, TBC, Vanilla over SOAP; Tortoise stays on the attach console + MySQL reads (it has no SOAP) | Q6 |
+| 8.3a–d | Accounts: list, set password, GM level | all four; one box per family | Q8ii, Q3 |
+| 8.4a–d | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
+| 8.5a–d | Browse Bots | all four; one box per family | Q4 |
 | 8.6 | My Party | WotLK only, by a server-side route — the mod-ale Lua bridge over SOAP, which is the only route owner answer 5 leaves and which **has never been recorded working**: the one live note about it (`bridge.rs:189-195`) records it failing on 2026-08-20 with the deploy reporting success. 8.6's first question is whether the route works at all; no client addon | Q2b, Q4, Q5 |
-| 8.7 | Module update checks; module manifests for TBC, Vanilla and Tortoise | all four | Q8iii |
+| 8.7a–d | Module update checks; module manifests for TBC, Vanilla and Tortoise | all four | Q8iii |
 | 8.8 | Steam integration | Linux / Steam Deck only | Q2d |
-| 8.9 | Uninstall / purge, as `phase8-decisions.md` | all four; gated on WotLK and one CMaNGOS game | Q2g |
+| 8.9a–b | Uninstall / purge, as `phase8-decisions.md` | all four; gated on WotLK and one CMaNGOS game | Q2g |
 
 **Phase 9:** character sheet (Q2c); doctor (Q2f); tuning knobs, config editor, settings page
 (Q8iii); single-instance guard (Q8iv); console history and autocomplete; a read-only realmlist
@@ -273,15 +273,15 @@ provides the in-game half for WotLK after the LAN step.
 
 | Step | Delivers | Gate |
 |---|---|---|
-| **8.1** | **Observability first**: the pre-stop log snapshot, the restart-loop verdict, the dashboard's reads and the bot-marker resolver, and the interlock that disables commands on an unstable server. None of it needs the channel — the counts are database reads and the snapshot is two docker commands — and all of it is what the next step needs if that step goes wrong. The write ledger and its test land here too, with the first new write sites | All four, one box per family; the crash-loop rendering forced once |
+| **8.1a–d** | **Observability first**: the pre-stop log snapshot, the restart-loop verdict, the dashboard's reads and the bot-marker resolver, and the interlock that disables commands on an unstable server. None of it needs the channel — the counts are database reads and the snapshot is two docker commands — and all of it is what the next step needs if that step goes wrong. The write ledger and its test land here too, with the first new write sites | All four, one box per family; the crash-loop rendering forced once |
 | **8.2a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text and setup modules; the password reset; the override re-render; the Server tab's channel group. **The enable press requires the world stopped** | WotLK on the Ubuntu VM, then native Windows on the gate box; TBC on the test box; **Vanilla on a fresh throwaway install on the test box (answer 9), the same install 8.9 needs, so one compile serves both**; Tortoise's attach-only sentence |
-| **8.3** | Accounts: list, set password, GM level | All four; the client logs in with the new password and is refused the old |
-| **8.4** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
-| **8.5** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
+| **8.3a–d** | Accounts: list, set password, GM level | All four; the client logs in with the new password and is refused the old |
+| **8.4a–d** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
+| **8.5a–d** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
 | **8.6** | My Party, WotLK only, over the Lua bridge | The Ubuntu VM after the owner's rebuild; a bot in the party frame |
-| **8.7** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | WotLK and one CMaNGOS box |
+| **8.7a–d** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | WotLK and one CMaNGOS box |
 | **8.8** | Steam, Linux and Steam Deck only | A machine with Steam — none exists on this side |
-| **8.9** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
+| **8.9a–b** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
 
 8.1 (observability) first, because it is what makes 8.2's failure legible; then 8.2a for WotLK and
 its lettered siblings per family; 8.3 and 8.5 after that and independent of each other; 8.4 after
