@@ -256,3 +256,31 @@ def test_a_recorder_whose_capture_fails_remembers_the_problem_and_does_not_raise
     assert recorder.last is not None
     assert recorder.last.path is None
     assert recorder.last.problem != ""
+
+
+def test_the_cleanup_after_a_failed_write_cannot_itself_raise(tmp_path: Path, monkeypatch) -> None:
+    """The bug CI found on Linux while this machine was green (2026-09-06).
+
+    When the logs directory is a FILE, the partial's parent is that file, and
+    Linux answers the tidy-up unlink with `NotADirectoryError` — which is not
+    the `FileNotFoundError` that `missing_ok=True` swallows. The exception then
+    escaped from inside the handler, out of a function whose whole contract is
+    that it does not raise, and into a Stop the user had pressed.
+
+    Pinned here without depending on either platform's errno: the write and the
+    unlink are both made to fail, and `capture()` must still answer.
+    """
+    monkeypatch.setattr(runner, "run", _FakeRunner())
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("this filesystem says no")
+
+    monkeypatch.setattr(Path, "write_text", refuse)
+    monkeypatch.setattr(Path, "unlink", refuse)
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+
+    snap = logsnap.capture(SPEC, server_dir, game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert snap.path is None
+    assert "this filesystem says no" in snap.problem

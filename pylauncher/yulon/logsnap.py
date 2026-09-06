@@ -108,8 +108,11 @@ def capture(
         partial.write_text(text, encoding="utf-8")
         os.replace(partial, target)
     except OSError as exc:
-        # Not a raise: this runs in front of a stop the user asked for.
-        partial.unlink(missing_ok=True)
+        # Not a raise: this runs in front of a stop the user asked for. The
+        # cleanup goes through `_discard()` because the tidy-up in a handler can
+        # fail for the same reason the write did, and an exception raised while
+        # handling one is the exception that escapes.
+        _discard(partial)
         logger.warning(f"could not save {spec.world}'s log to {target}: {exc}")
         return Snapshot(problem=f"could not save the server's log to {target}: {exc}")
     logger.info(f"saved {spec.world}'s log to {target}")
@@ -156,6 +159,23 @@ class Recorder:
             wsl_distro=self.wsl_distro,
         )
         return self.last
+
+
+def _discard(path: Path) -> None:
+    """Remove a half-written file, and never raise while doing it.
+
+    `unlink(missing_ok=True)` is not enough on its own. When the failure being
+    cleaned up is "the logs directory is a file", the partial's own PARENT is
+    that file, and Linux answers the unlink with `NotADirectoryError` rather
+    than the `FileNotFoundError` `missing_ok` swallows — so the handler raised
+    out of a function whose whole contract is that it does not. Windows answers
+    the same situation differently, which is why the local run was green and CI
+    was red (2026-09-06).
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug(f"could not remove {path}: {exc}")
 
 
 def _trim(text: str) -> str:
