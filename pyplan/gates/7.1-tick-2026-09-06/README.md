@@ -78,10 +78,11 @@ that were both live and resolving before the pass stopped being checked — that
   `pyplan/gates/bug39-lan-press-2026-09-05/` on branch `lane/b39` at **`8f9de57f`** — a commit on
   top of `cfb4c04f` that was **not merged into `yulon-phase7`** when this folder was written. The
   7.1 tick record cites it by path and line and says the same thing there. `lane/b39` is not that
-  commit: `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39`, run 2026-09-06 at
-  00:52 UTC, printed `30617293` (02:26:59 +0200) on `0ea57bce` (01:54:55) on `8f9de57f` (01:52:39).
-  The citation is pinned to the commit, not to the branch, and the tick record now says so and
-  records what the two later commits did and did not change.
+  commit: `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39`, run at
+  2026-09-06T01:12:46Z (`date -u +%FT%TZ` immediately before it, in the same shell command),
+  printed four commits — `323f738a` (03:00:51 +0200) on `30617293` (02:26:59) on `0ea57bce`
+  (01:54:55) on `8f9de57f` (01:52:39). The citation is pinned to the commit, not to the branch, and
+  the tick record now says so and records what the three later commits did and did not change.
 * **Any machine work on Fedora or Arch.** Nothing was installed, built or pressed for this tick. The
   Fedora/Arch sub-gate was re-scoped by the owner onto the evidence that already existed
   (`pyplan/gates/7.1-fedora44-*.log`, `pyplan/gates/7.1-arch/71-arch-appimage.log`), and the three
@@ -95,10 +96,10 @@ here and fixed; no measurement in this folder changed, and no test citation was 
 
 | what was wrong | what it says now | the command |
 |---|---|---|
-| The tick record wrote `at `lane/b39` = **`8f9de57f`**`. It was `8f9de57f` when the sentence was drafted and `0ea57bce` by the time it was committed — an equals sign between a moving branch and a fixed commit. | The SHA is pinned as *the first of `lane/b39`'s commits*, the branch's three commits are listed with their times, and the four readings the tick repeats are shown to survive the two later ones. | `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39` → `30617293` 02:26:59 +0200, `0ea57bce` 01:54:55, `8f9de57f` 01:52:39; `git diff 8f9de57f 30617293 -- pyplan/gates/bug39-lan-press-2026-09-05/README.md \| grep '^-' \| grep -c '23:31:24\|id 104\|172.30.48.1\|press.txt:79'` → **0** |
+| The tick record wrote `at `lane/b39` = **`8f9de57f`**` — an equals sign between a moving branch and a fixed commit. `lane/b39` was already `0ea57bce` (committed 01:54:55 +0200) when the tick commit `ec77b8ef` was made at 02:19:48 +0200. | The SHA is pinned as *the first of `lane/b39`'s commits*, the branch's commits are listed with their times, and the four readings the tick repeats are shown to survive the later ones. Round 3 re-read the branch and re-stated both as four commits (see the round-3 section below). | `git -C ../wt-b39 log --format='%h %ad' --date=iso cfb4c04f..lane/b39` → `30617293` 02:26:59 +0200, `0ea57bce` 01:54:55, `8f9de57f` 01:52:39; `git diff 8f9de57f 30617293 -- pyplan/gates/bug39-lan-press-2026-09-05/README.md \| grep '^-' \| grep -c '23:31:24\|id 104\|172.30.48.1\|press.txt:79'` → **0**; `git log -1 --format=%ad --date=iso ec77b8ef` → `2026-09-06 02:19:48 +0200` |
 | The tick bullet said the Fedora/Arch line carries **two** items; the CARRIED list under that line has three, and Appendix E says three twice. | *three items*. | `sed -n '/What is NOT on evidence and is CARRIED/,/Where those three are owed/p' pyplan/checklist.md \| grep -cE '^        [0-9]\. '` → **3**; `grep -n 'the two items' pyplan/checklist.md pyplan/phase7-decisions.md` → no output |
 | The plan page cited `tests/test_families_azerothcore.py:2` for the sentence "The tests of". It is on line 3 — line 2 is the blank line after the docstring's first line — at `2b6a9c6b` and at the lane tip alike. | `:3`. | `git grep -n 'The tests of' 2b6a9c6b -- pylauncher/tests/test_families_azerothcore.py` → `:3`; the same `grep -n` in the worktree → `3:` |
-| Two new sentences turned a 2026-08-31 measurement into a present-tense universal — "the one box that can exercise `SudoSession` at all" (checklist) and "the only box in this project that can exercise `SudoSession`, both other Linux boxes being passwordless" (Appendix E). The tree contradicts both. | Both name the run and the box instead: the 2026-08-31 press on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop` checkpoint, recorded on the 7.1 line as the first time `SudoSession` was ever exercised. The checklist site adds why password sudo is a property of that checkpoint. | `grep -n 'password-sudo box' pylauncher/yulon/platform.py` → `2432:    password-sudo box (clean Fedora, Arch) every step used to fail the same way.`; `ssh yulon-fedora 'sudo -n -l'` on 2026-09-06 at 00:55 UTC → `(ALL) NOPASSWD: ALL`; `grep -n 'only box in this project\|one box that can exercise' pyplan/checklist.md pyplan/phase7-decisions.md` → no output |
+| Two new sentences turned a 2026-08-31 measurement into a present-tense universal — "the one box that can exercise `SudoSession` at all" (checklist) and "the only box in this project that can exercise `SudoSession`, both other Linux boxes being passwordless" (Appendix E). The tree contradicts both. | Both name the run and the box instead: the 2026-08-31 press on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop` checkpoint, recorded on the 7.1 line as the first time `SudoSession` was ever exercised. The checklist site adds why password sudo is a property of that checkpoint. | `grep -n 'password-sudo box' pylauncher/yulon/platform.py` → `2432:    password-sudo box (clean Fedora, Arch) every step used to fail the same way.`; `ssh yulon-fedora 'sudo -n -l'`, re-read in round 3 at 2026-09-06T01:12:51Z → `(ALL) NOPASSWD: ALL`; `grep -n 'only box in this project\|one box that can exercise' pyplan/checklist.md pyplan/phase7-decisions.md` → no output |
 
 Two things review raised that were **not** changed, and why:
 
@@ -119,3 +120,35 @@ all (`grep -c overlaying` → 0), so it ran over the committed tip with nothing 
 unchanged`, `=== --checks: ALL GREEN ===`, exit 0. `987379f8` is the commit carrying the four
 corrections above; this row, the transcript itself and the section it sits in are the one commit
 after it, and nothing `--checks` reads lives under `pyplan/gates/`.
+
+## Round 3, 2026-09-06 — four measurement stamps re-read off a clock, and one clause dropped
+
+Review found that four dated measurements in this lane carried a clock time **later than the commit
+that contained them**. `git log --format='%h %cI' 2b6a9c6b..lane/b71`, converted with `date -u`,
+prints `ec77b8ef` 2026-09-06T00:19:48Z, `9817dffc` 00:22:29Z, `987379f8` 00:51:04Z and `339983df`
+00:52:55Z; `git log -S'run 2026-09-06 at 00:52 UTC'` and `git log -S'2026-09-06 at 00:55 UTC'` both
+name `987379f8` as the commit that introduced the two sentences. A file committed at 00:51:04Z
+cannot report a command run at 00:52 or 00:55, so those stamps were written rather than read. Both
+underlying facts were true. Round 3 re-ran both commands with `date -u +%FT%TZ` in the same shell
+command, immediately before each, and wrote what the clock printed.
+
+| site | what it said | what it says now |
+|---|---|---|
+| `pyplan/checklist.md`, the clause-15 paragraph, and this file's *"What this folder does NOT evidence"* bullet | the `lane/b39` log was "run 2026-09-06 at 00:52 UTC" and printed **three** commits | run at **2026-09-06T01:12:46Z**, printing **four** — `323f738a` (03:00:51 +0200) on `30617293` (02:26:59) on `0ea57bce` (01:54:55) on `8f9de57f` (01:52:39) |
+| `pyplan/checklist.md`, the *Fedora, the engine and the password sudo* bullet, and row 4 of the round-2 table above | `ssh yulon-fedora 'sudo -n -l'` "on 2026-09-06 at 00:55 UTC" | re-read at **2026-09-06T01:12:51Z**, same output `(ALL) NOPASSWD: ALL` |
+| row 1 of the round-2 table above | "It was `8f9de57f` when the sentence was drafted and `0ea57bce` by the time it was committed" — the first half had nothing behind it (no round-1 record timed that read, and the file is 287 lines at both commits, so its one detail does not discriminate) | only the provable half: `0ea57bce` was committed 01:54:55 +0200 and the tick commit `ec77b8ef` at 02:19:48 +0200 (`git log -1 --format=%ad --date=iso ec77b8ef`) |
+
+What the re-read printed, beyond the stamps: `lane/b39` gained a **fourth** commit, `323f738a`
+(2026-09-06 03:00:51 +0200), after round 2 read it. The four readings the tick repeats survive it —
+`git diff 8f9de57f 323f738a -- pyplan/gates/bug39-lan-press-2026-09-05/README.md | grep '^-' |
+grep -c '23:31:24\|id 104\|172.30.48.1\|press.txt:79'` → **0**. This round also checked the cited
+ranges by content and not only by that removed-line grep: `sed -n '<range>p'` of the file at
+`8f9de57f`, piped through `grep -vxF -f` the same file at `323f738a`, printed **0** absent lines for
+`:14-18` (5 lines), `:74-85` (12), `:161-170` (10) and `:199-219` (21), and **6 of 14** for
+`:147-160` — the one range `323f738a` reworked. The half the tick paraphrases is at
+`323f738a:184-186` and still reads ufw `inactive` before the press and `iptables -S | grep -c ufw`
+= 0 after it.
+
+No measurement in this folder changed and no test citation was repointed; the tick still rests on
+the same evidence. On a box, this round did one announced `ssh yulon-fedora 'sudo -n -l'` and the
+`--checks` run recorded below. Nothing was installed, started, stopped or removed.
