@@ -1,17 +1,27 @@
 # The LAN button, pressed end to end on a remote Linux box — 2026-09-05/06
 
-Everything below happened between **2026-09-05 22:59 UTC and 23:36:36 UTC** (2026-09-06
-00:59–01:36 CEST) on `yulon-ubuntu`, the live 7.2 WotLK install at `/home/pk/wowserver`,
-with a real 3.3.5a client on `vmhost` (the Hyper-V host, Windows 10). Those two bounds are
-the earliest and latest stamps a reader can re-derive from the files committed here: the
-first is `console-before.png`'s own top-bar clock, `Sep 6 00:59` CEST, and the last is
-`ufw-restored.txt:59`, `01:36:36` CEST. (The earliest stamp inside a text file is
-`state-before.txt:1`, `2026-09-05T23:02:16Z`.) An earlier draft of this line said
-"22:57 UTC and 23:38 UTC"; neither of those figures had an artifact behind it. The one
-exception to the window is a **correction pass at 02:16–02:19 CEST on 2026-09-06** (00:16
-UTC), which took no action on any box: three read-only calls to `vmhost` (`Get-Date`,
-`Get-ChildItem`, `Get-Item` + `VersionInfo`), one `scp` off `m910q`, and a `stat` on the
-laptop. Everything it printed is attributed to it where it appears.
+Everything **this lane did on a box** happened between **2026-09-05 22:59 UTC and 23:36:36 UTC**
+(2026-09-06 00:59–01:36 CEST), on four machines: `yulon-ubuntu` (the live 7.2 WotLK install),
+`vmhost` (the Hyper-V host, Windows 10, which ran the 3.3.5a client), and — for the speech-MPQ
+relay — the laptop and `m910q`. Three things fall outside that window: the orchestrator's client
+copy, finished `23:02:02` CEST = **21:02:02 UTC** (:228–231); lane 710's copy of the pre-press
+ufw rule file at **22:06** CEST = 20:06 UTC (:321); and this lane's own later record-keeping on
+2026-09-06 — a read-only correction pass at **02:16–02:19 CEST**, the `--checks` gate runs, and
+the removal of the throwaway relay log on `m910q` at **02:56:35 CEST** (Cleanup) — none touching
+the press evidence. Those passes changed no state on any box beyond the activity-terminal lines
+the rules require. Their calls, in full: on `vmhost`, `Get-Date`, `tailscale ip -4`,
+`Get-ChildItem`, `Get-Item` + `Get-Content -Tail` + `VersionInfo`, and two `Add-Content` lines
+to `C:\Users\PK\claude-activity.log`; on `m910q`, `cat /tmp/b39-http.log`, `ls ~/clients`,
+`pgrep -af`, one `scp` off the box, the `--checks` runs, one `rm`, and the `claude-say` lines
+that announce them; on the laptop, one `stat`. Everything they printed is attributed where it
+appears.
+
+Those two bounds are the earliest and latest stamps a reader can re-derive from the files
+committed here: the first is `console-before.png`'s own top-bar clock, `Sep 6 00:59` CEST,
+and the last is `ufw-restored.txt:59`, `01:36:36` CEST. (The earliest stamp inside a text
+file is `state-before.txt:1`, `2026-09-05T23:02:16Z`.) An earlier draft of this line said
+"22:57 UTC and 23:38 UTC"; neither of those figures had an artifact behind it, and it named
+the correction pass as the window's one exception when three things fall outside it.
 
 The box's own logs and the database are in **UTC**; the box's `date` and the activity
 terminal print **CEST** (UTC+2). `vmhost`'s clock is CEST too — `Get-Date -Format o` there
@@ -238,9 +248,16 @@ It took three runs, and the two failures are recorded because each is a fact abo
    `100.99.204.5`) — beginning `01:25:21`, `01:26:05` and `01:26:30` CEST, after one
    `01:25:11` self-test from m910q's own `100.78.24.50`. The host's files, read back at
    `2026-09-06T02:16:54+02:00`, have mtimes `1:26:05 AM`, `1:26:30 AM` and `1:27:05 AM`, each
-   the completion of the request the log line opens: so leg 2 succeeded in **104 s**
-   (`01:25:21` → `01:27:05`) for 1,034,555,658 bytes — which is the figure an earlier draft
-   reported as "105 s" while citing the failed log for it.
+   the completion of a request whose log line was already written when that request opened.
+   That property is not assumed, it is read off the log file itself: `stat -c '%n %s %y'
+   /tmp/b39-http.log` on `m910q` printed `331 2026-09-06 01:26:30.922109455 +0200` three
+   times on 2026-09-06 — the round-2 reviewer at ~02:39 CEST, the round-2 meta at 02:48:19
+   CEST, and this round at 02:56:01 CEST, all identical — and that last write of the log is
+   **34.08 s BEFORE** `lichking-speech-enus.mpq`'s completion mtime `1:27:05 AM` on `vmhost`,
+   which is only possible if `python3 -m http.server` stamps its line when a request opens,
+   not when it finishes. So leg 2 succeeded in **104 s** (`01:25:21` → `01:27:05`) for
+   1,034,555,658 bytes, an arithmetic on stamps rather than an assertion — and 104 s is the
+   figure an earlier draft reported as "105 s" while citing the failed log for it.
 
    Sizes: the host's `438856302` / `241298910` / `354400446` bytes equal m910q's listing at
    `speech-mpq-relay.log:9-11` and equal the laptop's originals, `stat -c '%n %s'
@@ -319,10 +336,15 @@ world server beyond a character-list reply.
 * No `b39-*` units; the three `ac-*` containers `Up 3 hours`; the checkout and venv at
   `/home/pk/p7/` left for whoever needs them next.
 * On `m910q`: the relay directory `~/clients/b39-speech` and its `:8766` server are gone;
-  `~/clients` holds the 1.12.1 and 2.4.3 clients it held before. One file was left there on
-  purpose — `/tmp/b39-http.log`, 331 bytes, the access log copied here as
-  `speech-relay-httpd.log` — so that a reader can re-derive the relay from the box as well
-  as from this folder.
+  `~/clients` holds the 1.12.1 and 2.4.3 clients it held before (`ls ~/clients` at 02:56:35
+  CEST on 2026-09-06 printed `WoW-Client-1.12.1` and `WoW-Client-2.4.3`, nothing else).
+  `/tmp/b39-http.log`, the 331-byte access log, was **removed at 02:56:35 CEST on
+  2026-09-06** (`rm` then `ls -la` → `No such file or directory`); an earlier draft of this
+  file said it had been kept on purpose so the relay could be re-derived from the box, which
+  was not a reason — immediately before the removal, `sha256sum /tmp/b39-http.log` on the box
+  printed `ffcd04b376cd9e56606e17611003d7786cda7cfbd6fb7b56537a29da8449f1c9` at 02:56:01
+  CEST, and that is the hash of the committed copy `speech-relay-httpd.log`, so the box copy
+  carried nothing this folder does not.
 * On `vmhost`: the client was closed (`Get-Process wow` → 0), the `b39-wow` scheduled task
   deleted, `C:` at 123.9 GB free. The three speech MPQs were **left in place**: they make the
   copied client work, and the client itself is the owner's, staged for this gate.
