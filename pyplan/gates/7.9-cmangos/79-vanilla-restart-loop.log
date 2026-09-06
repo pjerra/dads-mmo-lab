@@ -5,7 +5,7 @@ Using configuration file ../etc/mangosd.conf.
 World Database total connections: 2
 Could not connect to MySQL database at vanilla-db: Unknown MySQL server host 'vanilla-db' (-3)
 
-Cannot connect to world database vanilla-db;3306;mangos;vanilla-4d53d1e149a307d2;mangos
+Cannot connect to world database vanilla-db;3306;mangos;vanilla-REDACTED-SEE-BELOW;mangos
 [CMaNGOS Classic World server v0.18] id(1) port(8085)
 
 
@@ -27,7 +27,7 @@ Using configuration file ../etc/mangosd.conf.
 World Database total connections: 2
 Could not connect to MySQL database at vanilla-db: Unknown MySQL server host 'vanilla-db' (-3)
 
-Cannot connect to world database vanilla-db;3306;mangos;vanilla-4d53d1e149a307d2;mangos
+Cannot connect to world database vanilla-db;3306;mangos;vanilla-REDACTED-SEE-BELOW;mangos
 exit=1 restarts=8 policy=unless-stopped started=2026-09-04T00:08:48.901536076Z finished=2026-09-04T00:08:49.219275744Z
 vanilla-realmd	Exited (128) 12 minutes ago
 vanilla-mangosd	Exited (1) 3 minutes ago

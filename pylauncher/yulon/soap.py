@@ -36,15 +36,26 @@ What is kept from the prior art without change: the escape order (`&` before
 `<` and `>`, so the entities' own ampersand is not re-escaped) and extracting
 the reply text **raw**, without entity decoding — the text is evidence, and a
 decoder is another thing that can be wrong between the server and the capture.
+
+## Why `http.client` and not `urllib.request`
+
+Two reasons, and the first was found by this package's own guard.
+`test_download.py` insists every `urlopen` in the package is handed a verified
+TLS context, because three bare ones once inherited OpenSSL's snapshot of the
+Windows root store and failed on a fresh box. That rule is right and this call
+cannot satisfy it honestly: it is `http://` to a loopback port, where there is
+no certificate to verify, so passing a context would be pantomime.
+
+The second reason is better. `urllib.request` honours `http_proxy` and friends,
+so a user with a proxy configured would have a **loopback** SOAP call routed
+through it. `http.client.HTTPConnection` talks to the host it is given.
 """
 
 from __future__ import annotations
 
 import base64
+import http.client
 import re
-import socket
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -136,35 +147,27 @@ def execute(endpoint: Endpoint, command: str, *, timeout: float = DEFAULT_TIMEOU
     account whose level is too low — are answers about the server rather than
     faults in this code.
     """
-    request = urllib.request.Request(  # noqa: S310 - the scheme is this module's own
-        endpoint.url,
-        data=envelope(command).encode("utf-8"),
-        headers={
-            "Content-Type": "text/xml; charset=utf-8",
-            "Authorization": _basic(endpoint),
-            "SOAPAction": '""',
-        },
-        method="POST",
-    )
+    connection = http.client.HTTPConnection(endpoint.host, endpoint.port, timeout=timeout)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-            return _classify(response.status, response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        # 401, 403 and the fault-bearing 500 all arrive here: `urlopen` raises
-        # for any status it does not consider success, and the body is the part
-        # that matters.
-        body = exc.read().decode("utf-8", errors="replace") if exc.fp is not None else ""
-        return _classify(exc.code, body)
+        connection.request(
+            "POST",
+            "/",
+            body=envelope(command).encode("utf-8"),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "Authorization": _basic(endpoint),
+                "SOAPAction": '""',
+            },
+        )
+        response = connection.getresponse()
+        return _classify(response.status, response.read().decode("utf-8", errors="replace"))
     except TimeoutError:
+        # `socket.timeout` is this same class since 3.10, so one arm covers both.
         return Reply("timeout", f"no answer from {endpoint.url} within {timeout:g}s")
-    except urllib.error.URLError as exc:
-        # `URLError.reason` is the socket error; a timeout can arrive here too,
-        # wrapped, depending on where in the exchange it happened.
-        if isinstance(exc.reason, TimeoutError | socket.timeout):
-            return Reply("timeout", f"no answer from {endpoint.url} within {timeout:g}s")
-        return Reply("unreachable", f"could not reach {endpoint.url}: {exc.reason}")
-    except OSError as exc:
+    except (http.client.HTTPException, OSError) as exc:
         return Reply("unreachable", f"could not reach {endpoint.url}: {exc}")
+    finally:
+        connection.close()
 
 
 def _basic(endpoint: Endpoint) -> str:
