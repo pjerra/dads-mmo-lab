@@ -203,8 +203,8 @@ def test_the_counts_warning_reaches_the_verdict(tmp_path: Path) -> None:
 def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_container(
     tmp_path: Path,
 ) -> None:
-    """8.1c and 8.1d each add their tree's block; until then there are no counts."""
-    unmeasured = catalog_module.load_catalog().get("wow-vanilla")
+    """8.1d adds Tortoise's block; until then there are no counts."""
+    unmeasured = catalog_module.load_catalog().get("wow-tortoise")
     watch = dashboard.Dashboard(
         unmeasured.container_spec(),
         unmeasured,
@@ -218,7 +218,7 @@ def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_contain
 
     assert verdict.state == "up"
     assert verdict.players is None
-    assert "wow-vanilla" in verdict.problem
+    assert "wow-tortoise" in verdict.problem
 
 
 # -- the sentence the tab shows --------------------------------------------

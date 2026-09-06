@@ -286,20 +286,28 @@ def test_an_answer_that_is_not_four_numbers_is_reported_rather_than_parsed_optim
     assert counts.players is None
 
 
-@pytest.mark.parametrize("game", ["wow-vanilla", "wow-tortoise"])
-def test_the_trees_without_a_box_yet_carry_no_block_and_say_so(game: str) -> None:
-    """Per-tree facts are measured per tree: 8.1c and 8.1d each add their own."""
-    assert catalog_module.load_catalog().get(game).observability is None
+def test_the_tree_without_a_box_yet_carries_no_block_and_says_so() -> None:
+    """Per-tree facts are measured per tree: 8.1d adds Tortoise's own."""
+    assert catalog_module.load_catalog().get("wow-tortoise").observability is None
 
 
-# -- TBC (8.1b), whose facts are its own ------------------------------------
+# -- the CMaNGOS pair (8.1b, 8.1c), each with its own facts ------------------
+#
+# Parametrised rather than copied, and every assertion reads the entry under
+# test rather than a literal: the two trees happen to agree on this shape, and
+# the day one of them stops agreeing the test must fail rather than pass
+# because the other still holds. TBC's values were measured on `~/tbc-7.4c` and
+# Vanilla's on `~/vanilla-75b`, both on m910q on 2026-09-06.
 
+CMANGOS = ["wow-tbc", "wow-vanilla"]
 TBC = catalog_module.load_catalog().get("wow-tbc")
 
 
-def _tbc_install(tmp_path: Path, line: str = "AiPlayerbot.RandomBotAccountPrefix = RNDBOT") -> Path:
-    """A TBC server dir holding the one conf file, as the real install has it."""
-    conf = tmp_path / TBC.observability.bots.prefix_conf_file
+def _cmangos_install(
+    entry: object, tmp_path: Path, line: str = "AiPlayerbot.RandomBotAccountPrefix = RNDBOT"
+) -> Path:
+    """A CMaNGOS server dir holding the one conf file, as the real installs have it."""
+    conf = tmp_path / entry.observability.bots.prefix_conf_file
     conf.parent.mkdir(parents=True, exist_ok=True)
     conf.write_text(
         "AiPlayerbot.MinRandomBots = 500\nAiPlayerbot.MaxRandomBots = 500\n" + line + "\n",
@@ -308,7 +316,14 @@ def _tbc_install(tmp_path: Path, line: str = "AiPlayerbot.RandomBotAccountPrefix
     return tmp_path
 
 
-def test_tbc_reads_its_prefix_from_the_conf_that_install_really_has() -> None:
+def _tbc_install(tmp_path: Path, line: str = "AiPlayerbot.RandomBotAccountPrefix = RNDBOT") -> Path:
+    return _cmangos_install(TBC, tmp_path, line)
+
+
+@pytest.mark.parametrize("game", CMANGOS)
+def test_a_cmangos_tree_reads_its_prefix_from_the_conf_that_install_really_has(
+    game: str, tmp_path: Path
+) -> None:
     """Where TBC differs from WotLK, measured on `m910q` 2026-09-06.
 
     The AzerothCore install has no `playerbots.conf` at all, so its marker comes
@@ -321,42 +336,46 @@ def test_tbc_reads_its_prefix_from_the_conf_that_install_really_has() -> None:
     So on this tree the answer comes from the file and says so, and the two trees
     reach the same question by different routes.
     """
-    import tempfile
+    entry = catalog_module.load_catalog().get(game)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        answer = dbreads.resolve_marker(TBC, _tbc_install(Path(tmp)))
+    answer = dbreads.resolve_marker(entry, _cmangos_install(entry, tmp_path))
 
     assert answer.marker is not None
     assert answer.marker.prefix == "RNDBOT"
     assert answer.marker.source == "conf"
 
 
-def test_tbcs_clause_has_no_registry_arm_because_that_tree_has_no_such_table(
-    tmp_path: Path,
+@pytest.mark.parametrize("game", CMANGOS)
+def test_a_cmangos_clause_has_no_registry_arm_because_that_tree_has_no_such_table(
+    game: str, tmp_path: Path
 ) -> None:
     """`cmangos.md:570`: "bot-account marker | none — only the `account.username` RNDBOT% prefix".
 
     An arm invented for this tree would query a table that does not exist and
     turn every count into a SQL error.
     """
-    answer = dbreads.resolve_marker(TBC, _tbc_install(tmp_path))
+    entry = catalog_module.load_catalog().get(game)
+    answer = dbreads.resolve_marker(entry, _cmangos_install(entry, tmp_path))
     assert answer.marker is not None
 
-    clause = dbreads.bot_clause(TBC, answer.marker)
+    clause = dbreads.bot_clause(entry, answer.marker)
 
     assert clause.count(" OR ") == 0
     assert "playerbots_account_type" not in clause
-    assert "realmd.account" in clause, "the auth schema on this tree is `realmd`, not `acore_auth`"
+    assert f"{entry.databases.auth}.account" in clause
+    assert "acore_" not in clause, "nothing from the AzerothCore tree belongs in this clause"
 
 
-def test_tbcs_counts_address_its_own_schemas(tmp_path: Path) -> None:
-    """`characters.characters` and `realmd.account` — nothing inherited from WotLK."""
-    answer = dbreads.resolve_marker(TBC, _tbc_install(tmp_path))
+@pytest.mark.parametrize("game", CMANGOS)
+def test_a_cmangos_trees_counts_address_its_own_schemas(game: str, tmp_path: Path) -> None:
+    """Read from the entry, so a tree whose schemas change fails rather than passes."""
+    entry = catalog_module.load_catalog().get(game)
+    answer = dbreads.resolve_marker(entry, _cmangos_install(entry, tmp_path))
     assert answer.marker is not None
     sql = _FakeSql("1\t2\t3\t4\n")
 
-    dbreads.population(sql, TBC, answer.marker)
+    dbreads.population(sql, entry, answer.marker)
 
     statement = sql.statements[0][1]
-    assert "FROM characters.characters" in statement
+    assert f"FROM {entry.databases.characters}.{entry.observability.characters.table}" in statement
     assert "acore_" not in statement

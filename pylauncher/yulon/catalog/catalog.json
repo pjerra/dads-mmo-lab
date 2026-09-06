@@ -835,6 +835,19 @@
         "prompt": "mangos>",
         "prompt_precedes_answer": false
       },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "etc/aiplayerbot.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": null
+        }
+      },
       "client": {
         "version": "1.12.1",
         "build": 5875,

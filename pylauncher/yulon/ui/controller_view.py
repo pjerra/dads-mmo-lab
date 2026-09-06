@@ -551,11 +551,28 @@ def _for_vanilla(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1c. Measured on `~/vanilla-75b` before this block was written: this tree
+    # has `etc/aiplayerbot.conf` with the key live at column 0, `characters` and
+    # `realmd` for its schemas, and — its own section of the read says so, not
+    # TBC's — bot accounts marked only by the `account.username` prefix.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=vanilla_controller.VanillaController(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        controller=vanilla_controller.VanillaController(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         send_console=lambda cmd: vanilla_console.send_command(
             cmd, container=entry.container_spec().world, wsl_distro=wsl_distro

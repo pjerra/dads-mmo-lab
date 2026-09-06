@@ -2242,10 +2242,9 @@ def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
     assert services.controller.pre_stop is services.log_snapshot
 
 
-@pytest.mark.parametrize("game", ["wow-vanilla", "wow-tortoise"])
-def test_the_tabs_without_a_box_yet_get_neither(qapp: object, tmp_path: Path, game: str) -> None:
-    """8.1c and 8.1d each gate their own tree; nothing is inherited early."""
-    services = ControllerServices.for_entry(load_catalog().get(game), tmp_path)
+def test_the_tab_without_a_box_yet_gets_neither(qapp: object, tmp_path: Path) -> None:
+    """8.1d gates Tortoise; nothing is inherited early."""
+    services = ControllerServices.for_entry(load_catalog().get("wow-tortoise"), tmp_path)
 
     assert services.dashboard is None
     assert services.log_snapshot is None
