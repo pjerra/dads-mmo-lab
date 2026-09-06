@@ -253,7 +253,7 @@ with a citation per value. What matters at this level is the shape of the differ
 | The command then runs as | console, no level check | console level, regardless of the caller | console level, account id 0 |
 | A failed bind | graceful shutdown | **immediate exit, no saves** | — |
 | Items per mail | 12 | TBC 12, **Vanilla 1** | **1** |
-| Set a character's level | yes | yes | **no console route found** — the two handler names were searched and are absent; the reader did not search that tree's whole command table, so this is "none found", not "none exists" |
+| Set a character's level | yes | yes | **no console route to an arbitrary level** — the whole command table was searched on 2026-09-06: no `character level` row, and `.levelup` is console-false. What this tree does have is `reset level <player>`, console-legal at administrator level, which sets the *configured starting* level and takes a live player. The control is not drawn, and the sentence in its place names what does exist rather than implying nothing does |
 | Rename | a subcommand | a subcommand | a top-level command |
 | GM level lives in | the access table | the account row | the account row, **cached in memory** — the command route is the only one a running server sees |
 | Bot marker | registry types **or** account prefix | account prefix only | account prefix only |
