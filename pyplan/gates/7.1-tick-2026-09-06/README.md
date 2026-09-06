@@ -33,11 +33,11 @@ here, because a number carried forward is not a measurement.
 | `citations-after.txt` | the same rule run over both sides: **13** names no longer counted live, **7** newly counted and all seven resolve. |
 | `citation-scan.py` | the script those two came from — a copy of the guard's rule that can be pointed at a git revision, which pytest cannot. Its own docstring says it is a copy and what that costs. |
 | `checks-yulon-fedora.txt` | `run-tests-vm.sh --checks` over the pass's tree, before this folder existed: **2792 passed, 4 skipped in 27.01s**, mypy ×3 `Success: no issues found in 72 source files` (this platform / win32 / darwin), ruff `All checks passed!`, black `140 files would be left unchanged`, `=== --checks: ALL GREEN ===`, exit 0. |
-| `checks-yulon-fedora-final.txt` | the same gate run again over the finished tree — its own header line reads `==> syncing lane/b71 (ec77b8ef)` plus one overlaid uncommitted file, the plan page carrying the `git diff --numstat` paragraph: **2792 passed, 4 skipped in 20.73s**, the same three mypy passes, ruff, black `140 files`, `ALL GREEN`, exit 0. What that run did **not** contain is this row, the row above it and `checks-yulon-fedora-final.txt` itself, all three of which live under `pyplan/gates/` where nothing `--checks` runs reads them. |
+| `checks-yulon-fedora-final.txt` | the same gate run again over the finished tree — its own header line reads `==> syncing lane/b71 (ec77b8ef)` plus one overlaid uncommitted file, the plan page carrying the `git diff --numstat` paragraph: **2792 passed, 4 skipped in 20.73s**, the same three mypy passes, ruff, black `140 files`, `ALL GREEN`, exit 0. What that run did **not** contain is this row, the row above it and `checks-yulon-fedora-final.txt` itself, all three of which live under `pyplan/gates/7.1-tick-2026-09-06/`, a folder nothing under `pylauncher/` names (`grep -rn 7.1-tick-2026-09-06 pylauncher/` printed nothing at `a2067642`; `pyplan/gates/` as a whole is read by `tests/test_ready_budget.py:1068-1074`). |
 
 **One thing to know about `before-docspins.txt` and `after-docspins.txt`:** the pytest header in them
 names the per-run scratch checkout `run-tests-vm.sh` makes on the box. That path is not a place to
-cite anything from — it is deleted and remade per run — and it is left in only because these are raw
+cite anything from — it is created once per box and kept (`run-tests-vm.sh` clones it only when absent and `checkout -f`/`reset --hard`s it on every later run; five such checkouts sat under `~/yulon-runs` on yulon-fedora at 2026-09-06T01:39:41Z), so it is durable, per-box and in no tree — and it is left in only because these are raw
 transcripts and editing evidence to tidy a path is how evidence stops being evidence.
 
 ## The thirteen, before and after
@@ -119,7 +119,7 @@ all (`grep -c overlaying` → 0), so it ran over the committed tip with nothing 
 (this platform, as Windows, as macOS), ruff `All checks passed!`, black `140 files would be left
 unchanged`, `=== --checks: ALL GREEN ===`, exit 0. `987379f8` is the commit carrying the four
 corrections above; this row, the transcript itself and the section it sits in are the one commit
-after it, and nothing `--checks` reads lives under `pyplan/gates/`.
+after it, and nothing under `pyplan/gates/7.1-tick-2026-09-06/` is named anywhere in `pylauncher/` (`grep -rn 7.1-tick-2026-09-06 pylauncher/` printed nothing at `a2067642`). `pyplan/gates/` as a whole IS read: `tests/test_ready_budget.py:1068-1074` reads `7.7-win11-tortoise/README.md` at import, and one digit changed there turned three tests red on yulon-fedora on 2026-09-06 (round-3 review, `3 failed, 74 passed`).
 
 ## Round 3, 2026-09-06 — four measurement stamps re-read off a clock, and one clause dropped
 
@@ -160,4 +160,4 @@ the committed tip with nothing on top of it: **2792 passed, 4 skipped in 21.22s*
 issues found in 72 source files` three times (this platform, as Windows, as macOS), ruff `All checks
 passed!`, black `140 files would be left unchanged`, `=== --checks: ALL GREEN ===`, exit 0.
 `99b0a078` is the commit carrying the stamp corrections above; this paragraph and the transcript are
-the one commit after it, and nothing `--checks` reads lives under `pyplan/gates/`.
+the one commit after it, and nothing under `pyplan/gates/7.1-tick-2026-09-06/` is named anywhere in `pylauncher/` (`grep -rn 7.1-tick-2026-09-06 pylauncher/` printed nothing at `a2067642`). `pyplan/gates/` as a whole IS read: `tests/test_ready_budget.py:1068-1074` reads `7.7-win11-tortoise/README.md` at import, and one digit changed there turned three tests red on yulon-fedora on 2026-09-06 (round-3 review, `3 failed, 74 passed`).

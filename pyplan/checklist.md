@@ -320,7 +320,7 @@
       `press.txt:79`; `:161-170` is account `LANGATE`, id 104, made through the Accounts tile;
       `:199-219` is the 3.3.5a client on `vmhost` at 23:31:24 UTC with `COP_AUTHENTICATE
       code=AUTH_OK result=TRUE` and the server's own `last_ip 172.30.48.1`, the Hyper-V host's
-      address on the Default Switch; `:147-160` is the bound that record puts on itself (ufw was
+      address on the Default Switch (that gloss is at `:222-223`, three lines past the cited range); `:147-160` is the bound that record puts on itself (ufw was
       inactive before the press and stayed inactive, so the rules it wrote filter nothing on that
       box today). **Said plainly because it is the weak point of this tick:** those files are not
       in this tree at the commit that ticks the box. If `lane/b39` merges, its own edit to the
