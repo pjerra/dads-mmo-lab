@@ -135,7 +135,9 @@ Listed so section 4 of the kickoff can pick from them; none is settled here.
    native `Wow.exe` on Windows and the client on macOS show up to a watcher; a spike on a box with
    a client (`vmhost` holds a WotLK client; m910q holds all four).
 6. **Steam's `shortcuts.vdf` format and the compat-tool assignment** — a read of a real Steam
-   userdata folder; none exists on a test box this side.
+   userdata folder. None exists on a test box this side, but the owner named two on 2026-09-06
+   (answer 13): Baerthe's and DaddyCool's Steam Decks, running SteamOS. The read is an owner-run
+   capture on one of those, not a spike this side can run.
 7. **The live security levels on an installed server** — `acore_world.command` and the CMaNGOS
    `command` table (fact 8); a MySQL read on any running install.
 8b. **CLOSED 2026-09-06 by a spike, not a read** — whether a published port reaches a listener bound

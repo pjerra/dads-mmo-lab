@@ -50,6 +50,7 @@ quoted first.
 | 11 | **What "8.1" released.** The owner answered when the command channel was numbered 8.1; the review round then put observability first, so the channel is 8.2. Which was released? | **"The phase's first step, whatever it is"** — so work starts on observability and the channel follows, which is the ordering the reordering's own reason supports. |
 | 12 | **Vanilla's gates, re-asked.** Question 9 was put on my claim that no Vanilla install could reach ready anywhere. Measured on the box on 2026-09-06, that was too strong: a Vanilla server is running and ready at `/home/pk/vanilla-75b`, and what the engine refuses is a second install *press* on a pre-patch folder. Does answer 9 stand? | **"Gate against the running server; keep the throwaway for 8.9b only"** — which removes a compile from six boxes and leaves the throwaway install where uninstall actually needs one to destroy. |
 | 10 | **Tortoise's reach.** It has no SOAP and no remote console; on Linux its actions go through the attach console, on native Windows only through a 60-second queue that returns nothing. Which is v1? | **"Linux and macOS only for v1; Windows says why"** |
+| 13 | **8.8's gate box.** Steam was the one step carried as `[blocked]`: no machine on this side had Steam, so neither the shortcuts-file read nor the gate could happen. Which machine gates it? | **"baerthe and daddycool have steamdeck with steamos"** (2026-09-06) — two machines, named. 8.8 stops being blocked on hardware and becomes an **assigned** box, the shape §7.8's macOS box already has. Neither Deck is reachable from this side, so *who* runs it is the owner's to assign; the hardware question is closed. |
 
 ### Group (g), copied verbatim from `pyplan/phase8-decisions.md` (2026-08-31)
 
@@ -290,7 +291,7 @@ provides the in-game half for WotLK after the LAN step.
 | **8.5a–d** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
 | **8.6** | My Party, WotLK only, over the Lua bridge | The Ubuntu VM after the owner's rebuild; a bot in the party frame |
 | **8.7a–d** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | All four, one box per family |
-| **8.8** | Steam, Linux and Steam Deck only | A machine with Steam — none exists on this side |
+| **8.8** | Steam, Linux and Steam Deck only | A Steam Deck running SteamOS — Baerthe's or DaddyCool's (owner answer 13); assigned, not reachable from here |
 | **8.9a–b** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
 
 8.1 (observability) first, because it is what makes 8.2's failure legible; then 8.2a for WotLK and
@@ -484,7 +485,7 @@ Three findings arrived independently from more than one reviewer. Each is applie
 |---|---|---|
 | The listener's bind address was described as the container's loopback, which is the exact defect this page rejects design B for | superpowers; implied by the adversarial review's port analysis | "The cut" and Appendix A now say bound to all interfaces **inside** the container and published on the host's loopback only, and 8.2a's proof is a round-trip **from the host** |
 | Gear sets are promised on four families on an inventory join read on one | adversarial; third | 8.4b, 8.4c and 8.4d carry the read as a prerequisite; until it is done, gear sets are WotLK's alone |
-| The Steam box is mandatory for the exit and its machine does not exist | adversarial; superpowers | 8.8 carries `[blocked]` on hardware and the exit line names it as a carve-out, the way Phase 7's exit line names macOS |
+| The Steam box is mandatory for the exit and its machine does not exist | adversarial; superpowers | 8.8 carried `[blocked]` on hardware and the exit line named it as a carve-out, the way Phase 7's exit line names macOS. **Superseded 2026-09-06:** the owner named two Steam Decks (answer 13), so the finding's premise no longer holds; the box is assigned rather than blocked |
 
 ### The three findings that changed the shape of the phase
 
@@ -595,7 +596,10 @@ Three findings do not hold as stated.
   settle it without touching a gate box — but that server is the owner's and any command on it
   needs their explicit yes, so it is an owner question, recorded in the summary and on this line,
   not a spike this session ran.
-- **8.8 is blocked** on a machine with Steam that does not exist on this side.
+- **8.8's hardware gap is CLOSED (2026-09-06, owner answer 13):** Baerthe and DaddyCool each have a
+  Steam Deck running SteamOS. What is left is an assignment rather than a blockage — neither Deck is
+  reachable from this side, so both the `shortcuts.vdf` read and the gate are run by whoever the
+  owner names, the way §7.8's macOS box is. Until a name is on the line, 8.8 is unstarted, not blocked.
 - **Owner answer 10's second half has no gate**: no box runs Tortoise on native Windows, so "the
   tab carries the reason" is unprovable here.
 - **My Party's route has never been recorded working.** 8.6 asks that question first.
@@ -691,11 +695,12 @@ matching edit, given below it.
    names the step and writes nothing; a manifest applied to a stopped server reads back from its
    configuration file.
 
-### 8.8 Steam integration — Linux and Steam Deck only **[blocked]** on a machine with Steam
+### 8.8 Steam integration — Linux and Steam Deck only, gated on a Steam Deck
 1. Add the server launcher and the game client to the Steam library with artwork and the
    compatibility tool. The shortcuts file format is recorded nowhere in this repository and must be
    read from a real Steam profile first.
-2. _Definition of done:_ both entries appear in a real Steam library and launch.
+2. _Definition of done:_ both entries appear in a real Steam library and launch. Gated on a Steam
+   Deck running SteamOS (owner answer 13); the box is assigned, not held on this side.
 
 ### 8.9 Uninstall and purge
 1. As `pyplan/phase8-decisions.md`: one action scoped to the server folder, that install's Docker
@@ -707,9 +712,10 @@ matching edit, given below it.
 line names, with the evidence committed under `pyplan/gates/8.x-*`; no definition of done is
 satisfied by a skip, an absent capture, a stale marker or an exit code; no capability is reachable
 only from a command line; and Phase 7's controller-surface and cross-server regression gates are
-re-run green on the merged tip. **Two carve-outs, named rather than hidden:** 8.8 is `[blocked]` on
-a machine with Steam that does not exist on this side, the way §7.8 is blocked on hardware; and the
-sentence Tortoise shows on native Windows, where it has no pseudo-terminal, has no gate box.
+re-run green on the merged tip. **One carve-out, named rather than hidden:** the
+sentence Tortoise shows on native Windows, where it has no pseudo-terminal, has no gate box. 8.8 is
+no longer a carve-out — the owner named the hardware on 2026-09-06 (answer 13) — but its box runs on
+a Steam Deck nobody on this side can reach, so it is **assigned**, the way §7.8 is.
 ```
 
 And in the roadmap's closing "Out of scope (do not start these in v1)" list, the first line is
@@ -774,5 +780,6 @@ The panel also settled six facts by reading trees the designs had booked as spik
 under "Facts the panel settled by reading". Two questions came out of the design round rather than
 from the panel itself. The first — Tortoise's reach — **was put to the owner and answered** as
 question 10 above: Linux and macOS for v1, and where no pseudo-terminal exists the tab carries the
-reason. The second, which machine has Steam for 8.8's gate, is **OPEN**, is why 8.8 cannot be
-gated, and is recorded as an open question on this page rather than left in a verdict.
+reason. The second, which machine has Steam for 8.8's gate, was **answered on 2026-09-06** as
+question 13: two Steam Decks running SteamOS. Both design-round questions are now closed, and
+neither was closed by a verdict — one by the owner's reach decision, one by the owner's hardware.
