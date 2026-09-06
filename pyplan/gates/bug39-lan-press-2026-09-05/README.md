@@ -1,30 +1,39 @@
 # The LAN button, pressed end to end on a remote Linux box — 2026-09-05/06
 
-The **press and its readbacks** — every evidence file in this folder — were taken between
+The **press and its readbacks** — every file the press produced here; the one exception is
+`activity-log-excerpts.txt`, written in rounds 4 and 5, which dates itself — were taken between
 **2026-09-05 22:59 UTC and 23:36:36 UTC** (2026-09-06 00:59–01:36 CEST) on four machines:
 `yulon-ubuntu` (the live 7.2 WotLK install), `vmhost` (the Hyper-V host, Windows 10, which
 ran the 3.3.5a client), and — for the speech-MPQ relay — the laptop and `m910q`. Two things
 this record cites were done by someone else and fall outside it: the orchestrator's client
-copy, finished `23:02:02` CEST = **21:02:02 UTC** (:248–251), and lane 710's copy of the
-pre-press ufw rule file at **22:06** CEST = 20:06 UTC (:348). That window does **not** bound
+copy, finished `23:02:02` CEST = **21:02:02 UTC** (:263–266), and lane 710's copy of the
+pre-press ufw rule file at **22:06** CEST = 20:06 UTC (:363). That window does **not** bound
 this lane's own box actions, which went on after it; `activity-log-excerpts.txt`, committed
-here, carries each box's own stamped line. Three of them fall in the small hours of
-2026-09-06 CEST, still 2026-09-05 in UTC: `m910q` **01:37:49 CEST = 23:37:49 UTC**, the
-relay directory `~/clients/b39-speech` and its `:8766` server removed; `m910q`
+here, carries the two Linux boxes' own stamped lines. `vmhost`'s activity log is UTF-16 on
+the host and is not committed, so the three `vmhost` stamps below — `02:16:52`, `02:26:23`
+and `03:22:26` — are re-derivable only there. Three of the Linux lines fall in the small
+hours of 2026-09-06 CEST, still 2026-09-05 in UTC: `m910q` **01:37:49 CEST = 23:37:49
+UTC**, the relay directory `~/clients/b39-speech` and its `:8766` server removed; `m910q`
 **01:48:57–01:56:57 CEST = 23:48:57–23:56:57 UTC**, the round-1 `--checks` run; and
 `yulon-ubuntu` **01:51:18 CEST = 23:51:18 UTC**, the throwaway driver folder
 `/home/pk/p7/b39` removed, its parent `/home/pk/p7` reading back `2026-09-06
 01:51:18.345299699 +0200` as its own mtime, and `01:56:56` CEST the lane's closing line.
-The rest is record-keeping later on 2026-09-06, when CEST and UTC share the date: a
-read-only correction pass the boxes stamp `02:16:18` CEST (`m910q`) and `02:16:52`–
+The rest is record-keeping later on 2026-09-06, when CEST and UTC share the date: round 2's
+read-only correction pass, which the boxes stamp `02:16:18` CEST (`m910q`) and `02:16:52`–
 `02:26:23` CEST (`vmhost`); the `stat -c` and `sha256sum` reads on `m910q` of rounds 2 and 3
-(:271–277, :373–375); the `--checks` runs of rounds 2–4; the `rm` of the throwaway relay
-log on `m910q` at **02:56:35 CEST** (Cleanup); and this round's own reads, announced from
+(:286–292, :388–391); the `--checks` runs of every later fix and review stage, from the
+round-1 review's at `02:02:20`–`02:06:00` CEST on; the `rm` of the throwaway relay
+log on `m910q` at **02:56:35 CEST** (Cleanup); round 4's own reads, announced from
 `03:22:00` CEST (`m910q`), `03:22:04` (`yulon-ubuntu`) and `03:22:26` (`vmhost`) onward —
 among them the `ls -la --time-style=full-iso /home/pk/p7` at `03:29:22` CEST that re-derived
-the mtime quoted above, and the `--checks` run this round closes with.
+the mtime quoted above (the box's line at that stamp carries the stamp and nothing else:
+`claude-say` ran with no message. Its `03:29:31` line records what the read was and blames
+a wrong `claude-say` path; `activity-log-excerpts.txt` carries both lines and the check
+that refutes that explanation); and round 5's own reads, announced at `03:58:57` CEST
+(`yulon-ubuntu`), `03:58:58` (`m910q`) and `04:06:03` (`yulon-ubuntu` again, the
+`claude-say` check), which quoted the two log ranges round 4 had skipped.
 
-Of those, the read-only correction pass and this round's reads changed nothing on any box
+Of those, round 2's correction pass and rounds 4 and 5's reads changed nothing on any box
 beyond the activity-terminal lines the rules require; the two `rm`s changed state on purpose,
 and each `--checks` run synced a scratch checkout onto `m910q`. The correction pass's calls, as its
 round's record attributes them: on `vmhost`, `Get-Date`, `tailscale ip -4`, `Get-ChildItem`,
@@ -34,13 +43,17 @@ round's record attributes them: on `vmhost`, `Get-Date`, `tailscale ip -4`, `Get
 laptop, one `stat`. The other rounds' calls are attributed where they appear rather than
 listed here.
 
-Those two bounds are the earliest and latest stamps a reader can re-derive from the files
-committed here: the first is `console-before.png`'s own top-bar clock, `Sep 6 00:59` CEST,
-and the last is `ufw-restored.txt:59`, `01:36:36` CEST. (The earliest stamp inside a text
-file is `state-before.txt:1`, `2026-09-05T23:02:16Z`.) An earlier draft of this line said
-"22:57 UTC and 23:38 UTC"; neither of those figures had an artifact behind it. Drafts after
-that one said the window bounded everything this lane did on a box; the two boxes' activity
-terminals refute that, which is what the enumeration above replaced it with.
+The 22:59–23:36:36 UTC bounds above are the earliest and latest stamps **of the press** a
+reader can re-derive from the files committed here, `activity-log-excerpts.txt` aside (its
+stamps run from `00:59:20` to `04:06:03` CEST and date the lane's later actions, not the
+press): the first is `console-before.png`'s own top-bar clock, `Sep 6 00:59` CEST, and the
+last is `ufw-restored.txt:59`, `01:36:36` CEST. (The earliest stamp inside a press text file
+is `state-before.txt:1`, `2026-09-05T23:02:16Z`; the excerpt's first quoted line, `00:59:20`
+CEST = `22:59:20` UTC, is the lane's opening announcement and precedes it by 176 s.) An
+earlier draft of this line said "22:57 UTC and 23:38 UTC"; neither of those figures had an
+artifact behind it. Drafts after that one said the window bounded everything this lane did
+on a box; the two boxes' activity terminals refute that, which is what the enumeration
+above replaced it with.
 
 The box's own logs and the database are in **UTC**; the box's `date` and the activity
 terminal print **CEST** (UTC+2). `vmhost`'s clock is CEST too — `Get-Date -Format o` there
@@ -74,9 +87,11 @@ So the recovery route was re-proved on this guest first, with the same tools, be
 firewall was touched:
 
 **How to read the stamps in this section.** The two scripts' stdout was watched at the
-terminal and **not kept as a file**, so nothing in this folder can re-derive it; an earlier
-draft of this section quoted it (*"sent ctrl+alt+t"*, *"typed 27 key codes"*, *"sent
-Return"*) and gave a `00:59:53 CEST` stamp that likewise exists nowhere. Both are dropped.
+terminal and **not kept as a file**, so nothing in this folder reproduces it (the
+`01:00:46` line in `activity-log-excerpts.txt` announces what was about to be done, not
+what the scripts printed); an earlier draft of this section quoted it (*"sent
+ctrl+alt+t"*, *"typed 27 key codes"*, *"sent Return"*) and gave a `00:59:53 CEST` stamp
+that likewise exists nowhere. Both are dropped.
 What IS committed is the three screenshots, and each carries the guest's own top-bar clock,
 which is the stamp cited below.
 
@@ -397,7 +412,7 @@ world server beyond a character-list reply.
 | `ufw-restored.txt` / `state-after-cleanup.txt` | the box put back, with hashes |
 | `speech-mpq-relay.log` | the relay of the 1.03 GB the minimal client copy was missing — leg 1 succeeded, leg 2 as logged failed (`rc=7`) |
 | `speech-relay-httpd.log` | m910q's `http.server` access log, the only surviving transcript of the leg-2 retry that landed the files |
-| `activity-log-excerpts.txt` | the two Linux boxes' own activity-terminal lines for this lane — the source of every stamp in the header |
+| `activity-log-excerpts.txt` | the two Linux boxes' own activity-terminal lines for this lane — where every CEST announcement stamp the header gives for `m910q` or `yulon-ubuntu` comes from (the UTC halves beside them are those minus two hours); `vmhost`'s activity log is UTF-16 on the host and is not committed, so its `02:16:52`, `02:26:23` and `03:22:26` are re-derivable only there, and the two stamps from other agents' work (:263–266, :363) come from their own records |
 | `console-before.png` / `console-keyboard-proof.png` / `console-after.png` | the out-of-band way back in, proved first, and the desktop left as found |
 | `client-run1-missing-speech-mpq.jpg` | the dialog run 1 died on |
 | `client-login-screen.jpg` / `client-account-typed.jpg` / `client-after-auth.jpg` / `client-character-select.jpg` | the login, half-scale JPEG |
