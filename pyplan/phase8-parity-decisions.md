@@ -10,7 +10,10 @@
 > Method, the one `phase7-decisions.md` used: five read-only source reads produced
 > `pyplan/phase8-delta.md` (one row per feature, mechanism measured per emulator tree at the
 > catalog's pinned revisions; reports in `pyplan/phase8-reads/`); the owner answered the eight
-> questions below before any design existed; three designs were then written independently from
+> questions 1 to 8 below before any design existed; questions 9 and 10 were raised by the design
+> round and answered on 2026-09-06 after the judges reported — answer 10 narrowed the winning
+> design's channel list after it had won, and where the page still named the third channel is
+> recorded under "Review findings". Three designs were written independently from
 > three angles (`pyplan/phase8-designs/`) and scored by three judges (`pyplan/phase8-judges/`).
 > Every source read, design and verdict is committed beside this page, so what was rejected can be
 > read rather than summarised.
@@ -62,7 +65,7 @@ may reorder; it may not add or remove a feature without a new owner answer):
 
 | Step | Delivers | Families and platforms | Answer |
 |---|---|---|---|
-| 8.1 | The command channel: SOAP on `127.0.0.1` enabled in the installed config, an app-owned GM-3 account verified by a round-trip, a typed command layer with the per-tree facts as data | WotLK, TBC, Vanilla over SOAP; Tortoise stays on the attach console + MySQL reads (it has no SOAP) | Q6 |
+| 8.1 | The command channel: the listener bound to `0.0.0.0` **inside** the container and published on the host at `127.0.0.1` only (binding the container's own loopback is the defect this page rejects design B for), an app-owned GM-3 account verified by a round-trip **from the host**, a typed command layer with the per-tree facts as data | WotLK, TBC, Vanilla over SOAP; Tortoise stays on the attach console + MySQL reads (it has no SOAP) | Q6 |
 | 8.2 | Live dashboard (players, bots, uptime, restart-loop) and the worldserver log snapshot before every stop | all four; one box per family | Q8i, Q3 |
 | 8.3 | Accounts: list, set password, GM level | all four; one box per family | Q8ii, Q3 |
 | 8.4 | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
@@ -107,8 +110,8 @@ exit box is ticked; it still waits for this scoping's review cycle (the 2026-09-
 **Every Phase 8 feature asks a server one of two things — a question of its database, or a command
 of its world thread — through one typed seam whose per-tree differences are data on the catalog
 entry. `soap.py` is the wire; `channel.py` delivers a command over whichever channel the entry
-declares (SOAP on loopback for WotLK, TBC and Vanilla; the attach console where a pty exists; the
-`pending_commands` queue on Tortoise where nothing else can); `commands.py` builds the text from a
+declares — SOAP for WotLK, TBC and Vanilla; the attach console on Tortoise, where a pseudo-terminal
+exists (owner answer 10; its command queue is refused, not built); `commands.py` builds the text from a
 per-tree template and answers "can this server do this at all?" before a button is drawn;
 `dbreads.py` is the read side over the `DockerSql` seam that already exists. Every answer has
 three outcomes — yes, no, could-not-ask — and no feature writes to `characters` or `world` itself:
@@ -130,7 +133,7 @@ Three designs, three judges, seven criteria each scored 1–5. The scores are in
 reasoning that matters is here.
 
 **B — the user's surface — rejected as the shape, kept as the surface.** It has the best surface
-discipline in the set: `ui/controller_view.py` is 1937 lines and B is the only design that does
+discipline in the set: at `7bc5ebd3` `ui/controller_view.py` was 1937 lines, and B was the only design that did
 not add two more tabs inside it, the only one that says who tears a tab down when an uninstall
 finishes (`main.py:189` keeps `drop_controller`; the view signals up), and the only one whose
 "(exists)" test citations all resolve. What sank it as the shape is that its channel model is
@@ -153,11 +156,13 @@ chosen for two reasons. The first is placement: its `verbs.py` holds the per-tre
 Python, which is the same fact in the same place a conditional would have been, against
 style-guide §3's "manifests hold data, code holds behavior" and against the `families/cmangos.py`
 row that forbids a game literal and asserts it over the AST. The second is a cost it pays forever:
-C polls `server info` over SOAP every 30 seconds for the life of the server. Every command channel
-queues on the single world thread, and at this revision AzerothCore's SOAP loop accepts and
-processes one request inline (`ACSoap.cpp:56-63`) rather than spawning a thread per request as C
-states — so a dashboard tick queued behind a save drain holds the only accept loop while the
-user's next teleport waits in the kernel backlog. A and B both refused a periodic world-thread
+C polls `server info` over SOAP every 30 seconds, on the three trees that have SOAP — it exempts
+Tortoise, whose dashboard it makes reads-only. Every command channel queues on the single world
+thread, and at this revision AzerothCore's SOAP loop accepts and processes one request inline
+(`ACSoap.cpp:56-63`); C describes that loop as one thread per request, which is the one row of its
+own concurrency table that is wrong, and its next row has TBC and Vanilla right. So a dashboard
+tick queued behind a save drain holds the only accept loop while the user's next teleport waits in
+the kernel backlog. A and B both refused a periodic world-thread
 command, and they were right: players, bots and uptime come from database reads that bypass the
 world thread entirely.
 
@@ -166,8 +171,8 @@ the trees do, the only one that carries every per-tree fact as typed data the ca
 refuses on a typo, and the only one in which a fifth server is a JSON block and a gate rather than
 a Python edit. Its own fatal flaw was found and is fixed by a graft, not a redesign. The honest
 cost, named by the maintainer judge: `ControllerServices` gains seven grouped seams wired in four
-factories — the right granularity, and `tests/test_controller_packages_agree.py` already exists to
-keep the four in step.
+factories — the right granularity, and at `7bc5ebd3` `tests/test_controller_packages_agree.py`
+already existed to keep the four in step.
 
 ### What the panel required of A before a line of code
 
@@ -179,12 +184,12 @@ preference.
 | 1 | The enable step recreates the world with a bare `docker compose up -d <world>` | It calls **`docker.start_staged()`** (`docker.py:702`). The worldserver declares `depends_on: ac-db-import: condition: service_completed_successfully` (`base.yml.tmpl:276-277`), so a bare `up -d` evaluates that dependency; the docstring records what that did before it was fixed — "was killing the database" (`docker.py:707-711`). |
 | 2 | One press recreates a running world after a sentence | **Two presses, armed**, reusing the tab's own idiom (`ui/controller_view.py:628-646`), with the paragraph naming the disconnect and the up-to-300-second save drain. One press only when the world is down. Grafted from B. |
 | 3 | Nothing checks that the world survived being changed | **A failed SOAP bind is fatal, and differently per tree.** AzerothCore logs and calls `World::StopNow(ERROR_EXIT_CODE)` — a graceful shutdown (`ACSoap.cpp:41-46`). TBC and Vanilla call **`exit(-1)` from the SOAP worker thread** (`MaNGOSsoap.cpp:43-47`), killing the process with no character saves; both templates set `restart: unless-stopped`, so that is a restart loop. 8.1 therefore proves the port is free *before* it writes anything, and its Definition of done gains: after the recreate the world is running, the restart count has not grown, and this run's ready marker is in the log. On failure the app rolls the key back and says so. |
-| 4 | The published-bindings read proves 7878 is loopback-pinned | It is a **global** scan of every container's ports (`docker.py:2302`). It is filtered by compose project — the ownership proof the install guard already uses — before it can refuse anything. |
+| 4 | The published-bindings read proves 7878 is loopback-pinned | At `7bc5ebd3` it was a **global** scan of every container's ports (`docker.py:2302`). It is filtered by compose project — the ownership proof the install guard already uses — before it can refuse anything. |
 | 5 | The bot clause takes the catalog value, with a comment about where the live one would be | The prefix is **resolved the way the server resolves it**, and the three trees differ. AzerothCore consults `AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX` in the environment and it **wins over** the file (`AC Config.cpp:540-552`). TBC and Vanilla consult `Mangosd_AiPlayerbot_RandomBotAccountPrefix` — prefix `Mangosd_` from `SetSource(configFile, "Mangosd_")` (`TBC Main.cpp:156`), dots to underscores, **case preserved** — and it also wins, applied at parse time (`Config.cpp:75-78`). Tortoise has no environment layer at all. The resolver reports which source answered, refuses an unreadable or empty prefix rather than answering, and requires a safe character set before the value reaches SQL. Grafted from B and C, and extended by the read. |
 | 6 | The CMaNGOS `account set password` rows are marked unverified | **Verified today.** All three CMaNGOS-lineage trees take three arguments: two password arguments extracted and both required (`TBC Level3.cpp:1132`, `VAN :1093`, and Tortoise's handler). The unverified flag stays in the model for what is still unread. |
 | 7 | The MaNGOS SOAP namespace is marked unverified and pinned by a gate | **Read.** `MaNGOSsoap.cpp:156` carries the `urn:MaNGOS` namespace on mangos-tbc and mangos-classic alike. No gate is spent on it. |
 | 8 | The Console tab's attach sits outside the channel's lock | One lock per install covers **every** attach, the Console tab's included. The prompt delimiter "is a single-writer property, not a property of the console" (`console.py:57-73`); two writers put foreign prompts in each other's windows. |
-| 9 | A fourth three-valued type enters the tree | `yulon/ownership.py` already answers "whose folder is this?" in three values, and its docstring says why: "That is the part that must not be re-invented with two values." The uninstall's plan returns that type, and the new answer type is read against it before it is written. |
+| 9 | A fourth three-valued type enters the tree | At `7bc5ebd3` `yulon/ownership.py` already answered "whose folder is this?" in three values, and its module docstring said why: "That is the part that must not be re-invented with two values." The uninstall's plan returns that type, and the new answer type is read against it before it is written. |
 
 ### Facts the panel settled by reading, which the designs had booked as spikes
 
@@ -197,7 +202,7 @@ does not run.
 | Tortoise does not cache passwords; only the rank is cached | `TW AccountMgr.cpp:299-311` reads the stored hash on every check; `:250-256` caches the rank | A spike, and Tortoise keeps a set-password path |
 | The Lua engine's command hook hands the script the chat handler | `ALE PlayerHooks.cpp:57-60` pushes the player, the text and the handler | The bridge's arrival can be proved by the script's own reply, not only by a log line — at the revision read, which is unpinned |
 | The CMaNGOS and Tortoise column names the design declared unread are the ones it wrote | `TBC mangos.sql:2968-2978`, `characters.sql:791+`; `TW tw_world_item_template.sql`, `create_databases.sql:999` | The per-tree table blocks are verified data, not guesses |
-| The AzerothCore image ships `curl` and **no** `iproute2` or `net-tools` | `apps/docker/Dockerfile:68`, `:229` | `ss` is not a gate instrument; the listener is proved by a loopback request from inside the container and by the published port on the host |
+| The AzerothCore **worldserver** image installs neither `iproute2` nor `curl` | The `worldserver` stage is built `FROM runtime` (`apps/docker/Dockerfile:175`, `:112`), whose only apt install is `:122-126` — `libmysqlclient21 libreadline8 libicu74 libncurses5-dev gettext-base default-mysql-client adduser`. The `curl` at `:68` is the `build` stage and the one at `:229` is `client-data`; neither reaches the worldserver | Neither `ss` **nor** `curl` is a gate instrument inside that container. This row first said the image ships `curl`, written from a grep of the apt lines rather than a read of the stage graph, and both judges had recorded the question as unsettled; the correction is why the round-trip is taken **from the host through the published port**, which is what the feature needs to work anyway. `/proc/net/tcp` needs nothing installed and is the fallback |
 | An app account named `YULON` already exists on the TBC gate box | `checklist.md:1452-1461` — the 7.9 gate wrote that account at GM level 3 and logged a client in through it | A fixed account name would have collided on the first gate box; the per-install name does not |
 
 ---
@@ -211,7 +216,7 @@ for a file that is not there teaches a reader to discount the table.
 |---|---|---|---|
 | Data | `catalog/catalog.py` (changed) | The per-entry operations block: channels, GM-level shape, command templates, caps, bot marker, table and column names, and the optional Lua bridge — typed, frozen, extra keys forbidden | Hold a value that belongs to one install; know how a command is sent |
 | Wire | `soap.py` (new) | One command envelope over the standard library with Basic auth and bounded timeouts; the reply parsed into result, fault, or transport status | Build command text; hold a lock; know a game; let a password reach a log, a repr or an exception |
-| Delivery | `channel.py` (new) | The three-outcome answer type, the channel protocol, its three implementations, and the ranking that picks one from the entry; one lock per install covering every transport, the Console tab's attach included; mapping a transport failure to a reason from container state | Contain command text; retry a write after a timeout; contain UI |
+| Delivery | `channel.py` (new) | The answer type, the channel protocol, its **two** implementations — SOAP and attach (owner answer 10 refused the third) — and the ranking that picks one from the entry; one lock per install covering both transports, the Console tab's attach included; mapping a transport failure to a reason from container state. **A mutation on the attach transport is indeterminate until its own verify read answers**: that transport cannot separate a reply from the server's own asynchronous output (`console.py:10-12`, `:522-527`), so an action with no verifier is not offered there | Contain command text; retry a write after a timeout; contain UI |
 | Text | `commands.py` (new) | The command built from the entry's template; the quoting rule; argument validation; and the one predicate that both decides whether a control is drawn and supplies the sentence when it is not | Send anything; know a container name |
 | Reads | `dbreads.py` (new) | The typed reads over the existing SQL seam (`apply.py:504`): bot clause, online counts, item search, teleport targets, characters, accounts, bots, mail counts, group members | Call the write seam — asserted over the AST, not by grep |
 | Setup | `channel_setup.py` (new) | Per-tree enable, the app account's create-verify-persist state machine, the credential file under the app's config directory, and the rollback when the world does not come back | Persist before a round-trip has answered; rewrite the password of any account but its own |
@@ -374,6 +379,12 @@ a claim.
 - **Two installs of one game** still collide on container names and now on the SOAP port. The
   existing guard refuses the second start; the credential file records the port the daemon actually
   published.
+- **Module SQL marked for the import one-shot is reported as done and never applied.** Found by two
+  judges, in the method 8.7 extends: the applier appends such a step to its done list and continues
+  (`apply.py:1365-1367`), and the staged start never runs the one-shot (`docker.py:715-717`), so on
+  any installed server those steps silently do nothing. Seventeen shipped WotLK module manifests
+  carry such steps. 8.7 either runs the one-shot with the world stopped or reports the step as not
+  applied; what it may not do is keep logging it as done.
 - **Item mail is not idempotent.** Every other verb converges; a second press sends a second mail.
   The queue disables the button while one is in flight, and what the app forgets across a restart it
   reads back from the mail table.
@@ -447,8 +458,10 @@ matching edit, given below it.
    marker, and the table and column names. **[style]**
 2. Build the seam: the wire, the delivery layer with its three-outcome answer, the command
    builders with their capability predicate, and the typed reads over the existing SQL seam.
-3. Enable SOAP on loopback in the installed configuration and create an app-owned administrator
-   account, verified by a real round-trip before its credentials are stored.
+3. Enable the listener in the installed configuration — bound to all interfaces **inside** the
+   container, published on the host's loopback only — and create an app-owned administrator
+   account, verified by a real round-trip **from the host through the published port** before its
+   credentials are stored.
 4. _Definition of done:_ on each family's box the Server tab reports the channel verified; the
    account and its access row exist; the port is published on loopback only; the world container
    is running with an unchanged restart count and this run's ready marker after the change; a
@@ -569,6 +582,8 @@ any timer; a credential file inside the server folder; a fixed app-account name;
 command row into Tortoise's queue for anything the attach console can carry.
 
 The panel also settled six facts by reading trees the designs had booked as spikes, listed above
-under "Facts the panel settled by reading". Two questions the panel raised are the owner's and are
-recorded in the summary rather than answered here: whether Tortoise's Phase 8 actions are
-Linux-only for v1, and which machine has Steam for 8.8's gate.
+under "Facts the panel settled by reading". Two questions came out of the design round rather than
+from the panel itself. The first — Tortoise's reach — **was put to the owner and answered** as
+question 10 above: Linux and macOS for v1, and where no pseudo-terminal exists the tab carries the
+reason. The second, which machine has Steam for 8.8's gate, is **OPEN**, is why 8.8 cannot be
+gated, and is recorded as an open question on this page rather than left in a verdict.
