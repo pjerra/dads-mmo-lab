@@ -402,28 +402,28 @@ taken on trust: `mutations-round4.sh` checks the round-3 tip `ccfe7f97` out in t
 clone and runs the mutations there too.
 
 `mutations-round4.txt` (m910q, 2026-09-06, throwaway `git clone --shared /home/pk/dads-mmo-lab
-/home/pk/p7-b41-r4` detached at `2586b913`, `__pycache__` purged before and after every mutation,
+/home/pk/p7-b41-r4` detached at `92cacc44`, `__pycache__` purged before and after every mutation,
 clone removed at the end — the last line is `ls: cannot access '/home/pk/p7-b41-r4': No such file
 or directory`):
 
 | block | line | what it printed |
 | --- | --- | --- |
-| baseline at `2586b913` | 27 | `419 passed in 4.08s` |
+| baseline at `92cacc44` | 27 | `419 passed in 4.12s` |
 | UNMUTATED probe | 30 | `UNMUTATED firewalld loopback: seams=[] fw=[] manual=[] warnings=1` |
 | UNMUTATED probe | 32 | `UNMUTATED firewalld lan: seams=['detect_firewalld', 'detect_zones'] fw=['firewall-offline-cmd --add-port=3724/tcp', 'firewall-offline-cmd --add-port=8085/tcp'] manual=[] warnings=2` |
 | UNMUTATED probe | 35 | `UNMUTATED alf loopback: detect_alf called=False firewall_state=None manual=[]` |
 | UNMUTATED probe | 37-38 | `netsh loopback: manual=[]` / `netsh lan: manual=['Windows: set the network profile to Private …']` |
-| MR1 `if backend == "firewalld"` | 54, 57 | red, `AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])` at `test_networking.py:4924`, `1 failed, 418 passed` |
+| MR1 `if backend == "firewalld"` | 54, 57 | red, `AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])` at `test_networking.py:4929`, `1 failed, 418 passed` |
 | MR1 probe | 58-59 | `seams=['detect_firewalld', 'detect_zones'] fw=[] manual=[] warnings=2`, the extra warning being "the game ports were written to the DEFAULT zone" with no port written |
-| MR3 `if backend == "alf"` | 83, 86 | red, `AssertionError: ['detect_alf']` at `test_networking.py:4964`, `1 failed, 418 passed` |
+| MR3 `if backend == "alf"` | 83, 86 | red, `AssertionError: ['detect_alf']` at `test_networking.py:4969`, `1 failed, 418 passed` |
 | MR3 probe | 92 | `alf loopback: detect_alf called=True firewall_state=AlfState(enabled=True, …)` |
-| MR4 `if backend == "netsh"` | 111, 114 | red, `AssertionError: ('netsh', ('Windows: set the network profile to Private …',))` at `test_networking.py:4929`, `1 failed, 418 passed` |
+| MR4 `if backend == "netsh"` | 111, 114 | red, `AssertionError: ('netsh', ('Windows: set the network profile to Private …',))` at `test_networking.py:4934`, `1 failed, 418 passed` |
 | MR2 control `elif backend == "none"` | 129, 132 | red, the "allow inbound TCP 3724, 8085 by hand" step, `1 failed, 418 passed` |
-| restore | 141 | `419 passed in 4.11s` |
-| round-3 tip `ccfe7f97` baseline | 151 | `419 passed in 4.08s` |
+| restore | 141 | `419 passed in 4.32s` |
+| round-3 tip `ccfe7f97` baseline | 151 | `419 passed in 4.06s` |
 | MR1 at `ccfe7f97` | 160 | `419 passed in 4.09s` — **silent** |
-| MR3 at `ccfe7f97` | 169 | `419 passed in 4.11s` — **silent** |
-| back at `2586b913` | 177 | `419 passed in 4.12s` |
+| MR3 at `ccfe7f97` | 169 | `419 passed in 4.12s` — **silent** |
+| back at `92cacc44` | 177 | `419 passed in 4.06s` |
 
 What changed in the code: the test's firewalld seams now record their calls (`calls == []`), an
 `alf` case with a recording `detect_alf` asserts `firewall_state is None`, and the loopback
@@ -458,3 +458,12 @@ at the round-2 tip `9f0c2fa2`, before round 3's tests existed. That transcript l
 scratch directory, so the clause had nothing a reader could re-derive; it is now committed here
 verbatim as `mutations-round2-meta.txt`, with `416 passed` at lines 25, 43, 54 and 66 (baseline,
 M5, M6, restore) and the clone's removal at line 68.
+
+### `--checks`
+
+`checks-green-round4.txt` holds two runs of `run-tests-vm.sh --checks` on m910q on 2026-09-06,
+both `=== --checks: ALL GREEN ===` and exit 0: `2805 passed, 4 skipped` in 20.62 s (the round-4
+code edits uncommitted over `ccfe7f97`) and in 20.75 s (with the corrected docstrings and these
+gate files, uncommitted over `2586b913`); `Success: no issues found in 72 source files` three times
+each (this platform, as Windows, as macOS), `All checks passed!`, `140 files would be left
+unchanged.` A third run, with the working tree clean at `92cacc44`, is at the end of the same file.

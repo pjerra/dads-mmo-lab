@@ -4,7 +4,7 @@
 # Throwaway shared clone at the round-4 tip, removed at the end.
 set -uo pipefail
 R=/home/pk/p7-b41-r4
-SHA=2586b9139c2a0b5c553666be6547c0804f690c2a
+SHA=92cacc44e9dbc94d8b8611295374e73152675ddf
 W=$R/pylauncher/yulon/networking.py
 FILES="tests/test_spine.py tests/test_networking.py tests/test_controller_view.py"
 purge() { find $R -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null; }

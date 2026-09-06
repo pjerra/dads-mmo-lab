@@ -3241,13 +3241,14 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       recording `detect_firewalld`/`detect_zones` seams with `calls == []`, a recording
       `detect_alf` with `alf_calls == []` and `firewall_state is None`, the whole
       `warnings == (ONLY_THIS_COMPUTER,)` and the whole `manual_steps == ()`, each against a `lan`
-      control that shows the same seams called and the same steps built. At the new tip all three
+      control that shows the same seams called and the same steps built. At `92cacc44` all three
       mutations are red at the named assertion, each `1 failed, 418 passed`: MR1 at transcript
-      lines 54/57 (`AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])`,
-      `test_networking.py:4924`), MR3 at 83/86 (`AssertionError: ['detect_alf']`,
-      `test_networking.py:4964`) and MR4 at 111/114 (`AssertionError: ('netsh', ('Windows: set the
-      network profile to Private …',))`, `test_networking.py:4929`); baseline `419 passed` at
-      line 27 and after the restore at line 141.
+      lines 54/57 (`AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])` at
+      `test_networking.py:4929`, `assert calls == []`), MR3 at 83/86 (`AssertionError:
+      ['detect_alf']` at `:4969`) and MR4 at 111/114 (`AssertionError: ('netsh', ('Windows: set the
+      network profile to Private …',))` at `:4934`, `assert shut.manual_steps == ()`); baseline
+      `419 passed` at line 27 and after the restore at line 141. Line numbers in
+      `pylauncher/tests/` are as of `92cacc44`.
       **The netsh step is now gated too, and that is a decision, not an omission.** `plan()` still
       appended "Windows: set the network profile to Private (Settings → Network & Internet)" for a
       loopback plan on `netsh`, and round 3's filter on the string "TCP" could not see it. The

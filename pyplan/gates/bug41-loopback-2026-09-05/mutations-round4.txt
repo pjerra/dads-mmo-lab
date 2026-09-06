@@ -15,16 +15,16 @@ Or undo this operation with:
 
 Turn off this advice by setting config variable advice.detachedHead to false
 
-########## clone: /home/pk/p7-b41-r4   commit: 2586b9139c2a0b5c553666be6547c0804f690c2a   date: 2026-09-06T04:25:32Z
+########## clone: /home/pk/p7-b41-r4   commit: 92cacc44e9dbc94d8b8611295374e73152675ddf   date: 2026-09-06T04:31:16Z
 
-########## BASELINE at 2586b9139c2a0b5c553666be6547c0804f690c2a
+########## BASELINE at 92cacc44e9dbc94d8b8611295374e73152675ddf
 ........................................................................ [ 17%]
 ........................................................................ [ 34%]
 ........................................................................ [ 51%]
 ........................................................................ [ 68%]
 ........................................................................ [ 85%]
 ...........................................................              [100%]
-419 passed in 4.08s
+419 passed in 4.12s
 
 ########## P1/P2: what the three backends do for loopback and for lan, with recording seams
 UNMUTATED firewalld loopback: seams=[] fw=[] manual=[] warnings=1
@@ -51,10 +51,10 @@ E   AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])
       
       Left contains 2 more items, first extra item: 'detect_firewalld'
       Use -v to get more diff
-/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4924: AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])
+/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4929: AssertionError: ('firewalld', ['detect_firewalld', 'detect_zones'])
 =========================== short test summary info ============================
 FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing
-1 failed, 418 passed in 4.12s
+1 failed, 418 passed in 4.09s
 MUTATED-MR1 firewalld loopback: seams=['detect_firewalld', 'detect_zones'] fw=[] manual=[] warnings=2
     warn: firewalld's zones could not be read, so the game ports were written to the DEFAULT zone. If this machine's net
     warn: this realm will advertise 127.0.0.1, so no other machine can reach this server: every client that logs in is t
@@ -80,10 +80,10 @@ E   AssertionError: ['detect_alf']
       
       Left contains one more item: 'detect_alf'
       Use -v to get more diff
-/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4964: AssertionError: ['detect_alf']
+/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4969: AssertionError: ['detect_alf']
 =========================== short test summary info ============================
 FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing
-1 failed, 418 passed in 4.10s
+1 failed, 418 passed in 4.83s
 MUTATED-MR3 firewalld loopback: seams=[] fw=[] manual=[] warnings=1
     warn: this realm will advertise 127.0.0.1, so no other machine can reach this server: every client that logs in is t
 MUTATED-MR3 firewalld lan: seams=['detect_firewalld', 'detect_zones'] fw=['firewall-offline-cmd --add-port=3724/tcp', 'firewall-offline-cmd --add-port=8085/tcp'] manual=[] warnings=2
@@ -108,10 +108,10 @@ E   AssertionError: ('netsh', ('Windows: set the network profile to Private (Set
       
       Left contains one more item: 'Windows: set the network profile to Private (Settings → Network & Internet).'
       Use -v to get more diff
-/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4929: AssertionError: ('netsh', ('Windows: set the network profile to Private (Settings → Network & Internet).',))
+/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4934: AssertionError: ('netsh', ('Windows: set the network profile to Private (Settings → Network & Internet).',))
 =========================== short test summary info ============================
 FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing
-1 failed, 418 passed in 4.35s
+1 failed, 418 passed in 4.09s
 
 ########## MR2 (control, held since round 3): drop it from the 'none' branch
 MR2 applied
@@ -126,7 +126,7 @@ MR2 applied
 =================================== FAILURES ===================================
 E   AssertionError: ('No supported firewall tool (ufw/firewalld) was found; if a firewall is active, allow inbound TCP 3724, 8085 by hand.',)
     assert not ['No supported firewall tool (ufw/firewalld) was found; if a firewall is active, allow inbound TCP 3724, 8085 by hand.']
-/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4985: AssertionError: ('No supported firewall tool (ufw/firewalld) was found; if a firewall is active, allow inbound TCP 3724, 8085 by hand.',)
+/home/pk/p7-b41-r4/pylauncher/tests/test_networking.py:4990: AssertionError: ('No supported firewall tool (ufw/firewalld) was found; if a firewall is active, allow inbound TCP 3724, 8085 by hand.',)
 =========================== short test summary info ============================
 FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_nothing
 1 failed, 418 passed in 4.09s
@@ -138,7 +138,7 @@ FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_noth
 ........................................................................ [ 68%]
 ........................................................................ [ 85%]
 ...........................................................              [100%]
-419 passed in 4.11s
+419 passed in 4.32s
 
 ########## ROUND-3 TIP ccfe7f97140b7674632774688b27a3cc4e725252: were MR1 and MR3 silent there?
 -- baseline at the round-3 tip
@@ -148,7 +148,7 @@ FAILED tests/test_networking.py::test_a_loopback_plan_asks_the_firewall_for_noth
 ........................................................................ [ 68%]
 ........................................................................ [ 85%]
 ...........................................................              [100%]
-419 passed in 4.08s
+419 passed in 4.06s
 -- MR1 at the round-3 tip: if wants_firewall and backend == "firewalld": -> if backend == "firewalld":
 applied
 ........................................................................ [ 17%]
@@ -166,15 +166,15 @@ applied
 ........................................................................ [ 68%]
 ........................................................................ [ 85%]
 ...........................................................              [100%]
-419 passed in 4.11s
--- back at 2586b9139c2a0b5c553666be6547c0804f690c2a
+419 passed in 4.12s
+-- back at 92cacc44e9dbc94d8b8611295374e73152675ddf
 ........................................................................ [ 17%]
 ........................................................................ [ 34%]
 ........................................................................ [ 51%]
 ........................................................................ [ 68%]
 ........................................................................ [ 85%]
 ...........................................................              [100%]
-419 passed in 4.12s
+419 passed in 4.06s
 ?? pylauncher/.venv
 ########## removing the clone
 ls: cannot access '/home/pk/p7-b41-r4': No such file or directory
