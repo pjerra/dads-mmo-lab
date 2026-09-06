@@ -379,7 +379,11 @@
         `1 AzerothCore 172.30.55.119 172.30.55.119 8085` (reachable, not loopback), and `ready`'s own
         line in the transcript, `gate72-press3.log:3377`: "The realm now advertises 172.30.55.119, so
         players on other machines can reach this server". Both halves of the clause are therefore MET
-        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39.
+        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39. (Superseded
+        2026-09-05: both of those have since closed on this same gate line — the client login at the
+        **CLAUSE 14 IS MET** bullet below, 2026-09-05 07:31:41, and §39 at the **CLAUSE 15 IS MET**
+        bullet below, the LAN press of 2026-09-05 23:06:57 UTC. The sentence is kept because it is
+        the shape of the reasoning at the time it was written.)
       * **What the reworded clause asks for, and why (owner decision, 2026-09-05).** The gate now
         reads: the auth log's `127.0.0.1:8085` line, *then* the realm left advertising an address
         another machine can REACH, with `ready`'s own `UPDATE` counted in `yulon.log`. The two
@@ -424,7 +428,11 @@
         went through `ssh -L 3724/8085` with the realm at `127.0.0.1` — the loopback realm the owner
         asked to keep possible (§41), exercised for real. The same two limits apply: character list
         only, laptop not host. Until this record existed the 09-05 login was cited from memory alone.
-      * **"after the LAN step" — NOT MET, and deliberately.** The launcher's LAN step
+      * **"after the LAN step" — NOT MET, and deliberately.** (Superseded 2026-09-05: the LAN
+        step was pressed through the real widgets on this box at 23:06:57 UTC and a client on the
+        Hyper-V host logged in at 23:31:24 UTC, so **clause 15 is MET** — see the clause-15 bullet
+        further down this line. This bullet is kept because it is the 09-04 install's own record
+        and because the reason it gives is what the press had to answer.) The launcher's LAN step
         (`svc.network_apply`) was never invoked; the realm row was repointed at the Tailscale
         address by hand (`docker exec … UPDATE acore_auth.realmlist … WHERE id=1`, `rows_changed`
         1), and `sudo ufw status` at the end of that log still reads `Status: inactive`. The reason
@@ -434,7 +442,23 @@
       **So: four clauses stand between this sub-gate and a tick** — a compose-config capture and
       diff, the kill-mid-build/ccache half re-exercised (or the line re-scoped to say it is carried
       by the 2026-08-31 set), the `no UPDATE` clause reworded to the engine's current design, and
-      the LAN step, which waits on §39. **And the 7.1 box could not tick even if all four landed**,
+      the LAN step, which waits on §39. **Three of those four have since landed** (the compose
+      capture and the ccache cycle on the 09-05 clean run, the LAN step on 2026-09-05 at 23:06:57
+      UTC — the clause-15 bullet below); what is left of this list is the `no UPDATE` reading, which
+      is clauses 10-12.
+      **And "the owner's call" is not an accurate name for what is left there: this line already
+      carries FOUR readings of clauses 10-12 and they disagree with each other.** (1) The clause text
+      itself says the realm is read out of the database and out of `ready`'s own line, *"not from
+      `yulon.log` (see §42: the CLI writes none)"*. (2) The reworded-clause bullet grades *"Both
+      halves of the clause are therefore MET on the 2026-09-05 run"*. (3) The same bullet then says
+      *"Still owed, and not earned by the reword: no `yulon.log` UPDATE count has ever been
+      captured"*, and names the capture that would settle it
+      (`grep -c 'UPDATE' ~/.local/share/yulon/yulon.log` beside the realmlist row at `ready`).
+      (4) The clause-summary bullet calls the *"no `UPDATE`"* reading *"the owner's call, as recorded
+      above"*. So the next reader is owed a choice among four, not a wait for a decision: one of
+      those readings has to be picked on the record before anything can tick. **Lane b39 did not
+      settle it** — it pressed the LAN step and graded clause 15, and left 10-12 exactly as it found
+      them. **And the 7.1 box could not tick even if all four landed**,
       because the Fedora/Arch sub-gate below is open on its own terms: nothing was installed on
       Arch (the AppImage will not launch without `fuse2`), and Fedora still owes the kill-mid-build
       and a run from a cold checkpoint.
@@ -561,7 +585,9 @@
         but the "no `UPDATE`" reading is the owner's call, as recorded above), **14** (no client on
         the box at the time; **since MET — see the bullet below**), and **15** (the
         LAN step is bug-checklist §39 and was not run; the realm row reads `172.30.55.119` because
-        the engine's `ready` stage wrote it).
+        the engine's `ready` stage wrote it — **since MET too, on 2026-09-05 at 23:06:57 UTC, and
+        the row's value is why the press's `done` line reads as it does; see the clause-15
+        bullet**).
       * **CLAUSE 14 IS MET, 2026-09-05 at 07:31:41, against THIS install rather than a sibling.**
         A real 3.3.5a client authenticated against the 09-05 clean-checkpoint install — the one
         the two bullets above describe — on account **`GATELOGIN`, id 102**, created through
@@ -601,9 +627,58 @@
         09-04 login (`pyplan/gates/7.1-client-login/`, account `YULON`, over Tailscale, against a
         different install), and it is what makes this one answer the clause: the 09-04 login could
         not, because its install was not this one. What a loopback tunnel still does not speak to
-        is the LAN step — that is clause **15**, and it stays open on bug-checklist §39. The two
+        is the LAN step — that is clause **15**, which stayed open on bug-checklist §39 until the
+        press of 2026-09-05 23:06:57 UTC closed both (the clause-15 bullet below). The two
         are recorded apart on purpose: 14 asks that a client can log in, 15 asks that another
-        machine on the network can reach the realm the launcher advertises.
+        machine on the network can reach the realm the launcher advertises — and 15's login came
+        from the Hyper-V host over the LAN, which is why it can answer what this one cannot.
+      * **CLAUSE 15 IS MET, 2026-09-05 — the LAN step pressed by the app on this box, and a
+        client on the Hyper-V HOST logged in through the ports it advertised.** The clause reads
+        *"account + client login from the host after the LAN step"*, and all three halves are now
+        on evidence in `pyplan/gates/bug39-lan-press-2026-09-05/` (bug-checklist §39, CLOSED on
+        this press). Against the committed tree at `cfb4c04f`, on `yulon-ubuntu`:
+        * **The LAN step, by the app.** The real `ControllerView` over
+          `ControllerServices.for_entry(…, /home/pk/wowserver)`, offscreen with `status_poll_ms=0`;
+          `Show plan` and `Apply` pressed with `QTest.mouseClick`; `Apply` asserted DISABLED until
+          the plan arrived. `press.txt:79` is the module's own line —
+          `networking lan for wow-wotlk: 3 done, 1 skipped (1 refused), 0 manual` — and `:82-92` is
+          the report the widget rendered: `✓ ufw allow 3724/tcp`, `✓ ufw allow 8085/tcp`,
+          `✓ realmlist → 172.30.55.119`, then the withheld `ufw enable` under
+          `Could not do (run by hand):`. A second press two minutes later left the rule list
+          unchanged (`press2.txt:122`). Both presses ran over ssh and nothing was locked out: a new
+          TCP connection to `172.30.55.119:22` got sshd's banner afterwards (`press.txt:123`) and a
+          new ssh **login** from the laptop answered at 23:10:59 UTC
+          (`guishape-and-newssh.txt:2`).
+        * **The account, by the Accounts tile.** `LANGATE`, id **104**, GM 0, typed into the real
+          `QLineEdit`s with `QTest.keyClicks` and created by a `QTest.mouseClick` on `Create`;
+          `account_report -> 'LANGATE: created (id 104).'` and the row read back by `docker exec`
+          + `SELECT` as a real SRP6 row, salt 32 / verifier 32 (`account.txt:9,13`).
+        * **The login, from THE HOST, with no tunnel.** A 3.3.5a client (build 12340) on `vmhost`
+          — the Hyper-V host this VM runs on, which is what this clause's "the host" names, and
+          the half the 09-04 and 09-05 logins both had to concede — with `realmlist.wtf` =
+          `set realmlist 172.30.55.119`. `client-connection-20260906-0131.log:2,10,12`:
+          `RESPONSE_CONNECTED result: LOGIN_OK 172.30.55.119:3724`,
+          `COP_AUTHENTICATE code=AUTH_OK result=TRUE`,
+          `COP_GET_CHARACTERS code=44 result=TRUE`. Server side (`serverside.txt:5`):
+          `104 LANGATE last_login 2026-09-05 23:31:24 last_ip 172.30.48.1 failed_logins 0` —
+          and **`172.30.48.1` is that host's own address on the Default Switch**, the reading a
+          loopback tunnel could not produce (the 09-05 login recorded `172.18.0.1`, Docker's
+          bridge gateway). `client-character-select.jpg` is the character screen for realm
+          `AzerothCore`.
+        **What this clause still does not claim, and the bound the box puts on it.** `Enter World`
+        was never clicked and no character was created, the same two limits clause 14 carries. And
+        the ports almost certainly answered from the host *before* the press as well — **an
+        inference, not a measurement: the only `Test-NetConnection` the run took is after the press**
+        (`vmhost-ports.txt:2`, `2026-09-05T23:12:12Z`), and the 21:47 CEST before-press probe is one
+        the lane brief reports rather than one this run made. What was measured is why nothing could
+        have been filtering them: ufw was `inactive` with an
+        empty `### RULES ###` section, and `sudo -n iptables -S | grep -c ufw` answered **0** after
+        the press (`iptables-bound.txt:1`), so the rules the press wrote filter nothing on this box
+        today. The press proves the app writes the right rules, refuses the enable, keeps SSH and
+        advertises a reachable realm; it does not prove that opening a port changed reachability,
+        because nothing was closed. The box was put back afterwards: rules deleted,
+        `/etc/ufw/user.rules` restored to its pre-press bytes (`sha256 320f53e1…`, 307 bytes),
+        `LANGATE` deleted, realm row untouched throughout.
       * **A note on the edge count.** Every earlier record says 1829 ninja edges; core `413bea61a`
         has **1834**. A watcher written for `/1829]` never fired, which is why the first kill
         landed at 1226 rather than ~900. Pin the total from the log, not from a previous run.
@@ -828,7 +903,16 @@
        gate is disagreeing with this line alone, which is the honest place to put the disagreement.
        For the record on the gate's own terms: clause 14 is **now met**
        (a real client authenticated against the 09-05 install at 07:31:41 — see the 7.1 line),
-       and clause 15 is not, so that box would still be open on the old reading too.
+       and clause 15 was not when this was written. **Clause 15 is now met too** — the LAN step was
+       pressed by the app on that box on 2026-09-05 at 23:06:57 UTC and a client on the Hyper-V host
+       logged in at 23:31:24 UTC (`pyplan/gates/bug39-lan-press-2026-09-05/`) — so what would keep
+       that box open on the old reading is clauses **10-12**, the "no `UPDATE`" reading — and that
+       is not simply "the owner's call": the 7.1 gate line carries four readings of those three
+       clauses which disagree with each other (the clause text's *"not from `yulon.log`"*, the
+       reworded-clause bullet's *"both halves … MET on the 2026-09-05 run"*, the same bullet's
+       *"Still owed … no `yulon.log` UPDATE count has ever been captured"*, and the clause-summary
+       bullet's *"the owner's call"*). Someone has to pick one on the record; lane b39 did not, and
+       left 10-12 as it found them.
     - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6 under Task F.7
       gives a template for this tick that appends *"CMaNGOS entries `platforms: []`"* and ticks the
       gate box in the same commit. Neither was followed: `[]` was never applied and must not be
@@ -954,8 +1038,21 @@
         numbers are on the 7.1 line and the capture is
         `pyplan/gates/7.1-client-login/LOGIN-2026-09-05.md` with
         `client-connection-20260905-0731.log:10` and `server-side-20260905.txt:11`
-        (committed at `a0cc9dc0`; before that it was cited from the run report alone). **10-12 (owner decision) and 15 (§39) remain**, so this box
-        stays `- [ ]` — on two clauses now rather than three. Note that the PARENT 7.2 line was
+        (committed at `a0cc9dc0`; before that it was cited from the run report alone).
+        **Updated 2026-09-05 again: clause 15 IS now met** — the app's own LAN step was pressed
+        through the real widgets on that box at 23:06:57 UTC (`3 done, 1 skipped (1 refused), 0
+        manual`, ufw left inactive, SSH still reachable) and account `LANGATE` id 104 logged a real
+        client in from the Hyper-V host at 23:31:24 UTC with `last_ip 172.30.48.1`, the host's own
+        LAN address; capture `pyplan/gates/bug39-lan-press-2026-09-05/` and bug-checklist §39, now
+        CLOSED. **So 10-12 is what remains**, so this box
+        stays `- [ ]` — on one clause now rather than three. **What 10-12 needs is not a decision
+        anyone is waiting on:** the 7.1 gate line carries four readings of those three clauses which
+        disagree with each other — the clause text's *"not from `yulon.log` (see §42: the CLI writes
+        none)"*, the reworded-clause bullet's *"both halves … MET on the 2026-09-05 run"*, the same
+        bullet's *"Still owed … no `yulon.log` UPDATE count has ever been captured"*, and the
+        clause-summary bullet's *"the owner's call"*. One of the four has to be picked on the record
+        before this ticks. Lane b39 did not pick it and left 10-12 as it found them.
+        Note that the PARENT 7.2 line was
         ticked the same day on its own nine clauses; that tick says nothing about this gate, and
         this gate is not evidence for it.
       * **The record was corrected on 2026-09-05, and one of the five corrections matters to a
