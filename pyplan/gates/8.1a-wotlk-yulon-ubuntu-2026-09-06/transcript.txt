@@ -161,3 +161,48 @@ ac-database Up 27 seconds (healthy)
 
 $ ls -la ~/.local/share/yulon/logs/
 -rw-rw-r-- 1 pk pk 305250 Sep  6 21:05 wow-wotlk-243c46e3-20260906T190545Z.log
+
+
+=== the visible in-game effect — a real client, logged in by the owner ===
+
+Route: ssh -L 3724:127.0.0.1:3724 -L 8085:127.0.0.1:8085 yulon-ubuntu, realm row temporarily
+127.0.0.1, client C:\wow335ahd with Data/enUS/realmlist.wtf temporarily 127.0.0.1. Both put back
+afterwards (realm 172.30.55.119, client 100.71.125.58).
+
+Account made through the Server tab's own seam, not a console:
+
+[19:17:34Z] create_account -> AccountResult(username='YULONGATE', account_id=105, created=True, gm_level=0)
+
+The dashboard, polling every 3s, printing only when the line CHANGES (~/watch81a.log):
+
+[19:18:04Z] watching; every line below is a CHANGE in what the tab would show
+[19:18:04Z] up — 0 players, 500 bots, up 6m
+[19:26:48Z] up — 1 players, 500 bots, up 15m      <- entered the world
+[19:28:07Z] up — 0 players, 500 bots, up 17m      <- character select
+[19:28:57Z] up — 1 players, 500 bots, up 17m      <- entered again
+[19:29:47Z] up — 0 players, 500 bots, up 18m      <- logged out and quit
+
+The bot count is 500 on every one of those lines.
+
+The server's own rows, read while the character was in the world:
+
+  id   username    last_login           online  failed_logins
+  105  YULONGATE   2026-09-06 19:28:53  1       0
+
+  guid  name    level  online  account
+  1001  Asfgg   1      1       105
+
+  the player clause, run by hand at that moment:  1
+
+And after the logout:
+
+  105  YULONGATE  2026-09-06 19:28:53  0  0
+  1001 Asfgg      0
+
+=== put back ===
+
+$ docker exec ... "SELECT id,name,address,localAddress,port FROM acore_auth.realmlist;"
+1	AzerothCore	172.30.55.119	172.30.55.119	8085
+
+$ cat C:\wow335ahd\Data\enUS\realmlist.wtf
+set realmlist 100.71.125.58
