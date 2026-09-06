@@ -152,3 +152,12 @@ ranges by content and not only by that removed-line grep: `sed -n '<range>p'` of
 No measurement in this folder changed and no test citation was repointed; the tick still rests on
 the same evidence. On a box, this round did one announced `ssh yulon-fedora 'sudo -n -l'` and the
 `--checks` run recorded below. Nothing was installed, started, stopped or removed.
+
+`checks-yulon-fedora-r3.txt` is the gate re-run after the round-3 edits, 79 lines, no BOM
+(`head -c3 | od -An -tx1` → `3d 3d 3e`). Its first line reads `==> syncing lane/b71 (99b0a078) to
+yulon-fedora` and there is **no** `==> overlaying` line (`grep -c overlaying` → 0), so it ran over
+the committed tip with nothing on top of it: **2792 passed, 4 skipped in 21.22s**, mypy `Success: no
+issues found in 72 source files` three times (this platform, as Windows, as macOS), ruff `All checks
+passed!`, black `140 files would be left unchanged`, `=== --checks: ALL GREEN ===`, exit 0.
+`99b0a078` is the commit carrying the stamp corrections above; this paragraph and the transcript are
+the one commit after it, and nothing `--checks` reads lives under `pyplan/gates/`.
