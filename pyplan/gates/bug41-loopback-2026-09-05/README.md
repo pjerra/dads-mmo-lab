@@ -439,11 +439,24 @@ yulon-ubuntu 2026-09-06 06:27:43 +02:00 (read-only, announced), on the install t
 Apply had run against: `docker ps --format '{{.Names}}\t{{.Ports}}'` → `ac-authserver
 0.0.0.0:3724->3724/tcp` and `ac-worldserver … 0.0.0.0:8085->8085/tcp`; `ss -ltn` → LISTEN on
 `0.0.0.0:3724` and `0.0.0.0:8085`. The mode changes the address the realm row hands out and nothing
-else — `plan()` returns firewall commands, portproxy commands, a realmlist UPDATE and the
-`client_realmlist` string the report shows, and `apply()` additionally records the chosen mode in
-`.yulon-network.json`; no port binding is among them (round 5 corrected this list, which had
-omitted the last two). Another machine still connects and logs in, and is then told the world
-server is at 127.0.0.1, i.e. on itself. The comment now says that.
+else — of everything a `NetworkPlan` hands back, `apply()` RUNS the contents of
+`firewall_commands`, `portproxy_commands` and `realmlist_sql`, SHOWS `client_realmlist`, and leaves
+`manual_steps`, `warnings` and `refusals` as text for the owner (`manual_steps` is the one of those
+that ever carries a firewall instruction: "Windows: set the network profile to Private", appended
+only under the `netsh` backend and only when `wants_firewall`, so never under `loopback`); beyond
+the fields it writes `.yulon-network.json`. No container port binding is among them: a `portproxy`
+rule forwards a host address to 127.0.0.1, and the UPDATE changes only the address the realm row
+hands out. Another machine still connects and logs in, and is then told the world server is at
+127.0.0.1, i.e. on itself. The comment now says that.
+
+Rounds 4 and 5 both wrote this as a list of "the output fields a `NetworkPlan` carries" and both
+lists were short — the dataclass has 18 fields
+(`n=$(grep -n '^class NetworkPlan' pylauncher/yulon/networking.py | cut -d: -f1); awk -v s=$n
+'NR>=s && NR<=s+75' pylauncher/yulon/networking.py | grep -cE '^ +[a-z_]+:'` → `18` at
+`b481be54`), and round 5's four left out `manual_steps`, the only field that ever carried a
+firewall instruction, which is the comment's own subject. Round 6 stopped enumerating the fields
+and stated what `apply()` does with them; the conclusion (no networking mode writes a container
+port binding) is the one the 06:27:43 reading above supports and is unchanged.
 
 The two owner-visible strings were reviewed and KEPT: `networking.ONLY_THIS_COMPUTER` and the
 install line from `loopback_chosen_on_purpose()`. Both are quoted verbatim in committed records of
@@ -501,7 +514,9 @@ ran at. At `cdd5eba2` that line is 2741.
 Each of the eight now carries `at cdd5eba2`, so a later edit to `native.py` or `networking.py`
 moves the line without silently invalidating the citation. `native.py:202`, `native.py:245`,
 `native.py:92`, `networking.py:194`, `networking.py:220`, `controller_view.py:607` and
-`controller_view.py:1835` were re-derived at `cdd5eba2` too and had not moved.
+`controller_view.py:1835` were re-derived at `cdd5eba2` too and had not moved — but five of those
+seven carried no SHA at all until round 6 pinned them; see the round-6 section below, which also
+covers the citations this lane killed in OTHER entries and which round 5 never looked at.
 
 The drift has a shape, so round 5 has a shape: commit A (`cdd5eba2`) changed only `pylauncher/`,
 and commit B changed only md and txt. The numbers in B were read out of A's files with the tree
@@ -530,4 +545,84 @@ runner was called: `### date: 2026-09-06T07:02:39+02:00`, `### git rev-parse HEA
 `2805 passed, 4 skipped in 20.34s`,
 `Success: no issues found in 72 source files` three times (this platform, as Windows, as macOS),
 `All checks passed!`, `140 files would be left unchanged.`, `=== --checks: ALL GREEN ===`, exit 0.
+Commit B adds only md and txt on top of it, which no check reads.
+
+## Round 6 (2026-09-06) — the citations this lane killed in other entries, and the enumeration retired
+
+Round 5 re-derived §41's own eight citations and then said the drift mechanism was closed. It was
+not: this lane's edits to `pylauncher/yulon/networking.py` and `pylauncher/yulon/catalog/native.py`
+(`git diff --numstat cfb4c04f b481be54 --` those two files → `306  24` and `116  8`) had already
+moved lines that OTHER closed entries cite, and nobody had looked outside §41.
+
+Three such citations were found, all true at `cfb4c04f` and dead at the lane tip:
+
+| entry | said | printed at the lane tip | now says |
+| --- | --- | --- | --- |
+| §39, `bug-checklist.md` measured-closed paragraph | `networking.py:2956` | `@dataclass(frozen=True)` | `networking.py:3145` at `b481be54` |
+| §39, same sentence | `networking.py:2967` | `cannot tell a decision from a leftover.` | `networking.py:3156` at `b481be54` |
+| §23 | `native.py:335` | a bare `"""` | `native.py:406` at `b481be54` |
+
+The §39 pair was never pinned to the three commits its own sentence names: `git show
+<c>:pylauncher/yulon/networking.py | grep -n 'enable_firewall: bool = False'` printed `2310` at
+each of `9b0eb089`, `e72bc758` and `ee361035`. 2956/2967 were the merged tree's numbers at
+`cfb4c04f`, which is why they matched there and stopped matching here.
+
+How the list was bounded: `citation-scan-round6.sh` reads every `networking.py:N`, `native.py:N`
+and `controller_view.py:N` citation in `pyplan/**/*.md` and prints the pair when the cited line's
+CONTENT differs between `cfb4c04f` and the lane tip. `citation-scan-round6.txt` is its output — 79
+pairs, which is a superset of "this lane killed it": a pair is also printed when the citation was
+already stale at `cfb4c04f`, and when it is deliberately pinned to a later commit (§41's own, at
+`cdd5eba2`/`d1e41fbc`/`b481be54`, are in there for that reason). Each of the 79 was then read
+against the sentence citing it. Outside §41 the base line matched the sentence the scan could see
+in exactly two cases, `networking.py:2956` (§39) and `native.py:335` (§23); everywhere else the
+base line was already something unrelated — e.g.
+`bug-checklist.md:395` cites `controller_view.py:1307` for "`_module_action()` returns early" and
+that line at `cfb4c04f` is a docstring about a second press; `bug-checklist.md:904` cites
+`native.py:1061` for `already_cloned()` and that line is a parameter; the `native.py:272` pair in
+the 2026-08-28 hunt runlogs, `controller_view.py:931` in `findings-m910q.md`, `native.py:1969` in
+`phase7-decisions.md:1171`, `native.py:1955`/`:1990` in `checklist.md` and `native.py:1476` in
+`upstream-cmangos-doodad-drop.md` are the same shape. Those predate this lane, so round 6 left them
+as found rather than opening a tree-wide pass from inside a bug entry. The scan cannot see a bare
+`:NNN` continuation, which is how §39's `:2967` is written; that one was found by reading the
+sentence, and §23's `:709`, `:377`, `:667-669`, `:894`, `:899` were checked the same way and were
+all already stale at `cfb4c04f`.
+
+Five §41 citations that were correct but carried no SHA now carry `at b481be54`, which is what
+made the three above silent: `controller_view.py:607`, `controller_view.py:1835`,
+`networking.py:220`, `native.py:245` and `native.py:92`.
+
+The `wants_firewall` comment's enumeration was retired rather than corrected a third time — see the
+paragraph above under round 4's "The reason the branch gave for itself was false".
+
+Round 6 kept round 5's shape: commit A changed only `pylauncher/yulon/networking.py`, commit B only
+md and txt, and B's numbers were read out of A's files with `git status --porcelain` empty.
+
+The m910q box was read back read-only on 2026-09-06 at 07:49:07 +02:00 (announced in
+`~/bin/claude-say` before and after), through the same route the drivers in this folder use
+(`docker exec -e MYSQL_PWD="$(cat /home/pk/vanilla-75b/.db_password)" vanilla-db mariadb -uroot
+-N -B -e "SELECT id,name,address,port FROM realmd.realmlist;"`): `1  MaNGOS  192.168.10.134
+8085`, which is what "The box, put back" above says was restored; `/home/pk/vanilla-75b` holds
+`.yulon-install.json` and no `.yulon-network.json`; `vanilla-db` (healthy), `vanilla-realmd` and
+`vanilla-mangosd` up 44 hours; 34 GB free on `/`. Round 6 also removed a leftover from the round-5
+reviewer, `/home/pk/b41-r5-review-mut.sh`, and left nothing of its own on the box.
+
+Left as found, and named so it is not read as unnoticed: five lines in this folder carry a
+`/home/pk/yulon-runs/wt-b41/...` path — `red-before-the-code-networking.txt:1,24,25` and
+`red-before-the-code-spine-and-view.txt:6,7`. All five are the test runner's own header
+(`==> creating remote checkout …` and pytest's `rootdir:`), not a path this record cites as
+evidence, and `git grep -l yulon-runs cfb4c04f -- pyplan/ | wc -l` printed `19`, so 19 files
+already at the branch point carry the same header. Round 6 did not edit a captured transcript to
+remove them; whether the rule reaches runner headers is the owner's call, not this lane's.
+
+### `--checks`
+
+`checks-green-round6.txt` is one run of `run-tests-vm.sh --checks` on m910q, 2026-09-06 07:39,
+taken at commit A with the tree clean. Lines 1-5 are the capture's own header, written before the
+runner was called: `### date: 2026-09-06T07:39:41+02:00`, `### git rev-parse HEAD:`,
+`b481be54af6d7ef40b4427daf196778897c3c0f3`,
+`### git status --porcelain (empty means the tree is the commit):` with nothing under it, and
+`### ---`. Line 6 is `==> syncing lane/b41 (b481be54) to m910q`. Then
+`2805 passed, 4 skipped in 20.41s`,
+`Success: no issues found in 72 source files` three times, `All checks passed!`,
+`140 files would be left unchanged.`, `=== --checks: ALL GREEN ===` (line 62), exit 0.
 Commit B adds only md and txt on top of it, which no check reads.
