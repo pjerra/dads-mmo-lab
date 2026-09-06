@@ -47,6 +47,8 @@ quoted first.
 | 8iii | Module management beyond install/remove (update checks, manifests for the three CMaNGOS games, tuning knobs, config editor, settings page, account-wide sharing). | First **"Drop the account wide"**; on the clarifying question, **"Update checks + CMaNGOS manifests in Phase 8; knobs, editor, settings in Phase 9; account-wide refused"** |
 | 8iv | Automatic backups, self-update of the server sources, single-instance guard, autostart, adopting a server folder the app did not create. | **"None in Phase 8: single-instance in Phase 9, the rest later or refused"** |
 | 9 | **Vanilla's gates.** How are they met, given that the engine's `patch-sources` stage refuses a second press on any folder built before the doodad patch? | **"Fresh throwaway install on m910q, folded into 8.9's install"** — **the premise this question was put on was too strong, and the correction is recorded rather than the answer changed.** I told the owner no Vanilla install could reach ready anywhere. Checked on the box on 2026-09-06: a Vanilla server *is* running and ready on the test box at `/home/pk/vanilla-75b` (`vanilla-mangosd` started 08:19Z, restarts=1, logging `Avg Diff: 56. Sessions online: 0.`). What the engine refuses is a second *install press* on a pre-patch folder; that is not the same as the server being unusable. The answer still stands on its own terms — 8.9b needs a throwaway install regardless, so one compile still serves two boxes — but Vanilla's other gates could run against the server that is already up, and that is the owner's to choose. |
+| 11 | **What "8.1" released.** The owner answered when the command channel was numbered 8.1; the review round then put observability first, so the channel is 8.2. Which was released? | **"The phase's first step, whatever it is"** — so work starts on observability and the channel follows, which is the ordering the reordering's own reason supports. |
+| 12 | **Vanilla's gates, re-asked.** Question 9 was put on my claim that no Vanilla install could reach ready anywhere. Measured on the box on 2026-09-06, that was too strong: a Vanilla server is running and ready at `/home/pk/vanilla-75b`, and what the engine refuses is a second install *press* on a pre-patch folder. Does answer 9 stand? | **"Gate against the running server; keep the throwaway for 8.9b only"** — which removes a compile from six boxes and leaves the throwaway install where uninstall actually needs one to destroy. |
 | 10 | **Tortoise's reach.** It has no SOAP and no remote console; on Linux its actions go through the attach console, on native Windows only through a 60-second queue that returns nothing. Which is v1? | **"Linux and macOS only for v1; Windows says why"** |
 
 ### Group (g), copied verbatim from `pyplan/phase8-decisions.md` (2026-08-31)
@@ -624,7 +626,7 @@ matching edit, given below it.
 > is WotLK first, one box per emulator family, the way Phase 7 ran. (The owner answered "8.1 may
 > start now" when the command channel was numbered 8.1; the review round that followed put
 > observability first, so that step is now 8.2. The release is read as "the phase's first step",
-> which is the reading the reordering supports and which the owner has not been asked to confirm.)
+> which the owner confirmed on 2026-09-06 when asked which of the two steps the answer had released.)
 
 ### 8.1 Observability
 1. Save the worldserver log before every stop, remove and uninstall — this install's own container,
