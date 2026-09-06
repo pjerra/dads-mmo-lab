@@ -194,10 +194,13 @@ preference.
 | 8 | The Console tab's attach sits outside the channel's lock | One lock per install covers **every** attach, the Console tab's included. The prompt delimiter "is a single-writer property, not a property of the console" (`console.py:57-73`); two writers put foreign prompts in each other's windows. |
 | 9 | A fourth three-valued type enters the tree | At `7bc5ebd3` `yulon/ownership.py` already answered "whose folder is this?" in three values, and its module docstring said why: "That is the part that must not be re-invented with two values." The uninstall's plan returns that type, and the new answer type is read against it before it is written. |
 
-### Facts the panel settled by reading, which the designs had booked as spikes
+### Facts settled by reading after the panel reported, which the designs had booked as spikes
 
 Recorded because each removes work, and because a spike a read can answer is a spike this project
-does not run.
+does not run. **The reads themselves are committed at `pyplan/phase8-judges/panel-reads.md`** — with
+the command and the lines as they came back — because the first version of this table asserted six
+facts that no committed reader had produced, and one of the six was wrong. That is the failure this
+table exists to prevent, committed by the page enforcing the rule; the artefact is the remedy.
 
 | Fact | Where | What it removes |
 |---|---|---|
