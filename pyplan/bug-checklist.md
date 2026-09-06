@@ -3098,9 +3098,12 @@ box reached over ssh. That is what round 11 measured.
 **ROUND 11, 2026-09-05 — the button was pressed on a remote Linux box, and a client on another
 machine logged in through the ports it advertised. CLOSED.** Everything in this paragraph was
 measured between 22:59 and 23:36:36 UTC on 2026-09-05 (00:59-01:36 CEST on 2026-09-06) —
-the earliest and latest stamps a reader can re-derive from the committed files, namely
-`console-before.png`'s own top-bar clock (`Sep 6 00:59` CEST) and `ufw-restored.txt:59`
-(`01:36:36` CEST); an earlier draft of this paragraph said 22:57 and 23:38, and neither of
+the earliest and latest stamps **of the press** a reader can re-derive from the files
+committed with it, namely `console-before.png`'s own top-bar clock (`Sep 6 00:59` CEST)
+and `ufw-restored.txt:59` (`01:36:36` CEST). The one committed file in that folder those
+bounds do not cover is `activity-log-excerpts.txt`, written in rounds 4 and 5 to date the
+lane's later record-keeping from the boxes' own activity logs; its stamps run to
+`04:06:03` CEST. An earlier draft of this paragraph said 22:57 and 23:38, and neither of
 those two figures had an artifact behind it — on
 **`yulon-ubuntu`**, the live 7.2 install at `/home/pk/wowserver`, against the committed tree at
 `cfb4c04f` (`git rev-parse HEAD` in `/home/pk/p7/checkout`, `git status --short` empty). Command by
