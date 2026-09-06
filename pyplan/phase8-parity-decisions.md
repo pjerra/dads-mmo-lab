@@ -11,8 +11,9 @@
 > `pyplan/phase8-delta.md` (one row per feature, mechanism measured per emulator tree at the
 > catalog's pinned revisions; reports in `pyplan/phase8-reads/`); the owner answered the eight
 > questions below before any design existed; three designs were then written independently from
-> three angles and scored by three judges. Sections after "The cut" are written once the judge
-> panel has reported; until then this page records the inputs to the design, nothing more.
+> three angles (`pyplan/phase8-designs/`) and scored by three judges (`pyplan/phase8-judges/`).
+> Every source read, design and verdict is committed beside this page, so what was rejected can be
+> read rather than summarised.
 
 ---
 
@@ -99,7 +100,471 @@ exit box is ticked; it still waits for this scoping's review cycle (the 2026-09-
 
 ---
 
-*The sections that follow — the decision, why and what was rejected, architecture and module
-layout, per-feature detail, per-family data, delivery order and gates, blast radius, tests, risks,
-what the implementer should NOT build yet, doc changes, Appendix A (proposed roadmap §8) and
-Appendix B (the judge panel) — are written after the design round and the judges report.*
+## The decision
+
+**Every Phase 8 feature asks a server one of two things — a question of its database, or a command
+of its world thread — through one typed seam whose per-tree differences are data on the catalog
+entry. `soap.py` is the wire; `channel.py` delivers a command over whichever channel the entry
+declares (SOAP on loopback for WotLK, TBC and Vanilla; the attach console where a pty exists; the
+`pending_commands` queue on Tortoise where nothing else can); `commands.py` builds the text from a
+per-tree template and answers "can this server do this at all?" before a button is drawn;
+`dbreads.py` is the read side over the `DockerSql` seam that already exists. Every answer has
+three outcomes — yes, no, could-not-ask — and no feature writes to `characters` or `world` itself:
+the server performs those writes through its own commands, on its own thread.**
+
+Design **A** (`phase8-designs/a-server-side-seam.md`) is that design and is chosen. The surface is
+design **B**'s, grafted nearly whole: two new tabs as sub-views that signal up, one `OutcomeLabel`
+widget so no tab can quietly collapse three outcomes into two, and the two-press arm before
+anything restarts a running world. The operating discipline is design **C**'s: a write ledger with
+a test that enumerates every write site in the tree, the applier's missing guard on module SQL, a
+bounded pre-stop log snapshot, and the rule that a gate captures the rows it is about to change
+before it changes them.
+
+---
+
+## Why, and what was rejected
+
+Three designs, three judges, seven criteria each scored 1–5. The scores are in Appendix B; the
+reasoning that matters is here.
+
+**B — the user's surface — rejected as the shape, kept as the surface.** It has the best surface
+discipline in the set: `ui/controller_view.py` is 1937 lines and B is the only design that does
+not add two more tabs inside it, the only one that says who tears a tab down when an uninstall
+finishes (`main.py:189` keeps `drop_controller`; the view signals up), and the only one whose
+"(exists)" test citations all resolve. What sank it as the shape is that its channel model is
+built on a transport behaviour that does not exist. B derives "the server is starting" from a SOAP
+connection that "connects and blocks"; on all three SOAP cores the SOAP thread is created **after**
+`SetInitialWorldSettings()` returns (`AC Main.cpp:315`, `:337-339`; `TBC/VAN Master.cpp:126`,
+`:248`), so during a map load the connect is *refused*, and B's 8.1 gate line — "a Start shows
+'waiting for the world to finish loading' before 'ready'" — describes a state its own design never
+enters. Two more: it omits `SOAP.IP` entirely, whose shipped default binds the container's own
+loopback where a published port cannot reach it, so its press would enable a listener nothing can
+talk to; and it puts a GM-3 credential in the server folder, which is the folder the uninstall
+deletes, the folder users copy, and on Windows may live inside a WSL distro where a host-side
+0600 is not the host's to set.
+
+**C — the operator's risk — rejected as the shape, kept as the discipline.** It is the best
+document in the set on what breaks a live server, and it produced the single best test idea of the
+three: a write ledger with an AST walk that fails both on a write site absent from the ledger and
+on a ledger row that resolves to no site — a relationship asserted in both directions. It was not
+chosen for two reasons. The first is placement: its `verbs.py` holds the per-tree command texts in
+Python, which is the same fact in the same place a conditional would have been, against
+style-guide §3's "manifests hold data, code holds behavior" and against the `families/cmangos.py`
+row that forbids a game literal and asserts it over the AST. The second is a cost it pays forever:
+C polls `server info` over SOAP every 30 seconds for the life of the server. Every command channel
+queues on the single world thread, and at this revision AzerothCore's SOAP loop accepts and
+processes one request inline (`ACSoap.cpp:56-63`) rather than spawning a thread per request as C
+states — so a dashboard tick queued behind a save drain holds the only accept loop while the
+user's next teleport waits in the kernel backlog. A and B both refused a periodic world-thread
+command, and they were right: players, bots and uptime come from database reads that bypass the
+world thread entirely.
+
+**A — the server-side seam — chosen.** It is the only design whose server-state model matches what
+the trees do, the only one that carries every per-tree fact as typed data the catalog validator
+refuses on a typo, and the only one in which a fifth server is a JSON block and a gate rather than
+a Python edit. Its own fatal flaw was found and is fixed by a graft, not a redesign. The honest
+cost, named by the maintainer judge: `ControllerServices` gains seven grouped seams wired in four
+factories — the right granularity, and `tests/test_controller_packages_agree.py` already exists to
+keep the four in step.
+
+### What the panel required of A before a line of code
+
+Nine corrections. Each rests on a fact a judge or the orchestrator read in a tree, not on a
+preference.
+
+| # | A as drafted | The correction, and the fact behind it |
+|---|---|---|
+| 1 | The enable step recreates the world with a bare `docker compose up -d <world>` | It calls **`docker.start_staged()`** (`docker.py:702`). The worldserver declares `depends_on: ac-db-import: condition: service_completed_successfully` (`base.yml.tmpl:276-277`), so a bare `up -d` evaluates that dependency; the docstring records what that did before it was fixed — "was killing the database" (`docker.py:707-711`). |
+| 2 | One press recreates a running world after a sentence | **Two presses, armed**, reusing the tab's own idiom (`ui/controller_view.py:628-646`), with the paragraph naming the disconnect and the up-to-300-second save drain. One press only when the world is down. Grafted from B. |
+| 3 | Nothing checks that the world survived being changed | **A failed SOAP bind is fatal, and differently per tree.** AzerothCore logs and calls `World::StopNow(ERROR_EXIT_CODE)` — a graceful shutdown (`ACSoap.cpp:41-46`). TBC and Vanilla call **`exit(-1)` from the SOAP worker thread** (`MaNGOSsoap.cpp:43-47`), killing the process with no character saves; both templates set `restart: unless-stopped`, so that is a restart loop. 8.1 therefore proves the port is free *before* it writes anything, and its Definition of done gains: after the recreate the world is running, the restart count has not grown, and this run's ready marker is in the log. On failure the app rolls the key back and says so. |
+| 4 | The published-bindings read proves 7878 is loopback-pinned | It is a **global** scan of every container's ports (`docker.py:2302`). It is filtered by compose project — the ownership proof the install guard already uses — before it can refuse anything. |
+| 5 | The bot clause takes the catalog value, with a comment about where the live one would be | The prefix is **resolved the way the server resolves it**, and the three trees differ. AzerothCore consults `AC_AI_PLAYERBOT_RANDOM_BOT_ACCOUNT_PREFIX` in the environment and it **wins over** the file (`AC Config.cpp:540-552`). TBC and Vanilla consult `Mangosd_AiPlayerbot_RandomBotAccountPrefix` — prefix `Mangosd_` from `SetSource(configFile, "Mangosd_")` (`TBC Main.cpp:156`), dots to underscores, **case preserved** — and it also wins, applied at parse time (`Config.cpp:75-78`). Tortoise has no environment layer at all. The resolver reports which source answered, refuses an unreadable or empty prefix rather than answering, and requires a safe character set before the value reaches SQL. Grafted from B and C, and extended by the read. |
+| 6 | The CMaNGOS `account set password` rows are marked unverified | **Verified today.** All three CMaNGOS-lineage trees take three arguments: two password arguments extracted and both required (`TBC Level3.cpp:1132`, `VAN :1093`, and Tortoise's handler). The unverified flag stays in the model for what is still unread. |
+| 7 | The MaNGOS SOAP namespace is marked unverified and pinned by a gate | **Read.** `MaNGOSsoap.cpp:156` carries the `urn:MaNGOS` namespace on mangos-tbc and mangos-classic alike. No gate is spent on it. |
+| 8 | The Console tab's attach sits outside the channel's lock | One lock per install covers **every** attach, the Console tab's included. The prompt delimiter "is a single-writer property, not a property of the console" (`console.py:57-73`); two writers put foreign prompts in each other's windows. |
+| 9 | A fourth three-valued type enters the tree | `yulon/ownership.py` already answers "whose folder is this?" in three values, and its docstring says why: "That is the part that must not be re-invented with two values." The uninstall's plan returns that type, and the new answer type is read against it before it is written. |
+
+### Facts the panel settled by reading, which the designs had booked as spikes
+
+Recorded because each removes work, and because a spike a read can answer is a spike this project
+does not run.
+
+| Fact | Where | What it removes |
+|---|---|---|
+| Bots added to a party are logged out with their master | `PB src/Script/Playerbots.cpp:450-460` — the logout hook calls `LogoutAllBots()` when the player is not itself a bot | A spike on what a bot left behind costs |
+| Tortoise does not cache passwords; only the rank is cached | `TW AccountMgr.cpp:299-311` reads the stored hash on every check; `:250-256` caches the rank | A spike, and Tortoise keeps a set-password path |
+| The Lua engine's command hook hands the script the chat handler | `ALE PlayerHooks.cpp:57-60` pushes the player, the text and the handler | The bridge's arrival can be proved by the script's own reply, not only by a log line — at the revision read, which is unpinned |
+| The CMaNGOS and Tortoise column names the design declared unread are the ones it wrote | `TBC mangos.sql:2968-2978`, `characters.sql:791+`; `TW tw_world_item_template.sql`, `create_databases.sql:999` | The per-tree table blocks are verified data, not guesses |
+| The AzerothCore image ships `curl` and **no** `iproute2` or `net-tools` | `apps/docker/Dockerfile:68`, `:229` | `ss` is not a gate instrument; the listener is proved by a loopback request from inside the container and by the published port on the host |
+| An app account named `YULON` already exists on the TBC gate box | `checklist.md:1452-1461` — the 7.9 gate wrote that account at GM level 3 and logged a client in through it | A fixed account name would have collided on the first gate box; the per-install name does not |
+
+---
+
+## Architecture and module layout
+
+Extends the style-guide §3 table. Every row is added the day its module exists, not before — a row
+for a file that is not there teaches a reader to discount the table.
+
+| Layer | Module | Owns | Must never |
+|---|---|---|---|
+| Data | `catalog/catalog.py` (changed) | The per-entry operations block: channels, GM-level shape, command templates, caps, bot marker, table and column names, and the optional Lua bridge — typed, frozen, extra keys forbidden | Hold a value that belongs to one install; know how a command is sent |
+| Wire | `soap.py` (new) | One command envelope over the standard library with Basic auth and bounded timeouts; the reply parsed into result, fault, or transport status | Build command text; hold a lock; know a game; let a password reach a log, a repr or an exception |
+| Delivery | `channel.py` (new) | The three-outcome answer type, the channel protocol, its three implementations, and the ranking that picks one from the entry; one lock per install covering every transport, the Console tab's attach included; mapping a transport failure to a reason from container state | Contain command text; retry a write after a timeout; contain UI |
+| Text | `commands.py` (new) | The command built from the entry's template; the quoting rule; argument validation; and the one predicate that both decides whether a control is drawn and supplies the sentence when it is not | Send anything; know a container name |
+| Reads | `dbreads.py` (new) | The typed reads over the existing SQL seam (`apply.py:504`): bot clause, online counts, item search, teleport targets, characters, accounts, bots, mail counts, group members | Call the write seam — asserted over the AST, not by grep |
+| Setup | `channel_setup.py` (new) | Per-tree enable, the app account's create-verify-persist state machine, the credential file under the app's config directory, and the rollback when the world does not come back | Persist before a round-trip has answered; rewrite the password of any account but its own |
+| Evidence | `logsnap.py` (new) | The pre-stop log snapshot: this install's world container resolved through its own compose project, a bounded tail, a partial file renamed on success, retention that never prunes the file just written | Block a stop, on failure or on a hang |
+| Verdict | `dashboard.py` (new) | Composing container state and the two counts into a verdict with three-valued fields; the poll budget | Fire a world-thread command on a timer |
+| Features | `gm.py`, `party.py`, `purge.py`, `steam.py` (new) | One feature family each, every action shaped capability, command, channel, verify read | Build SQL; write into a client folder |
+| Surface | `ui/widgets/outcome.py`, `ui/characters_view.py`, `ui/bots_view.py`, `ui/uninstall_dialog.py` (new) | Rendering an answer in all three outcomes; the two new tabs as sub-views that signal up and never reach up | Contain business logic, SQL, command text or a subprocess |
+| Changed | `controller.py`, `docker.py`, `apply.py`, `accounts.py`, `composegen.py`, `ui/controller_view.py`, `main.py` | Additive only: a pre-stop snapshot hook; a bounded log tail; a running-state seam checked inside the SQL step; a password reset for one named account; one render token and an override re-render; new service fields and tabs; one signal connection | — |
+
+The Q7 guard goes **inside** the applier's SQL step (`apply.py:1359`), the one point every caller
+passes through — not in install and remove, which miss any other caller, and not in the view,
+which anything that is not a button bypasses.
+
+---
+
+## Per-family data, and what each tree costs
+
+The full typed model and the four catalog blocks are in `phase8-designs/a-server-side-seam.md` §3,
+with a citation per value. What matters at this level is the shape of the differences:
+
+| | WotLK (AzerothCore) | TBC / Vanilla (CMaNGOS) | Tortoise |
+|---|---|---|---|
+| Channel | SOAP, loopback | SOAP, loopback | **none** — attach where a pty exists, else a 60-second command queue |
+| Turned on by | a key in the generated override's environment | the same, under a different variable name, **or** the conf table; the environment wins over the file | — |
+| Login needs | GM level 3 in the access table | GM level 3 in the account row | — |
+| The command then runs as | console, no level check | console level, regardless of the caller | console level, account id 0 |
+| A failed bind | graceful shutdown | **immediate exit, no saves** | — |
+| Items per mail | 12 | TBC 12, **Vanilla 1** | **1** |
+| Set a character's level | yes | yes | **no such command** |
+| Rename | a subcommand | a subcommand | a top-level command |
+| GM level lives in | the access table | the account row | the account row, **cached in memory** — the command route is the only one a running server sees |
+| Bot marker | registry types **or** account prefix | account prefix only | account prefix only |
+| Bot party | the Lua bridge | out of scope (Q4) | out of scope |
+
+Tortoise is not a CMaNGOS server for any of these purposes, and TBC's facts are not Vanilla's. Each
+tree's block is gated on its own box.
+
+---
+
+## Delivery order and gates
+
+WotLK first on every step (Q3), one box per family, each box lettered so a Tortoise fact can never
+tick a WotLK box. Every gate captures the live rows it is about to change **before** it changes
+them, and again after. Boxes: the Ubuntu VM holds the finished 7.2 WotLK install and is the WotLK
+box; the test box holds all four clients and a running Tortoise and is the CMaNGOS box, one game at
+a time; the Windows gate box takes the two Windows-only facts; a 3.3.5a client on the Hyper-V host
+provides the in-game half for WotLK after the LAN step.
+
+| Step | Delivers | Gate |
+|---|---|---|
+| **8.1a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text, read and setup modules; the password reset; the override re-render; the Server tab's channel group | WotLK on the Ubuntu VM, then native Windows on the gate box (the first command channel that has ever answered there); TBC and Vanilla on the test box; Tortoise's attach-only sentence |
+| **8.2** | Dashboard verdict and the pre-stop log snapshot | All four; the crash-loop rendering forced once |
+| **8.3** | Accounts: list, set password, GM level | All four; the client logs in with the new password and is refused the old |
+| **8.4** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
+| **8.5** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
+| **8.6** | My Party, WotLK only, over the Lua bridge | The Ubuntu VM after the owner's rebuild; a bot in the party frame |
+| **8.7** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | WotLK and one CMaNGOS box |
+| **8.8** | Steam, Linux and Steam Deck only | A machine with Steam — none exists on this side |
+| **8.9** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
+
+8.1a first; 8.2 after it; 8.3 and 8.5 after 8.2 and independent of each other; 8.4 after 8.3; 8.7
+independent after 8.1a; 8.6 after 8.5 and the rebuild; 8.9 last, because it deletes the record 8.1
+creates. Phase 7's controller-surface gate and its regression pass are re-run before the exit box,
+because the base controller and the service assembly both change.
+
+---
+
+## Blast radius on the proven install and controller paths
+
+- `catalog.json`: every entry gains an operations block. Additive, and the strict models refuse a
+  typo when the catalog loads.
+- **The SOAP environment goes in that block, not in the install's world environment**, and reaches
+  the override through a new re-render rather than through the install-time render. This is the
+  decision that keeps the committed rendered-compose fixtures byte-identical, so Phase 7.1's
+  "matches the fixture" assertion keeps meaning what it meant.
+- The shared CMaNGOS base template gains one publish line. The "ports in exactly one file"
+  invariant holds. No CMaNGOS compose-config fixture exists, so the 8.1 gate captures the rendered
+  config before and after and the diff is that line — and the committed gate captures for 7.4c,
+  7.5 and 7.6 are stale on that block, which is named here rather than discovered later.
+- `controller.py` gains one optional constructor argument and two one-line calls; every existing
+  caller constructs without it and sees today's behaviour.
+- `apply.py` gains a running-state seam checked inside the SQL step. **This changes behaviour on
+  the proven Modules tab**: a running server now refuses module SQL aimed at the character or world
+  database. Named, wanted, and the reason Q7 exists.
+- `ui/controller_view.py` gains service fields and two tab builders that compose sub-views; no
+  existing builder is rewritten.
+- Not touched: the install engine, the networking module, the state file, maintenance, repair, the
+  console transport, the staged start, stop and remove paths, the repair button, and the port-remedy
+  contract.
+
+---
+
+## Tests
+
+Unit, no daemon, in the shapes this project already trusts — a recorder double, the real catalog,
+the real templates. Every name below is new; nothing here cites a test that does not exist.
+
+- The catalog-operations test: the four entries validate; a bridge without a channel, a queue
+  without an attach console, an empty bot prefix and a mail cap below one each fail; and the values
+  still marked unverified are enumerated **by name**, so ticking their box turns them red until a
+  gate measures them.
+- The wire test: the envelope by field for both namespaces; every reply shape mapped to its
+  outcome against a stub server; the password absent from every repr, log record and exception.
+- The delivery test: the three outcomes; a write is never retried after a timeout, proved by a
+  fixture that answers differently the second time; the lock serialises two concurrent asks, the
+  Console tab's attach included.
+- The text test: every builder against all four entries; the quoting rule; the per-tree caps
+  splitting a nineteen-piece set into two, two, nineteen and nineteen commands; the capability
+  predicate returning each of the three outcomes.
+- The read test: the SQL per entry, asserted by field; the write seam raises if reached.
+- The setup test: create, verify-fails, nothing persisted, and no second account on the next press;
+  the rollback when the world does not come back; the file's mode asserted on the open flags, not
+  on a later change.
+- The bot-marker test: both arms on WotLK, prefix only elsewhere; the three-source precedence per
+  tree; a fixture whose registry is empty with bots present, and one with citizens and no prefix.
+- **The write ledger test**, grafted from C and the best test idea in the three designs: an AST walk
+  over the package enumerating every write site, failing on one absent from the committed ledger
+  **and** on a ledger row that resolves to no site.
+- The applier-guard test: module SQL into the character or world database refused while the world
+  is up, with the step named; authentication-database steps unaffected; with the seam absent,
+  today's behaviour byte for byte.
+- One test file per feature module, each negative fixture violating exactly one rule.
+- Existing files extended: the compose generator's (the new token and re-render, keeping every byte
+  assertion), the catalog invariants (the publish line renders once per CMaNGOS game and never for
+  AzerothCore), the controller's (the stop calls the snapshot once, before the staged stop, and
+  still stops when it fails), the controller view's and the package-agreement test.
+
+Integration, against throwaway containers and never a real server: the wire against a stub server
+in a container, the bot-clause SQL against a throwaway database, the snapshot against a container
+that prints more than the tail and exits.
+
+Mutation discipline: purge the bytecode cache on both sides of every mutation, and a full score is
+a claim.
+
+---
+
+## Risks worth re-reading before 8.1
+
+- **Turning SOAP on can stop the server, and worse on the CMaNGOS family than on WotLK.** The
+  measured behaviours are in the correction table above. The price of the guard is one connect
+  probe before the press; the price of skipping it is a restart loop on a server whose characters
+  were not saved.
+- **A timeout does not un-queue a command.** SOAP waits on the world thread; if the launcher's
+  deadline expires first the command still runs. No write is ever retried automatically, every
+  write has a verify read, and the app says the command may still arrive rather than that it failed.
+- **The listener's bind address inside the container is the load-bearing unmeasured claim.** The
+  reasoning is sound and it is still a deduction: no Yu'lon install has ever run SOAP. The owner's
+  live server has, and a read of it settles the question without touching a gate box.
+- **Command security levels are a database question**, not a source question: AzerothCore overrides
+  them from a world-database table at load with only a warning, and both CMaNGOS trees read an
+  equivalent table. The design does not depend on the numbers, because SOAP runs at console level
+  on every tree; they are data for the reader.
+- **The Lua engine module is unpinned**, its compiled default is off while its own shipped comment
+  says on, and the manifest patches a key the module does not have. My Party rests on it, and the
+  bridge's arrival is proved by the script answering, never by the deploy reporting success.
+- **The credential file is a secret on disk**: restricted where that means something, and inheriting
+  the per-user directory's protection on Windows, which is the same class as the database password
+  the install already writes. What it grants is a console-level login on loopback; what it does not
+  grant is anything the database root password in the same install does not already.
+- **Two installs of one game** still collide on container names and now on the SOAP port. The
+  existing guard refuses the second start; the credential file records the port the daemon actually
+  published.
+- **Item mail is not idempotent.** Every other verb converges; a second press sends a second mail.
+  The queue disables the button while one is in flight, and what the app forgets across a restart it
+  reads back from the mail table.
+
+---
+
+## What the implementer should NOT build yet
+
+- No fourth transport: no remote-access console, no playerbot command server, no Lua bridge on
+  Tortoise. The playerbot command server is closed in the same press that opens SOAP, and its
+  closure is proved from inside the container.
+- No settings surface and no YAML writer for the override: the re-render comes from the template.
+- No periodic world-thread command, on any timer, for any reason.
+- No automatic retry of a write.
+- No write to the character or world database from the app, including "just for the offline case".
+- No coordinate teleport, no add-item, no heal, no summon — refused in the cut.
+- No bot party on the CMaNGOS family, and no console-driven party experiments outside a named spike.
+- No character sheet, doctor, tuning knobs, config editor, settings page or single-instance guard:
+  those are Phase 9.
+- No auto-stop, keep-awake-while-running, autostart, automatic backups or server self-update: later.
+- No client-folder write of any kind.
+
+---
+
+## Doc changes this phase makes
+
+- `pyplan/style-guide.md` §3 — a row per new module, each added the day the module exists; the
+  base controller's row gains the pre-stop snapshot; the applier's row gains the running seam; the
+  catalog's row gains the operations block.
+- `pyplan/README.md` §9 — the three lines struck through with the date, the way the Linux-native
+  line was; §11 gains the new files under the app's config directory.
+- `pyplan/checklist.md` — the `8.x` boxes below the kept 2026-08-21 identification box.
+- `pyplan/bug-checklist.md` — the boxes for the create-only Accounts tab, the crash-loop status, the
+  first-poll unknown and the Modules tab's selection each annotated with the step that closes them;
+  they tick on their own evidence, not by side effect.
+- The Lua engine's manifest — the conf key corrected to the one the module has, and a revision
+  pinned the day 8.6's gate passes.
+- `pylauncher/README.md` — the capability table gains a row per new surface as each gate records
+  what ran live.
+- `pyplan/roadmap.md` — **not edited**. Appendix A is the proposed §8.
+
+---
+
+## Appendix A — proposed `roadmap.md` §8 (not applied)
+
+To replace the Phase 8 block, from its `## Phase 8` heading through the separator before
+`## Phase 9`, on the owner's explicit word, in the roadmap's own shape: headers, numbered items,
+definitions of done, no narrative. The "Out of scope" list at the end of the roadmap needs the
+matching edit, given below it.
+
+```
+## Phase 8 — Feature parity with The Lab + Hypeer Launcher
+
+> A *feature* phase, not the UI/UX pass (that is Phase 9): it folds the capabilities of two
+> companion tools into Yu'lon so users need one app. Features still need a surface, because on
+> every platform the launcher is the product — minimal functional surfaces here, polish in 9.
+> Scoped 2026-09-06 in `pyplan/phase8-parity-decisions.md`, which records the owner's cut and the
+> mechanism measured per emulator tree; the uninstall feature was decided separately in
+> `pyplan/phase8-decisions.md`. My Party, item mail and teleport were out of v1 scope in
+> README §9 and are a deliberate expansion, each with its own step.
+>
+> **Ordering:** Phase 8 code may start once Phase 7's install engine is merged; it does not wait
+> for the Phase 7 exit box (owner decision, 2026-09-06). Delivery is WotLK first, one box per
+> emulator family, the way Phase 7 ran.
+
+### 8.1 The command channel
+1. Add a per-entry operations block to `catalog.json` carrying every per-tree fact: which channels
+   exist, how each is enabled, the GM-level shape, the command templates and their caps, the bot
+   marker, and the table and column names. **[style]**
+2. Build the seam: the wire, the delivery layer with its three-outcome answer, the command
+   builders with their capability predicate, and the typed reads over the existing SQL seam.
+3. Enable SOAP on loopback in the installed configuration and create an app-owned administrator
+   account, verified by a real round-trip before its credentials are stored.
+4. _Definition of done:_ on each family's box the Server tab reports the channel verified; the
+   account and its access row exist; the port is published on loopback only; the world container
+   is running with an unchanged restart count and this run's ready marker after the change; a
+   deliberately wrong credential is refused and the repair path restores it.
+
+### 8.2 Live dashboard and the pre-stop log snapshot
+1. Show players, bots, uptime and a restart-loop verdict from database reads and container state,
+   never from a command on a timer.
+2. Save the worldserver log before every stop, remove and uninstall.
+3. _Definition of done:_ the counts equal the same query run by hand; a forced crash reads as a
+   restart loop rather than as up; every stop leaves a log file the user can open.
+
+### 8.3 Accounts: list, set password, GM level
+1. List human accounts, excluding bots and the app's own; set a password and a GM level through
+   the server's own commands.
+2. _Definition of done:_ a client logs in with the changed password and is refused the old one;
+   the level reads back from the row; the app's own account cannot be edited from the tab.
+
+### 8.4 Teleport, item search, item mail, GM actions, gear sets
+1. Named teleport, item search, item mail, mailed money, revive, set level and rename, each drawn
+   only where the tree has the command, each performed by the server.
+2. Gear sets saved from a character and mailed back, chunked by the tree's items-per-mail cap.
+3. _Definition of done:_ every action, once on an offline character and once online, changes the
+   named row and shows its effect in the game client.
+
+### 8.5 Browse Bots
+1. A paged, filtered list of bots, resolved by the tree's own marker read from the live
+   configuration.
+2. _Definition of done:_ the count equals the same query run by hand on each family; an
+   unreadable marker refuses to answer rather than reporting zero.
+
+### 8.6 My Party — WotLK only
+1. Deploy the project's own Lua bridge scripts into the server folder and prove they answer.
+2. Add a bot by class, spec and level to an online character's party; kick; dismiss all.
+3. _Definition of done:_ the chosen bot is in the party frame in the game client, geared and
+   specced; a missing bridge says so instead of reporting success.
+
+### 8.7 Module update checks, and manifests for TBC, Vanilla and Tortoise
+1. Report how far behind each installed module is; apply updates.
+2. Refuse module SQL aimed at the character or world database while the world is running.
+3. _Definition of done:_ the commits-behind figure equals the same query run by hand; the refusal
+   names the step and writes nothing; a manifest applied to a stopped server reads back from its
+   configuration file.
+
+### 8.8 Steam integration — Linux and Steam Deck only
+1. Add the server launcher and the game client to the Steam library with artwork and the
+   compatibility tool.
+2. _Definition of done:_ both entries appear in a real Steam library and launch.
+
+### 8.9 Uninstall and purge
+1. As `pyplan/phase8-decisions.md`: one action scoped to the server folder, that install's Docker
+   project and the launcher's own record, with a "Keep my characters" checkbox.
+2. _Definition of done:_ the kept characters survive a reinstall to the same folder; an unticked
+   purge leaves nothing of the project; an install whose ownership cannot be proved is refused.
+
+**Phase 8 exit criteria:** every step above passes its live gate on the families and platforms its
+line names, with the evidence committed under `pyplan/gates/8.x-*`; no definition of done is
+satisfied by a skip, an absent capture, a stale marker or an exit code; no capability is reachable
+only from a command line; and Phase 7's controller-surface and cross-server regression gates are
+re-run green on the merged tip.
+```
+
+And in the roadmap's closing "Out of scope (do not start these in v1)" list, the first line is
+replaced, keeping the reversal visible the way Phase 7's was:
+
+```
+- ~~My Party / bot group builder, item database + in-game mail, teleport/GM in-game tools~~ —
+  **no longer out of scope.** Expanded into v1 by the owner on 2026-09-06: Phase 8 gives each its
+  own step and definition of done (`pyplan/phase8-parity-decisions.md`). Kept struck through so
+  the reversal is visible.
+```
+
+---
+
+## Appendix B — the judge panel (2026-09-06)
+
+Three designs, written independently from three angles by `fable` and committed unchanged under
+`pyplan/phase8-designs/`; three judges, two on `opus` and the skeptic on `fable`, committed under
+`pyplan/phase8-judges/`. Seven criteria each scored 1–5: style-guide fit, DRY and one seam,
+testability, operator safety on a live server, per-family correctness, gate quality, and blast
+radius with incremental delivery. 35 maximum.
+
+| | A — server-side seam | B — user's surface | C — operator's risk |
+|---|---|---|---|
+| Maintainer | **33** | 24 | 27 |
+| Operator | 31 | 24 | **31** |
+| Skeptic | **30** | 27 | 25 |
+| **Total** | **94** | 75 | 83 |
+
+The maintainer and the skeptic ranked A first. The operator scored A and C level and broke the tie
+for C on the two criteria that seat owns, operator safety and gate quality, while writing the
+sentence that decided the phase: *"A is the design I would rather maintain and C is the design I
+can actually run"* — and that A becomes runnable by taking C's write ledger, its state matrix, its
+capture-before-the-change rule and its gate discipline. That is what the grafts do, so the panel
+does not disagree about the outcome; it disagrees about which half was the harder half to write.
+
+**Grafts adopted from B:** the two new tabs as sub-views that signal up; one outcome widget so no
+tab can collapse three answers into two; the two-press arm before anything restarts a running
+world; the first status asked at construction; the zero-bots-with-characters warning; a timeout
+reported as a refusal with its cause, never as success; selection-gated module buttons; the
+uninstall signalled up so the window drops its own tab; per-family lettered gate boxes; and the
+in-client screenshot as the visible effect.
+
+**Grafts adopted from C:** the write ledger and the test that enumerates every write site in both
+directions; the applier's missing guard, placed inside the SQL step; closing the playerbot command
+server in the same press that opens SOAP, proved from inside the container; the two-way interlock
+between the console and typed commands; drain-before-stop; the bounded log snapshot; the
+deliberately-wrong-credential gate step; the bot marker's refusal semantics; and "evidence before"
+on every gate.
+
+**Dropped from A as drafted:** the bare compose recreate; the unfiltered published-bindings read;
+the catalog-only bot prefix; the unverified namespace and password arity, both settled by reading;
+and a fourth three-valued type where the tree already has one.
+
+**Rejected outright, by name:** the playerbot command server as a channel (unauthenticated, off
+the world thread, and it reaches only an already-loaded bot); a periodic world-thread command on
+any timer; a credential file inside the server folder; a fixed app-account name; and writing a
+command row into Tortoise's queue for anything the attach console can carry.
+
+The panel also settled six facts by reading trees the designs had booked as spikes, listed above
+under "Facts the panel settled by reading". Two questions the panel raised are the owner's and are
+recorded in the summary rather than answered here: whether Tortoise's Phase 8 actions are
+Linux-only for v1, and which machine has Steam for 8.8's gate.

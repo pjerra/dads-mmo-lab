@@ -382,20 +382,32 @@ See Roadmap.md for the full Phasing plan. The README only summarizes the high-le
 | Docker Desktop silent provisioning is fragile | Detect + verify with clear, retryable checks; offer manual-install fallback dialog. |
 | Porting `wow-manage.sh` tacit knowledge | Do it as an explicit Phase 2 with exit criteria; don't fold it into the UI work. |
 | "No WSL" expectation vs reality | Communicate honestly in docs (WSL is hidden, not removed). |
-| Scope creep on bot-party/item-mail features | Keep in-game tools (My Party, item mail, teleport) out of Phases 1–7; `roadmap.md` Phase 8 scopes them for the launcher itself, once all four servers are done, each with its own step and definition of done. |
+| Scope creep on bot-party/item-mail features | Kept in-game tools (My Party, item mail, teleport) out of Phases 1–7. Phase 8 scoped them on 2026-09-06, each with its own step and definition of done, and cut the ones with no console-legal mechanism (heal, summon, coordinate teleport) rather than inventing one — `pyplan/phase8-parity-decisions.md`. |
 | Unsigned binaries trigger OS gatekeeper warnings (Windows SmartScreen, macOS Gatekeeper) | For v1, document the click-through steps for users. Revisit code signing/notarization once the project has a budget/identity for certificates; track as a post-v1 milestone, not a blocker. |
 
 ---
 
 ## 9. Out of Scope (v1)
 
-Out of scope for the installer and controller work of Phases 1–7. The first three are deferred,
-not refused: `roadmap.md` Phase 8 picks them up as The Lab feature parity, after Phase 7's four
-servers and before the v1 Alpha, each owing its own step and definition of done there.
+Out of scope for the installer and controller work of Phases 1–7. The first three were deferred,
+not refused, and are **no longer out of scope at all**: Phase 8 was scoped on 2026-09-06 and the
+owner expanded them into v1, each with its own step and definition of done
+(`pyplan/phase8-parity-decisions.md`; the boxes are `checklist.md` Phase 8). Kept struck through so
+the reversal is visible.
 
-- **My Party / bot group builder** — was in The Lab; requires in-game/DB work, not script-wrapping.
-- **Item database + in-game mail** — separate later milestone.
-- **Teleport / GM in-game tools** — later.
+- ~~**My Party / bot group builder**~~ — **no longer out of scope.** Expanded into v1 on
+  2026-09-06 as step 8.6, WoW WotLK only (owner answers 2b and 4), by a server-side route: the
+  launcher's own Lua bridge over the command channel, never an addon written into the user's
+  client (answer 5). Browse Bots is step 8.5 on all four servers.
+- ~~**Item database + in-game mail**~~ — **no longer out of scope.** Expanded into v1 on
+  2026-09-06 as part of step 8.4 (owner answer 2a): item search is a database read, item mail is
+  the server's own command, and the items-per-message cap is a per-tree fact — twelve on WotLK and
+  TBC, one on Vanilla and Tortoise.
+- ~~**Teleport / GM in-game tools**~~ — **no longer out of scope.** Expanded into v1 on 2026-09-06
+  as the rest of step 8.4: named teleport, revive, set level, rename and mailed money, each drawn
+  only on a server whose own command table has it. Teleport to raw map coordinates stays out,
+  because it would need a direct write to the character database while the server runs, which
+  owner answer 7 refuses.
 - ~~**Full native reimplementation of installers on Linux**~~ — **no longer out of scope.**
   Overturned 2026-08-26 by the owner: Phase 7 puts every server on the one Python engine on every
   platform, Linux included, and deletes the bash installers (`pyplan/phase7-decisions.md`, "What
