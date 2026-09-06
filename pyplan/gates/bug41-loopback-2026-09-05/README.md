@@ -466,4 +466,8 @@ both `=== --checks: ALL GREEN ===` and exit 0: `2805 passed, 4 skipped` in 20.62
 code edits uncommitted over `ccfe7f97`) and in 20.75 s (with the corrected docstrings and these
 gate files, uncommitted over `2586b913`); `Success: no issues found in 72 source files` three times
 each (this platform, as Windows, as macOS), `All checks passed!`, `140 files would be left
-unchanged.` A third run, with the working tree clean at `92cacc44`, is at the end of the same file.
+unchanged.` A third run, with the working tree CLEAN at `5bf29ec5`, and a fourth after two sentences about
+what a `NetworkPlan` carries were tightened, are at the end of the same file: `2805 passed, 4
+skipped` in 20.32 s and in 19.62 s, the same three mypy successes each, ruff and black clean,
+`=== --checks: ALL GREEN ===`, exit 0. Run 4 is the state this lane's tip holds, minus that
+transcript and this paragraph, which no check reads.

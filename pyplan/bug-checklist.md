@@ -3263,8 +3263,9 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `172.30.55.119`, so this is the binding under the LAN mode as well):
       `docker ps --format '{{.Names}}\t{{.Ports}}'` printed `ac-authserver 0.0.0.0:3724->3724/tcp`
       and `ac-worldserver … 0.0.0.0:8085->8085/tcp` and `ss -ltn` printed LISTEN on `0.0.0.0:3724`
-      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: `plan()` returns
-      firewall commands, portproxy commands and a realmlist UPDATE, and nothing else. So another
+      and `0.0.0.0:8085` — the compose bindings, which no networking mode writes: the only ACTIONS
+      a `NetworkPlan` carries are `firewall_commands`, `portproxy_commands` and `realmlist_sql`,
+      and none of them is a container port binding. So another
       machine still connects and logs in and is then told the world
       server is at 127.0.0.1, i.e. on itself. The code comment that gave that sentence as the REASON
       for opening no ports ("a hole nothing is going to come through") was false and is rewritten
