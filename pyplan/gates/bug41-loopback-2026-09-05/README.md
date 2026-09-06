@@ -1,5 +1,16 @@
 # bug-checklist §41 — a realm can be set to loopback on purpose
 
+**Two runs, and the second one closes the gate.** Round 1 (2026-09-05, m910q) is everything
+from here down to "The box, put back"; it left one clause of §41's gate unmet — the second
+Install press, refused there by preflight for disk. Round 2 (2026-09-06, yulon-ubuntu, commit
+`96251d57`) is the last section of this file, and it is where the press actually ran, twice.
+Read round 2 for the gate's verdict, round 1 for the widget half, the RED-before-the-code
+evidence and the defect this work found.
+
+---
+
+## Round 1 — m910q, 2026-09-05 (the press clause not met)
+
 Driven on **m910q** on **2026-09-05** against the finished CMaNGOS Vanilla install at
 `/home/pk/vanilla-75b` (`.yulon-install.json`: `game_id wow-vanilla`, `family cmangos`,
 `install_id 06ced116`, eight stages completed; containers `vanilla-db`, `vanilla-realmd`,
@@ -129,3 +140,177 @@ filtered the listing by character.
 * `vanilla-db`, `vanilla-realmd`, `vanilla-mangosd` all up, 34 hours, db healthy;
 * the two `ufw allow` rules the Apply press added deleted; `ufw show added` is `(None)` and
   `ufw status` is `inactive`, which is how the box was found.
+
+---
+
+## Round 2 — yulon-ubuntu, 2026-09-06: the press, both halves
+
+Driven on **yulon-ubuntu** on **2026-09-06** against the finished AzerothCore WotLK install at
+`/home/pk/wowserver` (`.yulon-install.json` read at 04:43:21 box-local: `game_id wow-wotlk`,
+`family azerothcore`, `install_id 243c46e3`, six recorded stages completed; containers
+`ac-database`, `ac-authserver`, `ac-worldserver` up; `/` had 50 GB free), from a checkout of
+`lane/b41` at **`b206ad0c`** for the run itself and **`96251d57`** for the script fix that got
+its second half started. Every file named below is in `yulon-ubuntu-press/` beside this README.
+
+### Why not m910q
+
+Two reasons, and only the first was measured by this lane:
+
+1. **Preflight refused the press there for disk** — round 1 above, `press-refused-by-preflight.txt`.
+2. **The CMaNGOS engine now refuses a press on a folder built before the doodad patch.** The
+   round-2 lane brief records lane b43 measuring this on 2026-09-05, after `lane/doodad` merged
+   at `5a57164d`; m910q's Vanilla install was built 2026-09-04. In this tree the refusal is
+   `CmangosInstaller._refuse_to_patch_what_will_not_be_rebuilt()`
+   (`pylauncher/yulon/catalog/families/cmangos.py:360`, called from `_patch_sources()` at line
+   318, before `db-password` and `write-dockerfile`). **Read, not driven here** — this lane ran
+   no CMaNGOS press in round 2.
+
+yulon-ubuntu's install is AzerothCore, whose stage list has no `patch-sources` at all
+(`clone-core, clone-modules, generate-compose, build, client-data, start-db, import, up, ready`),
+and it had the room.
+
+### The gate, clause by clause
+
+| clause | met | file |
+| --- | --- | --- |
+| choose loopback **through the app** | yes, `QTest.mouseClick` on the real radio/buttons | `widget-loopback.log` |
+| the row is `127.0.0.1` after that choice | yes, `127.0.0.1 / 127.0.0.1`, read through `docker exec` | `widget-loopback.log` |
+| **press Install again** on the finished install | **yes — 880 s, exit 0, nothing compiled** | `press-chosen.log` |
+| the row is still `127.0.0.1` after the press | yes | `after-press-chosen.txt` |
+| a log line saying why it was left alone | yes, in stdout **and** in `yulon.log` | `press-chosen.log`, `yulon-log-press-chosen.txt` |
+| a never-chosen server still advertises a reachable address | yes, second press, 10 s, exit 0 | `press-never-chosen.log` |
+
+### Half one — the choice, through the real Networking tab
+
+`widget_driver_b41_wotlk.py`, offscreen, on the real `ControllerServices.for_entry()` wiring:
+**17 passed, 0 failed**. The row read through `docker exec -e MYSQL_PWD=password ac-database
+mysql -uroot -N -B -e "SELECT address, localAddress FROM acore_auth.realmlist WHERE id=1;"` —
+a route the widget never touches — was `172.30.55.119 / 172.30.55.119` before the Apply and
+`127.0.0.1 / 127.0.0.1` after it, and the file it wrote was
+
+    /home/pk/wowserver/.yulon-network.json
+    { "mode": "loopback", "recorded_unix": 1788662602 }
+
+### Half two — press 1: the chosen loopback is left alone
+
+`python -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver`, started 04:43:23,
+finished 04:58:03 box-local, **exit 0, 880 s**. It printed the engine's own already-finished
+lines for every recorded stage and compiled nothing (`press-chosen.log`):
+
+    Already finished: clone-core, clone-modules, generate-compose, build, client-data, import
+    mod-playerbots/azerothcore-wotlk is already cloned in /home/pk/wowserver; leaving it exactly as it is.
+    The compose files are already exactly what this install needs.
+    The server is already built; skipping the compile.
+    ac-client-data-init  | yulon: client data v20.0 already installed
+    The databases read as populated: 102 rows in acore_auth.account, 1000 rows in acore_characters.characters
+    They are already imported; leaving them alone.
+
+The run script watched that log for a compiler line (`Building CXX`, `make[N]`, a `[ NN%]`
+progress line, a BuildKit step header) and would have killed the press; it never fired.
+
+Then, after `ready`:
+
+> The address this realm advertises was left exactly as it is, because this server was set to
+> only this computer (127.0.0.1) on 2026-09-06 from its Networking tab, and that choice is
+> recorded in .yulon-network.json in the server folder. Nothing here overwrote it, which means
+> no other machine can reach this server. To undo it, open this server's Networking tab, pick
+> LAN (same Wi-Fi) or Internet play, press Show plan and then Apply.
+
+The row afterwards: `127.0.0.1 / 127.0.0.1` (`after-press-chosen.txt`).
+
+**Where the headless log is.** `install_wiring.main()` calls
+`configure(config_dir=platform.config_dir(), …)`, and `platform.config_dir()` on Linux is
+`$XDG_DATA_HOME/yulon` or, when that variable is empty, `~/.local/share/yulon`. It was empty in
+this run's environment, so the file is **`/home/pk/.local/share/yulon/yulon.log`** — not
+`~/.config/Yulon/yulon.log`, which the round-2 brief guessed at. It did not exist before this
+press (`before.txt`: `wc: /home/pk/.local/share/yulon/yulon.log: No such file or directory`);
+the press created it, and line 61 of it is the sentence above, timestamped `2026-09-06 04:57:59`
+(`yulon-log-press-chosen.txt`).
+
+### Half two — press 2: a server whose loopback was never chosen
+
+`.yulon-network.json` removed (`record-removed.txt`), the row left at `127.0.0.1 / 127.0.0.1`,
+and the same command pressed again: started 05:00:15, finished 05:00:25, **exit 0, 10 s**. Same
+already-finished lines, and then:
+
+> The realm now advertises 172.30.55.119, so players on other machines can reach this server:
+> 172.30.55.119 is the address they set in their client's realmlist. The server was already
+> running when this was set, so if a client is still sent to the old address, stop and start it
+> again on the Server tab.
+
+Row afterwards: `172.30.55.119 / 172.30.55.119` (`after-press-never-chosen.txt`, which also
+carries that press's whole `yulon.log` excerpt).
+
+### The way back a user actually has
+
+The entry asks how the choice is undone without deleting a file by hand.
+`networking.record_network_intent()` (`pylauncher/yulon/networking.py:2989`) stores the LAST
+APPLIED mode rather than only `loopback`, so the answer is the two buttons the install log's own
+sentence names. Driven, not read: `widget_driver_b41_wotlk_undo.py` chose the loopback again
+through the tab (record `{"mode": "loopback"}`, row `127.0.0.1`), then clicked `LAN (same
+Wi-Fi)` → `Show plan` → `Apply` — **5 passed, 0 failed** (`widget-undo.log`):
+
+    the record no longer says loopback -- NetworkIntent(mode='lan', recorded_unix=1788663628)
+    realm row now = '172.30.55.119   172.30.55.119'
+
+So there is a route through the tab and it needs no file handling. Deleting
+`.yulon-network.json` also works and is what press 2 above used, but nothing in the UI does that.
+
+### A defect this gate ran into, which is NOT §41's
+
+**Press 1 sat in `ready` for 14 minutes 28 seconds and was only released when `ac-authserver`
+was restarted.** The mechanism, in `why-ready-waited.txt`:
+
+* the `ready` stage waits for an auth-container log line matching `install.native.ready.auth`,
+  which is `{{REALM_HOST}}:{{WORLD_PORT}}`, filled at `native.py:2724` with
+  `INSTALL_REALM_HOST` — the fixed string `"127.0.0.1"` (`native.py:202`) — and escaped, so the
+  pattern is `127\.0\.0\.1:8085`;
+* `docker.wait_ready()` reads the CURRENT run's log only (`--since` the container's `StartedAt`);
+* `ac-authserver` had been running since `2026-09-05T20:48:03Z`, and its line for that run was
+  `Added realm "AzerothCore" at 172.30.55.119:8085.` — the row's value at the time it started.
+  The Apply had changed the row, but the container had not restarted, so its log could not match;
+* `up` runs `compose up -d --no-deps …`, which does not recreate a container that is already
+  running, so the press could not fix this itself.
+
+Measured: the press reached `ready` at 04:43:31 and said nothing more until `ac-authserver` was
+restarted at 04:57:57 box-local, whereupon its current-run log said `Added realm "AzerothCore" at
+127.0.0.1:8085.` and the press printed `The server is up.` at 04:57:59 — two seconds later.
+
+This is not caused by §41 and not fixed by it; `INSTALL_REALM_HOST` and the comment explaining it
+(`native.py:1522-1525`) both predate this lane. **Not measured here:** a press against a plain
+LAN-advertising install whose auth container was started under that row — the shape most finished
+installs are in. This lane restarted one container and got past it; it did not drive that case to
+a verdict, and it did not file a checklist entry for it, because allocating a number while other
+lanes are open would collide. It is reported in `r2-fix-b41.json` as a finding for the workflow
+to place.
+
+### The box, put back
+
+`put-back.txt`, taken 05:00:28-05:00:29 box-local, against `before.txt` from 04:43:21:
+
+| | before | after |
+| --- | --- | --- |
+| realm row `id 1` | `AzerothCore 172.30.55.119 172.30.55.119 8085` | the same |
+| `.yulon-network.json` | absent | absent (removed) |
+| `ufw status` | `inactive` | `inactive` |
+| `ufw show added` | `(None)` | `(None)` |
+| `ac-database` / `ac-worldserver` | up | up |
+| `/` free | 50 GB | 50 GB |
+
+Two things did change and are said rather than glossed:
+
+* **`ac-authserver` was restarted** (`Up 6 hours` → `Up 2 minutes`), deliberately, for the reason
+  in the section above. Nothing was removed or rebuilt, and its `RestartCount` read 0 afterwards.
+* **`.yulon-install.json` was rewritten by the presses**: `updated_unix` 1788563121 → 1788663620,
+  280 bytes both times, and its group went from `docker` to `pk` because the press wrote it as
+  user `pk`. The `completed` list is the same six stages. A press rewrites that file; that is the
+  engine's normal behaviour and not something this lane could avoid.
+
+### The one thing the run script got wrong
+
+The first launch died after press 1, before it could remove the record and press again: `wc -l`
+on a `yulon.log` that did not exist yet wrote its error into the same file the line count was
+read back from, and `$(( wc: … + 1 ))` under `set -u` exits the shell. `run.log` shows the run
+stopping there. The counter now tests for the file first, and the script takes a `part2`
+argument, which is how the rest of the gate was run (`96251d57`). Press 1 was not repeated: it
+had already finished green, and its evidence is the files above.

@@ -3148,7 +3148,7 @@ It matters because the Server tab's log panel is exactly a caller that starts a 
 caring about it, and an abort at exit is the kind of thing that looks like "the app crashed on
 close" in a bug report and gets attributed to whatever the user did last.
 
-### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc`, **STILL OPEN: the gate's second-press clause has not run**
+### 41. A realm cannot be set to loopback on purpose — 2026-09-05, FIXED 2026-09-05 on `lane/b41` at `d1e41fbc`, **CLOSED 2026-09-06: the press ran on yulon-ubuntu, gate driven at `b206ad0c`/`96251d57`**
 
 Found by the owner, reading Appendix C's reword: *"but make it possible to set it to 127.0.0.1"*.
 Not a regression — the behaviour is deliberate and argued — but the deliberate half has no way out.
@@ -3193,27 +3193,46 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       detects an address and before it queries the row; the two empty lists in
       `test_spine.py::test_a_loopback_the_owner_chose_is_left_alone_and_the_line_says_why` are what
       hold the reading in front.
-- [ ] The gate: choose loopback through the app, press Install again on the finished install, and the
+- [x] The gate: choose loopback through the app, press Install again on the finished install, and the
       row is still `127.0.0.1` with a log line saying why it was left alone — while a server whose
-      loopback was never chosen still ends up advertising a reachable address. — **Part-met on m910q
-      2026-09-05 at `d1e41fbc`, and the missing part is the press.** The choice was made through the
-      real Networking tab widgets (`QTest.mouseClick` on the real radio, `Show plan`, `Apply`) on the
-      finished CMaNGOS Vanilla install at `/home/pk/vanilla-75b`, and `realmd.realmlist.address` went
-      from `192.168.10.134` to `127.0.0.1` read back through `docker exec … mariadb`, with
-      `{"mode": "loopback", "recorded_unix": 1788639538}` on disk (16/16 checks,
-      `pyplan/gates/bug41-loopback-2026-09-05/widget-driver-output.txt`). The second Install press was
-      then attempted and REFUSED by the engine's own preflight, for disk and not for anything to do
-      with this entry: `[refuse] free space on Docker's disk and the server folder: 18 GB free, and
-      the install needs 40 GB` (`press-refused-by-preflight.txt`, 22:20:32 box-local; `df -h /` that
-      minute said 19G available of 117G). Reaching 40 GB meant deleting other lanes' material on a
-      shared box, and `yulon-ubuntu` — the other box with a finished install and 51 GB free — was in
-      use by lane 7.10 at that minute. What ran instead was the real `CmangosInstaller` built by
-      `install_wiring.installer_for_app()`, with its closing realm step called against the live
-      `vanilla-db`: with the intent recorded the row stayed `127.0.0.1` and one line said why; with
-      the file removed the same step on the same install put `192.168.10.134` back (12/12 checks,
-      `closing-step-output.txt`). That is the same method and the same database a press reaches, one
-      call past the preflight — what it does not show is the eight stages printing "already finished"
-      ahead of it. **To finish this box: run the press on a box with 40 GB free.**
+      loopback was never chosen still ends up advertising a reachable address. — **Met on
+      yulon-ubuntu 2026-09-06**, against the finished AzerothCore WotLK install at
+      `/home/pk/wowserver` (`install_id 243c46e3`, six recorded stages completed, `ac-*` containers
+      up, 50 GB free), from a checkout of `lane/b41` at `b206ad0c` and, for the second half,
+      `96251d57`. Whole record: `pyplan/gates/bug41-loopback-2026-09-05/README.md` §"Round 2", with
+      the files in `yulon-ubuntu-press/`.
+      **The choice, through the app:** `QTest.mouseClick` on the real radio, `Show plan`, `Apply`, on
+      the real `ControllerServices.for_entry()` wiring offscreen — 17/17 checks
+      (`yulon-ubuntu-press/widget-loopback.log`). `acore_auth.realmlist` id 1 went from
+      `172.30.55.119 / 172.30.55.119` to `127.0.0.1 / 127.0.0.1`, read through `docker exec …
+      mysql`, and `{"mode": "loopback", "recorded_unix": 1788662602}` was on disk.
+      **Press 1** (`python -m yulon.install_wiring wow-wotlk --server-dir /home/pk/wowserver`):
+      exit 0 in 880 s, `Already finished: clone-core, clone-modules, generate-compose, build,
+      client-data, import`, `The server is already built; skipping the compile.` — nothing compiled
+      (`press-chosen.log`). The row afterwards was still `127.0.0.1 / 127.0.0.1`, and the sentence
+      below appeared in the press's stdout AND at line 61 of `/home/pk/.local/share/yulon/yulon.log`
+      (`platform.config_dir()` on Linux; the file did not exist before this press), timestamped
+      `2026-09-06 04:57:59` (`after-press-chosen.txt`, `yulon-log-press-chosen.txt`).
+      **Press 2**, with `.yulon-network.json` removed and the row left on the loopback: exit 0 in
+      10 s, and the row came out `172.30.55.119 / 172.30.55.119` with "The realm now advertises
+      172.30.55.119, so players on other machines can reach this server" (`press-never-chosen.log`).
+      **The undo a user has:** `record_network_intent()` (`networking.py:2989`) stores the last
+      applied mode, so picking `LAN (same Wi-Fi)` and pressing Apply in the same tab rewrites the
+      record — driven, 5/5 checks, record `{"mode": "lan"}` and row `172.30.55.119`
+      (`widget-undo.log`). Deleting the file also works; nothing in the UI does that for you.
+      **The box was put back**: row `AzerothCore 172.30.55.119 172.30.55.119 8085`, no
+      `.yulon-network.json`, `ufw` inactive with `(None)` added, all three containers up
+      (`put-back.txt` against `before.txt`).
+      **One thing the press ran into that is not this entry's**: `ready` waits for an auth-container
+      log line matching `127\.0\.0\.1:8085` (`INSTALL_REALM_HOST`, `native.py:202`, filled at
+      `native.py:2724`), read from the container's CURRENT run only. `ac-authserver` had been up
+      since the row said `172.30.55.119`, so its log could not match and press 1 sat in `ready` from
+      04:43:31 until `ac-authserver` was restarted at 04:57:57, printing `The server is up.` two
+      seconds later. `up` runs `compose up -d --no-deps`, which does not recreate a running
+      container, so the press cannot clear this itself. It predates §41 (`native.py:1522-1525` argues
+      for the fixed value) and is not fixed by it. A press against a plain LAN-advertising install
+      whose auth container started under that row was NOT driven to a verdict here, and no checklist
+      entry was allocated for it — see `r2-fix-b41.json`.
 
 The line the install prints when it leaves the row alone (`loopback_chosen_on_purpose()`,
 `catalog/native.py:245`), as it came out of the live run:
