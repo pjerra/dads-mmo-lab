@@ -1189,3 +1189,64 @@ tonight came from editing a file another lane owned. This lands as its own lane 
 **When it is built, the gate is:** set the realm to loopback through the app; press Install again on
 the finished install; the row is still `127.0.0.1` and the log says why it was left alone — and the
 same run on a server whose loopback was never chosen still advertises a reachable address.
+
+## Appendix E — re-scope 7.1's Fedora/Arch sub-gate, and tick 7.1 (owner decision, 2026-09-06)
+
+Asked at ~01:50 CEST, with ten of the twelve Phase 7 boxes ticked (7.10 merged at `2b6a9c6b`) and
+7.1 the larger of the two left. The state put to the owner, all of it already written down on the
+7.1 line in `checklist.md`: the Ubuntu gate line's **clause 15 had just landed** on lane `b39` — the
+LAN step pressed through the real widgets on `yulon-ubuntu` and a 3.3.5a client on the Hyper-V host
+logging in at 23:31:24 UTC on 2026-09-05 — **clauses 10-12 on that line were recorded as "the
+owner's call"**, and the second sub-gate, *"packaged artifact on clean Fedora 44 … and clean Arch"*,
+was **open on its own terms**: the Fedora AppImage run was made on a box cleaned by deleting the
+previous install rather than restored from a cold checkpoint, Fedora's kill-mid-build had never been
+run, and nothing was ever installed on Arch, because the AppImage will not launch there without
+`fuse2`.
+
+**The owner's words, verbatim: "re-scope the fedora/arch sub-gate and tick 7.1."**
+
+**What it changes.** Three things, and no more than three.
+
+1. **The Fedora/Arch sub-gate box ticks on narrower terms than its own line asks for.** The
+   re-scoped terms are what is on evidence: on Fedora, the engine pass of 2026-08-31 including the
+   sudo password dialog — the only box in this project that can exercise `SudoSession`, both other
+   Linux boxes being passwordless — and the packaged artifact driving an install to a running server
+   on an SELinux-Enforcing box; on Arch, the engine pass of 2026-09-01 and the packaged artifact
+   refusing to start for want of `fuse2`. The original wording is kept above the re-scope paragraph
+   rather than rewritten, and the three items the narrower terms drop are named on that line under
+   CARRIED.
+2. **Clauses 10-12 of the Ubuntu gate line are accepted as recorded** — the `no UPDATE` reading,
+   reworded on 2026-09-05 to what the engine actually does (the realmlist row read out of the
+   database, plus `ready`'s own line in the install transcript, in place of a `yulon.log` UPDATE
+   count that has never been captured under either wording). That acceptance is what ticking 7.1
+   implies, and it is the whole of the reason; no further justification for it exists and none is
+   invented here.
+3. **7.1 ticks**, which costs a citation pass on `pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`
+   in the same commit, because `tests/test_docs_pins.py` widens to a plan the moment its phase line
+   reads `- [x]`. That pass was paid: 141 names presented as live with 13 unresolved before it, 135
+   live with 0 unresolved after, evidence in `pyplan/gates/7.1-tick-2026-09-06/`.
+
+**What it does not change.**
+
+* **7.8 stays open.** macOS is blocked on hardware, not on a decision, and nothing here touches it.
+* **The Phase 7 exit-criteria box stays `- [ ]`.** It is an owner call of its own and was not put to
+  him in this exchange.
+* **The three carried items stay owed** on the Fedora/Arch line: a Fedora run from the cold
+  `clean-desktop` checkpoint with the artifact doing the provisioning, a Fedora kill-mid-build, and
+  an Arch install through the artifact. Re-scoping a gate line is not the same as deciding the work
+  will never be done, and this appendix does not decide that.
+* **Clause 15's evidence is on `lane/b39` at `8f9de57f` and not in `yulon-phase7`** at the commit
+  that ticks the box. Until that branch merges, a reader of `yulon-phase7` alone cannot follow that
+  citation. Said here because it is the one place this tick points outside its own tree.
+* **The Arch FUSE message is still a defect with no `bug-checklist.md` section.** The launcher tells
+  an Arch user to "check your FUSE setup" and links a wiki, where the remedy is one line —
+  `pacman -S fuse2`. The 7.1 line has recorded that since 2026-09-04 without filing it. Nobody has
+  decided to file it, and this decision did not.
+
+**The cost avoided.** The ~4 h figure is the estimate that was put to the owner in the same
+exchange, not a measurement, and it is recorded as an estimate. What is measured, and is the floor
+under it: the Fedora AppImage install spent **52 min 40 s** between `systemd-inhibit` and
+`install of wow-wotlk finished` (`pyplan/gates/7.1-fedora44-appimage.log:11` and `:19`), and that run
+began with Docker already installed and `pk` already in the `docker` group. A cold-checkpoint run
+adds a provisioning press and a re-login before any of it, and the Arch half adds a package install
+and a second full build on a machine that has never compiled AzerothCore.
