@@ -144,3 +144,55 @@ $ ls -la ~/.local/share/yulon/logs/
 -rw-rw-r-- 1 pk pk 178886 sep.  6 21:59 wow-tbc-37f13213-20260906T195957Z.log
 
 TBC stopped with its containers kept; Vanilla back up, as it was before the run.
+
+
+=== the visible in-game effect — the owner's 2.4.3 client, 20:45-20:47Z ===
+
+No tunnel: m910q is on Tailscale, so the realm advertised 100.78.24.50 for the duration
+(192.168.10.134, its LAN address, is unreachable from the laptop) and was put back afterwards.
+
+Account, through the Server tab's own seam:
+    AccountResult(username='TBCGATE', account_id=105, created=True, gm_level=0)
+
+Client: C:\Users\perzi\Desktop\dadmmolab\Clients\WoW-Client-2.4.3
+        Data/enGB/realmlist.wtf did not exist and was created: "set realmlist 100.78.24.50"
+        (this client's locale is enGB, not the enUS the WotLK one uses)
+
+The dashboard, every line a CHANGE, polling every 3s:
+
+[20:45:15Z] up — 0 players, 505 bots, up 13m
+[20:45:30Z] up — 1 players, 504 bots, up 13m      <- entered the world
+[20:47:29Z] up — 0 players, 503 bots, up 15m      <- and left
+
+The bot count drifts on its own (505, 504, 503) as random bots rotate. Two numbers moving
+independently, each tracking what it names.
+
+Server-side, after the logout:
+
+    realmd.account            105  TBCGATE  gmlevel 0
+    characters.characters     901  Ddsasd   level 1  online 0  account 105
+    players by hand           0
+    online total              503
+
+=== a fault this run caused, and what it proved ===
+
+Before the login the TBC stack would not start: mangosd logged
+
+    Could not connect to MySQL database at tbc-db: Unknown MySQL server host 'tbc-db' (-3)
+
+Cause: a bare `docker start tbc-db` earlier in this session had started the container while its
+compose network did not exist, so it ran with NO network attached while `docker ps` said "Up" and
+healthy. Fixed with `docker compose up -d --no-deps --force-recreate tbc-db`, which reattached it.
+
+Worth recording because it is the exact shape of the bug this gate fixed an hour earlier: a
+container that reads as up while the server behind it is unusable. With the change made at
+769f56e8 the verdict for that state is `up` with `stable=False`, not a clean bill of health.
+
+=== the box afterwards ===
+
+realm address back to 192.168.10.134; TBC stopped with containers kept; Vanilla up and healthy.
+
+$ docker ps --format '{{.Names}} {{.Status}}'
+vanilla-realmd Up 8 seconds
+vanilla-mangosd Up 8 seconds
+vanilla-db Up 13 seconds (healthy)

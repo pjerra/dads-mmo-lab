@@ -1,6 +1,6 @@
 # 8.1b — Observability, WoW TBC — live gate
 
-**Where and when.** `m910q`, 2026-09-06 19:59Z–20:12Z, against the TBC install at `~/tbc-7.4c`
+**Where and when.** `m910q`, 2026-09-06 19:59Z–20:47Z, against the TBC install at `~/tbc-7.4c`
 (the one 7.4c built). Vanilla holds the same ports and was stopped for the duration and started
 again afterwards; every action was announced on that box's activity terminal first. Code at
 `769f56e8`, in its own worktree `~/gate81b`, under a **Python 3.11** venv built for the run — the
@@ -24,13 +24,41 @@ rather than being a constant.
 | A snapshot that fails is reported and the stop still happens | `problem=…File exists: '/tmp/gate81b-unwritable'`, `stop() -> True`, `running` → `exited` |
 | A crash-looping world reads as a loop | `restart_loop`, `stable=False`, count climbing 7 → 10 across six polls |
 | The first poll is not late | at construction: `status: db up, auth up, world up` with the verdict line already filled |
+| **Visible effect:** the player count moves when a client logs in and out | **0 → 1 → 0** across 20:45–20:47Z, while the bot count drifted 505 → 503 on its own |
 
-## Not proved here
+## The visible in-game effect — done 20:45–20:47Z, by the owner at the client
 
-**The visible in-game effect.** The box asks for the player count to move when a client logs in and
-out of *this* server. That needs a 2.4.3 client on a machine with a screen; the only client on the
-laptop is 3.3.5a, and `m910q` — which has 2.4.3 under `~/clients` — is headless. Named rather than
-skipped; the box stays unticked until it is done.
+The owner's 2.4.3 client is at `C:\Users\perzi\Desktop\dadmmolab\Clients\WoW-Client-2.4.3`, and
+this server is on Tailscale, so this login needed **no tunnel** — the realm advertised
+`100.78.24.50` for the duration and `192.168.10.134` (m910q's LAN address, unreachable from the
+laptop) was restored afterwards.
+
+The dashboard, polling every three seconds with nothing else driving it
+(`watch-during-the-login.txt`):
+
+```
+[20:45:15Z] up — 0 players, 505 bots, up 13m
+[20:45:30Z] up — 1 players, 504 bots, up 13m     <- the character entered the world
+[20:47:29Z] up — 0 players, 503 bots, up 15m     <- and left
+```
+
+**The bot count drifts underneath it** — 505, 504, 503 — because random bots rotate in and out on
+their own. That is what makes the player line's clean 0 → 1 → 0 evidence rather than noise: two
+numbers moving independently, each tracking the thing it names.
+
+The server's own rows for the same event:
+
+| | |
+|---|---|
+| `realmd.account` | `105  TBCGATE  gmlevel 0` — created through the Server tab's own seam |
+| `characters.characters` | `901  "Ddsasd"  level 1  account 105` |
+| the player clause by hand, after the logout | `0`, with 503 characters still online |
+
+The character is counted as a person and never as a bot: account 105 carries no `RNDBOT` prefix,
+and this tree's clause has only that arm.
+
+**One thing to note about the client.** That client had no `Data/enGB/realmlist.wtf` — this run
+created it. TBC's locale here is **enGB**, not the `enUS` the WotLK client uses.
 
 ## Where this tree differs from WotLK, measured rather than assumed
 
