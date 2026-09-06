@@ -1482,7 +1482,8 @@ cfb4c04f b481be54 -- pylauncher/yulon/catalog/native.py` → `116  8`) **with no
 disk**, and the only user-facing line (`:667-669`) prints the already-filtered tuple. A downgrade is
 therefore lossy and silent in both directions. (`:709`, `:377`, `:667-669` and the `:894`/`:899`
 pair above were already stale at `cfb4c04f` — `git show cfb4c04f:pylauncher/yulon/catalog/native.py
-| sed -n '709p;377p;667p;899p'` prints an empty line and three unrelated sentences — so they are
+| sed -n '377p;667p;668p;669p;709p;894p;899p'` prints an empty line at 377, `"""` at 669 and five
+unrelated sentences (read 2026-09-06 by the merger) — so they are
 not `lane/b41`'s to re-derive and were left as found; `write_state` is at `:500` at `b481be54`.)
 
 **FIXED 2026-09-02, on the day K.8 was about to make it reachable.** `InstallState` gained `unknown` —
@@ -3279,9 +3280,11 @@ overwrite the first. That is recorded intent, not a value read back out of the d
       `NetworkPlan` hands back, `apply()` RUNS the contents of `firewall_commands`,
       `portproxy_commands` and `realmlist_sql`, SHOWS `client_realmlist` (it goes in the report and
       the tab prints it), and leaves `manual_steps`, `warnings` and `refusals` as text for the owner
-      — `manual_steps` being the one of those that ever carries a firewall instruction ("Windows:
-      set the network profile to Private", appended only under the `netsh` backend and only when
-      `wants_firewall`, so never under `loopback`); beyond the fields it writes one file, the
+      (the firewall instructions among that text — the firewalld zone warnings, the backend-`none`
+      "allow inbound TCP … by hand" step and the `netsh` profile step — were each read under a
+      `wants_firewall` gate at `6795cbdd`, `networking.py:3298`, `:3397` and `:3481`, so none is
+      emitted under `loopback`; rounds 4, 5 and 6 each wrote an exhaustive claim here that the
+      tree refuted, and the merger dropped the claim); beyond the fields it writes one file, the
       `.yulon-network.json` this branch added. None of that is a container port binding: a
       `portproxy` rule forwards a host address to 127.0.0.1, and the UPDATE changes only the
       address the realm row hands out. (This sentence enumerated the dataclass's "output fields" in

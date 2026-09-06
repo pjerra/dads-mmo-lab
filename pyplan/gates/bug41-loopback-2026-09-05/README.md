@@ -441,9 +441,10 @@ Apply had run against: `docker ps --format '{{.Names}}\t{{.Ports}}'` → `ac-aut
 `0.0.0.0:3724` and `0.0.0.0:8085`. The mode changes the address the realm row hands out and nothing
 else — of everything a `NetworkPlan` hands back, `apply()` RUNS the contents of
 `firewall_commands`, `portproxy_commands` and `realmlist_sql`, SHOWS `client_realmlist`, and leaves
-`manual_steps`, `warnings` and `refusals` as text for the owner (`manual_steps` is the one of those
-that ever carries a firewall instruction: "Windows: set the network profile to Private", appended
-only under the `netsh` backend and only when `wants_firewall`, so never under `loopback`); beyond
+`manual_steps`, `warnings` and `refusals` as text for the owner (the firewall instructions among
+that text — the firewalld zone warnings, the backend-`none` step and the `netsh` profile step —
+were each read under a `wants_firewall` gate at `6795cbdd` — `networking.py:3298`, `:3397`, `:3481` —
+so none is emitted under `loopback`); beyond
 the fields it writes `.yulon-network.json`. No container port binding is among them: a `portproxy`
 rule forwards a host address to 127.0.0.1, and the UPDATE changes only the address the realm row
 hands out. Another machine still connects and logs in, and is then told the world server is at
@@ -453,8 +454,11 @@ Rounds 4 and 5 both wrote this as a list of "the output fields a `NetworkPlan` c
 lists were short — the dataclass has 18 fields
 (`n=$(grep -n '^class NetworkPlan' pylauncher/yulon/networking.py | cut -d: -f1); awk -v s=$n
 'NR>=s && NR<=s+75' pylauncher/yulon/networking.py | grep -cE '^ +[a-z_]+:'` → `18` at
-`b481be54`), and round 5's four left out `manual_steps`, the only field that ever carried a
-firewall instruction, which is the comment's own subject. Round 6 stopped enumerating the fields
+`b481be54`), and round 5's four left out `manual_steps`, a field the comment was about. Round 6
+stopped enumerating the fields but wrote a new exhaustive claim (`manual_steps` as the one field
+carrying a firewall instruction) that the tree refuted — the firewalld zone warnings go to
+`warnings` — so at `6795cbdd` the merger removed the claim; rounds 4, 5 and 6 each wrote one
+such sentence and each was false. Round 6 also
 and stated what `apply()` does with them; the conclusion (no networking mode writes a container
 port binding) is the one the 06:27:43 reading above supports and is unchanged.
 
