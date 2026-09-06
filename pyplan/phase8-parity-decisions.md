@@ -46,7 +46,7 @@ quoted first.
 | 8ii | Accounts list, set password, GM level. | **"v1 Phase 8"** |
 | 8iii | Module management beyond install/remove (update checks, manifests for the three CMaNGOS games, tuning knobs, config editor, settings page, account-wide sharing). | First **"Drop the account wide"**; on the clarifying question, **"Update checks + CMaNGOS manifests in Phase 8; knobs, editor, settings in Phase 9; account-wide refused"** |
 | 8iv | Automatic backups, self-update of the server sources, single-instance guard, autostart, adopting a server folder the app did not create. | **"None in Phase 8: single-instance in Phase 9, the rest later or refused"** |
-| 9 | **Vanilla's gates.** No Vanilla install can reach ready anywhere — the engine's `patch-sources` stage refuses a second press on any folder built before the doodad patch. How are its gates met? | **"Fresh throwaway install on m910q, folded into 8.9's install"** |
+| 9 | **Vanilla's gates.** How are they met, given that the engine's `patch-sources` stage refuses a second press on any folder built before the doodad patch? | **"Fresh throwaway install on m910q, folded into 8.9's install"** — **the premise this question was put on was too strong, and the correction is recorded rather than the answer changed.** I told the owner no Vanilla install could reach ready anywhere. Checked on the box on 2026-09-06: a Vanilla server *is* running and ready on the test box at `/home/pk/vanilla-75b` (`vanilla-mangosd` started 08:19Z, restarts=1, logging `Avg Diff: 56. Sessions online: 0.`). What the engine refuses is a second *install press* on a pre-patch folder; that is not the same as the server being unusable. The answer still stands on its own terms — 8.9b needs a throwaway install regardless, so one compile still serves two boxes — but Vanilla's other gates could run against the server that is already up, and that is the owner's to choose. |
 | 10 | **Tortoise's reach.** It has no SOAP and no remote console; on Linux its actions go through the attach console, on native Windows only through a 60-second queue that returns nothing. Which is v1? | **"Linux and macOS only for v1; Windows says why"** |
 
 ### Group (g), copied verbatim from `pyplan/phase8-decisions.md` (2026-08-31)
@@ -146,8 +146,10 @@ connection that "connects and blocks"; on all three SOAP cores the SOAP thread i
 `:248`), so during a map load the connect is *refused*, and B's 8.1 gate line — "a Start shows
 'waiting for the world to finish loading' before 'ready'" — describes a state its own design never
 enters. Two more: it omits `SOAP.IP` entirely, whose shipped default binds the container's own
-loopback where a published port cannot reach it, so its press would enable a listener nothing can
-talk to; and it puts a GM-3 credential in the server folder, which is the folder the uninstall
+loopback, which a published port does not serve — measured on 2026-09-06, and the failure is worse
+than "cannot reach": Docker accepts the connection and relays nothing, so the misconfiguration
+answers with silence rather than a refusal
+(`pyplan/gates/8-spikes/published-port-vs-container-loopback/`); and it puts a GM-3 credential in the server folder, which is the folder the uninstall
 deletes, the folder users copy, and on Windows may live inside a WSL distro where a host-side
 0600 is not the host's to set.
 
@@ -372,9 +374,15 @@ a claim.
 - **A timeout does not un-queue a command.** SOAP waits on the world thread; if the launcher's
   deadline expires first the command still runs. No write is ever retried automatically, every
   write has a verify read, and the app says the command may still arrive rather than that it failed.
-- **The listener's bind address inside the container is the load-bearing unmeasured claim.** The
-  reasoning is sound and it is still a deduction: no Yu'lon install has ever run SOAP. The owner's
-  live server has, and a read of it settles the question without touching a gate box.
+- **The listener's bind address inside the container is measured**, on a busybox stand-in rather
+  than a server (`pyplan/gates/8-spikes/published-port-vs-container-loopback/`, 2026-09-06). A
+  listener on the container's own loopback does not serve a published port — and it does not refuse
+  either: Docker accepts the connection on the host side and relays nothing, so a connect probe
+  **passes on the broken configuration**, and only a round-trip that receives a reply tells the
+  three states apart. Refused, silent and answering are the same three outcomes the seam types, and
+  "connected and silent" is also what a still-loading world looks like, which is why the ready
+  marker and not the connection is what separates them. What remains a deduction is only that the
+  emulators bind the way everything else does; the first per-family gate proves that.
 - **Command security levels are a database question**, not a source question: AzerothCore overrides
   them from a world-database table at load with only a warning, and both CMaNGOS trees read an
   equivalent table. The design does not depend on the numbers, because SOAP runs at console level
