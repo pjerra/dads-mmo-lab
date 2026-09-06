@@ -43,6 +43,8 @@ quoted first.
 | 8ii | Accounts list, set password, GM level. | **"v1 Phase 8"** |
 | 8iii | Module management beyond install/remove (update checks, manifests for the three CMaNGOS games, tuning knobs, config editor, settings page, account-wide sharing). | First **"Drop the account wide"**; on the clarifying question, **"Update checks + CMaNGOS manifests in Phase 8; knobs, editor, settings in Phase 9; account-wide refused"** |
 | 8iv | Automatic backups, self-update of the server sources, single-instance guard, autostart, adopting a server folder the app did not create. | **"None in Phase 8: single-instance in Phase 9, the rest later or refused"** |
+| 9 | **Vanilla's gates.** No Vanilla install can reach ready anywhere — the engine's `patch-sources` stage refuses a second press on any folder built before the doodad patch. How are its gates met? | **"Fresh throwaway install on m910q, folded into 8.9's install"** |
+| 10 | **Tortoise's reach.** It has no SOAP and no remote console; on Linux its actions go through the attach console, on native Windows only through a 60-second queue that returns nothing. Which is v1? | **"Linux and macOS only for v1; Windows says why"** |
 
 ### Group (g), copied verbatim from `pyplan/phase8-decisions.md` (2026-08-31)
 
@@ -232,7 +234,7 @@ with a citation per value. What matters at this level is the shape of the differ
 
 | | WotLK (AzerothCore) | TBC / Vanilla (CMaNGOS) | Tortoise |
 |---|---|---|---|
-| Channel | SOAP, loopback | SOAP, loopback | **none** — attach where a pty exists, else a 60-second command queue |
+| Channel | SOAP, loopback | SOAP, loopback | **none** — the attach console, where a pty exists (answer 10: Linux and macOS for v1) |
 | Turned on by | a key in the generated override's environment | the same, under a different variable name, **or** the conf table; the environment wins over the file | — |
 | Login needs | GM level 3 in the access table | GM level 3 in the account row | — |
 | The command then runs as | console, no level check | console level, regardless of the caller | console level, account id 0 |
@@ -260,7 +262,7 @@ provides the in-game half for WotLK after the LAN step.
 
 | Step | Delivers | Gate |
 |---|---|---|
-| **8.1a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text, read and setup modules; the password reset; the override re-render; the Server tab's channel group | WotLK on the Ubuntu VM, then native Windows on the gate box (the first command channel that has ever answered there); TBC and Vanilla on the test box; Tortoise's attach-only sentence |
+| **8.1a–e** | The channel: the operations model and four catalog blocks; the wire, delivery, text, read and setup modules; the password reset; the override re-render; the Server tab's channel group | WotLK on the Ubuntu VM, then native Windows on the gate box (the first command channel that has ever answered there); TBC on the test box; **Vanilla on a fresh throwaway install on the test box (answer 9), the same install 8.9 needs, so one compile serves both**; Tortoise's attach-only sentence |
 | **8.2** | Dashboard verdict and the pre-stop log snapshot | All four; the crash-loop rendering forced once |
 | **8.3** | Accounts: list, set password, GM level | All four; the client logs in with the new password and is refused the old |
 | **8.4** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
@@ -381,8 +383,10 @@ a claim.
 ## What the implementer should NOT build yet
 
 - No fourth transport: no remote-access console, no playerbot command server, no Lua bridge on
-  Tortoise. The playerbot command server is closed in the same press that opens SOAP, and its
-  closure is proved from inside the container.
+  Tortoise, **and no writer for Tortoise's command queue** — answer 10 makes its Phase 8 actions
+  Linux and macOS only, so on native Windows the tab carries the reason instead of a slower route.
+  The playerbot command server is closed in the same press that opens SOAP, and its closure is
+  proved from inside the container.
 - No settings surface and no YAML writer for the override: the re-render comes from the template.
 - No periodic world-thread command, on any timer, for any reason.
 - No automatic retry of a write.
