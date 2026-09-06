@@ -203,8 +203,15 @@ def test_the_counts_warning_reaches_the_verdict(tmp_path: Path) -> None:
 def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_container(
     tmp_path: Path,
 ) -> None:
-    """8.1d adds Tortoise's block; until then there are no counts."""
-    unmeasured = catalog_module.load_catalog().get("wow-tortoise")
+    """Every shipped tree has a block now, so this drives the path with a made-up entry.
+
+    The code path is still reachable — a game added tomorrow arrives without
+    one — and it must answer "I have no measured marker for this" rather than
+    counting nothing and calling it zero.
+    """
+    unmeasured = (
+        catalog_module.load_catalog().get("wow-tortoise").model_copy(update={"observability": None})
+    )
     watch = dashboard.Dashboard(
         unmeasured.container_spec(),
         unmeasured,

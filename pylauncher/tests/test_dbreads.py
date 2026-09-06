@@ -286,20 +286,23 @@ def test_an_answer_that_is_not_four_numbers_is_reported_rather_than_parsed_optim
     assert counts.players is None
 
 
-def test_the_tree_without_a_box_yet_carries_no_block_and_says_so() -> None:
-    """Per-tree facts are measured per tree: 8.1d adds Tortoise's own."""
-    assert catalog_module.load_catalog().get("wow-tortoise").observability is None
-
-
-# -- the CMaNGOS pair (8.1b, 8.1c), each with its own facts ------------------
+# -- the three prefix-only trees (8.1b, 8.1c, 8.1d), each with its own facts --
 #
 # Parametrised rather than copied, and every assertion reads the entry under
-# test rather than a literal: the two trees happen to agree on this shape, and
-# the day one of them stops agreeing the test must fail rather than pass
-# because the other still holds. TBC's values were measured on `~/tbc-7.4c` and
-# Vanilla's on `~/vanilla-75b`, both on m910q on 2026-09-06.
+# test rather than a literal: these three happen to agree on this shape, and the
+# day one of them stops agreeing the test must fail rather than pass because its
+# neighbours still hold.
+#
+# Two of them are CMaNGOS and the third is not. `cmangos.md` says so in as many
+# words — "This is **not** a CMaNGOS tree… Nothing in this section may be
+# inherited from the two sections above" — so Tortoise's values come from its
+# own section and its own source tree, and they carry their own citations even
+# where the value is the same: the compiled default is at
+# `PlayerbotAIConfig.cpp:545` here and `:500` on TBC, the shipped line is `:63`
+# here and `:57` there. Measured on m910q on 2026-09-06: TBC at `~/tbc-7.4c`,
+# Vanilla at `~/vanilla-75b`, Tortoise from the source at `~/tortoise-server`.
 
-CMANGOS = ["wow-tbc", "wow-vanilla"]
+CMANGOS = ["wow-tbc", "wow-vanilla", "wow-tortoise"]
 TBC = catalog_module.load_catalog().get("wow-tbc")
 
 
@@ -364,6 +367,9 @@ def test_a_cmangos_clause_has_no_registry_arm_because_that_tree_has_no_such_tabl
     assert "playerbots_account_type" not in clause
     assert f"{entry.databases.auth}.account" in clause
     assert "acore_" not in clause, "nothing from the AzerothCore tree belongs in this clause"
+    others = {"realmd", "tw_logon"} - {entry.databases.auth}
+    for foreign in others:
+        assert foreign not in clause, f"{game} must not reach into {foreign}"
 
 
 @pytest.mark.parametrize("game", CMANGOS)

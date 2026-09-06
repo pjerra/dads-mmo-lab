@@ -22,6 +22,7 @@ than an omission: see `controller_for()`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from yulon.catalog import native
@@ -32,8 +33,14 @@ from yulon.controller_wow_tortoise import docker_ctl
 class TortoiseController(Controller):
     """Lifecycle controller for one Tortoise (CMaNGOS-lineage) install."""
 
-    def __init__(self, server_dir: Path, *, wsl_distro: str | None = None) -> None:
-        super().__init__(docker_ctl.SPEC, server_dir, wsl_distro=wsl_distro)
+    def __init__(
+        self,
+        server_dir: Path,
+        *,
+        wsl_distro: str | None = None,
+        pre_stop: Callable[[], object] | None = None,
+    ) -> None:
+        super().__init__(docker_ctl.SPEC, server_dir, wsl_distro=wsl_distro, pre_stop=pre_stop)
 
     def wait_ready(self, realm_host: str, realm_port: int, **kwargs: float) -> bool:
         """Poll until the world container is up and this core's ready marker appears.
@@ -64,7 +71,12 @@ class TortoiseController(Controller):
         )
 
 
-def controller_for(server_dir: Path, *, wsl_distro: str | None = None) -> TortoiseController:
+def controller_for(
+    server_dir: Path,
+    *,
+    wsl_distro: str | None = None,
+    pre_stop: Callable[[], object] | None = None,
+) -> TortoiseController:
     """The controller for the install at `server_dir`, with no repair action attached.
 
     `Controller` takes an `import_probe`/`reset_unfinished` pair, and the Server
@@ -81,4 +93,4 @@ def controller_for(server_dir: Path, *, wsl_distro: str | None = None) -> Tortoi
     — `repair.import_state()` — and it is deliberately not wired to a button
     that would drop schemas nothing in this package can re-fill.
     """
-    return TortoiseController(server_dir, wsl_distro=wsl_distro)
+    return TortoiseController(server_dir, wsl_distro=wsl_distro, pre_stop=pre_stop)

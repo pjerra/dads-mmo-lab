@@ -2242,13 +2242,27 @@ def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
     assert services.controller.pre_stop is services.log_snapshot
 
 
-def test_the_tab_without_a_box_yet_gets_neither(qapp: object, tmp_path: Path) -> None:
-    """8.1d gates Tortoise; nothing is inherited early."""
-    services = ControllerServices.for_entry(load_catalog().get("wow-tortoise"), tmp_path)
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_tab_now_has_its_own_dashboard_and_snapshot(
+    qapp: object, tmp_path: Path, game: str
+) -> None:
+    """8.1a–d are all done, so this says every tree rather than all-but-one.
 
-    assert services.dashboard is None
-    assert services.log_snapshot is None
-    assert services.controller.pre_stop is None
+    The seams are the same four times over; what is behind them is each tree's
+    own, which is what `test_dbreads.py` and the four gate pages assert. This
+    only says nobody was left out — the failure that
+    `test_controller_packages_agree.py` exists to catch, from the other side.
+    """
+    entry = load_catalog().get(game)
+    if entry.install.password.file:
+        (tmp_path / entry.install.password.file).write_text("hunter2", encoding="utf-8")
+
+    services = ControllerServices.for_entry(entry, tmp_path)
+
+    assert services.dashboard is not None
+    assert isinstance(services.log_snapshot, logsnap.Recorder)
+    assert services.controller.pre_stop is services.log_snapshot
+    assert services.log_snapshot.spec.world == entry.containers.world
 
 
 def test_the_tbc_tab_is_wired_with_its_own_dashboard_and_snapshot(

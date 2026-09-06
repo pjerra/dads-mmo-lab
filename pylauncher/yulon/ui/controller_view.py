@@ -608,11 +608,29 @@ def _for_tortoise(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1d. This is NOT a CMaNGOS tree — `cmangos.md` says so in as many words —
+    # so every value under these two seams comes from its own section and its
+    # own source: `tw_char`/`tw_logon`, and a bot marker that is an account
+    # prefix with no registry, whose compiled default sits at
+    # `PlayerbotAIConfig.cpp:545` here where TBC's is at `:500`.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        controller=tortoise_controller.controller_for(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         # This package's `send()` takes no container: it addresses its own
         # entry's worldserver, which is the same catalog fact `spec.world` is.
