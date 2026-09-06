@@ -162,7 +162,7 @@ row that forbids a game literal and asserts it over the AST. The second is a cos
 C polls `server info` over SOAP every 30 seconds, on the three trees that have SOAP — it exempts
 Tortoise, whose dashboard it makes reads-only. Every command channel queues on the single world
 thread, and at this revision AzerothCore's SOAP loop accepts and processes one request inline
-(`ACSoap.cpp:56-63`); C describes that loop as one thread per request, which is the one row of its
+(`ACSoap.cpp:51-60`); C describes that loop as one thread per request, which is the one row of its
 own concurrency table that is wrong, and its next row has TBC and Vanilla right. So a dashboard
 tick queued behind a save drain holds the only accept loop while the user's next teleport waits in
 the kernel backlog. A and B both refused a periodic world-thread
