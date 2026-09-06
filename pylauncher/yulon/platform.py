@@ -11,6 +11,7 @@ import functools
 import importlib
 import json
 import os
+import shlex
 import shutil
 import socket
 import ssl
@@ -19,7 +20,7 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
@@ -611,8 +612,7 @@ _DOCKER_READY_POLL_SECONDS = 3.0
 # has wedged costs a couple of poll rounds rather than the whole budget.
 _DOCKER_PROBE_SECONDS = 10.0
 _MANUAL_DOCKER_DESKTOP = (
-    "Download and install Docker Desktop by hand: "
-    "https://www.docker.com/products/docker-desktop/"
+    "Download and install Docker Desktop by hand: https://www.docker.com/products/docker-desktop/"
 )
 # The sentence that is true wherever a TLS check fails on a box like the one in
 # the downloads block below: the root store, not the network, is what broke, and
@@ -1342,8 +1342,8 @@ DOCKER_GROUP_UNASKED_STEP = (
 )
 
 DOCKER_GROUP_RELOGIN_STEP = (
-    "Log out and back in (or run `newgrp docker`) so {user} can use Docker without sudo, "
-    "then click Install again."
+    "Restart Yu'lon so {user} can use Docker without sudo, then click Install again. "
+    "Log out and back in if a restart is not enough."
 )
 """Shown only where it is true: after a join that ran, or for an existing member.
 
@@ -1358,10 +1358,11 @@ answer was yes. Saying otherwise would promise an install that cannot start.
 def _explicit_yes(reply: str | None) -> bool:
     """Only a deliberate yes is consent. A dismissed dialog is not.
 
-    The same reading `make_responder()` applies to the installers' version of
-    this question, deliberately written the same way here: silence, an empty
-    string and a closed dialog all mean no, because refusing a privilege change
-    is recoverable and visible while granting one by accident is neither.
+    The same reading the bash engine's rule table applied to the installers'
+    version of this question, deliberately written the same way here and kept
+    after 7.2 deleted that table: silence, an empty string and a closed dialog
+    all mean no, because refusing a privilege change is recoverable and visible
+    while granting one by accident is neither.
     """
     return reply is not None and reply.strip().lower() in ("y", "yes")
 
@@ -1385,6 +1386,176 @@ def _docker_group_member(do: RunCmd, user: str) -> bool:
     if proc.returncode != 0:
         return False
     return "docker" in proc.stdout.split()
+
+
+REGROUP_ENV = "YULON_REGROUP"
+"""Set on a process that is already the product of a docker-group re-exec.
+
+Read by `docker_group_reexec()` before anything else, and the only thing between
+a machine where `sg` runs but does not deliver the group and an unbounded exec
+loop. A marker rather than a counter, because one re-exec either works or is
+never going to.
+"""
+
+
+def _process_group_names(gids: Iterable[int]) -> set[str]:
+    """Names for the gids THIS PROCESS carries; a gid with no group row is skipped.
+
+    Imported dynamically for the reason `_linux_user()` spells out at length:
+    `grp` is POSIX-only and this file is type-checked for Windows as well.
+
+    A gid with no `/etc/group` entry is not an error and must not raise. A group
+    deleted while a session was open leaves exactly that, and this runs on every
+    start, so the one machine in that state would fail to launch at all.
+    """
+    grp = importlib.import_module("grp")
+    names: set[str] = set()
+    for gid in gids:
+        try:
+            names.add(str(grp.getgrgid(gid).gr_name))
+        except KeyError:
+            continue
+    return names
+
+
+def docker_group_reexec(
+    *,
+    run: RunCmd | None = None,
+    which: Callable[[str], str | None] | None = None,
+    orig_argv: list[str] | None = None,
+    environ: Mapping[str, str] | None = None,
+    getgroups: Callable[[], list[int]] | None = None,
+    platform_id: Callable[[], PlatformId] = detect,
+) -> list[str] | None:
+    """The argv that restarts this process holding the docker group, or None.
+
+    A user just added to the `docker` group cannot use Docker from the session
+    that was already open, because supplementary groups are process
+    CREDENTIALS: set once, by PAM at login, and nothing propagates a later
+    `usermod` into a process that is already running. Every message in this
+    module answered that with "log out and back in".
+
+    It does not need a logout. `sg` is setgid-root and calls `setgroups()`, so a
+    process it starts is built from the group DATABASE rather than from
+    inherited credentials -- and the database is current the moment `usermod`
+    returns.
+
+    Measured on `yulon-ubuntu`, 2026-09-02, sampling both facts once a second
+    from a single process across a `usermod` that ran at t=5: `os.getgroups()`
+    did not contain the new group in ANY of the eighteen samples after the join,
+    while `id -nG <user>` contained it from t=6 onward. That gap is this
+    function's predicate, and it is why the two sides are read from two
+    different places instead of from one convenient one.
+
+    Returns None -- "nothing to regain, carry on" -- on every path but the one
+    it exists for, cheapest test first:
+
+    * **not Linux.** Windows needs a REBOOT, not a re-exec: `wsl --install`
+      turns on optional features that load at boot, which
+      `_ensure_docker_windows()` already reports as `reboot_required`. macOS has
+      no docker group at all.
+    * **already re-executed**, per `REGROUP_ENV`.
+    * **no `sg` on PATH.** It ships in `passwd`/`shadow-utils` on every distro
+      this project targets, but a stripped container image can be without it.
+    * **this process already HAS the group** -- the common case by a wide
+      margin, and the reason the whole check is cheap enough to run every start.
+    * **the database does not have it either**, so no join has happened and a
+      re-exec would gain nothing. `ensure_docker()` owns that case.
+
+    `sys.orig_argv` rather than a reconstruction from `sys.argv`: it is the
+    literal command line this interpreter was started with, so `-m yulon.x`
+    comes back as `-m yulon.x` rather than as a path to a file inside a package,
+    and a frozen build comes back as the app binary. It can hold a RELATIVE
+    interpreter path (measured: `['.venv/bin/python', '-c', ...]`), which is
+    correct here only because `sg` does not change directory -- if that ever
+    stops being true this must resolve argv[0] first.
+
+    `sg` takes ONE command string, so the argv is joined with `shlex.join`. That
+    is the single quoting site in this design, and it is the reason the design
+    is a re-exec at all: the alternative considered was wrapping every docker
+    subcommand in `sg` instead, which would have routed argv carrying the
+    database password through a shell on every call rather than once through a
+    command line that carries no secret.
+    """
+    if platform_id() != "linux":
+        return None
+    env = os.environ if environ is None else environ
+    if env.get(REGROUP_ENV):
+        return None
+    # Root already reaches the docker socket; there is nothing to regain, and
+    # asking would compare two different accounts. `_linux_user(None)` returns
+    # `$SUDO_USER` when euid is 0, so under `sudo` the database half of the
+    # predicate is about the invoking user while `os.getgroups()` is about root
+    # -- both answer yes, the predicate is permanently true, and a GUI that
+    # gates on it offers a pointless restart for every unrelated install
+    # failure (review, 2026-09-02).
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and geteuid() == 0:
+        return None
+    find = _which if which is None else which
+    sg = find("sg")
+    if sg is None:
+        logger.info("no `sg` on PATH; the docker group cannot be picked up without a logout")
+        return None
+    if getgroups is not None:
+        gids = list(getgroups())
+    else:
+        # `getattr`, the same shape `container_user_args()` uses for `os.getuid`:
+        # `os.getgroups` is POSIX-only and this file is type-checked for Windows
+        # too, where the direct call is `Module has no attribute "getgroups"`.
+        # Caught by CI's `mypy --platform win32` pass and by nothing else -- the
+        # Linux run, the test suite and `ruff` were all green on it.
+        #
+        # Reachable only on a host that says it is Linux and has no
+        # `os.getgroups`, which is the same impossible-but-checked case the
+        # `--user` builder guards. Refusing is the safe direction: without the
+        # gids there is no way to tell "already has the group" from "does not",
+        # and guessing the second restarts a launcher that had nothing to gain.
+        read = getattr(os, "getgroups", None)
+        if read is None:
+            logger.warning("this host says it is linux but has no os.getgroups; not restarting")
+            return None
+        gids = list(read())
+    if "docker" in _process_group_names(gids):
+        return None
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=5.0))
+    if not _docker_group_member(do, _linux_user(None)):
+        return None
+    command = list(sys.orig_argv) if orig_argv is None else list(orig_argv)
+    if not command:
+        # `sys.orig_argv` is never empty on a real interpreter; an injected one
+        # can be, and `sg docker -c ""` would exit 0 having started nothing,
+        # which reads from the outside exactly like a launcher that vanished.
+        return None
+    return [sg, "docker", "-c", shlex.join(command)]
+
+
+def restart_under_docker_group(reexec: Callable[[], list[str] | None] | None = None) -> bool:
+    """Replace this process with one holding the docker group. Does not return on success.
+
+    False means nothing was done and the caller carries on: either there was
+    nothing to regain (`docker_group_reexec()` said None) or the exec itself
+    failed. Neither is fatal — without the group the install refuses with a
+    sentence that says what to do, which is exactly where this user stood before
+    any of this existed.
+
+    The marker goes in BEFORE `os.execv`, not after. `execv` does not return, so
+    a marker set afterwards is a marker never set at all, and the machine where
+    `sg` runs without delivering the group gets a process that replaces itself
+    forever and never draws a window. It is removed again if the exec raises, so
+    nothing downstream reads a re-exec that did not happen.
+    """
+    argv = (docker_group_reexec if reexec is None else reexec)()
+    if argv is None:
+        return False
+    logger.info("restarting under `sg docker` to pick up the docker group")
+    os.environ[REGROUP_ENV] = "1"
+    try:
+        os.execv(argv[0], argv)
+    except OSError as exc:
+        os.environ.pop(REGROUP_ENV, None)
+        logger.warning(f"could not restart under `sg docker`: {exc}")
+    return False
 
 
 def linux_package_manager(
@@ -3430,8 +3601,7 @@ def _reserved_dir_reason(server_dir: Path) -> str | None:
             )
     if any(one.as_posix() in _RESERVED_SERVER_DIRS for one in spellings):
         return (
-            f"{server_dir} is a system directory. Pick a folder under your home directory "
-            "instead."
+            f"{server_dir} is a system directory. Pick a folder under your home directory instead."
         )
     if any(
         len(one.parts) == 2 and one.parts[1].lower() in _RESERVED_WINDOWS_DIRS for one in spellings
@@ -3550,11 +3720,48 @@ class KeepAwake(Protocol):
     def __exit__(self, *exc: object) -> None: ...
 
 
+_gui_thread: threading.Thread | None = None
+"""The thread running the window's event loop, once the GUI has named it.
+
+`None` in a process that never started a window: the headless harness
+(`yulon.install_wiring`), `--provision`, a test. That is not a missing fact —
+it is the fact that there is no GUI thread here, which is what
+`keep_awake()`'s Windows refusal reads.
+"""
+
+
+def declare_gui_thread() -> None:
+    """Record THIS thread as the one that runs the window's event loop.
+
+    `main.py`, beside `QApplication(sys.argv)`, is the only production caller;
+    the two tests in `test_platform.py` that declare a GUI thread call it too —
+    one to see that thread refused, one to see a worker beside it held —
+    because the refusal reads what this records. It is a declaration
+    rather than a detection because detecting it
+    means asking Qt, and this module may not import Qt (style-guide §3) — and
+    because a test suite that keeps one session-wide `QApplication` on its own
+    main thread would otherwise be indistinguishable from a running launcher.
+
+    What holds `main.py` to making the call is
+    `test_the_launcher_declares_which_thread_is_its_gui_thread`, which starts
+    the real entry point in a child process and fails if the declaration did
+    not arrive.
+    """
+    global _gui_thread
+    _gui_thread = threading.current_thread()
+
+
+def gui_thread() -> threading.Thread | None:
+    """The declared GUI thread, or `None` in a process that never started a window."""
+    return _gui_thread
+
+
 @contextmanager
 def keep_awake(
     *,
     platform_id: Callable[[], PlatformId] = detect,
     spawn: Callable[[list[str]], subprocess.Popen[bytes]] | None = None,
+    gui_thread: Callable[[], threading.Thread | None] = gui_thread,
 ) -> Iterator[None]:
     """Hold the machine awake for the duration of the block. Best effort, and it says so.
 
@@ -3577,10 +3784,23 @@ def keep_awake(
 
     Windows: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)`,
     which is a THREAD-scoped assertion — it must be set and cleared on the same
-    thread, and it only holds while that thread lives. That makes the worker
-    thread running the install the only correct place to call it, so calling it
-    from the main (GUI) thread is refused rather than silently doing nothing
-    useful the moment the install moves off it.
+    thread, and it only holds while that thread lives. The only correct caller
+    is therefore the thread that runs the install for its whole length, and the
+    refusal below names the one thread that provably is not that: the GUI's
+    event-loop thread, which hands every install to a `QThread`
+    (`ui/widgets/log_panel.py`) and would be claiming a guarantee the install
+    does not have.
+
+    WHICH thread that is comes from `declare_gui_thread()`, not from
+    `threading.main_thread()`. Until 2026-09-05 the test was main-thread
+    identity, and it was wrong for the entry point that needs the assertion
+    most: `install_wiring`'s headless harness iterates the engine's generator
+    on its own main thread, so that thread IS the one doing the install and
+    lives exactly as long. Measured on `yulon-win11-gate`, 2026-09-05 05:12:16
+    box-local, the TBC second press at `745307ad` logged `not holding this
+    machine awake: keep_awake() must run on the worker thread doing the
+    install` and ran the whole install unheld (bug-checklist §43). A process
+    that never started a window declares nothing, so nothing refuses it.
 
     Linux: `systemd-inhibit --what=idle:sleep ... sleep infinity`, detached,
     terminated on exit — the `caffeinate` shape. Unlike `caffeinate -w` it
@@ -3605,11 +3825,12 @@ def keep_awake(
             yield
         return
     if here == "windows":
-        if threading.current_thread() is threading.main_thread():
+        if gui_thread() is threading.current_thread():
             raise RuntimeError(
-                "keep_awake() must run on the worker thread doing the install: Windows scopes "
-                "the assertion to the thread that set it, so holding it on the GUI thread would "
-                "claim a guarantee the install does not have."
+                "keep_awake() must run on the thread doing the install, and this is the GUI "
+                "thread: Windows scopes the assertion to the thread that set it, and the GUI "
+                "thread hands the install to a worker, so holding it here would claim a "
+                "guarantee the install does not have."
             )
         with _keep_awake_windows():
             yield
@@ -3668,26 +3889,56 @@ build does not need the display, only the CPU.
 """
 
 
+def _windows_execution_state(flags: int) -> int:
+    """`SetThreadExecutionState(flags)`, as its own function so a test can stand in for it.
+
+    A seam rather than a `ctypes` patch: no box this suite runs on has a
+    Windows power API, so replacing this one call is the only way a test can
+    assert WHICH flags were asserted and that they were cleared again. Every
+    other check of the Windows branch could only ever watch it fail to find
+    `ctypes.windll`. `getattr` for the reason `_mapped_network_drive()` gives.
+    """
+    import ctypes
+
+    set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
+    return int(set_state(flags))
+
+
 @contextmanager
 def _keep_awake_windows() -> Iterator[None]:
     """Assert `ES_SYSTEM_REQUIRED` on THIS thread, and clear it on the way out.
 
-    Unverified on a real Windows box by this project (roadmap 6.3's gate owns
-    that). A failure to set it is logged and the block still runs: an install
-    that would have completed must not be refused because a power API said no.
+    Executed against a real `SetThreadExecutionState` for the first time on
+    2026-09-05: a headless `install_wiring` press on `yulon-win11-gate` logged
+    `holding this machine awake for the build: SetThreadExecutionState(
+    ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` at 13:30:21 box-local, so the call
+    resolved and Windows answered non-zero
+    (`pyplan/gates/bug43-keepawake-win11-2026-09-05/`). What the OS then DOES
+    with the assertion — that an idle machine really stays awake for hours —
+    is still unmeasured; roadmap 6.3's gate owns that half.
+
+    A failure to set it is logged and the block still runs: an install that
+    would have completed must not be refused because a power API said no.
+
+    The success is logged too, at INFO. It is the only positive evidence a gate
+    box can read afterwards — absence of the warning proves nothing about a
+    line that might simply never have been reached — and bug-checklist §43's
+    gate is a `yulon.log` read for exactly this pair.
     """
     try:
-        import ctypes
-
-        # `getattr` for the reason `_mapped_network_drive()` gives.
-        set_state = getattr(ctypes, "windll").kernel32.SetThreadExecutionState  # noqa: B009
-    except (AttributeError, OSError) as exc:  # pragma: no cover - non-Windows
+        held = _windows_execution_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED)
+    except (AttributeError, OSError) as exc:  # no `ctypes.windll` off Windows
         logger.warning(f"could not hold this machine awake ({exc}); the build may be interrupted")
         yield
         return
-    if not set_state(_ES_CONTINUOUS | _ES_SYSTEM_REQUIRED):
+    if held:
+        logger.info(
+            "holding this machine awake for the build: "
+            "SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)"
+        )
+    else:
         logger.warning("Windows refused the keep-awake assertion; the build may be interrupted")
     try:
         yield
     finally:
-        set_state(_ES_CONTINUOUS)
+        _windows_execution_state(_ES_CONTINUOUS)

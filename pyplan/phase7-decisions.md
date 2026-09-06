@@ -7,7 +7,10 @@
 > returned 46 findings (all edits to this page and its companions, none reopening a decision).
 >
 > Method, the same one `phase6-decisions.md` used: the four games' bash installers were mapped
-> stage by stage (eight files, 19,451 lines, read in full), the native engine was inventoried for
+> stage by stage (eight files, 19,451 lines, read in full — that figure is the plan's and was
+> wrong: re-counted 2026-09-05 off `2fddaa0e^`, the eight files held **21,880** lines. Corrected
+> here rather than in place because what this sentence records is what the design pass believed on
+> 2026-08-26), the native engine was inventoried for
 > what is generic and what is AzerothCore-shaped, three architectures were designed
 > independently from three angles, and three judges with different priorities (a maintainer, an
 > operator who runs the live gates, and a skeptic hunting the fatal flaw) scored them. The owner
@@ -171,8 +174,10 @@ password inside `_run_steps()`. `catalog.py` gains the 7.1 subset of the models 
 `composegen.py` takes its image prefix, built-service list and extra tokens from the entry
 instead of module constants, and reads `password.value` where it read `db_root_password`.
 
-Deleted in 7.2: the six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, 19,451
-lines of bash); `installer.Installer`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
+Deleted in 7.2: the six `install-*.sh`, `dml-start.sh`, `wow-manage.sh` (eight files, **21,880**
+lines of bash — this read 19,451, the plan's figure, until it was re-counted per file off
+`2fddaa0e^` on 2026-09-05; the same correction is on `pyplan/checklist.md`'s 7.2 line and in
+`phase7-plans/7.2-retire-bash.md`); `installer.Installer`, `PromptRule`, `PROMPT_RULES`, `make_responder`,
 `bash_available`, `host_package_manager`, `NO_BASH_HELP`; `Install.script`, `script_platforms`,
 `script_variants` (`db_root_password`/`db_root_password_file` go earlier, in 7.1, the moment
 `password` replaces them); the script-path tests including
@@ -1045,6 +1050,40 @@ definitions of done, no narrative.
 1. Catalog data and templates; compile inside the Dockerfile.
 2. _Definition of done:_ extraction from a 7272 client, boot to ready, update tables present,
    client connects; `status` promoted from `wip`; source pinned.
+3. **Tortoise ships WITH the Eluna Lua scripting engine (owner decision, 2026-09-02).**
+
+   The first Tortoise build reached cmake and stopped there:
+
+       CMake Error at CMakeLists.txt:50 (message):
+         Eluna submodule is missing.  Run: git submodule update --init --recursive
+         src/modules/Eluna
+
+   `Shyalya/tortoise-wow` @ `playerbots-integration-gh` declares exactly ONE submodule --
+   `src/modules/Eluna` from `https://github.com/ElunaLuaEngine/Eluna.git`, pinned at
+   `1b06f28ff3a00054d915d824c725fb4283fee74d` -- and the engine clones repositories without
+   fetching their submodules. Tortoise is the first entry that has one: the other three get their
+   extra modules as separate catalog sources (`cmangos/playerbots` into
+   `src/mangos-*/src/modules/Bots`).
+
+   **Two fixes existed and BOTH satisfy this line's "data and templates only" rule**, which is why
+   this is recorded as a decision rather than settled as a bug:
+
+   - **A (chosen).** Add Eluna as another `emulator.sources` entry, cloned at the pinned commit
+     into `src/tortoise-wow/src/modules/Eluna`. Tortoise ships with Lua scripting.
+   - **B (rejected).** Pass `-DBUILD_ELUNA=OFF` in the template. One flag, no clone, a shorter
+     build -- and a Tortoise without the scripting engine.
+
+   `CMakeLists.txt` defaults `BUILD_ELUNA` to `ON` and the template never passed it either way, so
+   B would have been a silent feature removal dressed as a build fix. The owner chose A: a
+   Turtle-derived server with playerbots plausibly carries content that depends on Eluna, and
+   shipping it without would be discovered by a user rather than by us.
+
+   `BUILD_ELUNA_TESTS` also defaults `ON` and calls `enable_testing()`; an install build has no
+   use for the Lua smoke test, so the template should turn it off. That is a build-time saving,
+   not part of the decision above.
+
+   **Still owed:** a rebuild proving the clone satisfies cmake. Nothing about A is confirmed until
+   a Tortoise build gets past `CMakeLists.txt:50`.
 
 ### 7.7 Native Windows, all four
 1. WotLK first (closes 6.3's `ac-db-import` bind-mount blocker), then TBC, Vanilla, Tortoise.
@@ -1101,3 +1140,134 @@ review of the reviews: 46 findings, all confirmed as edits to this page, `README
 scripts, eight bind lines, `DB_PASSWORD` in templates), two numbering schemes for one set of
 steps, a field move that contradicted the not-touched list, the two-press first run, sudo asked
 once, buildx absent from two package lists, and per-tool completion records. All are folded in.
+
+## Appendix C — the LAN button opens the ports (owner decision, 2026-09-04)
+
+Asked after three rounds of repair on bug-checklist §39 had each been refuted by measurement.
+Two options were put to the owner: (1) *conservative* — Yu'lon never runs `ufw enable`,
+`systemctl enable firewalld` or `firewall-cmd --reload` on the user's behalf; it stages the port
+rules and prints the two commands that finish, SSH port first; (2) *keep going* — repair the guard
+so the button does the whole thing and never takes the operator's own SSH away doing it.
+
+**The owner chose (2), and said why in one sentence: "I want it so they can just click a button
+then the server's ports get forwarded."** Staging-and-print is therefore rejected as the product,
+not merely deferred. Round 4 (the placed/unplaced rule, an empty socket table as unresolved,
+firewalld active zones) started the same evening.
+
+Scope pinned in the same exchange: *forwarded* means the machine's own firewall — 3724/8085
+open in ufw or firewalld so players on the LAN connect. Forwarding on the **router** (the app's
+`internet` mode, today a list of manual router steps) was named as a possible later feature —
+UPnP/NAT-PMP mapping from the app with a refusal that says why when the router declines — and
+is **not scheduled**; it needs a router to test against and is a feature, not a fix.
+
+## Appendix D — the realm must be settable to 127.0.0.1 on purpose (owner decision, 2026-09-05)
+
+Asked immediately after Appendix C's reword. Rewording the 7.1 clause blessed `ready`'s automatic
+`UPDATE` to a reachable address; the owner's next sentence was **"but make it possible to set it to
+127.0.0.1"**. So the reword stands and it is not the whole story: a user must be able to say *this
+server is for this computer only*, and have that stick.
+
+**Why it does not stick today, measured in the code rather than assumed.** `ready`'s realm step
+(`catalog/native.py:1969-2005`) reads the stored row and rewrites it unless
+`networking.advertisable()` accepts EVERY column. `advertisable()` refuses the loopback by design —
+that refusal is the whole of bug-checklist §35, where a realm advertising `127.0.0.1` told every
+client the world server was on the CLIENT's machine and the client hung at "Connecting" saying
+nothing. So a user who sets `127.0.0.1` by hand gets it overwritten by the next install press or
+resume, and the log line even says "players on other machines can reach this server".
+
+**What this needs, and the hard part is not the SQL.** `networking.Mode` is
+`Literal["lan", "internet"]`; a third value that writes the loopback is a small change. The real
+requirement is that the choice is REMEMBERED, because the failure mode is a resume silently undoing
+it. `ready` must be able to tell "this row is loopback because nobody has set it yet" from "this row
+is loopback because the owner chose that", and only the first may be overwritten. Recorded intent,
+not the row's value, is the thing to read.
+
+**Not started, and deliberately.** `networking.py` is mid-flight in bug-checklist §39 round 5 with
+three refuters reading it, and `catalog/native.py` is mid-flight in the §40/§21 lane. Two collisions
+tonight came from editing a file another lane owned. This lands as its own lane once those merge.
+
+**When it is built, the gate is:** set the realm to loopback through the app; press Install again on
+the finished install; the row is still `127.0.0.1` and the log says why it was left alone — and the
+same run on a server whose loopback was never chosen still advertises a reachable address.
+
+## Appendix E — re-scope 7.1's Fedora/Arch sub-gate, and tick 7.1 (owner decision, 2026-09-06)
+
+Asked at ~01:50 CEST, with ten of the twelve Phase 7 boxes ticked (7.10 merged at `2b6a9c6b`) and
+7.1 the larger of the two left. The state put to the owner, all of it already written down on the
+7.1 line in `checklist.md`: the Ubuntu gate line's **clause 15 had just landed** on lane `b39` — the
+LAN step pressed through the real widgets on `yulon-ubuntu` and a 3.3.5a client on the Hyper-V host
+logging in at 23:31:24 UTC on 2026-09-05 — **clauses 10-12 on that line were recorded as "the
+owner's call"**, and the second sub-gate, *"packaged artifact on clean Fedora 44 … and clean Arch"*,
+was **open on its own terms**: the Fedora AppImage run was made on a box cleaned by deleting the
+previous install rather than restored from a cold checkpoint, Fedora's kill-mid-build had never been
+run, and nothing was ever installed on Arch, because the AppImage will not launch there without
+`fuse2`.
+
+**The owner's words, verbatim: "re-scope the fedora/arch sub-gate and tick 7.1."**
+
+**What it changes.** Three things, and no more than three.
+
+1. **The Fedora/Arch sub-gate box ticks on narrower terms than its own line asks for.** The
+   re-scoped terms are what is on evidence: on Fedora, the engine pass of 2026-08-31 including the
+   sudo password dialog — run on `yulon-fedora-gate`, a clone of `yulon-fedora`'s `clean-desktop`
+   checkpoint, and recorded on the 7.1 line as the first time `SudoSession` was ever exercised — and
+   the packaged artifact driving an install to a running server
+   on an SELinux-Enforcing box; on Arch, the engine pass of 2026-09-01 and the packaged artifact
+   refusing to start for want of `fuse2`. The original wording is kept above the re-scope paragraph
+   rather than rewritten, and the three items the narrower terms drop are named on that line under
+   CARRIED.
+2. **Clauses 10-12 of the Ubuntu gate line are accepted as recorded** — the `no UPDATE` reading,
+   reworded on 2026-09-05 to what the engine actually does (the realmlist row read out of the
+   database, plus `ready`'s own line in the install transcript, in place of a `yulon.log` UPDATE
+   count that has never been captured under either wording). That acceptance is what ticking 7.1
+   implies, and it is the whole of the reason; no further justification for it exists and none is
+   invented here.
+3. **7.1 ticks**, which costs a citation pass on `pyplan/phase7-plans/7.1-spine-azerothcore-linux.md`
+   in the same commit, because `tests/test_docs_pins.py` widens to a plan the moment its phase line
+   reads `- [x]`. That pass was paid: 141 names presented as live with 13 unresolved before it, 135
+   live with 0 unresolved after, evidence in `pyplan/gates/7.1-tick-2026-09-06/`.
+
+**What it does not change.**
+
+* **7.8 stays open.** macOS is blocked on hardware, not on a decision, and nothing here touches it.
+* **The Phase 7 exit-criteria box stays `- [ ]`.** It is an owner call of its own and was not put to
+  him in this exchange.
+* **The three carried items stay owed** on the Fedora/Arch line: a Fedora run from the cold
+  `clean-desktop` checkpoint with the artifact doing the provisioning, a Fedora kill-mid-build, and
+  an Arch install through the artifact. Re-scoping a gate line is not the same as deciding the work
+  will never be done, and this appendix does not decide that.
+* **Clause 15's evidence is on `lane/b39` at `8f9de57f` and not in `yulon-phase7`** at the commit
+  that ticks the box. Until that branch merges, a reader of `yulon-phase7` alone cannot follow that
+  citation. Said here because it is the one place this tick points outside its own tree.
+* **The Arch FUSE message is still a defect with no `bug-checklist.md` section.** The launcher tells
+  an Arch user to "check your FUSE setup" and links a wiki, where the remedy is one line —
+  `pacman -S fuse2`. The 7.1 line has recorded that since 2026-09-04 without filing it. Nobody has
+  decided to file it, and this decision did not.
+
+**The cost avoided.** The ~4 h figure is the estimate that was put to the owner in the same
+exchange, not a measurement, and it is recorded as an estimate. What is measured, and is the floor
+under it: the Fedora AppImage install spent **52 min 40 s** between `systemd-inhibit` and
+`install of wow-wotlk finished` (`pyplan/gates/7.1-fedora44-appimage.log:11` and `:19`), and that run
+began with Docker already installed and `pk` already in the `docker` group. A cold-checkpoint run
+adds a provisioning press and a re-login before any of it, and the Arch half adds a package install
+and a second full build on a machine that has never compiled AzerothCore.
+
+## Appendix F — 7.8, the CMaNGOS issue, and the exit box (owner decisions, 2026-09-06)
+
+Asked at ~08:45 CEST, with 11 of 12 boxes ticked at `5de3c1a2` and PR #143 out of draft, as the
+three decisions the night's workflow had surfaced and not made. The owner's answers, verbatim:
+
+1. **"7.8 will be done by baerthe."** — 7.8 (macOS, all four) stays `- [ ]` and is Baerthe's, the
+   upstream developer's, on hardware they have; it is not carried as an open item on this side and
+   no Mac is rented. The 7.8 line in `checklist.md` says so.
+2. **"post it"** — the CMaNGOS vmap-extractor doodad issue. Posted the same morning from the owner's
+   GitHub account as https://github.com/cmangos/issues/issues/4286 (CMaNGOS keeps one centralised
+   tracker; `mangos-classic` and `mangos-tbc` have issues disabled), in the tracker's bug-report
+   shape with the draft's body as "Bug Details" and the pinned core/database SHAs in the template's
+   fields. The fenced diff in the post is byte-identical to the shipped patch (asserted before
+   posting). `pyplan/upstream-cmangos-doodad-issue.md` carries the URL.
+3. **"barthe decide to tick it."** — the Phase 7 exit-criteria box is Baerthe's to tick, not this
+   side's; it stays `- [ ]` with that sentence on it.
+
+What this changes: nothing in code. What it does not decide: §28, §31 and §36 in the bug checklist
+stay OPEN on their own terms.

@@ -376,25 +376,52 @@ def test_keep_awake_on_macos_survives_a_caffeinate_that_will_not_start() -> None
         pass
 
 
-def test_keep_awake_on_windows_refuses_the_gui_thread() -> None:
-    """The assertion is scoped to the thread that sets it, so the GUI thread is a lie.
+def _record_execution_state(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Stand in for `SetThreadExecutionState` and collect the flags it is handed.
+
+    Answering 1 (non-zero) is what the real call returns when Windows accepts
+    the assertion; 0 is the refusal `_keep_awake_windows()` warns about.
+    """
+    flags: list[int] = []
+
+    def _state(value: int) -> int:
+        flags.append(value)
+        return 1
+
+    monkeypatch.setattr(platform, "_windows_execution_state", _state)
+    return flags
+
+
+def test_keep_awake_on_windows_refuses_the_declared_gui_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The assertion is scoped to the thread that sets it, so the GUI thread's claim is a lie.
 
     `SetThreadExecutionState` holds only while its own thread lives, so taking
-    it on the main thread and then running the install on a worker would claim
-    a guarantee the install does not have.
+    it on the thread that runs the event loop and then handing the install to a
+    `QThread` would claim a guarantee the install does not have.
+
+    Refused by identity against what `declare_gui_thread()` recorded, not by
+    `threading.main_thread()`; the module global is restored by `monkeypatch`.
     """
-    with pytest.raises(RuntimeError, match="worker thread"):
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    flags = _record_execution_state(monkeypatch)
+    platform.declare_gui_thread()
+    assert platform.gui_thread() is threading.current_thread()
+
+    with pytest.raises(RuntimeError, match="this is the GUI thread"):
         with platform.keep_awake(platform_id=lambda: "windows"):
             pass
+    assert flags == [], "the refused claim still touched the power API"
 
 
-def test_keep_awake_on_windows_is_taken_on_a_worker_thread() -> None:
-    """The other half: off the main thread it does not refuse.
-
-    What it actually asserts to Windows cannot be checked here (there is no
-    Windows power API in a test), so this is about the thread rule only —
-    roadmap 6.3's live gate owns the rest.
-    """
+def test_keep_awake_on_windows_is_taken_on_a_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half, with a GUI declared: the worker the app installs on is not refused."""
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    _record_execution_state(monkeypatch)
+    platform.declare_gui_thread()
     outcome: list[str] = []
 
     def work() -> None:
@@ -408,6 +435,65 @@ def test_keep_awake_on_windows_is_taken_on_a_worker_thread() -> None:
     worker.start()
     worker.join()
     assert outcome == ["held"]
+
+
+def test_keep_awake_on_windows_holds_the_main_thread_of_a_process_with_no_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bug-checklist §43: the headless harness's main thread IS the thread doing the install.
+
+    `install_wiring` iterates the engine's generator on the thread that called
+    `main()`, and that thread lives exactly as long as the install, so the
+    assertion held there is honest. The old rule refused it by main-thread
+    identity — measured on `yulon-win11-gate` 2026-09-05 05:12:16 box-local,
+    where a whole TBC press ran unheld and said so once in `yulon.log`.
+    """
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    flags = _record_execution_state(monkeypatch)
+    assert threading.current_thread() is threading.main_thread()
+
+    with platform.keep_awake(platform_id=lambda: "windows"):
+        pass
+
+    assert flags == [
+        platform._ES_CONTINUOUS | platform._ES_SYSTEM_REQUIRED,
+        platform._ES_CONTINUOUS,
+    ], "the assertion was not taken and cleared on this thread"
+
+
+def test_keep_awake_on_windows_says_in_the_log_that_the_assertion_was_taken(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """§43's gate reads a log file, and absence of a warning is not evidence of a hold.
+
+    The INFO line is the positive half: a line that was never reached and a
+    line that succeeded look identical if only the warning is looked for.
+    """
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    _record_execution_state(monkeypatch)
+
+    with caplog.at_level("INFO", logger="yulon.platform"):
+        with platform.keep_awake(platform_id=lambda: "windows"):
+            pass
+
+    assert "holding this machine awake for the build: SetThreadExecutionState" in caplog.text
+    assert "not holding this machine awake" not in caplog.text
+
+
+def test_keep_awake_on_windows_still_runs_the_build_when_windows_refuses(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A power API answering 0 is a warning, never a refused install."""
+    monkeypatch.setattr(platform, "_gui_thread", None)
+    monkeypatch.setattr(platform, "_windows_execution_state", lambda _flags: 0)
+    ran = False
+
+    with caplog.at_level("WARNING", logger="yulon.platform"):
+        with platform.keep_awake(platform_id=lambda: "windows"):
+            ran = True
+
+    assert ran
+    assert "Windows refused the keep-awake assertion" in caplog.text
 
 
 def test_the_missing_cli_help_names_every_module_that_raises_it() -> None:
@@ -477,41 +563,6 @@ def test_the_home_directory_itself_is_refused_before_the_installer_sees_it(
     assert "wow-server-playerbots" not in problem
     # a dedicated subfolder of the same home is fine
     assert platform.server_dir_problem(tmp_path / "wow-server-playerbots") is None
-
-
-def test_the_gui_refuses_every_directory_the_install_scripts_refuse() -> None:
-    """Pin the lists together; a rule only one side knows is a delayed refusal.
-
-    Read from the scripts rather than restated, because restating is how the two
-    drift: the scripts grew this `case` and the GUI never learned it, which is
-    the defect this test exists for.
-
-    All three WotLK scripts are checked, not just Fedora - they are separate
-    files that have already diverged elsewhere. `$HOME` and `/` are handled by
-    their own branches in `_reserved_dir_reason`, so they are expected to be
-    absent from the literal tuple. The GUI is allowed to be STRICTER than the
-    scripts (it also knows the Windows trees), so this is a subset assertion in
-    that direction rather than equality.
-    """
-    installers = Path(__file__).resolve().parents[1] / "catalog" / "installers" / "wow-wotlk"
-    scripts = sorted(installers.glob("install-wow-wotlk*.sh"))
-    assert len(scripts) == 3, f"expected three WotLK installers, found {[s.name for s in scripts]}"
-    handled_elsewhere = {"/", "$HOME"}
-    for script in scripts:
-        rules = [
-            raw
-            for raw in script.read_text(encoding="utf-8").splitlines()
-            if raw.strip().startswith("/|") and raw.rstrip().endswith(")")
-        ]
-        # Explicit, so a reformat of the shell reports WHICH file stopped
-        # matching rather than raising StopIteration from a bare next().
-        assert len(rules) == 1, (
-            f"{script.name}: expected exactly one `case` line starting with '/|', found "
-            f"{len(rules)}. If the script was reformatted, update this test - do not delete it."
-        )
-        banned = {part.strip().strip('"') for part in rules[0].strip().rstrip(")").split("|")}
-        missing = banned - handled_elsewhere - set(platform._RESERVED_SERVER_DIRS)
-        assert not missing, f"{script.name} refuses {sorted(missing)} but the GUI does not"
 
 
 def test_a_symlink_onto_a_reserved_directory_is_refused_too() -> None:
