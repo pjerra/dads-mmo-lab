@@ -382,3 +382,12 @@ the app, and the sentence was printed two seconds later. `_advertise_realm()` ru
 stage and outside the `try` (`catalog/native.py:1527`, argued at `1518-1526`), so a `ready` that
 ran out its window would have raised, the install would have been recorded as failed, and the
 sentence would never have appeared. The entry now says so.
+
+### `--checks`
+
+`checks-green-round3.txt` holds two runs of `run-tests-vm.sh --checks` on m910q on 2026-09-06:
+one with the round-3 edits uncommitted and one with the working tree clean at `30ccbfce`. Both:
+`2805 passed, 4 skipped` (20.34 s / 20.01 s), `Success: no issues found in 72 source files` three
+times (this platform, as Windows, as macOS), `All checks passed!`, `140 files would be left
+unchanged.`, `=== --checks: ALL GREEN ===`, exit 0. The lane tip differs from `30ccbfce` only by
+that file and this paragraph, which no check reads.
