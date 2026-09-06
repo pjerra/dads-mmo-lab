@@ -379,7 +379,11 @@
         `1 AzerothCore 172.30.55.119 172.30.55.119 8085` (reachable, not loopback), and `ready`'s own
         line in the transcript, `gate72-press3.log:3377`: "The realm now advertises 172.30.55.119, so
         players on other machines can reach this server". Both halves of the clause are therefore MET
-        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39.
+        on the 2026-09-05 run; what remains open in 7.1 is the client login and §39. (Superseded
+        2026-09-05: both of those have since closed on this same gate line — the client login at the
+        **CLAUSE 14 IS MET** bullet below, 2026-09-05 07:31:41, and §39 at the **CLAUSE 15 IS MET**
+        bullet below, the LAN press of 2026-09-05 23:06:57 UTC. The sentence is kept because it is
+        the shape of the reasoning at the time it was written.)
       * **What the reworded clause asks for, and why (owner decision, 2026-09-05).** The gate now
         reads: the auth log's `127.0.0.1:8085` line, *then* the realm left advertising an address
         another machine can REACH, with `ready`'s own `UPDATE` counted in `yulon.log`. The two
@@ -441,7 +445,20 @@
       the LAN step, which waits on §39. **Three of those four have since landed** (the compose
       capture and the ccache cycle on the 09-05 clean run, the LAN step on 2026-09-05 at 23:06:57
       UTC — the clause-15 bullet below); what is left of this list is the `no UPDATE` reading, which
-      is clauses 10-12 and the owner's call. **And the 7.1 box could not tick even if all four landed**,
+      is clauses 10-12.
+      **And "the owner's call" is not an accurate name for what is left there: this line already
+      carries FOUR readings of clauses 10-12 and they disagree with each other.** (1) The clause text
+      itself says the realm is read out of the database and out of `ready`'s own line, *"not from
+      `yulon.log` (see §42: the CLI writes none)"*. (2) The reworded-clause bullet grades *"Both
+      halves of the clause are therefore MET on the 2026-09-05 run"*. (3) The same bullet then says
+      *"Still owed, and not earned by the reword: no `yulon.log` UPDATE count has ever been
+      captured"*, and names the capture that would settle it
+      (`grep -c 'UPDATE' ~/.local/share/yulon/yulon.log` beside the realmlist row at `ready`).
+      (4) The clause-summary bullet calls the *"no `UPDATE`"* reading *"the owner's call, as recorded
+      above"*. So the next reader is owed a choice among four, not a wait for a decision: one of
+      those readings has to be picked on the record before anything can tick. **Lane b39 did not
+      settle it** — it pressed the LAN step and graded clause 15, and left 10-12 exactly as it found
+      them. **And the 7.1 box could not tick even if all four landed**,
       because the Fedora/Arch sub-gate below is open on its own terms: nothing was installed on
       Arch (the AppImage will not launch without `fuse2`), and Fedora still owes the kill-mid-build
       and a run from a cold checkpoint.
@@ -650,7 +667,11 @@
           `AzerothCore`.
         **What this clause still does not claim, and the bound the box puts on it.** `Enter World`
         was never clicked and no character was created, the same two limits clause 14 carries. And
-        the ports answered from the host *before* the press as well: ufw was `inactive` with an
+        the ports almost certainly answered from the host *before* the press as well — **an
+        inference, not a measurement: the only `Test-NetConnection` the run took is after the press**
+        (`vmhost-ports.txt:2`, `2026-09-05T23:12:12Z`), and the 21:47 CEST before-press probe is one
+        the lane brief reports rather than one this run made. What was measured is why nothing could
+        have been filtering them: ufw was `inactive` with an
         empty `### RULES ###` section, and `sudo -n iptables -S | grep -c ufw` answered **0** after
         the press (`iptables-bound.txt:1`), so the rules the press wrote filter nothing on this box
         today. The press proves the app writes the right rules, refuses the enable, keeps SSH and
@@ -885,8 +906,13 @@
        and clause 15 was not when this was written. **Clause 15 is now met too** — the LAN step was
        pressed by the app on that box on 2026-09-05 at 23:06:57 UTC and a client on the Hyper-V host
        logged in at 23:31:24 UTC (`pyplan/gates/bug39-lan-press-2026-09-05/`) — so what would keep
-       that box open on the old reading is clauses **10-12**, the "no `UPDATE`" reading, which is
-       the owner's call.
+       that box open on the old reading is clauses **10-12**, the "no `UPDATE`" reading — and that
+       is not simply "the owner's call": the 7.1 gate line carries four readings of those three
+       clauses which disagree with each other (the clause text's *"not from `yulon.log`"*, the
+       reworded-clause bullet's *"both halves … MET on the 2026-09-05 run"*, the same bullet's
+       *"Still owed … no `yulon.log` UPDATE count has ever been captured"*, and the clause-summary
+       bullet's *"the owner's call"*). Someone has to pick one on the record; lane b39 did not, and
+       left 10-12 as it found them.
     - **What was deliberately NOT done, so nobody hunts for it.** The plan's Step 6 under Task F.7
       gives a template for this tick that appends *"CMaNGOS entries `platforms: []`"* and ticks the
       gate box in the same commit. Neither was followed: `[]` was never applied and must not be
@@ -1018,8 +1044,15 @@
         manual`, ufw left inactive, SSH still reachable) and account `LANGATE` id 104 logged a real
         client in from the Hyper-V host at 23:31:24 UTC with `last_ip 172.30.48.1`, the host's own
         LAN address; capture `pyplan/gates/bug39-lan-press-2026-09-05/` and bug-checklist §39, now
-        CLOSED. **So 10-12 (owner decision) is what remains**, so this box
-        stays `- [ ]` — on one clause now rather than three. Note that the PARENT 7.2 line was
+        CLOSED. **So 10-12 is what remains**, so this box
+        stays `- [ ]` — on one clause now rather than three. **What 10-12 needs is not a decision
+        anyone is waiting on:** the 7.1 gate line carries four readings of those three clauses which
+        disagree with each other — the clause text's *"not from `yulon.log` (see §42: the CLI writes
+        none)"*, the reworded-clause bullet's *"both halves … MET on the 2026-09-05 run"*, the same
+        bullet's *"Still owed … no `yulon.log` UPDATE count has ever been captured"*, and the
+        clause-summary bullet's *"the owner's call"*. One of the four has to be picked on the record
+        before this ticks. Lane b39 did not pick it and left 10-12 as it found them.
+        Note that the PARENT 7.2 line was
         ticked the same day on its own nine clauses; that tick says nothing about this gate, and
         this gate is not evidence for it.
       * **The record was corrected on 2026-09-05, and one of the five corrections matters to a

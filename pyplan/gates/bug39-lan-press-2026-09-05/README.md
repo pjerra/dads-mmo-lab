@@ -1,10 +1,23 @@
 # The LAN button, pressed end to end on a remote Linux box — 2026-09-05/06
 
-Everything below happened between **2026-09-05 22:57 UTC and 23:38 UTC** (2026-09-06
-00:57–01:38 CEST) on `yulon-ubuntu`, the live 7.2 WotLK install at `/home/pk/wowserver`,
-with a real 3.3.5a client on `vmhost` (the Hyper-V host, Windows 10). The box's own logs
-and the database are in **UTC**; the box's `date` and the activity terminal print **CEST**
-(UTC+2). Both stamps are given wherever it matters.
+Everything below happened between **2026-09-05 22:59 UTC and 23:36:36 UTC** (2026-09-06
+00:59–01:36 CEST) on `yulon-ubuntu`, the live 7.2 WotLK install at `/home/pk/wowserver`,
+with a real 3.3.5a client on `vmhost` (the Hyper-V host, Windows 10). Those two bounds are
+the earliest and latest stamps a reader can re-derive from the files committed here: the
+first is `console-before.png`'s own top-bar clock, `Sep 6 00:59` CEST, and the last is
+`ufw-restored.txt:59`, `01:36:36` CEST. (The earliest stamp inside a text file is
+`state-before.txt:1`, `2026-09-05T23:02:16Z`.) An earlier draft of this line said
+"22:57 UTC and 23:38 UTC"; neither of those figures had an artifact behind it. The one
+exception to the window is a **correction pass at 02:16–02:19 CEST on 2026-09-06** (00:16
+UTC), which took no action on any box: three read-only calls to `vmhost` (`Get-Date`,
+`Get-ChildItem`, `Get-Item` + `VersionInfo`), one `scp` off `m910q`, and a `stat` on the
+laptop. Everything it printed is attributed to it where it appears.
+
+The box's own logs and the database are in **UTC**; the box's `date` and the activity
+terminal print **CEST** (UTC+2). `vmhost`'s clock is CEST too — `Get-Date -Format o` there
+printed `2026-09-06T02:16:54.5296260+02:00` when the readbacks in this file were taken —
+so every stamp copied off that host is CEST unless it says `Z`. Both stamps are given
+wherever it matters.
 
 The code pressed was the committed tree at **`cfb4c04f`** — `git rev-parse HEAD` in
 `/home/pk/p7/checkout` answered `cfb4c04f367536375abf6382694a1f800c468b8a` with
@@ -17,8 +30,10 @@ is no longer true.** It was pressed, twice, through the real widgets, on a box r
 over ssh, and the ports it advertised were then used by a real client on another machine to
 log in.
 
-What it does **not** close is stated in "The bound this box puts on the press" below, and
-is the reason §39 keeps one OPEN paragraph.
+What it does **not** close is stated in "The bound this box puts on the press" below.
+§39 is CLOSED on this press (`pyplan/bug-checklist.md:2643` reads
+*"CLOSED 2026-09-05 on the press itself"*); the bound is recorded inside that closure as a
+design fact and a limit of this box, not as a remaining repair.
 
 ---
 
@@ -29,18 +44,27 @@ the hypervisor's synthetic keyboard, and `Msvm_Keyboard.TypeText` was unusable o
 So the recovery route was re-proved on this guest first, with the same tools, before the
 firewall was touched:
 
-* `C:\Users\PK\vmshot.ps1 -VMName yulon-ubuntu` at 00:59:53 CEST → **`console-before.png`**
-  (63,214 bytes): the GNOME desktop, a terminal at a `Choice:` prompt belonging to another
-  lane, untouched by this one.
+**How to read the stamps in this section.** The two scripts' stdout was watched at the
+terminal and **not kept as a file**, so nothing in this folder can re-derive it; an earlier
+draft of this section quoted it (*"sent ctrl+alt+t"*, *"typed 27 key codes"*, *"sent
+Return"*) and gave a `00:59:53 CEST` stamp that likewise exists nowhere. Both are dropped.
+What IS committed is the three screenshots, and each carries the guest's own top-bar clock,
+which is the stamp cited below.
+
+* `C:\Users\PK\vmshot.ps1 -VMName yulon-ubuntu -Out …` → **`console-before.png`**
+  (63,214 bytes), top bar `Sep 6 00:59` (CEST; 22:59 UTC): the GNOME desktop, a terminal at
+  a `Choice:` prompt belonging to another lane, untouched by this one.
 * `C:\Users\PK\vmkeys.ps1 -VMName yulon-ubuntu -OpenTerminal` then `-Keys 'echo b39 console
-  proof 0101'` → *"sent ctrl+alt+t"*, *"typed 27 key codes"*, *"sent Return"*, and
-  **`console-keyboard-proof.png`** (36,826 bytes) shows a second terminal window with
+  proof 0101'` → **`console-keyboard-proof.png`** (36,826 bytes), top bar `Sep 6 01:01`
+  (23:01 UTC), showing a second terminal window with
   `pk@yulon-ubuntu:~$ echo b39 console proof 0101` and its output `b39 console proof 0101`.
+  So the hypervisor's synthetic keyboard reached a shell on this guest: that is the claim,
+  and the image is the whole of the evidence for it.
   `-Keys` (virtual key codes) was used, not `-Text`/`TypeText`, for the reason the round-6
   record gives.
-* The proof terminal was then closed with `-Keys 'exit'`; **`console-after.png`** (63,140 bytes) shows
-  the same desktop as `console-before.png` (63,214 bytes), the other lane's `Choice:` prompt
-  still waiting; the two differ in the clock in the top bar.
+* The proof terminal was then closed with `-Keys 'exit'`; **`console-after.png`** (63,140 bytes),
+  top bar `Sep 6 01:01`, shows the same desktop as `console-before.png` (63,214 bytes), the
+  other lane's `Choice:` prompt still waiting.
 
 ## 2. The failsafes, armed before the press and cancelled after it
 
@@ -146,12 +170,18 @@ port 22   TcpTestSucceeded=True SourceAddress=172.30.48.1 RemoteAddress=172.30.5
 
 ### The bound this box puts on the press
 
-**Those ports were reachable before the press as well, and this run can prove why rather
-than merely say so.** ufw was `inactive` with an empty `### RULES ###` section before the
-press (`press.txt:11,15`), and after it `sudo -n iptables -S | grep -c ufw` answered **0**
-(`iptables-bound.txt:1`): none of ufw's chains is in the live ruleset while ufw is off, so
-the two rules the press wrote have no effect on a packet today. The only live rules naming
-the game ports are Docker's own DNAT lines (`iptables-bound.txt:4-5`).
+**Those ports were almost certainly reachable before the press as well — but that is an
+inference here, not a measurement, and the difference matters.** What was measured: ufw was
+`inactive` with an empty `### RULES ###` section before the press (`press.txt:11,15`), and
+after it `sudo -n iptables -S | grep -c ufw` answered **0** (`iptables-bound.txt:1`) — none
+of ufw's chains is in the live ruleset while ufw is off, so the two rules the press wrote
+have no effect on a packet today, and nothing else in the ruleset filters 3724 or 8085 (the
+only live rules naming the game ports are Docker's own DNAT lines, `iptables-bound.txt:4-5`).
+From that it follows that nothing was filtering those ports before the press either. What
+was **not** measured by this lane is a `Test-NetConnection` from the host BEFORE the press:
+the only probe in this folder is after it (`vmhost-ports.txt:2`, `2026-09-05T23:12:12Z`).
+The lane brief reports one at 21:47 CEST, before any LAN step, answering `True` for 3724 —
+that is a figure the brief hands over, not one this run took, and it is cited that way.
 
 So on this box the press proves that the app **writes the right rules and refuses the
 dangerous one**; it does not prove that opening a port changed reachability, because nothing
@@ -171,7 +201,10 @@ deliberately never enables it (§39 rounds 6–10), so that box has to arrive th
 
 ## 6. The client login, from the other machine, with no tunnel
 
-`vmhost:C:\clients\WoW-WotLK-3.3.5a-min` (3.3.5a build 12340, native D3D9, no DXVK).
+`vmhost:C:\clients\WoW-WotLK-3.3.5a-min` (native D3D9, no DXVK). The build number is the
+executable's own: `(Get-Item …\wow.exe).VersionInfo` read on `vmhost` at
+`2026-09-06T02:16:54+02:00` printed `FileVersion : 3, 3, 5, 12340`,
+`ProductVersion : Version 3.3` — so **3.3.5a build 12340**.
 `Data\enUS\realmlist.wtf` was written `set realmlist 172.30.55.119` and `WTF\Config.wtf`'s
 `SET realmList` set to the same. `wowdrive-b39.ps1` ran as a scheduled task with `/ru PK /it`
 so it landed in **console session 1** (`client-run3.log:1` records `session id: 1`), and
@@ -183,11 +216,38 @@ It took three runs, and the two failures are recorded because each is a fact abo
 1. **`client-run1.log`** — the client started and died without a window.
    `client-run1-missing-speech-mpq.jpg` shows why: *"Missing or corrupted data — Failed to
    open archive \*\*\*\*\speech-\*\*\*\*.MPQ."* The minimal copy
-   (`vmhost:C:\clients\wotlk-pull.log`, finished 23:02:02 UTC) had left out
+   (`vmhost:C:\clients\wotlk-pull.log`, whose last line is `done 2026-09-05T23:02:02` and
+   whose `wotlk-pull.done` has mtime `9/5/2026 11:02:02 PM` on that CEST host — so
+   **23:02:02 CEST = 21:02:02 UTC**; an earlier draft labelled it 23:02:02 UTC, which would
+   have put the copy finishing four minutes before the press) had left out
    `speech-enus.mpq`, `expansion-speech-enus.mpq` and `lichking-speech-enus.mpq`.
    **Not a graphics failure** — worth saying, because the brief expected D3D9 to be the risk.
-   The three files (1.03 GB) were relayed laptop → `m910q` → host in 49 s + 105 s
-   (`speech-mpq-relay.log`), and their sizes on the host matched the laptop's byte for byte.
+
+   **The relay of those three files, told against its artifacts, including the leg that
+   failed.** Leg 1, laptop → `m910q` by `scp`, took **49 s**: `01:21:09` to `01:21:58` CEST
+   (`speech-mpq-relay.log:1-5`), and `:6-11` is m910q's listing of the three at
+   `438856302`, `241298910` and `354400446` bytes. Leg 2 as that log records it **failed**:
+   three `curl -f` pulls from `http://100.78.24.50:8766/` exited `rc=7` in 2.3–2.6 s each
+   (`:16-18`, `01:21:59`–`01:22:08`), and the script's closing `Get-ChildItem` on the host
+   printed nothing at all because no file had been written. The transfer that actually
+   landed the files was a **retry three minutes later whose client-side transcript was not
+   kept** — that is a gap in this record and is stated as one. Its server side survives:
+   `speech-relay-httpd.log` is m910q's `python3 -m http.server 8766` access log, copied from
+   `m910q:/tmp/b39-http.log` at 02:16 CEST on 2026-09-06, and shows three `200` responses to
+   `100.99.204.5` — `vmhost`'s Tailscale address (`tailscale ip -4` on that host printed
+   `100.99.204.5`) — beginning `01:25:21`, `01:26:05` and `01:26:30` CEST, after one
+   `01:25:11` self-test from m910q's own `100.78.24.50`. The host's files, read back at
+   `2026-09-06T02:16:54+02:00`, have mtimes `1:26:05 AM`, `1:26:30 AM` and `1:27:05 AM`, each
+   the completion of the request the log line opens: so leg 2 succeeded in **104 s**
+   (`01:25:21` → `01:27:05`) for 1,034,555,658 bytes — which is the figure an earlier draft
+   reported as "105 s" while citing the failed log for it.
+
+   Sizes: the host's `438856302` / `241298910` / `354400446` bytes equal m910q's listing at
+   `speech-mpq-relay.log:9-11` and equal the laptop's originals, `stat -c '%n %s'
+   /c/wow335ahd/Data/enUS/{speech,expansion-speech,lichking-speech}-enus.MPQ` at 02:16:45
+   CEST on 2026-09-06 printing the same three numbers. That is a size comparison on all
+   three hops, taken in this sitting; **no checksum was taken on any hop**, so the earlier
+   draft's "byte for byte" overstated it and is dropped.
 2. **`client-run2.log`** — the login screen came up (`window handle 4196040, title 'World of
    Warcraft'`, `focus: True` at 01:28:25 CEST) and then **my own Escape keystroke quit the
    client**: the driver sent one "in case a dialog is up", and one second later every
@@ -259,7 +319,10 @@ world server beyond a character-list reply.
 * No `b39-*` units; the three `ac-*` containers `Up 3 hours`; the checkout and venv at
   `/home/pk/p7/` left for whoever needs them next.
 * On `m910q`: the relay directory `~/clients/b39-speech` and its `:8766` server are gone;
-  `~/clients` holds the 1.12.1 and 2.4.3 clients it held before.
+  `~/clients` holds the 1.12.1 and 2.4.3 clients it held before. One file was left there on
+  purpose — `/tmp/b39-http.log`, 331 bytes, the access log copied here as
+  `speech-relay-httpd.log` — so that a reader can re-derive the relay from the box as well
+  as from this folder.
 * On `vmhost`: the client was closed (`Get-Process wow` → 0), the `b39-wow` scheduled task
   deleted, `C:` at 123.9 GB free. The three speech MPQs were **left in place**: they make the
   copied client work, and the client itself is the owner's, staged for this gate.
@@ -281,7 +344,8 @@ world server beyond a character-list reply.
 | `vmhost-ports.txt` | `Test-NetConnection` from the other machine, and its own address |
 | `iptables-bound.txt` | why the reachability above is not evidence the press caused it |
 | `ufw-restored.txt` / `state-after-cleanup.txt` | the box put back, with hashes |
-| `speech-mpq-relay.log` | the 1.03 GB the minimal client copy was missing |
+| `speech-mpq-relay.log` | the relay of the 1.03 GB the minimal client copy was missing — leg 1 succeeded, leg 2 as logged failed (`rc=7`) |
+| `speech-relay-httpd.log` | m910q's `http.server` access log, the only surviving transcript of the leg-2 retry that landed the files |
 | `console-before.png` / `console-keyboard-proof.png` / `console-after.png` | the out-of-band way back in, proved first, and the desktop left as found |
 | `client-run1-missing-speech-mpq.jpg` | the dialog run 1 died on |
 | `client-login-screen.jpg` / `client-account-typed.jpg` / `client-after-auth.jpg` / `client-character-select.jpg` | the login, half-scale JPEG |

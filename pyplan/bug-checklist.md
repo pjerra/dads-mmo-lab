@@ -3097,16 +3097,23 @@ box reached over ssh. That is what round 11 measured.
 
 **ROUND 11, 2026-09-05 — the button was pressed on a remote Linux box, and a client on another
 machine logged in through the ports it advertised. CLOSED.** Everything in this paragraph was
-measured between 22:57 and 23:38 UTC on 2026-09-05 (00:57-01:38 CEST on 2026-09-06) on
+measured between 22:59 and 23:36:36 UTC on 2026-09-05 (00:59-01:36 CEST on 2026-09-06) —
+the earliest and latest stamps a reader can re-derive from the committed files, namely
+`console-before.png`'s own top-bar clock (`Sep 6 00:59` CEST) and `ufw-restored.txt:59`
+(`01:36:36` CEST); an earlier draft of this paragraph said 22:57 and 23:38, and neither of
+those two figures had an artifact behind it — on
 **`yulon-ubuntu`**, the live 7.2 install at `/home/pk/wowserver`, against the committed tree at
 `cfb4c04f` (`git rev-parse HEAD` in `/home/pk/p7/checkout`, `git status --short` empty). Command by
 command, with every readback, in `pyplan/gates/bug39-lan-press-2026-09-05/README.md`.
 
 * **The way back in was proved BEFORE the firewall was touched, with the tools the 7.1 recovery
-  needed.** `vmshot.ps1` at 00:59:53 CEST, then `vmkeys.ps1 -OpenTerminal` and
+  needed.** `vmshot.ps1`, then `vmkeys.ps1 -OpenTerminal` and
   `-Keys 'echo b39 console proof 0101'` — a second terminal opened on the guest's console, the line
   typed as virtual key codes, its output on screen, the terminal closed again
-  (`console-before.png`, `console-keyboard-proof.png`, `console-after.png`). Two failsafes were
+  (`console-before.png` at `Sep 6 00:59`, `console-keyboard-proof.png` and `console-after.png` at
+  `Sep 6 01:01`, each clock the guest's own top bar). The two scripts' stdout was not kept as a
+  file, so the screenshots are the whole of the evidence for this step and an earlier draft's
+  quoted output and `00:59:53` stamp have been dropped from the README. Two failsafes were
   armed first: `systemd-run --on-active=600 --unit=b39-failsafe /usr/sbin/ufw disable`, and a
   conditional `b39-failsafe2` at 300 s that would allow port 22 and disable ufw only if something
   had turned it on. `b39-failsafe2` fired at 01:07:42 CEST, read ufw as inactive and ran nothing;
@@ -3152,7 +3159,11 @@ command, with every readback, in `pyplan/gates/bug39-lan-press-2026-09-05/README
   thing the 2026-09-05 07:31 login could not show, because it went through `ssh -L` and the server
   recorded Docker's bridge gateway `172.18.0.1`. As in both earlier logins, `Enter World` was never
   clicked and no character was created.
-* **The bound this box puts on the press.** Those ports answered from the host before the press too.
+* **The bound this box puts on the press.** Those ports very likely answered from the host before
+  the press too — **an inference, and marked as one, because the only `Test-NetConnection` this run
+  took is AFTER the press** (`vmhost-ports.txt:2`, `2026-09-05T23:12:12Z`; the lane brief reports a
+  21:47 CEST probe answering `True` before any LAN step, which is a figure handed over rather than
+  one this run measured). What the run did measure is why nothing could have been filtering them:
   ufw was `inactive` with an empty `### RULES ###` section, and after the press
   `sudo -n iptables -S | grep -c ufw` answered **0** (`iptables-bound.txt:1`): none of ufw's chains
   is in the live ruleset while ufw is off, so the two rules the press wrote do not filter a packet

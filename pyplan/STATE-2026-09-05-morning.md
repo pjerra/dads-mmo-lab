@@ -14,7 +14,10 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
   result=TRUE`; server side `102 GATELOGIN last_login 2026-09-05 05:31:40 online 1 failed_logins 0`.
   That account was made through `ControllerServices`, so it is clause 13 evidence too. Route: an
   `ssh -L` tunnel with the realm temporarily at `127.0.0.1` — **Tailscale did not survive the
-  clean-ssh restore** — both since put back. Clause 15 (the LAN step) waits on §39.
+  clean-ssh restore** — both since put back. Clause 15 (the LAN step) waits on §39. **Superseded
+  2026-09-05 23:06:57 UTC: the LAN step was pressed end to end on `yulon-ubuntu` through the real
+  widgets, a client on `vmhost` logged in at 23:31:24 UTC with `last_ip 172.30.48.1`, and clause 15
+  is graded MET on the 7.1 gate line; §39 is CLOSED — `pyplan/gates/bug39-lan-press-2026-09-05/`.**
 * **7.2** — TICKED at `bdee23f5` (13:30 CEST): `lane/clause72` reworded the stale clause on what it
   meant, measured the deletion on both sides of `2fddaa0e`, and went through five review rounds
   before its record stopped carrying numbers written from memory. The previous lane refused to reword a criterion so it passes,
@@ -34,7 +37,7 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 | `lane/readybudget` | bbe6cdf4 | round 3 running — 2 blockers: a WSL cross-daemon read, and the `restarting` alive-status no test owns |
 | `lane/cancelcopy` | 2a4f0cab | round 3 running — the copy ignores the state file the app itself wrote |
 | `lane/headlesslog` | a20dae99 | round 3 running — the no-write rule is in-process only; the suite spawns children |
-| `lane/bug39-r6` | 380ef4ed | MERGED at `0bdbc4e3` after round 10 — owner: "stop at 10" (2026-09-05). Guard ALLOWs on the production path; Docker's zone judged machine-made on the real Fedora listings; the LAN button itself is still never pressed end to end on a real remote box (§39 stays OPEN on that) |
+| `lane/bug39-r6` | 380ef4ed | MERGED at `0bdbc4e3` after round 10 — owner: "stop at 10" (2026-09-05). Guard ALLOWs on the production path; Docker's zone judged machine-made on the real Fedora listings; the LAN button itself is still never pressed end to end on a real remote box (§39 stays OPEN on that). **Superseded 2026-09-05 23:06:57 UTC by `lane/b39`: pressed end to end on `yulon-ubuntu`, client login from `vmhost` at 23:31:24 UTC, §39 CLOSED — `pyplan/gates/bug39-lan-press-2026-09-05/`** |
 | `lane/doodad` | 851d0ca9 | MERGED at `5a57164d` after round 10 (same decision). The wedge is unreachable; the refused press launches no container; the issue draft's patch now applies (`doodad-2026-09-05/apply-check.txt`, doc-v2 exit 0 on both pinned revisions) |
 | `lane/clause72` | ed3102b6 | MERGED into `yulon-phase7` at `bdee23f5`; worktree and branch deleted |
 | `lane/dockerfile-value` | c1baabea | MERGED at `bdee23f5` — §29's value half closed; `render()` refuses a public value that carries the secret |
@@ -63,7 +66,10 @@ Open: 7.1, 7.2, 7.7, 7.8 (hardware), 7.10.
 
 Closed: §21, §27, §29 (both halves, `bdee23f5`), §30, §33, §40, §42 (headless log, `745307ad`, gate met on the Windows TBC second press). Filed: §43 (`keep_awake()` refuses the headless harness's own thread). Open: §39 (round 5 committed, two
 measured lockout routes left — **the LAN button is not done**), §41 (loopback realm), §42 (a headless
-install writes no log).
+install writes no log). **Superseded 2026-09-05 23:06:57 UTC: §39 is CLOSED — the LAN button was
+pressed end to end on `yulon-ubuntu` and a client on `vmhost` logged in at 23:31:24 UTC
+(`pyplan/gates/bug39-lan-press-2026-09-05/`), so the closed list gains §39 and the open list loses
+it.**
 
 ## Handoff, 21:15 CEST — for the workflow that does "all the open ones"
 
@@ -84,7 +90,13 @@ workflow".
    LAN step pressed on a real remote Linux box with a console fallback (a throwaway VM reached through
    `ssh vmhost` + Hyper-V console, never a box the lane is logged into by ssh alone). Two measured
    lockouts in the record; the round-6 run on yulon-fedora applied and restored with a
-   `systemd-run` failsafe — copy that shape.
+   `systemd-run` failsafe — copy that shape. **DONE 2026-09-05 23:06:57 UTC by `lane/b39`, which did
+   copy that shape: two `systemd-run` failsafes armed first, the console fallback proved on
+   `yulon-ubuntu` before the firewall was touched, the press through the real `ControllerView`, and a
+   3.3.5a client on `vmhost` logged in at 23:31:24 UTC. §39 CLOSED, clause 15 graded MET —
+   `pyplan/gates/bug39-lan-press-2026-09-05/`. The box was the live 7.2 install rather than a
+   throwaway VM; the lane's brief names that as the owner's decision that evening, quoting him as
+   "it can also be used to finish phase 7", and the brief is the only place this lane saw it.**
 4. **§43** — `keep_awake()` refuses the headless harness's main thread; small, Windows-measurable on
    `yulon-win11-gate` (Off; start it, host has the headroom).
 5. **7.8 macOS** and **whether to post the CMaNGOS issue** — owner decisions, not lane work. The issue
