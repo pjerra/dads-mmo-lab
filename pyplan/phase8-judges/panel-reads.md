@@ -71,9 +71,12 @@ And the compiled default disagrees with the shipped comment:
 421-  `item_template` int(11) unsigned NOT NULL DEFAULT '0' COMMENT 'Item Identifier',
 422-  PRIMARY KEY (`item`),
 ```
-Read 2026-09-06 by the third review, not by the panel. It is the same shape as AzerothCore's,
-which makes the gear-set prerequisite on 8.4b cheap — but Vanilla and Tortoise are still unread,
-and each is its own tree.
+Read 2026-09-06 by the third review, not by the panel. **Vanilla and Tortoise were read the same
+day** and carry the same five columns: `mangos-classic/sql/base/characters.sql:339-346` and
+`tortoise-wow/sql/create_databases.sql:573-581`. So all four trees carry the item's template id on
+the inventory row, which makes the equipped-set join *simpler* on the three CMaNGOS-lineage trees
+than on AzerothCore, where it needs a second hop through the item instance. The prerequisite this
+note was written to justify is therefore closed, and gear sets stay on all four families.
 
 ## 5. The AzerothCore worldserver image installs neither iproute2 nor curl
 

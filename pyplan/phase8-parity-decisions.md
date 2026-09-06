@@ -68,7 +68,7 @@ may reorder; it may not add or remove a feature without a new owner answer):
 | 8.1a–d | Live dashboard (players, bots, uptime, restart-loop), the worldserver log snapshot before every stop, the bot-marker resolver and the write ledger — **first, because it is what makes the next step's failure legible** | all four; one box per family | Q8i, Q3 |
 | 8.2a–e | The command channel: the listener bound to `0.0.0.0` **inside** the container and published on the host at `127.0.0.1` only (binding the container's own loopback is the defect this page rejects design B for), an app-owned GM-3 account verified by a round-trip **from the host**, a typed command layer with the per-tree facts as data | WotLK, TBC, Vanilla over SOAP; Tortoise stays on the attach console + MySQL reads (it has no SOAP) | Q6 |
 | 8.3a–d | Accounts: list, set password, GM level | all four; one box per family | Q8ii, Q3 |
-| 8.4a–d | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
+| 8.4a–d | Named teleport, item search, item mail, revive, set level, rename, mailed money, gear-set presets | all four; one box per family; Tortoise has no console route to an arbitrary level (searched exhaustively 2026-09-06), so that one control is not drawn there; Tortoise has no set-level and Vanilla/Tortoise mail one item per message | Q2a, Q3 |
 | 8.5a–d | Browse Bots | all four; one box per family | Q4 |
 | 8.6 | My Party | WotLK only, by a server-side route — the mod-ale Lua bridge over SOAP, which is the only route owner answer 5 leaves and which **has never been recorded working**: the one live note about it (`bridge.rs:189-195`) records it failing on 2026-08-20 with the deploy reporting success. 8.6's first question is whether the route works at all; no client addon | Q2b, Q4, Q5 |
 | 8.7a–d | Module update checks; module manifests for TBC, Vanilla and Tortoise | all four | Q8iii |
@@ -102,8 +102,8 @@ waits for this scoping's review cycle (the 2026-09-04 decision), and the rest of
 | `pyplan/README.md` §9 | "My Party / bot group builder", "Item database + in-game mail", "Teleport / GM in-game tools" — out of scope for v1, "deferred, not refused" | Deliberate v1 expansion (Q2a, Q2b): each is an `8.x` step with its own definition of done. Struck through on that page with the date, the way the Linux-native line was. |
 | `pyplan/roadmap.md` "Out of scope (do not start these in v1)" | the same three features, plus "Full native reimplementation of installers on Linux" (already overturned by Phase 7 and never struck there) | **Not edited.** Appendix A carries the replacement text for §8 and for that list. |
 | `pyplan/roadmap.md` §8 "Ordering rule: Phase 8 must not begin until Phase 7 exits" | | Overturned by Q1 for the code (2026-09-06) and by the 2026-09-04 decision for the scoping. Appendix A rewords it. |
-| `pyplan/phase7-decisions.md` "What the installer does not do" — "No account creation, no SOAP, no realmlist writer in the engine" | | Still true of the **install engine**. 8.1 enables SOAP in the installed config and creates the app's account from the controller side, after `ready`; the engine's stage list does not change. |
-| `pyplan/phase6-decisions.md` "Account creation — the finding that changes the plan": SOAP cannot create the first account | | Still true and load-bearing: 8.1's app account is written through `accounts.py`'s SRP6 row exactly because of it. |
+| `pyplan/phase7-decisions.md` "What the installer does not do" — "No account creation, no SOAP, no realmlist writer in the engine" | | Still true of the **install engine**. 8.2a enables the listener in the installed config and creates the app's account from the controller side; the engine's stage list does not change. |
+| `pyplan/phase6-decisions.md` "Account creation — the finding that changes the plan": SOAP cannot create the first account | | Still true and load-bearing: 8.2a's app account is written through `accounts.py`'s SRP6 row exactly because of it. |
 | `pyplan/checklist.md` Phase 8 preamble "[blocked] on Phase 7 … Scope still TBD" | | Replaced by the numbered `8.x` boxes; the ticked 2026-08-21 identification box is kept. |
 
 ---
@@ -140,12 +140,18 @@ discipline in the set: at `7bc5ebd3` `ui/controller_view.py` was 1937 lines, and
 not add two more tabs inside it, the only one that says who tears a tab down when an uninstall
 finishes (`main.py:189` keeps `drop_controller`; the view signals up), and the only one whose
 "(exists)" test citations all resolve. What sank it as the shape is that its channel model is
-built on a transport behaviour that does not exist. B derives "the server is starting" from a SOAP
-connection that "connects and blocks"; on all three SOAP cores the SOAP thread is created **after**
-`SetInitialWorldSettings()` returns (`AC Main.cpp:315`, `:337-339`; `TBC/VAN Master.cpp:126`,
-`:248`), so during a map load the connect is *refused*, and B's 8.1 gate line — "a Start shows
-'waiting for the world to finish loading' before 'ready'" — describes a state its own design never
-enters. Two more: it omits `SOAP.IP` entirely, whose shipped default binds the container's own
+built on a transport behaviour it never verified — **and the rebuttal this page first gave was
+itself wrong, which the spike later caught.** B derives "the server is starting" from a connection
+that "connects and blocks". The first version of this paragraph answered that the connect is
+*refused*, because the SOAP thread is created only after `SetInitialWorldSettings()` returns
+(`AC Main.cpp:315`, `:337-339`; `TBC/VAN Master.cpp:126`, `:248`). Those citations are right and the
+inference was not. Measured 2026-09-06 with a container up, its port published and nothing listening
+inside: the connection **succeeds and returns nothing**
+(`pyplan/gates/8-spikes/published-port-vs-container-loopback/`). B's description was closer to the
+truth than the rebuttal. What is true, and is why B is still not the shape, is that a connection
+tells you nothing here at all — a misconfigured bind, a world still loading and a healthy-but-slow
+server are one observation, and only the container's ready marker separates them — so a channel
+model that derives "starting" from the connection cannot work, whichever way the connection goes. Two more: it omits `SOAP.IP` entirely, whose shipped default binds the container's own
 loopback, which a published port does not serve — measured on 2026-09-06, and the failure is worse
 than "cannot reach": Docker accepts the connection and relays nothing, so the misconfiguration
 answers with silence rather than a refusal
@@ -225,14 +231,14 @@ for a file that is not there teaches a reader to discount the table.
 | Data | `catalog/catalog.py` (changed) | The per-entry operations block: channels, GM-level shape, command templates, caps, bot marker, table and column names, and the optional Lua bridge — typed, frozen, extra keys forbidden | Hold a value that belongs to one install; know how a command is sent |
 | Wire | `soap.py` (new) | One command envelope over the standard library with Basic auth and bounded timeouts; the reply parsed into result, fault, or transport status | Build command text; hold a lock; know a game; let a password reach a log, a repr or an exception |
 | Delivery | `channel.py` (new) | The answer type, the channel protocol, its **two** implementations — SOAP and attach (owner answer 10 refused the third) — and the ranking that picks one from the entry; one lock per install covering both transports, the Console tab's attach included; mapping a transport failure to a reason from container state. **A mutation on the attach transport is indeterminate until its own verify read answers**: that transport cannot separate a reply from the server's own asynchronous output (`console.py:10-12`, `:522-527`), so an action with no verifier is not offered there | Contain command text; retry a write after a timeout; contain UI |
-| Text | `commands.py` (new) | The command built from the entry's template; the quoting rule; argument validation; and the one predicate that both decides whether a control is drawn and supplies the sentence when it is not | Send anything; know a container name |
+| Text | `commands.py` (new) | The command built from the entry's template; the quoting rule; **the leading-dot rule — the console parser strips a leading `.` or `!`, and the prior art spells some commands with one and some without, so templates carry none and the rule lives here**; argument validation; and the one predicate that both decides whether a control is drawn and supplies the sentence when it is not | Send anything; know a container name |
 | Reads | `dbreads.py` (new) | The typed reads over the existing SQL seam (`apply.py:504`): bot clause, online counts, item search, teleport targets, characters, accounts, bots, mail counts, group members | Call the write seam — asserted over the AST, not by grep |
 | Setup | `channel_setup.py` (new) | Per-tree enable **through `docker.start_staged()`, never a bare compose recreate** (correction 1); the app account's create-verify-persist state machine; the credential file under the app's config directory; and the rollback when the world does not come back | Persist before a round-trip has answered; rewrite the password of any account but its own |
 | Evidence | `logsnap.py` (new) | The pre-stop log snapshot: this install's world container resolved through its own compose project, a bounded tail, a partial file renamed on success, retention that never prunes the file just written | Block a stop, on failure or on a hang |
 | Verdict | `dashboard.py` (new) | Composing container state and the two counts into a verdict with three-valued fields; the poll budget | Fire a world-thread command on a timer |
 | Features | `gm.py`, `party.py`, `purge.py`, `steam.py` (new) | One feature family each, every action shaped capability, command, channel, verify read; `purge.plan()` returns the existing three-valued ownership type rather than a fourth one (correction 9) | Build SQL; write into a client folder |
 | Surface | `ui/widgets/outcome.py`, `ui/characters_view.py`, `ui/bots_view.py`, `ui/uninstall_dialog.py` (new) | Rendering an answer in all three outcomes; the two new tabs as sub-views that signal up and never reach up | Contain business logic, SQL, command text or a subprocess |
-| Changed | `controller.py`, `docker.py`, `apply.py`, `accounts.py`, `composegen.py`, `ui/controller_view.py`, `main.py` | Additive only: a pre-stop snapshot hook; a bounded log tail; a running-state seam checked inside the SQL step; a password reset for one named account; one render token and an override re-render; new service fields and tabs; one signal connection | — |
+| Changed | `controller.py`, `docker.py`, `apply.py`, `accounts.py`, `composegen.py`, `ui/controller_view.py`, `main.py` | Additive only: a pre-stop snapshot hook; a bounded log tail; **the published-bindings read filtered by compose project before it can refuse anything (correction 4) — unfiltered it answers for whichever container holds the port**; a running-state seam checked inside the SQL step; a password reset for one named account; one render token and an override re-render; new service fields and tabs; one signal connection | — |
 
 The Q7 guard goes **inside** the applier's SQL step (`apply.py:1359`), the one point every caller
 passes through — not in install and remove, which miss any other caller, and not in the view,
@@ -281,7 +287,7 @@ provides the in-game half for WotLK after the LAN step.
 | **8.4a–d** | Named teleport, item search, item mail, mailed money, revive, set level, rename, gear sets | All four; every verb once offline and once online, each with its in-game effect on screen |
 | **8.5a–d** | Browse Bots | All four; the count equals the hand query and the in-game who-list finds a listed bot |
 | **8.6** | My Party, WotLK only, over the Lua bridge | The Ubuntu VM after the owner's rebuild; a bot in the party frame |
-| **8.7a–d** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | WotLK and one CMaNGOS box |
+| **8.7a–d** | Module update checks; manifests for the three CMaNGOS games; the applier's guard | All four, one box per family |
 | **8.8** | Steam, Linux and Steam Deck only | A machine with Steam — none exists on this side |
 | **8.9a–b** | Uninstall and purge, as `phase8-decisions.md` | WotLK on a **throwaway** install, never the 7.2 one; one CMaNGOS game |
 
@@ -305,7 +311,7 @@ because the base controller and the service assembly both change.
   decision that keeps the committed rendered-compose fixtures byte-identical, so Phase 7.1's
   "matches the fixture" assertion keeps meaning what it meant.
 - The shared CMaNGOS base template gains one publish line. The "ports in exactly one file"
-  invariant holds. No CMaNGOS compose-config fixture exists, so the 8.1 gate captures the rendered
+  invariant holds. No CMaNGOS compose-config fixture exists, so the 8.2c and 8.2d gates capture the rendered
   config before and after and the diff is that line — and the committed gate captures for 7.4c,
   7.5 and 7.6 are stale on that block, which is named here rather than discovered later.
 - `controller.py` gains one optional constructor argument and two one-line calls; every existing
@@ -365,12 +371,14 @@ a claim.
 
 ---
 
-## Risks worth re-reading before 8.1
+## Risks worth re-reading before 8.2a
 
 - **Turning SOAP on can stop the server, and worse on the CMaNGOS family than on WotLK.** The
-  measured behaviours are in the correction table above. The price of the guard is one connect
-  probe before the press; the price of skipping it is a restart loop on a server whose characters
-  were not saved.
+  measured behaviours are in the correction table above. The guard is not a probe — a connect probe
+  passes on the broken configuration, measured — it is that **the world must be down for the press**:
+  one stop and one start the user makes anyway. The failure is then caught after their own Start, by
+  the restart count and this run's ready marker, on a server that had no players on it. The price of
+  skipping it is a restart loop on a server whose characters were not saved.
 - **A timeout does not un-queue a command.** SOAP waits on the world thread; if the launcher's
   deadline expires first the command still runs. No write is ever retried automatically, every
   write has a verify read, and the app says the command may still arrive rather than that it failed.
@@ -411,8 +419,8 @@ a claim.
 
 ## What the implementer should NOT build yet
 
-- No fourth transport: no remote-access console, no playerbot command server, no Lua bridge on
-  Tortoise, **and no remote-access console** — `Ra.Enable` stays 0 and 8.1's gate asserts nothing
+- No fourth transport: no playerbot command server and no Lua bridge on
+  Tortoise, **and no remote-access console** — `Ra.Enable` stays 0 and 8.2a's gate asserts nothing
   is listening on 3443, because a second remote channel left at its shipped default while the first
   is deliberately opened is the same class of finding as the playerbot command server; **and no
   writer for Tortoise's command queue** — answer 10 makes its Phase 8 actions
@@ -526,15 +534,20 @@ Each is a correction to the record, not to the plan, and each was mine.
 Dropped judge requirements restored: the remote-access console asserted absent on 3443 alongside
 the playerbot command server (two judges had required it; only the second had landed); the
 Console-tab route removed from 8.2a and 8.2b, because the maintainer required it become its own
-sub-step behind the capability predicate and that reversal had gone unrecorded; corrections 1, 4
+sub-step behind the capability predicate and that reversal had gone unrecorded; corrections 1
 and 9 carried into the architecture table rather than living only in the table of corrections.
+**Correction 4 was claimed here in the first round and not carried; it is carried now, on the docker
+row.**
 
 Hedges restored to their sources: Tortoise's missing set-level command is now "no console route
 found", because the read searched two handler names and not that tree's whole table; the reads
-behind the six "settled by reading" facts are being committed rather than summarised.
+behind the six "settled by reading" facts were committed rather than summarised
+(`pyplan/phase8-judges/panel-reads.md`).
 
-Citation and record fixes: four citations off by a line or a range; the delta's declared path root,
-which said `pylauncher/` while most citations are relative to the package inside it; the method
+Citation and record fixes: four citations off by a line or a range — claimed in the first round and
+actually made in the second, recorded here rather than smoothed over; the delta's declared path
+root, which said `pylauncher/` while most citations resolve under the package inside it and
+`catalog/` resolves under both, now stated per prefix; the method
 note that said eight questions when the record holds ten, two of them answered after the judging;
 an appendix that reported an answered question as open; both stated reasons for rejecting design C,
 each wider than that design's own text; and present-tense assertions about the tree pinned to the
@@ -549,10 +562,11 @@ the lettered boxes and states that no family's later half runs before its own ch
 shared throwaway install's lifetime is stated across the seven boxes that need it rather than the
 two that were named.
 
-Evidence collected and then unused, now carried: the leading-dot rule for command text, the
-case-sensitive character-name lookup that answered "not online" for an online character in the
-prior art, and the escape character that survives a stricter SQL mode — all three were read, all
-three land on paths that take typed text, and none had reached either document.
+Evidence collected and then unused, now carried: the case-sensitive character-name lookup that
+answered "not online" for an online character in the prior art, and the escape character that
+survives a stricter SQL mode. Both land in 8.4a. **A third — the leading-dot rule for command text,
+which the console parser strips and which the prior art spells inconsistently — was claimed here in
+the first round and never carried; it is carried now, on the command-text module's row.**
 
 ### Refuted, with the reason
 
@@ -604,12 +618,28 @@ matching edit, given below it.
 > `pyplan/phase8-decisions.md`. My Party, item mail and teleport were out of v1 scope in
 > README §9 and are a deliberate expansion, each with its own step.
 >
-> **Ordering:** 8.1 may start now, on the branch stacked on Phase 7's pull request — the owner
-> declined the recommendation that it wait for that merge. It waits neither for the merge nor for
-> the Phase 7 exit box (owner decision, 2026-09-06); the rest of Phase 8 follows 8.1. Delivery is WotLK first, one box per
-> emulator family, the way Phase 7 ran.
+> **Ordering:** the phase's first step may start now, on the branch stacked on Phase 7's pull
+> request — the owner declined the recommendation that it wait for that merge. It waits neither for
+> the merge nor for the Phase 7 exit box (owner decision, 2026-09-06); the rest follows it. Delivery
+> is WotLK first, one box per emulator family, the way Phase 7 ran. (The owner answered "8.1 may
+> start now" when the command channel was numbered 8.1; the review round that followed put
+> observability first, so that step is now 8.2. The release is read as "the phase's first step",
+> which is the reading the reordering supports and which the owner has not been asked to confirm.)
 
-### 8.1 The command channel
+### 8.1 Observability
+1. Save the worldserver log before every stop, remove and uninstall — this install's own container,
+   a bounded tail, the install id in the filename, retention that never prunes the file just
+   written.
+2. Show players, bots, uptime and a restart-loop verdict from database reads and container state,
+   never from a command on a timer; resolve the bot marker the way each server resolves it and
+   report which source answered.
+3. First, because it is what makes 8.2's failure legible: enabling a listener can stop a server,
+   and on two of the four trees it does so without saving characters.
+4. _Definition of done:_ the counts equal the same query run by hand in the same minute; a forced
+   crash reads as a restart loop rather than as up; every stop leaves a log file the user can open;
+   an unreadable bot marker refuses to answer rather than reporting zero.
+
+### 8.2 The command channel
 1. Add a per-entry operations block to `catalog.json` carrying every per-tree fact: which channels
    exist, how each is enabled, the GM-level shape, the command templates and their caps, the bot
    marker, and the table and column names. **[style]**
@@ -618,18 +648,14 @@ matching edit, given below it.
 3. Enable the listener in the installed configuration — bound to all interfaces **inside** the
    container, published on the host's loopback only — and create an app-owned administrator
    account, verified by a real round-trip **from the host through the published port** before its
-   credentials are stored.
-4. _Definition of done:_ on each family's box the Server tab reports the channel verified; the
-   account and its access row exist; the port is published on loopback only; the world container
-   is running with an unchanged restart count and this run's ready marker after the change; a
-   deliberately wrong credential is refused and the repair path restores it.
-
-### 8.2 Live dashboard and the pre-stop log snapshot
-1. Show players, bots, uptime and a restart-loop verdict from database reads and container state,
-   never from a command on a timer.
-2. Save the worldserver log before every stop, remove and uninstall.
-3. _Definition of done:_ the counts equal the same query run by hand; a forced crash reads as a
-   restart loop rather than as up; every stop leaves a log file the user can open.
+   credentials are stored. **The press requires the world stopped:** a connect probe cannot make a
+   bind atomic, and it passes on the broken configuration anyway.
+4. _Definition of done:_ on each family's box the Server tab reports the channel verified, with the
+   reply text captured from the host; the app account exists at the level that tree's own schema
+   holds it in; the port is published on the host's loopback only; after the user's own Start the
+   world container is running with an unchanged restart count and this run's ready marker; a
+   deliberately wrong credential is refused and the repair path restores it without creating a
+   second account.
 
 ### 8.3 Accounts: list, set password, GM level
 1. List human accounts, excluding bots and the app's own; set a password and a GM level through
@@ -663,9 +689,10 @@ matching edit, given below it.
    names the step and writes nothing; a manifest applied to a stopped server reads back from its
    configuration file.
 
-### 8.8 Steam integration — Linux and Steam Deck only
+### 8.8 Steam integration — Linux and Steam Deck only **[blocked]** on a machine with Steam
 1. Add the server launcher and the game client to the Steam library with artwork and the
-   compatibility tool.
+   compatibility tool. The shortcuts file format is recorded nowhere in this repository and must be
+   read from a real Steam profile first.
 2. _Definition of done:_ both entries appear in a real Steam library and launch.
 
 ### 8.9 Uninstall and purge
@@ -678,7 +705,9 @@ matching edit, given below it.
 line names, with the evidence committed under `pyplan/gates/8.x-*`; no definition of done is
 satisfied by a skip, an absent capture, a stale marker or an exit code; no capability is reachable
 only from a command line; and Phase 7's controller-surface and cross-server regression gates are
-re-run green on the merged tip.
+re-run green on the merged tip. **Two carve-outs, named rather than hidden:** 8.8 is `[blocked]` on
+a machine with Steam that does not exist on this side, the way §7.8 is blocked on hardware; and the
+sentence Tortoise shows on native Windows, where it has no pseudo-terminal, has no gate box.
 ```
 
 And in the roadmap's closing "Out of scope (do not start these in v1)" list, the first line is
