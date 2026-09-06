@@ -1050,6 +1050,58 @@ class CharacterTable(_Strict):
     online: str = Field(default="online", min_length=1)
 
 
+class Operations(_Strict):
+    """How this tree's command channel is turned on and reached (8.2a).
+
+    Optional on an entry, and absent until that tree's own box measures it. The
+    environment keys are not spelled by hand: AzerothCore reads every ini key
+    `X` as `"AC_" + upper_snake(X)` (`Config.cpp:435-438`, transform at
+    `:370-374`), and the environment wins over both the file and the compiled
+    default — including for keys absent from the file (`:540-552`). The catalog
+    already relies on that rule for `AiPlayerbot.MinRandomBots`, which is the
+    proof it is generic rather than per-key.
+    """
+
+    channel: Literal["soap", "attach"]
+    port: int = Field(gt=0, lt=65536, description="The channel's port inside the container.")
+    gm_level: int = Field(ge=0, le=3, description="The level the channel needs of its account.")
+    enable_env: dict[str, str] = Field(
+        min_length=1,
+        description=(
+            "What the generated override must carry for the channel to exist. `SOAP.IP` is "
+            "`0.0.0.0` on purpose: the listener binds every interface INSIDE the container, "
+            "and the host side is pinned to loopback by the compose publication. A listener on "
+            "the container's own loopback does not serve a published port and does not refuse "
+            "either — measured, `gates/8-spikes/published-port-vs-container-loopback/`."
+        ),
+    )
+    must_not_listen: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "Ports that must be silent inside the container once the press has run. 8888 is "
+            "mod-playerbots' command server, which defaults to ON — 8888 in the dist AND in the "
+            "compiled fallback (`PlayerbotAIConfig.cpp:468`) — takes `<command>,<bot guid>` "
+            "lines on its own detached thread, and this install loads no module conf at all, so "
+            "the compiled default is what is in force. 3443 is the telnet remote console."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_soap_channel_says_how_it_is_switched_on(self) -> Operations:
+        """A channel nobody can enable is a channel that does not exist.
+
+        Checked here because the relationship has no other owner: `enable_env`
+        cannot see `channel`, and a `soap` entry whose keys never mention SOAP
+        would install cleanly and answer nothing.
+        """
+        if self.channel == "soap" and not any("SOAP" in key for key in self.enable_env):
+            raise ValueError(
+                "a soap channel must name the environment key that turns SOAP on; "
+                f"these are {sorted(self.enable_env)}"
+            )
+        return self
+
+
 class Observability(_Strict):
     """What the dashboard needs in order to count this install's population (8.1a).
 
@@ -1078,6 +1130,13 @@ class CatalogEntry(_Strict):
     realmlist: Realmlist = Realmlist()
     console: Console = Console()
     accounts: Accounts = Accounts()
+    operations: Operations | None = Field(
+        default=None,
+        description=(
+            "How this tree's command channel is enabled and reached (8.2a). `None` until that "
+            "tree's own box has measured it against its own core."
+        ),
+    )
     observability: Observability | None = Field(
         default=None,
         description=(

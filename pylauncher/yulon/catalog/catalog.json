@@ -91,6 +91,18 @@
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
       },
+      "operations": {
+        "channel": "soap",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_env": {
+          "AC_SOAP_ENABLED": "1",
+          "AC_SOAP_IP": "0.0.0.0",
+          "AC_AI_PLAYERBOT_COMMAND_SERVER_PORT": "0",
+          "AC_RA_ENABLE": "0"
+        },
+        "must_not_listen": [8888, 3443]
+      },
       "observability": {
         "characters": {
           "table": "characters",
