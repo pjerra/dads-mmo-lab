@@ -68,6 +68,14 @@ class Verdict:
     bots: int | None = None
     problem: str = ""
     warning: str = ""
+    database_unreachable: bool = False
+    """Set only when the READ failed, never when the bot marker was the problem.
+
+    The distinction is the whole point of the field. A database that will not
+    answer means the server cannot be acted on; a blank prefix in a conf file
+    means two numbers are missing and nothing else. Collapsing them would refuse
+    every command because somebody emptied a configuration key.
+    """
 
     @property
     def stable(self) -> bool:
@@ -80,8 +88,16 @@ class Verdict:
 
         `unknown` is False on purpose: a server nobody could ask about is not a
         server anyone should fire a command at.
+
+        So is a world whose database has gone, and that clause was added after
+        the machine refuted the first version (m910q, 2026-09-06). Take the
+        database away from an AzerothCore worldserver and it exits, the daemon
+        restarts it, and this reads `restart_loop`. Take it away from a CMaNGOS
+        one and the process stays up retrying the connection — `running`,
+        `RestartCount 0`, indefinitely — so `state == "up"` was true of a server
+        nobody could play on, and this said yes.
         """
-        return self.state == "up"
+        return self.state == "up" and not self.database_unreachable
 
 
 def line(verdict: Verdict) -> str:
@@ -197,6 +213,7 @@ class Dashboard:
             bots=counts.bots,
             problem=counts.problem,
             warning=counts.warning,
+            database_unreachable=bool(counts.problem),
         )
 
     def _uptime(self, started_at: str) -> timedelta | None:

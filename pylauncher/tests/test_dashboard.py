@@ -272,3 +272,58 @@ def test_an_uptime_under_a_minute_still_reads_as_a_duration() -> None:
     verdict = dashboard.Verdict("up", players=0, bots=0, uptime=timedelta(seconds=42))
 
     assert "up 42s" in dashboard.line(verdict)
+
+
+def test_a_world_whose_database_is_gone_is_not_stable_even_though_it_is_up(
+    tmp_path: Path,
+) -> None:
+    """Measured on m910q, 2026-09-06, and it refuted what `stable` did.
+
+    Take the database away from an AzerothCore worldserver and it exits; the
+    daemon restarts it, the count climbs, and the verdict says `restart_loop`.
+    Take it away from a CMaNGOS one and the process STAYS UP, retrying the
+    connection: `running`, `RestartCount 0`, for as long as you leave it. So on
+    that tree `state == "up"` was true of a server nobody could play on, and
+    `stable` — the value 8.2a's command interlock keys off — said yes.
+
+    A server whose database cannot be read is not one to aim a command at.
+    """
+
+    class _Dead:
+        def query(self, db: str, statement: str) -> str:
+            raise RuntimeError("ERROR 2002 (HY000): Can't connect to local MySQL server")
+
+    watch = dashboard.Dashboard(
+        SPEC,
+        WOTLK,
+        _install(tmp_path),
+        sql=_Dead(),
+        state_of=lambda _c: _running(),
+        now=lambda: NOW,
+    )
+
+    verdict = watch.tick()
+
+    assert verdict.state == "up"
+    assert verdict.stable is False
+    assert "could not read" in dashboard.line(verdict)
+
+
+def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path) -> None:
+    """The other half: a blank bot prefix says nothing about the server.
+
+    Refusing every command because someone emptied a conf key would be the
+    mirror of the bug above — and the database was never even asked.
+    """
+    server_dir = _install(tmp_path)
+    (server_dir / WOTLK.observability.bots.prefix_conf_file).write_text(
+        "AiPlayerbot.RandomBotAccountPrefix =" + chr(10), encoding="utf-8"
+    )
+    watch = dashboard.Dashboard(
+        SPEC, WOTLK, server_dir, sql=_FakeSql(), state_of=lambda _c: _running(), now=lambda: NOW
+    )
+
+    verdict = watch.tick()
+
+    assert verdict.problem != ""
+    assert verdict.stable is True, "a conf key is not a reason to refuse commands"

@@ -812,7 +812,14 @@ def project_containers(project: str, *, wsl_distro: str | None = None) -> list[s
 
 
 LOG_TAIL_LINES = 2000
-"""How many lines of a container's log a snapshot keeps.
+"""How many log ENTRIES of a container's log a snapshot keeps.
+
+Entries, not lines, and the difference is measured rather than assumed: on
+m910q on 2026-09-06 a `--tail 2000` of a CMaNGOS worldserver produced a file of
+**3114 newline-terminated lines** and no carriage returns. The json-file driver
+stores one entry per write, and a server that writes a multi-line message in one
+call — a banner, an assertion block — spends one entry on several lines. The
+byte cap below is what actually bounds the file; this bounds the read.
 
 A bound rather than everything, because `docker logs` prints every line the
 container has written across every restart, and a crash-looping worldserver
