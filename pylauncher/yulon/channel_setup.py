@@ -365,3 +365,96 @@ def ensure(
         verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
     )
     return verified
+
+
+# -- what the tab is handed --------------------------------------------------
+
+
+class InstallChannel:
+    """One install's channel setup, as the Server tab sees it (8.2a).
+
+    Two questions belong together here: pressing enable, and asking where the
+    setup has got to. They are the same state machine from two sides.
+
+    The state survives an app restart through the credential file and nothing
+    else. A saved credential means a round trip answered — that is the only way
+    one gets written — so finding one is `Verified` and finding none is `Idle`.
+    Nothing is inferred from a conf file: a written setting is not a working
+    channel, which is the distinction this whole box exists to keep.
+    """
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        server_dir: Path,
+        *,
+        templates_root: Path,
+        install_id: str,
+        create: Callable[[str, str, int], object],
+        channel_for: Callable[[soap.Endpoint], object],
+        config_dir: Path | None = None,
+        db_password: str | None = None,
+    ) -> None:
+        self.entry = entry
+        self.server_dir = server_dir
+        self.templates_root = templates_root
+        self.install_id = install_id
+        self._create = create
+        self._channel_for = channel_for
+        self._config_dir = config_dir
+        self._db_password = db_password
+        self._state: State = self._from_disk()
+
+    def _from_disk(self) -> State:
+        saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
+        if saved is None:
+            return Idle()
+        return Verified(account=saved.account, password=saved.password)
+
+    def enable(self, *, world_running: bool) -> Enabled:
+        """Write the channel on. Refuses while the world is running."""
+        return enable(
+            self.entry,
+            self.server_dir,
+            templates_root=self.templates_root,
+            world_running=world_running,
+            db_password=self._db_password,
+        )
+
+    def setup_state(self) -> State:
+        """Where the setup has got to, without asking the server anything."""
+        return self._state
+
+    def prove(self) -> State:
+        """Move the setup one step against the live server, and keep the answer.
+
+        Called after a start, not on a timer: it creates an account the first
+        time and then asks the server one real question. `ensure()` is what
+        makes a second call re-verify rather than re-create.
+        """
+        operations = self.entry.operations
+        if operations is None:
+            return self._state
+        account = account_name(self.install_id)
+        password = (
+            self._state.password
+            if isinstance(self._state, Pending | Verified)
+            else generate_password()
+        )
+        endpoint = soap.Endpoint(
+            host="127.0.0.1", port=operations.port, account=account, password=password
+        )
+        self._state = ensure(
+            account=account,
+            password=password,
+            create=self._create,
+            channel=self._channel_for(endpoint),
+            game=self.entry.id,
+            install_id=self.install_id,
+            host=endpoint.host,
+            port=endpoint.port,
+            config_dir=self._config_dir,
+            state=self._state,
+            gm_level=operations.gm_level,
+        )
+        return self._state

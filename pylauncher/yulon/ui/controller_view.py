@@ -24,6 +24,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -44,9 +45,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from yulon import channel as channel_module
+from yulon import channel_setup, docker, install_wiring, logsnap, networking, platform, resources
 from yulon import dashboard as dashboard_module
-from yulon import docker, install_wiring, logsnap, networking, platform
 from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
@@ -94,6 +97,26 @@ class UnsupportedGameError(RuntimeError):
     """
 
 
+class ChannelSetup(Protocol):
+    """What the Server tab needs of the command channel (8.2a).
+
+    Two methods, and the split matters: `enable()` is told whether the world is
+    running rather than deciding for itself, because the view is what knows the
+    status and `channel_setup` is what owns the rule. Neither guesses at the
+    other's job.
+
+    `setup_state()` rather than `status()` deliberately: `docker.status()` takes
+    a `wsl_distro`, and `test_controller_view.py`'s seam guard flags any call in
+    this file that names a distro-aware seam without passing one. A method here
+    that shares that name would have to be excused by hand, and a guard with an
+    exemption for a name collision is a guard one step nearer to useless.
+    """
+
+    def enable(self, *, world_running: bool) -> object: ...
+
+    def setup_state(self) -> object: ...
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -131,6 +154,13 @@ class ControllerServices:
 
     Held here as well so the tab can name the file that was just written: the
     controller's own return value is about stopping, not about evidence.
+    """
+    channel_setup: ChannelSetup | None = None
+    """This install's command-channel setup, for a game that has one (8.2a).
+
+    A small object rather than two callables because the two questions belong
+    together: pressing enable and asking where the setup has got to are the same
+    state machine seen from two sides.
     """
 
     @classmethod
@@ -318,6 +348,7 @@ def _assemble(
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
     dashboard: Callable[[], dashboard_module.Verdict] | None = None,
     log_snapshot: logsnap.Recorder | None = None,
+    channel_setup: ChannelSetup | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -346,6 +377,7 @@ def _assemble(
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
         dashboard=dashboard,
         log_snapshot=log_snapshot,
+        channel_setup=channel_setup,
     )
 
 
@@ -384,12 +416,29 @@ def _for_wotlk(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2a. The account is made through this game's own SRP6 row path — the seam
+    # the Accounts tab already uses — so the channel's account is created the
+    # way every other account on this install is.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        create=lambda name, pw, level: wotlk_accounts.create_account(
+            sql, name, pw, gm_level=level, scheme=entry.accounts.scheme or "azerothcore"
+        ),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        channel_setup=channel,
         controller=Controller(
             spec,
             server_dir,
@@ -666,6 +715,24 @@ so that "which games can this build manage?" has an answer that can be printed
 """
 
 
+def _channel_sentence(state: object) -> str:
+    """One line for where the channel setup has got to.
+
+    A function rather than a method so what it says can be read without a
+    widget, the same reason `dashboard.line()` is one.
+    """
+    if isinstance(state, channel_setup.Verified):
+        return f"Command channel: verified as {state.account}."
+    if isinstance(state, channel_setup.Pending):
+        return (
+            f"Command channel: the account {state.account} exists and is waiting to be proved. "
+            "Start the server if it is not running."
+        )
+    if isinstance(state, channel_setup.GaveUp):
+        return f"Command channel: not set up. {state.reason}"
+    return "Command channel: not set up yet."
+
+
 def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
     """Which host address each published port is bound to, or None if docker refused.
 
@@ -837,6 +904,15 @@ class ControllerView(QWidget):
         self.verdict_label = QLabel("", tab)
         self.verdict_label.setWordWrap(True)
         self.verdict_label.setVisible(False)
+        # 8.2a. Both are hidden for a game whose channel is not wired: 8.2b,
+        # 8.2c and 8.2d add their own, and a control that cannot work is worse
+        # than no control.
+        self.channel_label = QLabel("", tab)
+        self.channel_label.setWordWrap(True)
+        self.channel_label.setVisible(self.services.channel_setup is not None)
+        self.enable_channel_button = QPushButton("Turn on the command channel", tab)
+        self.enable_channel_button.setVisible(self.services.channel_setup is not None)
+        self.enable_channel_button.clicked.connect(self.enable_channel)
         self.status_label = QLabel("status: unknown", tab)
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
@@ -890,6 +966,8 @@ class ControllerView(QWidget):
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.channel_label)
+        box.addWidget(self.enable_channel_button)
         box.addLayout(row)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
@@ -984,6 +1062,11 @@ class ControllerView(QWidget):
             return
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
+        # The interlock, and the first use of the value 8.1 published. It reads
+        # `stable` rather than re-deriving it from the state word: a world that
+        # is `up` with an unreachable database is not stable, which is exactly
+        # what the TBC gate found in the first version of that property.
+        self.enable_channel_button.setEnabled(result.stable)
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:
@@ -996,6 +1079,40 @@ class ControllerView(QWidget):
         self._verdict_pending = False
         self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
         self.verdict_label.setVisible(True)
+
+    @Slot()
+    def enable_channel(self) -> None:
+        """Press the enable, and show what it said.
+
+        The press itself refuses while the world is running — that refusal is
+        the whole shape of 8.2a — so this hands it the status it already knows
+        rather than re-deciding, and shows the sentence either way.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self.problem_label.setText("")
+        running = self.stop_button.isEnabled()
+        try:
+            setup.enable(world_running=running)
+        except Exception as exc:  # noqa: BLE001 - the refusal is a sentence, not a crash
+            self.problem_label.setText(str(exc))
+            return
+        self.problem_label.setText(
+            "The command channel is written into this install's configuration. It is checked "
+            "the next time you start the server."
+        )
+        self.refresh_channel()
+
+    @Slot()
+    def refresh_channel(self) -> None:
+        """Say where the channel setup has got to, in words."""
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        state = setup.setup_state()
+        self.channel_label.setText(_channel_sentence(state))
+        self.channel_label.setVisible(True)
 
     @Slot()
     def recheck(self) -> None:

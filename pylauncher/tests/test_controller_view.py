@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import dashboard, docker, logsnap, networking, runner
+from yulon import channel_setup, dashboard, docker, logsnap, networking, runner
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
@@ -1531,7 +1531,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:339 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:370 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1545,11 +1545,11 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
-    assert "networking.apply:339" in calls, "the call this test pins has moved; re-pin it"
+    assert "networking.apply:370" in calls, "the call this test pins has moved; re-pin it"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:339" not in missing, missing
+    assert "apply() at controller_view.py:370" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -2278,3 +2278,168 @@ def test_the_tbc_tab_is_wired_with_its_own_dashboard_and_snapshot(
     assert isinstance(services.log_snapshot, logsnap.Recorder)
     assert services.controller.pre_stop is services.log_snapshot
     assert services.log_snapshot.spec.world == "tbc-mangosd", "it must snapshot THIS tree's world"
+
+
+# -- 8.2a: the command channel on the tab -----------------------------------
+
+
+class _StubSetup:
+    """Stands in for the channel-setup seam the wiring hands down."""
+
+    def __init__(self, state: object = None, refuse: str = "") -> None:
+        self.state = state
+        self.refuse = refuse
+        self.presses = 0
+        self.world_running_when_pressed: list[bool] = []
+
+    def enable(self, *, world_running: bool) -> object:
+        self.presses += 1
+        self.world_running_when_pressed.append(world_running)
+        if self.refuse:
+            raise channel_setup.EnableRefused(self.refuse)
+        return channel_setup.Enabled(path=Path("override.yml"), changed=True)
+
+    def setup_state(self) -> object:
+        return self.state
+
+
+def _with_channel(ps: _Ps, tmp_path: Path, stub: _StubSetup) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.channel_setup = stub
+    return services
+
+
+def test_the_enable_button_is_offered_only_for_a_game_that_has_a_channel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.2b, 8.2c and 8.2d wire their own; a tab without one shows no button."""
+    plain = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert plain.enable_channel_button.isVisibleTo(plain) is False
+
+
+def test_pressing_enable_while_the_world_runs_says_so_and_does_not_write(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The refusal is the feature, so the tab has to carry its sentence."""
+    stub = _StubSetup(refuse="the server has to be stopped before the command channel...")
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+    view.refresh_status()
+
+    view.enable_channel()
+
+    assert "stopped" in view.problem_label.text()
+
+
+def test_the_press_is_told_whether_the_world_is_running_rather_than_deciding_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The view knows the status; the module owns the rule. Neither guesses."""
+    stub = _StubSetup()
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    ps.names = ""
+    view.refresh_status()
+
+    view.enable_channel()
+
+    assert stub.world_running_when_pressed == [False]
+
+
+def test_after_a_successful_press_the_tab_says_it_is_checked_at_the_next_start(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Nothing is verified yet: the setting is read when the world starts."""
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, _StubSetup()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.enable_channel()
+
+    said = view.problem_label.text().lower()
+    assert "start" in said
+
+
+def test_a_verified_channel_is_shown_with_the_time_it_was_proved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Verified(account="YULON_AB", password="pw"))
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "verified" in view.channel_label.text().lower()
+
+
+def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.GaveUp(account="YULON_AB", reason="three round trips did not prove it")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "three round trips" in view.channel_label.text()
+
+
+# -- the interlock ----------------------------------------------------------
+
+
+def test_a_command_control_is_disabled_while_the_server_is_unstable(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The value 8.1 published, used for the first time here.
+
+    `stable` is False for a restart loop, for a daemon that cannot be asked, and
+    — since the TBC gate refuted the first version — for a world whose database
+    has gone. Every one of those is a server not to aim a command at.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("restart_loop", restarts=4)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is False
+
+
+def test_a_command_control_is_enabled_again_once_the_server_settles(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("up", players=0, bots=500)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True
+
+
+def test_the_interlock_reads_stable_rather_than_the_state_word(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A world that is `up` with an unreachable database is not stable.
+
+    Keying off `state == "up"` would pass here, which is exactly the bug the
+    TBC gate found in `stable` itself. The interlock must read the property, not
+    re-derive it.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict(
+        "up", problem="could not read the server's characters", database_unreachable=True
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is False

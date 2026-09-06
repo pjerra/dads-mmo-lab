@@ -327,7 +327,11 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # measured `observability` block has not had its 8.1 box. When that
         # block lands for a tree, this test fails until its wiring does too.
         unmeasured = {"dashboard", "log_snapshot"} if entry.observability is None else set()
-        allowed = module_surface | unmeasured
+        # The same self-closing shape for 8.2a's channel: an entry with no
+        # measured `operations` block has not had its 8.2 box, and the day it
+        # gets one this test fails until its wiring lands.
+        unwired = {"channel_setup"} if entry.operations is None else set()
+        allowed = module_surface | unmeasured | unwired
         if game == "wow-wotlk":
             assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
         else:
