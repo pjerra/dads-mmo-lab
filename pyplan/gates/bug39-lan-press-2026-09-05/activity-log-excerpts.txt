@@ -78,8 +78,9 @@ here. Both ranges carry a stamp the README header cites and the round-4 excerpt 
 out. Times are the boxes' local time, CEST = UTC+2.
 
 -------------------------------------------------------------------------
-m910q: the round-1 REVIEW's gate run, which falls before the 371-374/377-395 blocks
-above (that review ran between the lane's own 01:56:57 close and round 2's 02:16:18)
+m910q: the round-1 REVIEW's gate run, which falls between the two blocks quoted above -
+after 371-374 (which ends at the lane's own 01:56:57 close) and before 377-395 (which
+begins at round 2's 02:16:18)
   ssh m910q 'sed -n "375,376p" ~/claude-activity.log'   -> lines 375-376:
 -------------------------------------------------------------------------
 02:02:20  b39 review agent: re-running run-tests-vm.sh --checks from the lane worktree to verify the implementer’s green claim. Read-only otherwise.
