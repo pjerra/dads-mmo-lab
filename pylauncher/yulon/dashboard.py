@@ -84,6 +84,53 @@ class Verdict:
         return self.state == "up"
 
 
+def line(verdict: Verdict) -> str:
+    """The one sentence the Server tab shows above its three up/down words.
+
+    Pure, so what it says can be asserted without a widget: this is the whole
+    user-visible half of 8.1a, and a phrase reachable only through a GUI test is
+    a phrase nobody reads twice.
+
+    It never fills a gap with a number. A count that could not be read is given
+    as the reason it could not, because "0 players" and "I could not ask" look
+    identical on a tab and mean opposite things.
+    """
+    if verdict.state == "stopped":
+        return "stopped"
+    if verdict.state == "unknown":
+        return "could not be asked — docker did not answer about this container"
+    parts: list[str] = []
+    if verdict.state == "restart_loop":
+        head = f"restart loop — {verdict.restarts} restarts"
+        parts.append(head + (f", this run {_uptime(verdict.uptime)}" if verdict.uptime else ""))
+    else:
+        counts = (
+            f"{verdict.players} players, {verdict.bots} bots"
+            if verdict.players is not None and verdict.bots is not None
+            else verdict.problem
+        )
+        parts.append(f"up — {counts}" if counts else "up")
+        if verdict.uptime is not None:
+            parts[-1] += f", {_uptime(verdict.uptime)}"
+    if verdict.warning:
+        parts.append(verdict.warning)
+    if verdict.problem and verdict.players is not None:
+        parts.append(verdict.problem)
+    return " · ".join(parts)
+
+
+def _uptime(uptime: timedelta | None) -> str:
+    """`up 2h 14m`, and `up 42s` for a run that has not seen a minute yet."""
+    if uptime is None:
+        return ""
+    seconds = int(uptime.total_seconds())
+    if seconds < 60:
+        return f"up {seconds}s"
+    hours, rest = divmod(seconds, 3600)
+    minutes = rest // 60
+    return f"up {hours}h {minutes}m" if hours else f"up {minutes}m"
+
+
 class Dashboard:
     """Watches one install. Stateful, because a restart count only means something twice.
 

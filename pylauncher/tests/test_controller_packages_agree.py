@@ -319,11 +319,20 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
 
         services = ControllerServices.for_entry(entry, server_dir)
         absent = sorted(name for name in every_field if getattr(services, name, None) is None)
+        # The second documented exception, and it closes itself. 8.1a wired the
+        # dashboard and the pre-stop snapshot for WotLK only, because the counts
+        # need per-tree facts measured per tree; 8.1b, 8.1c and 8.1d each add
+        # their own. Rather than hard-code which three games are behind, the
+        # exception is tied to the fact that decides it — an entry with no
+        # measured `observability` block has not had its 8.1 box. When that
+        # block lands for a tree, this test fails until its wiring does too.
+        unmeasured = {"dashboard", "log_snapshot"} if entry.observability is None else set()
+        allowed = module_surface | unmeasured
         if game == "wow-wotlk":
             assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
         else:
-            assert set(absent) <= module_surface, (
-                f"{game} is missing {sorted(set(absent) - module_surface)}, which is not the "
+            assert set(absent) <= allowed, (
+                f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "
                 "module surface and so is a real gap against wow-wotlk"
             )
             # And the exception has to be REAL. Without this the test would
@@ -331,7 +340,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             # None -- including one that handed the three games WotLK's own
             # manifest store, which is the mistake `_no_manifest_store()`
             # exists to prevent.
-            assert set(absent) == module_surface, (
+            assert set(absent) == allowed, (
                 f"{game} reports {absent} rather than the module surface; `manifests/` holds "
                 "wow-wotlk alone, so a non-None store here means this game was handed "
                 "somebody else's manifests"

@@ -117,6 +117,47 @@ def capture(
     return Snapshot(path=target)
 
 
+class Recorder:
+    """A `capture()` bound to one install, which remembers its own last answer.
+
+    `Controller.pre_stop` is a plain callable on purpose — the controller must
+    not learn where a snapshot goes or that this module exists. The tab, though,
+    wants to name the file that was just written, and the controller's return
+    value is about stopping rather than about evidence. So the callable the
+    wiring hands down keeps its own answer, and the tab reads it after the stop
+    job has finished.
+
+    Never raises: `capture()` answers with a `problem` rather than an exception,
+    and `Controller._save_evidence()` swallows even the unexpected.
+    """
+
+    def __init__(
+        self,
+        spec: docker.ContainerSpec,
+        server_dir: Path,
+        *,
+        game: str,
+        logs_dir: Path,
+        wsl_distro: str | None = None,
+    ) -> None:
+        self.spec = spec
+        self.server_dir = server_dir
+        self.game = game
+        self.logs_dir = logs_dir
+        self.wsl_distro = wsl_distro
+        self.last: Snapshot | None = None
+
+    def __call__(self) -> Snapshot:
+        self.last = capture(
+            self.spec,
+            self.server_dir,
+            game=self.game,
+            logs_dir=self.logs_dir,
+            wsl_distro=self.wsl_distro,
+        )
+        return self.last
+
+
 def _trim(text: str) -> str:
     """Cut `text` to `MAX_BYTES`, keeping its END and starting on a whole line."""
     data = text.encode("utf-8")

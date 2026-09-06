@@ -202,3 +202,57 @@ def test_a_logs_directory_that_cannot_be_written_is_reported_and_never_raised(
 
     assert snap.path is None
     assert snap.problem != ""
+
+
+# -- the recorder the controller is given ----------------------------------
+#
+# `Controller.pre_stop` is a plain callable, so the controller never learns
+# where a snapshot goes. The tab, on the other hand, wants to name the file it
+# just wrote — so the callable it is given remembers its own last answer.
+
+
+def test_the_recorder_captures_when_called_and_remembers_where_it_put_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(runner, "run", _FakeRunner(log_text="the last words\n"))
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    recorder = logsnap.Recorder(SPEC, server_dir, game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    assert recorder.last is None
+    recorder()
+
+    assert recorder.last is not None
+    assert recorder.last.path is not None
+    assert recorder.last.path.read_text(encoding="utf-8") == "the last words\n"
+
+
+def test_the_recorders_last_answer_is_the_most_recent_one(tmp_path: Path, monkeypatch) -> None:
+    """Two stops in a session leave two files, and the tab names the second."""
+    monkeypatch.setattr(runner, "run", _FakeRunner())
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    recorder = logsnap.Recorder(SPEC, server_dir, game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    recorder()
+    first = recorder.last
+    recorder()
+
+    assert first is not None and recorder.last is not None
+    assert recorder.last is not first
+
+
+def test_a_recorder_whose_capture_fails_remembers_the_problem_and_does_not_raise(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """It is handed to `Controller.pre_stop`, which must never be able to block a stop."""
+    monkeypatch.setattr(runner, "run", _FakeRunner(container_id=""))
+    server_dir = tmp_path / "server"
+    server_dir.mkdir()
+    recorder = logsnap.Recorder(SPEC, server_dir, game="wow-wotlk", logs_dir=tmp_path / "logs")
+
+    recorder()
+
+    assert recorder.last is not None
+    assert recorder.last.path is None
+    assert recorder.last.problem != ""

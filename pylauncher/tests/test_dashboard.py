@@ -219,3 +219,56 @@ def test_a_game_with_no_measured_block_yet_says_so_and_still_reports_the_contain
     assert verdict.state == "up"
     assert verdict.players is None
     assert "wow-tbc" in verdict.problem
+
+
+# -- the sentence the tab shows --------------------------------------------
+#
+# Pure, and tested here rather than through the widget: what this says is the
+# whole user-visible half of 8.1a, and a phrase that only a GUI test can reach
+# is a phrase nobody reads twice.
+
+
+def test_the_line_leads_with_the_two_counts_because_that_is_what_was_asked_for() -> None:
+    verdict = dashboard.Verdict("up", players=3, bots=497, uptime=timedelta(hours=2, minutes=14))
+
+    assert dashboard.line(verdict) == "up — 3 players, 497 bots, up 2h 14m"
+
+
+def test_the_line_says_restart_loop_in_those_words_with_the_count() -> None:
+    """The word a person searches for when their server "keeps going down"."""
+    verdict = dashboard.Verdict("restart_loop", restarts=4, uptime=timedelta(seconds=30))
+
+    assert "restart loop" in dashboard.line(verdict)
+    assert "4 restarts" in dashboard.line(verdict)
+
+
+def test_a_refused_count_is_given_as_its_reason_and_never_as_two_zeroes() -> None:
+    verdict = dashboard.Verdict("up", problem="AiPlayerbot.RandomBotAccountPrefix is blank")
+
+    line = dashboard.line(verdict)
+
+    assert "blank" in line
+    assert "0 players" not in line
+
+
+def test_the_warning_rides_along_with_the_counts_rather_than_replacing_them() -> None:
+    verdict = dashboard.Verdict("up", players=2, bots=0, warning="no account matched 'rndbot'")
+
+    line = dashboard.line(verdict)
+
+    assert "2 players, 0 bots" in line
+    assert "rndbot" in line
+
+
+def test_an_unknown_state_says_docker_could_not_be_asked_rather_than_pretending() -> None:
+    assert "could not" in dashboard.line(dashboard.Verdict("unknown"))
+
+
+def test_a_stopped_server_says_stopped_and_nothing_else() -> None:
+    assert dashboard.line(dashboard.Verdict("stopped")) == "stopped"
+
+
+def test_an_uptime_under_a_minute_still_reads_as_a_duration() -> None:
+    verdict = dashboard.Verdict("up", players=0, bots=0, uptime=timedelta(seconds=42))
+
+    assert "up 42s" in dashboard.line(verdict)

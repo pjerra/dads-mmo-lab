@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import docker, networking, runner
+from yulon import dashboard, docker, logsnap, networking, runner
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
@@ -140,6 +140,16 @@ class _FakeMaintenance:
         self.forgotten += 1
         self.interrupted = None
         return True
+
+
+class _StubRecorder:
+    """A `logsnap.Recorder` that answers with a fixed snapshot, without a daemon."""
+
+    def __init__(self, snapshot: logsnap.Snapshot) -> None:
+        self.last = snapshot
+
+    def __call__(self) -> logsnap.Snapshot:
+        return self.last
 
 
 def _services(
@@ -1521,7 +1531,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:323 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:339 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1535,11 +1545,11 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
-    assert "networking.apply:323" in calls, "the call this test pins has moved; re-pin it"
+    assert "networking.apply:339" in calls, "the call this test pins has moved; re-pin it"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:323" not in missing, missing
+    assert "apply() at controller_view.py:339" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -2100,3 +2110,145 @@ def test_a_game_that_names_no_import_service_is_offered_no_repair_button(
     _watch_repair(wotlk_view, UNIMPORTED)
     _db_up(wotlk_view, ps)
     assert not wotlk_view.repair_button.isHidden(), "the gate hid the one repair that works"
+
+
+# -- 8.1a: the verdict line, and the first poll ----------------------------
+
+
+def test_the_tab_reads_its_status_at_once_instead_of_a_poll_interval_later(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Closes `pyplan/bug-checklist.md:552`.
+
+    The timer was started and never fired by hand, so for the first five seconds
+    a tab over a running server said "status: unknown" with Start enabled. The
+    label's opening value is the tell: nothing else writes it.
+    """
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=5000, job_runner=run_inline
+    )
+
+    assert "unknown" not in view.status_label.text()
+    assert "world up" in view.status_label.text()
+
+
+def test_polling_that_is_switched_off_stays_off_including_the_first_read(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`status_poll_ms=0` means "this tab does not poll", not "poll once"."""
+    ps.names = "ac-database\n"
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.status_label.text() == "status: unknown"
+
+
+def test_the_verdict_line_says_the_population_above_the_three_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.text() == "up — 3 players, 497 bots"
+
+
+def test_a_restart_loop_reaches_the_tab_in_those_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The half of 8.1a that closes `bug-checklist.md:499` on screen."""
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("restart_loop", restarts=4)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert "restart loop" in view.verdict_label.text()
+    assert "4 restarts" in view.verdict_label.text()
+
+
+def test_a_game_whose_verdict_is_not_wired_yet_shows_no_line_at_all(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.1b, 8.1c and 8.1d wire their own; until then the tab is as it was."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.text() == ""
+    assert not view.verdict_label.isVisibleTo(view)
+
+
+def test_a_verdict_that_raises_leaves_the_tab_working(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A dashboard is an instrument; an instrument must not be able to break the tab."""
+    services = _services(ps, tmp_path, [])
+
+    def boom() -> dashboard.Verdict:
+        raise RuntimeError("the daemon went away")
+
+    services.dashboard = boom
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert "could not" in view.verdict_label.text()
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert "db up" in view.status_label.text()
+
+
+def test_a_stop_names_the_file_the_servers_log_was_saved_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The evidence is worth nothing if the user cannot find it."""
+    services = _services(ps, tmp_path, [])
+    saved = tmp_path / "logs" / "wow-wotlk-abc-20260906T180000Z.log"
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(path=saved))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view.stop_server()
+
+    assert saved.name in view.problem_label.text()
+
+
+def test_a_stop_whose_snapshot_failed_says_so_rather_than_naming_no_file(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _services(ps, tmp_path, [])
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(problem="the log driver is wedged"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view.stop_server()
+
+    assert "wedged" in view.problem_label.text()
+
+
+def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
+    qapp: object, tmp_path: Path
+) -> None:
+    """8.1a is WotLK's box, so WotLK's wiring is where the two new seams appear."""
+    services = ControllerServices.for_entry(WOTLK, tmp_path)
+
+    assert services.dashboard is not None
+    assert isinstance(services.log_snapshot, logsnap.Recorder)
+    assert services.controller.pre_stop is services.log_snapshot
+
+
+@pytest.mark.parametrize("game", ["wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_the_other_three_tabs_get_neither_until_their_own_box(
+    qapp: object, tmp_path: Path, game: str
+) -> None:
+    """8.1b, 8.1c and 8.1d each gate their own tree; nothing is inherited early."""
+    services = ControllerServices.for_entry(load_catalog().get(game), tmp_path)
+
+    assert services.dashboard is None
+    assert services.log_snapshot is None
+    assert services.controller.pre_stop is None

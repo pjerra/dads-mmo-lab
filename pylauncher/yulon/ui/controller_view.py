@@ -44,7 +44,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, install_wiring, networking
+from yulon import dashboard as dashboard_module
+from yulon import docker, install_wiring, logsnap, networking, platform
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
@@ -118,6 +119,19 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    dashboard: Callable[[], dashboard_module.Verdict] | None = None
+    """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
+
+    Optional because the per-tree facts the counts need are measured per tree:
+    `wow-wotlk` has them (8.1a), and 8.1b, 8.1c and 8.1d add their own. A tab
+    without one shows no verdict line rather than an empty or invented one.
+    """
+    log_snapshot: Callable[[], logsnap.Snapshot] | None = None
+    """The same `logsnap.Recorder` the controller was given as its `pre_stop` hook.
+
+    Held here as well so the tab can name the file that was just written: the
+    controller's own return value is about stopping, not about evidence.
+    """
 
     @classmethod
     def for_entry(
@@ -302,6 +316,8 @@ def _assemble(
     backup: Callable[[], wotlk_maintenance.BackupReport],
     plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan],
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
+    dashboard: Callable[[], dashboard_module.Verdict] | None = None,
+    log_snapshot: logsnap.Recorder | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -328,6 +344,8 @@ def _assemble(
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+        dashboard=dashboard,
+        log_snapshot=log_snapshot,
     )
 
 
@@ -353,16 +371,32 @@ def _for_wotlk(
     # `fixed`. The reverse substitution — this function's `sql`/`mysql`/applier
     # taking the fixed value — is the closed bug `_db_password()` describes.
     probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
+    # 8.1a. Both are WotLK's alone for now: the counts need per-tree facts the
+    # catalog only carries for this entry, and 8.1b, 8.1c and 8.1d gate their
+    # own. The SAME recorder object is the controller's pre-stop hook and the
+    # tab's way of naming the file, so the tab reports the snapshot that was
+    # actually taken rather than one it re-derives.
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
         controller=Controller(
             spec,
             server_dir,
             wsl_distro=wsl_distro,
             import_probe=probe,
             reset_unfinished=reset,
+            pre_stop=recorder,
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -697,6 +731,7 @@ class ControllerView(QWidget):
         self._jobs: JobRunner = job_runner or threaded_job_runner(self)
         self._busy = False
         self._status_pending = False
+        self._verdict_pending = False
         self._module_pending: str | None = None
         self._console_pending = False
         self._tabs = QTabWidget(self)
@@ -728,14 +763,29 @@ class ControllerView(QWidget):
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_status)
+        self._timer.timeout.connect(self.refresh_verdict)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
+            # And once now. `QTimer.start()` fires nothing until the interval
+            # has passed, so a tab opened over a running server spent its first
+            # five seconds saying "status: unknown" with Start enabled
+            # (`pyplan/bug-checklist.md:552`). A tab told not to poll is not
+            # polled at all, here included.
+            self.refresh_status()
+            self.refresh_verdict()
 
     # ------------------------------------------------------------ server tab
 
     def _build_server_tab(self) -> None:
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+        # One line above the three up/down words, and only when this game's
+        # dashboard is wired: what it says is `dashboard.line()`, which is
+        # tested without a widget because a phrase reachable only through a GUI
+        # test is a phrase nobody reads twice.
+        self.verdict_label = QLabel("", tab)
+        self.verdict_label.setWordWrap(True)
+        self.verdict_label.setVisible(False)
         self.status_label = QLabel("status: unknown", tab)
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
@@ -787,6 +837,7 @@ class ControllerView(QWidget):
         ):
             row.addWidget(b)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
+        box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addLayout(row)
         box.addWidget(self.problem_label)
@@ -859,6 +910,41 @@ class ControllerView(QWidget):
             return  # a poll is already in flight; never queue them up
         self._status_pending = True
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
+
+    @Slot()
+    def refresh_verdict(self) -> None:
+        """Re-read this install's verdict off the GUI thread, if it has one.
+
+        Separate from `refresh_status()` rather than folded into it: the status
+        path is the one Phase 7 proved, and a tick that now also reads a
+        database is a different failure surface. Its own in-flight guard, for
+        the reason `refresh_status()` has one — a tick that takes longer than
+        the interval must not queue up behind itself.
+        """
+        if self.services.dashboard is None or self._verdict_pending:
+            return
+        self._verdict_pending = True
+        self._run(self.services.dashboard, self._verdict_ready, self._verdict_failed)
+
+    @Slot(object)
+    def _verdict_ready(self, result: object) -> None:
+        self._verdict_pending = False
+        if not isinstance(result, dashboard_module.Verdict):
+            return
+        self.verdict_label.setText(dashboard_module.line(result))
+        self.verdict_label.setVisible(True)
+
+    @Slot(object)
+    def _verdict_failed(self, exc: object) -> None:
+        """An instrument that breaks must not take the tab with it.
+
+        It writes its own line rather than `problem_label`, which belongs to the
+        actions a user pressed: a failing dashboard would otherwise wipe the
+        explanation of the stop that just refused.
+        """
+        self._verdict_pending = False
+        self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
+        self.verdict_label.setVisible(True)
 
     @Slot()
     def recheck(self) -> None:
@@ -1043,7 +1129,28 @@ class ControllerView(QWidget):
         self._set_busy(False)
         if result is False:
             self.problem_label.setText("None of this install's servers were running.")
+        else:
+            self._say_where_the_log_went()
         self.refresh_status()
+        self.refresh_verdict()
+
+    def _say_where_the_log_went(self) -> None:
+        """Name the file the pre-stop snapshot wrote, or say why there is none.
+
+        Read after the stop job has finished, so the value was written on the
+        worker thread and is read on the GUI thread with the job's completion
+        between them. Nothing here touches a widget from the worker.
+        """
+        recorder = self.services.log_snapshot
+        snapshot = getattr(recorder, "last", None) if recorder is not None else None
+        if snapshot is None:
+            return
+        if snapshot.path is not None:
+            self.problem_label.setText(f"The server's log was saved to {snapshot.path}")
+        elif snapshot.problem:
+            self.problem_label.setText(
+                f"The server stopped. Its log was not saved: {snapshot.problem}"
+            )
 
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
