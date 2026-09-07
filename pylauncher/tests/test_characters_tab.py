@@ -263,3 +263,60 @@ def test_the_gear_button_counts_in_english(tmp_path: Path) -> None:
     view.character_list.setCurrentRow(0)
 
     assert "2 mails)" in view.send_gear_button.text(), view.send_gear_button.text()
+
+
+def test_revive_is_only_offered_for_a_character_who_is_logged_in(tmp_path: Path) -> None:
+    """Measured on the live server, 2026-09-07, by a gate that had been fixed to
+    start from a state the command was supposed to change.
+
+    `revive` on an OFFLINE character answers success and does nothing: the row
+    read `health 0` before and `health 0` twenty seconds after, while the server
+    said yes with an empty message. It acts on a live player object, and an
+    offline character has none.
+
+    So the button is offered only where it can work. Every other action here
+    works offline -- the teleport's own help says "Character can be offline" --
+    so this is one control's rule and not the tab's.
+    """
+    people = (
+        Character(1, "Guglu", 78, True, "ADMIN"),
+        Character(2, "Ganaar", 7, False, "PLAYER"),
+    )
+    view = _view(tmp_path, play=_Play(characters=people))
+    view.refresh_characters()
+
+    view.character_list.setCurrentRow(0)
+    assert view.revive_button.isEnabled() is True, "an online character can be revived"
+
+    view.character_list.setCurrentRow(1)
+    assert view.revive_button.isEnabled() is False
+    assert "logged in" in view.revive_button.text(), view.revive_button.text()
+    for other in view.character_buttons():
+        if other is not view.revive_button:
+            assert other.isEnabled() is True, other.text()
+
+
+def test_the_list_refresh_after_an_action_is_bounded_rather_than_a_single_guess(
+    tmp_path: Path,
+) -> None:
+    """The review's finding about the 750ms delay, and it is a fair one.
+
+    One fixed delay measured on one server is a guess about every other: a
+    slower box, a bigger world or a stalled disk can take longer, and a single
+    scheduled read then leaves the list stale indefinitely with nothing to say
+    so. What replaces it is a short bounded sequence of re-reads that stops as
+    soon as the list changes -- and a generation token, so an older refresh
+    landing late cannot overwrite a newer one.
+    """
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+
+    assert view.refresh_attempts_after_an_action() > 1
+    assert view.refresh_attempts_after_an_action() <= 6
+
+    # a late result from an older generation is discarded
+    view.refresh_characters()
+    stale_generation = view._character_generation
+    view.refresh_characters()
+    view._characters_listed_at(stale_generation, ())
+    assert view.character_list.count() == 2, "a late older refresh emptied the list"

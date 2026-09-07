@@ -224,3 +224,29 @@ def test_a_level_this_command_does_not_take_is_refused_with_its_reason(
 
     assert outcome.done is False
     assert str(level) in outcome.problem
+
+
+def test_a_half_sent_set_says_what_arrived_and_does_not_advise_the_impossible(
+    tmp_path,
+) -> None:
+    """8.4a's adversarial review: the sentence offered an operation nobody has.
+
+    "send only what is missing" is not a thing this app can do — there is one
+    button and it sends everything worn — so a person following that advice
+    presses it again and the recipient gets the first twelve items twice.
+
+    What the sentence can honestly do is say which mails arrived, that pressing
+    again sends the whole set from the start, and that the ones already
+    delivered will arrive a second time if they do.
+    """
+    nineteen = "\n".join(str(6000 + n) for n in range(19))
+    sql = _Reader(**{"SELECT name FROM": "Guglu\n", "character_inventory": nineteen})
+    install = _install(tmp_path, sql=sql, channel=_Channel("yes", "no"))
+
+    outcome = install.send_gear_set("guglu", to="guglu", subject="s", body="b")
+
+    assert outcome.done is False
+    said = outcome.problem.lower()
+    assert "1 of 2" in said or "1 of the 2" in said, outcome.problem
+    assert "again" in said, "it does not say what pressing again would do"
+    assert "missing" not in said, "it still advises an operation that does not exist"

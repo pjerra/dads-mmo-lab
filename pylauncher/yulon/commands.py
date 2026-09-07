@@ -221,7 +221,8 @@ def mail_items(
         _require(item > 0, f"{item} is not an item id")
         _require(count > 0, f"{count} is not a number of items to send")
         parts.append(f"{item}:{count}")
-    subject, body = _mail_text(subject), _mail_text(body)
+    subject = _mail_text(subject, MAIL_SUBJECT_CAP)
+    body = _mail_text(body, MAIL_BODY_CAP)
     return line(f'send items {character} "{subject}" "{body}" ' + " ".join(parts))
 
 
@@ -234,19 +235,40 @@ def mail_money(character: str, *, subject: str, body: str, copper: int) -> str:
     """
     _character(character)
     _require(0 < copper <= _MONEY_CAP, f"{copper} is not an amount of copper this server holds")
-    return line(f'send money {character} "{_mail_text(subject)}" "{_mail_text(body)}" {copper}')
+    subject = _mail_text(subject, MAIL_SUBJECT_CAP)
+    body = _mail_text(body, MAIL_BODY_CAP)
+    return line(f'send money {character} "{subject}" "{body}" {copper}')
 
 
-def _mail_text(text: str) -> str:
+MAIL_SUBJECT_CAP = 200
+MAIL_BODY_CAP = 2000
+"""How much of a subject and a body this app will send.
+
+An unbounded argument is a command of unbounded length, and nobody has measured
+what this core does with one -- so it is bounded here rather than found out by a
+person whose mail vanished.
+"""
+
+
+def _mail_text(text: str, cap: int) -> str:
     """Subject or body, made safe to sit inside the quotes the server parses.
 
-    A quote would close the argument early and hand the rest of the sentence to
-    the parser as item ids; a line break would end the command and start
-    another one with whatever followed. Quotes are dropped and line breaks
-    become spaces -- REPLACED rather than deleted, so two words do not glue
-    together into one.
+    An allow-list rather than a list of characters somebody thought of, which
+    is 8.4a's adversarial review and the argument is the tokenizer: a quote
+    closes the argument early and hands the rest of the sentence to the parser
+    as item ids; a line break ends the command and starts another with whatever
+    followed; a BACKSLASH may escape the closing quote in the core's own
+    tokenizer; and tabs, nulls and escapes have no defined behaviour in a
+    command line nobody has tested them against.
+
+    So: printable text and spaces go through, everything else BECOMES a space
+    -- replaced rather than deleted, so two words do not glue into one -- and
+    the result is capped. A field that sanitises down to nothing is sent as a
+    single space, because `""` would let the server read the next argument as
+    this one.
     """
-    return "".join(" " if c in "\r\n" else c for c in text if c != '"')
+    kept = "".join("" if c in '"\\' else (c if c.isprintable() else " ") for c in text)[:cap]
+    return kept if kept.strip() else " "
 
 
 SERVER_INFO = "server info"

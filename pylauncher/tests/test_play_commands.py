@@ -176,3 +176,50 @@ def test_every_verb_refuses_a_character_name_the_server_would_not_accept(builder
     for bad in ("", "x" * 13, "Gu glu", "Guglu;revive Other", 'Gu"glu', "Guglu\nrevive Other"):
         with pytest.raises(commands.CommandError):
             builder(bad)
+
+
+# -- 8.4a's review: what a person may type into a mail ------------------------
+
+
+def test_mail_text_keeps_only_what_the_servers_parser_can_carry() -> None:
+    """The review's finding, and the argument for it is the tokenizer.
+
+    The subject and body are user text placed inside quotes the server parses.
+    Dropping quotes and turning line breaks into spaces was not enough: a
+    backslash may escape the closing quote in the core's own tokenizer, and a
+    tab or a control character can end an argument or be refused outright.
+
+    So this keeps what has been seen to work and drops the rest, rather than
+    forbidding a list of characters somebody thought of. Printable text and
+    spaces go through; everything else becomes a space, and the field is capped.
+    """
+    line = commands.mail_items(
+        "Guglu",
+        subject='a "quote" and a \\ and a \ttab',
+        body="line\nbreak\x00null\x1bescape",
+        items=((6948, 1),),
+    )
+
+    assert '"a quote and a  and a  tab"' in line, line
+    assert "\\" not in line
+    assert "\t" not in line and "\x00" not in line and "\x1b" not in line
+
+
+def test_mail_text_is_capped_rather_than_sent_at_any_length() -> None:
+    """An unbounded argument is a command of unbounded length, and nobody has
+    measured what this core does with one."""
+    line = commands.mail_items("Guglu", subject="s" * 500, body="b" * 5000, items=((6948, 1),))
+
+    subject = line.split('"')[1]
+    body = line.split('"')[3]
+    assert len(subject) <= commands.MAIL_SUBJECT_CAP
+    assert len(body) <= commands.MAIL_BODY_CAP
+
+
+def test_mail_text_that_is_only_unusable_characters_still_leaves_a_subject() -> None:
+    """A subject that sanitised down to nothing would send `""`, and the server
+    would read the body as the subject."""
+    line = commands.mail_items("Guglu", subject="\x00\x01", body="\x00", items=((6948, 1),))
+
+    subject = line.split('"')[1]
+    assert subject.strip() != "" or subject == " ", line

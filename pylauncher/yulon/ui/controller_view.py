@@ -166,9 +166,18 @@ Measured rather than guessed (2026-09-07, WotLK on `yulon-ubuntu`):
     level 55 -> 58: answered in 0.18s, the row changed after 0.30s
     level 58 -> 59: answered in 0.15s, the row changed after 0.26s
 
-750ms is that with room, and the sentence a person reads does not wait for it:
-the server's own words appear the moment they arrive, and only the LIST is
-scheduled.
+The sentence a person reads never waits for this: the server's own words appear
+the moment they arrive, and only the LIST is scheduled.
+"""
+
+_ROW_SETTLE_TRIES = 4
+"""How many times to re-read before giving up on the row catching up.
+
+One fixed delay measured on one server is a guess about every other -- a slower
+box, a bigger world, a stalled disk (8.4a's adversarial review). So the list is
+re-read up to four times, at 750ms, 1.5s, 2.25s and 3s, and stops as soon as it
+changes. Four is a bound rather than a promise: past it the list is what it is,
+and the server's own sentence is still on screen saying what happened.
 """
 
 
@@ -2326,6 +2335,7 @@ class ControllerView(QWidget):
         form.addRow(self.send_gear_button)
 
         self.character_report = QLabel("", tab)
+        self._character_generation = 0
         self.character_report.setWordWrap(True)
         self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         # A tree whose Play block nobody has measured gets a SENTENCE rather
@@ -2377,9 +2387,18 @@ class ControllerView(QWidget):
                 button.setEnabled(False)
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
         for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
             button.setText(f"{label} {name}")
             button.setEnabled(True)
+        if not online:
+            # Measured on the live server, 2026-09-07: `revive` on an offline
+            # character answers SUCCESS and does nothing -- the row read health 0
+            # before and health 0 twenty seconds after. It acts on a live player
+            # object and an offline character has none. Every other action here
+            # works offline; the teleport's own help says so in as many words.
+            self.revive_button.setEnabled(False)
+            self.revive_button.setText(f"{name} has to be logged in to be revived")
         pieces, mails = self._gear_set_size(name)
         if pieces:
             plural = "mail" if mails == 1 else "mails"
@@ -2407,12 +2426,54 @@ class ControllerView(QWidget):
             return ""
         return str(item.data(Qt.ItemDataRole.UserRole) or "")
 
+    def refresh_attempts_after_an_action(self) -> int:
+        """How many re-reads one successful action schedules. A bound, not a promise."""
+        return _ROW_SETTLE_TRIES
+
     @Slot()
     def refresh_characters(self) -> None:
         play = self.services.play
         if play is None:
             return
-        self._run(play.listing, self._characters_listed, self._characters_failed)  # type: ignore[attr-defined]
+        self._character_generation += 1
+        generation = self._character_generation
+        self._run(
+            play.listing,  # type: ignore[attr-defined]
+            lambda listed: self._characters_listed_at(generation, listed),
+            self._characters_failed,
+        )
+
+    def _characters_listed_at(self, generation: int, listed: object) -> None:
+        """Take this answer only if it is the newest one asked for.
+
+        Two actions in quick succession schedule two reads, and the older one
+        can land after the newer: without this, the list would end up showing
+        the earlier state and stay there (8.4a's adversarial review).
+        """
+        if generation != self._character_generation:
+            logger.info("a stale character list arrived and was dropped")
+            return
+        self._characters_listed(listed)
+
+    def _refresh_until_it_changes(self, before: tuple[str, ...], attempt: int = 1) -> None:
+        """Re-read the list until it differs from `before`, up to the bound.
+
+        The server answers about 0.15s before its own row is written, so the
+        first read after an action can legitimately show the old state; a
+        second and a third cost nothing and cover a machine slower than the one
+        this was measured on.
+        """
+        self.refresh_characters()
+        if self._character_rows() != before or attempt >= _ROW_SETTLE_TRIES:
+            return
+        QTimer.singleShot(
+            _ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(before, attempt + 1)
+        )
+
+    def _character_rows(self) -> tuple[str, ...]:
+        return tuple(
+            self.character_list.item(row).text() for row in range(self.character_list.count())
+        )
 
     @Slot(object)
     def _characters_listed(self, listed: object) -> None:
@@ -2424,6 +2485,7 @@ class ControllerView(QWidget):
                 f"{character.name} — level {character.level} — {where} — {character.account}"
             )
             item.setData(Qt.ItemDataRole.UserRole, character.name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
             self.character_list.addItem(item)
             if character.name == chosen:
                 self.character_list.setCurrentItem(item)
@@ -2454,7 +2516,8 @@ class ControllerView(QWidget):
             # answer arrives shows the state BEFORE the thing that was just
             # done -- "You change the level of Aevret to 60" above a row still
             # reading 55, which reads as the action having failed.
-            QTimer.singleShot(_ROW_SETTLE_MS, self.refresh_characters)
+            rows = self._character_rows()
+            QTimer.singleShot(_ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(rows))
 
     @Slot()
     def teleport_character(self) -> None:

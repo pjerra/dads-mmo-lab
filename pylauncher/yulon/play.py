@@ -309,8 +309,16 @@ class InstallPlay:
 
         A set of nineteen pieces does not fit in one mail on any of these trees,
         so this sends the mails the cap requires and, if one of them fails,
-        reports WHICH -- a plain failure would have somebody send the whole set
-        again and the recipient receive the first twelve twice.
+        reports WHICH and what pressing again would do.
+
+        **It is not resumable, and the sentence says so rather than implying
+        otherwise** (8.4a's adversarial review). An earlier version advised
+        "send only what is missing", which is an operation nobody has: there is
+        one button and it sends everything worn. Somebody following that advice
+        presses it again and the recipient receives the first twelve items
+        twice. Making it resumable means persisting the batches and their
+        states, which is a feature rather than a sentence, and it is not this
+        box's.
         """
         wearer = self._stored_name(character)
         if wearer is None:
@@ -346,8 +354,9 @@ class InstallPlay:
                     indeterminate=outcome.indeterminate,
                     problem=(
                         f"mail {number} of {len(batches)} did not go: {outcome.problem} "
-                        f"({number - 1} of {len(batches)} already arrived, so send only what "
-                        "is missing)"
+                        f"{number - 1} of the {len(batches)} mails already arrived. Pressing "
+                        "this again sends the whole set from the start, so whatever arrived "
+                        "will arrive a second time."
                     ),
                 )
         return Outcome(
