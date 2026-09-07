@@ -455,13 +455,28 @@ def test_a_row_that_changed_to_somebody_elses_password_is_not_a_yes() -> None:
     assert outcome.problem, "a failure with no sentence is not an answer"
 
 
-def test_a_clean_yes_is_believed_without_reading_anything() -> None:
-    """A core that answers properly is believed, and costs no query at all.
+def test_a_yes_the_row_contradicts_is_not_a_yes() -> None:
+    """Measured on the live Tortoise server, 2026-09-07, and it is a lockout.
 
-    The check is a fallback for cores that cannot say what they did, not a
-    second opinion on cores that can.
+    That fork's `account set password` answers "The password was changed" and
+    then stores a hash the password cannot reproduce: for an account that has
+    logged in before, the name is EMPTY in the hash it writes.
+
+        stored   A78031B82173E3D5AB216AB0835A165DB5D56020
+        SHA1(":PR0BE-P@SS55")                     matches
+        SHA1("GATE83E:PR0BE-P@SS55")              does not
+
+    The account can then never log in — measured, with a real 1.18.1 client —
+    and the server has just told this app it succeeded. An earlier version of
+    this test asserted that a clean yes is believed WITHOUT reading anything;
+    the machine refuted it, so this is the same test rewritten around what
+    happens rather than around what ought to.
+
+    One SELECT per password change is the price, and it buys the difference
+    between a person who knows their new password did not take and a person
+    locked out of their account by a reassurance.
     """
-    row = _Row(True)
+    row = _Row(False)
 
     outcome = useraccounts.set_password(
         _Channel("yes"),
@@ -471,8 +486,36 @@ def test_a_clean_yes_is_believed_without_reading_anything() -> None:
         password_is_in_force=row,
     )
 
+    assert outcome.done is False, "the server said yes and the row says otherwise"
+    assert "will not" in outcome.problem or "not that password" in outcome.problem, outcome.problem
+    assert row.asked == [("ALICE", "n3w-p@ss34")]
+
+
+def test_a_yes_the_row_agrees_with_is_a_yes() -> None:
+    """The other side of it, so the check cannot be satisfied by refusing."""
+    outcome = useraccounts.set_password(
+        _Channel("yes"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        password_is_in_force=_Row(True),
+    )
+
     assert outcome.done is True
-    assert row.asked == [], "nothing was asked of the database"
+
+
+def test_a_yes_stands_where_the_row_cannot_be_read_at_all() -> None:
+    """`None` is not `False`: a tree with no measured recipe, or a database that
+    did not answer, leaves the server's own reply exactly as it was."""
+    outcome = useraccounts.set_password(
+        _Channel("yes"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        password_is_in_force=lambda account, password: None,
+    )
+
+    assert outcome.done is True
 
 
 def test_a_reader_that_throws_leaves_the_servers_own_answer_standing() -> None:
@@ -575,14 +618,19 @@ def test_the_salt_is_read_as_the_salt_on_a_tree_that_names_it_s(tmp_path) -> Non
     assert "SRPPROBE" not in asked, "names are sent as a literal, not spliced in"
 
 
-def test_a_tree_whose_scheme_has_no_measured_recipe_answers_no(tmp_path) -> None:
-    """AzerothCore answers its own commands properly, so nothing there needs a
-    row believed — and inventing a recipe for it would be a guess wearing a
-    measurement's clothes."""
+def test_a_tree_whose_scheme_has_no_measured_recipe_says_it_cannot_tell(tmp_path) -> None:
+    """`None`, not `False`, and the difference decides what a person is told.
+
+    AzerothCore answers its own commands properly, so nothing there needs a row
+    believed, and inventing a recipe for it would be a guess wearing a
+    measurement's clothes. But since 8.3d a `False` here CONTRADICTS the
+    server's own yes and reports a failure -- so a tree this module has never
+    measured would have every successful password change reported as broken.
+    """
     reader = _Reader("00\t00\n")
     install = _install(tmp_path, sql=reader)
 
-    assert install._password_is_in_force("SRPPROBE", "kn0wn-p@ss77") is False
+    assert install._password_is_in_force("SRPPROBE", "kn0wn-p@ss77") is None
     assert reader.asked == [], "a scheme it cannot check is not worth a query"
 
 

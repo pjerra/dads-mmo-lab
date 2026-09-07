@@ -182,7 +182,7 @@ def set_password(
     account: str,
     password: str,
     app_account: str,
-    password_is_in_force: Callable[[str, str], bool] | None = None,
+    password_is_in_force: Callable[[str, str], bool | None] | None = None,
 ) -> Outcome:
     """`account set password <user> <pass> <pass>`, through the server itself.
 
@@ -211,10 +211,24 @@ def set_password(
 
     So `password_is_in_force` asks the one question that belongs to this
     command: is the password we were asked to set the one this account now has?
-    `yulon.srp6` answers it by recomputing the verifier from the row's own salt,
-    which is true whoever wrote the row and whatever the server said. It is
-    optional, and where it is absent or cannot answer, the server's own reply
-    stands -- the behaviour every caller had before this.
+    `yulon.passwordcheck` answers it from the account's own row, which is true
+    whoever wrote that row and whatever the server said.
+
+    **It is asked even when the server says yes** (8.3d). The tortoise fork
+    answers "The password was changed" and then, for an account that has logged
+    in before, stores a hash with an EMPTY account name in it:
+
+        stored                        A78031B82173E3D5AB216AB0835A165DB5D56020
+        SHA1(":PR0BE-P@SS55")         matches
+        SHA1("GATE83E:PR0BE-P@SS55")  does not
+
+    That account can never log in again -- measured with a real client -- and
+    the server has just reported success. So a yes the row contradicts is not a
+    yes, and the price of knowing is one SELECT per password change.
+
+    `None` is not `False`: a tree whose scheme nobody has measured, or a
+    database that did not answer, leaves the server's own reply exactly as it
+    was, which is the behaviour every caller had before this.
     """
     refusal = _not_our_own(account, app_account, "have its password changed")
     if refusal is not None:
@@ -224,32 +238,51 @@ def set_password(
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     outcome = _send(channel, line)
-    if outcome.done or password_is_in_force is None:
-        # A core that answers properly is believed, and costs no query at all.
+    if password_is_in_force is None:
         return outcome
-    if _in_force(password_is_in_force, account, password):
-        logger.info(f"{account}'s stored verifier is the one this password makes")
+    in_force = _in_force(password_is_in_force, account, password)
+    if in_force is None:
+        # Nothing to add: no measured recipe here, or the database did not
+        # answer. The server's own reply is all there is, as it always was.
+        return outcome
+    if in_force:
+        logger.info(f"{account}'s stored credential is the one this password makes")
         return Outcome(
             True,
             text=(
-                "The password was changed. This server reports a password change as a failure "
+                "The password was changed. Some servers report a password change as a failure "
                 "even when it works, so the account's own row was read to be sure."
+            ),
+        )
+    if outcome.done:
+        logger.warning(f"{account}: the server reported a password change its own row denies")
+        return Outcome(
+            False,
+            problem=(
+                f"The server said {account}'s password was changed, but the account's stored "
+                "credential is not that password, so it will not log in with it. Nothing here "
+                "can put it right: the change has to be made on the server itself, and the old "
+                "password may or may not still work. Try logging in before relying on either."
             ),
         )
     return outcome
 
 
-def _in_force(reader: Callable[[str, str], bool], account: str, password: str) -> bool:
-    """Whether the row says this password is in force, and never an exception.
+def _in_force(
+    reader: Callable[[str, str], bool | None], account: str, password: str
+) -> bool | None:
+    """Whether the row says this password is in force -- or `None` for cannot say.
 
-    A database that is down is one more thing that can be down; it is not this
-    command's failure to report, and what the server said stands instead.
+    Three answers and not two. A database that is down, or a tree whose scheme
+    nobody has measured, is a question this app could not ask; turning that into
+    "no" would report a password change as failed for every tree this module has
+    never measured.
     """
     try:
-        return bool(reader(account, password))
+        return reader(account, password)
     except Exception as exc:  # noqa: BLE001 - a read that failed is an absence
         logger.info(f"could not read {account}'s credential row: {exc}")
-        return False
+        return None
 
 
 def set_gm_level(
@@ -378,7 +411,7 @@ class InstallAccounts:
             password_is_in_force=self._password_is_in_force,
         )
 
-    def _password_is_in_force(self, account: str, password: str) -> bool:
+    def _password_is_in_force(self, account: str, password: str) -> bool | None:
         """Does this account's stored credential belong to this password?
 
         The narrow question, and the only one worth asking: a row that merely
@@ -401,14 +434,19 @@ class InstallAccounts:
         columns = passwordcheck.COLUMNS.get(scheme)
         if columns is None:
             logger.info(f"{self.entry.name} has no measured credential recipe; the reply stands")
-            return False
+            return None
         auth = self.entry.schema_map()["auth"]
         row = self._sql.query(
             "auth",
             f"SELECT {', '.join(columns)} FROM {auth}.account "
             f"WHERE username = {_text_literal(account)};",
         )
-        return passwordcheck.matches(scheme, account, password, row.split())
+        fields = row.split()
+        if not fields:
+            # No row at all is not "the wrong password" -- it is no answer.
+            logger.info(f"{account} has no credential row to read")
+            return None
+        return passwordcheck.matches(scheme, account, password, fields)
 
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()
