@@ -1,5 +1,11 @@
 # 8.3d — Accounts, WoW Tortoise — gated live on m910q, 2026-09-07
 
+**Ticked by the owner with the fork's defect recorded against it** (2026-09-07):
+the box's own clauses pass, and the one thing that does not work is the fork's
+`account set password` rather than anything this app does. Yu'lon refuses to
+report those changes as successes, and the message for the fork's authors is in
+this folder.
+
 The same four clauses as 8.3b against the Shyalya/tortoise fork, and one clause
 that only exists here, because this box found a defect in the fork itself that
 locks people out of their own accounts while reporting success.
