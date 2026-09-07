@@ -373,7 +373,8 @@ class _Captures:
         return self
 
     def send(self, _command: object) -> object:
-        raise AssertionError("this test does not send anything")
+        """Silence, so `prove()` gets as far as building its endpoint and stops."""
+        return type("Answer", (), {"outcome": "unknown", "denied": False, "text": ""})()
 
 
 def test_the_endpoint_carries_this_install_s_own_namespace(tmp_path: Path) -> None:
@@ -411,3 +412,41 @@ def test_the_endpoint_carries_this_install_s_own_namespace(tmp_path: Path) -> No
     assert captures.endpoints, "no endpoint was built"
     assert captures.endpoints[0].namespace == "urn:MaNGOS", captures.endpoints[0]
     assert tbc.operations is not None and tbc.operations.namespace == "urn:MaNGOS"
+
+
+def test_every_endpoint_this_channel_builds_carries_the_namespace(tmp_path: Path) -> None:
+    """Not one call site: every one, found by walking them.
+
+    `live_channel()` was asserted first and `prove()` was the path that actually
+    ran on the gate box -- it built its own endpoint and kept the field default,
+    so TBC got `urn:AC`, got HTTP 500, and read as a world that had not answered.
+    The lesson is already filed as `reviews-check-functions-not-call-sites`; this
+    test is the version of it that cannot rot, because it asks the object for
+    every endpoint it hands out rather than naming the ones known today.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    captures = _Captures()
+    channel = setup.InstallChannel(
+        tbc,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *_args: None,
+        reset=lambda *_args: None,
+        channel_for=captures,
+        config_dir=tmp_path / "config",
+    )
+
+    channel.prove()
+    setup.save_credential(
+        setup.Verified(account="YULON_AB12CD34", password="pw", at="2026-09-07 09:00 UTC"),
+        game=tbc.id,
+        install_id=INSTALL,
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path / "config",
+    )
+    channel.live_channel()
+
+    assert len(captures.endpoints) >= 2, captures.endpoints
+    assert {e.namespace for e in captures.endpoints} == {"urn:MaNGOS"}, captures.endpoints

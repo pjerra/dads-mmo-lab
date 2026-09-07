@@ -915,9 +915,11 @@ class InstallChannel:
             if isinstance(self._state, Pending | Verified)
             else generate_password()
         )
-        endpoint = soap.Endpoint(
-            host="127.0.0.1", port=operations.port, account=account, password=password
-        )
+        # The one seam, not a second construction: this line used to build its
+        # own endpoint and kept `Endpoint.namespace`'s default, so TBC was sent
+        # `urn:AC`, answered HTTP 500, and read as a world that had not finished
+        # loading. `live_channel()` had been fixed and this had not.
+        endpoint = self._endpoint(account, password)
         self._state = ensure(
             account=account,
             password=password,
