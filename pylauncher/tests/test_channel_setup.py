@@ -145,7 +145,9 @@ def test_the_credential_a_verified_state_yields_keeps_the_password_out_of_its_re
     verified = setup.Idle().created("YULON_AB12CD34", "s3cret-p4ssw0rd").verified()
 
     assert "s3cret-p4ssw0rd" not in repr(verified)
-    assert "s3cret-p4ssw0rd" not in repr(verified.credentials(host="127.0.0.1", port=7878, namespace="urn:AC"))
+    assert "s3cret-p4ssw0rd" not in repr(
+        verified.credentials(host="127.0.0.1", port=7878, namespace="urn:AC")
+    )
 
 
 def test_a_pending_state_cannot_be_told_it_was_created_again() -> None:
