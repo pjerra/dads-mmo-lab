@@ -54,7 +54,8 @@ from pathlib import Path
 
 from yulon import commands, platform, soap
 from yulon.catalog import composegen
-from yulon.catalog.catalog import CatalogEntry
+from yulon.catalog.catalog import CatalogEntry, ConfPatch
+from yulon.catalog.families import conf
 from yulon.log import get_logger
 
 logger = get_logger(__name__)
@@ -264,6 +265,12 @@ def enable(
             "starts, and writing it under a running world risks the world."
         )
 
+    # The conf half first, and deliberately: a tree that reads no environment is
+    # not switched on by the override at all, and the override's only job there
+    # is publishing the port. Doing it first means a refusal -- a conf that is
+    # not where the entry says -- happens before anything has been written.
+    conf_changed = _write_the_conf(entry, server_dir)
+
     target = server_dir / composegen.OVERRIDE_FILE
     before = target.read_text(encoding="utf-8") if target.exists() else ""
     backup = target.with_name(target.name + BACKUP_SUFFIX)
@@ -287,10 +294,64 @@ def enable(
     )
     if plan.override == before:
         logger.info(f"{entry.id}'s command channel was already switched on in {target.name}")
-        return Enabled(path=target, changed=False)
+        return Enabled(path=target, changed=conf_changed)
     target.write_text(plan.override, encoding="utf-8", newline="\n")
     logger.info(f"wrote {entry.id}'s command channel into {target}")
     return Enabled(path=target, changed=True)
+
+
+def _write_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Patch the conf keys this tree's channel needs. `False` when it has none.
+
+    The CMaNGOS lineage reads its settings from the file and nowhere else, so
+    this is that family's whole enable. It goes through `families/conf.patch()`
+    -- the same writer the install stage already uses on this same file for six
+    other keys -- rather than a second implementation of `Key = value`.
+
+    Backed up once, by the FIRST press, for the reason the override's backup is:
+    a second backup would capture the channel's own configuration, and a
+    rollback would then restore a file with the channel still in it.
+
+    A conf that is not where the entry says is a refusal, never a file this
+    creates. mangosd reads exactly one conf, and a stub with three SOAP keys in
+    it would bring the world up with every other setting at its compiled
+    default -- including the database it would then not find.
+    """
+    operations = entry.operations
+    if operations is None or operations.enable_conf is None:
+        return False
+    target = server_dir / operations.enable_conf.file
+    if not target.is_file():
+        raise EnableRefused(
+            f"{entry.name}'s command channel is switched on in {operations.enable_conf.file}, "
+            f"and there is no such file under {server_dir}. Nothing was written."
+        )
+    before = target.read_text(encoding="utf-8")
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    if not backup.exists():
+        backup.write_text(before, encoding="utf-8", newline="\n")
+    after = conf.patch(before, ConfPatch(keys=dict(operations.enable_conf.keys)), tokens={})
+    if after == before:
+        logger.info(f"{entry.id}'s channel keys were already in {target.name}")
+        return False
+    target.write_text(after, encoding="utf-8", newline="\n")
+    logger.info(f"wrote {entry.id}'s command channel into {target}")
+    return True
+
+
+def _restore_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
+    """Put the conf back the way the press found it. `False` when there is none."""
+    operations = entry.operations
+    if operations is None or operations.enable_conf is None:
+        return False
+    target = server_dir / operations.enable_conf.file
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    if not backup.is_file():
+        return False
+    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    backup.unlink()
+    logger.info(f"put {entry.id}'s {target.name} back the way the press found it")
+    return True
 
 
 def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = None) -> bool:
@@ -312,11 +373,16 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
     if it still says exactly that -- otherwise the file has been changed since,
     and the port is released without touching it.
     """
+    # The conf first: on a tree that reads no environment it IS the channel, and
+    # a rollback that released the port while leaving `SOAP.Enabled = 1` behind
+    # would bring the world up binding a port it had just been told to give up.
+    conf_back = _restore_the_conf(entry, server_dir)
+
     target = server_dir / composegen.OVERRIDE_FILE
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     if not backup.is_file():
         logger.info(f"nothing to roll back for {entry.id}: no {backup.name}")
-        return False
+        return conf_back
     now = target.read_text(encoding="utf-8") if target.is_file() else ""
     if expected is not None and now != expected:
         # Somebody -- a person, or the settings surface that owns this file --

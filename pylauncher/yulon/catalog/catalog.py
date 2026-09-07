@@ -1090,6 +1090,36 @@ class CharacterTable(_Strict):
     online: str = Field(default="online", min_length=1)
 
 
+class ConfEnable(_Strict):
+    """Which conf file turns this tree's channel on, and the keys that do it (8.2c).
+
+    The CMaNGOS lineage reads its configuration from the file and from nowhere
+    else: its reader lowercases the key and looks it up in what it parsed
+    (`src/shared/Config/Config.cpp:73`, `:91`), with no environment fallback
+    anywhere in it. AzerothCore's generic `AC_<UPPER_SNAKE>` rule
+    (`Config.cpp:435-438`) has no counterpart here, so `enable_env` cannot serve
+    these trees and this exists instead.
+
+    The mechanism is not new: `install.native.cmangos.conf` already patches six
+    keys in this same file at install time, through the same
+    `families/conf.py` writer. What is new is doing it to an install that
+    already exists, on a press, with a backup to roll back to.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description="The conf file, relative to the install directory (`etc/mangosd.conf`).",
+    )
+    keys: dict[str, str] = Field(
+        min_length=1,
+        description=(
+            "`Key = value` lines to set. `SOAP.IP` is `0.0.0.0` for the reason the "
+            "environment route gives: the listener binds every interface INSIDE the "
+            "container and the host side is pinned to loopback by the publication."
+        ),
+    )
+
+
 class Operations(_Strict):
     """How this tree's command channel is turned on and reached (8.2a).
 
@@ -1106,13 +1136,29 @@ class Operations(_Strict):
     port: int = Field(gt=0, lt=65536, description="The channel's port inside the container.")
     gm_level: int = Field(ge=0, le=3, description="The level the channel needs of its account.")
     enable_env: dict[str, str] = Field(
-        min_length=1,
+        default_factory=dict,
         description=(
             "What the generated override must carry for the channel to exist. `SOAP.IP` is "
             "`0.0.0.0` on purpose: the listener binds every interface INSIDE the container, "
             "and the host side is pinned to loopback by the compose publication. A listener on "
             "the container's own loopback does not serve a published port and does not refuse "
             "either — measured, `gates/8-spikes/published-port-vs-container-loopback/`."
+        ),
+    )
+    enable_conf: ConfEnable | None = Field(
+        default=None,
+        description=(
+            "The conf file that turns the channel on, for a tree with no environment "
+            "route. Exactly one of `enable_env` and `enable_conf` is declared."
+        ),
+    )
+    publish: bool = Field(
+        default=False,
+        description=(
+            "Whether the generated override must publish this port. False where the "
+            "install's own compose already does it -- WotLK's base file has carried "
+            "`${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a "
+            "channel -- and true where it does not, which is every CMaNGOS tree."
         ),
     )
     must_not_listen: tuple[int, ...] = Field(
@@ -1134,10 +1180,15 @@ class Operations(_Strict):
         cannot see `channel`, and a `soap` entry whose keys never mention SOAP
         would install cleanly and answer nothing.
         """
-        if self.channel == "soap" and not any("SOAP" in key for key in self.enable_env):
+        if bool(self.enable_env) == bool(self.enable_conf):
             raise ValueError(
-                "a soap channel must name the environment key that turns SOAP on; "
-                f"these are {sorted(self.enable_env)}"
+                "a channel is switched on ONE way: declare either enable_env or "
+                "enable_conf, not both and not neither"
+            )
+        keys = self.enable_env or (self.enable_conf.keys if self.enable_conf else {})
+        if self.channel == "soap" and not any("SOAP" in key.upper() for key in keys):
+            raise ValueError(
+                "a soap channel must name the key that turns SOAP on; " f"these are {sorted(keys)}"
             )
         return self
 

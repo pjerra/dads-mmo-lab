@@ -24,6 +24,16 @@ from yulon.catalog.catalog import load_catalog
 from yulon.catalog.composegen import BASE_FILE, BUILD_FILE, OVERRIDE_FILE
 
 WOTLK = load_catalog().get("wow-wotlk")
+TBC = load_catalog().get("wow-tbc")
+
+CONF_BEFORE = (
+    "# a mangosd.conf, as the install leaves it\n"
+    "Console.Enable = 1\n"
+    "Ra.Enable = 0\n"
+    "SOAP.Enabled = 0\n"
+    "SOAP.IP = 127.0.0.1\n"
+    "SOAP.Port = 7878\n"
+)
 
 
 def _installed(tmp_path: Path) -> Path:
@@ -123,11 +133,18 @@ def test_the_press_touches_only_the_override(tmp_path: Path) -> None:
 def test_an_entry_with_no_operations_block_is_refused_rather_than_guessed_at(
     tmp_path: Path,
 ) -> None:
-    """8.2b, 8.2c and 8.2d each measure their own; nothing is inherited early."""
-    tbc = load_catalog().get("wow-tbc")
+    """8.2d and 8.2e each measure their own; nothing is inherited early.
 
-    with pytest.raises(setup.EnableRefused, match="wow-tbc"):
-        setup.enable(tbc, tmp_path, templates_root=resources.installers_dir(), world_running=False)
+    Vanilla rather than TBC since 8.2c: TBC now HAS a block, and a test that
+    asserted the refusal against it would have started asserting that the
+    feature is missing from the tree it had just been added to.
+    """
+    vanilla = load_catalog().get("wow-vanilla")
+
+    with pytest.raises(setup.EnableRefused, match="wow-vanilla"):
+        setup.enable(
+            vanilla, tmp_path, templates_root=resources.installers_dir(), world_running=False
+        )
 
 
 # -- the port claim, and rolling it back (8.2a) ------------------------------
@@ -345,3 +362,123 @@ def test_the_userland_proxys_own_wording_is_matched_too() -> None:
     said = "Error starting userland proxy: listen tcp4 127.0.0.1:7878: bind: address already in use"
 
     assert setup.blames_the_host_port(said, 7878) is True
+
+
+# -- 8.2c: the trees that read no environment --------------------------------
+
+
+def _cmangos_installed(tmp_path: Path) -> Path:
+    """A CMaNGOS server dir: the three compose files AND the conf the press patches."""
+    from yulon.catalog import composegen
+
+    plan = composegen.render(
+        TBC, tmp_path, templates_root=resources.installers_dir(), db_password="pw"
+    )
+    composegen.write_plan(plan, tmp_path)
+    assert TBC.operations is not None and TBC.operations.enable_conf is not None
+    conf = tmp_path / TBC.operations.enable_conf.file
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(CONF_BEFORE, encoding="utf-8")
+    return tmp_path
+
+
+def _conf_of(server_dir: Path) -> Path:
+    assert TBC.operations is not None and TBC.operations.enable_conf is not None
+    return server_dir / TBC.operations.enable_conf.file
+
+
+def test_the_press_writes_the_conf_keys_on_a_tree_with_no_environment_route(
+    tmp_path: Path,
+) -> None:
+    """CMaNGOS reads its settings from the file and from nowhere else.
+
+    Its config reader lowercases the key and looks it up in what it parsed
+    (`src/shared/Config/Config.cpp:73`, `:91`); there is no environment fallback
+    anywhere in it, so 8.2a's four environment keys cannot serve this family.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+
+    after = _conf_of(server_dir).read_text(encoding="utf-8")
+    assert "SOAP.Enabled = 1" in after
+    assert "SOAP.IP = 0.0.0.0" in after
+    assert "SOAP.Port = 7878" in after
+    assert "Ra.Enable = 0" in after
+    # And the rest of the file is untouched: this is a patch, not a rewrite.
+    assert "Console.Enable = 1" in after
+    assert after.startswith("# a mangosd.conf, as the install leaves it")
+
+
+def test_the_conf_is_backed_up_once_by_the_first_press(tmp_path: Path) -> None:
+    """A second press must not back up the channel's own configuration.
+
+    The same trap the override's backup has: back it up twice and a rollback
+    restores a file with the channel still in it.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    backup = conf.with_name(conf.name + setup.BACKUP_SUFFIX)
+
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+
+    assert backup.read_text(encoding="utf-8") == CONF_BEFORE
+    assert "SOAP.Enabled = 1" in conf.read_text(encoding="utf-8")
+
+
+def test_the_rollback_gives_the_conf_back_as_well_as_the_port(tmp_path: Path) -> None:
+    """The port alone is not enough here: the world reads the conf on the way up."""
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+    assert "SOAP.Enabled = 1" in conf.read_text(encoding="utf-8")
+
+    assert setup.roll_back(TBC, server_dir) is True
+
+    assert conf.read_text(encoding="utf-8") == CONF_BEFORE
+    assert not conf.with_name(conf.name + setup.BACKUP_SUFFIX).exists()
+
+
+def test_the_press_refuses_when_the_conf_it_names_is_not_there(tmp_path: Path) -> None:
+    """Creating the file would be worse than refusing: mangosd would read a stub.
+
+    A conf with three SOAP keys and nothing else is not a configuration — the
+    world would come up with every other setting at its compiled default,
+    including the database it cannot then reach.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    _conf_of(server_dir).unlink()
+
+    with pytest.raises(setup.EnableRefused, match="mangosd.conf"):
+        setup.enable(
+            TBC,
+            server_dir,
+            templates_root=resources.installers_dir(),
+            world_running=False,
+            db_password="pw",
+        )

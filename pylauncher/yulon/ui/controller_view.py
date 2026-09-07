@@ -630,12 +630,34 @@ def _for_tbc(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2c. The same seam as 8.2a and a different enable route, which is the
+    # whole per-tree difference: CMaNGOS reads no environment, so this entry's
+    # channel is switched on by patching `etc/mangosd.conf` -- and `enable()`
+    # needs this install's generated database password, because rendering its
+    # compose files is part of the press.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: tbc_accounts.create_account(sql, name, pw, gm_level=level),
+        # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
+        # implementation here would write a row that looks right and can never
+        # log in.
+        reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        channel_setup=channel,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tbc_controller.TbcController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

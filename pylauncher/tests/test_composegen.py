@@ -61,6 +61,31 @@ _BOT_POPULATION_WRITE = re.compile(
 _KEY = re.compile(r"^\s*(?:-\s*)?(?P<key>[A-Za-z_][\w.-]*)\s*:")
 
 
+def published_ports(text: str) -> set[str]:
+    """The container-side port of every mapping under a `ports:` key.
+
+    Scoped to that key on purpose: a list item with a colon in it is just as
+    likely to be a volume (`- ./modules:/azerothcore/modules`), and the first
+    version of this helper reported one as a published port.
+    """
+    found: set[str] = set()
+    inside = False
+    indent = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        if stripped.rstrip(":") == "ports" and stripped.endswith(":"):
+            inside, indent = True, here
+            continue
+        if inside and (not stripped.startswith("- ") or here <= indent):
+            inside = False
+        if inside:
+            found.add(stripped.rstrip('"').rsplit(":", 1)[-1])
+    return found
+
+
 def keys_in(text: str) -> set[str]:
     """Every mapping key in a YAML document, at any depth, comments excluded."""
     found: set[str] = set()
@@ -189,12 +214,20 @@ def test_the_container_user_line_is_explained_where_it_is_absent(tmp_path: Path)
 
 
 def test_ports_appear_in_exactly_one_file(tmp_path: Path) -> None:
-    """`ports:` lives in the base file and NOWHERE else.
+    """A port the base publishes is published THERE and nowhere else.
 
     Compose does not replace a `ports:` list from a later file, it appends to
     it. So an "override" of the auth port publishes both 3724 and its
     replacement, and the second container to start fails to bind — after the
     build, not before it.
+
+    The rule is about ports the base file binds. 8.2c narrowed it from "no
+    ports in the override at all" to that, because the CMaNGOS trees publish no
+    channel port anywhere and appending one is the only way it can exist — there
+    is no base binding for it to be appended to, so the hazard above cannot
+    arise. WotLK is unaffected either way: its base has published
+    `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a
+    channel, so its entry says `publish: false` and its override still has none.
     """
     plan = render(tmp_path / "wow")
     assert "ports" in keys_in(plan.base)
@@ -1458,9 +1491,40 @@ def test_the_shared_cmangos_templates_render_for_every_family_entry(
         assert text.startswith(composegen.GENERATED_MARKER)
         assert "{{" not in text
     assert "ports" in keys_in(plan.base)
-    assert "ports" not in keys_in(plan.override)
     assert "ports" not in keys_in(plan.build)
     assert "build" not in keys_in(plan.base)
+    # The override publishes the channel's port and nothing else — on the trees
+    # that have a channel measured, which is TBC so far.
+    channel = entry.operations.port if entry.operations and entry.operations.publish else None
+    assert published_ports(plan.override) == ({str(channel)} if channel else set())
+
+
+def test_a_tree_that_publishes_no_channel_port_gets_one_from_the_override(
+    tmp_path: Path,
+) -> None:
+    """CMaNGOS binds 3724 and 8085 and nothing else; 7878 has to come from here.
+
+    Asserted as the WHOLE set of published ports, not by searching for 7878: a
+    test that only looks for what it wants cannot see a second binding of a port
+    the base already has, which is the thing the neighbouring rule prevents.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    plan = render_generated(tbc, tmp_path / "wow")
+
+    assert tbc.operations is not None and tbc.operations.publish
+    assert published_ports(plan.override) == {"7878"}, plan.override
+    assert "${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878" in plan.override
+    assert tbc.container_spec().world in plan.override
+
+
+def test_the_channel_port_is_never_published_twice(tmp_path: Path) -> None:
+    """WotLK's base already binds it, so its entry says so and its override adds none."""
+    wotlk = load_catalog().get("wow-wotlk")
+    plan = render(tmp_path / "wow")
+
+    assert wotlk.operations is not None and wotlk.operations.publish is False
+    assert published_ports(plan.override) == set()
+    assert "7878" in plan.base
 
 
 def test_the_cmangos_services_are_named_after_their_containers(tmp_path: Path) -> None:

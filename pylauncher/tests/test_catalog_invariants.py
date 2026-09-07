@@ -89,6 +89,26 @@ TEST_PASSWORD = "generated-0123456789abcdef"
 # is two lines and one key, and only the lines tell them apart.
 
 
+def published_ports(text: str) -> set[str]:
+    """The container-side port of every mapping under a `ports:` key."""
+    found: set[str] = set()
+    inside = False
+    indent = 0
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        if stripped.rstrip(":") == "ports" and stripped.endswith(":"):
+            inside, indent = True, here
+            continue
+        if inside and (not stripped.startswith("- ") or here <= indent):
+            inside = False
+        if inside:
+            found.add(stripped.rstrip('"').rsplit(":", 1)[-1])
+    return found
+
+
 def keys_in(text: str) -> set[str]:
     """Every mapping key the text spells, comments excluded."""
     found: set[str] = set()
@@ -324,8 +344,21 @@ def test_ports_live_in_one_file_and_nothing_survives_unfilled(
 ) -> None:
     plan = render(entry, tmp_path / entry.id)
     assert "ports" in keys_in(plan.base)
-    assert "ports" not in keys_in(plan.override), "compose CONCATENATES ports lists across files"
     assert "ports" not in keys_in(plan.build)
+    # The override may publish ONE port and only the channel's, and only on a
+    # tree whose base file does not bind it (8.2c). Compose concatenates ports
+    # lists across files, so a port the base already has would get a second
+    # binding rather than a replacement -- which is what this asserts, by
+    # naming the only number allowed rather than forbidding the key.
+    allowed = (
+        {str(entry.operations.port)}
+        if entry.operations is not None and entry.operations.publish
+        else set()
+    )
+    assert published_ports(plan.override) == allowed, (
+        entry.id,
+        "compose CONCATENATES ports lists across files",
+    )
     assert "build" not in keys_in(plan.base), "the build overlay is never auto-loaded"
     for name, text in (("base", plan.base), ("override", plan.override), ("build", plan.build)):
         assert "{{" not in text, f"{entry.id}: {name} kept a placeholder"

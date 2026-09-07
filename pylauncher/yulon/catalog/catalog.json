@@ -485,6 +485,25 @@
         "prompt": "mangos>",
         "prompt_precedes_answer": false
       },
+      "operations": {
+        "channel": "soap",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878",
+            "Ra.Enable": "0"
+          }
+        },
+        "publish": true,
+        "must_not_listen": [
+          8888,
+          3443
+        ]
+      },
       "observability": {
         "characters": {
           "table": "characters",

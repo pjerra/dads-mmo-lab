@@ -668,3 +668,46 @@ def test_a_restores_safety_dump_reports_missing_in_this_cores_spelling(
         "the safety dump announced a missing core database using AzerothCore's names on a "
         f"CMaNGOS install: {complaints}"
     )
+
+
+def test_the_app_rotates_its_own_password_in_this_cores_own_columns() -> None:
+    """8.2c's repair path, and the scheme is the whole point of it being separate.
+
+    `create_account()` refuses to re-salt a row that exists, because silently
+    changing an owner's password is worse than refusing. The channel's repair
+    needs exactly that on ONE account -- its own -- so this is a narrower seam
+    with a guard on the name, and it writes `v`/`s` because that is what this
+    core reads. WotLK's version writes `salt`/`verifier`; a shared
+    implementation would put AzerothCore's columns in a CMaNGOS row.
+    """
+    sql = FakeSql()
+
+    accounts.reset_own_password(sql, "YULON_ABCD1234", "n3w-p@ss34")
+
+    written = [statement for _, statement in sql.statements]
+    assert len(written) == 1
+    assert written[0].startswith("UPDATE account SET v = ")
+    assert " s = " in written[0]
+    assert "salt" not in written[0] and "verifier" not in written[0]
+    # Every literal is a hex blob (`_utf8mb4 X'...'`), which is this project's
+    # safe form -- so the name is asserted by DECODING what was written rather
+    # than by looking for it quoted, which it never is.
+    blobs = [bytes.fromhex(h).decode() for h in re.findall(r"X'([0-9A-F]+)'", written[0])]
+    assert blobs[-1] == "YULON_ABCD1234", blobs
+    assert "n3w-p@ss34" not in written[0], "the password must never reach a statement"
+    assert "n3w-p@ss34" not in "".join(blobs), "not even hex-encoded"
+
+
+def test_it_refuses_every_account_that_is_not_the_apps_own() -> None:
+    """The guard is on the KIND of name, not on one name.
+
+    Two installs can share an auth database, so "is it mine" cannot mean "is it
+    the one I remember making" -- an adversarial review made that point against
+    8.3a and it holds here.
+    """
+    sql = FakeSql()
+
+    with pytest.raises(accounts.AccountError, match="not an account this app owns"):
+        accounts.reset_own_password(sql, "SOMEONE_ELSE", "n3w-p@ss34")
+
+    assert sql.statements == []

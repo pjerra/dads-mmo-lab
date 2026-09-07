@@ -387,7 +387,11 @@ def render(
     )
     override = fill(
         texts["override.yml.tmpl"],
-        {"ENVIRONMENT": _env_block(env), "BIND_LABEL": bind_label},
+        {
+            "ENVIRONMENT": _env_block(env),
+            "BIND_LABEL": bind_label,
+            "CHANNEL_SERVICE": _channel_service(entry),
+        },
     )
     build = fill(
         texts["build.yml.tmpl"],
@@ -635,6 +639,34 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
         tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
         tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
     return tokens
+
+
+def _channel_service(entry: CatalogEntry) -> str:
+    """The override's services block: the channel's published port, or nothing.
+
+    Written here rather than in the template because the answer depends on the
+    entry: WotLK's base file has published
+    `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a
+    channel, so its entry says `publish: false` and this returns the empty
+    mapping that keeps the file a valid compose document. The CMaNGOS trees
+    publish no such port anywhere, so for them this is the only place it can
+    come from (8.2c).
+
+    The host side is pinned to loopback for the same reason 8.2a pins it: the
+    listener binds every interface INSIDE the container, and nothing off this
+    machine has business reaching a console that runs commands at SEC_CONSOLE.
+    The variable name is the same contract the rollback uses to give the port
+    back (`channel_setup.HOST_PORT_VAR`).
+    """
+    operations = entry.operations
+    if operations is None or not operations.publish:
+        return " {}"
+    port = operations.port
+    return (
+        f"\n  {entry.container_spec().world}:"
+        f"\n    ports:"
+        f'\n      - "${{DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:{port}}}:{port}"'
+    )
 
 
 def _env_block(env: Mapping[str, str]) -> str:
