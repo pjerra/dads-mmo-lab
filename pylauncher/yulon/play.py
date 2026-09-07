@@ -222,6 +222,16 @@ class InstallPlay:
     * **a name nobody has never reaches the server.** Its refusal would name a
       character that does not exist, which reads like the server disagreeing
       about a character rather than a typo.
+
+    **What canonicalising does NOT give is identity.** It fixes case; it is not
+    a lock. Between the lookup and the command a character can be renamed or
+    deleted and its name taken by another, and the command would then act on
+    the replacement (8.4a's adversarial review). These cores address these
+    commands by name and offer nothing else to address them by -- there is no
+    guid form of `character level` -- so the honest position is that this is a
+    real gap with no fix at this layer, narrow (it needs a rename or a delete in
+    the same second, on a server whose administrator is the person pressing the
+    button) and worth knowing about rather than papering over.
     """
 
     def __init__(
