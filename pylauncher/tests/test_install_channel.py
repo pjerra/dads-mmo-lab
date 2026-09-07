@@ -360,3 +360,54 @@ def test_settle_leaves_a_channel_that_gave_up_alone(tmp_path: Path) -> None:
     channel._state = setup.GaveUp(account="YULON_AB12CD34", reason="three tries")
 
     assert isinstance(channel.settle(), setup.GaveUp)
+
+
+class _Captures:
+    """Keeps the endpoint it was handed, and refuses to send anything."""
+
+    def __init__(self) -> None:
+        self.endpoints: list[object] = []
+
+    def __call__(self, endpoint: object) -> object:
+        self.endpoints.append(endpoint)
+        return self
+
+    def send(self, _command: object) -> object:
+        raise AssertionError("this test does not send anything")
+
+
+def test_the_endpoint_carries_this_install_s_own_namespace(tmp_path: Path) -> None:
+    """`Endpoint.namespace` has a default, and this is what stops anything using it.
+
+    The default exists so a credential file written before the field did stays
+    readable. Nothing inside the app may lean on it: TBC's listener answers
+    `urn:MaNGOS`, and an `urn:AC` envelope comes back HTTP 500 `method name or
+    namespace not recognized` -- which from the caller's side is
+    indistinguishable from a world that has not finished loading. Measured on
+    m910q, 2026-09-07, against a live CMaNGOS worldserver.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    captures = _Captures()
+    channel = setup.InstallChannel(
+        tbc,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *_args: None,
+        channel_for=captures,
+        config_dir=tmp_path / "config",
+    )
+    setup.save_credential(
+        setup.Verified(account="YULON_AB12CD34", password="pw", at="2026-09-07 09:00 UTC"),
+        game=tbc.id,
+        install_id=INSTALL,
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path / "config",
+    )
+
+    assert channel.live_channel() is not None
+
+    assert captures.endpoints, "no endpoint was built"
+    assert captures.endpoints[0].namespace == "urn:MaNGOS", captures.endpoints[0]
+    assert tbc.operations is not None and tbc.operations.namespace == "urn:MaNGOS"

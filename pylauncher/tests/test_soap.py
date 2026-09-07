@@ -284,3 +284,20 @@ def test_unescaping_leaves_a_bare_ampersand_alone_rather_than_guessing() -> None
     """Text the server did not escape is text, not a broken entity."""
     assert soap.unescape("bots & players") == "bots & players"
     assert soap.unescape("100% &amp; rising") == "100% & rising"
+
+
+def test_the_envelope_carries_this_tree_s_own_namespace() -> None:
+    """One wire format, two namespaces, and the server checks it before the password.
+
+    Measured on m910q, 2026-09-07, against a live CMaNGOS TBC worldserver: an
+    `urn:AC` envelope comes back HTTP 500 with `method name or namespace not
+    recognized` **whether the credential is right or wrong**, because the
+    namespace is checked first. So sending the wrong one does not read as a
+    rejected credential -- it reads as a server that has not answered, which is
+    exactly what a world still loading looks like too.
+    """
+    for namespace in ("urn:AC", "urn:MaNGOS"):
+        body = soap.envelope("server info", namespace=namespace)
+        assert f'xmlns:ns1="{namespace}"' in body, body
+        assert "<ns1:executeCommand>" in body
+        assert "<command>server info</command>" in body

@@ -95,11 +95,45 @@ def test_the_other_trees_have_no_block_until_their_own_box(game: str) -> None:
     assert load_catalog().get(game).operations is None
 
 
+def test_each_tree_states_its_own_soap_namespace() -> None:
+    """Measured live on 2026-09-07, and it is not the same on both families.
+
+    The CMaNGOS source study stopped exactly here -- "the gSOAP-generated
+    envelope is in `soapC.cpp`, which is generated code I did not read... needs
+    a judgement / live test" -- so it was measured against the running TBC
+    server on m910q. `urn:AC` gets HTTP 500 `Method 'ns1:executeCommand' not
+    implemented: method name or namespace not recognized`; `urn:MaNGOS` gets
+    HTTP 200 and the server's own `CMaNGOS/0.18 ... Online players: 0`.
+
+    There is no default, and that is the point: a default would be one tree's
+    answer inherited by every other, and the failure it produces looks exactly
+    like a world that has not finished loading -- the namespace is checked
+    BEFORE the password, so a wrong one answers 500 even for a bad credential.
+    """
+    wotlk = load_catalog().get("wow-wotlk")
+    tbc = load_catalog().get("wow-tbc")
+
+    assert wotlk.operations is not None and wotlk.operations.namespace == "urn:AC"
+    assert tbc.operations is not None and tbc.operations.namespace == "urn:MaNGOS"
+
+
+def test_a_channel_with_no_namespace_is_refused() -> None:
+    """A namespace nobody measured is a guess, and this one fails invisibly."""
+    with pytest.raises(ValidationError):
+        Operations(
+            channel="soap",
+            port=7878,
+            gm_level=3,
+            enable_env={"AC_SOAP_ENABLED": "1"},
+        )
+
+
 def test_a_soap_channel_that_never_says_how_to_switch_soap_on_is_refused() -> None:
     """The relationship has no other owner, so the model owns it."""
     with pytest.raises(ValidationError, match="turns SOAP on"):
         Operations(
             channel="soap",
+            namespace="urn:AC",
             port=7878,
             gm_level=3,
             enable_env={"AC_RA_ENABLE": "0"},
@@ -119,6 +153,7 @@ def test_a_tree_with_no_environment_route_says_which_conf_file_turns_it_on() -> 
     """
     ops = Operations(
         channel="soap",
+        namespace="urn:MaNGOS",
         port=7878,
         gm_level=3,
         enable_conf=ConfEnable(
@@ -138,6 +173,7 @@ def test_a_conf_route_that_never_mentions_soap_is_refused_like_the_env_one() -> 
     with pytest.raises(ValidationError, match="turns SOAP on"):
         Operations(
             channel="soap",
+            namespace="urn:MaNGOS",
             port=7878,
             gm_level=3,
             enable_conf=ConfEnable(file="etc/mangosd.conf", keys={"Ra.Enable": "0"}),
@@ -149,6 +185,7 @@ def test_declaring_both_routes_is_refused() -> None:
     with pytest.raises(ValidationError, match="switched on ONE way"):
         Operations(
             channel="soap",
+            namespace="urn:AC",
             port=7878,
             gm_level=3,
             enable_env={"AC_SOAP_ENABLED": "1"},
@@ -158,4 +195,4 @@ def test_declaring_both_routes_is_refused() -> None:
 
 def test_a_block_with_no_enable_keys_at_all_is_refused() -> None:
     with pytest.raises(ValidationError):
-        Operations(channel="soap", port=7878, gm_level=3, enable_env={})
+        Operations(channel="soap", namespace="urn:AC", port=7878, gm_level=3, enable_env={})

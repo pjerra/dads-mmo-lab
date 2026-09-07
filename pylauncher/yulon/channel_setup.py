@@ -48,7 +48,7 @@ import os
 import re
 import secrets
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -749,7 +749,16 @@ class InstallChannel:
     def _endpoint(self, account: str, password: str) -> soap.Endpoint:
         operations = self.entry.operations
         port = operations.port if operations is not None else 0
-        return soap.Endpoint(host="127.0.0.1", port=port, account=account, password=password)
+        return soap.Endpoint(
+            host="127.0.0.1",
+            port=port,
+            account=account,
+            password=password,
+            # This tree's own, never the field default: TBC answers
+            # `urn:MaNGOS` and the wrong namespace fails as though the world
+            # were still loading (measured, m910q 2026-09-07).
+            namespace=operations.namespace if operations is not None else "urn:AC",
+        )
 
     def check(self) -> State:
         """Ask whether the saved credential still works, and keep the answer.
@@ -844,6 +853,14 @@ class InstallChannel:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
         if saved is None:
             return None
+        # The file is the authority on the credential and the catalog is the
+        # authority on the namespace, so the entry's value replaces whatever the
+        # file happens to carry. A credential written before that field existed
+        # has the default in it, and the default is one tree's answer: handing
+        # it to another tree fails as though the world were still loading.
+        operations = self.entry.operations
+        if operations is not None and saved.namespace != operations.namespace:
+            saved = replace(saved, namespace=operations.namespace)
         return self._channel_for(saved)
 
     def roll_back(self) -> bool:

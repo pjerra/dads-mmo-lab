@@ -98,6 +98,16 @@ class Endpoint:
     diff, a logged object or a traceback frame dump would each print it.
     """
 
+    namespace: str = "urn:AC"
+    """Which XML namespace this listener answers to; see `envelope()`.
+
+    Defaulted here and NOWHERE else. This is a transport-level struct that
+    predates the second family, and every construction site inside the app now
+    passes the entry's own value; the default keeps a credential file written
+    before this field existed readable, which is the same reason
+    `Verified.at` is optional.
+    """
+
     @property
     def url(self) -> str:
         return f"http://{self.host}:{self.port}/"
@@ -120,7 +130,7 @@ class Reply:
 _ENVELOPE = (
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"'
-    ' xmlns:ns1="urn:AC">\n'
+    ' xmlns:ns1="{namespace}">\n'
     "  <SOAP-ENV:Body>\n"
     "    <ns1:executeCommand><command>{command}</command></ns1:executeCommand>\n"
     "  </SOAP-ENV:Body>\n"
@@ -128,9 +138,17 @@ _ENVELOPE = (
 )
 
 
-def envelope(command: str) -> str:
-    """The request body for `command`, escaped."""
-    return _ENVELOPE.format(command=escape(command))
+def envelope(command: str, *, namespace: str) -> str:
+    """The request body for `command`, escaped, in this tree's own namespace.
+
+    The namespace is an argument and not a constant because it is not the same
+    on both families -- `urn:AC` on AzerothCore, `urn:MaNGOS` on CMaNGOS -- and
+    getting it wrong is invisible from here: the service checks the namespace
+    before the credential, so the wrong one answers HTTP 500 `method name or
+    namespace not recognized` even for a bad password, which is indistinguishable
+    from a world that has not finished loading (measured on m910q, 2026-09-07).
+    """
+    return _ENVELOPE.format(command=escape(command), namespace=namespace)
 
 
 def escape(text: str) -> str:
@@ -185,7 +203,7 @@ def execute(endpoint: Endpoint, command: str, *, timeout: float = DEFAULT_TIMEOU
         connection.request(
             "POST",
             "/",
-            body=envelope(command).encode("utf-8"),
+            body=envelope(command, namespace=endpoint.namespace).encode("utf-8"),
             headers={
                 "Content-Type": "text/xml; charset=utf-8",
                 "Authorization": _basic(endpoint),

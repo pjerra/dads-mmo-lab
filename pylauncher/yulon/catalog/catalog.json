@@ -100,6 +100,7 @@
       },
       "operations": {
         "channel": "soap",
+        "namespace": "urn:AC",
         "port": 7878,
         "gm_level": 3,
         "enable_env": {
@@ -487,6 +488,7 @@
       },
       "operations": {
         "channel": "soap",
+        "namespace": "urn:MaNGOS",
         "port": 7878,
         "gm_level": 3,
         "enable_conf": {

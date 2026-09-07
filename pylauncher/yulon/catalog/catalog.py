@@ -1133,6 +1133,17 @@ class Operations(_Strict):
     """
 
     channel: Literal["soap", "attach"]
+    namespace: str = Field(
+        min_length=1,
+        description=(
+            "The XML namespace this tree's SOAP service answers to: `urn:AC` on AzerothCore, "
+            "`urn:MaNGOS` on the CMaNGOS lineage. No default, because a default is one tree's "
+            "answer inherited by the rest -- and the failure it produces is invisible. Measured "
+            "on m910q, 2026-09-07: the namespace is checked BEFORE the credential, so a wrong "
+            "one answers HTTP 500 `method name or namespace not recognized` even for a bad "
+            "password, which reads exactly like a world that has not finished loading."
+        ),
+    )
     port: int = Field(gt=0, lt=65536, description="The channel's port inside the container.")
     gm_level: int = Field(ge=0, le=3, description="The level the channel needs of its account.")
     enable_env: dict[str, str] = Field(
