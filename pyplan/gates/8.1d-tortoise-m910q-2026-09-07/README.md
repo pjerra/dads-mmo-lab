@@ -9,9 +9,9 @@ built for 8.1b. Every action was announced on that box's activity terminal first
 then took **17 minutes 46 seconds** to load, most of it one-time work — `ai_playerbot_equip_cache`
 is built class by class, spec by spec, level by level, and this fork logs every INSERT.
 
-**This box is NOT ticked.** One clause is unproved: *"the player count on the tab moves when a
-client logs in and out of this server."* A fresh install has no characters, and creating one needs
-somebody at the character-creation screen — see "What is left" below.
+**Ticked 2026-09-07.** The last clause was met at 06:33Z, twenty hours after the rest: the owner
+logged in with the gate account, made a character, entered the world and left again, and the
+count on the tab moved **0 → 1 → 0** around him.
 
 ## What was proved
 
@@ -26,7 +26,7 @@ somebody at the character-creation screen — see "What is left" below.
 | Every stop leaves a log whose contents match the Console tab | 227 061 bytes, 2000 lines, the console tail byte-identically inside it |
 | A snapshot that fails is reported and the stop still happens | `problem=…File exists`, `stop() -> True`, `running` → `exited` |
 | A crash-looping world reads as a loop | `restart_loop`, `stable=False`, **7 → 10 restarts** across seven polls |
-| **Visible effect:** the player count moves when a client logs in and out | **not proved** — see below |
+| **Visible effect:** the player count moves when a client logs in and out | **0 → 1 → 0**, 06:33:01Z to 06:34:34Z, with 500 bots counted as bots throughout — screenshots `8-` and `9-` |
 
 ## Two per-tree facts, and one of them contradicts its sibling
 
@@ -118,25 +118,38 @@ database taken away under the world, the world put back with the ordinary `docke
 and then **ten real minutes of waiting** to watch the interlock open on its own rather than
 asserting it from the rule. Screenshots `5-`, `6-` and `7-` are the Server tab in all three states.
 
-## What is left
+## The last clause, met
 
-The account has no character, and this server was installed today, so nothing on it does. Character
-creation needs the creation screen: three clicks computed from the client window's own rectangle
-were tried and the third one logged the client out instead, and the coordinates for this client's UI
-have not been measured. **The remaining clause is two minutes of somebody's time:**
-
-```
-account  TORTGATE
-password t0rt-g@te12
-realm    100.78.24.50   (already written into the client's realmlist.wtf)
-```
-
-Log in, make any character, enter the world, wait, and log out. The watcher is already running on
-`m910q` and writes every CHANGE in what the tab would show to `~/gate81d-watch.log`:
+The owner logged in on his own Turtle client at 06:33Z on 2026-09-07 and left again ninety seconds
+later. `gate81d_login.py` watched this install's dashboard across it and wrote down every CHANGE in
+what the Server tab would show:
 
 ```
-ssh m910q 'cat ~/gate81d-watch2.log'
+[06:33:01Z] up — 1 players, 500 bots, up 13m
+[06:33:54Z] up — 1 players, 499 bots, up 14m
+[06:34:00Z] up — 1 players, 500 bots, up 14m
+[06:34:34Z] up — 0 players, 499 bots, up 14m
 ```
+
+The person and the bots are counted apart, which is the point of the clause and of the marker
+behind it: **one** player and **five hundred** bots, on a server where 501 characters were online.
+The bots drifting 500 → 498 → 500 in between is this server's own population logging in and out,
+not a reading that wobbled.
+
+Corroborated by the rows the app never wrote:
+
+```
+account   104  TORTGATE  last_login 2026-09-07 06:31:47
+character 901  Dorta  level 1   online 1  →  online 0
+```
+
+Screenshots `8-a-player-is-on.png` (`up — 1 players, 500 bots, up 13m`) and `9-and-back-down.png`
+(`up — 0 players, 499 bots, up 14m`) are the Server tab either side of it, drawn offscreen with the
+same watcher behind them. The transcript is `login-transcript.txt`; the character-row dump it
+recorded has been left out of that file, being 500 lines of bots.
+
+The account was made through Yu'lon's own create-account seam and the realm address written through
+its own Networking plan/apply, so the client reached this box through the app's own work.
 
 ## How to re-run it
 
