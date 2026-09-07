@@ -331,7 +331,13 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # measured `operations` block has not had its 8.2 box, and the day it
         # gets one this test fails until its wiring lands.
         unwired = {"channel_setup"} if entry.operations is None else set()
-        allowed = module_surface | unmeasured | unwired
+        # And again for 8.3a's accounts. The fact that decides it is where this
+        # core keeps a GM level: reading the wrong store does not fail, it
+        # reports every account as level 0, so an entry without that measurement
+        # has not had its 8.3 box. 8.3b, 8.3c and 8.3d each add their own, and
+        # this test fails the day one of them lands without its wiring.
+        unlisted = {"accounts"} if entry.accounts.level is None else set()
+        allowed = module_surface | unmeasured | unwired | unlisted
         if game == "wow-wotlk":
             assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
         else:

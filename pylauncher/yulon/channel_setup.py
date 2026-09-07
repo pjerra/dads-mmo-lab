@@ -745,6 +745,20 @@ class InstallChannel:
             return self.check()
         return self.prove()
 
+    def live_channel(self) -> object | None:
+        """A channel on the saved credential, or None if there is not one yet.
+
+        The credential file is the only source, and that is deliberate: it is
+        written only after a round trip answered, so a channel handed out here
+        is one that has worked at least once. A feature asking for it while the
+        setup is `Idle` gets `None` and says so, rather than getting a channel
+        built on a password nothing has proved.
+        """
+        saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
+        if saved is None:
+            return None
+        return self._channel_for(saved)
+
     def roll_back(self) -> bool:
         """Undo this install's own press, and give its host port back.
 

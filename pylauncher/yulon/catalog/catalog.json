@@ -91,6 +91,13 @@
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
       },
+      "accounts": {
+        "level": {
+          "table": "account_access",
+          "account_column": "id",
+          "level_column": "gmlevel"
+        }
+      },
       "operations": {
         "channel": "soap",
         "port": 7878,

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from yulon import channel_setup, dashboard, docker, logsnap, networking, runner
+from yulon import channel_setup, dashboard, docker, logsnap, networking, runner, useraccounts
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
@@ -2672,3 +2672,179 @@ def test_the_interlock_reads_stable_rather_than_the_state_word(
     view.refresh_verdict()
 
     assert view.enable_channel_button.isEnabled() is False
+
+
+# -- 8.3a: the account list, and the two changes the server makes ------------
+
+
+class _StubAccounts:
+    """Stands in for the account seam the wiring hands down (8.3a)."""
+
+    def __init__(
+        self,
+        listing: useraccounts.Listing | None = None,
+        outcome: useraccounts.Outcome | None = None,
+    ) -> None:
+        self.list_result = listing or useraccounts.Listing(
+            accounts=[
+                useraccounts.Account(id=7, username="ALICE", gm_level=0),
+                useraccounts.Account(id=9, username="BOB", gm_level=3),
+            ]
+        )
+        self.outcome = outcome or useraccounts.Outcome(True, text="done")
+        self.passwords: list[tuple[str, str]] = []
+        self.levels: list[tuple[str, int]] = []
+        self.listings = 0
+
+    def listing(self) -> useraccounts.Listing:
+        self.listings += 1
+        return self.list_result
+
+    def set_password(self, account: str, password: str) -> useraccounts.Outcome:
+        self.passwords.append((account, password))
+        return self.outcome
+
+    def set_gm_level(self, account: str, level: int) -> useraccounts.Outcome:
+        self.levels.append((account, level))
+        return self.outcome
+
+
+def _with_accounts(ps: _Ps, tmp_path: Path, stub: _StubAccounts) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.accounts = stub
+    return services
+
+
+def test_the_account_list_shows_what_the_read_returned(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_accounts()
+
+    said = [view.account_list.item(i).text() for i in range(view.account_list.count())]
+    assert any("ALICE" in line for line in said)
+    assert any("BOB" in line and "3" in line for line in said)
+
+
+def test_a_list_that_could_not_be_read_says_so_instead_of_showing_none(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An empty list and an unreadable database look identical on screen."""
+    stub = _StubAccounts(
+        listing=useraccounts.Listing(problem="could not read this server's accounts: no container")
+    )
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_accounts()
+
+    assert view.account_list.count() == 0
+    assert "no container" in view.account_report.text()
+
+
+def test_neither_change_is_offered_until_an_account_is_chosen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A button that acts on "whichever row happens to be first" is a trap."""
+    view = ControllerView(
+        WOTLK,
+        _with_accounts(ps, tmp_path, _StubAccounts()),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+    view.refresh_accounts()
+
+    assert view.set_password_button.isEnabled() is False
+    assert view.set_gm_button.isEnabled() is False
+
+    view.account_list.setCurrentRow(0)
+
+    assert view.set_password_button.isEnabled() is True
+    assert view.set_gm_button.isEnabled() is True
+
+
+def test_setting_a_password_names_the_chosen_account_and_clears_the_field(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The field is cleared for the reason `create_account` clears its own.
+
+    A password left in a widget is a password in every later repr and
+    traceback frame of that widget.
+    """
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert stub.passwords == [("ALICE", "n3w-p@ss")]
+    assert view.selected_password.text() == ""
+
+
+def test_setting_a_level_names_the_chosen_account(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(1)
+    view.selected_gm.setValue(2)
+
+    view.set_selected_gm_level()
+
+    assert stub.levels == [("BOB", 2)]
+
+
+def test_a_change_the_server_refused_is_shown_in_the_servers_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubAccounts(outcome=useraccounts.Outcome(False, problem="There is no such account."))
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert "There is no such account." in view.account_report.text()
+
+
+def test_a_change_that_worked_re_reads_the_list_so_the_level_shown_is_the_new_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise the tab keeps showing the level the account no longer has."""
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    before = stub.listings
+    view.account_list.setCurrentRow(0)
+    view.selected_gm.setValue(1)
+
+    view.set_selected_gm_level()
+
+    assert stub.listings == before + 1
+
+
+def test_a_game_with_no_account_seam_shows_no_list_and_no_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.3b, 8.3c and 8.3d each measure their own; a control that cannot work is worse than none."""
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert view.account_list.isVisibleTo(view) is False
+    assert view.set_password_button.isVisibleTo(view) is False

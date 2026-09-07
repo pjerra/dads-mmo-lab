@@ -46,7 +46,16 @@ from PySide6.QtWidgets import (
 )
 
 from yulon import channel as channel_module
-from yulon import channel_setup, docker, install_wiring, logsnap, networking, platform, resources
+from yulon import (
+    channel_setup,
+    docker,
+    install_wiring,
+    logsnap,
+    networking,
+    platform,
+    resources,
+    useraccounts,
+)
 from yulon import dashboard as dashboard_module
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog import composegen
@@ -95,6 +104,20 @@ class UnsupportedGameError(RuntimeError):
     registry covers the whole catalog, so this raises in CI before it can
     raise in front of anybody.
     """
+
+
+class AccountAdmin(Protocol):
+    """What the Accounts tab needs of this install's accounts (8.3a).
+
+    A read and two writes, and the split between them is owner answer 7 rather
+    than a layering choice: this app reads rows and the SERVER changes them.
+    """
+
+    def listing(self) -> object: ...
+
+    def set_password(self, account: str, password: str) -> object: ...
+
+    def set_gm_level(self, account: str, level: int) -> object: ...
 
 
 class ChannelSetup(Protocol):
@@ -169,6 +192,13 @@ class ControllerServices:
     A small object rather than two callables because the two questions belong
     together: pressing enable and asking where the setup has got to are the same
     state machine seen from two sides.
+    """
+    accounts: AccountAdmin | None = None
+    """This install's user accounts, for a game whose stores are measured (8.3a).
+
+    One object and not three callables for the reason `channel_setup` is one:
+    the read and the two writes share a fact -- which account is the app's own
+    -- and splitting them would be three places to remember it.
     """
 
     @classmethod
@@ -357,6 +387,7 @@ def _assemble(
     dashboard: Callable[[], dashboard_module.Verdict] | None = None,
     log_snapshot: logsnap.Recorder | None = None,
     channel_setup: ChannelSetup | None = None,
+    accounts: AccountAdmin | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -386,6 +417,7 @@ def _assemble(
         dashboard=dashboard,
         log_snapshot=log_snapshot,
         channel_setup=channel_setup,
+        accounts=accounts,
     )
 
 
@@ -446,6 +478,17 @@ def _for_wotlk(
             state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
         ),
     )
+    # 8.3a. The list is a database read and the two changes are the server's
+    # own commands, which is owner answer 7 rather than a layering choice. Both
+    # halves are given the app's own account name -- the read leaves it out,
+    # the writes refuse it.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
     return _assemble(
         entry,
         server_dir,
@@ -453,6 +496,7 @@ def _for_wotlk(
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
+        accounts=accounts_admin,
         controller=Controller(
             spec,
             server_dir,
@@ -1840,6 +1884,45 @@ class ControllerView(QWidget):
         form.addRow("GM level", self.account_gm)
         form.addRow(self.create_account_button)
 
+        # 8.3a. Hidden for a game whose account stores have not been measured:
+        # 8.3b, 8.3c and 8.3d each add their own, and a list built on a guessed
+        # store shows every account as level 0, which is a lie shaped like an
+        # answer.
+        wired = self.services.accounts is not None
+        existing = QGroupBox("Accounts on this server", tab)
+        existing_box = QVBoxLayout(existing)
+        self.account_list = QListWidget(existing)
+        self.account_list.currentRowChanged.connect(self._account_chosen)
+        self.refresh_accounts_button = QPushButton("Refresh the list", existing)
+        self.refresh_accounts_button.clicked.connect(self.refresh_accounts)
+        change = QFormLayout()
+        self.selected_password = QLineEdit(existing)
+        self.selected_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.set_password_button = QPushButton("Set password", existing)
+        self.set_password_button.clicked.connect(self.set_selected_password)
+        self.selected_gm = QSpinBox(existing)
+        self.selected_gm.setRange(0, 3)
+        self.set_gm_button = QPushButton("Set GM level", existing)
+        self.set_gm_button.clicked.connect(self.set_selected_gm_level)
+        change.addRow("New password", self.selected_password)
+        change.addRow(self.set_password_button)
+        change.addRow("GM level", self.selected_gm)
+        change.addRow(self.set_gm_button)
+        existing_box.addWidget(self.account_list)
+        existing_box.addWidget(self.refresh_accounts_button)
+        existing_box.addLayout(change)
+        existing.setVisible(wired)
+        for control in (
+            self.account_list,
+            self.refresh_accounts_button,
+            self.set_password_button,
+            self.set_gm_button,
+        ):
+            control.setVisible(wired)
+        # Nothing is chosen yet, and a button that acts on "whichever row
+        # happens to be first" is a trap rather than a convenience.
+        self._account_chosen(-1)
+
         self.account_report = QLabel("", tab)
         # A core this app cannot write an account for is said once, here, with
         # the command that does work — rather than left as a live button whose
@@ -1857,9 +1940,112 @@ class ControllerView(QWidget):
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(accounts)
+        box.addWidget(existing)
         box.addWidget(self.account_report)
         box.addStretch(1)
         self._tabs.addTab(tab, "Accounts")
+
+    def _account_chosen(self, row: int) -> None:
+        """Both changes act on the chosen account, so both wait for one."""
+        chosen = row >= 0 and self.account_list.item(row) is not None
+        self.set_password_button.setEnabled(chosen)
+        self.set_gm_button.setEnabled(chosen)
+        if chosen:
+            item = self.account_list.item(row)
+            self.selected_gm.setValue(int(item.data(Qt.ItemDataRole.UserRole + 1) or 0))
+
+    def _chosen_account(self) -> str:
+        item = self.account_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    @Slot()
+    def refresh_accounts(self) -> None:
+        """Read the list, off the GUI thread: it is a `docker exec` and a query."""
+        admin = self.services.accounts
+        if admin is None:
+            return
+        self._run(admin.listing, self._accounts_listed, self._accounts_failed)
+
+    @Slot(object)
+    def _accounts_listed(self, listing: object) -> None:
+        chosen = self._chosen_account()
+        self.account_list.clear()
+        problem = getattr(listing, "problem", "")
+        if problem:
+            # Cleared first: an old list under a new error would be read as the
+            # current accounts, which is exactly the thing the problem says not
+            # to trust.
+            self.account_report.setText(problem)
+            self._account_chosen(-1)
+            return
+        for account in getattr(listing, "accounts", []):
+            item = QListWidgetItem(
+                f"{account.username} — id {account.id} — GM level {account.gm_level}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, account.username)
+            item.setData(Qt.ItemDataRole.UserRole + 1, account.gm_level)
+            self.account_list.addItem(item)
+            if account.username == chosen:
+                self.account_list.setCurrentItem(item)
+        if self.account_list.currentRow() < 0:
+            self._account_chosen(-1)
+
+    @Slot(object)
+    def _accounts_failed(self, exc: object) -> None:
+        self.account_report.setText(f"Could not read this server's accounts: {exc}")
+
+    @Slot()
+    def set_selected_password(self) -> None:
+        """Ask the server to change the chosen account's password.
+
+        The field is cleared for the reason `create_account` clears its own: a
+        password left in a widget is a password in every later repr and
+        traceback frame of that widget.
+        """
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        password = self.selected_password.text()
+        self.selected_password.clear()
+        self.account_report.setText(f"Changing {account}'s password…")
+        self._run(
+            lambda: admin.set_password(account, password),
+            self._account_changed,
+            self._accounts_failed,
+        )
+
+    @Slot()
+    def set_selected_gm_level(self) -> None:
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        level = self.selected_gm.value()
+        self.account_report.setText(f"Setting {account} to GM level {level}…")
+        self._run(
+            lambda: admin.set_gm_level(account, level),
+            self._account_changed,
+            self._accounts_failed,
+        )
+
+    @Slot(object)
+    def _account_changed(self, outcome: object) -> None:
+        """Say what came back, and re-read the list when something changed.
+
+        Without the re-read the tab keeps showing the level the account no
+        longer has — and the list is where a person checks that the change
+        landed.
+        """
+        if getattr(outcome, "done", False):
+            self.account_report.setText(getattr(outcome, "text", "") or "Done.")
+            self.refresh_accounts()
+            return
+        problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
+        self.account_report.setText(problem)
+        self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:

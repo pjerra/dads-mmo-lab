@@ -928,6 +928,38 @@ class Realmlist(_Strict):
     realm_id: int = 1
 
 
+class AccountLevel(_Strict):
+    """Where THIS core keeps an account's GM level (8.3a).
+
+    Two shapes, and reading the wrong one does not fail: it reports every
+    account as level 0, which is a lie shaped like an answer. AzerothCore keeps
+    it in a join table (`account_access`, keyed `id`, no realm filter, which is
+    how SOAP itself reads it); the CMaNGOS trees keep it on the account row,
+    under `gmlevel` on CMaNGOS proper and `rank` on tortoise.
+
+    Absent until that tree's own box measures it, like `observability` and for
+    the same reason: an inherited block is a guess wearing the shape of a fact.
+    """
+
+    table: str | None = Field(
+        default=None,
+        description=(
+            "The join table holding the level, or null when the level is a column on the "
+            "account row itself."
+        ),
+    )
+    account_column: str = Field(
+        default="id",
+        min_length=1,
+        description=(
+            "The column in `table` that carries the account id. Ignored when table is null."
+        ),
+    )
+    level_column: str = Field(
+        default="gmlevel", min_length=1, description="The column holding the level itself."
+    )
+
+
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
@@ -960,6 +992,14 @@ class Accounts(_Strict):
         default="account create <name> <password>",
         min_length=1,
         description="What to type on the worldserver console when `by_sql` is False.",
+    )
+    level: AccountLevel | None = Field(
+        default=None,
+        description=(
+            "Where this core keeps an account's GM level, for the account list (8.3a). Absent "
+            "until that tree's own box measures it: reading the wrong store reports every "
+            "account as level 0 rather than failing."
+        ),
     )
 
 
