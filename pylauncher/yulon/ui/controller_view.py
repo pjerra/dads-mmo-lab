@@ -964,6 +964,26 @@ def _for_tortoise(
         channel_for_saved=lambda: console,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
+    # 8.4d. The same seam as 8.4a over this fork's own measured facts: `rename`
+    # at the top level rather than under `character`, no console route to an
+    # arbitrary level at all, one item per mail, and a flat `item_template`
+    # column on the inventory row. Over the SAME console object the two seams
+    # above use -- a second `AttachChannel` would be a second `docker attach`
+    # on one worldserver, and two replies interleaved in one window.
+    #
+    # This line is 8.4d's, and it was the one the box was missing: the catalog
+    # block, the commands and the tab were all written, and without this the
+    # tab on this game drew "WoW Tortoise has not had its character actions
+    # measured yet" -- the entry said the measurement existed and the window
+    # said it did not. `test_every_game_offers_the_whole_controller_surface_
+    # wotlk_does` is the guard that says so, from the entry rather than from a
+    # list of which games are behind.
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=lambda: console,
+    )
     return _assemble(
         entry,
         server_dir,
@@ -972,6 +992,7 @@ def _for_tortoise(
         log_snapshot=recorder,
         console_probe=console.send,
         accounts=accounts_admin,
+        play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

@@ -577,3 +577,37 @@ def test_the_actions_that_are_safe_offline_are_not_caught_by_the_rename_guard(
     assert install.teleport("ganaar", "Stormwind").done is True
     assert install.revive("ganaar").done is True
     assert channel.sent == ["tele name Ganaar Stormwind", "revive Ganaar"], channel.sent
+
+
+def test_the_tortoise_tab_is_handed_a_seam_built_from_this_forks_own_entry(tmp_path) -> None:
+    """The line 8.4d was missing, and every test above it passed without.
+
+    The catalog block, the commands and the tab were all written for this tree
+    and `_for_tortoise` never bound the seam, so `ControllerServices.play` was
+    None and the Characters tab drew *"WoW Tortoise has not had its character
+    actions measured yet"* -- the entry saying the measurement exists and the
+    window saying it does not. `test_every_game_offers_the_whole_controller_
+    surface_wotlk_does` is the guard that caught it, and it asserts presence.
+
+    This asserts WHICH, which is the half that file's own docstring warns
+    presence is not: a seam handed a sibling's entry would send
+    `character rename` on the one fork where that is not a command, and would
+    promise twelve items per mail on the one that carries one. The entry is the
+    object every one of those facts is read from, so naming it names them all.
+    """
+    from yulon.ui.controller_view import ControllerServices
+
+    server_dir = tmp_path / TORTOISE.id
+    server_dir.mkdir()
+    password_file = TORTOISE.install.password.file
+    if password_file:
+        (server_dir / password_file).write_text("hunter2", encoding="utf-8")
+
+    seam = ControllerServices.for_entry(TORTOISE, server_dir).play
+
+    assert isinstance(seam, play.InstallPlay)
+    assert seam.entry.id == "wow-tortoise", seam.entry.id
+    assert seam.entry.play is not None
+    assert seam.entry.play.rename_command == "rename"
+    assert seam.entry.play.set_level_command is None
+    assert seam.mail_item_cap == 1
