@@ -22,23 +22,42 @@ wraps that in the one method every feature module is handed.
 
 ## Why this transport is offered no mutations, shown rather than argued
 
-The probe's own reply is the argument. This is what came back from `server info`, verbatim:
+The probe's own reply is the argument, and it took two readings to state it honestly.
+
+**The first reading over-claimed.** What came back from `server info` was four lines of the server's
+own SQL log sitting between the prompts:
 
 ```
 [1 ms] SQL: SELECT id FROM character_pet WHERE owner = '791'
-[1 ms] SQL: SELECT id FROM character_pet WHERE owner = '435'
 [0 ms] SQL: REPLACE INTO `character_pvp_currency` (`guid`, `honor`, …) VALUES (721, 0, 0, 0, 20698)
 [0 ms] SQL: UPDATE `characters` SET `honorRankPoints` = 0.0, … WHERE `guid` = 721
 Core revision: unknown / 1970-01-01 00:00:00 +0000 / Linux_x64 (little-endian)
 Players online: 0. Max online: 0.
-Server uptime: 41 Minutes 42 Seconds.
 ```
 
-Four lines of the server's own asynchronous SQL log arrived inside this command's reply window,
-between its prompt and the next. The transport cannot separate a reply from output the server
-happened to print at the same moment — which is the box's own sentence, and here it is on a real
-console. An action whose confirmation is "I saw something in the window" would be confirmed by
-whatever a busy server was doing anyway.
+Those lines are **this install's own configuration**, not this core's nature: `LogFilter_SQLText`
+is `0` in `mangosd.conf`, and `DatabaseMysql.cpp:229` prints every statement when it is. One key
+turns them off. Leading with them was leading with something we had switched on ourselves.
+
+**With that key set to 1, the reply is this:**
+
+```
+Could not open bot log file ../logs/bot_events.csv (No such file or directory). Logging to it is
+off for this run.
+Core revision: unknown / 1970-01-01 00:00:00 +0000 / Linux_x64 (little-endian)
+Players online: 0. Max online: 0.
+Server uptime: 29 Minutes 28 Seconds.
+```
+
+Still not the command's answer alone — and now the intruding line comes from the playerbots module
+rather than the database layer, which is the point stated properly. **The console is a shared
+stream.** Quietening one subsystem does not make it a request/response channel; it makes the next
+subsystem's output the one you read. An action confirmed by "I saw something in the window" would
+be confirmed by whatever the server happened to be saying.
+
+The install was put back to `LogFilter_SQLText = 0` afterwards, so it is as 8.1d and this box
+recorded it. The measurement is the finding; changing somebody's logging is not this app's to do
+quietly.
 
 ## The clause the box turns on, and how it was produced
 
