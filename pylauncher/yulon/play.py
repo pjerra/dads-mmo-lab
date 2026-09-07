@@ -19,8 +19,12 @@ naming what it would look like:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
+from yulon import commands
+from yulon.actions import Outcome, send
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import SqlReader
 from yulon.log import get_logger
@@ -198,3 +202,190 @@ def equipped(sql: SqlReader, entry: CatalogEntry, character: str) -> tuple[int, 
         )
     rows = sql.query("characters", statement)
     return tuple(int(line.split("\t")[0]) for line in rows.splitlines() if line.strip())
+
+
+# -- what the tab is handed --------------------------------------------------
+
+
+class InstallPlay:
+    """One install's characters, as the Characters tab presses them.
+
+    Reads go to the database and writes go to the server, which is owner
+    answer 7. Two things are true of every action here and are done in one place
+    rather than in eight:
+
+    * **the name is the server's, not the typist's.** `characters.name` is
+      case-sensitive on these trees and so is the server's own lookup, so every
+      action canonicalises first and sends the stored spelling. The prior art
+      answered "not online" for a character standing in Stormwind on exactly
+      this.
+    * **a name nobody has never reaches the server.** Its refusal would name a
+      character that does not exist, which reads like the server disagreeing
+      about a character rather than a typo.
+    """
+
+    def __init__(
+        self,
+        entry: CatalogEntry,
+        server_dir: Path,
+        *,
+        sql: SqlReader,
+        channel_for_saved: Callable[[], object | None],
+    ) -> None:
+        self.entry = entry
+        self.server_dir = server_dir
+        self._sql = sql
+        self._channel_for_saved = channel_for_saved
+
+    @staticmethod
+    def for_entry_is_possible(entry: CatalogEntry) -> bool:
+        """Whether this tree has measured what the tab would need.
+
+        The tab draws what the tree has: a button on a tree whose block is
+        absent would send a command nobody has run against it.
+        """
+        return entry.play is not None
+
+    @property
+    def mail_item_cap(self) -> int:
+        """How many attachments one mail carries here. Twelve on this tree."""
+        return self.entry.play.mail_item_cap if self.entry.play is not None else 1
+
+    # -- reads ---------------------------------------------------------------
+
+    def listing(self) -> tuple[Character, ...]:
+        return characters(self._sql, self.entry)
+
+    def find_items(self, text: str) -> tuple[Item, ...]:
+        return find_items(self._sql, self.entry, text)
+
+    def gear_set_size(self, character: str) -> tuple[int, int]:
+        """How many pieces this character is wearing, and how many mails that is.
+
+        Asked BEFORE the press, so the button can say "send 19 pieces in 2
+        mails" rather than leaving somebody to discover the second one.
+        """
+        name = self._stored_name(character)
+        if name is None:
+            return (0, 0)
+        pieces = equipped(self._sql, self.entry, name)
+        return (len(pieces), _mails_needed(len(pieces), self.mail_item_cap))
+
+    # -- writes --------------------------------------------------------------
+
+    def teleport(self, character: str, location: str) -> Outcome:
+        return self._one(character, lambda name: commands.teleport_to(name, location))
+
+    def set_level(self, character: str, level: int) -> Outcome:
+        return self._one(character, lambda name: commands.set_character_level(name, level))
+
+    def rename(self, character: str) -> Outcome:
+        return self._one(character, commands.rename_at_login)
+
+    def revive(self, character: str) -> Outcome:
+        return self._one(character, commands.revive)
+
+    def mail_gold(self, character: str, *, gold: int, subject: str, body: str) -> Outcome:
+        """Gold in, copper out, multiplied once and in one place."""
+        return self._one(
+            character,
+            lambda name: commands.mail_money(
+                name, subject=subject, body=body, copper=gold * _COPPER_PER_GOLD
+            ),
+        )
+
+    def mail_items(
+        self, character: str, *, items: tuple[tuple[int, int], ...], subject: str, body: str
+    ) -> Outcome:
+        return self._one(
+            character,
+            lambda name: commands.mail_items(
+                name, subject=subject, body=body, items=items, cap=self.mail_item_cap
+            ),
+        )
+
+    def send_gear_set(self, character: str, *, to: str, subject: str, body: str) -> Outcome:
+        """Everything a character is wearing, in as many mails as it takes.
+
+        A set of nineteen pieces does not fit in one mail on any of these trees,
+        so this sends the mails the cap requires and, if one of them fails,
+        reports WHICH -- a plain failure would have somebody send the whole set
+        again and the recipient receive the first twelve twice.
+        """
+        wearer = self._stored_name(character)
+        if wearer is None:
+            return Outcome(False, problem=_no_such(character))
+        recipient = self._stored_name(to)
+        if recipient is None:
+            return Outcome(False, problem=_no_such(to))
+        channel = self._channel_for_saved()
+        if channel is None:
+            return Outcome(False, problem=_NO_CHANNEL)
+        pieces = equipped(self._sql, self.entry, wearer)
+        if not pieces:
+            return Outcome(
+                False, problem=f"{wearer} is wearing nothing, so there are no items to send"
+            )
+        cap = self.mail_item_cap
+        batches = [pieces[at : at + cap] for at in range(0, len(pieces), cap)]
+        for number, batch in enumerate(batches, start=1):
+            try:
+                line = commands.mail_items(
+                    recipient,
+                    subject=subject,
+                    body=body,
+                    items=tuple((item, 1) for item in batch),
+                    cap=cap,
+                )
+            except commands.CommandError as exc:
+                return Outcome(False, problem=str(exc))
+            outcome = send(channel, line)
+            if not outcome.done:
+                return Outcome(
+                    False,
+                    indeterminate=outcome.indeterminate,
+                    problem=(
+                        f"mail {number} of {len(batches)} did not go: {outcome.problem} "
+                        f"({number - 1} of {len(batches)} already arrived, so send only what "
+                        "is missing)"
+                    ),
+                )
+        return Outcome(
+            True,
+            text=f"{len(pieces)} items sent to {recipient} in {len(batches)} mails.",
+        )
+
+    # -- the shape every write shares ----------------------------------------
+
+    def _one(self, character: str, build: Callable[[str], str]) -> Outcome:
+        name = self._stored_name(character)
+        if name is None:
+            return Outcome(False, problem=_no_such(character))
+        channel = self._channel_for_saved()
+        if channel is None:
+            return Outcome(False, problem=_NO_CHANNEL)
+        try:
+            line = build(name)
+        except commands.CommandError as exc:
+            return Outcome(False, problem=str(exc))
+        return send(channel, line)
+
+    def _stored_name(self, character: str) -> str | None:
+        return canonical_character(self._sql, self.entry, character)
+
+
+def _mails_needed(pieces: int, cap: int) -> int:
+    return (pieces + cap - 1) // cap if pieces else 0
+
+
+def _no_such(typed: str) -> str:
+    """Named with what was TYPED, because that is what a person can correct."""
+    return f"there is no character called {typed} on this server"
+
+
+_COPPER_PER_GOLD = 10_000
+
+_NO_CHANNEL = (
+    "the command channel is not set up for this install yet, and these changes are made by "
+    "the server rather than by writing rows"
+)
