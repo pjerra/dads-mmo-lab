@@ -900,6 +900,12 @@ class ControllerView(QWidget):
         self._build_modules_tab()
         self._build_networking_tab()
 
+        # What the channel says needs no daemon, no database and no network:
+        # it is read from the credential file, so it is shown whether or not
+        # this tab polls. Asking the SERVER about it is the part that is gated
+        # on polling, just below.
+        self.refresh_channel()
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_status)
         self._timer.timeout.connect(self.refresh_verdict)
@@ -912,6 +918,10 @@ class ControllerView(QWidget):
             # polled at all, here included.
             self.refresh_status()
             self.refresh_verdict()
+            # And ask the channel once, for the same reason: a credential the
+            # server has stopped accepting reads as verified straight off the
+            # disk, and until something asks, the repair is never offered.
+            self._check_the_channel()
 
     # ------------------------------------------------------------ server tab
 
@@ -1339,6 +1349,19 @@ class ControllerView(QWidget):
         self._set_busy(False)
         self.refresh_status()
         self._settle_the_channel()
+
+    def _check_the_channel(self) -> None:
+        """Ask whether the saved credential still works, off the GUI thread.
+
+        `check()` and not `settle()`: settle creates an account on an install
+        that has none, and opening a tab is not permission to write a row into
+        the user's auth database. `check()` asks nothing at all unless there is
+        a credential to ask about.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self._run(setup.check, self._channel_settled, self._channel_settle_failed)
 
     def _settle_the_channel(self) -> None:
         """After a start, ask the channel where it now stands.

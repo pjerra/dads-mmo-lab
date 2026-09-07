@@ -2491,6 +2491,56 @@ def test_pressing_repair_asks_the_setup_and_shows_what_came_back(
     assert view.repair_channel_button.isVisibleTo(view) is False
 
 
+def test_a_tab_opened_over_a_stale_credential_says_refused_rather_than_verified(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Found by the live gate, which is the only place it could be found.
+
+    A saved credential reads as verified straight off the disk, because that is
+    what the file records. If nothing asks the server, a credential the server
+    has since stopped accepting keeps saying verified until the next start --
+    and the repair the user needs is never offered. So the tab asks once, when
+    it opens, off the GUI thread.
+
+    `check()` and not `settle()`: settle CREATES on an install that has none,
+    and opening a tab is not permission to write a row into the user's auth
+    database.
+    """
+    stub = _StubSetup(
+        state=channel_setup.Verified(
+            account="YULON_AB", password="stale", at="2026-09-07 01:23 UTC"
+        )
+    )
+    stub.becomes = channel_setup.Refused(
+        account="YULON_AB", password="stale", reason="the server did not accept the saved password"
+    )
+
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=5, job_runner=run_inline
+    )
+
+    assert stub.checks == 1
+    assert stub.settles == 0, "opening a tab must never create an account"
+    assert "did not accept" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is True
+
+
+def test_a_tab_told_not_to_poll_still_shows_the_channel_without_asking_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same rule the status poll follows: not polled means not polled."""
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert stub.checks == 0
+    assert "2026-09-07 01:23 UTC" in view.channel_label.text()
+
+
 def test_a_finished_start_asks_the_channel_where_it_now_stands(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
