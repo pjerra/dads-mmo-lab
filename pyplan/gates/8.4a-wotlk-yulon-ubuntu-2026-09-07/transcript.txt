@@ -1,0 +1,71 @@
+** WARNING: connection is not using a post-quantum key exchange algorithm.
+** This session may be vulnerable to "store now, decrypt later" attacks.
+** The server may need to be upgraded. See https://openssh.com/pq.html
+Warning: Permanently added 'yulon-ubuntu' (ED25519) to the list of known hosts.
+##### pick
+[16:27:16Z] offline: Aevret wearing 12 pieces
+[16:27:16Z] online : Airaani wearing 19 pieces
+[16:27:16Z] the offline character's account is RNDBOT56 (id 57)
+##### offline
+[16:27:17Z] the offline character: Aevret
+[16:27:17Z] Aevret before: level 60 at (1629.85, -4373.64) map 1 at_login 2049 money 2000
+[16:27:18Z] teleport  : to Stormwind, done=True 'You are teleporting Aevret (offline) to Stormwind.'
+[16:27:18Z]             now at (-8833.38, 628.628) map 0
+[16:27:18Z] set level : done=True 'You changed level of Aevret to 60.'
+[16:27:18Z]             the row reads level 60
+[16:27:18Z] rename    : done=True at_login is now 2049
+[16:27:18Z] revive    : done=True ''
+[16:27:19Z] send gold : done=True mails 2 -> 3
+[16:27:19Z] PASSED: every action on an offline character, each read back in the row
+##### case
+[16:27:20Z] typed 'aevret': done=True ''
+[16:27:21Z] typed 'AEVRET': done=True ''
+[16:27:21Z] typed 'aEVRET': done=True ''
+[16:27:21Z] typed a name nobody has: done=False 'there is no character called NoSuchPersonHere on this server'
+[16:27:21Z] PASSED: every case finds the character, and a name nobody has is refused here
+##### gear
+[16:27:22Z] Airaani is wearing 19 pieces, and the button promises 2 mails
+[16:27:23Z] send gear : done=True '19 items sent to Airaani in 2 mails.'
+[16:27:23Z]             mails that arrived: 2
+[16:27:23Z] clause PASSED: 19 pieces, 2 mails promised, 2 arrived
+##### shots
+[16:27:24Z] the list holds 1001 characters
+[16:27:25Z] chosen: 'Aevret — level 60 — offline — RNDBOT56'
+[16:27:25Z]    button: 'Teleport Aevret' enabled=True
+[16:27:25Z]    button: 'Set level Aevret' enabled=True
+[16:27:25Z]    button: 'Rename at next login Aevret' enabled=True
+[16:27:25Z]    button: 'Revive Aevret' enabled=True
+[16:27:25Z]    button: 'Send gold to Aevret' enabled=True
+[16:27:25Z]    button: "Send Aevret's 12 worn items (1 mail)" enabled=True
+[16:27:25Z] after the teleport the tab says: 'You are teleporting Aevret (offline) to Orgrimmar.'
+
+##### the answer beats the write (answer-beats-the-write.py)
+level 60 -> 58: the server answered in 0.20s (True), the row changed after 0.31s
+level 58 -> 59: the server answered in 0.23s (True), the row changed after 0.35s
+
+##### the client half, as far as it got
+
+[18:21:42Z] client=C:\clients\WoW-WotLK-3.3.5a-min realmlist=172.30.55.119 account=RNDBOT56 label=wotlk
+[18:21:42Z] wrote realmlist into C:\clients\WoW-WotLK-3.3.5a-min\realmlist.wtf
+[18:21:42Z] wrote realmlist into C:\clients\WoW-WotLK-3.3.5a-min\WTF\Config.wtf
+[18:21:42Z] wrote realmlist into C:\clients\WoW-WotLK-3.3.5a-min\Data\enUS\realmlist.wtf
+[18:21:42Z] asked for a 1024x768 window
+[18:21:43Z] started Wow.exe as pid 4004
+[18:21:45Z] window handle: 8390602 (MainWindowHandle was 8390602)
+[18:21:58Z] foreground window: 8390602 (the client's is 8390602)
+[18:22:08Z] photographed C:\Users\PK\client-login\wotlk-1-login-screen.png
+[18:22:09Z] foreground window: 8390602 (the client's is 8390602)
+[18:22:10Z] clicked 978,542
+[18:22:11Z] clicked 978,626
+[18:22:13Z] photographed C:\Users\PK\client-login\wotlk-2-typed.png
+[18:22:13Z] sent the login
+[18:22:36Z] foreground window: 8390602 (the client's is 8390602)
+[18:22:36Z] photographed C:\Users\PK\client-login\wotlk-3a-realms.png
+[18:22:37Z] clicked 1079,752
+[18:22:46Z] foreground window: 8390602 (the client's is 8390602)
+[18:22:46Z] photographed C:\Users\PK\client-login\wotlk-3b-characters.png
+[18:22:46Z] asked to enter the world
+[18:23:47Z] foreground window: 8390602 (the client's is 8390602)
+[18:23:47Z] the client is still running at the answer
+[18:23:47Z] photographed C:\Users\PK\client-login\wotlk-3-answer.png
+[18:23:47Z] closed the client
