@@ -277,3 +277,52 @@ def test_a_console_that_could_not_be_reached_did_not_run_anything() -> None:
     assert answer.outcome == "unknown"
     assert answer.indeterminate is False, "nothing was typed, so nothing may have run"
     assert "cannot type at a console" in answer.reason
+
+
+# -- 8.3b: a refusal that arrives as silence --------------------------------
+
+
+def test_a_server_that_hangs_up_may_have_run_the_command_and_says_so() -> None:
+    """CMaNGOS refuses by hanging up, so silence cannot mean "not received".
+
+    Measured at the wire on the live TBC server (2026-09-07): `server info`
+    came back as 951 bytes of HTTP 200, and `account set`, `blargh` and
+    `account characters GATE83B` each came back as zero bytes with the
+    connection closed. The core hands a failed command to `soap_sender_fault`
+    (`MaNGOSsoap.cpp:133`) and nothing reaches the client.
+
+    Two things follow, and they pull in opposite directions:
+
+    it is NOT a dead channel -- the old sentence, "nothing is listening on the
+    command channel, it may not be turned on for this install yet", is simply
+    false, and sends a person to configure something that is working;
+
+    it is NOT a plain no either -- 8.3b measured a password change that the
+    server performed and then reported as a failure, so a command that hung up
+    may well have run. That is exactly `indeterminate`.
+    """
+    answer = _channel(_Wire(soap.Reply("silent", "127.0.0.1:7878 took the command"))).send(
+        "account set password bob a b"
+    )
+
+    assert answer.outcome == "unknown"
+    assert answer.indeterminate is True, "a hung-up command may still have run"
+    assert "may have" in answer.reason, answer.reason
+    assert "not be turned on" not in answer.reason, "the channel answered a moment ago"
+
+
+def test_the_reason_for_silence_does_not_depend_on_docker_being_askable() -> None:
+    """The connection is the evidence, and it is better evidence than the state.
+
+    Whatever docker says about the container, THIS app just completed a TCP
+    connection to the command channel and sent a whole request into it. A reason
+    built from the container state would answer "nothing is known about it" for
+    a machine we had just spoken to.
+    """
+    answer = _channel(_Wire(soap.Reply("silent", "took the command")), _state(status="")).send(
+        "account set password bob a b"
+    )
+
+    assert answer.outcome == "unknown"
+    assert answer.indeterminate is True
+    assert "nothing is known" not in answer.reason, answer.reason

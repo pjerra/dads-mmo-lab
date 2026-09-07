@@ -298,12 +298,17 @@ def _send(channel: object, line: str) -> Outcome:
         return Outcome(False, problem=getattr(answer, "text", "the server refused"))
     reason = getattr(answer, "reason", "") or "the server could not be asked"
     if getattr(answer, "indeterminate", False):
+        # No mechanism here. Two different machines arrive at this branch -- a
+        # timeout, where this app gave up while the server worked on, and a
+        # CMaNGOS refusal, where the server hung up on us at once (8.3b) -- and
+        # a sentence that names one of them describes something that did not
+        # happen for the other. The channel's own reason already says which.
         return Outcome(
             False,
             indeterminate=True,
             problem=(
-                f"{reason}. The change may already have been made — the server keeps working "
-                "on a command after this app stops waiting. Check before trying it again."
+                f"{reason.rstrip('.')}. The change may already have been made, so check "
+                "before trying it again."
             ),
         )
     return Outcome(False, problem=reason)

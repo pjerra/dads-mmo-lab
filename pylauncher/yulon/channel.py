@@ -213,6 +213,22 @@ class SoapChannel:
                     "which is the level the command channel needs."
                 ),
             )
+        if reply.outcome == "silent":
+            # The connection is better evidence than anything docker could say
+            # about the container: this app just completed a TCP connection to
+            # the command channel and put a whole request into it. So no
+            # `_why`, which would answer "this server is not running" for a
+            # machine it had spoken to a millisecond earlier.
+            return Answer(
+                "unknown",
+                reply.text,
+                reason=(
+                    "the server took the command and closed the connection without answering. "
+                    "On this server that is also what a refused command looks like, so the "
+                    "command may have run."
+                ),
+                indeterminate=True,
+            )
         return Answer(
             "unknown",
             reply.text,

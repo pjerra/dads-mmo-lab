@@ -131,21 +131,29 @@ def test_a_game_whose_level_store_has_not_been_measured_refuses_to_guess() -> No
 class _Channel:
     """A channel that records the command text and answers from a script."""
 
-    def __init__(self, *outcomes: str) -> None:
+    def __init__(
+        self,
+        *outcomes: str,
+        reason: str = "",
+        indeterminate: bool = False,
+    ) -> None:
         self.outcomes = list(outcomes) or ["yes"]
         self.sent: list[str] = []
+        self.reason = reason
+        self.indeterminate = indeterminate
 
     def send(self, command: str) -> object:
         self.sent.append(command)
         outcome = self.outcomes.pop(0) if self.outcomes else "yes"
+        default_reason = "" if outcome != "unknown" else "the server could not be reached"
         return type(
             "Answer",
             (),
             {
                 "outcome": outcome,
                 "text": "done" if outcome == "yes" else "the server said no",
-                "reason": "" if outcome != "unknown" else "the server could not be reached",
-                "indeterminate": False,
+                "reason": self.reason or default_reason,
+                "indeterminate": self.indeterminate,
                 "denied": False,
             },
         )()
@@ -470,3 +478,34 @@ def test_a_password_change_with_no_reader_falls_back_to_the_reply() -> None:
     )
 
     assert outcome.done is True
+
+
+def test_an_indeterminate_answer_does_not_invent_the_reason_it_is_indeterminate() -> None:
+    """Two different machines end here, and only one of them is a timeout.
+
+    A timeout is this app giving up while the server works on. A CMaNGOS
+    refusal is the opposite: the server hung up on us, immediately (8.3b,
+    measured at the wire). Telling a person "the server keeps working on a
+    command after this app stops waiting" for the second one describes
+    something that did not happen, and the reason the channel supplies already
+    says what did.
+    """
+    outcome = useraccounts.set_password(
+        _Channel(
+            "unknown",
+            reason=(
+                "the server took the command and closed the connection without answering. "
+                "On this server that is also what a refused command looks like, so the "
+                "command may have run."
+            ),
+            indeterminate=True,
+        ),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+    )
+
+    assert outcome.indeterminate is True
+    assert "closed the connection" in outcome.problem
+    assert "stops waiting" not in outcome.problem, outcome.problem
+    assert "check" in outcome.problem.lower(), "it still tells them what to do"

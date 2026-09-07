@@ -301,3 +301,36 @@ def test_the_envelope_carries_this_tree_s_own_namespace() -> None:
         assert f'xmlns:ns1="{namespace}"' in body, body
         assert "<ns1:executeCommand>" in body
         assert "<command>server info</command>" in body
+
+
+# -- 8.3b: a refusal that arrives as silence --------------------------------
+
+
+def test_a_server_that_takes_the_command_and_closes_is_not_a_dead_channel() -> None:
+    """Measured on the live TBC server, 2026-09-07, at the wire.
+
+    CMaNGOS hands a failed command to `soap_sender_fault` (`MaNGOSsoap.cpp:133`)
+    and the client gets NOTHING -- zero bytes, connection closed:
+
+        'server info'                 -> 951 bytes, HTTP 200
+        'account set'                 -> 0 bytes
+        'blargh'                      -> 0 bytes
+        'account characters GATE83B'  -> 0 bytes
+
+    So on that lineage every refusal looks like an outage. Calling it
+    `unreachable` makes this app tell a person to turn the command channel on
+    while the channel is answering other commands a second later.
+
+    The two are separable, and it is the connect that separates them: a channel
+    nobody is listening on refuses the connection, and this one accepts it,
+    takes the whole request, and then hangs up.
+    """
+
+    def handle(handler: object, _body: str) -> None:
+        handler.connection.close()  # type: ignore[attr-defined]
+
+    with _server(handle) as endpoint:
+        reply = soap.execute(endpoint, "account set")
+
+    assert reply.outcome == "silent", reply.outcome
+    assert "closed" in reply.text

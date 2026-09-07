@@ -64,8 +64,23 @@ from yulon.log import get_logger
 logger = get_logger(__name__)
 
 Outcome = Literal[
-    "answered", "refused", "unauthorised", "forbidden", "unreadable", "unreachable", "timeout"
+    "answered",
+    "refused",
+    "unauthorised",
+    "forbidden",
+    "unreadable",
+    "unreachable",
+    "silent",
+    "timeout",
 ]
+"""What one round trip came back as.
+
+`unreachable` and `silent` are two different machines. Nobody is listening on
+the first; the second accepted the connection, read the whole request and hung
+up without a byte of HTTP -- which on CMaNGOS is what EVERY refused command
+looks like (measured at the wire on the live TBC server, 2026-09-07:
+`server info` 951 bytes, `account set` and `blargh` 0 bytes).
+"""
 
 DEFAULT_TIMEOUT = 20.0
 """Seconds for one round trip, and it is a bound rather than a guess.
@@ -215,6 +230,17 @@ def execute(endpoint: Endpoint, command: str, *, timeout: float = DEFAULT_TIMEOU
     except TimeoutError:
         # `socket.timeout` is this same class since 3.10, so one arm covers both.
         return Reply("timeout", f"no answer from {endpoint.url} within {timeout:g}s")
+    except http.client.RemoteDisconnected:
+        # Raised only by `getresponse`, so the request is already out: the
+        # server took it and answered with nothing. On CMaNGOS that is a
+        # refusal (`MaNGOSsoap.cpp:133`); it is never a channel nobody is on,
+        # because that one fails at the connect instead. This arm has to come
+        # before the one below -- `RemoteDisconnected` is both an
+        # `HTTPException` and an `OSError`, so the broad arm would swallow it.
+        return Reply(
+            "silent",
+            f"{endpoint.url} took the command and closed the connection without answering",
+        )
     except (http.client.HTTPException, OSError) as exc:
         return Reply("unreachable", f"could not reach {endpoint.url}: {exc}")
     finally:
