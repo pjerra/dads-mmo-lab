@@ -76,6 +76,22 @@ until the app is restarted — and 8.2a's enable button, which is interlocked on
 disabled with it. Not fixed here; it belongs to `dashboard.py` and wants a test that recreates the
 container under a live watcher.
 
+**Fixed later the same morning.** The verdict now forgets what it knows when the container's
+restart count goes BACKWARDS: within one container's life that count only ever grows, so a drop is
+a different container wearing the same name and every count remembered about the old one is about
+something that no longer exists. `.Id` says the same thing more directly and was written first,
+then taken out — no verdict differs between the two, because a container fresh enough to have a new
+id has a count of zero, and one whose count has grown past the old one really is looping.
+
+The same press closed the mirror of it, found while writing the tests: a read that FAILED was being
+stored as history. `ContainerState()` carries `restart_count=0` — which is also what a container
+that has never restarted says — so one unanswered `docker inspect` made the NEXT honest read look
+like a count that grew, and a healthy server read as a loop for the ten minutes the settle rule
+holds. A failed read now leaves no trace in the history at all.
+
+Two new tests, and five mutations of the fix run against the suite with `__pycache__` purged on
+both sides: all five killed, each by the test that claims the behaviour.
+
 ## What is left
 
 The account has no character, and this server was installed today, so nothing on it does. Character

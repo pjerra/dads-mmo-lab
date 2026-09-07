@@ -334,3 +334,65 @@ def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path
 
     assert verdict.problem != ""
     assert verdict.stable is True, "a conf key is not a reason to refuse commands"
+
+
+def test_a_recreated_container_does_not_inherit_the_old_ones_restart_loop(
+    tmp_path: Path,
+) -> None:
+    """Measured on m910q, 2026-09-07: the tab kept saying `restart loop — 0 restarts`.
+
+    A watcher left running across 8.1d's crash-loop check went on calling a
+    healthy server a loop for minutes after `docker compose up -d` had built a
+    new container — zero restarts, and still a loop — while a dashboard made
+    fresh at that moment read `up`. The verdict was being carried by history
+    this object held about a container that no longer existed.
+
+    The count is what gives it away: within one container's life it only ever
+    grows, so a drop is a different container wearing the same name. The
+    ten-minute settle rule cannot cover this, because it is the rule that keeps
+    the old verdict alive for those ten minutes.
+
+    A fixed server that keeps reading as broken also keeps 8.2a's enable button,
+    interlocked on `stable`, disabled behind it.
+    """
+    long_ago = "2026-09-06T12:00:00.000000000Z"
+    three_minutes_in = (NOW - timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    thirty_seconds_in = (NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    watch = _watch(
+        tmp_path,
+        [
+            _running(long_ago, 8),
+            _running(long_ago, 9),
+            _running(three_minutes_in, 0),
+            _running(thirty_seconds_in, 1),
+        ],
+    )
+
+    watch.tick()
+    looping = watch.tick()
+    after_the_recreate = watch.tick()
+    crashing_again = watch.tick()
+
+    assert looping.state == "restart_loop"
+    assert after_the_recreate.state == "up"
+    assert after_the_recreate.stable is True
+    # And forgetting the old container does not leave the new one unwatched.
+    assert crashing_again.state == "restart_loop"
+
+
+def test_a_read_that_failed_does_not_become_a_restart_loop_on_the_next_tick(
+    tmp_path: Path,
+) -> None:
+    """A docker that would not answer said nothing about the count, not zero.
+
+    `ContainerState()` carries `restart_count=0` because that is also what a
+    container which has never restarted says, and a read that failed leaves the
+    same value in the field. Kept, it turns the NEXT honest read into a count
+    that grew: one hiccup, and a healthy server reads as a loop until it has
+    been up ten minutes.
+    """
+    watch = _watch(tmp_path, [_running(restarts=4), docker.ContainerState(), _running(restarts=4)])
+
+    assert watch.tick().state == "up"
+    assert watch.tick().state == "unknown"
+    assert watch.tick().state == "up"

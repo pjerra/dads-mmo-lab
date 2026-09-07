@@ -153,6 +153,11 @@ class Dashboard:
     A single count says nothing — every server that has ever been restarted has
     a non-zero one. What says something is the count CHANGING between two ticks,
     so the previous value is kept here rather than asked for again.
+
+    What is kept is about one container, and `docker compose up -d` can put a
+    different one behind the same name. `_replaced()` is where that is noticed;
+    without it the history outlives its subject and a repaired server goes on
+    reading as the broken one it replaced.
     """
 
     def __init__(
@@ -181,6 +186,13 @@ class Dashboard:
         """Ask once, and answer with everything that was learned."""
         state = self._state_of(self.spec.world)
         uptime = self._uptime(state.started_at)
+        if state.status == "":
+            # A read that failed said nothing about the count, and `0` is what
+            # it leaves in the field. Kept out of the history, it stays a gap in
+            # the record; stored, it makes the next honest read look like growth.
+            return Verdict("unknown", state.restart_count, state.started_at, uptime)
+        if self._replaced(state):
+            self._looping = False
         grew = self._last_restarts is not None and state.restart_count > self._last_restarts
         self._last_restarts = state.restart_count
         if grew:
@@ -188,13 +200,36 @@ class Dashboard:
         elif self._looping and uptime is not None and uptime >= SETTLED_AFTER:
             self._looping = False
 
-        if state.status == "":
-            return Verdict("unknown", state.restart_count, state.started_at, uptime)
         if state.status == "restarting" or (self._looping and state.status == "running"):
             return Verdict("restart_loop", state.restart_count, state.started_at, uptime)
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
         return self._with_population(state, uptime)
+
+    def _replaced(self, state: docker.ContainerState) -> bool:
+        """Whether the container this history is about has been replaced under its name.
+
+        Measured on m910q, 2026-09-07: a watcher left running across 8.1d's
+        crash-loop check went on printing `restart loop — 0 restarts, this run
+        up 3m` for minutes after `docker compose up -d` had built a new
+        container, while a dashboard made fresh at that moment read `up`. The
+        loop had been real; the container it happened to was gone. A fixed
+        server that keeps reading as broken also keeps 8.2a's enable button,
+        interlocked on `stable`, disabled behind it.
+
+        The count going BACKWARDS is the evidence, and it needs nothing this
+        module does not already read. Within one container's life the count only
+        ever grows, so a drop cannot be that container — it is a new one wearing
+        the same name, and every count remembered about the old one is now about
+        something that no longer exists.
+
+        `.Id` would say the same thing more directly and was written first, then
+        taken out: no verdict here differs between the two, because a container
+        fresh enough to have a new id has a count of zero, and one whose count
+        has grown past the old one really is looping. An untestable second
+        source is not a safety net, it is a line nothing pins.
+        """
+        return self._last_restarts is not None and state.restart_count < self._last_restarts
 
     def _with_population(self, state: docker.ContainerState, uptime: timedelta | None) -> Verdict:
         """The two counts, or the reason there are none. Never a wrong number."""
