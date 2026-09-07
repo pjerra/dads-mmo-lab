@@ -167,9 +167,14 @@ def test_an_item_search_asks_for_a_bounded_number_of_rows() -> None:
 def test_a_gear_set_on_this_tree_joins_the_item_instance_to_get_its_id() -> None:
     """The per-tree fact this box was warned about: AzerothCore's
     `character_inventory` row carries `item`, which is the INSTANCE guid, and
-    the template id lives in `item_instance.itemEntry`. A query that read
-    `character_inventory` alone would answer a list of guids that look like item
-    ids — every one of them wrong, and none of them empty.
+    the template id lives in `item_instance.itemEntry`.
+
+    A query that read `character_inventory` alone here would have to select
+    `item` — that install has no other column to select — and would answer a
+    list of guids that look like item ids, every one of them wrong and none of
+    them empty. (8.4c: on the CMaNGOS trees the same slip is not available,
+    because their inventory row carries `item_template` too. The shapes are not
+    mirror images of each other, and `yulon.play.equipped` says which is which.)
     """
     sql = _Reader("6948\n2589\n")
 
@@ -202,28 +207,19 @@ def test_a_gear_set_reads_only_the_equipped_slots() -> None:
 def test_the_gear_set_query_follows_the_catalog_and_not_an_if_in_this_module() -> None:
     """The two shapes differ by one join, and the tree decides which.
 
-    AzerothCore's inventory row carries the item INSTANCE guid; the CMaNGOS
-    trees carry the template id on the row itself (measured on the TBC install,
-    2026-09-06). Only the first is in the catalog today -- TBC's block waits for
-    8.4b to measure its own mail cap and commands rather than inherit them -- so
-    the second shape is exercised through an entry whose block says so, which
-    is what a tree gaining that block will do.
+    AzerothCore's inventory row carries the item INSTANCE guid alone; the
+    CMaNGOS trees carry the template id on the row itself (measured on the TBC
+    install 2026-09-06 and on the Vanilla one 2026-09-07). The flat shape used
+    to be exercised through a synthesised copy of WotLK's entry, because no
+    shipped entry carried it; two do now, so this asks a real one — a
+    synthesised entry cannot catch a catalog whose block was pasted from the
+    wrong sibling, and that is the failure 8.4c had to avoid.
     """
-    without_join = WOTLK.model_copy(
-        update={
-            "play": WOTLK.play.model_copy(
-                update={
-                    "equipped": WOTLK.play.equipped.model_copy(
-                        update={"template_column": "item_template", "instance_table": None}
-                    )
-                }
-            )
-        }
-    )
+    vanilla = load_catalog().get("wow-vanilla")
     joined, flat = _Reader(""), _Reader("")
 
     play.equipped(joined, WOTLK, "Guglu")
-    play.equipped(flat, without_join, "Guglu")
+    play.equipped(flat, vanilla, "Guglu")
 
     assert "item_instance" in joined.asked[0][1]
     assert "item_instance" not in flat.asked[0][1], flat.asked[0][1]
@@ -231,16 +227,21 @@ def test_the_gear_set_query_follows_the_catalog_and_not_an_if_in_this_module() -
 
 
 def test_a_tree_that_has_not_measured_its_gear_refuses_rather_than_guesses() -> None:
-    """Vanilla and Tortoise have no Play block yet — their own boxes measure it.
+    """Tortoise has no Play block yet — 8.4d is the box that measures it.
 
-    Guessing the WotLK shape there would answer a list of instance guids that
-    look exactly like item ids, so the read refuses and names the game.
+    Guessing a shape is not free: `template_column` is a column name that goes
+    into a statement unread, and the wrong one either errors or answers the
+    wrong number (see `play.equipped`'s own note). So the read refuses and names
+    the game rather than defaulting to whichever sibling was measured last.
+
+    This stood on Vanilla until 8.4c measured it. The guard moved rather than
+    went.
     """
     import pytest
 
-    vanilla = load_catalog().get("wow-vanilla")
+    tortoise = load_catalog().get("wow-tortoise")
 
     with pytest.raises(play.NotMeasured) as refused:
-        play.equipped(_Reader(""), vanilla, "Guglu")
+        play.equipped(_Reader(""), tortoise, "Guglu")
 
-    assert "WoW Vanilla" in str(refused.value)
+    assert "WoW Tortoise" in str(refused.value)

@@ -80,14 +80,14 @@ def test_a_rename_marks_the_character_for_the_next_login() -> None:
 
 def test_mail_with_items_quotes_the_subject_and_the_body() -> None:
     """The server parses the quotes: `"#subject" "#text"` in its own help."""
-    line = commands.mail_items("Guglu", subject="A gift", body="For you", items=((6948, 1),))
+    line = commands.mail_items("Guglu", subject="A gift", body="For you", items=((6948, 1),), cap=1)
 
     assert line == 'send items Guglu "A gift" "For you" 6948:1'
 
 
 def test_mail_carries_every_item_as_id_and_count() -> None:
     line = commands.mail_items(
-        "Guglu", subject="Set", body="Wear it", items=((6948, 1), (2589, 20))
+        "Guglu", subject="Set", body="Wear it", items=((6948, 1), (2589, 20)), cap=12
     )
 
     assert line == 'send items Guglu "Set" "Wear it" 6948:1 2589:20'
@@ -103,6 +103,7 @@ def test_a_quote_or_a_newline_in_the_text_cannot_end_the_argument() -> None:
         subject='He said "hello"',
         body="first\nsecond\r\nthird",
         items=((6948, 1),),
+        cap=1,
     )
 
     assert line == 'send items Guglu "He said hello" "first second  third" 6948:1'
@@ -111,13 +112,17 @@ def test_a_quote_or_a_newline_in_the_text_cannot_end_the_argument() -> None:
 
 def test_a_mail_with_no_items_is_refused_rather_than_sent_empty() -> None:
     with pytest.raises(commands.CommandError):
-        commands.mail_items("Guglu", subject="s", body="b", items=())
+        commands.mail_items("Guglu", subject="s", body="b", items=(), cap=1)
 
 
 def test_a_mail_may_not_carry_more_items_than_this_tree_allows() -> None:
-    """Twelve on this tree, which is what its own mail code caps an attachment
-    list at. The number is passed in rather than written here, because the
-    trees do not agree and 8.4c's tree allows exactly one."""
+    """The number is the caller's, and the same list is legal or not by it.
+
+    Twelve is WotLK's and TBC's; one is Vanilla's, measured by 8.4c on that
+    install's own `Mail.h`. Both are asserted here against one list of items,
+    because a check that reads a number from anywhere but its argument would
+    pass the first two lines and fail the third.
+    """
     twelve = tuple((6948, 1) for _ in range(12))
     assert commands.mail_items("Guglu", subject="s", body="b", items=twelve, cap=12)
 
@@ -127,10 +132,37 @@ def test_a_mail_may_not_carry_more_items_than_this_tree_allows() -> None:
         commands.mail_items("Guglu", subject="s", body="b", items=twelve, cap=1)
 
 
+def test_a_mail_cannot_be_built_without_naming_this_trees_cap() -> None:
+    """8.4c. `cap` had a default of twelve, which is one tree's fact sitting in
+    the module all four trees read.
+
+    On the Vanilla install the cap is ONE (`Mail.h:49`, read on m910q
+    2026-09-07), so the default did not merely widen a check — it built a line
+    that server refuses, and the refusal arrives as a closed connection with no
+    sentence in it (8.3b). Nothing shipped broken, because both callers in
+    `yulon.play` happened to pass `cap=`; a caller that forgets is now a
+    `TypeError` at the call rather than a hang-up at the server.
+    """
+    with pytest.raises(TypeError):
+        commands.mail_items("Guglu", subject="s", body="b", items=((6948, 1),))
+
+
+def test_the_refusal_counts_a_single_attachment_in_english() -> None:
+    """Before 8.4c the sentence read "at most 1 items in one mail".
+
+    No tree could reach it: a cap of one arrived with the Vanilla install, and
+    this refusal is on the way to a button somebody is about to press again.
+    """
+    with pytest.raises(commands.CommandError) as refused:
+        commands.mail_items("Guglu", subject="s", body="b", items=((6948, 1), (2589, 1)), cap=1)
+
+    assert "at most 1 item in one mail" in str(refused.value), str(refused.value)
+
+
 def test_an_item_count_of_zero_or_less_is_not_a_gift() -> None:
     for bad in (0, -3):
         with pytest.raises(commands.CommandError):
-            commands.mail_items("Guglu", subject="s", body="b", items=((6948, bad),))
+            commands.mail_items("Guglu", subject="s", body="b", items=((6948, bad),), cap=1)
 
 
 def test_mailed_money_is_sent_in_copper_because_that_is_what_the_server_counts() -> None:
@@ -164,7 +196,7 @@ def test_a_revive_names_the_character_even_though_the_help_does_not() -> None:
         lambda name: commands.teleport_to(name, "Stormwind", verb="teleport name"),
         lambda name: commands.set_character_level(name, 10),
         commands.rename_at_login,
-        lambda name: commands.mail_items(name, subject="s", body="b", items=((1, 1),)),
+        lambda name: commands.mail_items(name, subject="s", body="b", items=((1, 1),), cap=1),
         lambda name: commands.mail_money(name, subject="s", body="b", copper=1),
         commands.revive,
     ],
@@ -201,6 +233,7 @@ def test_mail_text_keeps_only_what_the_servers_parser_can_carry() -> None:
         subject='a "quote" and a \\ and a \ttab',
         body="line\nbreak\x00null\x1bescape",
         items=((6948, 1),),
+        cap=1,
     )
 
     assert '"a quote and a  and a  tab"' in line, line
@@ -211,7 +244,9 @@ def test_mail_text_keeps_only_what_the_servers_parser_can_carry() -> None:
 def test_mail_text_is_capped_rather_than_sent_at_any_length() -> None:
     """An unbounded argument is a command of unbounded length, and nobody has
     measured what this core does with one."""
-    line = commands.mail_items("Guglu", subject="s" * 500, body="b" * 5000, items=((6948, 1),))
+    line = commands.mail_items(
+        "Guglu", subject="s" * 500, body="b" * 5000, items=((6948, 1),), cap=1
+    )
 
     subject = line.split('"')[1]
     body = line.split('"')[3]
@@ -222,7 +257,7 @@ def test_mail_text_is_capped_rather_than_sent_at_any_length() -> None:
 def test_mail_text_that_is_only_unusable_characters_still_leaves_a_subject() -> None:
     """A subject that sanitised down to nothing would send `""`, and the server
     would read the body as the subject."""
-    line = commands.mail_items("Guglu", subject="\x00\x01", body="\x00", items=((6948, 1),))
+    line = commands.mail_items("Guglu", subject="\x00\x01", body="\x00", items=((6948, 1),), cap=1)
 
     subject = line.split('"')[1]
     assert subject.strip() != "" or subject == " ", line

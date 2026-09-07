@@ -224,17 +224,38 @@ def mail_items(
     subject: str,
     body: str,
     items: tuple[tuple[int, int], ...],
-    cap: int = 12,
+    cap: int,
 ) -> str:
     """`send items <to> "<subject>" "<text>" id:count ...`.
 
-    `cap` is passed rather than written here because the trees disagree -- this
-    one takes twelve attachments and 8.4c's takes exactly one -- and a number in
-    this file would silently promise the wrong thing on one of them.
+    `cap` is the CALLER'S, measured per tree and named at every call: this
+    module is read by four trees and they do not agree, so no number here can be
+    right for all of them. Each entry carries its own in `play.mail_item_cap`.
+
+    It was a keyword with a default of twelve until 8.4c, and the default was
+    the bug rather than a convenience: `MAX_MAIL_ITEMS` is 1 on the Vanilla
+    install and 12 on the TBC one -- the same line of the same header in two
+    checkouts on the same box (`src/game/Mails/Mail.h:49`, read 2026-09-07) --
+    so a caller that omitted it built a two-attachment line for a server that
+    accepts one, and that server's refusal is a `return false` that reaches SOAP
+    as a closed connection with nothing in it to read.
+
+    **What this counts is items, and what the server counts is STACKS.** Read
+    on the Vanilla checkout, 2026-09-07: `src/game/Chat/Level3.cpp:6385-6397`
+    splits one `id:count` into as many pairs as `GetMaxStackSize()` needs BEFORE
+    it compares the list to `MAX_MAIL_ITEMS`, and the server's own message
+    (mangos_string 53) says "item stacks". So `2589:40` is two stacks there and
+    one item here. Nothing sends such a line today -- the only caller is
+    `send_gear_set`, and worn gear is always count 1 -- and closing the gap
+    honestly needs `item_template.stackable`, which is a read this module has
+    not got. It is written down rather than guessed at.
     """
     _character(character)
     _require(bool(items), "a mail with no items in it is not a gift")
-    _require(len(items) <= cap, f"this server carries at most {cap} items in one mail")
+    _require(
+        len(items) <= cap,
+        f"this server carries at most {cap} item{'' if cap == 1 else 's'} in one mail",
+    )
     parts = []
     for item, count in items:
         _require(item > 0, f"{item} is not an item id")

@@ -18,7 +18,8 @@ from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
-VANILLA = load_catalog().get("wow-vanilla")
+TORTOISE = load_catalog().get("wow-tortoise")
+"""The tree with no Play block. It was Vanilla until 8.4c measured that one."""
 
 
 @pytest.fixture(autouse=True)
@@ -35,11 +36,13 @@ def _inline_jobs(qapp: object, monkeypatch: pytest.MonkeyPatch) -> None:
 class _Play:
     """A stand-in for `InstallPlay`, recording what the tab asked it to do."""
 
-    def __init__(self, *, characters: tuple[Character, ...] = (), pieces: int = 19) -> None:
+    def __init__(
+        self, *, characters: tuple[Character, ...] = (), pieces: int = 19, cap: int = 12
+    ) -> None:
         self.characters = characters
         self.pieces = pieces
         self.calls: list[tuple[str, tuple[object, ...]]] = []
-        self.mail_item_cap = 12
+        self.mail_item_cap = cap
         self.answer = _Outcome(True, text="done")
 
     def listing(self) -> tuple[Character, ...]:
@@ -47,8 +50,18 @@ class _Play:
         return self.characters
 
     def gear_set_size(self, character: str) -> tuple[int, int]:
+        """Pieces, and the mails they take AT THIS TREE'S CAP.
+
+        The eleven and the twelve were written in here when TBC and WotLK were
+        the only measured trees, and they made this fake answer the same way
+        whatever tree it stood for: a two-piece set came back as one mail on a
+        server whose cap is one (Vanilla, 8.4c). The arithmetic is spelled out
+        rather than imported from `yulon.play`, so this stays a check on the tab
+        and not a copy of the code under test.
+        """
         self.calls.append(("gear_set_size", (character,)))
-        return (self.pieces, (self.pieces + 11) // 12)
+        cap = self.mail_item_cap
+        return (self.pieces, (self.pieces + cap - 1) // cap if self.pieces else 0)
 
     def teleport(self, character: str, location: str) -> object:
         self.calls.append(("teleport", (character, location)))
@@ -109,11 +122,18 @@ def _people() -> tuple[Character, ...]:
 
 def test_a_tree_that_has_not_measured_its_play_block_gets_a_sentence(tmp_path: Path) -> None:
     """Not a disabled button: a button that cannot work is a promise the tab
-    cannot keep, and 8.4c and 8.4d are the boxes that make it work there."""
-    view = _view(tmp_path, VANILLA, play=None)
+    cannot keep, and 8.4d is the box that makes it work there.
+
+    The entry is Tortoise because it is the one whose block is genuinely absent.
+    Vanilla stood here until 8.4c, and after that box its `play` was not None —
+    so the fixture said "this tree has not measured its block" about a tree that
+    had, and passed anyway because the test forces `play=None`. A fixture that
+    passes on a false premise is testing the argument, not the tree.
+    """
+    view = _view(tmp_path, TORTOISE, play=None)
 
     assert view.character_list.isVisibleTo(view) is False
-    assert VANILLA.name in view.character_report.text()
+    assert TORTOISE.name in view.character_report.text()
 
 
 def test_the_actions_wait_for_a_character_to_be_chosen(tmp_path: Path) -> None:
@@ -263,6 +283,29 @@ def test_the_gear_button_counts_in_english(tmp_path: Path) -> None:
     view.character_list.setCurrentRow(0)
 
     assert "2 mails)" in view.send_gear_button.text(), view.send_gear_button.text()
+
+
+def test_on_a_one_item_per_mail_tree_the_button_promises_a_mail_per_piece(
+    tmp_path: Path,
+) -> None:
+    """8.4c's own clause: "a two-item send arrives as two mails and the button
+    says so before the press".
+
+    The sentence needs no new shape for it — the tab has counted in mails since
+    8.4a — but until this test the FIXTURE could not express a tree that is not
+    TBC: it computed `(pieces + 11) // 12` and would have answered "1 mail" for
+    a two-piece set on a server that sends two, whatever the tab did.
+
+    The cap is 1 here because `MAX_MAIL_ITEMS` is 1 on the Vanilla install
+    (read on m910q, 2026-09-07, `src/game/Mails/Mail.h:49`).
+    """
+    view = _view(tmp_path, play=_Play(characters=_people(), pieces=2, cap=1))
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    said = view.send_gear_button.text()
+    assert "2 worn items" in said, said
+    assert "(2 mails)" in said, said
 
 
 def test_revive_is_only_offered_for_a_character_who_is_logged_in(tmp_path: Path) -> None:

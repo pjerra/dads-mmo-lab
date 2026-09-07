@@ -850,6 +850,22 @@ def _for_vanilla(
         channel_for_saved=channel.live_channel,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
+    # 8.4c. The same seam as 8.4a and 8.4b over facts read from THIS install's
+    # own checkout on m910q, 2026-09-07 — and one of them is a different number
+    # from its TBC sibling's, which is the whole box: `Mail.h:49` here is
+    # `#define MAX_MAIL_ITEMS 1` where the same line of the same header in
+    # `~/tbc-7.4c` reads 12, so a gear set is one mail per piece and the button
+    # says so before the press. The other two match TBC and were still asked
+    # rather than inherited: `tele name` is the verb (`Chat.cpp:806-814`, and
+    # `teleport` is not a command in that file at all), and the inventory row
+    # carries the template id itself (`characters.sql:339-347` has both `item`
+    # and `item_template`, and `Player.cpp:3832` writes both).
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
@@ -858,6 +874,7 @@ def _for_vanilla(
         log_snapshot=recorder,
         channel_setup=channel,
         accounts=accounts_admin,
+        play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -2838,22 +2855,41 @@ class ControllerView(QWidget):
             self.bot_summary.setText(problem)
             self._show_page_buttons()
             return
+        # 8.5b: the split is drawn only where the two signals can disagree.
+        # Three of the four trees have no playerbots schema at all, and on
+        # m910q's TBC install this tab read "0 by the playerbots registry" —
+        # naming a table that install has not got, beside a zero a person would
+        # then go looking for. The per-row source is the same noise: one signal
+        # means the same word on every row.
+        split = botlist.has_registry(self.entry)
         for bot in getattr(page, "bots", []):
             where = "online" if bot.online else "offline"
-            self.bot_list.addItem(f"{bot.name} — level {bot.level} — {where} — {bot.source}")
+            said_row = f"{bot.name} — level {bot.level} — {where}"
+            self.bot_list.addItem(f"{said_row} — {bot.source}" if split else said_row)
         total = self._bot_total
         # A page number and not a row range: the rows are read by cursor, so
         # "51-100" would be a count this tab does not have and cannot get
         # without paying for it on every press.
         page_number = len(self._bot_cursors)
-        said = (
-            f"{total} {'bot' if total == 1 else 'bots'}: "
-            f"{getattr(page, 'by_registry', 0)} by the playerbots registry, "
-            f"{getattr(page, 'by_prefix', 0)} by the account prefix. "
-            f"Page {page_number}, {self.bot_list.count()} shown."
-        )
+        shown = f"Page {page_number}, {self.bot_list.count()} shown."
         warning = getattr(page, "warning", "")
-        self.bot_summary.setText(f"{said} {warning}".strip() if warning else said)
+        if warning:
+            # 8.5b. The clause is "warns, NEITHER reporting zero", and the first
+            # live run of this path (m910q, TBC, 2026-09-07) read
+            # "0 bots. Page 1, 0 shown. no character matched …" -- the number a
+            # person reads first was the one the sentence after it exists to
+            # contradict. The count is dropped rather than moved: the warning
+            # only ever fires on a zero, so there is no other number to lose.
+            self.bot_summary.setText(f"{warning}. {shown}")
+            self._show_page_buttons()
+            return
+        counted = f"{total} {'bot' if total == 1 else 'bots'}"
+        if split:
+            counted += (
+                f": {getattr(page, 'by_registry', 0)} by the playerbots registry, "
+                f"{getattr(page, 'by_prefix', 0)} by the account prefix"
+            )
+        self.bot_summary.setText(f"{counted}. {shown}")
         self._show_page_buttons()
 
     @Slot(object)

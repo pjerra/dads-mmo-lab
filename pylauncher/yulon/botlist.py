@@ -1,12 +1,35 @@
-"""Browsing this server's bots, one page at a time (Phase 8.5a).
+"""Browsing this server's bots, one page at a time (Phase 8.5a, 8.5b, 8.5c).
 
 8.1a already counts them. What this adds is the list, and one fact per row that
-the count cannot carry: **which signal identified it**. On this tree there are
+the count cannot carry: **which signal identified it**. On WotLK there are
 two — the playerbots registry and the account-name prefix — and they disagree in
 exactly the case that matters. An install whose prefix was changed after its
 bots were made has rows the registry knows about and the prefix does not; a
 single number hides that, and a person looking for a missing bot has nowhere to
 look.
+
+**Only WotLK has two.** The three CMaNGOS trees carry the account prefix and
+nothing else, so on those the split is a sentence about nothing: it named the
+`playerbots` registry, which those installs have not got, and put a zero beside
+it that a person would then go looking for. `has_registry()` is the one reading
+of that fact, and both the SQL that attributes a row and the sentence the tab
+prints take it from there (8.5b, measured on m910q's TBC install 2026-09-07:
+900 bots of 901 characters, the split reading 0/900 on every read).
+
+**Where a marker matching nothing is reachable at all.** On WotLK it is not —
+8.5a asked with a marker matching nothing and still got 1000, because the
+registry arm answers whether or not the prefix does. On a one-signal tree the
+zero is real, and the warning beside it is the only honest output. That path
+was exercised against a live server for the first time on 8.5b.
+
+**And a zero has two causes, which had one sentence between them.** The name
+filter is folded into the WHERE the total is counted over, so a filter matching
+nothing reached the marker warning: the tab blamed a marker that had matched 500
+rows a keystroke earlier. `_why_zero` picks the sentence by which question was
+asked, and the point is not only that the filtered sentence was false — it is
+that the marker sentence is the whole live evidence for the warn clause on a
+one-signal tree, and a second cause for the same words would have left 8.5c's
+gate unable to say which one it photographed (8.5c, 2026-09-07).
 
 Paged because the owner runs 500 and has said the number is his to raise. Read
 live, never cached: the population moves while the tab is open.
@@ -59,7 +82,11 @@ class Bot:
     level: int
     online: bool
     source: str
-    """`registry` or `prefix` — which of this tree's two signals found it."""
+    """`registry` or `prefix` — which signal found it.
+
+    Read on every tree, shown only where `has_registry()` is true: on a tree
+    with one signal it is the same word on every row.
+    """
 
 
 @dataclass(frozen=True)
@@ -165,16 +192,7 @@ def page(
 
     warning = ""
     if total == 0:
-        try:
-            characters = sql.query("characters", f"SELECT COUNT(*) FROM {table};").strip()
-        except Exception as exc:  # noqa: BLE001
-            characters = ""
-            logger.info(f"could not ask how many characters exist: {exc}")
-        if characters.isdigit() and int(characters) > 0:
-            warning = (
-                f"no character matched the bot marker {marker.prefix!r}, though this server has "
-                f"{characters} characters"
-            )
+        warning = _why_zero(sql, table, f"({clause})", marker, name_like)
 
     parsed = _rows(rows)
     if isinstance(parsed, str):
@@ -194,16 +212,97 @@ def page(
     )
 
 
+def _why_zero(sql: SqlReader, table: str, clause: str, marker: Marker, name_like: str) -> str:
+    """The sentence beside a zero, chosen by which question produced it (8.5c).
+
+    Two different things drive `total` to zero and they had one sentence between
+    them, because the name filter is folded into the very WHERE the total is
+    counted over. Typing a filter that matched nothing made the tab say *"no
+    character matched the bot marker 'RNDBOT'"* — of a marker that had matched
+    500 rows a keystroke earlier. That is a false sentence on its own, and it
+    was worse than that: on a one-signal tree the marker warning is the whole
+    evidence for 8.5b's third clause, so a second cause for the same words left
+    the gate unable to say which one it had photographed (adversarial review of
+    8.5c's plan, 2026-09-07).
+
+    The denominators differ with the question. An unfiltered zero is held
+    against the whole characters table — "did this marker find anybody at all on
+    a populated server". A filtered zero is held against the bots the marker DID
+    find, because quoting the character count there would read as the marker
+    having failed. A filtered zero on a server where the marker found nothing
+    either falls through to the marker's sentence: the filter is not the
+    interesting half of that answer.
+    """
+    if name_like:
+        bots = _count(sql, table, clause)
+        if bots:
+            return (
+                f"no bot's name begins with {name_like!r} — this server has "
+                f"{bots} {'bot' if bots == 1 else 'bots'}"
+            )
+    characters = _count(sql, table, "")
+    if characters:
+        return (
+            f"no character matched the bot marker {marker.prefix!r}, though this server has "
+            f"{characters} characters"
+        )
+    return ""
+
+
+def _count(sql: SqlReader, table: str, where: str) -> int | None:
+    """One COUNT, or None when the server would not say.
+
+    A failure here is not the page's failure — the rows and the total are
+    already in hand — so it is logged and the sentence is left off rather than
+    turned into a problem.
+    """
+    statement = f"SELECT COUNT(*) FROM {table}{f' WHERE {where}' if where else ''};"
+    try:
+        answer = sql.query("characters", statement).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.info(f"could not ask {statement}: {exc}")
+        return None
+    return int(answer) if answer.isdigit() and int(answer) > 0 else None
+
+
+def has_registry(entry: CatalogEntry) -> bool:
+    """Whether this tree has a second bot signal to attribute a row to (8.5b).
+
+    The split is worth showing only where two signals can disagree. Of the four
+    games, only WotLK's AzerothCore carries the playerbots registry; the three
+    CMaNGOS trees have the account prefix and nothing else, and on m910q's TBC
+    install the schema list read exactly `characters, logs, realmd, mangos, sys,
+    mysql, performance_schema` on 2026-09-07 — no `playerbots` anywhere.
+
+    One definition, read by both the SQL that attributes a row and the sentence
+    that reports the attribution, because two independent readings of the same
+    catalog field are two things that can drift apart.
+    """
+    ops = entry.observability
+    if ops is None:
+        return False
+    registry = ops.bots.registry
+    return registry is not None and registry.database in entry.schema_map()
+
+
 def _registry_clause(entry: CatalogEntry, ops: object) -> str:
     """True of a character whose account the playerbots registry owns.
 
     `1 = 0` where there is no registry, so the CASE still parses and every row
     is attributed to the prefix — which is the truth on a tree that has only
     that signal.
+
+    This is the ATTRIBUTION clause, and it is the one that is allowed to
+    degenerate to a constant. `dbreads.bot_clause` is the IDENTITY clause and is
+    not: the Rust prior art recorded an incident on 2026-08-01 where the
+    identity clause degraded to `0 = 1` on a registry-less tree and reported a
+    server full of bots as having none (`botid.rs:178-190`). The two must stay
+    on their own sides of that line; on TBC, measured on 2026-09-07, the
+    identity clause has one arm and answers 900 while this one reads `1 = 0`.
     """
     registry = ops.bots.registry  # type: ignore[attr-defined]
     schemas = entry.schema_map()
-    if registry is None or registry.database not in schemas:
+    if not has_registry(entry):
         return "1 = 0"
     account = ops.characters.account  # type: ignore[attr-defined]
     types = ", ".join(str(t) for t in registry.types)

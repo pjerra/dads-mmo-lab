@@ -13,8 +13,11 @@ naming what it would look like:
 * a search pattern with a `%` in it matches every item in the game, because
   `%` and `_` are LIKE wildcards and a person typing "50% off" did not mean
   that;
-* a gear-set query that joins one table where this tree needs two answers a
-  list of instance guids that look exactly like item ids.
+* a gear-set query built for the wrong tree reads a column that means something
+  else. `character_inventory.item` is the item INSTANCE guid on all four of
+  these trees, and a query that selected it would answer a list of numbers that
+  look exactly like item ids and are not (see `equipped`, which records what
+  each of the shapes actually does on each tree, measured rather than assumed).
 """
 
 from __future__ import annotations
@@ -35,9 +38,13 @@ logger = get_logger(__name__)
 class NotMeasured(LookupError):
     """This tree has no Play block, so there is nothing here to read it with.
 
-    Raised rather than guessed. The two shapes differ by one join, and the wrong
-    one answers a list of instance guids that look exactly like item ids -- so a
-    default would be a silent wrong answer on whichever tree it did not fit.
+    Raised rather than guessed, and the reason is narrower than the one this
+    class was first given. What the block carries are COLUMN NAMES that go into
+    a statement unread and a NUMBER that goes onto a button as a promise;
+    nothing here can check either against a server nobody has asked. The column
+    name that is silently wrong is `item` -- the instance guid, on every one of
+    these trees -- and it is the one a person porting a sibling's block half way
+    would land on. See `equipped` for what each shape does where.
     """
 
 
@@ -171,10 +178,35 @@ def equipped(sql: SqlReader, entry: CatalogEntry, character: str) -> tuple[int, 
 
     The shape of the query is the catalog's, because the trees disagree about
     where the item id lives. AzerothCore's inventory row carries the item
-    INSTANCE guid and the template id is a join away in `item_instance`;
-    CMaNGOS's inventory row carries the template id itself. A query built for
-    the wrong one does not fail -- it answers a list of guids that look exactly
-    like item ids.
+    INSTANCE guid alone and the template id is a join away in
+    `item_instance.itemEntry`; the CMaNGOS rows carry BOTH -- `item` (the
+    instance guid, and the primary key) and `item_template`.
+
+    **What each shape does where, corrected in 8.4c.** The note here said a
+    query built for the wrong tree "does not fail -- it answers a list of
+    guids", it was repeated in five places, and it is true of neither of the two
+    shapes this catalog offers:
+
+    * the flat shape on AzerothCore names a column that install has not got
+      (`character_inventory` there is `guid, bag, slot, item` --
+      `pyplan/phase8-reads/azerothcore.md:432-441`), so it is an `Unknown
+      column` error and loud;
+    * the joined shape on a CMaNGOS tree answers the SAME ids the flat one
+      does, because `character_inventory.item` is `item_instance.guid` and
+      `Player.cpp:3832` writes both from one Item -- a redundant hop, and one
+      that can only drop a piece whose `item_instance` row is missing.
+
+    The shape that answers guids is neither of those: it is `template_column`
+    set to `item` with no join, which is what porting AzerothCore's column name
+    onto CMaNGOS's flat shape produces. That is the mistake the catalog block
+    exists to make deliberate, and the flat shape is chosen on these trees
+    because it is one hop and cannot lose a row to a missing join.
+
+    (Vanilla's half of that was read on m910q, 2026-09-07:
+    `~/vanilla-75b/src/mangos-classic/sql/base/characters.sql:339-347` and
+    `src/game/Entities/Player.cpp:3832`. That the two shapes agree ROW FOR ROW
+    on a loaded database is a source reading, not a live one -- 8.4c's gate
+    counts the difference on the running server.)
     """
     schemas = entry.schema_map()
     if entry.play is None:
@@ -258,8 +290,23 @@ class InstallPlay:
 
     @property
     def mail_item_cap(self) -> int:
-        """How many attachments one mail carries here. Twelve on this tree."""
-        return self.entry.play.mail_item_cap if self.entry.play is not None else 1
+        """How many attachments one mail carries HERE, from this entry's block.
+
+        No number in this file is right for every tree: `MAX_MAIL_ITEMS` is 12
+        on the WotLK and TBC installs and 1 on the Vanilla one -- the same line
+        of the same header in two CMaNGOS checkouts on m910q, read 2026-09-07.
+
+        The refusal used to be a returned 1, which read as a refusal only while
+        no tree carried a cap of one. Vanilla does, so from 8.4c that answer was
+        indistinguishable from a measurement, and a gear button on an unmeasured
+        tree would have promised a mail per piece with nothing behind it.
+        """
+        if self.entry.play is None:
+            raise NotMeasured(
+                f"{self.entry.name} has not measured how many items one of its mails carries, "
+                "so this app cannot say how many mails a gear set would take"
+            )
+        return self.entry.play.mail_item_cap
 
     # -- reads ---------------------------------------------------------------
 

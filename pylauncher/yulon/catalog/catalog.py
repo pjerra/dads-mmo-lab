@@ -1018,13 +1018,18 @@ class Accounts(_Strict):
 class Equipped(_Strict):
     """Where THIS tree keeps the item id of a thing a character is wearing.
 
-    Two shapes, and reading the wrong one does not fail: AzerothCore's
-    `character_inventory` row carries the item INSTANCE guid (`item`) and the
-    template id is one join away in `item_instance.itemEntry`, while the CMaNGOS
-    trees carry the template id on the inventory row itself (measured on the TBC
-    install, 2026-09-06). A query built for the wrong shape answers a list of
-    instance guids that look exactly like item ids -- every one of them wrong,
-    and not one of them empty.
+    Two shapes: AzerothCore's `character_inventory` row carries the item
+    INSTANCE guid (`item`) and nothing else, so the template id is one join away
+    in `item_instance.itemEntry`; the CMaNGOS rows carry both that guid and
+    `item_template` (measured on the TBC install 2026-09-06 and on the Vanilla
+    one 2026-09-07), so the flat read is one hop.
+
+    Corrected in 8.4c: the shape that answers "instance guids that look exactly
+    like item ids" is not either of those swapped over -- the flat shape on
+    AzerothCore is an `Unknown column` error, and the joined shape on CMaNGOS is
+    the same answer by a longer road. It is `template_column` set to `item`,
+    which is what carrying AzerothCore's column name onto CMaNGOS's flat shape
+    produces, and it is the reason this is three fields rather than a default.
     """
 
     template_column: str = Field(

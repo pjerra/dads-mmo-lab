@@ -199,12 +199,18 @@ def test_a_set_that_fails_half_way_says_which_mails_went(tmp_path) -> None:
 
 
 def test_a_tree_with_no_measured_play_block_offers_nothing(tmp_path) -> None:
-    """The tab draws what the tree has. Vanilla and Tortoise have not measured
-    theirs yet, and a button drawn there would send a command nobody has
-    checked."""
-    vanilla = load_catalog().get("wow-vanilla")
+    """The tab draws what the tree has, and a button drawn on a tree nobody has
+    asked would send a command nobody has checked.
 
-    assert play.InstallPlay.for_entry_is_possible(vanilla) is False
+    The unmeasured tree here was Vanilla until 8.4c measured it; the guard moved
+    to Tortoise rather than going, because it is the guard the whole
+    `NotMeasured` class exists for and there is still exactly one tree holding
+    it. When 8.4d measures Tortoise there will be no tree left to stand here,
+    and the honest thing then is a synthesised entry rather than a deletion.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+
+    assert play.InstallPlay.for_entry_is_possible(tortoise) is False
     assert play.InstallPlay.for_entry_is_possible(WOTLK) is True
 
 
@@ -212,6 +218,49 @@ def test_the_mail_cap_offered_is_the_one_this_tree_carries(tmp_path) -> None:
     install = _install(tmp_path)
 
     assert install.mail_item_cap == 12
+
+
+def test_an_unmeasured_tree_has_no_cap_to_offer_rather_than_a_plausible_one(
+    tmp_path,
+) -> None:
+    """The fallback answered 1, which stopped being a refusal on 2026-09-07.
+
+    It was written when no tree carried a cap of one, so the number could only
+    mean "nobody measured this". Vanilla's is 1 (`Mail.h:49`), so from 8.4c an
+    unmeasured tree and a measured one answer the same thing at this property —
+    and a gear button on the unmeasured one would promise a mail per piece with
+    nothing behind the promise. It raises instead, in the same voice
+    `play.equipped` already refuses in.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    install = play.InstallPlay(
+        tortoise, tmp_path, sql=_Reader(), channel_for_saved=lambda: _Channel()
+    )
+
+    with pytest.raises(play.NotMeasured) as refused:
+        install.mail_item_cap  # noqa: B018
+
+    assert "WoW Tortoise" in str(refused.value)
+
+
+def test_the_cap_is_this_trees_own_and_not_its_siblings() -> None:
+    """Same core, same command, different number — asserted in one breath.
+
+    Read on m910q, 2026-09-07, from the two installs' own checkouts: Vanilla's
+    `src/mangos-classic/src/game/Mails/Mail.h:49` is `#define MAX_MAIL_ITEMS 1`
+    and TBC's `src/mangos-tbc/src/game/Mails/Mail.h:49`, the same line of the
+    same header, is `12`. The server enforces it at
+    `src/game/Chat/Level3.cpp:6393` and, being a `return false`, the refusal
+    reaches SOAP as a closed connection rather than as a sentence (8.3b).
+
+    Both halves are in ONE test on purpose. 8.4c's whole hazard is pasting the
+    sibling's block over, which would leave a Vanilla cap that reads 12 and a
+    gear button promising two mails for a server that will send neither.
+    """
+    catalog = load_catalog()
+
+    assert catalog.get("wow-vanilla").play.mail_item_cap == 1
+    assert catalog.get("wow-tbc").play.mail_item_cap == 12
 
 
 @pytest.mark.parametrize("level", [0, 256])

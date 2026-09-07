@@ -47,6 +47,8 @@ from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
+TBC = load_catalog().get("wow-tbc")
+"""8.5b's tree: one bot signal, the account prefix, and no registry table."""
 
 
 @pytest.fixture(autouse=True)
@@ -2974,6 +2976,106 @@ def test_a_marker_matching_nothing_warns_rather_than_reading_as_no_bots(
     assert "no character matched" in view.bot_summary.text()
 
 
+# -- 8.5b: the tab on a tree that has only one signal -------------------------
+
+
+def test_a_tree_with_only_the_prefix_does_not_name_a_registry_it_has_not_got(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b. TBC has no playerbots schema, so the split is a sentence about nothing.
+
+    Before this, this tab read "900 bots: 0 by the playerbots registry, 900 by
+    the account prefix" on m910q's TBC install — a table this install has not
+    got, and a zero beside it that a person would go looking for. The per-row
+    `— prefix` suffix is the same noise said 900 times.
+
+    The presence assertions sit beside the absence ones deliberately: `"registry"
+    not in ""` is true of a label that says nothing at all.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Adilad", level=57, online=True, source="prefix")],
+            total=900,
+            by_registry=0,
+            by_prefix=900,
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "900 bots" in view.bot_summary.text()
+    assert "registry" not in view.bot_summary.text()
+    row = view.bot_list.item(0).text()
+    assert "Adilad" in row and "level 57" in row
+    assert "prefix" not in row
+
+
+def test_a_marker_matching_nothing_on_a_one_signal_tree_warns_without_naming_a_registry(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b, and the clause 8.5a could not reach.
+
+    On WotLK a marker matching nothing still returns the registry's rows, so
+    this state is unreachable there — 8.5a's own entry defers it to the trees
+    that have only the prefix. This is one of them, and the sentence shown
+    beside the zero must not also be a claim about a table that does not exist.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            total=0,
+            warning=(
+                "no character matched the bot marker 'NOSUCHBOTPREFIX', though this server "
+                "has 901 characters"
+            ),
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "no character matched" in view.bot_summary.text()
+    assert "901" in view.bot_summary.text()
+    assert "registry" not in view.bot_summary.text()
+
+
+def test_a_zero_is_not_the_headline_when_the_marker_is_what_matched_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b. The clause is "warns, NEITHER reporting zero" — so it must not.
+
+    The first live run of this path on m910q's TBC install printed
+    "0 bots. Page 1, 0 shown. no character matched …": the number a person reads
+    first was the one the sentence after it exists to contradict. That is 8.1a's
+    confident-lie shape with the correction stapled to the end, and this box is
+    the tree the checklist nominates to settle the clause, so what it records
+    becomes the rule for 8.5c and 8.5d.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            total=0,
+            warning=(
+                "no character matched the bot marker 'NOSUCHBOTPREFIX', though this server "
+                "has 901 characters"
+            ),
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    said = view.bot_summary.text()
+    assert said.startswith("no character matched"), said
+    assert "0 bots" not in said
+    assert "Page 1" in said, "it must still say which page is on screen"
+
+
 def test_the_next_page_starts_where_this_one_ended(qapp: object, ps: _Ps, tmp_path: Path) -> None:
     """A cursor, not a count.
 
@@ -3305,3 +3407,97 @@ def test_the_gm_level_controls_offer_what_this_tree_actually_accepts(
     assert view.account_gm.maximum() == ceiling, game
     assert view.selected_gm.maximum() == ceiling, game
     assert view.account_gm.minimum() == 0, game
+
+
+# -- 8.5c: what each game's Bots tab really asks -------------------------------
+
+
+BOT_SQL_BY_GAME = {
+    # game -> (auth schema, characters schema, the db container the query runs in)
+    "wow-wotlk": ("acore_auth", "acore_characters", "ac-database"),
+    "wow-tbc": ("realmd", "characters", "tbc-db"),
+    "wow-vanilla": ("realmd", "characters", "vanilla-db"),
+    "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
+}
+"""Written out per game rather than read back out of the entry.
+
+An expectation derived from `entry.schema_map()` is the same object that
+produced the value under test, so it passes on a wrong catalog value — which is
+the class of defect this test exists to catch. These four were each measured on
+their own box: `acore_*` on yulon-ubuntu (8.1a), `realmd`/`characters` from
+m910q's TBC and Vanilla volumes (8.1b, 8.1c), `tw_logon`/`tw_char` from the
+Tortoise install (8.1d).
+"""
+
+
+def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Bots tab, driven for all four games through the seam that runs the SQL.
+
+    Until 8.5c only WotLK's SQL had ever been asserted at the wiring level; the
+    other three were checked by calling `botlist.page()` with a hand-picked
+    entry, which is a call site rather than the function the button reaches
+    ("reviews check functions, not call sites"). 8.3c found precisely this class
+    of defect on Vanilla by walking every game instead.
+
+    Two seams are answered for, and both are named on purpose. `docker_prefix`
+    decides whether `DockerSql._argv` can build a command at all, and
+    `_probe_client` is the one that would otherwise run `docker exec` against
+    this laptop's daemon just to ask which mysql binary a container has — a
+    probe nobody reading "fake `subprocess.run`" would think to stop. The client
+    cache is module-level and is cleared between games, because a name resolved
+    for one container must not answer for the next.
+    """
+    from yulon import apply as apply_module
+
+    sent: dict[str, list[list[str]]] = {}
+
+    monkeypatch.setattr(apply_module.platform, "docker_prefix", lambda wsl_distro=None: ("docker",))
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: candidates[0])
+
+    for entry in _every_game():
+        apply_module._client_cache.clear()
+        argvs: list[list[str]] = []
+        asked: list[str] = []
+        sent[entry.id] = argvs
+
+        # The two lists are bound as defaults rather than closed over: this
+        # function is defined inside the loop, and a closure would read
+        # whichever list the LAST game happened to leave behind, so every
+        # game's assertions would be made against the last game's traffic.
+        def fake_run(
+            argv: Sequence[str],
+            _argvs: list[list[str]] = argvs,
+            _asked: list[str] = asked,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            _argvs.append(list(argv))
+            # The statement is on stdin, never in argv -- `apply._mysql` puts it
+            # there deliberately, because argv is world-readable and a statement
+            # can carry a password. The first version of this test read argv for
+            # the SQL and found the schema name and nothing else.
+            _asked.append(str(kwargs.get("input") or ""))
+            return subprocess.CompletedProcess(list(argv), 0, "0\t0\t0", "")
+
+        monkeypatch.setattr(apply_module.subprocess, "run", fake_run)
+        server_dir = tmp_path / entry.id
+        (server_dir / "etc").mkdir(parents=True, exist_ok=True)
+        services = ControllerServices.for_entry(entry, server_dir)
+        assert services.bots is not None, f"{entry.id} has no Bots tab"
+        services.bots.page()
+
+        auth, characters, container = BOT_SQL_BY_GAME[entry.id]
+        counting = next((s for s in asked if s.startswith("SELECT COUNT(*), SUM(")), "")
+        assert counting, f"{entry.id} never counted: {asked}"
+        assert f"FROM {characters}.characters" in counting, f"{entry.id}: {counting}"
+        assert f"FROM {auth}.account" in counting, f"{entry.id}: {counting}"
+        assert all(a[-1] == characters for a in argvs), f"{entry.id} connected elsewhere: {argvs}"
+        assert all(container in a for a in argvs), f"{entry.id} asked the wrong container: {argvs}"
+
+        registry = entry.observability.bots.registry
+        named = "playerbots_account_type" in counting
+        assert named is (registry is not None), (
+            f"{entry.id}: registry {'declared' if registry else 'absent'}, "
+            f"table {'named' if named else 'not named'} in {counting}"
+        )

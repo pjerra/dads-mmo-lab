@@ -884,6 +884,11 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 1
+      },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },
         "scheme": "mangos_srp6"

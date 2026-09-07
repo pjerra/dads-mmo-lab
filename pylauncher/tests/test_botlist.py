@@ -211,3 +211,121 @@ def test_a_full_page_offers_a_next_one() -> None:
     page = botlist.page(sql, WOTLK, MARKER, limit=2)
 
     assert page.next_after == ("Bot1", 1)
+
+
+# -- 8.5b: the trees that have only one signal --------------------------------
+
+
+def test_a_tree_with_no_registry_has_no_second_signal_to_split_by() -> None:
+    """8.5b. TBC, Vanilla and Tortoise have one signal; WotLK has two.
+
+    The split is worth showing only where the two can disagree. On a tree whose
+    catalog entry carries no registry there is nothing to disagree with, and
+    naming one is naming a table the install has not got — measured on m910q's
+    TBC install on 2026-09-07, whose schema list is exactly `characters, logs,
+    realmd, mangos, sys, mysql, performance_schema`.
+    """
+    catalog = load_catalog()
+
+    assert botlist.has_registry(catalog.get("wow-wotlk")) is True
+    assert botlist.has_registry(catalog.get("wow-tbc")) is False
+    assert botlist.has_registry(catalog.get("wow-vanilla")) is False
+    assert botlist.has_registry(catalog.get("wow-tortoise")) is False
+
+
+def test_the_split_flag_and_the_attribution_clause_cannot_disagree() -> None:
+    """One reading of the catalog, not two.
+
+    `_registry_clause` degenerating to `1 = 0` and "this tree has no second
+    signal" are the same fact. Asserted over every game rather than over the
+    one this box gates, because the failure this guards against is a later
+    hand-written flag that is right on TBC and wrong on the next tree.
+    """
+    for entry in load_catalog().games:
+        ops = entry.observability
+        if ops is None:
+            continue
+        degenerate = botlist._registry_clause(entry, ops) == "1 = 0"
+        assert degenerate is not botlist.has_registry(entry), entry.id
+
+
+# -- 8.5c: the two ways a zero happens, told apart -----------------------------
+
+
+VANILLA = load_catalog().get("wow-vanilla")
+"""8.5c's tree. One signal, the account prefix, like TBC and Tortoise."""
+
+
+def test_a_filter_that_matches_nothing_does_not_blame_the_marker() -> None:
+    """Two causes of a zero, and only one of them is the marker's fault.
+
+    The name filter is folded into the same WHERE the total is counted over, so
+    a filter matching nothing drives `total == 0` down the same branch as a
+    marker matching nothing — and the tab then said *"no character matched the
+    bot marker 'RNDBOT'"* about a marker that had matched 500 rows a keystroke
+    earlier. On a one-signal tree that sentence is the whole proof of 8.5b's
+    third clause, so a second way to produce it makes the gate's evidence unable
+    to identify its own cause (adversarial review of 8.5c's plan, 2026-09-07).
+    """
+    sql = _Reader("0\t0\t0", "", "500")
+
+    page = botlist.page(sql, VANILLA, MARKER, name_like="Zzz")
+
+    assert page.total == 0
+    assert "marker" not in page.warning, page.warning
+    assert "'Zzz'" in page.warning and "500" in page.warning, page.warning
+
+
+def test_the_zero_a_filter_made_is_measured_against_the_bots_not_the_characters() -> None:
+    """The number the two sentences quote is not the same number.
+
+    An unfiltered zero is compared with the whole characters table, because the
+    question it answers is "did this marker find anybody at all on a populated
+    server". A filtered zero is compared with the bots the marker DID find,
+    because the question is "how many of those does this filter exclude" — and
+    quoting 900 characters there would invite exactly the wrong reading.
+
+    Asserted through the statements the reader was handed rather than by reading
+    the source, which is how `_Reader.asked` is used throughout this file.
+    """
+    filtered = _Reader("0\t0\t0", "", "500")
+    botlist.page(filtered, VANILLA, MARKER, name_like="Zzz")
+
+    unfiltered = _Reader("0\t0\t0", "", "900")
+    botlist.page(unfiltered, VANILLA, MARKER)
+
+    third_filtered = filtered.asked[2][1]
+    third_unfiltered = unfiltered.asked[2][1]
+    assert "LIKE 'RNDBOT%'" in third_filtered, third_filtered
+    assert "name LIKE" not in third_filtered, "the filter must not narrow its own denominator"
+    assert "LIKE" not in third_unfiltered, third_unfiltered
+
+
+def test_a_filter_that_matches_something_says_nothing_at_all() -> None:
+    """The sentence exists to explain a zero, and there is no zero here."""
+    sql = _Reader("3\t0\t3", "Arm\t9\t1\tprefix\t4\n")
+
+    page = botlist.page(sql, VANILLA, MARKER, name_like="Arm")
+
+    assert page.total == 3
+    assert page.warning == ""
+    assert len(sql.asked) == 2, "a page that found rows must not pay for a third query"
+
+
+def test_a_filter_on_a_server_the_marker_found_nothing_on_still_blames_the_marker() -> None:
+    """Both zeros at once, and the marker is the one worth saying.
+
+    A filter typed on a server where the marker matched nothing would otherwise
+    answer "no bot's name begins with 'Zzz'" — true, and it hides the fact that
+    there are no bots here under either question. `_why_zero` asks the bots
+    first, gets a zero, and falls through to the marker's sentence.
+
+    Asserted because the docstring claims it: a documented fallthrough that
+    nothing checks is a declaration, not a behaviour.
+    """
+    sql = _Reader("0\t0\t0", "", "0", "900")
+
+    page = botlist.page(sql, VANILLA, MARKER, name_like="Zzz")
+
+    assert "no character matched the bot marker" in page.warning, page.warning
+    assert "900" in page.warning
