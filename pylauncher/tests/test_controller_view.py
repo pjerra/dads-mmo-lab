@@ -3245,6 +3245,9 @@ def test_a_window_with_no_prompt_reads_as_could_not_ask_on_the_tab(
     # and `indeterminate` carries what it implies; the wording of the
     # implication belongs to whatever shows it to a person.
     assert said.count("may still have run") == 1, said
+    # ...and it reads as prose. The first fix for the doubling left the two
+    # sentences run together with no full stop between them.
+    assert ". the command may still have run" in said, said
     # Not a substring search for "fail": the sentence legitimately contains the
     # word, in "nothing here is a failure". What must not appear is the CLAIM.
     for claim in ("the command failed", "failed to", "could not run"):

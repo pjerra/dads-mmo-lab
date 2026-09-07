@@ -1395,7 +1395,10 @@ class ControllerView(QWidget):
         if result.outcome == "yes":
             self.console_probe_label.setText(result.text.strip() or "The console answered.")
             return
-        said = result.reason or "the console did not answer"
+        # The reason is a clause and not a sentence -- it is written to be read
+        # after "Could not ask:" -- so the full stop is this line's to add. The
+        # gate read it back without one when the clause below was appended.
+        said = (result.reason or "the console did not answer").rstrip(".") + "."
         if result.indeterminate:
             said += " The command may still have run, so nothing here is a failure."
         self.console_probe_label.setText(f"Could not ask: {said}")
