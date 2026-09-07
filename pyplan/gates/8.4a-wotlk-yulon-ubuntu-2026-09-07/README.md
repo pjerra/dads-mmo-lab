@@ -1,8 +1,8 @@
 # 8.4a — Play, WoW WotLK — server side gated live on yulon-ubuntu, 2026-09-07
 
-**Not ticked.** Every clause that can be proved without a person in the game is
-green; the one that needs a character somebody is actually playing is not, and
-the reason is recorded below rather than worked around.
+Every clause is green, including the ones that need a character standing in the
+world — sent from the other side of the machine while a real 3.3.5a client had
+it logged in.
 
 Server: the AzerothCore install on `yulon-ubuntu` (`~/wowserver`, rev
 `413bea61a85e`, playerbots). Code: `c3d5011b`.
@@ -15,37 +15,42 @@ Server: the AzerothCore install on `yulon-ubuntu` (`~/wowserver`, rev
 | a name typed in the wrong case | `aevret`, `AEVRET` and `aEVRET` all found `Aevret`; a name nobody has was refused before the server was asked |
 | a gear set larger than one mail | 19 pieces, the button promised 2 mails, 2 arrived |
 | the tab draws what the tree has | every button named its character: `Teleport Aevret`, `Send Aevret's 12 worn items (1 mail)` |
+| every action on a character being played | teleport, level, mailed gold and rename, each seen in the client — the table below |
 
 Screenshots `1-characters.png` (1001 characters, live), `2-chosen.png` (the
 buttons naming the chosen one) and `3-teleported.png` (the tab reading the
 server's own sentence back).
 
-## What is not, and why
+## The client half, on a character a person was playing
 
-**The client half.** The definition of done asks for the effect in the game
-client — the character standing at the destination, the mail in the mailbox, the
-level on the character frame. Doing that needs a character somebody is playing,
-and **this server has no people on it**: 1001 characters, all of them bots.
+The definition of done asks for the effect in the game client. This server has
+1001 characters and 1000 of them are bots — but the thousand-and-first is
+`Asfgg` on `YULONGATE`, a character the owner made by hand for an earlier box.
+Its account's password was set through 8.3a's own button (a second live press of
+that feature), a real 3.3.5a client logged in with it, and the actions were sent
+from the other side of the machine while it stood in the world.
 
-The way in was to take over a bot's account with 8.3a's own password button and
-log in as it. That worked as far as the realm list — `5-client-realm-list.png`
-is the real 3.3.5a client authenticated as `RNDBOT56` with the password this app
-set, which is a second live press of 8.3a — and then stopped: after the realm
-list the client returns to a login screen reading "Connected"
-(`6-client-login-hangs.png`), three attempts, and no character ever reached the
-world. The likeliest reason is the one the box cannot work around: the
-playerbots module owns those characters' sessions, and a bot account is not an
-empty account with a spare seat in it.
+| what was sent | what the client showed |
+| --- | --- |
+| `teleport name Asfgg Orgrimmar` | the character in **Valley of Strength**, and *"You are being teleported by server console command."* in the log (`6-client-orgrimmar-level-20.png`) |
+| `character level Asfgg 20` | the portrait reading **20**, the achievements for levels 10 and 20, and *"Server console command level up you to [20]"* |
+| `send money Asfgg "A gift" … 70000` | the **envelope** on the minimap — mail waiting (`8-client-mail-envelope.png`) |
+| `teleport name Asfgg Stormwind` | the **Trade District**, and *"Changed Channel: [1. General - Stormwind City]"* (`7-client-stormwind.png`) |
+| `character rename Asfgg` | at the next login: **"Your name has been flagged for rename — Please enter a new name"**, over a character panel reading *Asfgg, Level 20 Warrior, Stormwind City* (`9-client-rename-prompt.png`) |
 
-So the honest state is: the server half is done and the client half needs a
-character a person owns — the same shape as 8.1d, which the owner logged into by
-hand. Two minutes of somebody's time closes it.
+That last frame carries three of them at once: the rename prompt the flag
+produces, the level the command set, and the city the teleport moved it to.
 
-**The online clause** is in the same place for the same reason. It ran against
-an online BOT and the readings were not usable: `character level` answered
-"You changed level of Airaani to 60." and the row still read 72 half a minute
-later, because the module maintains its bots' levels. A character a person is
-playing has no such second author.
+`revive` has no visible effect on a character who is not dead; the server
+answered it and the row was read.
+
+**The bot route did not work, and that is worth recording.** The first attempt
+took over a bot's account the same way. It authenticated — `5-client-realm-list.png`
+is that client at the realm list — and then never reached the world, three
+times, returning to a login screen reading "Connected". The playerbots module
+owns those characters' sessions. An online BOT is no good for the online clause
+either: `character level` answered "You changed level of Airaani to 60." and the
+row still read 72 half a minute later, because the module maintains its bots.
 
 ## Three things this box measured
 

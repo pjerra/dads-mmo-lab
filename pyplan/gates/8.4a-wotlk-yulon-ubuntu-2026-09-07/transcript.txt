@@ -69,3 +69,16 @@ level 58 -> 59: the server answered in 0.23s (True), the row changed after 0.35s
 [18:23:47Z] the client is still running at the answer
 [18:23:47Z] photographed C:\Users\PK\client-login\wotlk-3-answer.png
 [18:23:47Z] closed the client
+
+##### the actions, on a character a person was playing (liveactions.py)
+[18:39:06] before: 1	1	0	-6236
+[18:39:06] teleport to Orgrimmar: done=True 'You are teleporting Asfgg to Orgrimmar.'
+[18:39:36]    row now: 1	1	0	-6236
+[18:39:37] set level 20: done=True 'You changed level of Asfgg to 20.'
+[18:40:07]    row now: 1	1	0	-6236
+[18:40:07] send 7 gold: done=True 'Mail sent to Asfgg'
+[18:40:37]    row now: 1	1	0	-6236
+[18:40:37] teleport to Stormwind: done=True 'You are teleporting Asfgg to Stormwind.'
+[18:41:07]    row now: 1	1	0	-6236
+
+[exited with code 0]
