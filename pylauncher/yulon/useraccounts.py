@@ -176,13 +176,38 @@ class Outcome:
     """
 
 
-def set_password(channel: object, *, account: str, password: str, app_account: str) -> Outcome:
+def set_password(
+    channel: object,
+    *,
+    account: str,
+    password: str,
+    app_account: str,
+    credentials: Callable[[str], str] | None = None,
+) -> Outcome:
     """`account set password <user> <pass> <pass>`, through the server itself.
 
     Owner answer 7: the server performs its own character-database writes. A
     password written here as a row is a row this app would have to get exactly
     right on every core, forever, and getting it wrong inserts something that
     looks correct and can never log in.
+
+    **The reply is a hint and the row is the answer** (8.3b, measured on m910q
+    2026-09-07). CMaNGOS's handler sends its success message and then
+    `SetSentErrorMessage(true); return false;` -- deliberately, "to avoid normal
+    report for hide passwords" (`Level3.cpp:1178-1183`) -- and SOAP turns a
+    handler that returned false into a fault. So on that core a SUCCESSFUL
+    change comes back as a failure, every time. On the live server the salt and
+    verifier both moved while this app was told the channel was unreachable.
+
+    Telling somebody their password did not change when it did is the worst of
+    the available wrongs: they retype the old one, for an account that no longer
+    has it. 8.3a's review raised that hazard for timeouts; here it is guaranteed.
+
+    `credentials` reads this account's credential columns, whatever they are on
+    this tree, and is taken BEFORE the command as well as after -- the before
+    read cannot be conditional, because nothing yet knows whether the reply will
+    be usable. It is optional: without it the reply is all there is, which is
+    the behaviour every caller had before this.
     """
     refusal = _not_our_own(account, app_account, "have its password changed")
     if refusal is not None:
@@ -191,7 +216,36 @@ def set_password(channel: object, *, account: str, password: str, app_account: s
         line = commands.account_set_password(account, password)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
-    return _send(channel, line)
+    before = _credentials_now(credentials, account)
+    outcome = _send(channel, line)
+    if outcome.done or credentials is None:
+        return outcome
+    after = _credentials_now(credentials, account)
+    if before is not None and after is not None and after != before:
+        logger.info(f"{account}'s credential row changed, whatever the command reported")
+        return Outcome(
+            True,
+            text=(
+                "The password was changed. This server reports a password change as a failure "
+                "even when it works, so the account's own row was read to be sure."
+            ),
+        )
+    return outcome
+
+
+def _credentials_now(reader: Callable[[str], str] | None, account: str) -> str | None:
+    """This account's credential columns, or `None` if they could not be read.
+
+    `None` and not `""`: a read that failed must never compare equal to another
+    read that failed, or two failures would report a password as unchanged.
+    """
+    if reader is None:
+        return None
+    try:
+        return reader(account)
+    except Exception as exc:  # noqa: BLE001 - a failed read is an absence, not a crash
+        logger.info(f"could not read {account}'s credential row: {exc}")
+        return None
 
 
 def set_gm_level(
@@ -255,6 +309,23 @@ def _send(channel: object, line: str) -> Outcome:
     return Outcome(False, problem=reason)
 
 
+_CREDENTIAL_COLUMNS: dict[str, tuple[str, ...]] = {
+    "azerothcore": ("salt", "verifier"),
+    "mangos_srp6": ("s", "v"),
+}
+"""Which columns hold an account's credential, per scheme this app can write.
+
+Not a guess and not a default: `accounts.scheme` is what each tree's own box
+measured, and a scheme absent from here is one whose password changes cannot be
+confirmed by reading -- which is a refusal, not a shrug.
+"""
+
+
+def _text_literal(text: str) -> str:
+    """A hex blob, as every other statement in this project writes a string."""
+    return "_utf8mb4 X'" + text.encode("utf-8").hex().upper() + "'"
+
+
 # -- what the tab is handed --------------------------------------------------
 
 
@@ -297,7 +368,35 @@ class InstallAccounts:
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
         return set_password(
-            channel, account=account, password=password, app_account=self.app_account
+            channel,
+            account=account,
+            password=password,
+            app_account=self.app_account,
+            credentials=self._credentials,
+        )
+
+    def _credentials(self, account: str) -> str:
+        """This account's credential columns, in whatever shape this core keeps them.
+
+        `salt`/`verifier` on AzerothCore, `v`/`s` on the CMaNGOS trees. The
+        scheme is a fact the entry already carries, and reading the wrong pair
+        would not fail -- it would report every password change as unchanged.
+
+        The VALUES never leave this method's caller, which compares them and
+        throws them away: they are a verifier and a salt, not a password, and
+        nothing logs them.
+        """
+        columns = _CREDENTIAL_COLUMNS.get(self.entry.accounts.scheme or "")
+        if columns is None:
+            raise ValueError(
+                f"{self.entry.name} has no measured credential columns, so a password change "
+                "cannot be confirmed by reading them"
+            )
+        auth = self.entry.schema_map()["auth"]
+        return self._sql.query(
+            "auth",
+            f"SELECT {', '.join(columns)} FROM {auth}.account "
+            f"WHERE username = {_text_literal(account)};",
         )
 
     def set_gm_level(self, account: str, level: int) -> Outcome:

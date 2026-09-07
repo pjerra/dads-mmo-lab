@@ -365,3 +365,108 @@ def test_a_change_the_server_did_not_answer_in_time_is_not_reported_as_a_failure
     assert outcome.done is False
     assert outcome.indeterminate is True
     assert "may already" in outcome.problem.lower()
+
+
+# -- 8.3b: the reply is a hint; the row is the answer ------------------------
+
+
+class _Credentials:
+    """A reader whose account row changes the first time it is asked twice."""
+
+    def __init__(self, *, changes: bool = True) -> None:
+        self.changes = changes
+        self.reads: list[str] = []
+        self._n = 0
+
+    def query(self, db: str, statement: str) -> str:
+        self.reads.append(statement)
+        self._n += 1
+        if not self.changes:
+            return "AAAA\tBBBB\n"
+        return "AAAA\tBBBB\n" if self._n == 1 else "CCCC\tDDDD\n"
+
+
+def test_a_password_change_this_core_reports_as_failed_is_confirmed_by_the_row() -> None:
+    """Measured on m910q, 2026-09-07, and it is by design in the core.
+
+    CMaNGOS's `HandleAccountSetPasswordCommand` sends its success message and
+    then `SetSentErrorMessage(true); return false;` -- deliberately, "to avoid
+    normal report for hide passwords" (`Level3.cpp:1178-1183`). SOAP turns a
+    handler that returned false into a fault, so a SUCCESSFUL change comes back
+    as a failure; on the live TBC server the salt and verifier both moved while
+    the app was told the channel was unreachable.
+
+    Telling a person their password did not change when it did is the worst of
+    the available wrongs: they retype the old one, for an account that no longer
+    has it. 8.3a's own review raised this hazard for timeouts; here it is
+    guaranteed rather than occasional.
+
+    So the row decides. The reply is a hint.
+    """
+    reader = _Credentials(changes=True)
+
+    outcome = useraccounts.set_password(
+        _Channel("unknown"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+    )
+
+    assert outcome.done is True, outcome.problem
+    assert "changed" in outcome.text.lower(), outcome.text
+
+
+def test_a_password_change_that_really_did_nothing_still_reports_the_problem() -> None:
+    """The other half. An unchanged row plus an unhappy reply is a failure."""
+    reader = _Credentials(changes=False)
+
+    outcome = useraccounts.set_password(
+        _Channel("unknown"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+    )
+
+    assert outcome.done is False
+    assert outcome.problem, "a failure with no sentence is not an answer"
+
+
+def test_a_clean_yes_is_believed_without_a_second_read() -> None:
+    """A core that answers properly is believed, and asked nothing further.
+
+    The BEFORE read cannot be conditional -- it has to be taken before the
+    command is sent, when nothing yet knows whether the reply will be usable --
+    but the second one is only needed where the first answer was not an answer.
+    One SELECT on the happy path, two on the path that needs them.
+    """
+    reader = _Credentials(changes=True)
+
+    outcome = useraccounts.set_password(
+        _Channel("yes"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+    )
+
+    assert outcome.done is True
+    assert len(reader.reads) == 1, "a clean answer needed no second opinion"
+
+
+def test_a_password_change_with_no_reader_falls_back_to_the_reply() -> None:
+    """`credentials` is optional, and without it the reply is all there is.
+
+    Kept optional so a caller that has no database seam -- a test, a tree whose
+    box has not measured its columns -- still gets the old behaviour rather than
+    an exception.
+    """
+    outcome = useraccounts.set_password(
+        _Channel("yes"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+    )
+
+    assert outcome.done is True
