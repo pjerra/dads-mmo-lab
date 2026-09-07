@@ -129,6 +129,11 @@ def test_the_forced_compile_says_why_it_is_compiling_something_already_built(
     server_dir = a_finished_install(rec, tmp_path)
     said = list(engine(rec).rebuild(InstallOptions(server_dir=server_dir)))
     assert any("asked for" in line and "already built" in line for line in said), said
+    # And the build's own opening line stops saying "on a first install", which
+    # is the wrong half of the truth for a press that is deliberately rebuilding
+    # a finished server.
+    building = [line for line in said if line.startswith("Building the server.")]
+    assert building and "first install" not in building[0], building
 
 
 # -- modules cloned since the last build --------------------------------------

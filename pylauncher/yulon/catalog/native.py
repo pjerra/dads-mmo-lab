@@ -2700,7 +2700,18 @@ class StagedInstaller:
                 yield (
                     "Docker would not say whether this install is built, so it is being rebuilt."
                 )
-        yield "Building the server. This takes hours on a first install; the output below is live."
+        # Two sentences for one action, because "on a first install" is the
+        # wrong half of the truth for the press that is deliberately rebuilding
+        # a finished one, and this feature is about not telling a user something
+        # that does not match what they just did.
+        yield (
+            "Building the server. The output below is live. "
+            + (
+                "This is the same compile an install does, and it takes as long."
+                if ctx.force_build
+                else "This takes hours on a first install."
+            )
+        )
         run = yield from self._pump(
             lambda sink: self._seams.build(
                 ctx.server_dir, composegen.COMPOSE_FILES, sink=sink, cancel=ctx.cancel
