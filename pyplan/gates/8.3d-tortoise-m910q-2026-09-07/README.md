@@ -43,8 +43,21 @@ for an account that has logged in before, a hash **with an empty account name in
 it**. The account can never log in again, and the server has just reported
 success.
 
-Isolated to that one variable — same core, same command, same password, same
-minute, two accounts (`lockout` stage):
+**Isolated properly, after the adversarial review refused the first attempt.**
+That version compared two DIFFERENT accounts and attributed the difference to
+`last_login`, which confounds identity, row state and command order with it. The
+controlled version (`controlled-experiment.py`) creates four accounts together
+and gives all four the same password change twice, from the same script; between
+the rounds, only two of them log in.
+
+    round 1   all four        every hash correct
+    round 2   CTRLONE, CTRLTWO      still correct
+              TREATONE, TREATTWO    EMPTY-NAME hash
+
+Prior login is the only thing that differs, and it is now a within-account
+before-and-after with two controls that took the same number of changes.
+
+The first pair of readings, which the `lockout` stage still asserts:
 
     SHAPROBE  last_login 0000-00-00 00:00:00
        stored           C20C345AE839AF76C206C48BFAF73EB2C812145E

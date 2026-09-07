@@ -87,3 +87,19 @@ account: already there
 [0 ms] SQL: SELECT sha_pass_hash,id,locked,last_ip,v,s,security,email_verif,geolock_pin,email,UNIX_TIMESTAMP(joindate),rank,current_realm,active FROM account WHERE username = 'GATE83D'
 [7 ms] SQL: UPDATE account SET v = '0985CC6D03C45D0A36198BF16251D44B9C0A7C44DCEC9EA1C7F4E38B036AD04C', s = 'C2ACE932F480CD62E58C0BDF5FD0191A9764205303D9534EB10066EDF299AF3D' WHERE username = 'GATE83D'
 [4 ms] SQL: UPDATE account SET sessionkey = '20854BDA3B610585FE4BCDA5BEF4CB2441BC3FA975E83CF2A8A9CAF7473DFABA72144E77F438E105', last_ip = '172.26.0.1', last_login = NOW(), locale = '0', failed_logins = 0, os = 'niW', platform = '68x' WHERE username = 'GATE83D'
+
+##### the controlled experiment (controlled-experiment.py)
+# Four accounts created together, the same change twice, and only two of them
+# logged in between the rounds. The first version of this box compared two
+# different accounts, which the adversarial review would not accept.
+round 1 -- the same change, all four:
+   CTRLONE   last_login=0000-00-00 00:00:00  CORRECT
+   CTRLTWO   last_login=0000-00-00 00:00:00  CORRECT
+   TREATONE  last_login=0000-00-00 00:00:00  CORRECT
+   TREATTWO  last_login=0000-00-00 00:00:00  CORRECT
+(TREATONE and TREATTWO log in with the real client, then log out)
+round 2 -- the same change again, all four:
+   CTRLONE   last_login=0000-00-00 00:00:00  CORRECT
+   CTRLTWO   last_login=0000-00-00 00:00:00  CORRECT
+   TREATONE  last_login=2026-09-07 15:32:25  EMPTY-NAME
+   TREATTWO  last_login=2026-09-07 15:33:20  EMPTY-NAME
