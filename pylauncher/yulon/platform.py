@@ -499,6 +499,51 @@ def _windows_lan_ip_from_wsl() -> str | None:
     return ip or None
 
 
+DOCKER_BLOCK_QUERY = (
+    "Get-NetFirewallRule -Direction Inbound -Action Block -Enabled True -ErrorAction "
+    "SilentlyContinue | Where-Object { $_.DisplayName -like '*Docker Desktop*' } | "
+    "Select-Object -ExpandProperty DisplayName"
+)
+"""One read, and a read only. Every setter here needs an elevated token, and
+this path has none -- the sentence the plan produces is for the user to act on."""
+
+
+def detect_blocked_docker_rules(run: RunCmd | None = None) -> tuple[str, ...]:
+    """Windows Firewall rules that BLOCK inbound traffic to Docker Desktop, by name.
+
+    Measured on `yulon-win11-gate`, 2026-09-07, and the reason this exists: the
+    ports were published on `0.0.0.0`, the guest had an explicit Allow for both,
+    the network profile was already Private -- and no other machine could reach
+    either one. Two enabled inbound rules named `Docker Desktop Backend` with
+    `Action = Block`, one per profile, which Windows writes when the first "allow
+    this app on the network" prompt is dismissed. **A block rule beats every
+    allow rule**, so the server was reachable from that box and nowhere else.
+
+    Off Windows this spawns nothing and answers `()`, which is also what makes
+    it safe to call from a test box. An unreadable firewall answers `()` too: it
+    is not an open one, but it is not evidence of a blocked one either, and a
+    plan that guessed would tell working machines they are broken.
+
+    The answer is deduplicated. Windows writes one rule per profile and repeats
+    the name; what a person needs is the name to look for, once.
+    """
+    if detect() != "windows":
+        return ()
+    do: RunCmd = run if run is not None else (lambda argv: runner.run(argv, timeout=8.0))
+    try:
+        proc = do(["powershell.exe", "-NoProfile", "-Command", DOCKER_BLOCK_QUERY])
+    except OSError:
+        return ()
+    if proc.returncode != 0:
+        return ()
+    seen: list[str] = []
+    for line in proc.stdout.splitlines():
+        name = line.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen)
+
+
 @dataclass(frozen=True)
 class PublicIpResult:
     """The public-IP probe's answer, plus whether it was TLS and not the network that failed.

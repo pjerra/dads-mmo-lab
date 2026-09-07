@@ -460,6 +460,110 @@ def test_off_macos_the_probe_spawns_nothing(monkeypatch: pytest.MonkeyPatch) -> 
     assert platform.detect_alf_state(run=_never) == platform.AlfState()
 
 
+class _Rules:
+    """Stands in for the one PowerShell read the block-rule probe makes."""
+
+    def __init__(self, stdout: str = "", returncode: int = 0) -> None:
+        self.stdout = stdout
+        self.returncode = returncode
+        self.argv: list[list[str]] = []
+
+    def __call__(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        self.argv.append(argv)
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, "")
+
+
+def test_off_windows_the_docker_block_probe_spawns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same rule every probe in this module follows, and what makes it unit-testable."""
+    monkeypatch.setattr(platform, "detect", lambda: "linux")
+
+    def _never(_argv: list[str]) -> subprocess.CompletedProcess[str]:
+        raise AssertionError("the Windows firewall probe ran something off Windows")
+
+    assert platform.detect_blocked_docker_rules(run=_never) == ()
+
+
+def test_the_probe_names_the_blocking_rules_it_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured on yulon-win11-gate, 2026-09-07: TWO rules of the same name.
+
+    Windows writes them when the first "allow this app on the network" prompt is
+    dismissed, and a Block rule beats every Allow rule — so every published port
+    was reachable from that box and from nowhere else. The name repeats because
+    Windows writes one per profile; the answer is deduplicated, since what a
+    person needs is the name to look for, once.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    rules = _Rules("Docker Desktop Backend\r\nDocker Desktop Backend\r\n")
+
+    assert platform.detect_blocked_docker_rules(run=rules) == ("Docker Desktop Backend",)
+    assert len(rules.argv) == 1, "one read, not one per profile"
+
+
+def test_a_probe_that_cannot_read_the_rules_says_nothing_rather_than_guessing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unreadable firewall is not an open one, and it is not a blocked one either.
+
+    The output matters as much as the exit code: a PowerShell that fails still
+    prints, and reading its complaint as a rule name would put an error message
+    in front of the user as something to go and delete.
+    """
+    monkeypatch.setattr(platform, "detect", lambda: "windows")
+    shouted = _Rules("Get-NetFirewallRule : Access is denied.", returncode=1)
+
+    assert platform.detect_blocked_docker_rules(run=shouted) == ()
+
+
+def test_a_windows_plan_names_dockers_own_block_rules_when_they_are_there() -> None:
+    """The step exists because the machine needed it and nothing said so.
+
+    On yulon-win11-gate the ports were published on `0.0.0.0`, the guest firewall
+    had an explicit Allow for both, the profile was already Private — and the
+    host still could not reach either one. The plan's only Windows sentence was
+    about the network profile, which was already right.
+    """
+    made = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="netsh",
+        steamos=False,
+        wsl=False,
+        enable_firewall=True,
+        detect_docker_blocks=lambda: ("Docker Desktop Backend",),
+    )
+
+    said = [s for s in made.manual_steps if "Docker Desktop Backend" in s]
+    assert said, made.manual_steps
+    assert "block" in said[0].lower(), said[0]
+
+
+def test_a_windows_plan_says_nothing_about_block_rules_that_are_not_there() -> None:
+    """A step that fires when it does not apply is noise, and noise is not read.
+
+    Asserted as the whole set of Windows sentences rather than by searching for
+    "Docker": with no rules to name, the sentence would carry no such word and a
+    search for one would not see the step it is meant to catch.
+    """
+    made = networking.plan(
+        WOTLK,
+        "lan",
+        lan_ip="192.168.1.25",
+        firewall="netsh",
+        steamos=False,
+        wsl=False,
+        enable_firewall=True,
+        detect_docker_blocks=lambda: (),
+    )
+
+    windows_steps = [s for s in made.manual_steps if s.startswith("Windows:")]
+    assert windows_steps == [
+        "Windows: set the network profile to Private (Settings → Network & Internet)."
+    ], windows_steps
+
+
 def test_the_unblock_command_is_produced_to_show_never_to_run() -> None:
     """It needs root, and this path does not ask for passwords — so the user runs it.
 

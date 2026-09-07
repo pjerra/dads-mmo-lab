@@ -3150,6 +3150,7 @@ def plan(
     detect_lan: Callable[[], str | None] = platform.detect_lan_ip,
     detect_public: Callable[[], platform.PublicIpResult] = platform.detect_public_ip,
     detect_alf: Callable[[], platform.AlfState] = platform.detect_alf_state,
+    detect_docker_blocks: Callable[[], tuple[str, ...]] = platform.detect_blocked_docker_rules,
 ) -> NetworkPlan:
     """Compute the plan for `mode`. Detection seams default to the real platform probes.
 
@@ -3490,6 +3491,19 @@ def plan(
         manual.append(
             "Windows: set the network profile to Private (Settings → Network & Internet)."
         )
+        # And the one the profile sentence cannot cover. Asked only on a plan
+        # that already wants the firewall, so a `loopback` plan still asks the
+        # machine nothing at all.
+        blocked = detect_docker_blocks()
+        if blocked:
+            names = ", ".join(f"`{name}`" for name in blocked)
+            manual.append(
+                "Windows: delete or disable the inbound firewall rule "
+                f"{names}, which is set to BLOCK. Windows writes it when the "
+                '"allow this app on the network" prompt is dismissed, and a block '
+                "rule beats every allow rule — with it in place this server is "
+                "reachable only from this machine, however the ports are published."
+            )
 
     return NetworkPlan(
         mode=mode,
