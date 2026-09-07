@@ -92,6 +92,20 @@ holds. A failed read now leaves no trace in the history at all.
 Two new tests, and five mutations of the fix run against the suite with `__pycache__` purged on
 both sides: all five killed, each by the test that claims the behaviour.
 
+**And proved back on this box, against both a stand-in and the subject** — `fix-transcript.txt`,
+with the two scripts beside it. `dashprobe.py` puts a busybox container into a real restart loop
+and replaces it: the unfixed code answers `restart loop — 0 restarts, this run up 5s` while a
+dashboard made fresh at the same moment answers `up`, which is this README's own sentence produced
+on demand; the fixed code answers `up`. `dash81d.py` then does it to `tortoise-mangosd` itself by
+8.1d's own recipe — the database taken away under the world, `restart loop — 8 restarts`, then the
+ordinary `docker compose up -d` — and the same watcher reads `up — 0 players, 123 bots, up 1m`.
+Screenshots `5-` and `6-` are the Server tab in both states.
+
+One detail worth keeping: compose said **`Container tortoise-mangosd Started`**, not `Recreated`,
+and `RestartCount` still went 8 → 0. A manual start resets docker's count, so "the count went
+backwards" covers the ordinary repair as well as a true recreate — and it is why the ten-minute
+settle rule could never have covered this on its own.
+
 ## What is left
 
 The account has no character, and this server was installed today, so nothing on it does. Character

@@ -1,0 +1,129 @@
+8.1d's defect: the fix, proved on m910q
+=======================================
+
+The defect, from this folder's README: a Dashboard that has seen a restart loop
+keeps calling it one after the container is recreated. Fixed at 44838184; what
+follows is the same probe run against the code before and after, and then
+against the real Tortoise worldserver.
+
+Code: ~/gate81d at 44838184 (the 'before' run has dashboard.py alone checked out
+at 9eb0f63a, the commit before the fix).
+Venv: ~/gate81d/pylauncher/.venv-gate (Python 3.11.15).
+
+
+1. THE MECHANISM, on a stand-in container  (dashprobe.py)
+--------------------------------------------------------
+
+A busybox container named dash-probe, put into a real restart loop under
+'--restart unless-stopped', then replaced. Chosen over the worldserver on
+purpose: what is in question is docker's own bookkeeping across a replacement,
+and busybox answers it in forty seconds where a worldserver costs minutes of
+map loading.
+
+BEFORE THE FIX (dashboard.py at 9eb0f63a):
+
+    [06:03:46Z] starting a container that exits as soon as it runs
+    [06:03:51Z] poll  1  : restart loop — 6 restarts, this run up 1s   [state=restart_loop docker='restarting'/6]
+    [06:03:56Z] poll  2  : restart loop — 7 restarts, this run up 2s   [state=restart_loop docker='restarting'/7]
+    [06:04:01Z] poll  3  : restart loop — 8 restarts, this run up 1s   [state=restart_loop docker='restarting'/8]
+    [06:04:01Z] recreating the container -- same name, new container
+    [06:04:02Z] docker now says: status='running' restart_count=0
+    [06:04:02Z] the SAME dashboard object, ticking on:
+    [06:04:07Z] poll  1  : restart loop — 0 restarts, this run up 5s   [state=restart_loop]
+    [06:04:12Z] poll  2  : restart loop — 0 restarts, this run up 10s   [state=restart_loop]
+    [06:04:17Z] poll  3  : restart loop — 0 restarts, this run up 15s   [state=restart_loop]
+    [06:04:22Z] poll  4  : restart loop — 0 restarts, this run up 20s   [state=restart_loop]
+    [06:04:22Z] a dashboard made fresh at this moment: up — 0 players, 510 bots, up 20s
+    [06:04:22Z] cleaned up: dash-probe removed
+    Traceback (most recent call last):
+      File "/home/pk/dashprobe.py", line 106, in <module>
+        main()
+      File "/home/pk/dashprobe.py", line 97, in main
+        assert verdict.state == "up", f"still {verdict.state} after the recreate"
+               ^^^^^^^^^^^^^^^^^^^^^
+    AssertionError: still restart_loop after the recreate
+
+    That is the README's sentence, reproduced on demand: 'restart loop - 0
+    restarts, this run up 5s' from the watcher, 'up' from a dashboard made
+    fresh at the same moment.
+
+AFTER THE FIX (44838184):
+
+    [06:03:00Z] starting a container that exits as soon as it runs
+    [06:03:05Z] poll  1  : restart loop — 6 restarts, this run up 1s   [state=restart_loop docker='restarting'/6]
+    [06:03:10Z] poll  2  : restart loop — 7 restarts, this run up 2s   [state=restart_loop docker='restarting'/7]
+    [06:03:15Z] poll  3  : restart loop — 8 restarts, this run up 1s   [state=restart_loop docker='restarting'/8]
+    [06:03:15Z] recreating the container -- same name, new container
+    [06:03:16Z] docker now says: status='running' restart_count=0
+    [06:03:16Z] the SAME dashboard object, ticking on:
+    [06:03:21Z] poll  1  : up — 0 players, 510 bots, up 5s   [state=up]
+    [06:03:26Z] poll  2  : up — 0 players, 510 bots, up 10s   [state=up]
+    [06:03:31Z] poll  3  : up — 0 players, 510 bots, up 15s   [state=up]
+    [06:03:36Z] poll  4  : up — 0 players, 510 bots, up 20s   [state=up]
+    [06:03:36Z] a dashboard made fresh at this moment: up — 0 players, 510 bots, up 20s
+    [06:03:36Z] PROVED: the watcher that saw the loop reads the recreated container as up
+    [06:03:36Z] cleaned up: dash-probe removed
+
+
+2. THE SUBJECT ITSELF, on tortoise-mangosd  (dash81d.py)
+--------------------------------------------------------
+
+8.1d's own recipe for a real loop: the database taken away under the world.
+Then the world put back with the ordinary 'docker compose up -d', and the SAME
+dashboard object asked what it sees.
+
+    [06:06:15Z] before anything: up — 0 players, 498 bots, up 3h 42m
+    [06:06:15Z] taking the database away under the world (8.1d's own recipe)
+    2026-09-07 08:06:16 WARNING [yulon.dbreads] could not count this server's population: SQL failed (query → tw_char): Error response from daemon: container e8d5774aa5bfefa3ab861b7085c103d6ec5f9ad79598dbd4790638f1ccaace20 is not running
+    [06:06:26Z] poll  1  : restart loop — 7 restarts, this run up 2s   [restart_loop docker='restarting'/7]
+    [06:06:36Z] poll  2  : restart loop — 8 restarts, this run up 5s   [restart_loop docker='restarting'/8]
+    [06:06:36Z] the tab, mid-loop:
+    [06:06:36Z]   wrote /home/pk/gate81d-fix-shots/1-restart-loop.png   status='status: db down, auth up, world up'
+    [06:06:36Z]   verdict on the tab: 'restart loop — 8 restarts, this run up 5s'
+    [06:06:36Z] putting it back: world down, database up, then the ordinary start
+    [06:07:02Z] compose up -d:  Container tortoise-mangosd Started
+    [06:07:02Z] docker now says: status='running' restart_count=0
+    [06:07:02Z] the SAME dashboard object, ticking on:
+    [06:07:12Z] poll  1  : up — 0 players, 0 bots, up 10s   [up]
+    [06:07:22Z] poll  2  : up — 0 players, 0 bots, up 20s   [up]
+    [06:07:32Z] poll  3  : up — 0 players, 0 bots, up 30s   [up]
+    [06:07:42Z] poll  4  : up — 0 players, 0 bots, up 40s   [up]
+    [06:07:52Z] poll  5  : up — 0 players, 0 bots, up 50s   [up]
+    [06:08:03Z] poll  6  : up — 0 players, 118 bots, up 1m   [up]
+    [06:08:03Z] a dashboard made fresh at this moment: up — 0 players, 120 bots, up 1m
+    [06:08:03Z] the tab, after the world came back:
+    [06:08:03Z]   wrote /home/pk/gate81d-fix-shots/2-up-again.png   status='status: db up, auth up, world up'
+    [06:08:03Z]   verdict on the tab: 'up — 0 players, 123 bots, up 1m'
+    [06:08:03Z] PROVED on the real worldserver: the watcher that saw the loop reads it as up
+
+    Note what compose said: 'Container tortoise-mangosd Started', not
+    'Recreated' - and RestartCount still went 8 -> 0. A manual start resets
+    docker's count, which is why the count going BACKWARDS is the evidence the
+    fix reads, and why the ten-minute settle rule could not cover this on its
+    own.
+
+    Screenshots: 5-restart-loop-on-the-tab.png (verdict 'restart loop - 8
+    restarts, this run up 5s', status 'db down, auth up, world up') and
+    6-up-again-same-watcher.png (verdict 'up - 0 players, 123 bots, up 1m',
+    Start greyed out because the server is running). Both are the Server tab
+    drawn offscreen with this watcher behind it.
+
+    The bot count climbing 0 -> 118 -> 123 across the last polls is this
+    server's own bots logging back in, not a reading that drifted.
+
+
+3. THE CHECKS
+-------------
+
+    run-tests-vm.sh --checks on m910q, at the committed tree:
+        3112 passed, 5 skipped in 39.81s
+        mypy this platform / win32 / darwin: no issues, 81 source files
+        ruff: all checks passed;  black: 165 files unchanged
+
+    Five mutations of the fix, __pycache__ purged on both sides of each:
+        KILLED  a replaced container is never noticed
+        KILLED  the count going forwards is read as a replacement
+        KILLED  an unchanged count counts as a replacement
+        KILLED  the replacement is noticed but the loop is not forgotten
+        KILLED  a failed read is written into the history again
+    survivors: none
