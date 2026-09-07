@@ -514,6 +514,7 @@ class Recorder:
             container_project=self.container_project,
             start_db=self.start_db,
             start=self.start,
+            recreate=self.recreate,
             wait_db_healthy=lambda spec: self.db_healthy,
             wait_ready=lambda spec, ready: self.ready,
             world_output=lambda spec: self.world_output,
@@ -551,6 +552,18 @@ class Recorder:
 
     def start(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
         self.calls.append("start")
+        return True
+
+    def recreate(self, spec: docker.ContainerSpec, server_dir: Path) -> bool:
+        """`docker.recreate_staged()` — `start` with `--force-recreate`.
+
+        Recorded under its OWN name, never as `start`. The two are different
+        requests: a rebuild that issued the plain `up -d` would leave the
+        pre-rebuild containers running, which is the defect the whole rebuild
+        control exists for, and a double that logged both as "start" could not
+        tell that apart from a correct run.
+        """
+        self.calls.append("recreate")
         return True
 
 
