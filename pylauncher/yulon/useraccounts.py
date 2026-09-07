@@ -285,11 +285,16 @@ def _not_our_own(account: str, app_account: str, what: str) -> Outcome | None:
         return None
     mine = name == app_account.strip().upper()
     whose = "its own command channel" if mine else "another install's command channel"
+    # "reserves", not "made": the name is derived from the install id and is
+    # refused whether or not an account by it exists. On the tortoise fork this
+    # app never makes one -- the console IS the channel there, so there is no
+    # credential and no account (8.2e) -- and a sentence claiming otherwise
+    # teaches a person the wrong thing about their own server, in the tab.
     return Outcome(
         False,
         problem=(
-            f"{account} is an account this app made for {whose}, and it cannot {what} from "
-            "here — the channel it belongs to would stop working"
+            f"{account} is the name this app reserves for {whose}, and it cannot {what} from "
+            "here — where that account exists, changing it stops the channel working"
         ),
     )
 

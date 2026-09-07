@@ -614,3 +614,31 @@ def test_another_writer_between_the_command_and_the_read_cannot_forge_a_yes(tmp_
 
     assert outcome.done is False, "a stranger's write must not be reported as ours"
     assert outcome.problem
+
+
+def test_the_refusal_does_not_claim_an_account_this_tree_never_had() -> None:
+    """8.3d, read off the live Tortoise gate.
+
+    The guard reserves a name derived from the install id, and refuses it
+    whether or not an account by that name exists. On the CMaNGOS and
+    AzerothCore trees this app does make one, for its SOAP channel. On the
+    Tortoise fork it never does — the console IS the channel, so there is no
+    credential and no account — and the sentence still said "is an account this
+    app made for its own command channel", about an account nobody had made.
+
+    A refusal that describes something that does not exist teaches a person the
+    wrong thing about their own server, and this one is shown in the tab.
+    """
+    outcome = useraccounts.set_gm_level(
+        _Channel(),
+        account="YULON_AB",
+        level=1,
+        app_account="YULON_AB",
+        realms=False,
+        highest=4,
+    )
+
+    assert outcome.done is False
+    assert "this app made" not in outcome.problem, outcome.problem
+    assert "reserves" in outcome.problem, outcome.problem
+    assert "command channel" in outcome.problem
