@@ -76,35 +76,47 @@ until the app is restarted — and 8.2a's enable button, which is interlocked on
 disabled with it. Not fixed here; it belongs to `dashboard.py` and wants a test that recreates the
 container under a live watcher.
 
-**Fixed later the same morning.** The verdict now forgets what it knows when the container's
-restart count goes BACKWARDS: within one container's life that count only ever grows, so a drop is
-a different container wearing the same name and every count remembered about the old one is about
-something that no longer exists. `.Id` says the same thing more directly and was written first,
-then taken out — no verdict differs between the two, because a container fresh enough to have a new
-id has a count of zero, and one whose count has grown past the old one really is looping.
+**Fixed the same morning, and the first fix was wrong.** The verdict now stops calling a restarted
+container a loop — a count of zero cannot be one, and the sentence above was simply false. But the
+first version went further and handed back `stable` as well, on the argument that a restart count
+which has gone BACKWARDS means a different container. An adversarial review refuted it using
+evidence this very run had already produced and I had read past: compose said **`Container
+tortoise-mangosd Started`**, not `Recreated`, and `RestartCount` still went 8 → 0. **A manual start
+resets docker's count exactly as a recreate does.** So pressing Start on a server whose crash cause
+was still there would have been answered `stable=True` for as long as its world takes to load and
+die again — minutes on these trees. That is the bug 8.1a exists to close, arriving from the other
+side.
 
-The same press closed the mirror of it, found while writing the tests: a read that FAILED was being
-stored as history. `ContainerState()` carries `restart_count=0` — which is also what a container
-that has never restarted says — so one unanswered `docker inspect` made the NEXT honest read look
-like a count that grew, and a healthy server read as a loop for the ten minutes the settle rule
-holds. A failed read now leaves no trace in the history at all.
+The label and the interlock are two questions, so they are two values. `Verdict.after_a_loop` says
+this run followed a loop and has not yet outlasted `SETTLED_AFTER`; `stable` is False while it is
+set, and the line says why:
 
-Two new tests, and five mutations of the fix run against the suite with `__pycache__` purged on
-both sides: all five killed, each by the test that claims the behaviour.
+```
+up — 0 players, 0 bots, up 30s · restarted after a crash loop — not called steady until this run has lasted 10m
+```
 
-**And proved back on this box, against both a stand-in and the subject** — `fix-transcript.txt`,
-with the two scripts beside it. `dashprobe.py` puts a busybox container into a real restart loop
-and replaces it: the unfixed code answers `restart loop — 0 restarts, this run up 5s` while a
-dashboard made fresh at the same moment answers `up`, which is this README's own sentence produced
-on demand; the fixed code answers `up`. `dash81d.py` then does it to `tortoise-mangosd` itself by
-8.1d's own recipe — the database taken away under the world, `restart loop — 8 restarts`, then the
-ordinary `docker compose up -d` — and the same watcher reads `up — 0 players, 123 bots, up 1m`.
-Screenshots `5-` and `6-` are the Server tab in both states.
+Ten minutes of the run that is actually going is the same evidence the settle rule always asked
+for, measured against the right run. `.Id` was written first and taken out: identity would name a
+manual restart and a recreate apart, and **neither is evidence of health**, so nothing downstream
+could act on the difference.
 
-One detail worth keeping: compose said **`Container tortoise-mangosd Started`**, not `Recreated`,
-and `RestartCount` still went 8 → 0. A manual start resets docker's count, so "the count went
-backwards" covers the ordinary repair as well as a true recreate — and it is why the ten-minute
-settle rule could never have covered this on its own.
+The same press closed the mirror of the defect, found while writing the tests: a read that FAILED
+was being stored as history. `ContainerState()` carries `restart_count=0` — which is also what a
+container that has never restarted says — so one unanswered `docker inspect` made the NEXT honest
+read look like a count that grew, and a healthy server read as a loop for ten minutes. A failed
+read now leaves no trace in the history at all.
+
+Nine mutations, `__pycache__` purged on both sides of each: all nine killed, each by the test that
+claims the behaviour.
+
+**Proved back on this box, against a stand-in and against the subject** — `fix-transcript.txt`,
+with both probes beside it. `dashprobe.py` puts a busybox container into a real restart loop and
+replaces it; the unfixed code answers `restart loop — 0 restarts, this run up 5s` while a dashboard
+made fresh at the same moment answers `up`, which is this README's own sentence produced on demand
+in forty seconds. `dash81d.py` then does it to `tortoise-mangosd` itself by 8.1d's own recipe — the
+database taken away under the world, the world put back with the ordinary `docker compose up -d`,
+and then **ten real minutes of waiting** to watch the interlock open on its own rather than
+asserting it from the rule. Screenshots `5-`, `6-` and `7-` are the Server tab in all three states.
 
 ## What is left
 

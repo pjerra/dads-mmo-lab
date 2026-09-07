@@ -116,17 +116,36 @@ def main() -> None:
     say(f"docker now says: status={after.status!r} restart_count={after.restart_count}")
 
     say("the SAME dashboard object, ticking on:")
-    for poll in range(1, 7):
+    for poll in range(1, 4):
         time.sleep(10)
         verdict = watch.tick()
-        say(f"poll {poll:2}  : {dashboard.line(verdict)}   [{verdict.state}]")
+        say(
+            f"poll {poll:2}  : {dashboard.line(verdict)}   "
+            f"[{verdict.state} stable={verdict.stable}]"
+        )
     fresh = dashboard.Dashboard(SPEC, ENTRY, SERVER_DIR, sql=sql_seam()).tick()
     say(f"a dashboard made fresh at this moment: {dashboard.line(fresh)}")
-    assert verdict.state == "up", f"still {verdict.state} after the world came back"
+    assert verdict.state == "up", f"still called {verdict.state} after the world came back"
     assert fresh.state == verdict.state, "the old watcher and a fresh one disagree"
-    say("the tab, after the world came back:")
-    shot(watch, "2-up-again.png")
-    say("PROVED on the real worldserver: the watcher that saw the loop reads it as up")
+    assert not verdict.stable, "a reset count is not evidence the crash cause is gone"
+    assert "crash" in dashboard.line(verdict), "the tab must say why it is holding back"
+    say("the tab, restarted but not yet steady:")
+    shot(watch, "2-restarted-not-yet-steady.png")
+
+    # And now the part no rule can stand in for: sitting through SETTLED_AFTER
+    # and watching the interlock open on its own, against the real clock.
+    say(f"waiting out SETTLED_AFTER ({dashboard.SETTLED_AFTER}) on this run:")
+    deadline = time.monotonic() + 13 * 60
+    while time.monotonic() < deadline:
+        time.sleep(60)
+        verdict = watch.tick()
+        say(f"  {dashboard.line(verdict)}   [stable={verdict.stable}]")
+        if verdict.stable:
+            break
+    assert verdict.stable, "the interlock never opened; SETTLED_AFTER did not fire"
+    say("the tab, steady again:")
+    shot(watch, "3-steady-again.png")
+    say("PROVED on the real worldserver: not a loop, not yet steady, then steady")
 
 
 if __name__ == "__main__":

@@ -91,12 +91,17 @@ def main() -> None:
         for poll in range(1, 5):
             time.sleep(5)
             verdict = watch.tick()
-            say(f"poll {poll:2}  : {dashboard.line(verdict)}   [state={verdict.state}]")
+            say(
+                f"poll {poll:2}  : {dashboard.line(verdict)}   "
+                f"[state={verdict.state} stable={verdict.stable}]"
+            )
         fresh = dashboard.Dashboard(SPEC, ENTRY, SERVER_DIR, sql=FakeSql()).tick()
         say(f"a dashboard made fresh at this moment: {dashboard.line(fresh)}")
-        assert verdict.state == "up", f"still {verdict.state} after the recreate"
+        assert verdict.state == "up", f"still called {verdict.state} after the restart"
         assert fresh.state == verdict.state, "the old watcher and a fresh one disagree"
-        say("PROVED: the watcher that saw the loop reads the recreated container as up")
+        assert not verdict.stable, "a reset count is not evidence the crash cause is gone"
+        assert "crash" in dashboard.line(verdict), "the tab must say why it is holding back"
+        say("PROVED: no longer called a loop, and not yet called steady either")
     finally:
         run("docker", "rm", "-f", NAME)
         say(f"cleaned up: {NAME} removed")
