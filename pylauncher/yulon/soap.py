@@ -138,6 +138,39 @@ def escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+_ENTITY = re.compile(r"&(#[0-9]+|#[xX][0-9a-fA-F]+|lt|gt|amp|quot|apos);")
+
+_NAMED = {"lt": "<", "gt": ">", "amp": "&", "quot": '"', "apos": "'"}
+
+
+def unescape(text: str) -> str:
+    """Undo XML escaping in text the server sent, because a person reads it.
+
+    Measured on `yulon-ubuntu`, 2026-09-07: a real `server info` came back with
+    every line ending `&#xD;`, and that text goes straight into a gate capture
+    and, later, the console this channel will carry.
+
+    XML's five named entities and numeric character references, and nothing
+    else. Not `html.unescape`, which also decodes several hundred HTML-only
+    names -- a server printing a literal `&nbsp;` in somebody's guild name
+    would have it silently turned into a space. An `&` that begins no entity is
+    left exactly as it is: it is text, not a broken entity to be guessed at.
+
+    `&amp;` last is not a concern here the way it is when escaping, because a
+    single pass over the source never revisits what it has already written.
+    """
+
+    def one(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if body.startswith("#"):
+            digits = body[1:]
+            base = 16 if digits[:1] in ("x", "X") else 10
+            return chr(int(digits.lstrip("xX") if base == 16 else digits, base))
+        return _NAMED[body]
+
+    return _ENTITY.sub(one, text)
+
+
 def execute(endpoint: Endpoint, command: str, *, timeout: float = DEFAULT_TIMEOUT) -> Reply:
     """POST one command and classify the answer. Never raises.
 
@@ -192,9 +225,9 @@ def _classify(status: int, body: str) -> Reply:
         )
     fault = _FAULT.search(body)
     if fault:
-        return Reply("refused", fault.group(1), status)
+        return Reply("refused", unescape(fault.group(1)), status)
     result = _RESULT.search(body)
     if result:
-        return Reply("answered", result.group(1), status)
+        return Reply("answered", unescape(result.group(1)), status)
     logger.warning(f"a SOAP reply carried neither a result nor a fault (HTTP {status})")
     return Reply("unreadable", body.strip()[:400], status)

@@ -240,3 +240,47 @@ def test_the_command_is_escaped_so_a_bracket_cannot_change_the_envelope() -> Non
     assert "<bob>" not in seen[0]
     assert "&lt;bob&gt;" in seen[0]
     assert seen[0].count("<ns1:executeCommand>") == 1
+
+
+def test_the_reply_text_is_unescaped_because_a_person_reads_it() -> None:
+    """Measured on `yulon-ubuntu`, 2026-09-07: the server escapes its own output.
+
+    A real `server info` came back as
+
+        AzerothCore rev. 413bea61a85e+ ... (Static)&#xD;
+        Connected players: 0. Characters in world: 500.&#xD;
+
+    and that text goes straight to a person -- the gate capture, and the
+    console this channel will carry later. `&#xD;` is a carriage return the
+    server put there, not something to show.
+    """
+    body = (
+        "<SOAP-ENV:Envelope><SOAP-ENV:Body><ns1:executeCommandResponse>"
+        "<result>Connected players: 0.&#xD;&#10;Bots &amp; players &lt;here&gt;</result>"
+        "</ns1:executeCommandResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>"
+    )
+
+    reply = soap._classify(200, body)
+
+    assert reply.outcome == "answered"
+    assert "&#xD;" not in reply.text
+    assert "&amp;" not in reply.text
+    assert reply.text == "Connected players: 0.\r\nBots & players <here>"
+
+
+def test_a_fault_is_unescaped_for_the_same_reason() -> None:
+    body = (
+        "<SOAP-ENV:Fault><faultstring>There is no such command &apos;foo&apos;"
+        "</faultstring></SOAP-ENV:Fault>"
+    )
+
+    reply = soap._classify(200, body)
+
+    assert reply.outcome == "refused"
+    assert reply.text == "There is no such command 'foo'"
+
+
+def test_unescaping_leaves_a_bare_ampersand_alone_rather_than_guessing() -> None:
+    """Text the server did not escape is text, not a broken entity."""
+    assert soap.unescape("bots & players") == "bots & players"
+    assert soap.unescape("100% &amp; rising") == "100% & rising"
