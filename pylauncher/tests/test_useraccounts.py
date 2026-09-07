@@ -579,3 +579,33 @@ def test_a_tree_whose_scheme_has_no_measured_recipe_answers_no(tmp_path) -> None
 
     assert install._password_is_in_force("SRPPROBE", "kn0wn-p@ss77") is False
     assert reader.asked == [], "a scheme it cannot check is not worth a query"
+
+
+def test_another_writer_between_the_command_and_the_read_cannot_forge_a_yes(tmp_path) -> None:
+    """The review's own scenario, end to end through the object the tab holds.
+
+    The command is refused (this core refuses by hanging up, so the channel
+    answers `unknown`), and while that happens somebody else changes the same
+    account's password. The row is now different from what it was — which is
+    exactly what the first version of this took as proof — and it is not this
+    password, so the answer is no.
+
+    A false POSITIVE is not merely unlikely here, it is unreachable: the only
+    row that says yes is a row holding the password this call was given, and
+    then "the password was changed" is true whoever wrote it.
+    """
+    salt = "E040A443299D8590D08C3353B3F9960548A9BB82B873659FC7533CA2031B485A"
+    somebody_elses = "27BADE411219414667B39335D71F258E191312B78C065F630954135E8870111B"
+    channel = _Channel("unknown")
+    install = useraccounts.InstallAccounts(
+        load_catalog().get("wow-vanilla"),
+        tmp_path,
+        sql=_Reader(f"{salt}\t{somebody_elses}\n"),
+        channel_for_saved=lambda: channel,
+        app_account="YULON_AB12CD34",
+    )
+
+    outcome = install.set_password("SRPPROBE", "the-password-we-asked-for")
+
+    assert outcome.done is False, "a stranger's write must not be reported as ours"
+    assert outcome.problem
