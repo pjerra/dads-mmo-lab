@@ -82,3 +82,17 @@ Connection: close
 [15:54:59Z] sent the login
 [15:55:21Z] photographed C:\Users\PK\client-login\tbc-new-3-answer.png
 [15:55:21Z] closed the client
+
+##### the same clause re-run after the adversarial review changed the check
+# 2026-09-07 16:26 local. The row is no longer believed because it MOVED; the
+# stored verifier is recomputed from the row's own salt and compared, and the
+# recipe measured on the Vanilla box reproduces this tree's rows too.
+2026-09-07 16:26:55 INFO [yulon.controller_wow_wotlk.accounts] account GATE83B already exists (id 107), keeping its password
+[14:26:55Z] target account: GATE83B (already existed)
+[14:26:55Z] v/s before: 33303439323543304434434438374443…
+2026-09-07 16:26:55 INFO [yulon.useraccounts] GATE83B's stored verifier is the one this password makes
+[14:26:55Z] set_password said: done=True The password was changed. This server reports a password change as a failure even when it works, so the account's own row was read to be sure.
+[14:26:55Z] v/s after:  31383639384645343045433044463831…
+[14:26:55Z] the channel a moment later: 'CMaNGOS/0.18 (0000-00-00T00:00:00+00:00 - Git repository not found) for Linux_x64 (little-endian)'
+[14:26:55Z] clause 2 (server half) PASSED: the server changed its own row
+[14:26:55Z] THE CLIENT HALF: log in as GATE83B with 'n3w-p@ss34'; 'old-p@ss12' must fail

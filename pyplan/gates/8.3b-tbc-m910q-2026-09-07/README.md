@@ -40,11 +40,25 @@ fault. `pwtruth.py` measured it on the live server:
     the row CHANGED: True
 
 A person told their password change failed retypes the old one, for an account
-that no longer has it. So **the reply is a hint and the row is the answer**: one
-SELECT before the command, a second only where the first reply was not an
-answer, and the columns come from `accounts.scheme` — `salt`/`verifier` on
-AzerothCore, `v`/`s` here. A failed read answers `None` and never `""`, so two
-failed reads cannot compare equal and report a password as unchanged.
+that no longer has it. So **the reply is a hint and the row is the answer**.
+
+**What "the row says" means changed after this box was first written, and this
+paragraph is the correction rather than a tidy-up.** The first version compared
+the credential columns before and after and took any difference as proof. This
+box's own adversarial review refused that, and was right: anything else that
+writes that row — a second window, an administrator at a console, another
+install sharing this auth database — would have turned a refused command into a
+reported success, and the person would be locked out BY the reassurance.
+
+The shipped check recomputes the verifier instead. SRP6 stores
+`g^H(s, H(USER:PASS)) mod N`, so the row's own salt and the password that was
+asked for say whether THAT password is the one the account now has — whoever
+wrote the row, and whatever the server said. There is no before-read left, so
+there is no window to race, and a false positive is unreachable rather than
+merely unlikely. The recipe was measured on the live Vanilla server the same
+afternoon (`8.3c-vanilla-m910q-2026-09-07/`), and it reproduces this tree's rows
+too; `transcript.txt` ends with clause 2 re-run against the shipped code, where
+the log line reads *"GATE83B's stored verifier is the one this password makes"*.
 
 **2. A refused command arrives as nothing at all.** Asked with a raw socket, so
 nothing in this app could be blamed for the reading:
