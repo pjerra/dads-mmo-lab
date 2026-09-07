@@ -77,16 +77,31 @@ def account_create(account: str, password: str) -> str:
     return line(f"account create {account} {password}")
 
 
-def account_set_gm_level(account: str, level: int) -> str:
-    """`account set gmlevel <user> <n> -1`.
+def account_set_gm_level(account: str, level: int, *, realms: bool) -> str:
+    """`account set gmlevel <user> <n>`, with `-1` for every realm where there are realms.
 
-    The `-1` is "every realm". SOAP reads the level from `account_access` with
-    no realm filter, so a row pinned to one realm id would not be seen on this
-    path; the prior art passes `-1` for the same reason (`soap_cmds.rs:95`).
+    `realms` is required and not defaulted, because the two cores disagree and
+    neither disagreement fails loudly.
+
+    AzerothCore keeps the level in `account_access`, which has a `RealmID`
+    column, so its command takes a realm and `-1` means every one of them. SOAP
+    reads that table with no realm filter, so a row pinned to a single realm id
+    would not be seen on this path; the prior art passes `-1` for the same
+    reason (`soap_cmds.rs:95`).
+
+    The CMaNGOS handler takes no such argument. It is
+    `account set gmlevel <account> <level>`, and it writes
+    `UPDATE account SET gmlevel = '%i' WHERE id = '%u'` against the account row
+    (`Level3.cpp:1080-1128`, read on the TBC install 2026-09-07). There is no
+    realm to name because there is no table with realms in it.
+
+    The caller knows which it is from a fact its own box already measured:
+    `entry.accounts.level.table` is null exactly where the level is a column.
     """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
     _require(0 <= level <= 3, f"{level} is not a GM level this server has")
-    return line(f"account set gmlevel {account} {level} -1")
+    every_realm = " -1" if realms else ""
+    return line(f"account set gmlevel {account} {level}{every_realm}")
 
 
 def account_set_password(account: str, password: str) -> str:

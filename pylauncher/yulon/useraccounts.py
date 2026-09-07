@@ -194,13 +194,20 @@ def set_password(channel: object, *, account: str, password: str, app_account: s
     return _send(channel, line)
 
 
-def set_gm_level(channel: object, *, account: str, level: int, app_account: str) -> Outcome:
-    """`account set gmlevel <user> <n> -1` — every realm, for the reason in `commands`."""
+def set_gm_level(
+    channel: object, *, account: str, level: int, app_account: str, realms: bool
+) -> Outcome:
+    """`account set gmlevel <user> <n>`, with the realm argument where there are realms.
+
+    `realms` comes from the entry -- a tree whose level is a column on the
+    account row has no realm to name -- and is passed rather than defaulted, for
+    the reason `commands.account_set_gm_level()` gives.
+    """
     refusal = _not_our_own(account, app_account, "have its GM level changed")
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_gm_level(account, level)
+        line = commands.account_set_gm_level(account, level, realms=realms)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     return _send(channel, line)
@@ -297,7 +304,16 @@ class InstallAccounts:
         channel = self._channel()
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
-        return set_gm_level(channel, account=account, level=level, app_account=self.app_account)
+        # From the entry, not from a default: a tree whose level lives on the
+        # account row has no realm to name (8.3b).
+        level_block = self.entry.accounts.level
+        return set_gm_level(
+            channel,
+            account=account,
+            level=level,
+            app_account=self.app_account,
+            realms=level_block is not None and level_block.table is not None,
+        )
 
     def _channel(self) -> object | None:
         return self._channel_for_saved()

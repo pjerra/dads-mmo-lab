@@ -121,7 +121,7 @@ def test_the_gm_level_command_carries_the_realm_argument_this_core_needs() -> No
     no `RealmID` filter; the prior art's builder passes `-1` for the same reason
     (`soap_cmds.rs:95`).
     """
-    assert commands.account_set_gm_level("YULON_AB12CD34", 3) == (
+    assert commands.account_set_gm_level("YULON_AB12CD34", 3, realms=True) == (
         "account set gmlevel YULON_AB12CD34 3 -1"
     )
 
@@ -140,3 +140,32 @@ def test_an_argument_cannot_smuggle_a_second_command_in() -> None:
     """The charsets are allow-lists, so a space or a semicolon never lands in a line."""
     with pytest.raises(commands.CommandError):
         commands.account_create("YULON_AB12CD34 x; account delete bob", "p@ssw0rd12345678")
+
+
+def test_the_realm_argument_belongs_to_the_core_that_has_realms_in_its_level_table() -> None:
+    """Read out of `Level3.cpp:1080` on the TBC install, 2026-09-07.
+
+    AzerothCore keeps an account's level in `account_access`, which has a
+    `RealmID` column, so its command takes a realm and `-1` means "every realm".
+    The CMaNGOS handler takes no such argument at all -- it is
+    `account set gmlevel <account> <level>` and writes
+    `UPDATE account SET gmlevel = ... WHERE id = ...` against the account row.
+
+    The argument that decides it is the one already measured: a tree whose level
+    lives on the account row has no realm to name. Passing a third argument to a
+    handler that parses two is not something to find out in production, and it
+    is not something to guess at either.
+    """
+    assert commands.account_set_gm_level("BOB", 2, realms=True) == "account set gmlevel BOB 2 -1"
+    assert commands.account_set_gm_level("BOB", 2, realms=False) == "account set gmlevel BOB 2"
+
+
+def test_the_realm_argument_is_not_defaulted() -> None:
+    """A default here is one core's answer handed to the other, silently.
+
+    Neither shape fails loudly against the wrong core: the extra argument is
+    likely to be ignored, and its absence certainly is. What follows is a level
+    that did or did not change, discovered later.
+    """
+    with pytest.raises(TypeError):
+        commands.account_set_gm_level("BOB", 2)  # type: ignore[call-arg]
