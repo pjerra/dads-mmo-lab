@@ -183,7 +183,11 @@ def test_the_file_carries_no_more_than_it_must(tmp_path: Path) -> None:
 
     written = json.loads(path.read_text(encoding="utf-8"))
 
-    assert set(written) == {"account", "password", "host", "port", "verified_at"}
+    assert set(written) == {"account", "password", "namespace", "host", "port", "verified_at"}
+    # `namespace` joined the file in 8.2c: the app overrides it from the entry
+    # on the way out, but a file that records a fact should record the true
+    # one -- the gate on m910q read this file, sent `urn:AC` and got HTTP 500
+    # from a channel that had just verified.
 
 
 # -- the whole path ---------------------------------------------------------

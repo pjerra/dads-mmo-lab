@@ -167,9 +167,20 @@ class Verified:
     answer that would be actively misleading.
     """
 
-    def credentials(self, *, host: str, port: int) -> soap.Endpoint:
-        """The endpoint to persist. Only reachable from here, by design."""
-        return soap.Endpoint(host=host, port=port, account=self.account, password=self.password)
+    def credentials(self, *, host: str, port: int, namespace: str) -> soap.Endpoint:
+        """The endpoint to persist. Only reachable from here, by design.
+
+        `namespace` is passed rather than defaulted for the reason `envelope()`
+        gives: it is not the same on both families, and a file that records the
+        wrong one misleads everything that reads the file rather than the entry.
+        """
+        return soap.Endpoint(
+            host=host,
+            port=port,
+            account=self.account,
+            password=self.password,
+            namespace=namespace,
+        )
 
 
 @dataclass(frozen=True)
@@ -492,6 +503,7 @@ def save_credential(
     install_id: str,
     host: str,
     port: int,
+    namespace: str = "urn:AC",
     config_dir: Path | None = None,
 ) -> Path:
     """Write the credential for an account whose round trip has answered.
@@ -505,6 +517,7 @@ def save_credential(
         {
             "account": verified.account,
             "password": verified.password,
+            "namespace": namespace,
             "host": host,
             "port": port,
             "verified_at": verified.at,
@@ -537,6 +550,10 @@ def load_credential(
             port=int(raw["port"]),
             account=str(raw["account"]),
             password=str(raw["password"]),
+            # `.get`, because a file written before this field existed is still
+            # a usable credential -- and the entry overrides it on the way out
+            # anyway (`InstallChannel.live_channel`).
+            namespace=str(raw.get("namespace", "urn:AC")),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.info(f"no usable credential at {path}: {type(exc).__name__}")
@@ -556,6 +573,7 @@ def ensure(
     install_id: str,
     host: str,
     port: int,
+    namespace: str = "urn:AC",
     config_dir: Path | None = None,
     state: State | None = None,
     gm_level: int = 3,
@@ -609,7 +627,13 @@ def ensure(
 
     verified = current.verified()
     save_credential(
-        verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
+        verified,
+        game=game,
+        install_id=install_id,
+        host=host,
+        port=port,
+        namespace=namespace,
+        config_dir=config_dir,
     )
     return verified
 
@@ -636,6 +660,7 @@ def repair(
     install_id: str,
     host: str,
     port: int,
+    namespace: str = "urn:AC",
     config_dir: Path | None = None,
     gm_level: int = 3,
     now: Callable[[], str] = now_utc,
@@ -674,7 +699,13 @@ def repair(
         )
     verified = Verified(account=state.account, password=password, at=now())
     save_credential(
-        verified, game=game, install_id=install_id, host=host, port=port, config_dir=config_dir
+        verified,
+        game=game,
+        install_id=install_id,
+        host=host,
+        port=port,
+        namespace=namespace,
+        config_dir=config_dir,
     )
     return verified
 
@@ -819,6 +850,7 @@ class InstallChannel:
             install_id=self.install_id,
             host=endpoint.host,
             port=endpoint.port,
+            namespace=endpoint.namespace,
             config_dir=self._config_dir,
             gm_level=operations.gm_level if operations is not None else 3,
         )
@@ -929,6 +961,7 @@ class InstallChannel:
             install_id=self.install_id,
             host=endpoint.host,
             port=endpoint.port,
+            namespace=endpoint.namespace,
             config_dir=self._config_dir,
             state=self._state,
             gm_level=operations.gm_level,

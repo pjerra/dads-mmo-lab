@@ -450,3 +450,40 @@ def test_every_endpoint_this_channel_builds_carries_the_namespace(tmp_path: Path
 
     assert len(captures.endpoints) >= 2, captures.endpoints
     assert {e.namespace for e in captures.endpoints} == {"urn:MaNGOS"}, captures.endpoints
+
+
+def test_the_saved_credential_records_the_namespace_it_was_proved_with(
+    tmp_path: Path,
+) -> None:
+    """The app overrides it on read, and the FILE still has to be right.
+
+    `live_channel()` replaces whatever the file carries with the entry's value,
+    so the app is safe either way. Anything else that reads the file is not: on
+    m910q the 8.2c gate loaded the saved credential, sent `urn:AC` and got HTTP
+    500 back from a channel that had just verified. A credential file that
+    records a fact should record the true one.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    captures = _Captures()
+    channel = setup.InstallChannel(
+        tbc,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *_args: None,
+        reset=lambda *_args: None,
+        channel_for=lambda _endpoint: _Answers(),
+        config_dir=tmp_path / "config",
+    )
+
+    assert isinstance(channel.prove(), setup.Verified)
+
+    saved = setup.load_credential(tbc.id, INSTALL, config_dir=tmp_path / "config")
+    assert saved is not None
+    assert saved.namespace == "urn:MaNGOS", saved
+    del captures
+
+
+class _Answers:
+    def send(self, _command: object) -> object:
+        return type("Answer", (), {"outcome": "yes", "denied": False, "text": "ok"})()
