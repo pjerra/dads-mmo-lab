@@ -135,15 +135,17 @@ def test_an_entry_with_no_operations_block_is_refused_rather_than_guessed_at(
 ) -> None:
     """8.2d and 8.2e each measure their own; nothing is inherited early.
 
-    Vanilla rather than TBC since 8.2c: TBC now HAS a block, and a test that
-    asserted the refusal against it would have started asserting that the
-    feature is missing from the tree it had just been added to.
+    Tortoise since 8.2d, having been TBC's until 8.2c and Vanilla's until now:
+    each time a tree gains a channel, a test asserting the refusal against it
+    would start asserting that the feature is missing from the tree it had just
+    been added to. Tortoise is the last one, and 8.2e is a different shape
+    entirely -- that core has no SOAP at all.
     """
-    vanilla = load_catalog().get("wow-vanilla")
+    tortoise = load_catalog().get("wow-tortoise")
 
-    with pytest.raises(setup.EnableRefused, match="wow-vanilla"):
+    with pytest.raises(setup.EnableRefused, match="wow-tortoise"):
         setup.enable(
-            vanilla, tmp_path, templates_root=resources.installers_dir(), world_running=False
+            tortoise, tmp_path, templates_root=resources.installers_dir(), world_running=False
         )
 
 

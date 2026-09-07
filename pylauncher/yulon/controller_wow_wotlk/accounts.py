@@ -428,11 +428,21 @@ def reset_own_password(
         )
     if not _valid_password(password):
         raise AccountError("that password is not one this server would accept")
-    salt, verifier = registration_data(name, password)
+    # The scheme was a parameter this function took and never read until 8.2d.
+    # Harmless while AzerothCore was the only tree with a channel, since the
+    # hard-coded columns were right; then TBC needed `v`/`s` and took a copy of
+    # the whole function, and Vanilla would have taken a third. A parameter that
+    # is accepted and ignored is worse than no parameter -- it tells the caller
+    # it has a choice it does not have.
+    if scheme == "mangos_srp6":
+        s_hex, v_hex = mangos_srp6_credentials(name, password)
+        columns = f"v = {_text_literal(v_hex)}, s = {_text_literal(s_hex)}"
+    else:
+        salt, verifier = registration_data(name, password)
+        columns = f"salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)}"
     sql.run_statement(
         _ACCOUNTS_DB,
-        f"UPDATE account SET salt = {_hex_literal(salt)}, verifier = {_hex_literal(verifier)} "
-        f"WHERE username = {_text_literal(name)};",
+        f"UPDATE account SET {columns} WHERE username = {_text_literal(name)};",
     )
     logger.info(f"rotated the password of this app's own account {name}")  # never the password
 

@@ -41,6 +41,7 @@ from pathlib import Path
 
 from yulon.apply import DockerSql
 from yulon.controller_wow_tbc import docker_ctl
+from yulon.controller_wow_wotlk import accounts as writer
 from yulon.controller_wow_wotlk.accounts import (
     APP_ACCOUNT_PREFIX as APP_ACCOUNT_PREFIX,
 )
@@ -68,10 +69,6 @@ from yulon.controller_wow_wotlk.accounts import (
 )
 from yulon.controller_wow_wotlk.accounts import (
     SqlSeam as SqlSeam,
-)
-from yulon.controller_wow_wotlk.accounts import (
-    _text_literal,
-    mangos_srp6_credentials,
 )
 from yulon.controller_wow_wotlk.accounts import (
     create_account as _create_account,
@@ -167,28 +164,20 @@ def create_account(
 def reset_own_password(sql: SqlSeam, name: str, password: str) -> None:
     """Give THIS APP'S OWN account a new password, in THIS core's own columns.
 
-    8.2c's repair path. Separate from `create_account()` for the reason that one
-    gives: it will not re-salt a row that exists, because silently changing an
-    owner's password is worse than refusing. The channel needs exactly that on
-    one account -- the one it made -- so the guard here is on the kind of name
-    rather than on a remembered one: two installs can share an auth database,
-    which an adversarial review made against 8.3a and which holds here too.
+    8.2c's repair path, and the shared writer with this game's scheme bound --
+    the same relationship `create_account()` above has with it. It was a copy of
+    the whole function until 8.2d, because the shared one took a `scheme` and
+    ignored it; when Vanilla needed the identical thing, reading the argument
+    was plainly better than a third copy.
 
-    Separate from WotLK's version as well, and that is the substance rather than
-    packaging: this core reads `v`/`s`, AzerothCore reads `salt`/`verifier`, and
-    a shared implementation would write one core's columns into the other's row
-    -- which does not fail, it produces an account that looks right and can
-    never log in.
+    What the scheme decides is not cosmetic: this core reads `v`/`s` where
+    AzerothCore reads `salt`/`verifier`, and writing the wrong pair does not
+    fail -- it produces an account that looks correct and can never log in.
+
+    Separate from `create_account()` for the reason that one gives: it will not
+    re-salt a row that exists, because silently changing an owner's password is
+    worse than refusing. The channel needs exactly that on the one account it
+    made, and the guard is on the KIND of name rather than a remembered one,
+    since two installs can share an auth database.
     """
-    if not name.startswith(APP_ACCOUNT_PREFIX) or name != name.upper():
-        raise AccountError(
-            f"{name!r} is not an account this app owns, so its password is not this app's to "
-            f"change. Only accounts named {APP_ACCOUNT_PREFIX}… are."
-        )
-    s_hex, v_hex = mangos_srp6_credentials(name, password)
-    sql.run_statement(
-        "auth",
-        f"UPDATE account SET v = {_text_literal(v_hex)}, s = {_text_literal(s_hex)} "
-        f"WHERE username = {_text_literal(name)};",
-    )
-    logger.info(f"rotated the password of this app's own account {name}")  # never the password
+    writer.reset_own_password(sql, name, password, scheme="mangos_srp6")

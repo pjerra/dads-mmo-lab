@@ -181,3 +181,18 @@ def create_account(
         NotImplementedError: the catalog declares no scheme for this core.
     """
     return writer.create_account(sql, username, password, gm_level=gm_level, scheme=scheme())
+
+
+def reset_own_password(sql: SqlSeam, name: str, password: str) -> None:
+    """Give THIS APP'S OWN account a new password, in this core's own columns.
+
+    The shared writer with this game's scheme bound, exactly as
+    `create_account()` above is -- `v`/`s` here, not AzerothCore's
+    `salt`/`verifier`. The repair path for a credential the server has rejected
+    (8.2d); `create_account()` will not do it, because re-salting a row that
+    exists would silently change its owner's password.
+
+    The guard on the name lives in the shared writer and refuses every account
+    that does not carry this app's own prefix.
+    """
+    writer.reset_own_password(sql, name, password, scheme=scheme())

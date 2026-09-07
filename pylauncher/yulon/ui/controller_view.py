@@ -715,12 +715,33 @@ def _for_vanilla(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2d. The same seam and the same enable route as TBC -- a conf file,
+    # because this family reads no environment -- with this tree's own facts
+    # under it. `db_password` is handed over because rendering this install's
+    # compose files is part of the press, and this family generates its
+    # password per install.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: vanilla_accounts.create_account(
+            sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        channel_setup=channel,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

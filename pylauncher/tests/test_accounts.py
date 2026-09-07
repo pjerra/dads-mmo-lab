@@ -816,3 +816,32 @@ def test_it_refuses_a_password_the_server_would_refuse() -> None:
         accounts.reset_own_password(sql, "YULON_243C46E3", "no")
 
     assert sql.statements == []
+
+
+def test_the_reset_writes_the_columns_the_scheme_names() -> None:
+    """`scheme` was a parameter this function took and never read (8.2d).
+
+    It was harmless while AzerothCore was the only tree that had a channel: the
+    hard-coded `salt`/`verifier` happened to be right. TBC then needed `v`/`s`
+    and got its own copy of the function, and when Vanilla needed exactly the
+    same thing the choice was a third copy or reading the argument. A parameter
+    that is accepted and ignored is worse than no parameter -- it says the
+    caller has a choice it does not have.
+
+    Both shapes are asserted here, in one test, because what matters is that
+    they DIFFER: a single-scheme test would pass just as well against the
+    version that ignored the argument.
+    """
+    ac, mangos = _Recorder(), _Recorder()
+
+    accounts.reset_own_password(ac, "YULON_243C46E3", "n3w-p@ssw0rd1234")
+    accounts.reset_own_password(mangos, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="mangos_srp6")
+
+    wrote_ac = [s for _, s in ac.statements if s.strip().upper().startswith("UPDATE")][-1]
+    wrote_mangos = [s for _, s in mangos.statements if s.strip().upper().startswith("UPDATE")][-1]
+    assert "UPDATE account SET salt = " in wrote_ac and " verifier = " in wrote_ac
+    assert "UPDATE account SET v = " in wrote_mangos and " s = " in wrote_mangos
+    assert "salt" not in wrote_mangos and "verifier" not in wrote_mangos
+    assert " v = " not in wrote_ac and " s = " not in wrote_ac
+    for statement in (wrote_ac, wrote_mangos):
+        assert "n3w-p@ssw0rd1234" not in statement, "the password reached a statement"

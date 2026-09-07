@@ -89,7 +89,7 @@ def test_the_gm_level_is_the_one_soap_itself_requires() -> None:
     assert WOTLK.operations.gm_level == 3
 
 
-@pytest.mark.parametrize("game", ["wow-vanilla", "wow-tortoise"])
+@pytest.mark.parametrize("game", ["wow-tortoise"])
 def test_the_other_trees_have_no_block_until_their_own_box(game: str) -> None:
     """8.2b, 8.2c and 8.2d measure their own; Tortoise has no SOAP at all."""
     assert load_catalog().get(game).operations is None
