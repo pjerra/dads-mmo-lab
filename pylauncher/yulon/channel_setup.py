@@ -351,18 +351,72 @@ def _write_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
 
 
 def _restore_the_conf(entry: CatalogEntry, server_dir: Path) -> bool:
-    """Put the conf back the way the press found it. `False` when there is none."""
+    """Put the channel's OWN keys back where the press found them. `False` if none.
+
+    An inverse patch and not a restore, which is the whole point (adversarial
+    review, 2026-09-07). The backup is written by the first press and lives
+    until a rollback consumes it, so it can be arbitrarily old -- that argument
+    is already written down for the compose override, which is why
+    `roll_back(expected=...)` exists there. Putting seventy kilobytes of
+    somebody's settings back from a copy of unknown age, in order to undo four
+    keys, throws away every edit made in between.
+
+    So each key this app wrote is set back to the value the backup has for it,
+    and a key the backup did not have at all is removed. Every other line is
+    left exactly as it is.
+
+    The backup is NOT deleted here: `roll_back()` unlinks it once the whole
+    undo has succeeded, for the reason its own comment gives about the
+    override's copy.
+    """
     operations = entry.operations
     if operations is None or operations.enable_conf is None:
         return False
     target = server_dir / operations.enable_conf.file
     backup = target.with_name(target.name + BACKUP_SUFFIX)
-    if not backup.is_file():
+    if not backup.is_file() or not target.is_file():
         return False
-    target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
-    backup.unlink()
-    logger.info(f"put {entry.id}'s {target.name} back the way the press found it")
+    was = _conf_values(backup.read_text(encoding="utf-8"), operations.enable_conf.keys)
+    now = target.read_text(encoding="utf-8")
+    put_back = {key: value for key, value in was.items() if value is not None}
+    drop = [key for key, value in was.items() if value is None]
+    after = conf.patch(now, ConfPatch(keys=put_back), tokens={}) if put_back else now
+    if drop:
+        after = _without_keys(after, drop)
+    if after != now:
+        target.write_text(after, encoding="utf-8", newline="\n")
+    logger.info(f"put {entry.id}'s own keys in {target.name} back where the press found them")
     return True
+
+
+def _conf_values(text: str, keys: Mapping[str, str]) -> dict[str, str | None]:
+    """What this file said about each key: its value, or `None` if it said nothing.
+
+    `None` is the case that makes the difference between an inverse patch and a
+    guess: a key the install never had must be REMOVED on the way back, not set
+    to some default this module invented.
+    """
+    found: dict[str, str | None] = dict.fromkeys(keys)
+    for line in text.splitlines():
+        stripped = line.strip()
+        for key in keys:
+            if stripped.startswith(key) and stripped[len(key) :].lstrip().startswith("="):
+                found[key] = stripped.split("=", 1)[1].strip()
+    return found
+
+
+def _without_keys(text: str, keys: list[str]) -> str:
+    """`text` with every line setting one of `keys` removed, and nothing else touched."""
+    kept = []
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if any(
+            stripped.startswith(key) and stripped[len(key) :].lstrip().startswith("=")
+            for key in keys
+        ):
+            continue
+        kept.append(line)
+    return "".join(kept)
 
 
 def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = None) -> bool:
@@ -417,8 +471,24 @@ def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = N
     # with the port it cannot have and nothing to retry from.
     composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
     backup.unlink()
+    # And the conf's copy, in the same breath and for the same reason: until
+    # every artifact is back, the copies are the only way to retry. Deleting
+    # this one inside `_restore_the_conf()` left a failure on `.env` or the
+    # override with nothing to retry FROM (adversarial review, 2026-09-07).
+    _forget_the_conf_backup(entry, server_dir)
     logger.info(f"rolled {entry.id}'s command channel back and released its host port")
     return True
+
+
+def _forget_the_conf_backup(entry: CatalogEntry, server_dir: Path) -> None:
+    """Drop the conf's copy, once the whole rollback has succeeded."""
+    operations = entry.operations
+    if operations is None or operations.enable_conf is None:
+        return
+    target = server_dir / operations.enable_conf.file
+    backup = target.with_name(target.name + BACKUP_SUFFIX)
+    if backup.is_file():
+        backup.unlink()
 
 
 def blames_the_host_port(message: str, port: int) -> bool:
@@ -503,10 +573,15 @@ def save_credential(
     install_id: str,
     host: str,
     port: int,
-    namespace: str = "urn:AC",
+    namespace: str,
     config_dir: Path | None = None,
 ) -> Path:
     """Write the credential for an account whose round trip has answered.
+
+    `namespace` is required, not defaulted: this file records what PROVED the
+    credential, so the caller has to say what proved it. A default here would be
+    one tree's answer written into every other tree's file, which is the same
+    inheritance `Operations.namespace` refuses at the other end.
 
     Takes a `Verified` and nothing else, which is how "never persist before the
     round trip answered" is enforced: the earlier states cannot be passed here.
@@ -550,10 +625,12 @@ def load_credential(
             port=int(raw["port"]),
             account=str(raw["account"]),
             password=str(raw["password"]),
-            # `.get`, because a file written before this field existed is still
-            # a usable credential -- and the entry overrides it on the way out
-            # anyway (`InstallChannel.live_channel`).
-            namespace=str(raw.get("namespace", "urn:AC")),
+            # An empty string where the file never recorded one, which is a
+            # DIFFERENT fact from recording `urn:AC`: a credential written
+            # before 8.2c belongs to whatever tree it belongs to, and reading
+            # it as AzerothCore's answer would be the inheritance this field
+            # exists to stop. `live_channel()` fills it from the entry.
+            namespace=str(raw.get("namespace", "")),
         )
     except (OSError, ValueError, KeyError, TypeError) as exc:
         logger.info(f"no usable credential at {path}: {type(exc).__name__}")
@@ -573,7 +650,7 @@ def ensure(
     install_id: str,
     host: str,
     port: int,
-    namespace: str = "urn:AC",
+    namespace: str,
     config_dir: Path | None = None,
     state: State | None = None,
     gm_level: int = 3,
@@ -660,7 +737,7 @@ def repair(
     install_id: str,
     host: str,
     port: int,
-    namespace: str = "urn:AC",
+    namespace: str,
     config_dir: Path | None = None,
     gm_level: int = 3,
     now: Callable[[], str] = now_utc,
@@ -885,14 +962,25 @@ class InstallChannel:
         saved = load_credential(self.entry.id, self.install_id, config_dir=self._config_dir)
         if saved is None:
             return None
-        # The file is the authority on the credential and the catalog is the
-        # authority on the namespace, so the entry's value replaces whatever the
-        # file happens to carry. A credential written before that field existed
-        # has the default in it, and the default is one tree's answer: handing
-        # it to another tree fails as though the world were still loading.
+        # One authority, and it is the round trip (adversarial review,
+        # 2026-09-07). A namespace in this file is there because a real round
+        # trip answered through it; the catalog is a claim about the tree. So
+        # the file wins where it has an answer, the catalog bootstraps a file
+        # that has none -- one written before 8.2c -- and a disagreement is
+        # said out loud instead of being resolved in silence, because the
+        # failure it would otherwise produce is HTTP 500, which looks exactly
+        # like a world that has not finished loading.
         operations = self.entry.operations
-        if operations is not None and saved.namespace != operations.namespace:
-            saved = replace(saved, namespace=operations.namespace)
+        claimed = operations.namespace if operations is not None else ""
+        if not saved.namespace:
+            saved = replace(saved, namespace=claimed or "urn:AC")
+        elif claimed and saved.namespace != claimed:
+            logger.warning(
+                f"{self.entry.id}'s saved credential was proved with namespace "
+                f"{saved.namespace!r} and the catalog now says {claimed!r}; using the one "
+                "that worked. If the channel stops answering, delete the credential and "
+                "press the enable again."
+            )
         return self._channel_for(saved)
 
     def roll_back(self) -> bool:

@@ -50,6 +50,7 @@ def test_a_verified_account_can_be_saved_and_read_back(tmp_path: Path) -> None:
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -104,6 +105,7 @@ def test_the_file_is_created_private_by_its_open_flags_not_by_a_later_chmod(
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -123,6 +125,7 @@ def test_and_on_a_posix_box_the_mode_really_is_private(tmp_path: Path) -> None:
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -140,6 +143,7 @@ def test_saving_twice_replaces_rather_than_refusing(tmp_path: Path) -> None:
             install_id="ab12cd34",
             host="127.0.0.1",
             port=7878,
+            namespace="urn:AC",
             config_dir=tmp_path,
         )
 
@@ -157,6 +161,7 @@ def test_the_password_never_reaches_a_log_while_being_saved(
             install_id="ab12cd34",
             host="127.0.0.1",
             port=7878,
+            namespace="urn:AC",
             config_dir=tmp_path,
         )
         setup.load_credential("wow-wotlk", "ab12cd34", config_dir=tmp_path)
@@ -178,6 +183,7 @@ def test_the_file_carries_no_more_than_it_must(tmp_path: Path) -> None:
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -222,6 +228,7 @@ def test_a_failed_verification_writes_no_credential_file(tmp_path: Path) -> None
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -243,6 +250,7 @@ def test_a_verified_round_trip_creates_the_account_once_and_saves_it(tmp_path: P
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
     )
 
@@ -267,6 +275,7 @@ def test_resuming_from_pending_re_verifies_and_never_creates_again(tmp_path: Pat
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
         state=pending,
     )

@@ -1517,6 +1517,50 @@ def test_a_tree_that_publishes_no_channel_port_gets_one_from_the_override(
     assert tbc.container_spec().world in plan.override
 
 
+def test_a_base_that_already_binds_the_channel_port_gets_no_second_binding(
+    tmp_path: Path,
+) -> None:
+    """Adversarial review, 2026-09-07: `publish` is desired policy, not live structure.
+
+    The entry's flag says "this tree's compose does not bind 7878, so the
+    override must". Nothing checked that it was still true, and two things can
+    make it false on a real install: a user editing the base file, and a future
+    template revision adding the binding while the flag stays. Compose
+    CONCATENATES ports lists, so either produces two publications of one
+    container port -- which is precisely the failure the rule this box narrowed
+    was written to prevent.
+
+    So the answer comes from the base compose that will actually be loaded, and
+    the flag only asks for it.
+    """
+    server_dir = tmp_path / "wow"
+    tbc = load_catalog().get("wow-tbc")
+    assert tbc.operations is not None and tbc.operations.publish
+
+    # An install whose base file binds the channel port already, whatever the
+    # entry believes -- written the way a person or a later template would.
+    server_dir.mkdir(parents=True, exist_ok=True)
+    plan = render_generated(tbc, server_dir)
+    base = server_dir / composegen.BASE_FILE
+    base.write_text(
+        plan.base.replace(
+            '      - "${DOCKER_WORLD_EXTERNAL_PORT:-8085}:8085"',
+            '      - "${DOCKER_WORLD_EXTERNAL_PORT:-8085}:8085"\n'
+            '      - "${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878"',
+        ),
+        encoding="utf-8",
+    )
+
+    again = render_generated(tbc, server_dir)
+
+    assert published_ports(again.override) == set(), again.override
+    # The INSTALLED base is what compose loads and what the answer came from;
+    # the freshly rendered one still has no 7878 in it, which is the whole
+    # reason the flag could not be trusted on its own.
+    assert published_ports(base.read_text(encoding="utf-8")) >= {"7878"}
+    assert published_ports(again.base) == {"3306", "3724", "8085"}
+
+
 def test_the_channel_port_is_never_published_twice(tmp_path: Path) -> None:
     """WotLK's base already binds it, so its entry says so and its override adds none."""
     wotlk = load_catalog().get("wow-wotlk")

@@ -482,3 +482,69 @@ def test_the_press_refuses_when_the_conf_it_names_is_not_there(tmp_path: Path) -
             world_running=False,
             db_password="pw",
         )
+
+
+def test_the_rollback_keeps_an_edit_made_after_the_press(tmp_path: Path) -> None:
+    """Adversarial review, 2026-09-07, and the same point 8.2a's review made once.
+
+    The backup is written by the FIRST press and lives until a rollback consumes
+    it, so it can be arbitrarily old -- that argument is already written down for
+    the compose override, which is why `roll_back(expected=...)` exists there.
+    The conf had no equivalent and was restored wholesale: seventy kilobytes of
+    somebody's settings, replaced from a copy of unknown age, to undo four keys.
+
+    So the undo is an inverse PATCH of the keys this app owns, and every other
+    line survives untouched.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+    # A person changes something else entirely, after the press.
+    edited = conf.read_text(encoding="utf-8").replace(
+        "Console.Enable = 1", 'Console.Enable = 0\nMotd = "a new day"'
+    )
+    conf.write_text(edited, encoding="utf-8")
+
+    assert setup.roll_back(TBC, server_dir) is True
+
+    after = conf.read_text(encoding="utf-8")
+    assert "Console.Enable = 0" in after, "an unrelated edit was thrown away"
+    assert 'Motd = "a new day"' in after, "a line added after the press was thrown away"
+    # ...and the channel's own keys are back where the press found them.
+    assert "SOAP.Enabled = 0" in after
+    assert "SOAP.IP = 127.0.0.1" in after
+
+
+def test_the_conf_backup_outlives_a_rollback_that_could_not_finish(tmp_path: Path) -> None:
+    """The ordering argument the override already makes, applied to the conf.
+
+    `roll_back()` restores the conf, then the override, then the `.env`. The
+    conf's backup used to be deleted in the middle of that, so a failure on
+    either later step left nothing to retry from -- the exact failure mode the
+    override's own comment says it avoids by unlinking last.
+    """
+    server_dir = _cmangos_installed(tmp_path)
+    conf = _conf_of(server_dir)
+    backup = conf.with_name(conf.name + setup.BACKUP_SUFFIX)
+    setup.enable(
+        TBC,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_running=False,
+        db_password="pw",
+    )
+    # The override's own backup is what the rest of the rollback needs; without
+    # it the function returns early, which is the "could not finish" this asks
+    # about.
+    (server_dir / (OVERRIDE_FILE + setup.BACKUP_SUFFIX)).unlink()
+
+    setup.roll_back(TBC, server_dir)
+
+    assert backup.is_file(), "the conf's only copy was deleted before the job was done"
+    assert "SOAP.Enabled = 0" in conf.read_text(encoding="utf-8")

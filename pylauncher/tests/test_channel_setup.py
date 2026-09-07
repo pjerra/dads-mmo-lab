@@ -186,6 +186,7 @@ def test_the_time_is_written_beside_the_credential_and_read_back() -> None:
             install_id="ab12cd34",
             host="127.0.0.1",
             port=7878,
+            namespace="urn:AC",
             config_dir=config,
         )
 
@@ -251,6 +252,7 @@ def test_repair_resets_the_password_of_the_account_it_already_has() -> None:
             install_id="ab12cd34",
             host="127.0.0.1",
             port=7878,
+            namespace="urn:AC",
             config_dir=config,
             now=lambda: FIXED,
         )
@@ -285,6 +287,7 @@ def test_a_repair_whose_round_trip_still_fails_saves_nothing() -> None:
             install_id="ab12cd34",
             host="127.0.0.1",
             port=7878,
+            namespace="urn:AC",
             config_dir=config,
         )
 
@@ -345,6 +348,7 @@ def test_a_credential_the_server_rejects_becomes_repairable_not_another_try(
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
         state=state,
     )
@@ -372,6 +376,7 @@ def test_silence_during_setup_is_still_just_another_try(tmp_path: Path) -> None:
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
         state=state,
     )
@@ -402,6 +407,7 @@ def test_ensure_leaves_a_refused_credential_for_the_repair_path(tmp_path: Path) 
         install_id="ab12cd34",
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path,
         state=state,
     )

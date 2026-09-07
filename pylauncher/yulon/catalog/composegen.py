@@ -390,7 +390,7 @@ def render(
         {
             "ENVIRONMENT": _env_block(env),
             "BIND_LABEL": bind_label,
-            "CHANNEL_SERVICE": _channel_service(entry),
+            "CHANNEL_SERVICE": _channel_service(entry, base, server_dir),
         },
     )
     build = fill(
@@ -641,7 +641,7 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
     return tokens
 
 
-def _channel_service(entry: CatalogEntry) -> str:
+def _channel_service(entry: CatalogEntry, base: str, server_dir: Path) -> str:
     """The override's services block: the channel's published port, or nothing.
 
     Written here rather than in the template because the answer depends on the
@@ -662,11 +662,50 @@ def _channel_service(entry: CatalogEntry) -> str:
     if operations is None or not operations.publish:
         return " {}"
     port = operations.port
+    # `publish` is what the entry WANTS, not proof of what the install has
+    # (adversarial review, 2026-09-07). Two things make the flag stale on a real
+    # install: somebody editing the base file, and a later template revision
+    # adding the binding while the flag stays. Compose concatenates ports lists,
+    # so either would publish this container port twice -- the exact failure the
+    # rule narrowed for this feature exists to prevent. So the answer comes from
+    # the base file that will actually be loaded: the one on disk if there is
+    # one, and otherwise the one being rendered beside this.
+    installed = server_dir / BASE_FILE
+    already = installed.read_text(encoding="utf-8") if installed.is_file() else base
+    if _binds(already, port):
+        logger.info(
+            f"{entry.id}'s compose already publishes {port}; the override adds no second binding"
+        )
+        return " {}"
     return (
         f"\n  {entry.container_spec().world}:"
         f"\n    ports:"
         f'\n      - "${{DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:{port}}}:{port}"'
     )
+
+
+def _binds(compose_text: str, port: int) -> bool:
+    """Whether this compose document publishes `port` on the container side.
+
+    Reads the mappings under a `ports:` key rather than searching the text: the
+    number appears in this file as an environment default and in comments too,
+    and `"7878" in text` would answer yes to both.
+    """
+    inside = False
+    indent = 0
+    for line in compose_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        if stripped.rstrip(":") == "ports" and stripped.endswith(":"):
+            inside, indent = True, here
+            continue
+        if inside and (not stripped.startswith("- ") or here <= indent):
+            inside = False
+        if inside and stripped.rstrip('"').rsplit(":", 1)[-1] == str(port):
+            return True
+    return False
 
 
 def _env_block(env: Mapping[str, str]) -> str:

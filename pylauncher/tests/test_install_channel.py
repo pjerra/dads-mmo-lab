@@ -117,6 +117,7 @@ def _save(
         install_id=INSTALL,
         host="127.0.0.1",
         port=7878,
+        namespace="urn:AC",
         config_dir=tmp_path / "config",
     )
 
@@ -404,6 +405,7 @@ def test_the_endpoint_carries_this_install_s_own_namespace(tmp_path: Path) -> No
         install_id=INSTALL,
         host="127.0.0.1",
         port=7878,
+        namespace="urn:MaNGOS",
         config_dir=tmp_path / "config",
     )
 
@@ -444,6 +446,7 @@ def test_every_endpoint_this_channel_builds_carries_the_namespace(tmp_path: Path
         install_id=INSTALL,
         host="127.0.0.1",
         port=7878,
+        namespace="urn:MaNGOS",
         config_dir=tmp_path / "config",
     )
     channel.live_channel()
@@ -487,3 +490,86 @@ def test_the_saved_credential_records_the_namespace_it_was_proved_with(
 class _Answers:
     def send(self, _command: object) -> object:
         return type("Answer", (), {"outcome": "yes", "denied": False, "text": "ok"})()
+
+
+def test_a_proven_namespace_beats_the_catalog_and_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Adversarial review, 2026-09-07: the file is evidence, the catalog is a claim.
+
+    A namespace that completed a real round trip is the one that worked. If the
+    catalog later disagrees -- an edit, a lineage change, a fork that moved --
+    replacing the proven value would break a working channel with exactly the
+    opaque failure this field exists to prevent: HTTP 500, indistinguishable
+    from a world still loading.
+
+    So the file wins where it has an answer, and the disagreement is said out
+    loud rather than resolved in silence.
+    """
+    tbc = load_catalog().get("wow-tbc")
+    captures = _Captures()
+    channel = setup.InstallChannel(
+        tbc,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *_args: None,
+        channel_for=captures,
+        config_dir=tmp_path / "config",
+    )
+    setup.save_credential(
+        setup.Verified(account="YULON_AB12CD34", password="pw", at="2026-09-07 09:00 UTC"),
+        game=tbc.id,
+        install_id=INSTALL,
+        host="127.0.0.1",
+        port=7878,
+        namespace="urn:SomethingElse",
+        config_dir=tmp_path / "config",
+    )
+
+    with caplog.at_level("WARNING"):
+        channel.live_channel()
+
+    assert captures.endpoints[0].namespace == "urn:SomethingElse", captures.endpoints[0]
+    assert any("urn:SomethingElse" in record.message for record in caplog.records), caplog.text
+
+
+def test_a_credential_older_than_the_field_is_bootstrapped_from_the_catalog(
+    tmp_path: Path,
+) -> None:
+    """The other half: no answer in the file means the catalog is all there is.
+
+    A file written before 8.2c has no namespace in it, and reading one as
+    `urn:AC` would hand AzerothCore's answer to whatever tree the file belongs
+    to. `None` there says "this was never recorded", which is a different fact
+    from "it was recorded as urn:AC".
+    """
+    tbc = load_catalog().get("wow-tbc")
+    captures = _Captures()
+    channel = setup.InstallChannel(
+        tbc,
+        tmp_path,
+        templates_root=resources.installers_dir(),
+        install_id=INSTALL,
+        create=lambda *_args: None,
+        channel_for=captures,
+        config_dir=tmp_path / "config",
+    )
+    path = setup.credential_path(tbc.id, INSTALL, config_dir=tmp_path / "config")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "account": "YULON_AB12CD34",
+                "password": "pw",
+                "host": "127.0.0.1",
+                "port": 7878,
+                "verified_at": "2026-09-06 09:00 UTC",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    channel.live_channel()
+
+    assert captures.endpoints[0].namespace == "urn:MaNGOS", captures.endpoints[0]
