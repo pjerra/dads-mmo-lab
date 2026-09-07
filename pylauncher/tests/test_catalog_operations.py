@@ -250,3 +250,35 @@ def test_declaring_both_routes_is_refused() -> None:
 def test_a_block_with_no_enable_keys_at_all_is_refused() -> None:
     with pytest.raises(ValidationError):
         Operations(channel="soap", namespace="urn:AC", port=7878, gm_level=3, enable_env={})
+
+
+# -- 8.3c: where each tree keeps an account's level --------------------------
+
+
+def test_the_two_cmangos_trees_keep_the_level_on_the_account_row() -> None:
+    """Measured per tree, on the live servers, and not inherited from a sibling.
+
+    TBC on 2026-09-07 and Vanilla the same afternoon: `SHOW TABLES LIKE
+    'account_access'` came back EMPTY on both, `account` carries a `gmlevel`
+    column, and each server's own `help account set gmlevel` reads
+
+        Syntax: .account set gmlevel [#accountId|$accountName] #level
+
+    with no realm argument, because there is no table with realms in it to
+    name. A `table` here would make this app join something that does not
+    exist; a realm argument would be an extra token the parser hands to
+    `ExtractInt32` (`Level3.cpp:1041-1090`).
+    """
+    for game in ("wow-tbc", "wow-vanilla"):
+        level = load_catalog().get(game).accounts.level
+        assert level is not None, f"{game} has no measured level store"
+        assert level.table is None, f"{game} must not name a table it does not have"
+        assert level.level_column == "gmlevel"
+
+
+def test_wotlk_still_keeps_it_in_its_own_join_table() -> None:
+    """The other shape, kept beside the first so a copy-paste shows up here."""
+    level = load_catalog().get("wow-wotlk").accounts.level
+
+    assert level is not None
+    assert level.table == "account_access"

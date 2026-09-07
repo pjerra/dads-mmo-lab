@@ -762,6 +762,17 @@ def _for_vanilla(
             state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
         ),
     )
+    # 8.3c. The same seam as 8.3a and 8.3b, over this tree's own measured fact:
+    # `SHOW TABLES LIKE 'account_access'` is empty here and the level is a
+    # column on the account row, so `accounts.level.table` is null and there is
+    # nothing to join or to write.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
     return _assemble(
         entry,
         server_dir,
@@ -769,6 +780,7 @@ def _for_vanilla(
         dashboard=watcher.tick,
         log_snapshot=recorder,
         channel_setup=channel,
+        accounts=accounts_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=vanilla_controller.VanillaController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

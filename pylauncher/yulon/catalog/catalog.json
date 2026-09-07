@@ -870,6 +870,9 @@
         "local_address_column": null
       },
       "accounts": {
+        "level": {
+          "level_column": "gmlevel"
+        },
         "scheme": "mangos_srp6"
       },
       "console": {

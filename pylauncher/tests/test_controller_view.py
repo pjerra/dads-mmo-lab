@@ -3253,3 +3253,28 @@ def test_a_window_with_no_prompt_reads_as_could_not_ask_on_the_tab(
     for claim in ("the command failed", "failed to", "could not run"):
         assert claim not in said, said
     assert said.startswith("could not ask"), said
+
+
+def test_a_game_that_knows_where_its_levels_live_gets_the_accounts_surface(
+    tmp_path: Path,
+) -> None:
+    """The catalog fact and the wiring are two things, and only one of them shows.
+
+    `accounts.level` says this tree's GM level store has been measured on its
+    own box. If the services for that game are then assembled without an
+    accounts object, the Accounts tab draws its "this game cannot do that yet"
+    sentence — for a game that can, with the measurement sitting in the catalog
+    unused. Nothing raises; the feature is just missing (8.3c found exactly
+    this on Vanilla, whose level block was measured the same afternoon).
+
+    The reverse arm matters as much: a game with no measured store must NOT be
+    handed the surface, because reading the wrong store reports every account
+    as level 0.
+    """
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        measured = entry.accounts.level is not None
+        assert (services.accounts is not None) is measured, (
+            f"{entry.id}: level block {'measured' if measured else 'absent'}, "
+            f"accounts surface {'present' if services.accounts else 'absent'}"
+        )
