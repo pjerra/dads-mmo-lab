@@ -300,6 +300,83 @@ class _Answering:
         return type("Answer", (), {"outcome": self.outcome, "text": "", "indeterminate": False})()
 
 
+class _Denies:
+    """A channel whose server rejects the credential -- 401, not silence."""
+
+    def send(self, _command: object) -> object:
+        return type(
+            "Answer",
+            (),
+            {"outcome": "no", "text": "unauthorised", "indeterminate": False, "denied": True},
+        )()
+
+
+def test_a_credential_the_server_rejects_becomes_repairable_not_another_try(
+    tmp_path: Path,
+) -> None:
+    """Found by 8.2c's gate on m910q, and it is a dead end, not a slow path.
+
+    TBC's world takes minutes to load its bots, so the first three round trips
+    after a Start can all miss it and the setup gives up with nothing saved --
+    which is the designed behaviour and fine. What is not fine is the run after
+    it: with no credential on disk the setup starts from `Idle`, generates a
+    NEW password, and calls `create`, which by design keeps the password of an
+    account that already exists. Every round trip from then on is a 401, and a
+    401 counted as "did not answer yet" gives up again. Forever, on every run,
+    with no way out but hand-written SQL.
+
+    `Answer.denied` already tells the two apart -- it was added in 8.2a for the
+    check-on-open path -- and this is the other place that has to read it. A
+    rejection means the account is KNOWN, which is precisely the state the
+    repair path exists for.
+
+    WotLK hid this: its world answers inside three tries.
+    """
+    state = setup.Pending("YULON_AB12CD34", "generated-just-now", tries=0)
+
+    after = setup.ensure(
+        account="YULON_AB12CD34",
+        password="generated-just-now",
+        create=lambda *_args: None,
+        channel=_Denies(),
+        game="wow-tbc",
+        install_id="ab12cd34",
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path,
+        state=state,
+    )
+
+    assert isinstance(after, setup.Refused), after
+    assert after.account == "YULON_AB12CD34"
+    assert after.password == "generated-just-now", "the repair needs the password it tried"
+    assert "reject" in after.reason.lower() or "not accept" in after.reason.lower(), after.reason
+
+
+def test_silence_during_setup_is_still_just_another_try(tmp_path: Path) -> None:
+    """The other half of the distinction, and the reason it cannot be collapsed.
+
+    A world still loading has not rejected anything. Turning that into a refusal
+    would offer the user a password reset for a server that was never asked.
+    """
+    state = setup.Pending("YULON_AB12CD34", "generated-just-now", tries=0)
+
+    after = setup.ensure(
+        account="YULON_AB12CD34",
+        password="generated-just-now",
+        create=lambda *_args: None,
+        channel=_Answering("no"),
+        game="wow-tbc",
+        install_id="ab12cd34",
+        host="127.0.0.1",
+        port=7878,
+        config_dir=tmp_path,
+        state=state,
+    )
+
+    assert isinstance(after, setup.Pending) and after.tries == 1
+
+
 def test_ensure_leaves_a_refused_credential_for_the_repair_path(tmp_path: Path) -> None:
     """A refused state must never fall into the create-or-verify machinery.
 

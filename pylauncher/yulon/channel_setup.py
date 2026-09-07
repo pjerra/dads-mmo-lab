@@ -582,6 +582,27 @@ def ensure(
         current = current.created(account, password)
 
     answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
+    if getattr(answer, "denied", False):
+        # The server was asked and SAID NO, which is a different fact from "it
+        # has not answered yet" and has a different way out. Found by 8.2c's
+        # gate on m910q: TBC's world takes minutes to load, so the three tries
+        # after a Start can all miss it and the setup gives up with nothing
+        # saved -- correctly. The run after that is the trap. With no credential
+        # on disk it starts from `Idle`, generates a NEW password and calls
+        # `create`, which by design keeps the password of an account that
+        # already exists; every round trip from then on is a 401, and a 401
+        # counted as silence gives up again, on every run, with no way out but
+        # hand-written SQL. A rejection means the account is KNOWN, which is
+        # exactly what the repair path is for.
+        logger.info(f"the command channel for {game} was rejected; it can be repaired")
+        return Refused(
+            account=current.account,
+            password=current.password,
+            reason=(
+                "the server did not accept the password this app generated for its own "
+                "account. The account exists, so its password can be reset for it."
+            ),
+        )
     if getattr(answer, "outcome", "") != "yes":
         logger.info(f"the command channel for {game} did not answer yet; not saving anything")
         return current.verify_failed()
