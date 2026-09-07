@@ -319,11 +319,62 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
 
         services = ControllerServices.for_entry(entry, server_dir)
         absent = sorted(name for name in every_field if getattr(services, name, None) is None)
+        # The second documented exception, and it closes itself. 8.1a wired the
+        # dashboard and the pre-stop snapshot for WotLK only, because the counts
+        # need per-tree facts measured per tree; 8.1b, 8.1c and 8.1d each add
+        # their own. Rather than hard-code which three games are behind, the
+        # exception is tied to the fact that decides it — an entry with no
+        # measured `observability` block has not had its 8.1 box. When that
+        # block lands for a tree, this test fails until its wiring does too.
+        unmeasured = {"dashboard", "log_snapshot"} if entry.observability is None else set()
+        # The same self-closing shape for 8.2a's channel: an entry with no
+        # measured `operations` block has not had its 8.2 box, and the day it
+        # gets one this test fails until its wiring lands.
+        # ...and, since 8.2e, for a channel there is nothing to set UP: an
+        # attach channel has no listener, no port and no account, so a
+        # `channel_setup` on that tree would be a state machine with no states.
+        # Both facts are read from the entry, so neither can rot into a
+        # hard-coded list of which games are behind.
+        unwired = (
+            {"channel_setup"}
+            if entry.operations is None or entry.operations.channel == "attach"
+            else set()
+        )
+        # And again for 8.3a's accounts. The fact that decides it is where this
+        # core keeps a GM level: reading the wrong store does not fail, it
+        # reports every account as level 0, so an entry without that measurement
+        # has not had its 8.3 box. 8.3b, 8.3c and 8.3d each add their own, and
+        # this test fails the day one of them lands without its wiring.
+        unlisted = {"accounts"} if entry.accounts.level is None else set()
+        # 8.5a's bot browser rides on the same measurement 8.1a's dashboard
+        # does -- the bot marker -- so it is absent exactly where `observability`
+        # is, and arrives with that tree's own 8.1 box.
+        unbrowsed = {"bots"} if entry.observability is None else set()
+        # 8.2e runs the other way: `console_probe` belongs to the ONE tree whose
+        # channel is the console, so it is absent everywhere else -- including on
+        # the reference. The fact that decides it is the channel the entry
+        # declares, so a tree that ever gains an attach channel fails this until
+        # its probe is wired, and a tree that loses one fails it until the seam
+        # goes.
+        console = entry.operations.channel if entry.operations is not None else None
+        unprobed = {"console_probe"} if console != "attach" else set()
+        # 8.4a's Characters tab, decided by the same kind of fact: where a tree
+        # keeps a character's equipped items, and how many attachments one of
+        # its mails carries. Both go out unchecked -- a column name into a
+        # statement and a number onto a button -- so a tree without that
+        # measurement has not had its 8.4 box, and this fails the day 8.4b,
+        # 8.4c or 8.4d lands its catalog block without its wiring. It did:
+        # 8.4c's block landed first and this was the RED that asked for the
+        # `play=` line in `_for_vanilla`.
+        unplayed = {"play"} if entry.play is None else set()
+        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed | unplayed
         if game == "wow-wotlk":
-            assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
+            assert (
+                set(absent) == unprobed
+            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
         else:
-            assert set(absent) <= module_surface, (
-                f"{game} is missing {sorted(set(absent) - module_surface)}, which is not the "
+            assert set(absent) <= allowed, (
+                f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "
                 "module surface and so is a real gap against wow-wotlk"
             )
             # And the exception has to be REAL. Without this the test would
@@ -331,7 +382,7 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
             # None -- including one that handed the three games WotLK's own
             # manifest store, which is the mistake `_no_manifest_store()`
             # exists to prevent.
-            assert set(absent) == module_surface, (
+            assert set(absent) == allowed, (
                 f"{game} reports {absent} rather than the module surface; `manifests/` holds "
                 "wow-wotlk alone, so a non-None store here means this game was handed "
                 "somebody else's manifests"

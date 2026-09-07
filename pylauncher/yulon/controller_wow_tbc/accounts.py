@@ -41,6 +41,10 @@ from pathlib import Path
 
 from yulon.apply import DockerSql
 from yulon.controller_wow_tbc import docker_ctl
+from yulon.controller_wow_wotlk import accounts as writer
+from yulon.controller_wow_wotlk.accounts import (
+    APP_ACCOUNT_PREFIX as APP_ACCOUNT_PREFIX,
+)
 
 # The `as` spelling is what mypy's --no-implicit-reexport asks for: these names
 # are this module's public surface too, so a caller need not know which package
@@ -69,6 +73,7 @@ from yulon.controller_wow_wotlk.accounts import (
 from yulon.controller_wow_wotlk.accounts import (
     create_account as _create_account,
 )
+from yulon.log import get_logger
 
 SCHEME = docker_ctl.ENTRY.accounts.scheme
 """How this core stores an account, from the entry: `mangos_srp6` for TBC.
@@ -77,6 +82,8 @@ SCHEME = docker_ctl.ENTRY.accounts.scheme
 worldserver console instead", which is why `create_account()` below checks it
 rather than assuming a string arrived.
 """
+
+logger = get_logger(__name__)
 
 CONSOLE_COMMAND = docker_ctl.ENTRY.accounts.console_command
 """What to type at the `mangos>` prompt when the SQL path is not available."""
@@ -152,3 +159,25 @@ def create_account(
             f"not write one. Create it at the worldserver console instead: {CONSOLE_COMMAND}"
         )
     return _create_account(sql, username, password, gm_level=gm_level, scheme=scheme)
+
+
+def reset_own_password(sql: SqlSeam, name: str, password: str) -> None:
+    """Give THIS APP'S OWN account a new password, in THIS core's own columns.
+
+    8.2c's repair path, and the shared writer with this game's scheme bound --
+    the same relationship `create_account()` above has with it. It was a copy of
+    the whole function until 8.2d, because the shared one took a `scheme` and
+    ignored it; when Vanilla needed the identical thing, reading the argument
+    was plainly better than a third copy.
+
+    What the scheme decides is not cosmetic: this core reads `v`/`s` where
+    AzerothCore reads `salt`/`verifier`, and writing the wrong pair does not
+    fail -- it produces an account that looks correct and can never log in.
+
+    Separate from `create_account()` for the reason that one gives: it will not
+    re-salt a row that exists, because silently changing an owner's password is
+    worse than refusing. The channel needs exactly that on the one account it
+    made, and the guard is on the KIND of name rather than a remembered one,
+    since two installs can share an auth database.
+    """
+    writer.reset_own_password(sql, name, password, scheme="mangos_srp6")

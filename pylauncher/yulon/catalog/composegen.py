@@ -387,7 +387,11 @@ def render(
     )
     override = fill(
         texts["override.yml.tmpl"],
-        {"ENVIRONMENT": _env_block(env), "BIND_LABEL": bind_label},
+        {
+            "ENVIRONMENT": _env_block(env),
+            "BIND_LABEL": bind_label,
+            "CHANNEL_SERVICE": _channel_service(entry, base, server_dir),
+        },
     )
     build = fill(
         texts["build.yml.tmpl"],
@@ -635,6 +639,76 @@ def entry_tokens(entry: CatalogEntry) -> dict[str, str]:
         tokens["MAKE_JOBS"] = str(native.cmangos.dockerfile.make_jobs)
         tokens["CORE_DIR"] = str(PurePosixPath(native.cmangos.conf.source_dir).parent)
     return tokens
+
+
+def _channel_service(entry: CatalogEntry, base: str, server_dir: Path) -> str:
+    """The override's services block: the channel's published port, or nothing.
+
+    Written here rather than in the template because the answer depends on the
+    entry: WotLK's base file has published
+    `${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a
+    channel, so its entry says `publish: false` and this returns the empty
+    mapping that keeps the file a valid compose document. The CMaNGOS trees
+    publish no such port anywhere, so for them this is the only place it can
+    come from (8.2c).
+
+    The host side is pinned to loopback for the same reason 8.2a pins it: the
+    listener binds every interface INSIDE the container, and nothing off this
+    machine has business reaching a console that runs commands at SEC_CONSOLE.
+    The variable name is the same contract the rollback uses to give the port
+    back (`channel_setup.HOST_PORT_VAR`).
+    """
+    operations = entry.operations
+    # `publish` is False for an attach channel and `port` is None on one -- that
+    # core has no listener to publish. Both are checked, because the first is a
+    # policy and the second is the fact behind it.
+    if operations is None or not operations.publish or operations.port is None:
+        return " {}"
+    port = operations.port
+    # `publish` is what the entry WANTS, not proof of what the install has
+    # (adversarial review, 2026-09-07). Two things make the flag stale on a real
+    # install: somebody editing the base file, and a later template revision
+    # adding the binding while the flag stays. Compose concatenates ports lists,
+    # so either would publish this container port twice -- the exact failure the
+    # rule narrowed for this feature exists to prevent. So the answer comes from
+    # the base file that will actually be loaded: the one on disk if there is
+    # one, and otherwise the one being rendered beside this.
+    installed = server_dir / BASE_FILE
+    already = installed.read_text(encoding="utf-8") if installed.is_file() else base
+    if _binds(already, port):
+        logger.info(
+            f"{entry.id}'s compose already publishes {port}; the override adds no second binding"
+        )
+        return " {}"
+    return (
+        f"\n  {entry.container_spec().world}:"
+        f"\n    ports:"
+        f'\n      - "${{DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:{port}}}:{port}"'
+    )
+
+
+def _binds(compose_text: str, port: int) -> bool:
+    """Whether this compose document publishes `port` on the container side.
+
+    Reads the mappings under a `ports:` key rather than searching the text: the
+    number appears in this file as an environment default and in comments too,
+    and `"7878" in text` would answer yes to both.
+    """
+    inside = False
+    indent = 0
+    for line in compose_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        here = len(line) - len(line.lstrip())
+        if stripped.rstrip(":") == "ports" and stripped.endswith(":"):
+            inside, indent = True, here
+            continue
+        if inside and (not stripped.startswith("- ") or here <= indent):
+            inside = False
+        if inside and stripped.rstrip('"').rsplit(":", 1)[-1] == str(port):
+            return True
+    return False
 
 
 def _env_block(env: Mapping[str, str]) -> str:

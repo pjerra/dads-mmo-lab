@@ -2353,6 +2353,13 @@ _ACCOUNTED_LISTINGS: dict[tuple[str, str], str] = {
         "globs `Data/*/realmlist.wtf` in the USER'S client to find the file to write; a glob "
         "matching nothing falls back to `Data/enUS/`, and the write itself is to a named file"
     ),
+    ("logsnap.py", "_prune"): (
+        "lists this install's own snapshots in the app's logs directory to keep the newest "
+        "ten. It decides a DELETE rather than a write, and the file it has just written is "
+        "excluded by identity before the sort, so an empty or unreadable listing costs at "
+        "most an unpruned folder; its own `except OSError` logs and returns, because "
+        "retention failing must not fail the stop it runs in front of"
+    ),
     ("ui/controller_view.py", "refresh_backups"): (
         "lists `*.sql` in the backups directory to fill a list widget; reads, shows, writes "
         "nothing"

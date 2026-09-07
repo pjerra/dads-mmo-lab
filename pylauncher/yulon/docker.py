@@ -811,6 +811,82 @@ def project_containers(project: str, *, wsl_distro: str | None = None) -> list[s
     return _project_containers(project, wsl_distro=wsl_distro)
 
 
+LOG_TAIL_LINES = 2000
+"""How many log ENTRIES of a container's log a snapshot keeps.
+
+Entries, not lines, and the difference is measured rather than assumed: on
+m910q on 2026-09-06 a `--tail 2000` of a CMaNGOS worldserver produced a file of
+**3114 newline-terminated lines** and no carriage returns. The json-file driver
+stores one entry per write, and a server that writes a multi-line message in one
+call — a banner, an assertion block — spends one entry on several lines. The
+byte cap below is what actually bounds the file; this bounds the read.
+
+A bound rather than everything, because `docker logs` prints every line the
+container has written across every restart, and a crash-looping worldserver
+writes its whole startup again on each pass — the case a snapshot is most likely
+to be taken on is exactly the case where the unbounded read is largest. Two
+thousand lines is past an AzerothCore world server's startup banner and into the
+run that preceded the stop, which is the part a person reads.
+"""
+
+_LOG_TAIL_TIMEOUT = 30.0
+"""A snapshot's whole budget for one `docker logs`, because it runs before a stop.
+
+`docker logs` against a wedged log driver does not return. Without a bound, the
+evidence step would hold up the stop the user asked for — the one thing it must
+never do.
+"""
+
+
+def compose_container_id(
+    service: str, server_dir: Path, *, wsl_distro: str | None = None
+) -> str | None:
+    """The container id compose has for `service` in THIS project, or `None`.
+
+    By project, never by name. Every AzerothCore-derived game pins its container
+    names globally (`ac-worldserver`), so on a machine with two installs of one
+    game a name lookup answers for whichever container happens to wear the name
+    — the same class of bug `_project_containers()` exists to avoid, and the
+    reason `start_staged()` addresses the project by its directory.
+
+    `-a` because a stopped container still has a log, and the callers that want
+    one are the stop, the remove and the uninstall.
+
+    `None` rather than an exception for every failure: the caller is evidence
+    collection, and evidence that cannot be collected must not stop the action
+    it was collected for.
+    """
+    proc = _docker(
+        ["compose", "ps", "-a", "-q", service], cwd=server_dir, wsl_distro=wsl_distro, timeout=30.0
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not resolve {service} in {server_dir}: {proc.stderr.strip()}")
+        return None
+    ids = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not ids:
+        logger.warning(f"compose knows no container for {service} in {server_dir}")
+        return None
+    return ids[0]
+
+
+def log_tail(container: str, lines: int = LOG_TAIL_LINES, *, wsl_distro: str | None = None) -> str:
+    """The last `lines` of a container's log, or `""` if it could not be read.
+
+    The bounded counterpart to `_logs()`, which reads everything on purpose
+    because readiness needs a marker printed once. Nothing that keeps a file
+    wants that read: see `LOG_TAIL_LINES`.
+    """
+    proc = _docker(
+        ["logs", "--tail", str(lines), container],
+        wsl_distro=wsl_distro,
+        timeout=_LOG_TAIL_TIMEOUT,
+    )
+    if proc.returncode != 0:
+        logger.warning(f"could not read the logs of {container}: {proc.stderr.strip()}")
+        return ""
+    return proc.stdout
+
+
 def remove_staged(spec: ContainerSpec, server_dir: Path, *, wsl_distro: str | None = None) -> bool:
     """Stop this install and REMOVE its containers. Volumes are never touched.
 

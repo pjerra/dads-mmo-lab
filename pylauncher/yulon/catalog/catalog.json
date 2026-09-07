@@ -91,6 +91,55 @@
           "set realmlist 127.0.0.1 (or the host's LAN/public IP for other players)"
         ]
       },
+      "play": {
+        "equipped": {
+          "template_column": "itemEntry",
+          "instance_table": "item_instance",
+          "inventory_column": "item"
+        },
+        "teleport_command": "teleport name",
+        "mail_item_cap": 12
+      },
+      "accounts": {
+        "level": {
+          "table": "account_access",
+          "account_column": "id",
+          "level_column": "gmlevel",
+          "max_level": 3
+        }
+      },
+      "operations": {
+        "channel": "soap",
+        "namespace": "urn:AC",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_env": {
+          "AC_SOAP_ENABLED": "1",
+          "AC_SOAP_IP": "0.0.0.0",
+          "AC_AI_PLAYERBOT_COMMAND_SERVER_PORT": "0",
+          "AC_RA_ENABLE": "0"
+        },
+        "must_not_listen": [8888, 3443]
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "env/dist/etc/modules/playerbots.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": {
+            "database": "playerbots",
+            "table": "playerbots_account_type",
+            "account_column": "account_id",
+            "type_column": "account_type",
+            "types": [1, 2, 3]
+          }
+        }
+      },
       "has_manifests": true
     },
     {
@@ -440,12 +489,51 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 12
+      },
       "accounts": {
+        "level": { "level_column": "gmlevel", "max_level": 3 },
         "scheme": "mangos_srp6"
       },
       "console": {
         "prompt": "mangos>",
         "prompt_precedes_answer": false
+      },
+      "operations": {
+        "channel": "soap",
+        "namespace": "urn:MaNGOS",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878",
+            "Ra.Enable": "0"
+          }
+        },
+        "publish": true,
+        "must_not_listen": [
+          8888,
+          3443
+        ]
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "etc/aiplayerbot.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": null
+        }
       },
       "client": {
         "version": "2.4.3",
@@ -796,12 +884,48 @@
         "address_column": "address",
         "local_address_column": null
       },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 1
+      },
       "accounts": {
+        "level": { "level_column": "gmlevel", "max_level": 3 },
         "scheme": "mangos_srp6"
       },
       "console": {
         "prompt": "mangos>",
         "prompt_precedes_answer": false
+      },
+      "operations": {
+        "channel": "soap",
+        "namespace": "urn:MaNGOS",
+        "port": 7878,
+        "gm_level": 3,
+        "enable_conf": {
+          "file": "etc/mangosd.conf",
+          "keys": {
+            "SOAP.Enabled": "1",
+            "SOAP.IP": "0.0.0.0",
+            "SOAP.Port": "7878",
+            "Ra.Enable": "0"
+          }
+        },
+        "publish": true,
+        "must_not_listen": [8888, 3443]
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "etc/aiplayerbot.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": null
+        }
       },
       "client": {
         "version": "1.12.1",
@@ -1094,11 +1218,28 @@
         "local_address_column": null
       },
       "accounts": {
+        "level": { "level_column": "rank", "max_level": 4 },
         "scheme": "mangos_sha"
       },
       "console": {
         "prompt": "mangos>",
         "prompt_precedes_answer": false
+      },
+      "operations": {
+        "channel": "attach"
+      },
+      "observability": {
+        "characters": {
+          "table": "characters",
+          "account": "account",
+          "online": "online"
+        },
+        "bots": {
+          "account_prefix": "rndbot",
+          "prefix_conf_file": "etc/aiplayerbot.conf",
+          "prefix_conf_key": "AiPlayerbot.RandomBotAccountPrefix",
+          "registry": null
+        }
       },
       "client": {
         "version": "1.18.1",

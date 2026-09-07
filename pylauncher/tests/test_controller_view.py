@@ -10,7 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from yulon import docker, networking, runner
+from yulon import (
+    botlist,
+    channel,
+    channel_setup,
+    commands,
+    dashboard,
+    docker,
+    logsnap,
+    networking,
+    runner,
+    useraccounts,
+)
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog.catalog import CatalogEntry, load_catalog
 from yulon.controller import Controller
@@ -36,6 +47,8 @@ from yulon.ui.controller_view import ControllerServices, ControllerView
 from yulon.ui.widgets.job import run_inline
 
 WOTLK = load_catalog().get("wow-wotlk")
+TBC = load_catalog().get("wow-tbc")
+"""8.5b's tree: one bot signal, the account prefix, and no registry table."""
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +153,16 @@ class _FakeMaintenance:
         self.forgotten += 1
         self.interrupted = None
         return True
+
+
+class _StubRecorder:
+    """A `logsnap.Recorder` that answers with a fixed snapshot, without a daemon."""
+
+    def __init__(self, snapshot: logsnap.Snapshot) -> None:
+        self.last = snapshot
+
+    def __call__(self) -> logsnap.Snapshot:
+        return self.last
 
 
 def _services(
@@ -1521,7 +1544,7 @@ def test_the_seam_guard_sees_a_seam_reached_through_a_re_exporting_module(
 def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     """The 7.3 false positive, pinned by line so the fix above cannot revive it.
 
-    `networking.apply(plan, sql=sql)` at controller_view.py:323 is a different
+    `networking.apply(plan, sql=sql)` at controller_view.py:370 is a different
     `apply` from `sqlplan.apply(..., wsl_distro=...)`; it reaches no daemon.
     Asserted here rather than left implicit in the guard's `not missing`, so a
     regression names the call instead of just reddening the guard - and pinned
@@ -1530,16 +1553,24 @@ def test_the_seam_guard_still_exempts_networkings_own_apply() -> None:
     import ast
 
     view = Path(controller_view_module.__file__)
-    calls = {
-        f"{ast.unparse(n.func.value)}.{n.func.attr}:{n.lineno}"
+    # Found by parsing rather than pinned to a literal line: the literal was
+    # re-pinned by hand three times in one session by edits ABOVE it, which is
+    # churn that teaches a reader to update the number without reading what it
+    # guards. What is asserted is what the test is named for -- that this exact
+    # call is the one the seam guard exempts.
+    lines = [
+        n.lineno
         for n in ast.walk(ast.parse(view.read_text(encoding="utf-8")))
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-    }
-    assert "networking.apply:323" in calls, "the call this test pins has moved; re-pin it"
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "apply"
+        and ast.unparse(n.func.value) == "networking"
+    ]
+    assert len(lines) == 1, f"expected exactly one networking.apply call, found {lines}"
 
     accepts, missing = _scan_for_seams_without_a_distro(view.parent.parent, view)
     assert "apply" in accepts, "the scan no longer knows `apply` can take a distro"
-    assert "apply() at controller_view.py:323" not in missing, missing
+    assert f"apply() at controller_view.py:{lines[0]}" not in missing, missing
 
 
 def test_for_wotlk_defaults_to_no_distro(qapp: object, tmp_path: Path) -> None:
@@ -2100,3 +2131,1373 @@ def test_a_game_that_names_no_import_service_is_offered_no_repair_button(
     _watch_repair(wotlk_view, UNIMPORTED)
     _db_up(wotlk_view, ps)
     assert not wotlk_view.repair_button.isHidden(), "the gate hid the one repair that works"
+
+
+# -- 8.1a: the verdict line, and the first poll ----------------------------
+
+
+def test_the_tab_reads_its_status_at_once_instead_of_a_poll_interval_later(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Closes `pyplan/bug-checklist.md:552`.
+
+    The timer was started and never fired by hand, so for the first five seconds
+    a tab over a running server said "status: unknown" with Start enabled. The
+    label's opening value is the tell: nothing else writes it.
+    """
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=5000, job_runner=run_inline
+    )
+
+    assert "unknown" not in view.status_label.text()
+    assert "world up" in view.status_label.text()
+
+
+def test_polling_that_is_switched_off_stays_off_including_the_first_read(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """`status_poll_ms=0` means "this tab does not poll", not "poll once"."""
+    ps.names = "ac-database\n"
+
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert view.status_label.text() == "status: unknown"
+
+
+def test_the_verdict_line_says_the_population_above_the_three_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("up", players=3, bots=497)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.text() == "up — 3 players, 497 bots"
+
+
+def test_a_restart_loop_reaches_the_tab_in_those_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The half of 8.1a that closes `bug-checklist.md:499` on screen."""
+    services = _services(ps, tmp_path, [])
+    services.dashboard = lambda: dashboard.Verdict("restart_loop", restarts=4)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert "restart loop" in view.verdict_label.text()
+    assert "4 restarts" in view.verdict_label.text()
+
+
+def test_a_game_whose_verdict_is_not_wired_yet_shows_no_line_at_all(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.1b, 8.1c and 8.1d wire their own; until then the tab is as it was."""
+    view = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    view.refresh_verdict()
+
+    assert view.verdict_label.text() == ""
+    assert not view.verdict_label.isVisibleTo(view)
+
+
+def test_a_verdict_that_raises_leaves_the_tab_working(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A dashboard is an instrument; an instrument must not be able to break the tab."""
+    services = _services(ps, tmp_path, [])
+
+    def boom() -> dashboard.Verdict:
+        raise RuntimeError("the daemon went away")
+
+    services.dashboard = boom
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert "could not" in view.verdict_label.text()
+    ps.names = "ac-database\n"
+    view.refresh_status()
+    assert "db up" in view.status_label.text()
+
+
+def test_a_stop_names_the_file_the_servers_log_was_saved_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The evidence is worth nothing if the user cannot find it."""
+    services = _services(ps, tmp_path, [])
+    saved = tmp_path / "logs" / "wow-wotlk-abc-20260906T180000Z.log"
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(path=saved))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view.stop_server()
+
+    assert saved.name in view.problem_label.text()
+
+
+def test_a_stop_whose_snapshot_failed_says_so_rather_than_naming_no_file(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _services(ps, tmp_path, [])
+    services.log_snapshot = _StubRecorder(logsnap.Snapshot(problem="the log driver is wedged"))
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+
+    view.stop_server()
+
+    assert "wedged" in view.problem_label.text()
+
+
+def test_the_wotlk_tab_is_wired_with_a_dashboard_and_a_pre_stop_snapshot(
+    qapp: object, tmp_path: Path
+) -> None:
+    """8.1a is WotLK's box, so WotLK's wiring is where the two new seams appear."""
+    services = ControllerServices.for_entry(WOTLK, tmp_path)
+
+    assert services.dashboard is not None
+    assert isinstance(services.log_snapshot, logsnap.Recorder)
+    assert services.controller.pre_stop is services.log_snapshot
+
+
+@pytest.mark.parametrize("game", ["wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise"])
+def test_every_tab_now_has_its_own_dashboard_and_snapshot(
+    qapp: object, tmp_path: Path, game: str
+) -> None:
+    """8.1a–d are all done, so this says every tree rather than all-but-one.
+
+    The seams are the same four times over; what is behind them is each tree's
+    own, which is what `test_dbreads.py` and the four gate pages assert. This
+    only says nobody was left out — the failure that
+    `test_controller_packages_agree.py` exists to catch, from the other side.
+    """
+    entry = load_catalog().get(game)
+    if entry.install.password.file:
+        (tmp_path / entry.install.password.file).write_text("hunter2", encoding="utf-8")
+
+    services = ControllerServices.for_entry(entry, tmp_path)
+
+    assert services.dashboard is not None
+    assert isinstance(services.log_snapshot, logsnap.Recorder)
+    assert services.controller.pre_stop is services.log_snapshot
+    assert services.log_snapshot.spec.world == entry.containers.world
+
+
+def test_the_tbc_tab_is_wired_with_its_own_dashboard_and_snapshot(
+    qapp: object, tmp_path: Path
+) -> None:
+    """8.1b. The seams are the same two; the facts underneath them are this tree's."""
+    entry = load_catalog().get("wow-tbc")
+    (tmp_path / entry.install.password.file).write_text("hunter2", encoding="utf-8")
+
+    services = ControllerServices.for_entry(entry, tmp_path)
+
+    assert services.dashboard is not None
+    assert isinstance(services.log_snapshot, logsnap.Recorder)
+    assert services.controller.pre_stop is services.log_snapshot
+    assert services.log_snapshot.spec.world == "tbc-mangosd", "it must snapshot THIS tree's world"
+
+
+# -- 8.2a: the command channel on the tab -----------------------------------
+
+
+class _StubSetup:
+    """Stands in for the channel-setup seam the wiring hands down."""
+
+    def __init__(self, state: object = None, refuse: str = "") -> None:
+        self.state = state
+        self.refuse = refuse
+        self.presses = 0
+        self.world_running_when_pressed: list[bool] = []
+        self.checks = 0
+        self.settles = 0
+        self.settled: object = None
+        self.repairs = 0
+        self.rollbacks = 0
+        self.becomes: object = None
+        self.repaired: object = None
+        self.rolled_back = True
+
+    def enable(self, *, world_running: bool) -> object:
+        self.presses += 1
+        self.world_running_when_pressed.append(world_running)
+        if self.refuse:
+            raise channel_setup.EnableRefused(self.refuse)
+        return channel_setup.Enabled(path=Path("override.yml"), changed=True)
+
+    def setup_state(self) -> object:
+        return self.state
+
+    def check(self) -> object:
+        self.checks += 1
+        if self.becomes is not None:
+            self.state = self.becomes
+        return self.state
+
+    def settle(self) -> object:
+        self.settles += 1
+        if self.settled is not None:
+            self.state = self.settled
+        return self.state
+
+    def repair(self) -> object:
+        self.repairs += 1
+        if self.repaired is not None:
+            self.state = self.repaired
+        return self.state
+
+    def roll_back(self) -> bool:
+        self.rollbacks += 1
+        return self.rolled_back
+
+
+def _with_channel(ps: _Ps, tmp_path: Path, stub: _StubSetup) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.channel_setup = stub
+    return services
+
+
+def test_the_enable_button_is_offered_only_for_a_game_that_has_a_channel(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.2b, 8.2c and 8.2d wire their own; a tab without one shows no button."""
+    plain = ControllerView(WOTLK, _services(ps, tmp_path, []), status_poll_ms=0)
+
+    assert plain.enable_channel_button.isVisibleTo(plain) is False
+
+
+def test_pressing_enable_while_the_world_runs_says_so_and_does_not_write(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The refusal is the feature, so the tab has to carry its sentence."""
+    stub = _StubSetup(refuse="the server has to be stopped before the command channel...")
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    ps.names = "ac-database\nac-authserver\nac-worldserver\n"
+    view.refresh_status()
+
+    view.enable_channel()
+
+    assert "stopped" in view.problem_label.text()
+
+
+def test_the_press_is_told_whether_the_world_is_running_rather_than_deciding_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The view knows the status; the module owns the rule. Neither guesses."""
+    stub = _StubSetup()
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    ps.names = ""
+    view.refresh_status()
+
+    view.enable_channel()
+
+    assert stub.world_running_when_pressed == [False]
+
+
+def test_after_a_successful_press_the_tab_says_it_is_checked_at_the_next_start(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Nothing is verified yet: the setting is read when the world starts."""
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, _StubSetup()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.enable_channel()
+
+    said = view.problem_label.text().lower()
+    assert "start" in said
+
+
+def test_a_verified_channel_is_shown_with_the_time_it_was_proved(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    said = view.channel_label.text()
+    assert "verified" in said.lower()
+    assert "2026-09-07 01:23 UTC" in said, "verified once and verified in March read the same"
+
+
+def test_a_credential_written_before_times_existed_says_so_rather_than_inventing_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Verified(account="YULON_AB", password="pw"))
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "verified" in view.channel_label.text().lower()
+
+
+def test_a_refused_credential_says_so_and_offers_the_repair(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The repair is offered only where it applies.
+
+    A button that resets the channel account's password is the one control on
+    this tab that can break a working channel, so it exists only while the
+    server has actually refused the credential.
+    """
+    stub = _StubSetup(
+        state=channel_setup.Refused(
+            account="YULON_AB", password="stale", reason="the server did not accept it"
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "did not accept" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is True
+
+
+def test_the_repair_is_hidden_while_the_channel_works(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert view.repair_channel_button.isVisibleTo(view) is False
+
+
+def test_pressing_repair_asks_the_setup_and_shows_what_came_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.Refused(account="YULON_AB", password="stale", reason="rejected")
+    )
+    stub.repaired = channel_setup.Verified(
+        account="YULON_AB", password="fresh", at="2026-09-07 02:00 UTC"
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.repair_channel()
+
+    assert stub.repairs == 1
+    assert "2026-09-07 02:00 UTC" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is False
+
+
+def test_a_tab_opened_over_a_stale_credential_says_refused_rather_than_verified(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Found by the live gate, which is the only place it could be found.
+
+    A saved credential reads as verified straight off the disk, because that is
+    what the file records. If nothing asks the server, a credential the server
+    has since stopped accepting keeps saying verified until the next start --
+    and the repair the user needs is never offered. So the tab asks once, when
+    it opens, off the GUI thread.
+
+    `check()` and not `settle()`: settle CREATES on an install that has none,
+    and opening a tab is not permission to write a row into the user's auth
+    database.
+    """
+    stub = _StubSetup(
+        state=channel_setup.Verified(
+            account="YULON_AB", password="stale", at="2026-09-07 01:23 UTC"
+        )
+    )
+    stub.becomes = channel_setup.Refused(
+        account="YULON_AB", password="stale", reason="the server did not accept the saved password"
+    )
+
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=5, job_runner=run_inline
+    )
+
+    assert stub.checks == 1
+    assert stub.settles == 0, "opening a tab must never create an account"
+    assert "did not accept" in view.channel_label.text()
+    assert view.repair_channel_button.isVisibleTo(view) is True
+
+
+def test_a_tab_told_not_to_poll_still_shows_the_channel_without_asking_the_server(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The same rule the status poll follows: not polled means not polled."""
+    stub = _StubSetup(
+        state=channel_setup.Verified(account="YULON_AB", password="pw", at="2026-09-07 01:23 UTC")
+    )
+
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert stub.checks == 0
+    assert "2026-09-07 01:23 UTC" in view.channel_label.text()
+
+
+def test_a_finished_start_asks_the_channel_where_it_now_stands(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise the press writes a configuration nobody ever proves.
+
+    The account is created by the first settle after a start, so without this
+    call the channel the user turned on is never set up at all -- and a
+    credential that stopped working is never noticed.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    stub.settled = channel_setup.Verified(
+        account="YULON_AB", password="pw", at="2026-09-07 02:10 UTC"
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._server_action_done(None)
+
+    assert stub.settles == 1
+    assert "2026-09-07 02:10 UTC" in view.channel_label.text()
+
+
+def test_a_start_that_fails_on_the_channel_port_rolls_the_channel_back(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause about an occupied port, at the seam that learns about it.
+
+    Docker refuses to publish a host port something else holds, so the
+    container is never created and no setting is ever read. Undoing the press
+    is what makes the next Start work, and saying so is what stops the user
+    pressing enable again into the same wall.
+    """
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._start_failed(
+        docker.DockerCommandError(
+            "driver failed programming external connectivity on endpoint ac-worldserver: "
+            "Bind for 127.0.0.1:7878 failed: port is already allocated"
+        )
+    )
+
+    assert stub.rollbacks == 1
+    said = view.problem_label.text()
+    assert "7878" in said
+    assert "command channel" in said.lower()
+
+
+def test_a_start_that_fails_for_another_reason_leaves_the_channel_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(state=channel_setup.Idle())
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view._start_failed(docker.DockerCommandError("ac-database exited with code 1"))
+
+    assert stub.rollbacks == 0
+    assert "exited with code 1" in view.problem_label.text()
+
+
+def test_a_channel_that_gave_up_shows_the_reason_rather_than_a_spinner(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubSetup(
+        state=channel_setup.GaveUp(account="YULON_AB", reason="three round trips did not prove it")
+    )
+    view = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_channel()
+
+    assert "three round trips" in view.channel_label.text()
+
+
+# -- the interlock ----------------------------------------------------------
+
+
+def test_a_command_control_is_disabled_while_the_server_is_unstable(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The value 8.1 published, used for the first time here.
+
+    `stable` is False for a restart loop, for a daemon that cannot be asked, and
+    — since the TBC gate refuted the first version — for a world whose database
+    has gone. Every one of those is a server not to aim a command at.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("restart_loop", restarts=4)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is False
+
+
+def test_a_command_control_is_enabled_again_once_the_server_settles(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("up", players=0, bots=500)
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True
+
+
+def test_the_press_is_reachable_in_the_one_state_that_allows_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Measured on yulon-win11-gate, 2026-09-07, on the route a person has.
+
+    The press REFUSES while the world is running -- that is 8.2a's whole shape,
+    because a failed bind is not atomic and on the CMaNGOS trees it costs
+    character saves. The button was enabled on `stable`, and `stable` is only
+    ever true while the world IS running. So the control was live exactly when
+    pressing it could not work, and dead exactly when it would: with the world
+    stopped and the channel not set up, the Windows box showed
+
+        verdict  'stopped'
+        channel  'Command channel: not set up yet.'
+        ENABLE   disabled
+
+    and the app's own refusal sentence tells the user to do the thing that
+    disables the button: "Stop it, press this again, then start it as usual."
+
+    8.2a did not catch it because its gate called `InstallChannel.enable()`
+    directly. The mechanism was proved; the route was not.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("stopped")
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True
+
+
+def test_the_interlock_reads_stable_rather_than_the_state_word(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A world that is `up` with an unreachable database is not stable.
+
+    Keying off `state == "up"` would pass here, which is exactly the bug the
+    TBC gate found in `stable` itself. The interlock must read the property, not
+    re-derive it.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict(
+        "up", problem="could not read the server's characters", database_unreachable=True
+    )
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is False
+
+
+# -- 8.3a: the account list, and the two changes the server makes ------------
+
+
+class _StubAccounts:
+    """Stands in for the account seam the wiring hands down (8.3a)."""
+
+    def __init__(
+        self,
+        listing: useraccounts.Listing | None = None,
+        outcome: useraccounts.Outcome | None = None,
+    ) -> None:
+        self.list_result = listing or useraccounts.Listing(
+            accounts=[
+                useraccounts.Account(id=7, username="ALICE", gm_level=0),
+                useraccounts.Account(id=9, username="BOB", gm_level=3),
+            ]
+        )
+        self.outcome = outcome or useraccounts.Outcome(True, text="done")
+        self.passwords: list[tuple[str, str]] = []
+        self.levels: list[tuple[str, int]] = []
+        self.listings = 0
+
+    def listing(self) -> useraccounts.Listing:
+        self.listings += 1
+        return self.list_result
+
+    def set_password(self, account: str, password: str) -> useraccounts.Outcome:
+        self.passwords.append((account, password))
+        return self.outcome
+
+    def set_gm_level(self, account: str, level: int) -> useraccounts.Outcome:
+        self.levels.append((account, level))
+        return self.outcome
+
+
+def _with_accounts(ps: _Ps, tmp_path: Path, stub: _StubAccounts) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.accounts = stub
+    return services
+
+
+def test_the_account_list_shows_what_the_read_returned(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_accounts()
+
+    said = [view.account_list.item(i).text() for i in range(view.account_list.count())]
+    assert any("ALICE" in line for line in said)
+    assert any("BOB" in line and "3" in line for line in said)
+
+
+def test_a_list_that_could_not_be_read_says_so_instead_of_showing_none(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """An empty list and an unreadable database look identical on screen."""
+    stub = _StubAccounts(
+        listing=useraccounts.Listing(problem="could not read this server's accounts: no container")
+    )
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_accounts()
+
+    assert view.account_list.count() == 0
+    assert "no container" in view.account_report.text()
+
+
+def test_neither_change_is_offered_until_an_account_is_chosen(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A button that acts on "whichever row happens to be first" is a trap."""
+    view = ControllerView(
+        WOTLK,
+        _with_accounts(ps, tmp_path, _StubAccounts()),
+        status_poll_ms=0,
+        job_runner=run_inline,
+    )
+    view.refresh_accounts()
+
+    assert view.set_password_button.isEnabled() is False
+    assert view.set_gm_button.isEnabled() is False
+
+    view.account_list.setCurrentRow(0)
+
+    assert view.set_password_button.isEnabled() is True
+    assert view.set_gm_button.isEnabled() is True
+
+
+def test_setting_a_password_names_the_chosen_account_and_clears_the_field(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The field is cleared for the reason `create_account` clears its own.
+
+    A password left in a widget is a password in every later repr and
+    traceback frame of that widget.
+    """
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert stub.passwords == [("ALICE", "n3w-p@ss")]
+    assert view.selected_password.text() == ""
+
+
+def test_setting_a_level_names_the_chosen_account(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(1)
+    view.selected_gm.setValue(2)
+
+    view.set_selected_gm_level()
+
+    assert stub.levels == [("BOB", 2)]
+
+
+def test_a_change_the_server_refused_is_shown_in_the_servers_own_words(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubAccounts(outcome=useraccounts.Outcome(False, problem="There is no such account."))
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert "There is no such account." in view.account_report.text()
+
+
+def test_a_change_that_worked_re_reads_the_list_so_the_level_shown_is_the_new_one(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise the tab keeps showing the level the account no longer has."""
+    stub = _StubAccounts()
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_accounts()
+    before = stub.listings
+    view.account_list.setCurrentRow(0)
+    view.selected_gm.setValue(1)
+
+    view.set_selected_gm_level()
+
+    assert stub.listings == before + 1
+
+
+def test_a_game_with_no_account_seam_shows_no_list_and_no_buttons(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.3b, 8.3c and 8.3d each measure their own; a control that cannot work is worse than none."""
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert view.account_list.isVisibleTo(view) is False
+    assert view.set_password_button.isVisibleTo(view) is False
+
+
+# -- 8.5a: browsing the bots -------------------------------------------------
+
+
+class _StubBots:
+    """Stands in for the bot-browsing seam the wiring hands down (8.5a)."""
+
+    def __init__(self, page: botlist.Page | None = None) -> None:
+        self.result = page or botlist.Page(
+            bots=[
+                botlist.Bot(name="Guglu", level=14, online=True, source="registry"),
+                botlist.Bot(name="Ritdy", level=3, online=False, source="prefix"),
+            ],
+            total=500,
+            by_registry=480,
+            by_prefix=20,
+            next_after=("Ritdy", 9),
+        )
+        self.asked: list[tuple[int, str]] = []
+
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
+        self.asked.append((after, name_like))
+        return self.result
+
+
+def _with_bots(ps: _Ps, tmp_path: Path, stub: _StubBots) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.bots = stub
+    return services
+
+
+def test_the_bot_list_shows_the_rows_and_the_split_by_signal(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Both numbers, because one of them hides the case that matters.
+
+    An install whose prefix changed after its bots were made has rows the
+    registry knows and the prefix does not.
+    """
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    said = [view.bot_list.item(i).text() for i in range(view.bot_list.count())]
+    assert any("Guglu" in line and "registry" in line for line in said)
+    assert any("Ritdy" in line and "prefix" in line for line in said)
+    assert "500" in view.bot_summary.text()
+    assert "480" in view.bot_summary.text()
+    assert "20" in view.bot_summary.text()
+
+
+def test_a_marker_that_could_not_be_read_says_so_and_shows_no_rows(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubBots(page=botlist.Page(problem="this install's bot marker could not be read"))
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert view.bot_list.count() == 0
+    assert "could not be read" in view.bot_summary.text()
+
+
+def test_a_marker_matching_nothing_warns_rather_than_reading_as_no_bots(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubBots(
+        page=botlist.Page(total=0, warning="no character matched the bot marker 'rndbot'")
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "no character matched" in view.bot_summary.text()
+
+
+# -- 8.5b: the tab on a tree that has only one signal -------------------------
+
+
+def test_a_tree_with_only_the_prefix_does_not_name_a_registry_it_has_not_got(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b. TBC has no playerbots schema, so the split is a sentence about nothing.
+
+    Before this, this tab read "900 bots: 0 by the playerbots registry, 900 by
+    the account prefix" on m910q's TBC install — a table this install has not
+    got, and a zero beside it that a person would go looking for. The per-row
+    `— prefix` suffix is the same noise said 900 times.
+
+    The presence assertions sit beside the absence ones deliberately: `"registry"
+    not in ""` is true of a label that says nothing at all.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Adilad", level=57, online=True, source="prefix")],
+            total=900,
+            by_registry=0,
+            by_prefix=900,
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "900 bots" in view.bot_summary.text()
+    assert "registry" not in view.bot_summary.text()
+    row = view.bot_list.item(0).text()
+    assert "Adilad" in row and "level 57" in row
+    assert "prefix" not in row
+
+
+def test_a_marker_matching_nothing_on_a_one_signal_tree_warns_without_naming_a_registry(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b, and the clause 8.5a could not reach.
+
+    On WotLK a marker matching nothing still returns the registry's rows, so
+    this state is unreachable there — 8.5a's own entry defers it to the trees
+    that have only the prefix. This is one of them, and the sentence shown
+    beside the zero must not also be a claim about a table that does not exist.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            total=0,
+            warning=(
+                "no character matched the bot marker 'NOSUCHBOTPREFIX', though this server "
+                "has 901 characters"
+            ),
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "no character matched" in view.bot_summary.text()
+    assert "901" in view.bot_summary.text()
+    assert "registry" not in view.bot_summary.text()
+
+
+def test_a_zero_is_not_the_headline_when_the_marker_is_what_matched_nothing(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """8.5b. The clause is "warns, NEITHER reporting zero" — so it must not.
+
+    The first live run of this path on m910q's TBC install printed
+    "0 bots. Page 1, 0 shown. no character matched …": the number a person reads
+    first was the one the sentence after it exists to contradict. That is 8.1a's
+    confident-lie shape with the correction stapled to the end, and this box is
+    the tree the checklist nominates to settle the clause, so what it records
+    becomes the rule for 8.5c and 8.5d.
+    """
+    stub = _StubBots(
+        page=botlist.Page(
+            total=0,
+            warning=(
+                "no character matched the bot marker 'NOSUCHBOTPREFIX', though this server "
+                "has 901 characters"
+            ),
+        )
+    )
+    view = ControllerView(
+        TBC, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    said = view.bot_summary.text()
+    assert said.startswith("no character matched"), said
+    assert "0 bots" not in said
+    assert "Page 1" in said, "it must still say which page is on screen"
+
+
+def test_the_next_page_starts_where_this_one_ended(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A cursor, not a count.
+
+    With OFFSET, one bot logging out before the boundary shifts every later
+    page by one: a row is shown twice and the one that took its place is never
+    shown at all.
+    """
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+
+    view.next_bot_page()
+
+    assert stub.asked[-1][0] == ("Ritdy", 9)
+
+
+def test_the_first_page_has_no_previous_to_go_back_to(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+
+    view.previous_bot_page()
+
+    assert stub.asked[-1][0] is None
+    assert view.previous_bots_button.isEnabled() is False
+
+
+def test_going_back_returns_to_the_cursor_the_earlier_page_started_from(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Which is why the cursors are kept in a stack.
+
+    There is no arithmetic that turns "where page three starts" into "where
+    page two starts": the only way back is the key the earlier page was read
+    with.
+    """
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    view.next_bot_page()
+    view.next_bot_page()
+
+    view.previous_bot_page()
+
+    assert stub.asked[-1][0] == ("Ritdy", 9)
+    assert view.previous_bots_button.isEnabled() is True
+
+
+def test_a_last_page_offers_no_next(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Zed", level=1, online=False, source="registry")],
+            total=1,
+            by_registry=1,
+            next_after=None,
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert view.next_bots_button.isEnabled() is False
+
+
+def test_a_filter_is_passed_through_and_sends_the_list_back_to_the_first_page(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Otherwise a filter typed on page nine shows page nine of a shorter list."""
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    view.next_bot_page()
+    view.bot_filter.setText("Gug")
+
+    view.filter_bots()
+
+    assert stub.asked[-1] == (None, "Gug")
+
+
+def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    view = ControllerView(
+        WOTLK, _services(ps, tmp_path, []), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
+
+
+def test_one_bot_is_a_bot_and_not_one_bots(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A filter that matched one row said "1 bots" on the live gate."""
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Anmi", level=7, online=False, source="registry")],
+            total=1,
+            by_registry=1,
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "1 bot:" in view.bot_summary.text()
+
+
+def test_a_change_whose_result_is_unknown_is_not_announced_as_a_failure(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The sentence is shown; the failure signal is not raised.
+
+    `action_failed` is what the rest of the app treats as "that did not
+    happen". A timeout on a password change is not that — the command may have
+    run — so the tab says so in words and stays quiet on the wire.
+    """
+    stub = _StubAccounts(
+        outcome=useraccounts.Outcome(
+            False,
+            indeterminate=True,
+            problem="the server did not answer within 20s. The change may already have been made",
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_accounts(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    failures: list[str] = []
+    view.action_failed.connect(failures.append)
+    view.refresh_accounts()
+    view.account_list.setCurrentRow(0)
+    view.selected_password.setText("n3w-p@ss")
+
+    view.set_selected_password()
+
+    assert "may already have been made" in view.account_report.text()
+    assert failures == []
+
+
+# -- 8.2e: the tree with no listener to set up -------------------------------
+
+
+def test_a_console_channel_says_so_instead_of_offering_a_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Tortoise links neither gsoap nor RASocket: there is nothing to switch on.
+
+    A greyed-out "Turn on the command channel" would be the worst of both --
+    it says the feature exists and refuses to explain. The tab carries the
+    reason instead, and the button does not exist on this entry at all.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    services = _services(ps, tmp_path, [])
+    view = ControllerView(tortoise, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_channel()
+
+    assert view.enable_channel_button.isVisibleTo(view) is False
+    assert view.repair_channel_button.isVisibleTo(view) is False
+    said = view.channel_label.text()
+    assert view.channel_label.isVisibleTo(view) is True, said
+    assert "console" in said.lower(), said
+    assert (
+        "not set up yet" not in said.lower()
+    ), "that sentence promises a set-up that cannot happen"
+
+
+def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The control, without which the test above would pass on a build with no buttons."""
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    assert view.enable_channel_button.isVisibleTo(view) is True
+
+
+class _Probe:
+    """Stands in for the console channel the tab is handed."""
+
+    def __init__(self, answer: object) -> None:
+        self.answer = answer
+        self.sent: list[str] = []
+
+    def __call__(self, command: str) -> object:
+        self.sent.append(command)
+        return self.answer
+
+
+def _with_probe(ps: _Ps, tmp_path: Path, probe: _Probe) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.console_probe = probe
+    return services
+
+
+def test_the_console_probe_button_belongs_to_the_console_trees_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A tree with a set-up button does not also need a test button.
+
+    Its verified line already says a real round trip answered, and with a time
+    on it. The console trees have no such line to show, which is what this
+    button is for.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1"))
+
+    console = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+    soap = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, _StubSetup()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert console.test_console_button.isVisibleTo(console) is True
+    assert soap.test_console_button.isVisibleTo(soap) is False
+
+
+def test_the_probe_shows_what_the_console_answered(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The visible effect this box asks for: a real reply, on the Server tab."""
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1\nOnline players: 0"))
+    view = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.test_console()
+
+    assert probe.sent == [commands.SERVER_INFO]
+    assert "Online players: 0" in view.console_probe_label.text()
+
+
+def test_a_window_with_no_prompt_reads_as_could_not_ask_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause this whole box turns on, said in the words a person reads.
+
+    `indeterminate` means the command may have run. Presenting that as a
+    failure would invite somebody to send it again -- which for a mutation is
+    exactly the wrong advice, and is why this tree is offered no mutations yet.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(
+        channel.Answer(
+            outcome="unknown",
+            text="Loading maps...",
+            reason="the console printed no prompt inside the reply window",
+            indeterminate=True,
+        )
+    )
+    view = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.test_console()
+
+    said = view.console_probe_label.text().lower()
+    assert "no prompt" in said, said
+    # ONCE, not merely present. The live gate on m910q read this sentence back
+    # with "the command may still have run" in it twice: the channel's reason
+    # said it and this label said it again. The channel states what happened
+    # and `indeterminate` carries what it implies; the wording of the
+    # implication belongs to whatever shows it to a person.
+    assert said.count("may still have run") == 1, said
+    # ...and it reads as prose. The first fix for the doubling left the two
+    # sentences run together with no full stop between them.
+    assert ". the command may still have run" in said, said
+    # Not a substring search for "fail": the sentence legitimately contains the
+    # word, in "nothing here is a failure". What must not appear is the CLAIM.
+    for claim in ("the command failed", "failed to", "could not run"):
+        assert claim not in said, said
+    assert said.startswith("could not ask"), said
+
+
+def test_a_game_that_knows_where_its_levels_live_gets_the_accounts_surface(
+    tmp_path: Path,
+) -> None:
+    """The catalog fact and the wiring are two things, and only one of them shows.
+
+    `accounts.level` says this tree's GM level store has been measured on its
+    own box. If the services for that game are then assembled without an
+    accounts object, the Accounts tab draws its "this game cannot do that yet"
+    sentence — for a game that can, with the measurement sitting in the catalog
+    unused. Nothing raises; the feature is just missing (8.3c found exactly
+    this on Vanilla, whose level block was measured the same afternoon).
+
+    The reverse arm matters as much: a game with no measured store must NOT be
+    handed the surface, because reading the wrong store reports every account
+    as level 0.
+    """
+    for entry in _every_game():
+        services = ControllerServices.for_entry(entry, tmp_path / entry.id)
+        measured = entry.accounts.level is not None
+        assert (services.accounts is not None) is measured, (
+            f"{entry.id}: level block {'measured' if measured else 'absent'}, "
+            f"accounts surface {'present' if services.accounts else 'absent'}"
+        )
+
+
+@pytest.mark.parametrize("game", [e.id for e in load_catalog().games])
+def test_the_gm_level_controls_offer_what_this_tree_actually_accepts(
+    game: str, tmp_path: Path
+) -> None:
+    """A hard-coded 0-to-3 was drawn for every game until 8.3d.
+
+    The Tortoise fork accepts 4 -- measured on the live server, where
+    `account set gmlevel SHAPROBE 4` answered *"You change security level of
+    account SHAPROBE to 4."* and `5` answered *"Incorrect values."* Its own
+    check grants at the caller's own level rather than strictly below it, so
+    drawing 0-to-3 there hides a level the tree has, and hides it silently:
+    nothing fails, the person simply cannot ask for it.
+
+    Both controls are checked, because there are two -- one for creating an
+    account and one for changing an existing one -- and they were two separate
+    hard-coded numbers.
+    """
+    entry = load_catalog().get(game)
+    view = ControllerView(entry, _services(_Ps(), tmp_path, []), status_poll_ms=0)
+    level = entry.accounts.level
+    ceiling = level.max_level if level is not None else 3
+
+    assert view.account_gm.maximum() == ceiling, game
+    assert view.selected_gm.maximum() == ceiling, game
+    assert view.account_gm.minimum() == 0, game
+
+
+# -- 8.5c: what each game's Bots tab really asks -------------------------------
+
+
+BOT_SQL_BY_GAME = {
+    # game -> (auth schema, characters schema, the db container the query runs in)
+    "wow-wotlk": ("acore_auth", "acore_characters", "ac-database"),
+    "wow-tbc": ("realmd", "characters", "tbc-db"),
+    "wow-vanilla": ("realmd", "characters", "vanilla-db"),
+    "wow-tortoise": ("tw_logon", "tw_char", "tortoise-db"),
+}
+"""Written out per game rather than read back out of the entry.
+
+An expectation derived from `entry.schema_map()` is the same object that
+produced the value under test, so it passes on a wrong catalog value — which is
+the class of defect this test exists to catch. These four were each measured on
+their own box: `acore_*` on yulon-ubuntu (8.1a), `realmd`/`characters` from
+m910q's TBC and Vanilla volumes (8.1b, 8.1c), `tw_logon`/`tw_char` from the
+Tortoise install (8.1d).
+"""
+
+
+def test_each_game_browses_bots_in_its_own_schemas_and_names_no_registry_it_lacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Bots tab, driven for all four games through the seam that runs the SQL.
+
+    Until 8.5c only WotLK's SQL had ever been asserted at the wiring level; the
+    other three were checked by calling `botlist.page()` with a hand-picked
+    entry, which is a call site rather than the function the button reaches
+    ("reviews check functions, not call sites"). 8.3c found precisely this class
+    of defect on Vanilla by walking every game instead.
+
+    Two seams are answered for, and both are named on purpose. `docker_prefix`
+    decides whether `DockerSql._argv` can build a command at all, and
+    `_probe_client` is the one that would otherwise run `docker exec` against
+    this laptop's daemon just to ask which mysql binary a container has — a
+    probe nobody reading "fake `subprocess.run`" would think to stop. The client
+    cache is module-level and is cleared between games, because a name resolved
+    for one container must not answer for the next.
+    """
+    from yulon import apply as apply_module
+
+    sent: dict[str, list[list[str]]] = {}
+
+    monkeypatch.setattr(apply_module.platform, "docker_prefix", lambda wsl_distro=None: ("docker",))
+    monkeypatch.setattr(apply_module, "_probe_client", lambda container, candidates: candidates[0])
+
+    for entry in _every_game():
+        apply_module._client_cache.clear()
+        argvs: list[list[str]] = []
+        asked: list[str] = []
+        sent[entry.id] = argvs
+
+        # The two lists are bound as defaults rather than closed over: this
+        # function is defined inside the loop, and a closure would read
+        # whichever list the LAST game happened to leave behind, so every
+        # game's assertions would be made against the last game's traffic.
+        def fake_run(
+            argv: Sequence[str],
+            _argvs: list[list[str]] = argvs,
+            _asked: list[str] = asked,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
+            _argvs.append(list(argv))
+            # The statement is on stdin, never in argv -- `apply._mysql` puts it
+            # there deliberately, because argv is world-readable and a statement
+            # can carry a password. The first version of this test read argv for
+            # the SQL and found the schema name and nothing else.
+            _asked.append(str(kwargs.get("input") or ""))
+            return subprocess.CompletedProcess(list(argv), 0, "0\t0\t0", "")
+
+        monkeypatch.setattr(apply_module.subprocess, "run", fake_run)
+        server_dir = tmp_path / entry.id
+        (server_dir / "etc").mkdir(parents=True, exist_ok=True)
+        services = ControllerServices.for_entry(entry, server_dir)
+        assert services.bots is not None, f"{entry.id} has no Bots tab"
+        services.bots.page()
+
+        auth, characters, container = BOT_SQL_BY_GAME[entry.id]
+        counting = next((s for s in asked if s.startswith("SELECT COUNT(*), SUM(")), "")
+        assert counting, f"{entry.id} never counted: {asked}"
+        assert f"FROM {characters}.characters" in counting, f"{entry.id}: {counting}"
+        assert f"FROM {auth}.account" in counting, f"{entry.id}: {counting}"
+        assert all(a[-1] == characters for a in argvs), f"{entry.id} connected elsewhere: {argvs}"
+        assert all(container in a for a in argvs), f"{entry.id} asked the wrong container: {argvs}"
+
+        registry = entry.observability.bots.registry
+        named = "playerbots_account_type" in counting
+        assert named is (registry is not None), (
+            f"{entry.id}: registry {'declared' if registry else 'absent'}, "
+            f"table {'named' if named else 'not named'} in {counting}"
+        )

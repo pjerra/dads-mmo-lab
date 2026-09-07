@@ -928,6 +928,50 @@ class Realmlist(_Strict):
     realm_id: int = 1
 
 
+class AccountLevel(_Strict):
+    """Where THIS core keeps an account's GM level (8.3a).
+
+    Two shapes, and reading the wrong one does not fail: it reports every
+    account as level 0, which is a lie shaped like an answer. AzerothCore keeps
+    it in a join table (`account_access`, keyed `id`, no realm filter, which is
+    how SOAP itself reads it); the CMaNGOS trees keep it on the account row,
+    under `gmlevel` on CMaNGOS proper and `rank` on tortoise.
+
+    Absent until that tree's own box measures it, like `observability` and for
+    the same reason: an inherited block is a guess wearing the shape of a fact.
+    """
+
+    table: str | None = Field(
+        default=None,
+        description=(
+            "The join table holding the level, or null when the level is a column on the "
+            "account row itself."
+        ),
+    )
+    account_column: str = Field(
+        default="id",
+        min_length=1,
+        description=(
+            "The column in `table` that carries the account id. Ignored when table is null."
+        ),
+    )
+    level_column: str = Field(
+        default="gmlevel", min_length=1, description="The column holding the level itself."
+    )
+    max_level: int = Field(
+        default=3,
+        ge=1,
+        le=9,
+        description=(
+            "The highest level this core's own command accepts, measured by asking it. Three of "
+            "the four trees stop at 3 (`SEC_ADMINISTRATOR`, and Vanilla's own help says `#level "
+            "may range from 0 to 3`); the tortoise fork accepts 4, because its check grants at "
+            "the caller's own level rather than strictly below it. A surface that draws the "
+            "wrong ceiling here does not fail -- it silently offers less than the tree has."
+        ),
+    )
+
+
 class Accounts(_Strict):
     """Whether this app can create an account on this core by writing the row itself.
 
@@ -960,6 +1004,79 @@ class Accounts(_Strict):
         default="account create <name> <password>",
         min_length=1,
         description="What to type on the worldserver console when `by_sql` is False.",
+    )
+    level: AccountLevel | None = Field(
+        default=None,
+        description=(
+            "Where this core keeps an account's GM level, for the account list (8.3a). Absent "
+            "until that tree's own box measures it: reading the wrong store reports every "
+            "account as level 0 rather than failing."
+        ),
+    )
+
+
+class Equipped(_Strict):
+    """Where THIS tree keeps the item id of a thing a character is wearing.
+
+    Two shapes: AzerothCore's `character_inventory` row carries the item
+    INSTANCE guid (`item`) and nothing else, so the template id is one join away
+    in `item_instance.itemEntry`; the CMaNGOS rows carry both that guid and
+    `item_template` (measured on the TBC install 2026-09-06 and on the Vanilla
+    one 2026-09-07), so the flat read is one hop.
+
+    Corrected in 8.4c: the shape that answers "instance guids that look exactly
+    like item ids" is not either of those swapped over -- the flat shape on
+    AzerothCore is an `Unknown column` error, and the joined shape on CMaNGOS is
+    the same answer by a longer road. It is `template_column` set to `item`,
+    which is what carrying AzerothCore's column name onto CMaNGOS's flat shape
+    produces, and it is the reason this is three fields rather than a default.
+    """
+
+    template_column: str = Field(
+        min_length=1,
+        description=(
+            "The column holding the item's template id -- on `item_instance` where "
+            "`instance_table` is set, and on the inventory row where it is null."
+        ),
+    )
+    instance_table: str | None = Field(
+        default=None,
+        description=(
+            "The table to join for the template id, or null where the inventory row "
+            "already carries it."
+        ),
+    )
+    inventory_column: str = Field(
+        default="item",
+        min_length=1,
+        description="The inventory column that keys the join. Ignored without instance_table.",
+    )
+
+
+class Play(_Strict):
+    """What the Characters tab may offer on this tree (8.4a).
+
+    Absent until that tree's own box measures it, like `observability` and
+    `accounts.level`, and for the same reason: an inherited block is a guess
+    wearing the shape of a fact.
+    """
+
+    equipped: Equipped = Field(description="How to read what a character is wearing.")
+    teleport_command: str = Field(
+        min_length=1,
+        description=(
+            "This tree's named-teleport verb, measured by asking it: `teleport name` on "
+            "AzerothCore, `tele name` on the CMaNGOS trees -- where `teleport` is not a "
+            "command at all and the refusal arrives as a closed connection."
+        ),
+    )
+    mail_item_cap: int = Field(
+        ge=1,
+        description=(
+            "How many attachments this tree carries in ONE mail. Twelve on AzerothCore and "
+            "CMaNGOS TBC; 8.4c's tree takes exactly one, so a set of gear is that many mails "
+            "and the button has to say so before the press."
+        ),
     )
 
 
@@ -994,6 +1111,223 @@ class Client(_Strict):
     notes: tuple[str, ...] = ()
 
 
+class BotRegistry(_Strict):
+    """A table this core's bot module keeps, listing which accounts are bots.
+
+    One of the two arms of the bot marker, and never the only one. On a freshly
+    built AzerothCore install this table can hold **zero rows while a thousand
+    bot characters play**: the module fills it as it goes, so a detector that
+    asks it alone reports every bot as a person and its inverse reports zero
+    bots — a failure with nothing about it that looks broken (`botid.rs:4-17`,
+    live proof 2026-08-01, recorded in `pyplan/phase8-reads/hypeer.md`).
+    """
+
+    database: Db = Field(description="Which of this entry's databases the table lives in.")
+    table: str = Field(min_length=1)
+    account_column: str = Field(min_length=1)
+    type_column: str = Field(min_length=1)
+    types: tuple[int, ...] = Field(min_length=1, description="The type values that mean `bot`.")
+
+
+class BotMarker(_Strict):
+    """How this tree tells a bot character from a person's.
+
+    `account_prefix` is the module's own compiled default, not the value in
+    force: an install may have been given a prefix of its own, so the live value
+    is read from `prefix_conf_file` and this is the fallback the server itself
+    would use if the key is absent. Which of the two answered is reported to the
+    user rather than smoothed over.
+    """
+
+    account_prefix: str = Field(
+        min_length=1,
+        description=(
+            "The module's compiled default prefix. Never empty: an empty prefix becomes "
+            "`LIKE '%'`, which classifies every account — and so every human — as a bot "
+            "(`botid.rs:33-38`)."
+        ),
+    )
+    prefix_conf_file: str = Field(
+        min_length=1, description="Where the live prefix lives, relative to the server dir."
+    )
+    prefix_conf_key: str = Field(min_length=1)
+    registry: BotRegistry | None = None
+
+
+class CharacterTable(_Strict):
+    """The columns of this core's `characters` table that 8.1a reads.
+
+    Named per tree rather than assumed. Tortoise keeps its characters in
+    `tw_char`, and a column spelling that is right for one core is a guess about
+    every other one.
+    """
+
+    table: str = Field(default="characters", min_length=1)
+    account: str = Field(default="account", min_length=1)
+    online: str = Field(default="online", min_length=1)
+
+
+class ConfEnable(_Strict):
+    """Which conf file turns this tree's channel on, and the keys that do it (8.2c).
+
+    The CMaNGOS lineage reads its configuration from the file and from nowhere
+    else: its reader lowercases the key and looks it up in what it parsed
+    (`src/shared/Config/Config.cpp:73`, `:91`), with no environment fallback
+    anywhere in it. AzerothCore's generic `AC_<UPPER_SNAKE>` rule
+    (`Config.cpp:435-438`) has no counterpart here, so `enable_env` cannot serve
+    these trees and this exists instead.
+
+    The mechanism is not new: `install.native.cmangos.conf` already patches six
+    keys in this same file at install time, through the same
+    `families/conf.py` writer. What is new is doing it to an install that
+    already exists, on a press, with a backup to roll back to.
+    """
+
+    file: str = Field(
+        min_length=1,
+        description="The conf file, relative to the install directory (`etc/mangosd.conf`).",
+    )
+    keys: dict[str, str] = Field(
+        min_length=1,
+        description=(
+            "`Key = value` lines to set. `SOAP.IP` is `0.0.0.0` for the reason the "
+            "environment route gives: the listener binds every interface INSIDE the "
+            "container and the host side is pinned to loopback by the publication."
+        ),
+    )
+
+
+class Operations(_Strict):
+    """How this tree's command channel is turned on and reached (8.2a).
+
+    Optional on an entry, and absent until that tree's own box measures it. The
+    environment keys are not spelled by hand: AzerothCore reads every ini key
+    `X` as `"AC_" + upper_snake(X)` (`Config.cpp:435-438`, transform at
+    `:370-374`), and the environment wins over both the file and the compiled
+    default — including for keys absent from the file (`:540-552`). The catalog
+    already relies on that rule for `AiPlayerbot.MinRandomBots`, which is the
+    proof it is generic rather than per-key.
+    """
+
+    channel: Literal["soap", "attach"]
+    namespace: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "The XML namespace this tree's SOAP service answers to: `urn:AC` on AzerothCore, "
+            "`urn:MaNGOS` on the CMaNGOS lineage. No default, because a default is one tree's "
+            "answer inherited by the rest -- and the failure it produces is invisible. Measured "
+            "on m910q, 2026-09-07: the namespace is checked BEFORE the credential, so a wrong "
+            "one answers HTTP 500 `method name or namespace not recognized` even for a bad "
+            "password, which reads exactly like a world that has not finished loading."
+        ),
+    )
+    port: int | None = Field(
+        default=None, gt=0, lt=65536, description="The channel's port inside the container."
+    )
+    gm_level: int | None = Field(
+        default=None, ge=0, le=3, description="The level the channel needs of its account."
+    )
+    enable_env: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "What the generated override must carry for the channel to exist. `SOAP.IP` is "
+            "`0.0.0.0` on purpose: the listener binds every interface INSIDE the container, "
+            "and the host side is pinned to loopback by the compose publication. A listener on "
+            "the container's own loopback does not serve a published port and does not refuse "
+            "either — measured, `gates/8-spikes/published-port-vs-container-loopback/`."
+        ),
+    )
+    enable_conf: ConfEnable | None = Field(
+        default=None,
+        description=(
+            "The conf file that turns the channel on, for a tree with no environment "
+            "route. Exactly one of `enable_env` and `enable_conf` is declared."
+        ),
+    )
+    publish: bool = Field(
+        default=False,
+        description=(
+            "Whether the generated override must publish this port. False where the "
+            "install's own compose already does it -- WotLK's base file has carried "
+            "`${DOCKER_SOAP_EXTERNAL_PORT:-127.0.0.1:7878}:7878` since before there was a "
+            "channel -- and true where it does not, which is every CMaNGOS tree."
+        ),
+    )
+    must_not_listen: tuple[int, ...] = Field(
+        default=(),
+        description=(
+            "Ports that must be silent inside the container once the press has run. 8888 is "
+            "mod-playerbots' command server, which defaults to ON — 8888 in the dist AND in the "
+            "compiled fallback (`PlayerbotAIConfig.cpp:468`) — takes `<command>,<bot guid>` "
+            "lines on its own detached thread, and this install loads no module conf at all, so "
+            "the compiled default is what is in force. 3443 is the telnet remote console."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _a_soap_channel_says_how_it_is_switched_on(self) -> Operations:
+        """A channel nobody can enable is a channel that does not exist.
+
+        Checked here because the relationship has no other owner: `enable_env`
+        cannot see `channel`, and a `soap` entry whose keys never mention SOAP
+        would install cleanly and answer nothing.
+        """
+        if self.channel == "attach":
+            # Nothing to enable, nothing to publish, nothing to authenticate:
+            # this core links neither gsoap nor RASocket, so its only way in is
+            # the console the Console tab already types at. A field declared
+            # here that cannot apply is worse than a missing one -- it reads as
+            # something somebody measured (8.2e).
+            claimed = [
+                name
+                for name, value in (
+                    ("port", self.port),
+                    ("namespace", self.namespace),
+                    ("gm_level", self.gm_level),
+                    ("enable_env", self.enable_env or None),
+                    ("enable_conf", self.enable_conf),
+                )
+                if value is not None
+            ]
+            if claimed:
+                raise ValueError(
+                    f"an attach channel has no listener, so it declares none of these: "
+                    f"{', '.join(claimed)}"
+                )
+            return self
+        for name, value in (
+            ("port", self.port),
+            ("namespace", self.namespace),
+            ("gm_level", self.gm_level),
+        ):
+            if value is None:
+                raise ValueError(f"a {self.channel} channel must state its {name}")
+        if bool(self.enable_env) == bool(self.enable_conf):
+            raise ValueError(
+                "a channel is switched on ONE way: declare either enable_env or "
+                "enable_conf, not both and not neither"
+            )
+        keys = self.enable_env or (self.enable_conf.keys if self.enable_conf else {})
+        if self.channel == "soap" and not any("SOAP" in key.upper() for key in keys):
+            raise ValueError(
+                "a soap channel must name the key that turns SOAP on; " f"these are {sorted(keys)}"
+            )
+        return self
+
+
+class Observability(_Strict):
+    """What the dashboard needs in order to count this install's population (8.1a).
+
+    Optional on an entry, and absent until that tree's own box measures it: an
+    inherited block would be a guess wearing the shape of a fact. 8.1b, 8.1c and
+    8.1d each add their own.
+    """
+
+    characters: CharacterTable = CharacterTable()
+    bots: BotMarker
+
+
 class CatalogEntry(_Strict):
     """One installable server."""
 
@@ -1009,7 +1343,25 @@ class CatalogEntry(_Strict):
     client: Client
     realmlist: Realmlist = Realmlist()
     console: Console = Console()
-    accounts: Accounts = Accounts()
+    accounts: Accounts = Field(default_factory=Accounts)
+    play: Play | None = Field(
+        default=None,
+        description="What the Characters tab may offer here, once this tree has measured it.",
+    )
+    operations: Operations | None = Field(
+        default=None,
+        description=(
+            "How this tree's command channel is enabled and reached (8.2a). `None` until that "
+            "tree's own box has measured it against its own core."
+        ),
+    )
+    observability: Observability | None = Field(
+        default=None,
+        description=(
+            "The per-tree facts the dashboard's counts need (8.1a). `None` until this tree's "
+            "own box has measured them against its own schema and its own bot module."
+        ),
+    )
     has_manifests: bool = Field(
         default=False, description="Whether manifests/<id>/ exists for module management."
     )

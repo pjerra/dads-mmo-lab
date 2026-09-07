@@ -748,3 +748,100 @@ def test_a_cmangos_account_is_written_with_v_s_and_gmlevel() -> None:
     assert not any("sha_pass_hash" in s for s in written), written
     grant = _one_statement(sql, "UPDATE account SET gmlevel")
     assert f"WHERE id = {result.account_id}" in grant
+
+
+# -- resetting the app's OWN account (8.2a) ---------------------------------
+
+
+class _Recorder:
+    """A SQL seam that records statements and answers `query` from a table."""
+
+    def __init__(self, answer: str = "106\n") -> None:
+        self.statements: list[tuple[str, str]] = []
+        self.answer = answer
+
+    def run_statement(self, db: str, statement: str) -> None:
+        self.statements.append((db, statement))
+
+    def run_file(self, db: str, path: object) -> None:  # pragma: no cover - not used here
+        raise AssertionError("reset must not run a file")
+
+    def query(self, db: str, statement: str) -> str:
+        self.statements.append((db, statement))
+        return self.answer
+
+
+def test_resetting_the_apps_own_account_writes_a_new_verifier_for_that_name_only() -> None:
+    """The repair path for a credential file that has gone stale.
+
+    `create_account` deliberately never re-salts an existing row — silently
+    changing an owner's password is worse than refusing — so the repair is its
+    own seam, and it is scoped by the WHERE it writes.
+    """
+    sql = _Recorder()
+
+    accounts.reset_own_password(sql, "YULON_243C46E3", "n3w-p@ssw0rd1234")
+
+    writes = [s for _, s in sql.statements if s.strip().upper().startswith("UPDATE")]
+    assert len(writes) == 1, writes
+    assert "salt" in writes[0] and "verifier" in writes[0]
+    # The name goes in as a hex literal rather than a quoted string, which is
+    # how this module writes every text value — so the WHERE is asserted by
+    # decoding it rather than by matching the spelling of a quote.
+    where = writes[0].split("WHERE username =")[1]
+    hexed = where.strip().split("X'")[1].split("'")[0]
+    assert bytes.fromhex(hexed).decode() == "YULON_243C46E3"
+
+
+def test_it_refuses_any_account_that_is_not_this_apps_own() -> None:
+    """The architecture's rule for this module, enforced rather than intended.
+
+    "Must never rewrite the password of any account but its own." A name
+    without the app's prefix is somebody's character account, and this seam is
+    the one place that could quietly take it over.
+    """
+    sql = _Recorder()
+
+    for name in ("player", "admin", "YULONISH", "yulon_243c46e3x"):
+        with pytest.raises(accounts.AccountError, match="own"):
+            accounts.reset_own_password(sql, name, "n3w-p@ssw0rd1234")
+
+    assert sql.statements == [], "it touched the database before refusing"
+
+
+def test_it_refuses_a_password_the_server_would_refuse() -> None:
+    sql = _Recorder()
+
+    with pytest.raises(accounts.AccountError):
+        accounts.reset_own_password(sql, "YULON_243C46E3", "no")
+
+    assert sql.statements == []
+
+
+def test_the_reset_writes_the_columns_the_scheme_names() -> None:
+    """`scheme` was a parameter this function took and never read (8.2d).
+
+    It was harmless while AzerothCore was the only tree that had a channel: the
+    hard-coded `salt`/`verifier` happened to be right. TBC then needed `v`/`s`
+    and got its own copy of the function, and when Vanilla needed exactly the
+    same thing the choice was a third copy or reading the argument. A parameter
+    that is accepted and ignored is worse than no parameter -- it says the
+    caller has a choice it does not have.
+
+    Both shapes are asserted here, in one test, because what matters is that
+    they DIFFER: a single-scheme test would pass just as well against the
+    version that ignored the argument.
+    """
+    ac, mangos = _Recorder(), _Recorder()
+
+    accounts.reset_own_password(ac, "YULON_243C46E3", "n3w-p@ssw0rd1234")
+    accounts.reset_own_password(mangos, "YULON_243C46E3", "n3w-p@ssw0rd1234", scheme="mangos_srp6")
+
+    wrote_ac = [s for _, s in ac.statements if s.strip().upper().startswith("UPDATE")][-1]
+    wrote_mangos = [s for _, s in mangos.statements if s.strip().upper().startswith("UPDATE")][-1]
+    assert "UPDATE account SET salt = " in wrote_ac and " verifier = " in wrote_ac
+    assert "UPDATE account SET v = " in wrote_mangos and " s = " in wrote_mangos
+    assert "salt" not in wrote_mangos and "verifier" not in wrote_mangos
+    assert " v = " not in wrote_ac and " s = " not in wrote_ac
+    for statement in (wrote_ac, wrote_mangos):
+        assert "n3w-p@ssw0rd1234" not in statement, "the password reached a statement"

@@ -24,6 +24,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from PySide6.QtCore import Qt, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
@@ -44,8 +45,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from yulon import docker, install_wiring, networking
+from yulon import (
+    botlist,
+    channel_setup,
+    commands,
+    dbreads,
+    docker,
+    install_wiring,
+    logsnap,
+    networking,
+    platform,
+    resources,
+    useraccounts,
+)
+from yulon import channel as channel_module
+from yulon import dashboard as dashboard_module
+from yulon import play as play_module
 from yulon.apply import Applier, ApplyReport, DockerSql
+from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
 from yulon.controller import Controller, InstallStatus, PortConflictError
 from yulon.controller_wow_tbc import accounts as tbc_accounts
@@ -93,6 +110,105 @@ class UnsupportedGameError(RuntimeError):
     """
 
 
+class BotBrowser(Protocol):
+    """What the Bots tab needs (8.5a). One question, asked with a page and a filter."""
+
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> object: ...
+
+
+class AccountAdmin(Protocol):
+    """What the Accounts tab needs of this install's accounts (8.3a).
+
+    A read and two writes, and the split between them is owner answer 7 rather
+    than a layering choice: this app reads rows and the SERVER changes them.
+    """
+
+    def listing(self) -> object: ...
+
+    def set_password(self, account: str, password: str) -> object: ...
+
+    def set_gm_level(self, account: str, level: int) -> object: ...
+
+
+class ChannelSetup(Protocol):
+    """What the Server tab needs of the command channel (8.2a).
+
+    Two methods, and the split matters: `enable()` is told whether the world is
+    running rather than deciding for itself, because the view is what knows the
+    status and `channel_setup` is what owns the rule. Neither guesses at the
+    other's job.
+
+    `setup_state()` rather than `status()` deliberately: `docker.status()` takes
+    a `wsl_distro`, and `test_controller_view.py`'s seam guard flags any call in
+    this file that names a distro-aware seam without passing one. A method here
+    that shares that name would have to be excused by hand, and a guard with an
+    exemption for a name collision is a guard one step nearer to useless.
+    """
+
+    def enable(self, *, world_running: bool) -> object: ...
+
+    def settle(self) -> object: ...
+
+    def check(self) -> object: ...
+
+    def repair(self) -> object: ...
+
+    def roll_back(self) -> bool: ...
+
+    def setup_state(self) -> object: ...
+
+
+_ROW_SETTLE_MS = 750
+"""How long to leave the server to write what it has already reported.
+
+Measured rather than guessed (2026-09-07, WotLK on `yulon-ubuntu`):
+
+    level 55 -> 58: answered in 0.18s, the row changed after 0.30s
+    level 58 -> 59: answered in 0.15s, the row changed after 0.26s
+
+The sentence a person reads never waits for this: the server's own words appear
+the moment they arrive, and only the LIST is scheduled.
+"""
+
+_ROW_SETTLE_TRIES = 4
+"""How many times to re-read before giving up on the row catching up.
+
+One fixed delay measured on one server is a guess about every other -- a slower
+box, a bigger world, a stalled disk (8.4a's adversarial review). So the list is
+re-read up to four times, at 750ms, 1.5s, 2.25s and 3s, and stops as soon as it
+changes. Four is a bound rather than a promise: past it the list is what it is,
+and the server's own sentence is still on screen saying what happened.
+"""
+
+
+_CHARACTER_ACTIONS = (
+    "Teleport",
+    "Set level",
+    "Rename at next login",
+    "Revive",
+    "Send gold to",
+    "Send everything worn by",
+)
+"""The verbs, in the order `ControllerView.character_buttons()` returns them.
+
+Two lists that have to stay in step would be a bug waiting; `zip(..., strict=True)`
+makes a seventh button added to one and not the other raise on the first
+selection rather than silently mislabel.
+"""
+
+
+def _highest_level(entry: CatalogEntry) -> int:
+    """The highest GM level this tree's own command accepts.
+
+    Falls back to 3 where the tree's level store has not been measured, which is
+    the level every core in this catalog calls administrator: a game whose block
+    is absent draws no level controls that do anything anyway, and 3 is the
+    number this app drew for all four before any of them were measured.
+    """
+    level = entry.accounts.level
+    return level.max_level if level is not None else 3
+
+
 @dataclass
 class ControllerServices:
     """Everything the view calls down into. Real implementations by default; fakes in tests.
@@ -118,6 +234,55 @@ class ControllerServices:
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport]
     interrupted_restore: Callable[[], wotlk_maintenance.InterruptedRestore | None]
     forget_interrupted: Callable[[], bool]
+    dashboard: Callable[[], dashboard_module.Verdict] | None = None
+    """One tick of this install's dashboard, or `None` for a game whose block is unmeasured.
+
+    Optional because the per-tree facts the counts need are measured per tree:
+    `wow-wotlk` has them (8.1a), and 8.1b, 8.1c and 8.1d add their own. A tab
+    without one shows no verdict line rather than an empty or invented one.
+    """
+    log_snapshot: Callable[[], logsnap.Snapshot] | None = None
+    """The same `logsnap.Recorder` the controller was given as its `pre_stop` hook.
+
+    Held here as well so the tab can name the file that was just written: the
+    controller's own return value is about stopping, not about evidence.
+    """
+    channel_setup: ChannelSetup | None = None
+    """This install's command-channel setup, for a game that has one (8.2a).
+
+    A small object rather than two callables because the two questions belong
+    together: pressing enable and asking where the setup has got to are the same
+    state machine seen from two sides.
+    """
+    bots: BotBrowser | None = None
+    """This install's bots, for a game whose marker is measured (8.5a).
+
+    The tab exists only where this is wired: a Bots tab that cannot say which
+    accounts are bots would have to show every character on the server, and on
+    this install that is 900 rows of which 500 are the answer.
+    """
+    console_probe: Callable[[str], object] | None = None
+    """One command through this install's command channel, for a console tree (8.2e).
+
+    A callable and not the channel object: the tab has no business knowing what
+    transport is behind it, and the wiring hands over `AttachChannel(...).send`.
+    It is the CHANNEL's send and not the Console tab's own seam:
+    what the Server tab shows has to come through the object every later feature
+    on this tree will use, or it proves the console works and not the channel.
+
+    `None` everywhere else. A tree with a set-up button has a verified line
+    saying a real round trip answered and when, which is the same evidence by a
+    better route; two ways to say it would be one more than is true.
+    """
+    accounts: AccountAdmin | None = None
+    play: object | None = None
+    """8.4a's Characters tab, where this tree has measured what it needs."""
+    """This install's user accounts, for a game whose stores are measured (8.3a).
+
+    One object and not three callables for the reason `channel_setup` is one:
+    the read and the two writes share a fact -- which account is the app's own
+    -- and splitting them would be three places to remember it.
+    """
 
     @classmethod
     def for_entry(
@@ -302,6 +467,13 @@ def _assemble(
     backup: Callable[[], wotlk_maintenance.BackupReport],
     plan_restore: Callable[[Path], wotlk_maintenance.RestorePlan],
     restore: Callable[[wotlk_maintenance.RestorePlan], wotlk_maintenance.RestoreReport],
+    dashboard: Callable[[], dashboard_module.Verdict] | None = None,
+    log_snapshot: logsnap.Recorder | None = None,
+    channel_setup: ChannelSetup | None = None,
+    accounts: AccountAdmin | None = None,
+    play: object | None = None,
+    bots: BotBrowser | None = None,
+    console_probe: Callable[[str], object] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -328,6 +500,13 @@ def _assemble(
         restore=restore,
         interrupted_restore=lambda: wotlk_maintenance.interrupted_restore(server_dir),
         forget_interrupted=lambda: wotlk_maintenance.forget_interrupted_restore(server_dir),
+        dashboard=dashboard,
+        log_snapshot=log_snapshot,
+        channel_setup=channel_setup,
+        accounts=accounts,
+        play=play,
+        bots=bots,
+        console_probe=console_probe,
     )
 
 
@@ -353,16 +532,81 @@ def _for_wotlk(
     # `fixed`. The reverse substitution — this function's `sql`/`mysql`/applier
     # taking the fixed value — is the closed bug `_db_password()` describes.
     probe, reset = install_wiring.import_gate_for(entry, wsl_distro=wsl_distro)
+    # 8.1a. Both are WotLK's alone for now: the counts need per-tree facts the
+    # catalog only carries for this entry, and 8.1b, 8.1c and 8.1d gate their
+    # own. The SAME recorder object is the controller's pre-stop hook and the
+    # tab's way of naming the file, so the tab reports the snapshot that was
+    # actually taken rather than one it re-derives.
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2a. The account is made through this game's own SRP6 row path — the seam
+    # the Accounts tab already uses — so the channel's account is created the
+    # way every other account on this install is.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        create=lambda name, pw, level: wotlk_accounts.create_account(
+            sql, name, pw, gm_level=level, scheme=entry.accounts.scheme or "azerothcore"
+        ),
+        # The repair seam, and the reason it is a different function from
+        # `create`: `create_account` deliberately refuses to re-salt a row that
+        # exists, because silently changing an owner's password is worse than
+        # refusing. `reset_own_password` refuses every name that is not this
+        # app's own, so the one account it can rewrite is the one it made.
+        reset=lambda name, pw: wotlk_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
+    # 8.3a. The list is a database read and the two changes are the server's
+    # own commands, which is owner answer 7 rather than a layering choice. Both
+    # halves are given the app's own account name -- the read leaves it out,
+    # the writes refuse it.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
+    # 8.4a. The Characters tab, over the same channel the account writes use
+    # and the same reader the lists use: this app reads rows and the server
+    # changes them (owner answer 7).
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        channel_setup=channel,
+        accounts=accounts_admin,
+        play=characters_admin,
+        # 8.5a. The marker is resolved per read rather than once at start-up:
+        # it lives in a conf file the user can change while the app is open,
+        # and a list built on a stale marker is a list of the wrong characters.
+        bots=_BotBrowser(entry, server_dir, sql),
         controller=Controller(
             spec,
             server_dir,
             wsl_distro=wsl_distro,
             import_probe=probe,
             reset_unfinished=reset,
+            pre_stop=recorder,
         ),
         sql=sql,
         # Three facts, from three different places, and the command needs all of
@@ -456,11 +700,72 @@ def _for_tbc(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1b, and every fact under these two is this tree's own: `characters`,
+    # `realmd`, and a bot marker that is an account prefix with no registry
+    # table behind it. The seams are the same; nothing about them is inherited.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2c. The same seam as 8.2a and a different enable route, which is the
+    # whole per-tree difference: CMaNGOS reads no environment, so this entry's
+    # channel is switched on by patching `etc/mangosd.conf` -- and `enable()`
+    # needs this install's generated database password, because rendering its
+    # compose files is part of the press.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: tbc_accounts.create_account(sql, name, pw, gm_level=level),
+        # This core's own columns: `v`/`s`, not `salt`/`verifier`. A shared
+        # implementation here would write a row that looks right and can never
+        # log in.
+        reset=lambda name, pw: tbc_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
+    # 8.3b. The same seam as 8.3a, and this tree's own fact under it: the GM
+    # level is a column on the account row, so `accounts.level.table` is null
+    # and there is no access row to join -- or to write.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
+    # 8.4b. The same seam as 8.4a over this tree's own measured facts: its
+    # teleport verb is `tele name` (`teleport` is not a command here at all),
+    # and its inventory row carries the item's template id, so a set of gear is
+    # one join where AzerothCore needs two.
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=tbc_controller.TbcController(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        channel_setup=channel,
+        accounts=accounts_admin,
+        play=characters_admin,
+        bots=_BotBrowser(entry, server_dir, sql),
+        controller=tbc_controller.TbcController(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         # No `prompt=`: this package binds this console's prompt and the side of
         # it the answer arrives on, both from the same catalog entry. Passing
@@ -501,11 +806,79 @@ def _for_vanilla(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1c. Measured on `~/vanilla-75b` before this block was written: this tree
+    # has `etc/aiplayerbot.conf` with the key live at column 0, `characters` and
+    # `realmd` for its schemas, and — its own section of the read says so, not
+    # TBC's — bot accounts marked only by the `account.username` prefix.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2d. The same seam and the same enable route as TBC -- a conf file,
+    # because this family reads no environment -- with this tree's own facts
+    # under it. `db_password` is handed over because rendering this install's
+    # compose files is part of the press, and this family generates its
+    # password per install.
+    channel = channel_setup.InstallChannel(
+        entry,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        install_id=composegen.install_id(server_dir),
+        db_password=password,
+        create=lambda name, pw, level: vanilla_accounts.create_account(
+            sql, name, pw, gm_level=level
+        ),
+        reset=lambda name, pw: vanilla_accounts.reset_own_password(sql, name, pw),
+        channel_for=lambda endpoint: channel_module.SoapChannel(
+            endpoint=endpoint,
+            state_of=lambda: docker.container_state(spec.world, wsl_distro=wsl_distro),
+        ),
+    )
+    # 8.3c. The same seam as 8.3a and 8.3b, over this tree's own measured fact:
+    # `SHOW TABLES LIKE 'account_access'` is empty here and the level is a
+    # column on the account row, so `accounts.level.table` is null and there is
+    # nothing to join or to write.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
+    # 8.4c. The same seam as 8.4a and 8.4b over facts read from THIS install's
+    # own checkout on m910q, 2026-09-07 — and one of them is a different number
+    # from its TBC sibling's, which is the whole box: `Mail.h:49` here is
+    # `#define MAX_MAIL_ITEMS 1` where the same line of the same header in
+    # `~/tbc-7.4c` reads 12, so a gear set is one mail per piece and the button
+    # says so before the press. The other two match TBC and were still asked
+    # rather than inherited: `tele name` is the verb (`Chat.cpp:806-814`, and
+    # `teleport` is not a command in that file at all), and the inventory row
+    # carries the template id itself (`characters.sql:339-347` has both `item`
+    # and `item_template`, and `Player.cpp:3832` writes both).
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=vanilla_controller.VanillaController(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        channel_setup=channel,
+        accounts=accounts_admin,
+        play=characters_admin,
+        bots=_BotBrowser(entry, server_dir, sql),
+        controller=vanilla_controller.VanillaController(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         send_console=lambda cmd: vanilla_console.send_command(
             cmd, container=entry.container_spec().world, wsl_distro=wsl_distro
@@ -541,11 +914,54 @@ def _for_tortoise(
     password = _db_password(entry, server_dir)
     sql = _sql_for(entry, password, wsl_distro=wsl_distro)
     mysql = _mysql_for(entry, password, wsl_distro=wsl_distro)
+    # 8.1d. This is NOT a CMaNGOS tree — `cmangos.md` says so in as many words —
+    # so every value under these two seams comes from its own section and its
+    # own source: `tw_char`/`tw_logon`, and a bot marker that is an account
+    # prefix with no registry, whose compiled default sits at
+    # `PlayerbotAIConfig.cpp:545` here where TBC's is at `:500`.
+    spec = entry.container_spec()
+    recorder = logsnap.Recorder(
+        spec,
+        server_dir,
+        game=entry.id,
+        logs_dir=platform.config_dir() / "logs",
+        wsl_distro=wsl_distro,
+    )
+    watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2e. This core links neither gsoap nor RASocket, so there is no listener
+    # to enable and no `channel_setup` here -- the console IS the channel. The
+    # tab is handed this install's channel as one callable, and the Server tab's
+    # probe is the only Phase 8 surface that exists on this tree so far.
+    # 8.3d. One channel object, used twice: the Server tab's probe presses it,
+    # and the Accounts tab sends this tree's two commands down it. They are the
+    # same console and the same lock, which is the point -- two channels over
+    # one `docker attach` would interleave two replies in one window.
+    console = channel_module.AttachChannel(
+        send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+    )
+    # There is no credential and nothing to set up on this core, so the channel
+    # is simply always the console: `channel_for_saved` answers it rather than
+    # looking one up, and the AttachChannel says "could not ask" by itself when
+    # the world is not there to answer.
+    accounts_admin = useraccounts.InstallAccounts(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=lambda: console,
+        app_account=channel_setup.account_name(composegen.install_id(server_dir)),
+    )
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
-        controller=tortoise_controller.controller_for(server_dir, wsl_distro=wsl_distro),
+        dashboard=watcher.tick,
+        log_snapshot=recorder,
+        console_probe=console.send,
+        accounts=accounts_admin,
+        bots=_BotBrowser(entry, server_dir, sql),
+        controller=tortoise_controller.controller_for(
+            server_dir, wsl_distro=wsl_distro, pre_stop=recorder
+        ),
         sql=sql,
         # This package's `send()` takes no container: it addresses its own
         # entry's worldserver, which is the same catalog fact `spec.world` is.
@@ -579,6 +995,104 @@ A dict rather than a chain of `if`s so that adding a game is adding a row, and
 so that "which games can this build manage?" has an answer that can be printed
 (`UnsupportedGameError` prints it) and asserted against `catalog.json`.
 """
+
+
+class _BotBrowser:
+    """`botlist.page()` with this install's live marker in front of it."""
+
+    def __init__(self, entry: CatalogEntry, server_dir: Path, sql: DockerSql) -> None:
+        self.entry = entry
+        self.server_dir = server_dir
+        self._sql = sql
+
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
+        answer = dbreads.resolve_marker(self.entry, self.server_dir)
+        if answer.marker is None:
+            return botlist.Page(problem=answer.problem or "this install's bot marker is unreadable")
+        return botlist.page(
+            self._sql,
+            self.entry,
+            answer.marker,
+            after=after,
+            name_like=name_like,
+        )
+
+
+def _press_is_allowed(verdict: dashboard_module.Verdict) -> bool:
+    """Whether the enable press is reachable in the state this verdict describes.
+
+    Two clauses, and each was put here by a machine.
+
+    `stable` is 8.1's own value and the first use of it: a world that is `up`
+    with an unreachable database is not stable, which is what the TBC gate found
+    in the first version of that property, and a server nobody could ask about
+    is not one to aim a command at.
+
+    `stopped` was added after yulon-win11-gate refuted the rest of it on
+    2026-09-07. The press REFUSES while the world is running -- 8.2a's whole
+    shape, because a failed bind is not atomic -- and `stable` is only ever true
+    while the world IS running. So the only control that turns the channel on
+    was live exactly when pressing it could not work and dead exactly when it
+    would, and the refusal sentence asked the user to do the thing that greys
+    the button out. A stopped server is the state the press is FOR.
+
+    Everything else stays shut: `restart_loop` and `unknown` are both servers
+    that may be running, and the press would refuse or, worse, write a setting
+    under a world that is up.
+    """
+    return verdict.stable or verdict.state == "stopped"
+
+
+CONSOLE_CHANNEL_SENTENCE = (
+    "Commands reach this server through the worldserver console on the Console tab. "
+    "This core has no remote command listener to turn on \u2014 it is built with neither "
+    "SOAP nor the telnet console \u2014 so there is nothing to set up here."
+)
+"""What the Server tab says for a tree whose channel is the console (8.2e).
+
+The alternative was a greyed-out "Turn on the command channel", which is the
+worst of both: it says the feature exists and then refuses to explain. This
+core's complete source and dependency lists name neither gsoap nor `RASocket`,
+so there is no listener, no port, no account -- and the console the Console tab
+already types at is the whole of its command channel.
+"""
+
+
+def _is_console_channel(entry: CatalogEntry) -> bool:
+    """Whether this entry's command channel is the attach console.
+
+    Read from the entry rather than from the absence of a `channel_setup`: a
+    missing seam means "this build wires nothing", which is also true of a tree
+    whose box has not been done yet, and those two must not say the same thing
+    to a user.
+    """
+    operations = entry.operations
+    return operations is not None and operations.channel == "attach"
+
+
+def _channel_sentence(state: object) -> str:
+    """One line for where the channel setup has got to.
+
+    A function rather than a method so what it says can be read without a
+    widget, the same reason `dashboard.line()` is one.
+    """
+    if isinstance(state, channel_setup.Verified):
+        # The time is the whole point of showing this at all: a channel proved
+        # once and broken since reads identically to one proved a minute ago.
+        # A credential written before the field existed says so rather than
+        # borrowing the current moment, which is the one answer that misleads.
+        when = f" at {state.at}" if state.at else " (before this app recorded when)"
+        return f"Command channel: verified as {state.account}{when}."
+    if isinstance(state, channel_setup.Refused):
+        return f"Command channel: refused. {state.reason}"
+    if isinstance(state, channel_setup.Pending):
+        return (
+            f"Command channel: the account {state.account} exists and is waiting to be proved. "
+            "Start the server if it is not running."
+        )
+    if isinstance(state, channel_setup.GaveUp):
+        return f"Command channel: not set up. {state.reason}"
+    return "Command channel: not set up yet."
 
 
 def _safe_bindings(wsl_distro: str | None = None) -> dict[int, str] | None:
@@ -697,6 +1211,7 @@ class ControllerView(QWidget):
         self._jobs: JobRunner = job_runner or threaded_job_runner(self)
         self._busy = False
         self._status_pending = False
+        self._verdict_pending = False
         self._module_pending: str | None = None
         self._console_pending = False
         self._tabs = QTabWidget(self)
@@ -722,20 +1237,76 @@ class ControllerView(QWidget):
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
+        self._build_characters_tab()
+        self._build_bots_tab()
         self._build_maintenance_tab()
         self._build_modules_tab()
         self._build_networking_tab()
 
+        # What the channel says needs no daemon, no database and no network:
+        # it is read from the credential file, so it is shown whether or not
+        # this tab polls. Asking the SERVER about it is the part that is gated
+        # on polling, just below.
+        self.refresh_channel()
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_status)
+        self._timer.timeout.connect(self.refresh_verdict)
         if status_poll_ms > 0:
             self._timer.start(status_poll_ms)
+            # And once now. `QTimer.start()` fires nothing until the interval
+            # has passed, so a tab opened over a running server spent its first
+            # five seconds saying "status: unknown" with Start enabled
+            # (`pyplan/bug-checklist.md:552`). A tab told not to poll is not
+            # polled at all, here included.
+            self.refresh_status()
+            self.refresh_verdict()
+            # And ask the channel once, for the same reason: a credential the
+            # server has stopped accepting reads as verified straight off the
+            # disk, and until something asks, the repair is never offered.
+            self._check_the_channel()
 
     # ------------------------------------------------------------ server tab
 
     def _build_server_tab(self) -> None:
         tab = QWidget(self)
         box = QVBoxLayout(tab)
+        # One line above the three up/down words, and only when this game's
+        # dashboard is wired: what it says is `dashboard.line()`, which is
+        # tested without a widget because a phrase reachable only through a GUI
+        # test is a phrase nobody reads twice.
+        self.verdict_label = QLabel("", tab)
+        self.verdict_label.setWordWrap(True)
+        self.verdict_label.setVisible(False)
+        # 8.2a. Both are hidden for a game whose channel is not wired: 8.2b,
+        # 8.2c and 8.2d add their own, and a control that cannot work is worse
+        # than no control.
+        self.channel_label = QLabel("", tab)
+        self.channel_label.setWordWrap(True)
+        # Shown for a tree with a channel to set up AND for one whose channel is
+        # the console: the second has nothing to press but everything to explain
+        # (8.2e).
+        self.channel_label.setVisible(
+            self.services.channel_setup is not None or _is_console_channel(self.entry)
+        )
+        if _is_console_channel(self.entry):
+            self.channel_label.setText(CONSOLE_CHANNEL_SENTENCE)
+        self.test_console_button = QPushButton("Test the console", tab)
+        self.test_console_button.setVisible(self.services.console_probe is not None)
+        self.test_console_button.clicked.connect(self.test_console)
+        self.console_probe_label = QLabel("", tab)
+        self.console_probe_label.setWordWrap(True)
+        self.console_probe_label.setVisible(False)
+        self.enable_channel_button = QPushButton("Turn on the command channel", tab)
+        self.enable_channel_button.setVisible(self.services.channel_setup is not None)
+        self.enable_channel_button.clicked.connect(self.enable_channel)
+        # Hidden until the server has actually refused the saved credential.
+        # This is the one control on the tab that can break a channel that
+        # works -- it resets the account's password -- so it exists only where
+        # there is nothing left to break.
+        self.repair_channel_button = QPushButton("Repair the command channel", tab)
+        self.repair_channel_button.setVisible(False)
+        self.repair_channel_button.clicked.connect(self.repair_channel)
         self.status_label = QLabel("status: unknown", tab)
         # Why a whole label and not a dialog: the stop path's refusals are
         # paragraphs naming containers, projects and the file to edit, and they
@@ -787,7 +1358,13 @@ class ControllerView(QWidget):
         ):
             row.addWidget(b)
         box.addWidget(QLabel(f"<b>{self.entry.name}</b> — {self.services.controller.server_dir}"))
+        box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
+        box.addWidget(self.channel_label)
+        box.addWidget(self.test_console_button)
+        box.addWidget(self.console_probe_label)
+        box.addWidget(self.enable_channel_button)
+        box.addWidget(self.repair_channel_button)
         box.addLayout(row)
         box.addWidget(self.problem_label)
         box.addWidget(self.stop_other_button)
@@ -859,6 +1436,151 @@ class ControllerView(QWidget):
             return  # a poll is already in flight; never queue them up
         self._status_pending = True
         self._run(self.services.controller.status, self._status_ready, self._status_failed)
+
+    @Slot()
+    def refresh_verdict(self) -> None:
+        """Re-read this install's verdict off the GUI thread, if it has one.
+
+        Separate from `refresh_status()` rather than folded into it: the status
+        path is the one Phase 7 proved, and a tick that now also reads a
+        database is a different failure surface. Its own in-flight guard, for
+        the reason `refresh_status()` has one — a tick that takes longer than
+        the interval must not queue up behind itself.
+        """
+        if self.services.dashboard is None or self._verdict_pending:
+            return
+        self._verdict_pending = True
+        self._run(self.services.dashboard, self._verdict_ready, self._verdict_failed)
+
+    @Slot(object)
+    def _verdict_ready(self, result: object) -> None:
+        self._verdict_pending = False
+        if not isinstance(result, dashboard_module.Verdict):
+            return
+        self.verdict_label.setText(dashboard_module.line(result))
+        self.verdict_label.setVisible(True)
+        self.enable_channel_button.setEnabled(_press_is_allowed(result))
+
+    @Slot(object)
+    def _verdict_failed(self, exc: object) -> None:
+        """An instrument that breaks must not take the tab with it.
+
+        It writes its own line rather than `problem_label`, which belongs to the
+        actions a user pressed: a failing dashboard would otherwise wipe the
+        explanation of the stop that just refused.
+        """
+        self._verdict_pending = False
+        self.verdict_label.setText(f"could not read this server's dashboard: {exc}")
+        self.verdict_label.setVisible(True)
+
+    @Slot()
+    def enable_channel(self) -> None:
+        """Press the enable, and show what it said.
+
+        The press itself refuses while the world is running — that refusal is
+        the whole shape of 8.2a — so this hands it the status it already knows
+        rather than re-deciding, and shows the sentence either way.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self.problem_label.setText("")
+        running = self.stop_button.isEnabled()
+        try:
+            setup.enable(world_running=running)
+        except Exception as exc:  # noqa: BLE001 - the refusal is a sentence, not a crash
+            self.problem_label.setText(str(exc))
+            return
+        self.problem_label.setText(
+            "The command channel is written into this install's configuration. It is checked "
+            "the next time you start the server."
+        )
+        self.refresh_channel()
+
+    @Slot()
+    def test_console(self) -> None:
+        """Send one harmless command through this install's channel and show the answer.
+
+        `server info` because it changes nothing and prints something a person
+        can recognise. Off the GUI thread: this waits on a reply window measured
+        in seconds, and the Console tab's own send is bounded the same way.
+        """
+        probe = self.services.console_probe
+        if probe is None:
+            return
+        self.console_probe_label.setText("Asking the console\u2026")
+        self.console_probe_label.setVisible(True)
+        self._run(
+            lambda: probe(commands.SERVER_INFO),
+            self._console_probe_ready,
+            self._console_probe_failed,
+        )
+
+    @Slot(object)
+    def _console_probe_ready(self, result: object) -> None:
+        """What the channel said, in the words the distinction needs.
+
+        An answer that did not come back delimited is `indeterminate`: the
+        command may have run. Saying "failed" there would invite a person to
+        send it again, which for a mutation is exactly the wrong advice -- and
+        is why this tree is offered no mutations yet (8.2e).
+        """
+        if not isinstance(result, channel_module.Answer):
+            return
+        if result.outcome == "yes":
+            self.console_probe_label.setText(result.text.strip() or "The console answered.")
+            return
+        # The reason is a clause and not a sentence -- it is written to be read
+        # after "Could not ask:" -- so the full stop is this line's to add. The
+        # gate read it back without one when the clause below was appended.
+        said = (result.reason or "the console did not answer").rstrip(".") + "."
+        if result.indeterminate:
+            said += " The command may still have run, so nothing here is a failure."
+        self.console_probe_label.setText(f"Could not ask: {said}")
+
+    @Slot(object)
+    def _console_probe_failed(self, error: object) -> None:
+        self.console_probe_label.setText(f"Could not ask: {error}")
+
+    @Slot()
+    def refresh_channel(self) -> None:
+        """Say where the channel setup has got to, in words."""
+        setup = self.services.channel_setup
+        if setup is None:
+            # A console channel has no setup to ask about and never changes, so
+            # this is the whole of its answer (8.2e).
+            if _is_console_channel(self.entry):
+                self.channel_label.setText(CONSOLE_CHANNEL_SENTENCE)
+                self.channel_label.setVisible(True)
+            return
+        state = setup.setup_state()
+        self._show_channel(state)
+
+    def _show_channel(self, state: object) -> None:
+        """One place where a channel state becomes what the tab looks like."""
+        self.channel_label.setText(_channel_sentence(state))
+        self.channel_label.setVisible(True)
+        self.repair_channel_button.setVisible(isinstance(state, channel_setup.Refused))
+
+    @Slot()
+    def repair_channel(self) -> None:
+        """Reset the channel account's password, and say what came back.
+
+        Pressed rather than automatic: the reset is a write to the user's auth
+        database, and one that this app is only allowed to make against its own
+        account. `InstallChannel.repair()` refuses from any state but refused,
+        so a stale press cannot break a channel that has since started working.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self.problem_label.setText("")
+        try:
+            state = setup.repair()
+        except Exception as exc:  # noqa: BLE001 - a failed repair is a sentence
+            self.problem_label.setText(str(exc))
+            return
+        self._show_channel(state)
 
     @Slot()
     def recheck(self) -> None:
@@ -1030,6 +1752,46 @@ class ControllerView(QWidget):
     def _server_action_done(self, _result: object) -> None:
         self._set_busy(False)
         self.refresh_status()
+        self._settle_the_channel()
+
+    def _check_the_channel(self) -> None:
+        """Ask whether the saved credential still works, off the GUI thread.
+
+        `check()` and not `settle()`: settle creates an account on an install
+        that has none, and opening a tab is not permission to write a row into
+        the user's auth database. `check()` asks nothing at all unless there is
+        a credential to ask about.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self._run(setup.check, self._channel_settled, self._channel_settle_failed)
+
+    def _settle_the_channel(self) -> None:
+        """After a start, ask the channel where it now stands.
+
+        Run through the job runner and never on the GUI thread: `settle()`
+        creates a database row and makes a SOAP round trip, and a world that is
+        still loading answers slowly by design -- doing it here would freeze the
+        window for as long as the server takes.
+
+        Failures are silent by design. This is not something the user asked
+        for; the channel's own line already says where the setup has got to,
+        and a red paragraph about it would land on top of whatever the Start
+        was actually telling them.
+        """
+        setup = self.services.channel_setup
+        if setup is None:
+            return
+        self._run(setup.settle, self._channel_settled, self._channel_settle_failed)
+
+    @Slot(object)
+    def _channel_settled(self, state: object) -> None:
+        self._show_channel(state)
+
+    @Slot(object)
+    def _channel_settle_failed(self, exc: object) -> None:
+        logger.info(f"the command channel could not be settled: {exc}")
 
     @Slot(object)
     def _stop_done(self, result: object) -> None:
@@ -1043,7 +1805,28 @@ class ControllerView(QWidget):
         self._set_busy(False)
         if result is False:
             self.problem_label.setText("None of this install's servers were running.")
+        else:
+            self._say_where_the_log_went()
         self.refresh_status()
+        self.refresh_verdict()
+
+    def _say_where_the_log_went(self) -> None:
+        """Name the file the pre-stop snapshot wrote, or say why there is none.
+
+        Read after the stop job has finished, so the value was written on the
+        worker thread and is read on the GUI thread with the job's completion
+        between them. Nothing here touches a widget from the worker.
+        """
+        recorder = self.services.log_snapshot
+        snapshot = getattr(recorder, "last", None) if recorder is not None else None
+        if snapshot is None:
+            return
+        if snapshot.path is not None:
+            self.problem_label.setText(f"The server's log was saved to {snapshot.path}")
+        elif snapshot.problem:
+            self.problem_label.setText(
+                f"The server stopped. Its log was not saved: {snapshot.problem}"
+            )
 
     @Slot(object)
     def _start_failed(self, exc: object) -> None:
@@ -1053,9 +1836,49 @@ class ControllerView(QWidget):
             return
         self._hide_stop_other()
         msg = str(exc)
-        self.problem_label.setText(msg)
-        self.action_failed.emit(msg)
+        rolled = self._roll_the_channel_back_if_it_took_the_port(msg)
+        self.problem_label.setText(rolled or msg)
+        self.action_failed.emit(rolled or msg)
         self.refresh_status()
+
+    def _roll_the_channel_back_if_it_took_the_port(self, message: str) -> str:
+        """Undo the press when the start failed on the port the channel claims.
+
+        Docker refuses to publish a host port something else already holds, so
+        the container is never created and no setting the press wrote is ever
+        read. Rolling back is what makes the next Start work; saying so is what
+        stops the user pressing enable again into the same wall.
+
+        Returns the sentence to show, or "" when this failure was about
+        something else -- a start that failed for another reason must never
+        quietly switch the channel off.
+        """
+        setup = self.services.channel_setup
+        operations = self.entry.operations
+        # `port is None` is an attach channel, which has no listener and so no
+        # host port for a failed start to be about (8.2e).
+        if setup is None or operations is None or operations.port is None:
+            return ""
+        if not channel_setup.blames_the_host_port(message, operations.port):
+            return ""
+        try:
+            undone = setup.roll_back()
+        except Exception as exc:  # noqa: BLE001 - the rollback is best effort
+            return (
+                f"The server could not start: port {operations.port} on this machine is in use "
+                f"by something else, and the command channel could not be undone: {exc}"
+            )
+        if not undone:
+            return (
+                f"The server could not start: port {operations.port} on this machine is in use "
+                "by something else. Free it, or stop whatever holds it, and start again."
+            )
+        self.refresh_channel()
+        return (
+            f"The server could not start: port {operations.port} on this machine is in use by "
+            "something else. The command channel has been turned off again and the port given "
+            "back, so the server will start. Free that port and turn the channel on again."
+        )
 
     def _offer_to_stop_the_other_server(self, exc: PortConflictError) -> None:
         """Name the install holding the ports, and offer to stop it.
@@ -1415,13 +2238,56 @@ class ControllerView(QWidget):
         self.account_password = QLineEdit(accounts)
         self.account_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.account_gm = QSpinBox(accounts)
-        self.account_gm.setRange(0, 3)
+        # 8.3d: the ceiling is this tree's, measured by asking its own
+        # command. Three of the four stop at 3; the tortoise fork accepts 4,
+        # and a control that offered 0-to-3 there would hide a level the
+        # tree has without anything failing.
+        self.account_gm.setRange(0, _highest_level(self.entry))
         self.create_account_button = QPushButton("Create", accounts)
         self.create_account_button.clicked.connect(self.create_account)
         form.addRow("Username", self.account_name)
         form.addRow("Password", self.account_password)
         form.addRow("GM level", self.account_gm)
         form.addRow(self.create_account_button)
+
+        # 8.3a. Hidden for a game whose account stores have not been measured:
+        # 8.3b, 8.3c and 8.3d each add their own, and a list built on a guessed
+        # store shows every account as level 0, which is a lie shaped like an
+        # answer.
+        wired = self.services.accounts is not None
+        existing = QGroupBox("Accounts on this server", tab)
+        existing_box = QVBoxLayout(existing)
+        self.account_list = QListWidget(existing)
+        self.account_list.currentRowChanged.connect(self._account_chosen)
+        self.refresh_accounts_button = QPushButton("Refresh the list", existing)
+        self.refresh_accounts_button.clicked.connect(self.refresh_accounts)
+        change = QFormLayout()
+        self.selected_password = QLineEdit(existing)
+        self.selected_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.set_password_button = QPushButton("Set password", existing)
+        self.set_password_button.clicked.connect(self.set_selected_password)
+        self.selected_gm = QSpinBox(existing)
+        self.selected_gm.setRange(0, _highest_level(self.entry))
+        self.set_gm_button = QPushButton("Set GM level", existing)
+        self.set_gm_button.clicked.connect(self.set_selected_gm_level)
+        change.addRow("New password", self.selected_password)
+        change.addRow(self.set_password_button)
+        change.addRow("GM level", self.selected_gm)
+        change.addRow(self.set_gm_button)
+        existing_box.addWidget(self.account_list)
+        existing_box.addWidget(self.refresh_accounts_button)
+        existing_box.addLayout(change)
+        existing.setVisible(wired)
+        for control in (
+            self.account_list,
+            self.refresh_accounts_button,
+            self.set_password_button,
+            self.set_gm_button,
+        ):
+            control.setVisible(wired)
+        # Nothing is chosen yet, and a button that acts on "whichever row
+        # happens to be first" is a trap rather than a convenience.
+        self._account_chosen(-1)
 
         self.account_report = QLabel("", tab)
         # A core this app cannot write an account for is said once, here, with
@@ -1440,9 +2306,414 @@ class ControllerView(QWidget):
         self.account_report.setWordWrap(True)
         self.account_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         box.addWidget(accounts)
+        box.addWidget(existing)
         box.addWidget(self.account_report)
         box.addStretch(1)
         self._tabs.addTab(tab, "Accounts")
+
+    def _build_characters_tab(self) -> None:
+        """8.4a. Every action drawn only where this tree has the command, and
+        every button naming the character it would act on.
+
+        A button called "Revive" is one somebody presses believing it acts on
+        the row they are looking at. "Revive Guglu" is one they can check before
+        pressing, and it costs a `setText` per selection.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        wired = self.services.play is not None
+
+        people = QGroupBox("Characters on this server", tab)
+        people_box = QVBoxLayout(people)
+        self.character_list = QListWidget(people)
+        self.character_list.currentRowChanged.connect(self._character_chosen)
+        self.refresh_characters_button = QPushButton("Refresh the list", people)
+        self.refresh_characters_button.clicked.connect(self.refresh_characters)
+        people_box.addWidget(self.character_list)
+        people_box.addWidget(self.refresh_characters_button)
+
+        actions = QGroupBox("What to do", tab)
+        form = QFormLayout(actions)
+        self.teleport_where = QLineEdit(actions)
+        self.teleport_where.setPlaceholderText("a place this server knows, like Stormwind")
+        self.teleport_button = QPushButton("Teleport", actions)
+        self.teleport_button.clicked.connect(self.teleport_character)
+        self.new_level = QSpinBox(actions)
+        self.new_level.setRange(1, 255)
+        self.set_level_button = QPushButton("Set level", actions)
+        self.set_level_button.clicked.connect(self.set_character_level)
+        self.rename_button = QPushButton("Rename at next login", actions)
+        self.rename_button.clicked.connect(self.rename_character)
+        self.revive_button = QPushButton("Revive", actions)
+        self.revive_button.clicked.connect(self.revive_character)
+        self.gold_amount = QSpinBox(actions)
+        self.gold_amount.setRange(1, 214_748)
+        self.mail_gold_button = QPushButton("Send gold", actions)
+        self.mail_gold_button.clicked.connect(self.mail_gold)
+        self.send_gear_button = QPushButton("Send everything worn", actions)
+        self.send_gear_button.clicked.connect(self.send_gear_set)
+        form.addRow("Teleport to", self.teleport_where)
+        form.addRow(self.teleport_button)
+        form.addRow("Level", self.new_level)
+        form.addRow(self.set_level_button)
+        form.addRow(self.rename_button)
+        form.addRow(self.revive_button)
+        form.addRow("Gold", self.gold_amount)
+        form.addRow(self.mail_gold_button)
+        form.addRow(self.send_gear_button)
+
+        self.character_report = QLabel("", tab)
+        self._character_generation = 0
+        self.character_report.setWordWrap(True)
+        self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # A tree whose Play block nobody has measured gets a SENTENCE rather
+        # than disabled buttons: a control that cannot work is a promise this
+        # tab cannot keep, and 8.4c and 8.4d are the boxes that make it work
+        # there. Saying which game it is stops the sentence reading like a
+        # fault in the app.
+        if not wired:
+            self.character_report.setText(
+                f"{self.entry.name} has not had its character actions measured yet, so this tab "
+                "shows none. They are read from a live server of this game, one box each, "
+                "because a command that exists on one of these cores is not a command that "
+                "exists on the next."
+            )
+        people.setVisible(wired)
+        actions.setVisible(wired)
+        for control in (self.character_list, self.refresh_characters_button):
+            control.setVisible(wired)
+        self._character_chosen(-1)
+
+        box.addWidget(people)
+        box.addWidget(actions)
+        box.addWidget(self.character_report)
+        box.addStretch(1)
+        self._tabs.addTab(tab, "Characters")
+
+    def character_buttons(self) -> tuple[QPushButton, ...]:
+        """Every control that acts on the chosen character.
+
+        One tuple, so the enabling, the naming and the tests all walk the same
+        list -- a seventh button added to the form and forgotten here would be
+        the one that stays enabled with nothing selected.
+        """
+        return (
+            self.teleport_button,
+            self.set_level_button,
+            self.rename_button,
+            self.revive_button,
+            self.mail_gold_button,
+            self.send_gear_button,
+        )
+
+    def _character_chosen(self, row: int) -> None:
+        """Name the chosen character in every button, or wait for one."""
+        item = self.character_list.item(row) if row >= 0 else None
+        if item is None:
+            for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+                button.setText(label)
+                button.setEnabled(False)
+            return
+        name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
+        for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+            button.setText(f"{label} {name}")
+            button.setEnabled(True)
+        if not online:
+            # Measured on the live server, 2026-09-07: `revive` on an offline
+            # character answers SUCCESS and does nothing -- the row read health 0
+            # before and health 0 twenty seconds after. It acts on a live player
+            # object and an offline character has none. Every other action here
+            # works offline; the teleport's own help says so in as many words.
+            self.revive_button.setEnabled(False)
+            self.revive_button.setText(f"{name} has to be logged in to be revived")
+        pieces, mails = self._gear_set_size(name)
+        if pieces:
+            plural = "mail" if mails == 1 else "mails"
+            self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
+        else:
+            # Nothing worn is not a failure and not a thing to press: the
+            # server would refuse an empty mail with a sentence about item ids.
+            self.send_gear_button.setText(f"{name} is wearing nothing")
+            self.send_gear_button.setEnabled(False)
+
+    def _gear_set_size(self, name: str) -> tuple[int, int]:
+        play = self.services.play
+        if play is None:
+            return (0, 0)
+        try:
+            pieces, mails = play.gear_set_size(name)  # type: ignore[attr-defined]
+            return (int(pieces), int(mails))
+        except Exception as exc:  # noqa: BLE001 - a read that failed is not a press
+            logger.info(f"could not size {name}'s gear: {exc}")
+            return (0, 0)
+
+    def _chosen_character(self) -> str:
+        item = self.character_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    def refresh_attempts_after_an_action(self) -> int:
+        """How many re-reads one successful action schedules. A bound, not a promise."""
+        return _ROW_SETTLE_TRIES
+
+    @Slot()
+    def refresh_characters(self) -> None:
+        play = self.services.play
+        if play is None:
+            return
+        self._character_generation += 1
+        generation = self._character_generation
+        self._run(
+            play.listing,  # type: ignore[attr-defined]
+            lambda listed: self._characters_listed_at(generation, listed),
+            self._characters_failed,
+        )
+
+    def _characters_listed_at(self, generation: int, listed: object) -> None:
+        """Take this answer only if it is the newest one asked for.
+
+        Two actions in quick succession schedule two reads, and the older one
+        can land after the newer: without this, the list would end up showing
+        the earlier state and stay there (8.4a's adversarial review).
+        """
+        if generation != self._character_generation:
+            logger.info("a stale character list arrived and was dropped")
+            return
+        self._characters_listed(listed)
+
+    def _refresh_until_it_changes(self, before: tuple[str, ...], attempt: int = 1) -> None:
+        """Re-read the list until it differs from `before`, up to the bound.
+
+        The server answers about 0.15s before its own row is written, so the
+        first read after an action can legitimately show the old state; a
+        second and a third cost nothing and cover a machine slower than the one
+        this was measured on.
+        """
+        self.refresh_characters()
+        if self._character_rows() != before or attempt >= _ROW_SETTLE_TRIES:
+            return
+        QTimer.singleShot(
+            _ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(before, attempt + 1)
+        )
+
+    def _character_rows(self) -> tuple[str, ...]:
+        return tuple(
+            self.character_list.item(row).text() for row in range(self.character_list.count())
+        )
+
+    @Slot(object)
+    def _characters_listed(self, listed: object) -> None:
+        chosen = self._chosen_character()
+        self.character_list.clear()
+        for character in listed:  # type: ignore[attr-defined]
+            where = "online" if character.online else "offline"
+            item = QListWidgetItem(
+                f"{character.name} — level {character.level} — {where} — {character.account}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, character.name)
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(character.online))
+            self.character_list.addItem(item)
+            if character.name == chosen:
+                self.character_list.setCurrentItem(item)
+        if self.character_list.currentRow() < 0:
+            self._character_chosen(-1)
+
+    @Slot(object)
+    def _characters_failed(self, exc: object) -> None:
+        self.character_report.setText(f"Could not read this server's characters: {exc}")
+
+    def _character_action(self, what: str, run: object) -> None:
+        """One press, one sentence, all three outcomes."""
+        name = self._chosen_character()
+        if self.services.play is None or not name:
+            return
+        self.character_report.setText(f"{what} {name}…")
+        self._run(run, self._character_done, self._characters_failed)  # type: ignore[arg-type]
+
+    @Slot(object)
+    def _character_done(self, outcome: object) -> None:
+        done = bool(getattr(outcome, "done", False))
+        said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
+        self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
+        if done:
+            # NOT `self.refresh_characters()`. Measured on the live server,
+            # 2026-09-07: the command answers in about 0.15s and its own row
+            # lands about 0.1s after that, so a list re-read the moment the
+            # answer arrives shows the state BEFORE the thing that was just
+            # done -- "You change the level of Aevret to 60" above a row still
+            # reading 55, which reads as the action having failed.
+            rows = self._character_rows()
+            QTimer.singleShot(_ROW_SETTLE_MS, lambda: self._refresh_until_it_changes(rows))
+
+    @Slot()
+    def teleport_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        where = self.teleport_where.text().strip()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Teleporting", lambda: play.teleport(name, where)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def set_character_level(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        level = self.new_level.value()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Setting the level of", lambda: play.set_level(name, level)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def rename_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Marking for rename", lambda: play.rename(name)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def revive_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action("Reviving", lambda: play.revive(name))  # type: ignore[attr-defined]
+
+    @Slot()
+    def mail_gold(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        gold = self.gold_amount.value()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Sending gold to",
+            lambda: play.mail_gold(  # type: ignore[attr-defined]
+                name, gold=gold, subject="A gift", body="From the server owner"
+            ),
+        )
+
+    @Slot()
+    def send_gear_set(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Sending the worn items of",
+            lambda: play.send_gear_set(  # type: ignore[attr-defined]
+                name, to=name, subject="Your gear", body="Everything you were wearing"
+            ),
+        )
+
+    def _account_chosen(self, row: int) -> None:
+        """Both changes act on the chosen account, so both wait for one."""
+        chosen = row >= 0 and self.account_list.item(row) is not None
+        self.set_password_button.setEnabled(chosen)
+        self.set_gm_button.setEnabled(chosen)
+        if chosen:
+            item = self.account_list.item(row)
+            self.selected_gm.setValue(int(item.data(Qt.ItemDataRole.UserRole + 1) or 0))
+
+    def _chosen_account(self) -> str:
+        item = self.account_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    @Slot()
+    def refresh_accounts(self) -> None:
+        """Read the list, off the GUI thread: it is a `docker exec` and a query."""
+        admin = self.services.accounts
+        if admin is None:
+            return
+        self._run(admin.listing, self._accounts_listed, self._accounts_failed)
+
+    @Slot(object)
+    def _accounts_listed(self, listing: object) -> None:
+        chosen = self._chosen_account()
+        self.account_list.clear()
+        problem = getattr(listing, "problem", "")
+        if problem:
+            # Cleared first: an old list under a new error would be read as the
+            # current accounts, which is exactly the thing the problem says not
+            # to trust.
+            self.account_report.setText(problem)
+            self._account_chosen(-1)
+            return
+        for account in getattr(listing, "accounts", []):
+            item = QListWidgetItem(
+                f"{account.username} — id {account.id} — GM level {account.gm_level}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, account.username)
+            item.setData(Qt.ItemDataRole.UserRole + 1, account.gm_level)
+            self.account_list.addItem(item)
+            if account.username == chosen:
+                self.account_list.setCurrentItem(item)
+        if self.account_list.currentRow() < 0:
+            self._account_chosen(-1)
+
+    @Slot(object)
+    def _accounts_failed(self, exc: object) -> None:
+        self.account_report.setText(f"Could not read this server's accounts: {exc}")
+
+    @Slot()
+    def set_selected_password(self) -> None:
+        """Ask the server to change the chosen account's password.
+
+        The field is cleared for the reason `create_account` clears its own: a
+        password left in a widget is a password in every later repr and
+        traceback frame of that widget.
+        """
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        password = self.selected_password.text()
+        self.selected_password.clear()
+        self.account_report.setText(f"Changing {account}'s password…")
+        self._run(
+            lambda: admin.set_password(account, password),
+            self._account_changed,
+            self._accounts_failed,
+        )
+
+    @Slot()
+    def set_selected_gm_level(self) -> None:
+        admin = self.services.accounts
+        account = self._chosen_account()
+        if admin is None or not account:
+            return
+        level = self.selected_gm.value()
+        self.account_report.setText(f"Setting {account} to GM level {level}…")
+        self._run(
+            lambda: admin.set_gm_level(account, level),
+            self._account_changed,
+            self._accounts_failed,
+        )
+
+    @Slot(object)
+    def _account_changed(self, outcome: object) -> None:
+        """Say what came back, and re-read the list when something changed.
+
+        Without the re-read the tab keeps showing the level the account no
+        longer has — and the list is where a person checks that the change
+        landed.
+        """
+        if getattr(outcome, "done", False):
+            self.account_report.setText(getattr(outcome, "text", "") or "Done.")
+            self.refresh_accounts()
+            return
+        problem = getattr(outcome, "problem", "") or "the server did not say what went wrong"
+        self.account_report.setText(problem)
+        # `action_failed` is what the rest of the app treats as "that did not
+        # happen", and a timeout is not that: the server keeps working on a
+        # command after this app stops waiting. The sentence is shown either
+        # way; only the signal is withheld.
+        if not getattr(outcome, "indeterminate", False):
+            self.action_failed.emit(problem)
 
     @Slot()
     def create_account(self) -> None:
@@ -1487,6 +2758,143 @@ class ControllerView(QWidget):
         self.create_account_button.setEnabled(True)
         self.account_report.setText(f"Could not create the account: {exc}")
         self.action_failed.emit(str(exc))
+
+    # --------------------------------------------------------------- bots tab
+
+    def _build_bots_tab(self) -> None:
+        """Browsing the bots, for a game whose marker this app has measured.
+
+        The whole tab is absent otherwise rather than empty: without a marker
+        the only honest list is every character on the server, which on this
+        install is 900 rows of which 500 are the answer.
+        """
+        if self.services.bots is None:
+            return
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        self.bot_summary = QLabel("", tab)
+        self.bot_summary.setWordWrap(True)
+        self.bot_list = QListWidget(tab)
+        row = QHBoxLayout()
+        self.bot_filter = QLineEdit(tab)
+        self.bot_filter.setPlaceholderText("name begins with…")
+        self.bot_filter.returnPressed.connect(self.filter_bots)
+        self.filter_bots_button = QPushButton("Find", tab)
+        self.filter_bots_button.clicked.connect(self.filter_bots)
+        self.previous_bots_button = QPushButton("Previous", tab)
+        self.previous_bots_button.clicked.connect(self.previous_bot_page)
+        self.next_bots_button = QPushButton("Next", tab)
+        self.next_bots_button.clicked.connect(self.next_bot_page)
+        row.addWidget(self.bot_filter)
+        row.addWidget(self.filter_bots_button)
+        row.addWidget(self.previous_bots_button)
+        row.addWidget(self.next_bots_button)
+        box.addWidget(self.bot_summary)
+        box.addWidget(self.bot_list)
+        box.addLayout(row)
+        # A stack of cursors, one per page seen. There is no arithmetic that
+        # turns "where page three starts" into "where page two starts", so the
+        # only way back is the key the earlier page was read with.
+        self._bot_cursors: list[tuple[str, int] | None] = [None]
+        self._bot_next: tuple[str, int] | None = None
+        self._bot_total: int | None = None
+        self._show_page_buttons()
+        self._tabs.addTab(tab, "Bots")
+
+    def _show_page_buttons(self) -> None:
+        """Neither button offers a page that is not there."""
+        self.previous_bots_button.setEnabled(len(self._bot_cursors) > 1)
+        self.next_bots_button.setEnabled(self._bot_next is not None)
+
+    @Slot()
+    def refresh_bots(self) -> None:
+        """Read the page this tab is on, off the GUI thread."""
+        browser = self.services.bots
+        if browser is None:
+            return
+        after, name_like = self._bot_cursors[-1], self.bot_filter.text().strip()
+        self._run(
+            lambda: browser.page(after=after, name_like=name_like),
+            self._bots_listed,
+            self._bots_failed,
+        )
+
+    @Slot()
+    def filter_bots(self) -> None:
+        """A new filter starts at the first page.
+
+        Otherwise a filter typed on page nine shows page nine of a list that may
+        now be one page long, which reads as "no bots match".
+        """
+        self._bot_cursors = [None]
+        self.refresh_bots()
+
+    @Slot()
+    def next_bot_page(self) -> None:
+        if self._bot_next is None:
+            return
+        self._bot_cursors.append(self._bot_next)
+        self.refresh_bots()
+
+    @Slot()
+    def previous_bot_page(self) -> None:
+        # The first entry is the first page's absent cursor and is never
+        # popped: the button can be reached by a keyboard while a mouse sees it
+        # disabled.
+        if len(self._bot_cursors) > 1:
+            self._bot_cursors.pop()
+        self.refresh_bots()
+
+    @Slot(object)
+    def _bots_listed(self, page: object) -> None:
+        self.bot_list.clear()
+        problem = getattr(page, "problem", "")
+        self._bot_total = getattr(page, "total", None)
+        self._bot_next = getattr(page, "next_after", None)
+        if problem:
+            self.bot_summary.setText(problem)
+            self._show_page_buttons()
+            return
+        # 8.5b: the split is drawn only where the two signals can disagree.
+        # Three of the four trees have no playerbots schema at all, and on
+        # m910q's TBC install this tab read "0 by the playerbots registry" —
+        # naming a table that install has not got, beside a zero a person would
+        # then go looking for. The per-row source is the same noise: one signal
+        # means the same word on every row.
+        split = botlist.has_registry(self.entry)
+        for bot in getattr(page, "bots", []):
+            where = "online" if bot.online else "offline"
+            said_row = f"{bot.name} — level {bot.level} — {where}"
+            self.bot_list.addItem(f"{said_row} — {bot.source}" if split else said_row)
+        total = self._bot_total
+        # A page number and not a row range: the rows are read by cursor, so
+        # "51-100" would be a count this tab does not have and cannot get
+        # without paying for it on every press.
+        page_number = len(self._bot_cursors)
+        shown = f"Page {page_number}, {self.bot_list.count()} shown."
+        warning = getattr(page, "warning", "")
+        if warning:
+            # 8.5b. The clause is "warns, NEITHER reporting zero", and the first
+            # live run of this path (m910q, TBC, 2026-09-07) read
+            # "0 bots. Page 1, 0 shown. no character matched …" -- the number a
+            # person reads first was the one the sentence after it exists to
+            # contradict. The count is dropped rather than moved: the warning
+            # only ever fires on a zero, so there is no other number to lose.
+            self.bot_summary.setText(f"{warning}. {shown}")
+            self._show_page_buttons()
+            return
+        counted = f"{total} {'bot' if total == 1 else 'bots'}"
+        if split:
+            counted += (
+                f": {getattr(page, 'by_registry', 0)} by the playerbots registry, "
+                f"{getattr(page, 'by_prefix', 0)} by the account prefix"
+            )
+        self.bot_summary.setText(f"{counted}. {shown}")
+        self._show_page_buttons()
+
+    @Slot(object)
+    def _bots_failed(self, exc: object) -> None:
+        self.bot_summary.setText(f"Could not read this server's bots: {exc}")
 
     # -------------------------------------------------------- maintenance tab
 
