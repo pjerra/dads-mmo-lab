@@ -150,20 +150,39 @@ def _character(name: str) -> str:
     return name
 
 
-def teleport_to(character: str, location: str) -> str:
-    """`teleport name <character> <location>` -- and it works on an OFFLINE one.
+_TELEPORT_VERB = re.compile(r"^[a-z]+ name$")
+"""What a teleport verb looks like, so a catalog value cannot become two commands.
 
-    `teleport name` rather than `teleport`: the second moves whoever is
-    selected, and over a command channel nobody is selected. The server's own
-    help says "Character can be offline", which is what makes this a button
-    that works on a character list rather than only on somebody playing.
+`teleport name` on AzerothCore and `tele name` on the CMaNGOS trees -- measured
+on both, 2026-09-07, where `teleport` on the second answered "There is no such
+command". Anything else is a tree nobody has measured, and sending it would put
+a character name where a verb belongs.
+"""
+
+
+def teleport_to(character: str, location: str, *, verb: str) -> str:
+    """`<verb> <character> <location>` -- and it works on an OFFLINE character.
+
+    The verb is `teleport name` on AzerothCore and `tele name` on the CMaNGOS
+    trees; the bare `teleport`/`tele` moves whoever is SELECTED, and over a
+    command channel nobody is selected. Both trees' own help says "Character
+    can be offline", which is what makes this a button that works on a list
+    rather than only on somebody playing.
+
+    Passed rather than defaulted, for the reason `realms` and `highest` are:
+    the trees disagree and the disagreement is silent -- `teleport name` on TBC
+    is refused by a server that closes the connection without a word.
     """
     _character(character)
+    _require(
+        bool(_TELEPORT_VERB.match(verb.strip())),
+        f"{verb!r} is not a teleport command this app has measured on a server",
+    )
     _require(
         bool(_TELEPORT_LOCATION.match(location)),
         f"{location!r} is not one of this server's teleport names",
     )
-    return line(f"teleport name {character} {location}")
+    return line(f"{verb.strip()} {character} {location}")
 
 
 def set_character_level(character: str, level: int) -> str:

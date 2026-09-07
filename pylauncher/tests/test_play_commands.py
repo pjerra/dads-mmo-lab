@@ -29,7 +29,10 @@ from yulon import commands
 def test_a_teleport_names_the_character_and_the_place() -> None:
     """`teleport name` and not `teleport`: the second moves whoever is selected,
     and over a command channel nobody is selected."""
-    assert commands.teleport_to("Guglu", "Stormwind") == "teleport name Guglu Stormwind"
+    assert (
+        commands.teleport_to("Guglu", "Stormwind", verb="teleport name")
+        == "teleport name Guglu Stormwind"
+    )
 
 
 def test_a_teleport_location_is_one_token_of_the_servers_own_alphabet() -> None:
@@ -38,12 +41,12 @@ def test_a_teleport_location_is_one_token_of_the_servers_own_alphabet() -> None:
     argument is a second argument to the server, not a longer name."""
     for bad in ("Storm wind", 'Storm"wind', "Stormwind;", "", "x" * 65):
         with pytest.raises(commands.CommandError):
-            commands.teleport_to("Guglu", bad)
+            commands.teleport_to("Guglu", bad, verb="teleport name")
 
 
 def test_a_teleport_refuses_a_name_the_server_would_not_accept() -> None:
     with pytest.raises(commands.CommandError):
-        commands.teleport_to("Gu glu", "Stormwind")
+        commands.teleport_to("Gu glu", "Stormwind", verb="teleport name")
 
 
 # -- level ------------------------------------------------------------------
@@ -158,7 +161,7 @@ def test_a_revive_names_the_character_even_though_the_help_does_not() -> None:
 @pytest.mark.parametrize(
     "builder",
     [
-        lambda name: commands.teleport_to(name, "Stormwind"),
+        lambda name: commands.teleport_to(name, "Stormwind", verb="teleport name"),
         lambda name: commands.set_character_level(name, 10),
         commands.rename_at_login,
         lambda name: commands.mail_items(name, subject="s", body="b", items=((1, 1),)),
@@ -223,3 +226,36 @@ def test_mail_text_that_is_only_unusable_characters_still_leaves_a_subject() -> 
 
     subject = line.split('"')[1]
     assert subject.strip() != "" or subject == " ", line
+
+
+# -- 8.4b: the same verb is not the same word on the next tree ----------------
+
+
+def test_the_teleport_verb_comes_from_the_tree_rather_than_this_file() -> None:
+    """Measured on both servers, 2026-09-07.
+
+    AzerothCore: `.teleport name [#playername] #location`.
+    CMaNGOS TBC: `teleport` is not a command at all -- *"There is no such
+    command"* -- and the verb is `.tele name [#playername] #location`.
+
+    Both say "Character can be offline" in their own help, which is what makes
+    this a button that works on a list. A constant here would have drawn a
+    working button on one tree and a silent refusal on the other.
+    """
+    assert (
+        commands.teleport_to("Guglu", "Stormwind", verb="teleport name")
+        == "teleport name Guglu Stormwind"
+    )
+    assert (
+        commands.teleport_to("Ddsasd", "Orgrimmar", verb="tele name")
+        == "tele name Ddsasd Orgrimmar"
+    )
+
+
+def test_a_teleport_verb_nobody_measured_is_refused_rather_than_sent() -> None:
+    """The verb is a fact from the catalog, and an empty one means the tree has
+    not been measured — sending `" Guglu Stormwind"` would be a command whose
+    first word is a character name."""
+    for bad in ("", "   ", "tele name; account delete x"):
+        with pytest.raises(commands.CommandError):
+            commands.teleport_to("Guglu", "Stormwind", verb=bad)

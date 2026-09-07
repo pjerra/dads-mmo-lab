@@ -743,6 +743,16 @@ def _for_tbc(
         channel_for_saved=channel.live_channel,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
+    # 8.4b. The same seam as 8.4a over this tree's own measured facts: its
+    # teleport verb is `tele name` (`teleport` is not a command here at all),
+    # and its inventory row carries the item's template id, so a set of gear is
+    # one join where AzerothCore needs two.
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
@@ -751,6 +761,7 @@ def _for_tbc(
         log_snapshot=recorder,
         channel_setup=channel,
         accounts=accounts_admin,
+        play=characters_admin,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tbc_controller.TbcController(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder

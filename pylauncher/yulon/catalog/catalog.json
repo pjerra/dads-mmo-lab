@@ -97,6 +97,7 @@
           "instance_table": "item_instance",
           "inventory_column": "item"
         },
+        "teleport_command": "teleport name",
         "mail_item_cap": 12
       },
       "accounts": {
@@ -487,6 +488,11 @@
         "table": "realmlist",
         "address_column": "address",
         "local_address_column": null
+      },
+      "play": {
+        "equipped": { "template_column": "item_template" },
+        "teleport_command": "tele name",
+        "mail_item_cap": 12
       },
       "accounts": {
         "level": { "level_column": "gmlevel", "max_level": 3 },

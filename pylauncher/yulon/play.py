@@ -284,7 +284,8 @@ class InstallPlay:
     # -- writes --------------------------------------------------------------
 
     def teleport(self, character: str, location: str) -> Outcome:
-        return self._one(character, lambda name: commands.teleport_to(name, location))
+        verb = self.entry.play.teleport_command if self.entry.play is not None else ""
+        return self._one(character, lambda name: commands.teleport_to(name, location, verb=verb))
 
     def set_level(self, character: str, level: int) -> Outcome:
         return self._one(character, lambda name: commands.set_character_level(name, level))

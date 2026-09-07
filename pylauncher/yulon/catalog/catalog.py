@@ -1057,6 +1057,14 @@ class Play(_Strict):
     """
 
     equipped: Equipped = Field(description="How to read what a character is wearing.")
+    teleport_command: str = Field(
+        min_length=1,
+        description=(
+            "This tree's named-teleport verb, measured by asking it: `teleport name` on "
+            "AzerothCore, `tele name` on the CMaNGOS trees -- where `teleport` is not a "
+            "command at all and the refusal arrives as a closed connection."
+        ),
+    )
     mail_item_cap: int = Field(
         ge=1,
         description=(
