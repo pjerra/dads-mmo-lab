@@ -13,7 +13,6 @@ from yulon import play
 from yulon.catalog.catalog import load_catalog
 
 WOTLK = load_catalog().get("wow-wotlk")
-TBC = load_catalog().get("wow-tbc")
 
 
 class _Reader:
@@ -200,18 +199,35 @@ def test_a_gear_set_reads_only_the_equipped_slots() -> None:
     assert "slot" in statement
 
 
-def test_the_gear_set_query_is_this_trees_and_not_the_other_ones() -> None:
-    """TBC's own `character_inventory` carries the template id as a column of
-    the inventory row, measured 2026-09-06, so that tree needs one join where
-    this one needs two. The shape comes from the catalog rather than from an
-    `if` in this function."""
-    wotlk_sql, tbc_sql = _Reader(""), _Reader("")
+def test_the_gear_set_query_follows_the_catalog_and_not_an_if_in_this_module() -> None:
+    """The two shapes differ by one join, and the tree decides which.
 
-    play.equipped(wotlk_sql, WOTLK, "Guglu")
-    play.equipped(tbc_sql, TBC, "Guglu")
+    AzerothCore's inventory row carries the item INSTANCE guid; the CMaNGOS
+    trees carry the template id on the row itself (measured on the TBC install,
+    2026-09-06). Only the first is in the catalog today -- TBC's block waits for
+    8.4b to measure its own mail cap and commands rather than inherit them -- so
+    the second shape is exercised through an entry whose block says so, which
+    is what a tree gaining that block will do.
+    """
+    without_join = WOTLK.model_copy(
+        update={
+            "play": WOTLK.play.model_copy(
+                update={
+                    "equipped": WOTLK.play.equipped.model_copy(
+                        update={"template_column": "item_template", "instance_table": None}
+                    )
+                }
+            )
+        }
+    )
+    joined, flat = _Reader(""), _Reader("")
 
-    assert "item_instance" in wotlk_sql.asked[0][1]
-    assert "item_instance" not in tbc_sql.asked[0][1], tbc_sql.asked[0][1]
+    play.equipped(joined, WOTLK, "Guglu")
+    play.equipped(flat, without_join, "Guglu")
+
+    assert "item_instance" in joined.asked[0][1]
+    assert "item_instance" not in flat.asked[0][1], flat.asked[0][1]
+    assert "item_template" in flat.asked[0][1]
 
 
 def test_a_tree_that_has_not_measured_its_gear_refuses_rather_than_guesses() -> None:

@@ -60,6 +60,7 @@ from yulon import (
 )
 from yulon import channel as channel_module
 from yulon import dashboard as dashboard_module
+from yulon import play as play_module
 from yulon.apply import Applier, ApplyReport, DockerSql
 from yulon.catalog import composegen
 from yulon.catalog.catalog import CatalogEntry
@@ -157,6 +158,22 @@ class ChannelSetup(Protocol):
     def setup_state(self) -> object: ...
 
 
+_CHARACTER_ACTIONS = (
+    "Teleport",
+    "Set level",
+    "Rename at next login",
+    "Revive",
+    "Send gold to",
+    "Send everything worn by",
+)
+"""The verbs, in the order `ControllerView.character_buttons()` returns them.
+
+Two lists that have to stay in step would be a bug waiting; `zip(..., strict=True)`
+makes a seventh button added to one and not the other raise on the first
+selection rather than silently mislabel.
+"""
+
+
 def _highest_level(entry: CatalogEntry) -> int:
     """The highest GM level this tree's own command accepts.
 
@@ -235,6 +252,8 @@ class ControllerServices:
     better route; two ways to say it would be one more than is true.
     """
     accounts: AccountAdmin | None = None
+    play: object | None = None
+    """8.4a's Characters tab, where this tree has measured what it needs."""
     """This install's user accounts, for a game whose stores are measured (8.3a).
 
     One object and not three callables for the reason `channel_setup` is one:
@@ -429,6 +448,7 @@ def _assemble(
     log_snapshot: logsnap.Recorder | None = None,
     channel_setup: ChannelSetup | None = None,
     accounts: AccountAdmin | None = None,
+    play: object | None = None,
     bots: BotBrowser | None = None,
     console_probe: Callable[[str], object] | None = None,
 ) -> ControllerServices:
@@ -461,6 +481,7 @@ def _assemble(
         log_snapshot=log_snapshot,
         channel_setup=channel_setup,
         accounts=accounts,
+        play=play,
         bots=bots,
         console_probe=console_probe,
     )
@@ -534,6 +555,15 @@ def _for_wotlk(
         channel_for_saved=channel.live_channel,
         app_account=channel_setup.account_name(composegen.install_id(server_dir)),
     )
+    # 8.4a. The Characters tab, over the same channel the account writes use
+    # and the same reader the lists use: this app reads rows and the server
+    # changes them (owner answer 7).
+    characters_admin = play_module.InstallPlay(
+        entry,
+        server_dir,
+        sql=sql,
+        channel_for_saved=channel.live_channel,
+    )
     return _assemble(
         entry,
         server_dir,
@@ -542,6 +572,7 @@ def _for_wotlk(
         log_snapshot=recorder,
         channel_setup=channel,
         accounts=accounts_admin,
+        play=characters_admin,
         # 8.5a. The marker is resolved per read rather than once at start-up:
         # it lives in a conf file the user can change while the app is open,
         # and a list built on a stale marker is a list of the wrong characters.
@@ -1155,6 +1186,7 @@ class ControllerView(QWidget):
         self._build_server_tab()
         self._build_console_tab()
         self._build_accounts_tab()
+        self._build_characters_tab()
         self._build_bots_tab()
         self._build_maintenance_tab()
         self._build_modules_tab()
@@ -2227,6 +2259,242 @@ class ControllerView(QWidget):
         box.addWidget(self.account_report)
         box.addStretch(1)
         self._tabs.addTab(tab, "Accounts")
+
+    def _build_characters_tab(self) -> None:
+        """8.4a. Every action drawn only where this tree has the command, and
+        every button naming the character it would act on.
+
+        A button called "Revive" is one somebody presses believing it acts on
+        the row they are looking at. "Revive Guglu" is one they can check before
+        pressing, and it costs a `setText` per selection.
+        """
+        tab = QWidget(self)
+        box = QVBoxLayout(tab)
+        wired = self.services.play is not None
+
+        people = QGroupBox("Characters on this server", tab)
+        people_box = QVBoxLayout(people)
+        self.character_list = QListWidget(people)
+        self.character_list.currentRowChanged.connect(self._character_chosen)
+        self.refresh_characters_button = QPushButton("Refresh the list", people)
+        self.refresh_characters_button.clicked.connect(self.refresh_characters)
+        people_box.addWidget(self.character_list)
+        people_box.addWidget(self.refresh_characters_button)
+
+        actions = QGroupBox("What to do", tab)
+        form = QFormLayout(actions)
+        self.teleport_where = QLineEdit(actions)
+        self.teleport_where.setPlaceholderText("a place this server knows, like Stormwind")
+        self.teleport_button = QPushButton("Teleport", actions)
+        self.teleport_button.clicked.connect(self.teleport_character)
+        self.new_level = QSpinBox(actions)
+        self.new_level.setRange(1, 255)
+        self.set_level_button = QPushButton("Set level", actions)
+        self.set_level_button.clicked.connect(self.set_character_level)
+        self.rename_button = QPushButton("Rename at next login", actions)
+        self.rename_button.clicked.connect(self.rename_character)
+        self.revive_button = QPushButton("Revive", actions)
+        self.revive_button.clicked.connect(self.revive_character)
+        self.gold_amount = QSpinBox(actions)
+        self.gold_amount.setRange(1, 214_748)
+        self.mail_gold_button = QPushButton("Send gold", actions)
+        self.mail_gold_button.clicked.connect(self.mail_gold)
+        self.send_gear_button = QPushButton("Send everything worn", actions)
+        self.send_gear_button.clicked.connect(self.send_gear_set)
+        form.addRow("Teleport to", self.teleport_where)
+        form.addRow(self.teleport_button)
+        form.addRow("Level", self.new_level)
+        form.addRow(self.set_level_button)
+        form.addRow(self.rename_button)
+        form.addRow(self.revive_button)
+        form.addRow("Gold", self.gold_amount)
+        form.addRow(self.mail_gold_button)
+        form.addRow(self.send_gear_button)
+
+        self.character_report = QLabel("", tab)
+        self.character_report.setWordWrap(True)
+        self.character_report.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        # A tree whose Play block nobody has measured gets a SENTENCE rather
+        # than disabled buttons: a control that cannot work is a promise this
+        # tab cannot keep, and 8.4c and 8.4d are the boxes that make it work
+        # there. Saying which game it is stops the sentence reading like a
+        # fault in the app.
+        if not wired:
+            self.character_report.setText(
+                f"{self.entry.name} has not had its character actions measured yet, so this tab "
+                "shows none. They are read from a live server of this game, one box each, "
+                "because a command that exists on one of these cores is not a command that "
+                "exists on the next."
+            )
+        people.setVisible(wired)
+        actions.setVisible(wired)
+        for control in (self.character_list, self.refresh_characters_button):
+            control.setVisible(wired)
+        self._character_chosen(-1)
+
+        box.addWidget(people)
+        box.addWidget(actions)
+        box.addWidget(self.character_report)
+        box.addStretch(1)
+        self._tabs.addTab(tab, "Characters")
+
+    def character_buttons(self) -> tuple[QPushButton, ...]:
+        """Every control that acts on the chosen character.
+
+        One tuple, so the enabling, the naming and the tests all walk the same
+        list -- a seventh button added to the form and forgotten here would be
+        the one that stays enabled with nothing selected.
+        """
+        return (
+            self.teleport_button,
+            self.set_level_button,
+            self.rename_button,
+            self.revive_button,
+            self.mail_gold_button,
+            self.send_gear_button,
+        )
+
+    def _character_chosen(self, row: int) -> None:
+        """Name the chosen character in every button, or wait for one."""
+        item = self.character_list.item(row) if row >= 0 else None
+        if item is None:
+            for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+                button.setText(label)
+                button.setEnabled(False)
+            return
+        name = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+            button.setText(f"{label} {name}")
+            button.setEnabled(True)
+        pieces, mails = self._gear_set_size(name)
+        if pieces:
+            self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} mails)")
+        else:
+            # Nothing worn is not a failure and not a thing to press: the
+            # server would refuse an empty mail with a sentence about item ids.
+            self.send_gear_button.setText(f"{name} is wearing nothing")
+            self.send_gear_button.setEnabled(False)
+
+    def _gear_set_size(self, name: str) -> tuple[int, int]:
+        play = self.services.play
+        if play is None:
+            return (0, 0)
+        try:
+            pieces, mails = play.gear_set_size(name)  # type: ignore[attr-defined]
+            return (int(pieces), int(mails))
+        except Exception as exc:  # noqa: BLE001 - a read that failed is not a press
+            logger.info(f"could not size {name}'s gear: {exc}")
+            return (0, 0)
+
+    def _chosen_character(self) -> str:
+        item = self.character_list.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.ItemDataRole.UserRole) or "")
+
+    @Slot()
+    def refresh_characters(self) -> None:
+        play = self.services.play
+        if play is None:
+            return
+        self._run(play.listing, self._characters_listed, self._characters_failed)  # type: ignore[attr-defined]
+
+    @Slot(object)
+    def _characters_listed(self, listed: object) -> None:
+        chosen = self._chosen_character()
+        self.character_list.clear()
+        for character in listed:  # type: ignore[attr-defined]
+            where = "online" if character.online else "offline"
+            item = QListWidgetItem(
+                f"{character.name} — level {character.level} — {where} — {character.account}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, character.name)
+            self.character_list.addItem(item)
+            if character.name == chosen:
+                self.character_list.setCurrentItem(item)
+        if self.character_list.currentRow() < 0:
+            self._character_chosen(-1)
+
+    @Slot(object)
+    def _characters_failed(self, exc: object) -> None:
+        self.character_report.setText(f"Could not read this server's characters: {exc}")
+
+    def _character_action(self, what: str, run: object) -> None:
+        """One press, one sentence, all three outcomes."""
+        name = self._chosen_character()
+        if self.services.play is None or not name:
+            return
+        self.character_report.setText(f"{what} {name}…")
+        self._run(run, self._character_done, self._characters_failed)  # type: ignore[arg-type]
+
+    @Slot(object)
+    def _character_done(self, outcome: object) -> None:
+        done = bool(getattr(outcome, "done", False))
+        said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
+        self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
+        if done:
+            self.refresh_characters()
+
+    @Slot()
+    def teleport_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        where = self.teleport_where.text().strip()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Teleporting", lambda: play.teleport(name, where)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def set_character_level(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        level = self.new_level.value()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Setting the level of", lambda: play.set_level(name, level)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def rename_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Marking for rename", lambda: play.rename(name)  # type: ignore[attr-defined]
+        )
+
+    @Slot()
+    def revive_character(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action("Reviving", lambda: play.revive(name))  # type: ignore[attr-defined]
+
+    @Slot()
+    def mail_gold(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        gold = self.gold_amount.value()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Sending gold to",
+            lambda: play.mail_gold(  # type: ignore[attr-defined]
+                name, gold=gold, subject="A gift", body="From the server owner"
+            ),
+        )
+
+    @Slot()
+    def send_gear_set(self) -> None:
+        play, name = self.services.play, self._chosen_character()
+        if play is None or not name:
+            return
+        self._character_action(
+            "Sending the worn items of",
+            lambda: play.send_gear_set(  # type: ignore[attr-defined]
+                name, to=name, subject="Your gear", body="Everything you were wearing"
+            ),
+        )
 
     def _account_chosen(self, row: int) -> None:
         """Both changes act on the chosen account, so both wait for one."""

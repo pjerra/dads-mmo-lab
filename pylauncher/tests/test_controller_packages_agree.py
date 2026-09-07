@@ -358,7 +358,14 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # goes.
         console = entry.operations.channel if entry.operations is not None else None
         unprobed = {"console_probe"} if console != "attach" else set()
-        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed
+        # 8.4a's Characters tab, decided by the same kind of fact: where a tree
+        # keeps a character's equipped items, and how many attachments one of
+        # its mails carries. Reading the wrong shape answers a list of instance
+        # guids that look exactly like item ids, so a tree without that
+        # measurement has not had its 8.4 box -- and this fails the day 8.4b,
+        # 8.4c or 8.4d lands its catalog block without its wiring.
+        unplayed = {"play"} if entry.play is None else set()
+        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed | unplayed
         if game == "wow-wotlk":
             assert (
                 set(absent) == unprobed
