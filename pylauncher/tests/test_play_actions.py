@@ -486,9 +486,7 @@ def _one_row(tmp_path, entry, row: str, channel):
     because the guard fired.
     """
     reader = _Reader(**{"UPPER(name)": row})
-    install = play.InstallPlay(
-        entry, tmp_path, sql=reader, channel_for_saved=lambda: channel
-    )
+    install = play.InstallPlay(entry, tmp_path, sql=reader, channel_for_saved=lambda: channel)
     return install, reader
 
 
