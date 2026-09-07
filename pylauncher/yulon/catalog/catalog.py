@@ -1078,6 +1078,85 @@ class Play(_Strict):
             "and the button has to say so before the press."
         ),
     )
+    revive_offline: bool | None = Field(
+        default=None,
+        description=(
+            "Whether `revive` does anything to a character who is NOT logged in, or null "
+            "where nobody has measured it here -- and the button is offered only on a True. "
+            "8.4a and 8.4b both read `characters.health` before and after, saw 0 and 0, and "
+            "concluded the command does nothing offline; 8.4c measured the CORPSE instead "
+            "and watched it go, on a character that never logged in. The offline branch is "
+            "`ConvertCorpseForPlayer` -- 'will resurrected at login without corpse' -- so "
+            "health is exactly the column it does not touch. Null on the trees whose own "
+            "boxes have not looked again."
+        ),
+    )
+    rename_command: str = Field(
+        min_length=1,
+        description=(
+            "This tree's verb for flagging a rename at the next login. `character rename` on "
+            "three of these trees; the tortoise fork registers `rename` at the TOP level "
+            "(`Chat.cpp:850`) and its `characterCommandTable` has no rename row at all, so "
+            "the sibling spelling arrives there as an unknown SUBcommand and answers with a "
+            "list of the subcommands it does have."
+        ),
+    )
+    rename_offline_refusal: str | None = Field(
+        default=None,
+        description=(
+            "What to say instead of offering the at-login rename to a character who is NOT "
+            "logged in, or null where this tree flags an offline character the same way it "
+            "flags a live one. A sentence rather than a boolean because the trees do not "
+            "merely differ in whether it WORKS: on the tortoise fork the same spelling runs "
+            "`UPDATE characters SET name = guid` for an offline character "
+            "(`Commands.cpp:12624-12635`), which does not flag a rename -- it throws the name "
+            "away. That is data loss behind a button, and the sentence says what to do "
+            "instead."
+        ),
+    )
+    set_level_command: str | None = Field(
+        description=(
+            "This tree's verb for putting a character at a level somebody picks -- "
+            "`character level` on three of these trees -- or NULL where the console has no "
+            "route to one. Required rather than defaulted, because a default is exactly how "
+            "a null turns back into a sibling's string on the way to the wire. The tortoise "
+            "fork is the null: the only command that writes an arbitrary level is `.levelup`, "
+            "whose table row sets `AllowConsole` false (`Chat.cpp:923`), and `CliHandler::"
+            "isAvailable` refuses on that field before it looks at security at all -- a "
+            "refusal the `command` DB table cannot override, since that table carries "
+            "SecurityLevel and Help and nothing else (`Chat.cpp:1730-1770`)."
+        ),
+    )
+    set_level_absent_reason: str | None = Field(
+        default=None,
+        description=(
+            "The sentence the Characters tab draws where the set-level control would be, on a "
+            "tree that has no such command. Required exactly where `set_level_command` is "
+            "null, and forbidden where it is not -- 8.4d's own clause is that the group is "
+            "replaced by a sentence NAMING WHAT DOES EXIST rather than one implying nothing "
+            "does, so 'not supported' would satisfy the shape and miss the point. It lives in "
+            "the catalog beside the measurement it comes from rather than in the view, "
+            "because it is a fact about a server and not a piece of English about a button."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _an_absent_level_command_says_what_this_tree_has_instead(self) -> Play:
+        """The two fields are one fact and neither can hold it alone.
+
+        A null command with no sentence draws an empty space where a group was,
+        which is the outcome 8.4d exists to prevent; a sentence beside a command
+        that works is a sentence nothing would ever draw, so it would rot
+        unread. Asserted here because the relationship has no other owner --
+        the view reads both and the catalog file writes both, and neither can
+        see the other (`defects live between the parts`).
+        """
+        if (self.set_level_command is None) != bool(self.set_level_absent_reason):
+            raise ValueError(
+                "set_level_absent_reason is required exactly where set_level_command is null: "
+                f"command={self.set_level_command!r}, reason={self.set_level_absent_reason!r}"
+            )
+        return self
 
 
 class Console(_Strict):

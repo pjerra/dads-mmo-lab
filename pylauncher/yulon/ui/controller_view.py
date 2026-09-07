@@ -2352,10 +2352,34 @@ class ControllerView(QWidget):
         self.mail_gold_button.clicked.connect(self.mail_gold)
         self.send_gear_button = QPushButton("Send everything worn", actions)
         self.send_gear_button.clicked.connect(self.send_gear_set)
+        # 8.4d. The set-level group is drawn only where the tree HAS such a
+        # command, and where it has not, the space it would have taken carries a
+        # sentence about what the server can do instead. Not a disabled button
+        # (a promise this tab cannot keep), not an empty space (which reads as a
+        # tab that forgot), and not "not supported" (which says nothing a person
+        # can act on): the entry's own `set_level_absent_reason`, measured with
+        # the absence and stored beside it, so this view holds no English about
+        # anybody's server.
+        self.set_level_absent = QLabel("", actions)
+        self.set_level_absent.setWordWrap(True)
+        self.set_level_absent.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         form.addRow("Teleport to", self.teleport_where)
         form.addRow(self.teleport_button)
-        form.addRow("Level", self.new_level)
-        form.addRow(self.set_level_button)
+        if self._set_level_command() is not None:
+            form.addRow("Level", self.new_level)
+            form.addRow(self.set_level_button)
+            self.set_level_absent.setVisible(False)
+        else:
+            # Hidden as well as un-added: a widget with a parent and no layout
+            # cell still draws itself at the corner of its parent, so leaving
+            # the row out is not by itself leaving the control out.
+            self.new_level.setVisible(False)
+            self.set_level_button.setVisible(False)
+            reason = self.entry.play.set_level_absent_reason if self.entry.play else None
+            self.set_level_absent.setText(reason or "")
+            self.set_level_absent.setVisible(bool(reason))
+            if reason:
+                form.addRow(self.set_level_absent)
         form.addRow(self.rename_button)
         form.addRow(self.revive_button)
         form.addRow("Gold", self.gold_amount)
@@ -2390,14 +2414,24 @@ class ControllerView(QWidget):
         box.addStretch(1)
         self._tabs.addTab(tab, "Characters")
 
-    def character_buttons(self) -> tuple[QPushButton, ...]:
-        """Every control that acts on the chosen character.
+    def _set_level_command(self) -> str | None:
+        """This tree's set-level verb, or None where its console has no route.
 
-        One tuple, so the enabling, the naming and the tests all walk the same
-        list -- a seventh button added to the form and forgotten here would be
-        the one that stays enabled with nothing selected.
+        Read from the entry rather than decided by id, which is 8.4d's own
+        clause: a tab that knows Tortoise by name is a tab that is wrong about
+        the fifth game.
         """
-        return (
+        return self.entry.play.set_level_command if self.entry.play is not None else None
+
+    def _character_actions(self) -> tuple[tuple[QPushButton, str], ...]:
+        """The controls this TREE has, each with the verb that labels it.
+
+        Pairs rather than two lists, because the two have to stay in step and a
+        `zip(..., strict=True)` over a list that is now conditional would fail
+        on the first selection instead of on the drawing. A button withheld
+        here is withheld from the naming, the enabling and the tests at once.
+        """
+        every = (
             self.teleport_button,
             self.set_level_button,
             self.rename_button,
@@ -2405,30 +2439,71 @@ class ControllerView(QWidget):
             self.mail_gold_button,
             self.send_gear_button,
         )
+        drawn = self._set_level_command() is not None
+        return tuple(
+            (button, label)
+            for button, label in zip(every, _CHARACTER_ACTIONS, strict=True)
+            if drawn or button is not self.set_level_button
+        )
+
+    def character_buttons(self) -> tuple[QPushButton, ...]:
+        """Every control that acts on the chosen character, ON THIS TREE.
+
+        One tuple, so the enabling, the naming and the tests all walk the same
+        list -- a seventh button added to the form and forgotten here would be
+        the one that stays enabled with nothing selected.
+        """
+        return tuple(button for button, _ in self._character_actions())
 
     def _character_chosen(self, row: int) -> None:
         """Name the chosen character in every button, or wait for one."""
         item = self.character_list.item(row) if row >= 0 else None
         if item is None:
-            for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+            for button, label in self._character_actions():
                 button.setText(label)
                 button.setEnabled(False)
             return
         name = str(item.data(Qt.ItemDataRole.UserRole) or "")
         online = bool(item.data(Qt.ItemDataRole.UserRole + 1))
-        for button, label in zip(self.character_buttons(), _CHARACTER_ACTIONS, strict=True):
+        for button, label in self._character_actions():
             button.setText(f"{label} {name}")
             button.setEnabled(True)
-        if not online:
-            # Measured on the live server, 2026-09-07: `revive` on an offline
-            # character answers SUCCESS and does nothing -- the row read health 0
-            # before and health 0 twenty seconds after. It acts on a live player
-            # object and an offline character has none. Every other action here
-            # works offline; the teleport's own help says so in as many words.
+        offline_rename = self._rename_offline_refusal()
+        if not online and offline_rename:
+            # 8.4d, and it is a sharper case than the revive one below: the
+            # command is not merely ineffective offline on that fork, it does
+            # something ELSE. `rename <char>` with no new name flags the rename
+            # for a character who is logged in (`Commands.cpp:12612-12623`); for
+            # one who is not, the same spelling runs
+            # `UPDATE characters SET name = guid` (`:12624-12635`) and the name
+            # is gone. So the refusal is the entry's, per tree, and it names
+            # what the server would have done rather than only saying no.
+            self.rename_button.setEnabled(False)
+            self.rename_button.setText(f"{name} {offline_rename}")
+        if not online and not self._revive_works_offline():
+            # Whether an offline revive does anything is a PER-TREE fact and the
+            # entry carries it. It was a constant here, on the strength of a
+            # reading taken on two other trees: `characters.health` before and
+            # after, 0 and 0, "so the command does nothing". 8.4c looked at the
+            # CORPSE on the Vanilla server instead and watched it go, on a
+            # character that never logged in -- the offline branch is
+            # `ConvertCorpseForPlayer`, which resurrects at the next login and
+            # touches no health. Every other action here works offline; the
+            # teleport's own help says so in as many words.
             self.revive_button.setEnabled(False)
             self.revive_button.setText(f"{name} has to be logged in to be revived")
-        pieces, mails = self._gear_set_size(name)
-        if pieces:
+        pieces, mails, refusal = self._gear_set_size(name)
+        self.send_gear_button.setToolTip("" if refusal is None else refusal[1])
+        if refusal is not None:
+            # The read did not answer, and WHY is the only useful thing to draw.
+            # Measured on the live Vanilla server, 2026-09-07 (8.4c): two
+            # characters there are called Joleta, the read raised, and this
+            # branch used to fall through to "wearing nothing" -- a sentence
+            # about the character that was false, in place of a sentence about
+            # the server that was true.
+            self.send_gear_button.setText(refusal[0])
+            self.send_gear_button.setEnabled(False)
+        elif pieces:
             plural = "mail" if mails == 1 else "mails"
             self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
         else:
@@ -2437,16 +2512,41 @@ class ControllerView(QWidget):
             self.send_gear_button.setText(f"{name} is wearing nothing")
             self.send_gear_button.setEnabled(False)
 
-    def _gear_set_size(self, name: str) -> tuple[int, int]:
+    def _revive_works_offline(self) -> bool:
+        """Only where this tree's own box measured that it does.
+
+        A missing block and an unmeasured field both mean "do not offer it",
+        which is the same answer for the same reason: nobody has run the command
+        against that server and watched what it did.
+        """
+        return bool(self.entry.play is not None and self.entry.play.revive_offline)
+
+    def _rename_offline_refusal(self) -> str:
+        """What to say instead of flagging a rename on a character who is out.
+
+        Empty on every tree whose entry carries no such refusal, which is the
+        honest default here and not the one `revive_offline` takes: a rename
+        flag is offered until a tree has been measured to do something worse,
+        and this app has watched three trees do the harmless thing.
+        """
+        play = self.entry.play
+        return (play.rename_offline_refusal or "") if play is not None else ""
+
+    def _gear_set_size(self, name: str) -> tuple[int, int, tuple[str, str] | None]:
+        """The set's size, or why there is not one -- short enough for the
+        button, and in full for the tooltip behind it."""
         play = self.services.play
         if play is None:
-            return (0, 0)
+            return (0, 0, None)
         try:
             pieces, mails = play.gear_set_size(name)  # type: ignore[attr-defined]
-            return (int(pieces), int(mails))
+            return (int(pieces), int(mails), None)
+        except play_module.Ambiguous as exc:
+            logger.info(f"could not size {name}'s gear: {exc}")
+            return (0, 0, (exc.summary, str(exc)))
         except Exception as exc:  # noqa: BLE001 - a read that failed is not a press
             logger.info(f"could not size {name}'s gear: {exc}")
-            return (0, 0)
+            return (0, 0, (f"Could not read what {name} is wearing", str(exc)))
 
     def _chosen_character(self) -> str:
         item = self.character_list.currentItem()
