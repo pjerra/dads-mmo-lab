@@ -48,7 +48,7 @@ character can see.
 | File | What it shows |
 |---|---|
 | `1-bots.png` | the Bots tab: 1000 bots, the split by signal, and the first fifty |
-| `2-page-two.png` | the next page, 51–100 |
+| `2-page-two.png` | the next page, read from where the first one ended |
 | `3-filtered.png` | a three-letter filter, and the one row it matched |
 | `4-who-list.png` | the client in the world, and `/who` finding a bot the tab listed |
 
