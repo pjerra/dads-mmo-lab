@@ -2663,6 +2663,37 @@ def test_a_command_control_is_enabled_again_once_the_server_settles(
     assert view.enable_channel_button.isEnabled() is True
 
 
+def test_the_press_is_reachable_in_the_one_state_that_allows_it(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Measured on yulon-win11-gate, 2026-09-07, on the route a person has.
+
+    The press REFUSES while the world is running -- that is 8.2a's whole shape,
+    because a failed bind is not atomic and on the CMaNGOS trees it costs
+    character saves. The button was enabled on `stable`, and `stable` is only
+    ever true while the world IS running. So the control was live exactly when
+    pressing it could not work, and dead exactly when it would: with the world
+    stopped and the channel not set up, the Windows box showed
+
+        verdict  'stopped'
+        channel  'Command channel: not set up yet.'
+        ENABLE   disabled
+
+    and the app's own refusal sentence tells the user to do the thing that
+    disables the button: "Stop it, press this again, then start it as usual."
+
+    8.2a did not catch it because its gate called `InstallChannel.enable()`
+    directly. The mechanism was proved; the route was not.
+    """
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    services.dashboard = lambda: dashboard.Verdict("stopped")
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_verdict()
+
+    assert view.enable_channel_button.isEnabled() is True
+
+
 def test_the_interlock_reads_stable_rather_than_the_state_word(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:

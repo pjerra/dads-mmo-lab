@@ -818,6 +818,31 @@ class _BotBrowser:
         )
 
 
+def _press_is_allowed(verdict: dashboard_module.Verdict) -> bool:
+    """Whether the enable press is reachable in the state this verdict describes.
+
+    Two clauses, and each was put here by a machine.
+
+    `stable` is 8.1's own value and the first use of it: a world that is `up`
+    with an unreachable database is not stable, which is what the TBC gate found
+    in the first version of that property, and a server nobody could ask about
+    is not one to aim a command at.
+
+    `stopped` was added after yulon-win11-gate refuted the rest of it on
+    2026-09-07. The press REFUSES while the world is running -- 8.2a's whole
+    shape, because a failed bind is not atomic -- and `stable` is only ever true
+    while the world IS running. So the only control that turns the channel on
+    was live exactly when pressing it could not work and dead exactly when it
+    would, and the refusal sentence asked the user to do the thing that greys
+    the button out. A stopped server is the state the press is FOR.
+
+    Everything else stays shut: `restart_loop` and `unknown` are both servers
+    that may be running, and the press would refuse or, worse, write a setting
+    under a world that is up.
+    """
+    return verdict.stable or verdict.state == "stopped"
+
+
 def _channel_sentence(state: object) -> str:
     """One line for where the channel setup has got to.
 
@@ -1191,11 +1216,7 @@ class ControllerView(QWidget):
             return
         self.verdict_label.setText(dashboard_module.line(result))
         self.verdict_label.setVisible(True)
-        # The interlock, and the first use of the value 8.1 published. It reads
-        # `stable` rather than re-deriving it from the state word: a world that
-        # is `up` with an unreachable database is not stable, which is exactly
-        # what the TBC gate found in the first version of that property.
-        self.enable_channel_button.setEnabled(result.stable)
+        self.enable_channel_button.setEnabled(_press_is_allowed(result))
 
     @Slot(object)
     def _verdict_failed(self, exc: object) -> None:
