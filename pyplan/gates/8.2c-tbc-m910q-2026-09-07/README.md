@@ -82,11 +82,45 @@ entry, so the app was safe; anything reading the file was not, and this gate rea
 and got HTTP 500 from a channel that had verified seconds earlier. The file carries it now, read
 back with `.get` so a credential written before the field is still a credential.
 
+## The adversarial review, and what it changed
+
+Four findings, all four real, all four fixed at `5cdb22e3`.
+
+**The rollback restored the whole conf to undo four keys.** The backup is written by the first
+press and lives until a rollback consumes it, so it can be arbitrarily old — the argument already
+written down for the compose override, which is why `roll_back(expected=...)` exists there. The
+conf had no equivalent. It is an inverse **patch** now, and `rollbackprobe.py` proves it against
+this install's real 71 kB file rather than a fixture:
+
+```
+before       SOAP.Enabled 1   SOAP.IP 0.0.0.0    Console.Enable 1   71714 bytes, 1927 lines
+edited       Console.Enable 0 and one new line                      71751 bytes
+rolled back  SOAP.Enabled 0   SOAP.IP 127.0.0.1  Console.Enable 0   71753 bytes, 1928 lines
+```
+
+The channel's own keys went back and nothing else moved. Under the previous code the file would
+have returned to 71 716 bytes and 1927 lines, taking both edits with it.
+
+**The port could be published twice.** `publish` says what the entry wants, not what the install
+has, and two things make it stale on a real box: somebody editing the base compose, and a later
+template revision adding the binding while the flag stays. The answer now comes from the base file
+that will actually be loaded.
+
+**Both backups outlive a rollback that could not finish.** The conf's copy was deleted inside the
+restore, so a failure on the override or the `.env` left nothing to retry from — the ordering
+argument the override's own comment already makes.
+
+**A proven namespace beats the catalog.** The file records what a real round trip answered through;
+the catalog is a claim about the tree. The file wins where it has an answer, the catalog bootstraps
+one written before 8.2c, and a disagreement is logged rather than resolved in silence. That took
+`save_credential`'s default with it: a default there was the same inheritance in miniature.
+
 ## The files
 
 * `gate82c.py` — the gate. Stages: `ports before press prove recover rows marker break repair port after`.
 * `soapprobe.py` — three envelope shapes against the live listener, right and wrong credentials.
   This is the probe the source study asked for.
+* `rollbackprobe.py` — the inverse-patch rollback, against this install's real conf.
 * `answerprobe.py` — what `soap.execute()` and `channel.SoapChannel` make of those same answers.
 * `transcript.txt` — the presses quoted from the runs that made them, then a fresh read-only pass.
 * `1-` before, `2-verified` the recovery, `3-refused`, `4-repaired`, `5-rolled-back`, `6-after`.
