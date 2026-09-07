@@ -52,7 +52,13 @@ class Answer:
     reason: str = ""
     """Why there is no answer, when there is none. Empty for `yes` and `no`."""
     indeterminate: bool = False
-    """True when the command may have run. Only a timeout sets it."""
+    """True when the command may have run, so a caller must not simply retry.
+
+    A SOAP timeout sets it: the request was sent and the answer never came. So
+    does an attach console whose reply window held no prompt -- the command was
+    typed and nothing came back delimited (8.2e). A console that could not be
+    reached at all does NOT set it, because nothing was typed.
+    """
     denied: bool = False
     """True only when the SERVER said it does not accept this credential.
 
@@ -79,11 +85,81 @@ class Channel(Protocol):
     def send(self, command: str) -> Answer: ...
 
 
+class AttachChannel:
+    """The attach-console transport, for a core with no SOAP and no RA (8.2e).
+
+    Tortoise's mangosd links neither gsoap nor `RASocket` -- its complete source
+    and dependency lists name neither -- so there is no listener to enable, no
+    port to publish and no account to authenticate. What it has is the console
+    the Console tab already types at, live-gated against a real worldserver on
+    2026-08-23, and this wraps it in the one method every feature module is
+    handed.
+
+    **The distinction this class exists for** is what a window with no prompt in
+    it means. `ConsoleReply.prompted` is False when nothing was delimited, and
+    the transport cannot tell why: `docker attach` failing before it reached a
+    console looks exactly like a worldserver that is up and still loading its
+    maps. Either way the command may have been typed and may have run. So that
+    is `unknown` carrying `indeterminate` -- "I could not ask" -- and never
+    `no`, which would invite a caller to do it again.
+
+    A `ConsoleError` is the opposite half and is deliberately NOT indeterminate:
+    it is raised before anything is typed, so the command certainly did not run.
+
+    Nothing here is ever `denied`. There is no credential on this transport to
+    reject, and a feature keying off that flag must not read "no prompt" as "your
+    password is wrong".
+    """
+
+    def __init__(
+        self,
+        *,
+        send: Callable[..., object],
+        window: float | None = None,
+    ) -> None:
+        self._send = send
+        self._window = window
+        self.lock = threading.Lock()
+        """This install's lock, as `SoapChannel` has: one console, one typist."""
+
+    def send(self, command: str) -> Answer:
+        """Type one command at the console and read that command's answer."""
+        with self.lock:
+            try:
+                reply = (
+                    self._send(command, window=self._window)
+                    if self._window is not None
+                    else self._send(command)
+                )
+            except Exception as exc:  # noqa: BLE001 - every console failure is an answer here
+                logger.info(f"the console could not be reached: {exc}")
+                return Answer(
+                    outcome="unknown",
+                    reason=str(exc),
+                    # Nothing was typed, so nothing may have run. Saying it
+                    # might have is as wrong as saying it failed.
+                    indeterminate=False,
+                )
+        lines = tuple(getattr(reply, "lines", ()))
+        text = "\n".join(lines)
+        if not getattr(reply, "prompted", False):
+            return Answer(
+                outcome="unknown",
+                text=text,
+                reason=(
+                    "the console printed no prompt inside the reply window, so nothing in it is "
+                    "this command's answer. The command may still have run."
+                ),
+                indeterminate=True,
+            )
+        return Answer(outcome="yes", text=text)
+
+
 class SoapChannel:
     """The SOAP transport: the only one WotLK, TBC and Vanilla need.
 
-    Tortoise has no SOAP at all and reaches its world another way; that
-    transport arrives with its own box rather than being written blind here.
+    Tortoise has no SOAP at all and reaches its world another way -- see
+    `AttachChannel`, which 8.2e added once that transport had a box of its own.
     """
 
     def __init__(

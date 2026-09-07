@@ -1133,7 +1133,8 @@ class Operations(_Strict):
     """
 
     channel: Literal["soap", "attach"]
-    namespace: str = Field(
+    namespace: str | None = Field(
+        default=None,
         min_length=1,
         description=(
             "The XML namespace this tree's SOAP service answers to: `urn:AC` on AzerothCore, "
@@ -1144,8 +1145,12 @@ class Operations(_Strict):
             "password, which reads exactly like a world that has not finished loading."
         ),
     )
-    port: int = Field(gt=0, lt=65536, description="The channel's port inside the container.")
-    gm_level: int = Field(ge=0, le=3, description="The level the channel needs of its account.")
+    port: int | None = Field(
+        default=None, gt=0, lt=65536, description="The channel's port inside the container."
+    )
+    gm_level: int | None = Field(
+        default=None, ge=0, le=3, description="The level the channel needs of its account."
+    )
     enable_env: dict[str, str] = Field(
         default_factory=dict,
         description=(
@@ -1191,6 +1196,36 @@ class Operations(_Strict):
         cannot see `channel`, and a `soap` entry whose keys never mention SOAP
         would install cleanly and answer nothing.
         """
+        if self.channel == "attach":
+            # Nothing to enable, nothing to publish, nothing to authenticate:
+            # this core links neither gsoap nor RASocket, so its only way in is
+            # the console the Console tab already types at. A field declared
+            # here that cannot apply is worse than a missing one -- it reads as
+            # something somebody measured (8.2e).
+            claimed = [
+                name
+                for name, value in (
+                    ("port", self.port),
+                    ("namespace", self.namespace),
+                    ("gm_level", self.gm_level),
+                    ("enable_env", self.enable_env or None),
+                    ("enable_conf", self.enable_conf),
+                )
+                if value is not None
+            ]
+            if claimed:
+                raise ValueError(
+                    f"an attach channel has no listener, so it declares none of these: "
+                    f"{', '.join(claimed)}"
+                )
+            return self
+        for name, value in (
+            ("port", self.port),
+            ("namespace", self.namespace),
+            ("gm_level", self.gm_level),
+        ):
+            if value is None:
+                raise ValueError(f"a {self.channel} channel must state its {name}")
         if bool(self.enable_env) == bool(self.enable_conf):
             raise ValueError(
                 "a channel is switched on ONE way: declare either enable_env or "

@@ -1202,6 +1202,9 @@
         "prompt": "mangos>",
         "prompt_precedes_answer": false
       },
+      "operations": {
+        "channel": "attach"
+      },
       "observability": {
         "characters": {
           "table": "characters",

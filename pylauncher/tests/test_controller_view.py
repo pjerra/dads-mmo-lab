@@ -12,7 +12,9 @@ import pytest
 
 from yulon import (
     botlist,
+    channel,
     channel_setup,
+    commands,
     dashboard,
     docker,
     logsnap,
@@ -3118,3 +3120,128 @@ def test_a_change_whose_result_is_unknown_is_not_announced_as_a_failure(
 
     assert "may already have been made" in view.account_report.text()
     assert failures == []
+
+
+# -- 8.2e: the tree with no listener to set up -------------------------------
+
+
+def test_a_console_channel_says_so_instead_of_offering_a_button(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Tortoise links neither gsoap nor RASocket: there is nothing to switch on.
+
+    A greyed-out "Turn on the command channel" would be the worst of both --
+    it says the feature exists and refuses to explain. The tab carries the
+    reason instead, and the button does not exist on this entry at all.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    services = _services(ps, tmp_path, [])
+    view = ControllerView(tortoise, services, status_poll_ms=0, job_runner=run_inline)
+
+    view.refresh_channel()
+
+    assert view.enable_channel_button.isVisibleTo(view) is False
+    assert view.repair_channel_button.isVisibleTo(view) is False
+    said = view.channel_label.text()
+    assert view.channel_label.isVisibleTo(view) is True, said
+    assert "console" in said.lower(), said
+    assert (
+        "not set up yet" not in said.lower()
+    ), "that sentence promises a set-up that cannot happen"
+
+
+def test_the_soap_trees_keep_their_button(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The control, without which the test above would pass on a build with no buttons."""
+    services = _with_channel(ps, tmp_path, _StubSetup())
+    view = ControllerView(WOTLK, services, status_poll_ms=0, job_runner=run_inline)
+
+    assert view.enable_channel_button.isVisibleTo(view) is True
+
+
+class _Probe:
+    """Stands in for the console channel the tab is handed."""
+
+    def __init__(self, answer: object) -> None:
+        self.answer = answer
+        self.sent: list[str] = []
+
+    def __call__(self, command: str) -> object:
+        self.sent.append(command)
+        return self.answer
+
+
+def _with_probe(ps: _Ps, tmp_path: Path, probe: _Probe) -> ControllerServices:
+    services = _services(ps, tmp_path, [])
+    services.console_probe = probe
+    return services
+
+
+def test_the_console_probe_button_belongs_to_the_console_trees_alone(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """A tree with a set-up button does not also need a test button.
+
+    Its verified line already says a real round trip answered, and with a time
+    on it. The console trees have no such line to show, which is what this
+    button is for.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1"))
+
+    console = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+    soap = ControllerView(
+        WOTLK, _with_channel(ps, tmp_path, _StubSetup()), status_poll_ms=0, job_runner=run_inline
+    )
+
+    assert console.test_console_button.isVisibleTo(console) is True
+    assert soap.test_console_button.isVisibleTo(soap) is False
+
+
+def test_the_probe_shows_what_the_console_answered(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """The visible effect this box asks for: a real reply, on the Server tab."""
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(channel.Answer(outcome="yes", text="Tortoise 1.18.1\nOnline players: 0"))
+    view = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.test_console()
+
+    assert probe.sent == [commands.SERVER_INFO]
+    assert "Online players: 0" in view.console_probe_label.text()
+
+
+def test_a_window_with_no_prompt_reads_as_could_not_ask_on_the_tab(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """The clause this whole box turns on, said in the words a person reads.
+
+    `indeterminate` means the command may have run. Presenting that as a
+    failure would invite somebody to send it again -- which for a mutation is
+    exactly the wrong advice, and is why this tree is offered no mutations yet.
+    """
+    tortoise = load_catalog().get("wow-tortoise")
+    probe = _Probe(
+        channel.Answer(
+            outcome="unknown",
+            text="Loading maps...",
+            reason="the console printed no prompt inside the reply window",
+            indeterminate=True,
+        )
+    )
+    view = ControllerView(
+        tortoise, _with_probe(ps, tmp_path, probe), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.test_console()
+
+    said = view.console_probe_label.text().lower()
+    assert "no prompt" in said, said
+    assert "may still have run" in said, said
+    # Not a substring search for "fail": the sentence legitimately contains the
+    # word, in "nothing here is a failure". What must not appear is the CLAIM.
+    for claim in ("the command failed", "failed to", "could not run"):
+        assert claim not in said, said
+    assert said.startswith("could not ask"), said

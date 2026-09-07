@@ -135,17 +135,19 @@ def test_an_entry_with_no_operations_block_is_refused_rather_than_guessed_at(
 ) -> None:
     """8.2d and 8.2e each measure their own; nothing is inherited early.
 
-    Tortoise since 8.2d, having been TBC's until 8.2c and Vanilla's until now:
-    each time a tree gains a channel, a test asserting the refusal against it
-    would start asserting that the feature is missing from the tree it had just
-    been added to. Tortoise is the last one, and 8.2e is a different shape
-    entirely -- that core has no SOAP at all.
+    Against a SYNTHETIC entry since 8.2e, and that is the end of a migration:
+    this test named wow-tbc, then wow-vanilla, then wow-tortoise, moving each
+    time a tree gained a channel -- because a test asserting the refusal against
+    a real entry starts asserting that the feature is missing from the tree it
+    was just added to. Every tree has one now. The refusal is still worth
+    pinning, so what it is pinned against is an entry with the block removed
+    rather than whichever game happens to be last.
     """
-    tortoise = load_catalog().get("wow-tortoise")
+    unmeasured = WOTLK.model_copy(update={"operations": None})
 
-    with pytest.raises(setup.EnableRefused, match="wow-tortoise"):
+    with pytest.raises(setup.EnableRefused, match="wow-wotlk"):
         setup.enable(
-            tortoise, tmp_path, templates_root=resources.installers_dir(), world_running=False
+            unmeasured, tmp_path, templates_root=resources.installers_dir(), world_running=False
         )
 
 

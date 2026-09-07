@@ -203,3 +203,77 @@ def test_a_level_too_low_is_not_denied_because_a_new_password_would_not_fix_it()
 
     assert answer.denied is False
     assert "GM level" in answer.reason
+
+
+# -- 8.2e: the transport for a core with no SOAP -----------------------------
+
+
+class _Console:
+    """Stands in for a game package's `console.send`."""
+
+    def __init__(self, reply: object = None, raises: Exception | None = None) -> None:
+        self.reply = reply
+        self.raises = raises
+        self.sent: list[str] = []
+
+    def __call__(self, command: str, **_kwargs: object) -> object:
+        self.sent.append(command)
+        if self.raises is not None:
+            raise self.raises
+        return self.reply
+
+
+def _reply(lines: tuple[str, ...], *, prompted: bool = True) -> object:
+    return type(
+        "ConsoleReply", (), {"command": "server info", "lines": lines, "prompted": prompted}
+    )()
+
+
+def test_an_answer_delimited_by_the_prompt_is_an_answer() -> None:
+    """The ordinary case: the console printed a prompt, so what is between them is the reply."""
+    console = _Console(_reply(("Tortoise 1.18.1", "Online players: 0")))
+
+    answer = channel.AttachChannel(send=console).send("server info")
+
+    assert answer.outcome == "yes"
+    assert "Online players: 0" in answer.text
+    assert answer.indeterminate is False
+    assert console.sent == ["server info"]
+
+
+def test_a_window_with_no_prompt_is_could_not_ask_and_never_failure() -> None:
+    """The clause this box is built on, and the reason this core gets no mutations yet.
+
+    `prompted=False` means nothing in the window was delimited, and the
+    transport cannot tell WHY: `docker attach` failing before it reached a
+    console looks the same as a worldserver that is up and still loading maps.
+    Either way the command may have been typed and may have run, so the honest
+    answer is "I could not ask", carrying `indeterminate` -- never "it failed",
+    which would invite a caller to do it again.
+    """
+    console = _Console(_reply(("Loading maps...",), prompted=False))
+
+    answer = channel.AttachChannel(send=console).send("server info")
+
+    assert answer.outcome == "unknown"
+    assert answer.indeterminate is True, "an undelimited window may still have run the command"
+    assert answer.denied is False, "there is no credential on this transport to deny"
+    assert "prompt" in answer.reason.lower(), answer.reason
+
+
+def test_a_console_that_could_not_be_reached_did_not_run_anything() -> None:
+    """The other half, and it is the half that is NOT indeterminate.
+
+    A `ConsoleError` is raised before anything is typed -- no pty on this host,
+    no docker CLI, `docker attach` refusing to start. The command did not run,
+    so saying it might have would be as wrong as saying it failed.
+    """
+    from yulon.controller_wow_wotlk.console import ConsoleError
+
+    console = _Console(raises=ConsoleError("this host cannot type at a console"))
+
+    answer = channel.AttachChannel(send=console).send("server info")
+
+    assert answer.outcome == "unknown"
+    assert answer.indeterminate is False, "nothing was typed, so nothing may have run"
+    assert "cannot type at a console" in answer.reason

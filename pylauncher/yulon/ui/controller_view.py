@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
 from yulon import (
     botlist,
     channel_setup,
+    commands,
     dbreads,
     docker,
     install_wiring,
@@ -207,6 +208,19 @@ class ControllerServices:
     The tab exists only where this is wired: a Bots tab that cannot say which
     accounts are bots would have to show every character on the server, and on
     this install that is 900 rows of which 500 are the answer.
+    """
+    console_probe: Callable[[str], object] | None = None
+    """One command through this install's command channel, for a console tree (8.2e).
+
+    A callable and not the channel object: the tab has no business knowing what
+    transport is behind it, and the wiring hands over `AttachChannel(...).send`.
+    It is the CHANNEL's send and not the Console tab's own seam:
+    what the Server tab shows has to come through the object every later feature
+    on this tree will use, or it proves the console works and not the channel.
+
+    `None` everywhere else. A tree with a set-up button has a verified line
+    saying a real round trip answered and when, which is the same evidence by a
+    better route; two ways to say it would be one more than is true.
     """
     accounts: AccountAdmin | None = None
     """This install's user accounts, for a game whose stores are measured (8.3a).
@@ -404,6 +418,7 @@ def _assemble(
     channel_setup: ChannelSetup | None = None,
     accounts: AccountAdmin | None = None,
     bots: BotBrowser | None = None,
+    console_probe: Callable[[str], object] | None = None,
 ) -> ControllerServices:
     """The seams that are the same sentence for every game, plus the ones that are not.
 
@@ -435,6 +450,7 @@ def _assemble(
         channel_setup=channel_setup,
         accounts=accounts,
         bots=bots,
+        console_probe=console_probe,
     )
 
 
@@ -795,12 +811,19 @@ def _for_tortoise(
         wsl_distro=wsl_distro,
     )
     watcher = dashboard_module.Dashboard(spec, entry, server_dir, sql=sql, wsl_distro=wsl_distro)
+    # 8.2e. This core links neither gsoap nor RASocket, so there is no listener
+    # to enable and no `channel_setup` here -- the console IS the channel. The
+    # tab is handed this install's channel as one callable, and the Server tab's
+    # probe is the only Phase 8 surface that exists on this tree so far.
     return _assemble(
         entry,
         server_dir,
         wsl_distro=wsl_distro,
         dashboard=watcher.tick,
         log_snapshot=recorder,
+        console_probe=channel_module.AttachChannel(
+            send=lambda cmd, **kw: tortoise_console.send(cmd, wsl_distro=wsl_distro, **kw)
+        ).send,
         bots=_BotBrowser(entry, server_dir, sql),
         controller=tortoise_controller.controller_for(
             server_dir, wsl_distro=wsl_distro, pre_stop=recorder
@@ -884,6 +907,33 @@ def _press_is_allowed(verdict: dashboard_module.Verdict) -> bool:
     under a world that is up.
     """
     return verdict.stable or verdict.state == "stopped"
+
+
+CONSOLE_CHANNEL_SENTENCE = (
+    "Commands reach this server through the worldserver console on the Console tab. "
+    "This core has no remote command listener to turn on \u2014 it is built with neither "
+    "SOAP nor the telnet console \u2014 so there is nothing to set up here."
+)
+"""What the Server tab says for a tree whose channel is the console (8.2e).
+
+The alternative was a greyed-out "Turn on the command channel", which is the
+worst of both: it says the feature exists and then refuses to explain. This
+core's complete source and dependency lists name neither gsoap nor `RASocket`,
+so there is no listener, no port, no account -- and the console the Console tab
+already types at is the whole of its command channel.
+"""
+
+
+def _is_console_channel(entry: CatalogEntry) -> bool:
+    """Whether this entry's command channel is the attach console.
+
+    Read from the entry rather than from the absence of a `channel_setup`: a
+    missing seam means "this build wires nothing", which is also true of a tree
+    whose box has not been done yet, and those two must not say the same thing
+    to a user.
+    """
+    operations = entry.operations
+    return operations is not None and operations.channel == "attach"
 
 
 def _channel_sentence(state: object) -> str:
@@ -1098,7 +1148,20 @@ class ControllerView(QWidget):
         # than no control.
         self.channel_label = QLabel("", tab)
         self.channel_label.setWordWrap(True)
-        self.channel_label.setVisible(self.services.channel_setup is not None)
+        # Shown for a tree with a channel to set up AND for one whose channel is
+        # the console: the second has nothing to press but everything to explain
+        # (8.2e).
+        self.channel_label.setVisible(
+            self.services.channel_setup is not None or _is_console_channel(self.entry)
+        )
+        if _is_console_channel(self.entry):
+            self.channel_label.setText(CONSOLE_CHANNEL_SENTENCE)
+        self.test_console_button = QPushButton("Test the console", tab)
+        self.test_console_button.setVisible(self.services.console_probe is not None)
+        self.test_console_button.clicked.connect(self.test_console)
+        self.console_probe_label = QLabel("", tab)
+        self.console_probe_label.setWordWrap(True)
+        self.console_probe_label.setVisible(False)
         self.enable_channel_button = QPushButton("Turn on the command channel", tab)
         self.enable_channel_button.setVisible(self.services.channel_setup is not None)
         self.enable_channel_button.clicked.connect(self.enable_channel)
@@ -1163,6 +1226,8 @@ class ControllerView(QWidget):
         box.addWidget(self.verdict_label)
         box.addWidget(self.status_label)
         box.addWidget(self.channel_label)
+        box.addWidget(self.test_console_button)
+        box.addWidget(self.console_probe_label)
         box.addWidget(self.enable_channel_button)
         box.addWidget(self.repair_channel_button)
         box.addLayout(row)
@@ -1298,10 +1363,57 @@ class ControllerView(QWidget):
         self.refresh_channel()
 
     @Slot()
+    def test_console(self) -> None:
+        """Send one harmless command through this install's channel and show the answer.
+
+        `server info` because it changes nothing and prints something a person
+        can recognise. Off the GUI thread: this waits on a reply window measured
+        in seconds, and the Console tab's own send is bounded the same way.
+        """
+        probe = self.services.console_probe
+        if probe is None:
+            return
+        self.console_probe_label.setText("Asking the console\u2026")
+        self.console_probe_label.setVisible(True)
+        self._run(
+            lambda: probe(commands.SERVER_INFO),
+            self._console_probe_ready,
+            self._console_probe_failed,
+        )
+
+    @Slot(object)
+    def _console_probe_ready(self, result: object) -> None:
+        """What the channel said, in the words the distinction needs.
+
+        An answer that did not come back delimited is `indeterminate`: the
+        command may have run. Saying "failed" there would invite a person to
+        send it again, which for a mutation is exactly the wrong advice -- and
+        is why this tree is offered no mutations yet (8.2e).
+        """
+        if not isinstance(result, channel_module.Answer):
+            return
+        if result.outcome == "yes":
+            self.console_probe_label.setText(result.text.strip() or "The console answered.")
+            return
+        said = result.reason or "the console did not answer"
+        if result.indeterminate:
+            said += " The command may still have run, so nothing here is a failure."
+        self.console_probe_label.setText(f"Could not ask: {said}")
+
+    @Slot(object)
+    def _console_probe_failed(self, error: object) -> None:
+        self.console_probe_label.setText(f"Could not ask: {error}")
+
+    @Slot()
     def refresh_channel(self) -> None:
         """Say where the channel setup has got to, in words."""
         setup = self.services.channel_setup
         if setup is None:
+            # A console channel has no setup to ask about and never changes, so
+            # this is the whole of its answer (8.2e).
+            if _is_console_channel(self.entry):
+                self.channel_label.setText(CONSOLE_CHANNEL_SENTENCE)
+                self.channel_label.setVisible(True)
             return
         state = setup.setup_state()
         self._show_channel(state)
@@ -1605,7 +1717,9 @@ class ControllerView(QWidget):
         """
         setup = self.services.channel_setup
         operations = self.entry.operations
-        if setup is None or operations is None:
+        # `port is None` is an attach channel, which has no listener and so no
+        # host port for a failed start to be about (8.2e).
+        if setup is None or operations is None or operations.port is None:
             return ""
         if not channel_setup.blames_the_host_port(message, operations.port):
             return ""

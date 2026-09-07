@@ -856,7 +856,12 @@ class InstallChannel:
 
     def _endpoint(self, account: str, password: str) -> soap.Endpoint:
         operations = self.entry.operations
-        port = operations.port if operations is not None else 0
+        # An attach entry never reaches here -- no factory wires an
+        # `InstallChannel` for a tree whose channel is the console (8.2e), and
+        # `enable()` refuses one outright. The fallbacks are what a bug would
+        # produce if one ever did: port 0 fails to connect loudly, rather than
+        # quietly addressing something else.
+        port = operations.port or 0 if operations is not None else 0
         return soap.Endpoint(
             host="127.0.0.1",
             port=port,
@@ -865,7 +870,7 @@ class InstallChannel:
             # This tree's own, never the field default: TBC answers
             # `urn:MaNGOS` and the wrong namespace fails as though the world
             # were still loading (measured, m910q 2026-09-07).
-            namespace=operations.namespace if operations is not None else "urn:AC",
+            namespace=(operations.namespace or "urn:AC") if operations is not None else "urn:AC",
         )
 
     def check(self) -> State:
@@ -929,7 +934,7 @@ class InstallChannel:
             port=endpoint.port,
             namespace=endpoint.namespace,
             config_dir=self._config_dir,
-            gm_level=operations.gm_level if operations is not None else 3,
+            gm_level=(operations.gm_level if operations is not None else None) or 3,
         )
         return self._state
 
@@ -1052,6 +1057,6 @@ class InstallChannel:
             namespace=endpoint.namespace,
             config_dir=self._config_dir,
             state=self._state,
-            gm_level=operations.gm_level,
+            gm_level=operations.gm_level or 3,
         )
         return self._state

@@ -659,7 +659,10 @@ def _channel_service(entry: CatalogEntry, base: str, server_dir: Path) -> str:
     back (`channel_setup.HOST_PORT_VAR`).
     """
     operations = entry.operations
-    if operations is None or not operations.publish:
+    # `publish` is False for an attach channel and `port` is None on one -- that
+    # core has no listener to publish. Both are checked, because the first is a
+    # policy and the second is the fact behind it.
+    if operations is None or not operations.publish or operations.port is None:
         return " {}"
     port = operations.port
     # `publish` is what the entry WANTS, not proof of what the install has

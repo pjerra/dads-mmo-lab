@@ -89,10 +89,64 @@ def test_the_gm_level_is_the_one_soap_itself_requires() -> None:
     assert WOTLK.operations.gm_level == 3
 
 
-@pytest.mark.parametrize("game", ["wow-tortoise"])
-def test_the_other_trees_have_no_block_until_their_own_box(game: str) -> None:
-    """8.2b, 8.2c and 8.2d measure their own; Tortoise has no SOAP at all."""
-    assert load_catalog().get(game).operations is None
+def test_every_tree_now_states_its_channel_and_they_are_not_the_same() -> None:
+    """8.2e was the last one, and the four answers are three different shapes.
+
+    This test replaces the one that named the trees which had no block yet: as
+    of 8.2e there are none, and asserting an absence that can no longer happen
+    is a test that can only ever pass.
+    """
+    channels = {
+        game: load_catalog().get(game).operations
+        for game in ("wow-wotlk", "wow-tbc", "wow-vanilla", "wow-tortoise")
+    }
+    assert all(block is not None for block in channels.values()), channels
+
+    assert channels["wow-wotlk"].enable_env and not channels["wow-wotlk"].enable_conf
+    for game in ("wow-tbc", "wow-vanilla"):
+        assert channels[game].enable_conf and not channels[game].enable_env
+    # And the one that has nothing to switch on at all.
+    assert channels["wow-tortoise"].channel == "attach"
+    assert channels["wow-tortoise"].port is None
+
+
+def test_an_attach_channel_declares_nothing_it_does_not_have() -> None:
+    """Tortoise links neither gsoap nor RASocket, so most of this block is meaningless.
+
+    There is no listener to enable, so no `enable_env` and no `enable_conf`;
+    no port to publish; no envelope, so no namespace; and no account, because
+    the console runs its commands at `SEC_CONSOLE` with account id 0. Declaring
+    any of them would be describing a channel this core does not have.
+    """
+    ops = Operations(channel="attach")
+
+    assert ops.enable_env == {} and ops.enable_conf is None
+    assert ops.port is None
+    assert ops.namespace is None
+    assert ops.gm_level is None
+    assert ops.publish is False
+
+
+def test_an_attach_channel_that_claims_a_port_or_a_namespace_is_refused() -> None:
+    """A field that cannot apply is worse than a missing one: it reads as measured."""
+    for extra in ({"port": 7878}, {"namespace": "urn:MaNGOS"}, {"gm_level": 3}):
+        with pytest.raises(ValidationError, match="attach"):
+            Operations(channel="attach", **extra)
+
+
+def test_a_soap_channel_still_has_to_say_all_three() -> None:
+    """The other side of the same validator: nothing became optional for SOAP."""
+    for missing in ("port", "namespace", "gm_level"):
+        fields = {
+            "channel": "soap",
+            "namespace": "urn:AC",
+            "port": 7878,
+            "gm_level": 3,
+            "enable_env": {"AC_SOAP_ENABLED": "1"},
+        }
+        del fields[missing]
+        with pytest.raises(ValidationError):
+            Operations(**fields)
 
 
 def test_each_tree_states_its_own_soap_namespace() -> None:

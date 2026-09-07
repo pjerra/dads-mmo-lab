@@ -330,7 +330,16 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # The same self-closing shape for 8.2a's channel: an entry with no
         # measured `operations` block has not had its 8.2 box, and the day it
         # gets one this test fails until its wiring lands.
-        unwired = {"channel_setup"} if entry.operations is None else set()
+        # ...and, since 8.2e, for a channel there is nothing to set UP: an
+        # attach channel has no listener, no port and no account, so a
+        # `channel_setup` on that tree would be a state machine with no states.
+        # Both facts are read from the entry, so neither can rot into a
+        # hard-coded list of which games are behind.
+        unwired = (
+            {"channel_setup"}
+            if entry.operations is None or entry.operations.channel == "attach"
+            else set()
+        )
         # And again for 8.3a's accounts. The fact that decides it is where this
         # core keeps a GM level: reading the wrong store does not fail, it
         # reports every account as level 0, so an entry without that measurement
@@ -341,9 +350,19 @@ def test_every_game_offers_the_whole_controller_surface_wotlk_does(tmp_path: Pat
         # does -- the bot marker -- so it is absent exactly where `observability`
         # is, and arrives with that tree's own 8.1 box.
         unbrowsed = {"bots"} if entry.observability is None else set()
-        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed
+        # 8.2e runs the other way: `console_probe` belongs to the ONE tree whose
+        # channel is the console, so it is absent everywhere else -- including on
+        # the reference. The fact that decides it is the channel the entry
+        # declares, so a tree that ever gains an attach channel fails this until
+        # its probe is wired, and a tree that loses one fails it until the seam
+        # goes.
+        console = entry.operations.channel if entry.operations is not None else None
+        unprobed = {"console_probe"} if console != "attach" else set()
+        allowed = module_surface | unmeasured | unwired | unlisted | unbrowsed | unprobed
         if game == "wow-wotlk":
-            assert absent == [], f"wow-wotlk is the reference and is missing {absent}"
+            assert (
+                set(absent) == unprobed
+            ), f"wow-wotlk is the reference and is missing {sorted(set(absent) - unprobed)}"
         else:
             assert set(absent) <= allowed, (
                 f"{game} is missing {sorted(set(absent) - allowed)}, which is not the "
