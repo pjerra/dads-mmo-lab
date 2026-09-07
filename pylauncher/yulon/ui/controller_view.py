@@ -2233,7 +2233,8 @@ class ControllerView(QWidget):
         total = self._bot_total
         first = self._bot_offset + 1 if self.bot_list.count() else self._bot_offset
         said = (
-            f"{total} bots: {getattr(page, 'by_registry', 0)} by the playerbots registry, "
+            f"{total} {'bot' if total == 1 else 'bots'}: "
+            f"{getattr(page, 'by_registry', 0)} by the playerbots registry, "
             f"{getattr(page, 'by_prefix', 0)} by the account prefix. "
             f"Showing {first}–{self._bot_offset + self.bot_list.count()}."
         )

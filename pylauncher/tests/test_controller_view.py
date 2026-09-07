@@ -2991,3 +2991,21 @@ def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: 
     )
 
     assert [view._tabs.tabText(i) for i in range(view._tabs.count())].count("Bots") == 0
+
+
+def test_one_bot_is_a_bot_and_not_one_bots(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A filter that matched one row said "1 bots" on the live gate."""
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Anmi", level=7, online=False, source="registry")],
+            total=1,
+            by_registry=1,
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert "1 bot:" in view.bot_summary.text()
