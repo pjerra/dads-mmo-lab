@@ -93,7 +93,7 @@ Log in, make any character, enter the world, wait, and log out. The watcher is a
 `m910q` and writes every CHANGE in what the tab would show to `~/gate81d-watch.log`:
 
 ```
-ssh m910q 'cat ~/gate81d-watch.log'
+ssh m910q 'cat ~/gate81d-watch2.log'
 ```
 
 ## How to re-run it
