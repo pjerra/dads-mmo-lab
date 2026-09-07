@@ -58,6 +58,24 @@ That is a real wart for anyone making an account through Yu'lon on this tree: it
 information you have entered is not valid" once, and then it works. Writing `v`/`s` at creation
 would remove it; that belongs to 8.3d, not here.
 
+## One more thing the watcher found, and it is a defect
+
+**A `Dashboard` that has seen a restart loop keeps calling it one after the container is
+recreated.** The watcher left running across the crash-loop check went on printing
+
+```
+restart loop — 0 restarts, this run up 3m
+```
+
+for minutes after the world was healthy — zero restarts, and still a loop. A dashboard built fresh
+at the same moment read `up — 0 players, 510 bots`. So the verdict is being carried by history the
+object holds rather than by what the container says now, and a recreate resets the count under it.
+
+On the tab that means a server that HAD a restart loop and has been fixed keeps reading as broken
+until the app is restarted — and 8.2a's enable button, which is interlocked on `stable`, stays
+disabled with it. Not fixed here; it belongs to `dashboard.py` and wants a test that recreates the
+container under a live watcher.
+
 ## What is left
 
 The account has no character, and this server was installed today, so nothing on it does. Character
