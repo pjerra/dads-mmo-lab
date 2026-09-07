@@ -23,7 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from yulon import commands
+from yulon import commands, srp6
 from yulon.catalog.catalog import CatalogEntry
 from yulon.dbreads import Marker, SqlReader, bot_clause, resolve_marker
 from yulon.log import get_logger
@@ -182,7 +182,7 @@ def set_password(
     account: str,
     password: str,
     app_account: str,
-    credentials: Callable[[str], str] | None = None,
+    password_is_in_force: Callable[[str, str], bool] | None = None,
 ) -> Outcome:
     """`account set password <user> <pass> <pass>`, through the server itself.
 
@@ -194,20 +194,27 @@ def set_password(
     **The reply is a hint and the row is the answer** (8.3b, measured on m910q
     2026-09-07). CMaNGOS's handler sends its success message and then
     `SetSentErrorMessage(true); return false;` -- deliberately, "to avoid normal
-    report for hide passwords" (`Level3.cpp:1178-1183`) -- and SOAP turns a
-    handler that returned false into a fault. So on that core a SUCCESSFUL
-    change comes back as a failure, every time. On the live server the salt and
-    verifier both moved while this app was told the channel was unreachable.
+    report for hide passwords" (`Level3.cpp:1178-1183` on TBC, and the same
+    lines on Vanilla) -- and SOAP turns a handler that returned false into a
+    fault. So on those cores a SUCCESSFUL change comes back as a failure, every
+    time.
 
     Telling somebody their password did not change when it did is the worst of
     the available wrongs: they retype the old one, for an account that no longer
     has it. 8.3a's review raised that hazard for timeouts; here it is guaranteed.
 
-    `credentials` reads this account's credential columns, whatever they are on
-    this tree, and is taken BEFORE the command as well as after -- the before
-    read cannot be conditional, because nothing yet knows whether the reply will
-    be usable. It is optional: without it the reply is all there is, which is
-    the behaviour every caller had before this.
+    But **"the row changed" is not the answer either**, which is what 8.3b's own
+    adversarial review found. Anything else that writes that row -- a second
+    window, an administrator at a console, another install sharing the auth
+    database -- would make a refused command look like a success, and the person
+    would then be locked out by the reassurance rather than by the failure.
+
+    So `password_is_in_force` asks the one question that belongs to this
+    command: is the password we were asked to set the one this account now has?
+    `yulon.srp6` answers it by recomputing the verifier from the row's own salt,
+    which is true whoever wrote the row and whatever the server said. It is
+    optional, and where it is absent or cannot answer, the server's own reply
+    stands -- the behaviour every caller had before this.
     """
     refusal = _not_our_own(account, app_account, "have its password changed")
     if refusal is not None:
@@ -216,13 +223,12 @@ def set_password(
         line = commands.account_set_password(account, password)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
-    before = _credentials_now(credentials, account)
     outcome = _send(channel, line)
-    if outcome.done or credentials is None:
+    if outcome.done or password_is_in_force is None:
+        # A core that answers properly is believed, and costs no query at all.
         return outcome
-    after = _credentials_now(credentials, account)
-    if before is not None and after is not None and after != before:
-        logger.info(f"{account}'s credential row changed, whatever the command reported")
+    if _in_force(password_is_in_force, account, password):
+        logger.info(f"{account}'s stored verifier is the one this password makes")
         return Outcome(
             True,
             text=(
@@ -233,19 +239,17 @@ def set_password(
     return outcome
 
 
-def _credentials_now(reader: Callable[[str], str] | None, account: str) -> str | None:
-    """This account's credential columns, or `None` if they could not be read.
+def _in_force(reader: Callable[[str, str], bool], account: str, password: str) -> bool:
+    """Whether the row says this password is in force, and never an exception.
 
-    `None` and not `""`: a read that failed must never compare equal to another
-    read that failed, or two failures would report a password as unchanged.
+    A database that is down is one more thing that can be down; it is not this
+    command's failure to report, and what the server said stands instead.
     """
-    if reader is None:
-        return None
     try:
-        return reader(account)
-    except Exception as exc:  # noqa: BLE001 - a failed read is an absence, not a crash
+        return bool(reader(account, password))
+    except Exception as exc:  # noqa: BLE001 - a read that failed is an absence
         logger.info(f"could not read {account}'s credential row: {exc}")
-        return None
+        return False
 
 
 def set_gm_level(
@@ -318,7 +322,12 @@ _CREDENTIAL_COLUMNS: dict[str, tuple[str, ...]] = {
     "azerothcore": ("salt", "verifier"),
     "mangos_srp6": ("s", "v"),
 }
-"""Which columns hold an account's credential, per scheme this app can write.
+"""Which columns hold an account's SALT and then its VERIFIER, per scheme.
+
+The ORDER is the point and it differs: AzerothCore names them `salt`,
+`verifier`; the CMaNGOS trees name them `s`, `v` -- and `s` is the salt, so a
+pair read in the table's own column order would be back to front on one of the
+two trees and would answer "no" for every correct password.
 
 Not a guess and not a default: `accounts.scheme` is what each tree's own box
 measured, and a scheme absent from here is one whose password changes cannot be
@@ -377,32 +386,42 @@ class InstallAccounts:
             account=account,
             password=password,
             app_account=self.app_account,
-            credentials=self._credentials,
+            password_is_in_force=self._password_is_in_force,
         )
 
-    def _credentials(self, account: str) -> str:
-        """This account's credential columns, in whatever shape this core keeps them.
+    def _password_is_in_force(self, account: str, password: str) -> bool:
+        """Does this account's stored credential belong to this password?
 
-        `salt`/`verifier` on AzerothCore, `v`/`s` on the CMaNGOS trees. The
-        scheme is a fact the entry already carries, and reading the wrong pair
-        would not fail -- it would report every password change as unchanged.
+        The narrow question, and the only one worth asking: a row that merely
+        CHANGED could have been changed by a second window, an administrator at
+        a console, or another install sharing this auth database, and reporting
+        that as this command's success would lock somebody out with a
+        reassurance (8.3b's adversarial review).
 
-        The VALUES never leave this method's caller, which compares them and
-        throws them away: they are a verifier and a salt, not a password, and
-        nothing logs them.
+        The columns are this tree's own -- `salt`/`verifier` on AzerothCore,
+        `s`/`v` on the CMaNGOS trees -- because reading the wrong pair would not
+        fail loudly on a row that has both; it would answer no every time.
+
+        The salt and the verifier never leave this method. They are not a
+        password, and nothing logs them.
         """
-        columns = _CREDENTIAL_COLUMNS.get(self.entry.accounts.scheme or "")
-        if columns is None:
-            raise ValueError(
-                f"{self.entry.name} has no measured credential columns, so a password change "
-                "cannot be confirmed by reading them"
-            )
+        scheme = self.entry.accounts.scheme or ""
+        columns = _CREDENTIAL_COLUMNS.get(scheme)
+        if columns is None or scheme not in srp6.MEASURED_SCHEMES:
+            logger.info(f"{self.entry.name} has no measured credential recipe; the reply stands")
+            return False
         auth = self.entry.schema_map()["auth"]
-        return self._sql.query(
+        row = self._sql.query(
             "auth",
             f"SELECT {', '.join(columns)} FROM {auth}.account "
             f"WHERE username = {_text_literal(account)};",
         )
+        fields = row.split()
+        if len(fields) != 2:
+            logger.info(f"{account} has no single credential row to read")
+            return False
+        salt, verifier = fields
+        return srp6.matches(scheme, account, password, salt, verifier)
 
     def set_gm_level(self, account: str, level: int) -> Outcome:
         channel = self._channel()

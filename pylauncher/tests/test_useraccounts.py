@@ -375,23 +375,19 @@ def test_a_change_the_server_did_not_answer_in_time_is_not_reported_as_a_failure
     assert "may already" in outcome.problem.lower()
 
 
-# -- 8.3b: the reply is a hint; the row is the answer ------------------------
+# -- 8.3b: the reply is a hint; the ROW is the answer, and only if it is ours --
 
 
-class _Credentials:
-    """A reader whose account row changes the first time it is asked twice."""
+class _Row:
+    """A stand-in for the reader that asks whether a password is now in force."""
 
-    def __init__(self, *, changes: bool = True) -> None:
-        self.changes = changes
-        self.reads: list[str] = []
-        self._n = 0
+    def __init__(self, *answers: bool) -> None:
+        self.answers = list(answers)
+        self.asked: list[tuple[str, str]] = []
 
-    def query(self, db: str, statement: str) -> str:
-        self.reads.append(statement)
-        self._n += 1
-        if not self.changes:
-            return "AAAA\tBBBB\n"
-        return "AAAA\tBBBB\n" if self._n == 1 else "CCCC\tDDDD\n"
+    def __call__(self, account: str, password: str) -> bool:
+        self.asked.append((account, password))
+        return self.answers.pop(0) if self.answers else False
 
 
 def test_a_password_change_this_core_reports_as_failed_is_confirmed_by_the_row() -> None:
@@ -409,66 +405,96 @@ def test_a_password_change_this_core_reports_as_failed_is_confirmed_by_the_row()
     has it. 8.3a's own review raised this hazard for timeouts; here it is
     guaranteed rather than occasional.
 
-    So the row decides. The reply is a hint.
+    So the row decides -- but only by answering the one question that belongs to
+    THIS command: is the password we were asked to set the one the account now
+    has? See `test_a_row_that_changed_to_somebody_elses_password_is_not_a_yes`.
     """
-    reader = _Credentials(changes=True)
+    row = _Row(True)
 
     outcome = useraccounts.set_password(
         _Channel("unknown"),
         account="ALICE",
         password="n3w-p@ss34",
         app_account="YULON_AB",
-        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+        password_is_in_force=row,
     )
 
     assert outcome.done is True, outcome.problem
     assert "changed" in outcome.text.lower(), outcome.text
+    assert row.asked == [("ALICE", "n3w-p@ss34")], "it asks about ITS OWN password"
 
 
-def test_a_password_change_that_really_did_nothing_still_reports_the_problem() -> None:
-    """The other half. An unchanged row plus an unhappy reply is a failure."""
-    reader = _Credentials(changes=False)
+def test_a_row_that_changed_to_somebody_elses_password_is_not_a_yes() -> None:
+    """8.3b's adversarial review, and it was right.
+
+    An earlier version of this took any change to the credential columns as
+    proof that this command had made it. Anything else that writes the row --
+    a second window, an administrator at a console, another install sharing the
+    auth database -- would then have this app tell a person their new password
+    works while the account holds a different one. That person is now locked
+    out BY the reassurance, which is worse than the failure it replaced.
+
+    The reader answers the narrow question instead, and a no is a no.
+    """
+    row = _Row(False)
 
     outcome = useraccounts.set_password(
         _Channel("unknown"),
         account="ALICE",
         password="n3w-p@ss34",
         app_account="YULON_AB",
-        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+        password_is_in_force=row,
     )
 
     assert outcome.done is False
     assert outcome.problem, "a failure with no sentence is not an answer"
 
 
-def test_a_clean_yes_is_believed_without_a_second_read() -> None:
-    """A core that answers properly is believed, and asked nothing further.
+def test_a_clean_yes_is_believed_without_reading_anything() -> None:
+    """A core that answers properly is believed, and costs no query at all.
 
-    The BEFORE read cannot be conditional -- it has to be taken before the
-    command is sent, when nothing yet knows whether the reply will be usable --
-    but the second one is only needed where the first answer was not an answer.
-    One SELECT on the happy path, two on the path that needs them.
+    The check is a fallback for cores that cannot say what they did, not a
+    second opinion on cores that can.
     """
-    reader = _Credentials(changes=True)
+    row = _Row(True)
 
     outcome = useraccounts.set_password(
         _Channel("yes"),
         account="ALICE",
         password="n3w-p@ss34",
         app_account="YULON_AB",
-        credentials=lambda name: reader.query("auth", f"SELECT s, v ... {name}"),
+        password_is_in_force=row,
     )
 
     assert outcome.done is True
-    assert len(reader.reads) == 1, "a clean answer needed no second opinion"
+    assert row.asked == [], "nothing was asked of the database"
+
+
+def test_a_reader_that_throws_leaves_the_servers_own_answer_standing() -> None:
+    """The database is one more thing that can be down, and it is not this
+    command's failure to report. What the server said stands."""
+
+    def broken(account: str, password: str) -> bool:
+        raise RuntimeError("the database is not answering")
+
+    outcome = useraccounts.set_password(
+        _Channel("unknown"),
+        account="ALICE",
+        password="n3w-p@ss34",
+        app_account="YULON_AB",
+        password_is_in_force=broken,
+    )
+
+    assert outcome.done is False
+    assert "not answering" not in outcome.problem, "the person is told about the command"
 
 
 def test_a_password_change_with_no_reader_falls_back_to_the_reply() -> None:
-    """`credentials` is optional, and without it the reply is all there is.
+    """`password_is_in_force` is optional, and without it the reply is all there is.
 
-    Kept optional so a caller that has no database seam -- a test, a tree whose
-    box has not measured its columns -- still gets the old behaviour rather than
-    an exception.
+    Kept optional so a caller with no database seam -- a test, a tree whose
+    scheme nobody has measured -- gets the old behaviour rather than an
+    exception.
     """
     outcome = useraccounts.set_password(
         _Channel("yes"),
@@ -509,3 +535,47 @@ def test_an_indeterminate_answer_does_not_invent_the_reason_it_is_indeterminate(
     assert "closed the connection" in outcome.problem
     assert "stops waiting" not in outcome.problem, outcome.problem
     assert "check" in outcome.problem.lower(), "it still tells them what to do"
+
+
+def test_the_salt_is_read_as_the_salt_on_a_tree_that_names_it_s(tmp_path) -> None:
+    """The whole path, from the catalog's scheme to a live vector.
+
+    Two failures live between the parts here and neither would raise. The
+    CMaNGOS trees name the pair `s`, `v` and AzerothCore names it `salt`,
+    `verifier` -- so a pair read in the wrong ORDER answers "no" for every
+    correct password, and this app would tell a person their password change
+    failed every single time on one tree. And a scheme with no measured recipe
+    must answer no rather than guess.
+
+    The vector is the one `tests/test_srp6.py` documents: account SRPPROBE,
+    password "kn0wn-p@ss77", read off the live Vanilla server on m910q on
+    2026-09-07.
+    """
+    salt = "E040A443299D8590D08C3353B3F9960548A9BB82B873659FC7533CA2031B485A"
+    verifier = "27BADE411219414667B39335D71F258E191312B78C065F630954135E8870111B"
+    vanilla = load_catalog().get("wow-vanilla")
+    reader = _Reader(f"{salt}\t{verifier}\n")
+    install = useraccounts.InstallAccounts(
+        vanilla,
+        tmp_path,
+        sql=reader,
+        channel_for_saved=lambda: None,
+        app_account="YULON_AB12CD34",
+    )
+
+    assert install._password_is_in_force("SRPPROBE", "kn0wn-p@ss77") is True
+    assert install._password_is_in_force("SRPPROBE", "some-other-pass") is False
+    asked = reader.asked[0][1]
+    assert "SELECT s, v" in asked, asked
+    assert "SRPPROBE" not in asked, "names are sent as a literal, not spliced in"
+
+
+def test_a_tree_whose_scheme_has_no_measured_recipe_answers_no(tmp_path) -> None:
+    """AzerothCore answers its own commands properly, so nothing there needs a
+    row believed — and inventing a recipe for it would be a guess wearing a
+    measurement's clothes."""
+    reader = _Reader("00\t00\n")
+    install = _install(tmp_path, sql=reader)
+
+    assert install._password_is_in_force("SRPPROBE", "kn0wn-p@ss77") is False
+    assert reader.asked == [], "a scheme it cannot check is not worth a query"
