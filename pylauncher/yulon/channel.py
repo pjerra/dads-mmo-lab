@@ -147,8 +147,13 @@ class AttachChannel:
                 outcome="unknown",
                 text=text,
                 reason=(
+                    # What happened, and only that. What it IMPLIES -- that the
+                    # command may still have run -- is `indeterminate`, and the
+                    # surface that shows this to a person says it in its own
+                    # words. Saying it here too printed it twice on the tab
+                    # (measured on m910q, 8.2e's gate).
                     "the console printed no prompt inside the reply window, so nothing in it is "
-                    "this command's answer. The command may still have run."
+                    "this command's answer"
                 ),
                 indeterminate=True,
             )

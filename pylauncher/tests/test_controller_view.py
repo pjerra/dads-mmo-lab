@@ -3239,7 +3239,12 @@ def test_a_window_with_no_prompt_reads_as_could_not_ask_on_the_tab(
 
     said = view.console_probe_label.text().lower()
     assert "no prompt" in said, said
-    assert "may still have run" in said, said
+    # ONCE, not merely present. The live gate on m910q read this sentence back
+    # with "the command may still have run" in it twice: the channel's reason
+    # said it and this label said it again. The channel states what happened
+    # and `indeterminate` carries what it implies; the wording of the
+    # implication belongs to whatever shows it to a person.
+    assert said.count("may still have run") == 1, said
     # Not a substring search for "fail": the sentence legitimately contains the
     # word, in "nothing here is a failure". What must not appear is the CLAIM.
     for claim in ("the command failed", "failed to", "could not run"):
