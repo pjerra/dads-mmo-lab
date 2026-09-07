@@ -121,7 +121,7 @@ def test_the_gm_level_command_carries_the_realm_argument_this_core_needs() -> No
     no `RealmID` filter; the prior art's builder passes `-1` for the same reason
     (`soap_cmds.rs:95`).
     """
-    assert commands.account_set_gm_level("YULON_AB12CD34", 3, realms=True) == (
+    assert commands.account_set_gm_level("YULON_AB12CD34", 3, realms=True, highest=3) == (
         "account set gmlevel YULON_AB12CD34 3 -1"
     )
 
@@ -156,8 +156,14 @@ def test_the_realm_argument_belongs_to_the_core_that_has_realms_in_its_level_tab
     handler that parses two is not something to find out in production, and it
     is not something to guess at either.
     """
-    assert commands.account_set_gm_level("BOB", 2, realms=True) == "account set gmlevel BOB 2 -1"
-    assert commands.account_set_gm_level("BOB", 2, realms=False) == "account set gmlevel BOB 2"
+    assert (
+        commands.account_set_gm_level("BOB", 2, realms=True, highest=3)
+        == "account set gmlevel BOB 2 -1"
+    )
+    assert (
+        commands.account_set_gm_level("BOB", 2, realms=False, highest=3)
+        == "account set gmlevel BOB 2"
+    )
 
 
 def test_the_realm_argument_is_not_defaulted() -> None:
@@ -169,3 +175,32 @@ def test_the_realm_argument_is_not_defaulted() -> None:
     """
     with pytest.raises(TypeError):
         commands.account_set_gm_level("BOB", 2)  # type: ignore[call-arg]
+
+
+def test_the_level_ceiling_is_the_trees_and_not_a_number_in_this_file() -> None:
+    """8.3d, measured on the live Tortoise server.
+
+    That fork answered `account set gmlevel SHAPROBE 4` with *"You change
+    security level of account SHAPROBE to 4."* and `5` with *"Incorrect
+    values."*, because its own check grants at the caller's level rather than
+    strictly below it. A hard-coded `<= 3` here refuses a level the server
+    accepts — and refuses it in this app's own voice, as though the SERVER had
+    said no, which is the worst way to be wrong about somebody else's rule.
+
+    So the ceiling is passed in, from the same catalog block that says where the
+    level is stored, and it is required rather than defaulted for the same
+    reason `realms` is: the trees disagree and the disagreement is silent.
+    """
+    assert (
+        commands.account_set_gm_level("BOB", 4, realms=False, highest=4)
+        == "account set gmlevel BOB 4"
+    )
+
+    with pytest.raises(commands.CommandError) as refused:
+        commands.account_set_gm_level("BOB", 4, realms=False, highest=3)
+    assert "4" in str(refused.value)
+
+    with pytest.raises(commands.CommandError):
+        commands.account_set_gm_level("BOB", 5, realms=False, highest=4)
+    with pytest.raises(commands.CommandError):
+        commands.account_set_gm_level("BOB", -1, realms=False, highest=4)

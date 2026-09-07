@@ -253,19 +253,20 @@ def _in_force(reader: Callable[[str, str], bool], account: str, password: str) -
 
 
 def set_gm_level(
-    channel: object, *, account: str, level: int, app_account: str, realms: bool
+    channel: object, *, account: str, level: int, app_account: str, realms: bool, highest: int
 ) -> Outcome:
     """`account set gmlevel <user> <n>`, with the realm argument where there are realms.
 
-    `realms` comes from the entry -- a tree whose level is a column on the
-    account row has no realm to name -- and is passed rather than defaulted, for
+    `realms` and `highest` both come from the entry -- a tree whose level is a
+    column on the account row has no realm to name, and the trees do not agree
+    on how high the levels go -- and both are passed rather than defaulted, for
     the reason `commands.account_set_gm_level()` gives.
     """
     refusal = _not_our_own(account, app_account, "have its GM level changed")
     if refusal is not None:
         return refusal
     try:
-        line = commands.account_set_gm_level(account, level, realms=realms)
+        line = commands.account_set_gm_level(account, level, realms=realms, highest=highest)
     except commands.CommandError as exc:
         return Outcome(False, problem=str(exc))
     return _send(channel, line)
@@ -409,7 +410,8 @@ class InstallAccounts:
         if channel is None:
             return Outcome(False, problem=_NO_CHANNEL)
         # From the entry, not from a default: a tree whose level lives on the
-        # account row has no realm to name (8.3b).
+        # account row has no realm to name (8.3b), and the trees do not agree on
+        # how high the levels go (8.3d -- the tortoise fork accepts 4).
         level_block = self.entry.accounts.level
         return set_gm_level(
             channel,
@@ -417,6 +419,7 @@ class InstallAccounts:
             level=level,
             app_account=self.app_account,
             realms=level_block is not None and level_block.table is not None,
+            highest=level_block.max_level if level_block is not None else 3,
         )
 
     def _channel(self) -> object | None:

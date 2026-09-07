@@ -77,7 +77,7 @@ def account_create(account: str, password: str) -> str:
     return line(f"account create {account} {password}")
 
 
-def account_set_gm_level(account: str, level: int, *, realms: bool) -> str:
+def account_set_gm_level(account: str, level: int, *, realms: bool, highest: int) -> str:
     """`account set gmlevel <user> <n>`, with `-1` for every realm where there are realms.
 
     `realms` is required and not defaulted, because the two cores disagree and
@@ -97,9 +97,16 @@ def account_set_gm_level(account: str, level: int, *, realms: bool) -> str:
 
     The caller knows which it is from a fact its own box already measured:
     `entry.accounts.level.table` is null exactly where the level is a column.
+
+    `highest` is required for the same reason and comes from the same block.
+    Three of these trees stop at 3 and the tortoise fork accepts 4, because its
+    check grants at the caller's own level rather than strictly below it
+    (measured live, 2026-09-07: `4` was accepted and `5` answered "Incorrect
+    values."). A number in this file would refuse a level the server accepts,
+    in this app's own voice, as though the SERVER had said no.
     """
     _require(valid_account_name(account), f"{account!r} is not a name this server would accept")
-    _require(0 <= level <= 3, f"{level} is not a GM level this server has")
+    _require(0 <= level <= highest, f"{level} is not a GM level this server has")
     every_realm = " -1" if realms else ""
     return line(f"account set gmlevel {account} {level}{every_realm}")
 

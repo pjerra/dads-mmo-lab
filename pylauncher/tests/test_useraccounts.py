@@ -179,7 +179,7 @@ def test_a_level_change_is_the_servers_own_command_across_every_realm() -> None:
     channel = _Channel()
 
     outcome = useraccounts.set_gm_level(
-        channel, account="ALICE", level=2, app_account="YULON_AB", realms=True
+        channel, account="ALICE", level=2, app_account="YULON_AB", realms=True, highest=3
     )
 
     assert outcome.done is True
@@ -199,7 +199,7 @@ def test_neither_action_may_be_taken_on_the_apps_own_account() -> None:
             c, account="yulon_ab", password="whatever1", app_account="YULON_AB"
         ),
         lambda c: useraccounts.set_gm_level(
-            c, account="YULON_AB", level=0, app_account="YULON_AB", realms=True
+            c, account="YULON_AB", level=0, app_account="YULON_AB", realms=True, highest=3
         ),
     ):
         channel = _Channel()
@@ -238,7 +238,12 @@ def test_a_channel_that_could_not_ask_says_that_rather_than_that_it_failed() -> 
     believe the password is unchanged when nobody knows whether it is.
     """
     outcome = useraccounts.set_gm_level(
-        _Channel("unknown"), account="ALICE", level=1, app_account="YULON_AB", realms=True
+        _Channel("unknown"),
+        account="ALICE",
+        level=1,
+        app_account="YULON_AB",
+        realms=True,
+        highest=3,
     )
 
     assert outcome.done is False
