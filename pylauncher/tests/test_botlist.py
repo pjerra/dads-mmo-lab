@@ -31,7 +31,7 @@ class _Reader:
 
 
 def test_a_page_is_the_rows_the_server_has_with_the_signal_that_found_each() -> None:
-    sql = _Reader("2\t1\t1", "Guglu\t14\t1\tregistry\nRitdy\t3\t0\tprefix\n")
+    sql = _Reader("2\t1\t1", "Guglu\t14\t1\tregistry\t7\nRitdy\t3\t0\tprefix\t9\n")
 
     page = botlist.page(sql, WOTLK, MARKER)
 
@@ -85,11 +85,10 @@ def test_a_page_asks_for_one_page_and_not_the_whole_table() -> None:
     """500 bots today and the owner has said the number is his to raise."""
     sql = _Reader("500\t500\t0", "")
 
-    botlist.page(sql, WOTLK, MARKER, offset=40, limit=20)
+    botlist.page(sql, WOTLK, MARKER, limit=20)
 
     rows = sql.asked[1][1]
     assert "LIMIT 20" in rows
-    assert "OFFSET 40" in rows
 
 
 def test_the_filter_is_escaped_with_a_character_a_stricter_sql_mode_keeps() -> None:
@@ -124,7 +123,7 @@ def test_a_database_that_cannot_be_read_says_so() -> None:
 
 
 def test_a_row_that_will_not_parse_fails_the_page_rather_than_vanishing() -> None:
-    sql = _Reader("2\t2\t0", "Guglu\t14\t1\tregistry\nnonsense\n")
+    sql = _Reader("2\t2\t0", "Guglu\t14\t1\tregistry\t7\nnonsense\n")
 
     page = botlist.page(sql, WOTLK, MARKER)
 
@@ -156,3 +155,59 @@ def test_the_order_has_a_tiebreak_so_two_of_a_name_cannot_swap_between_pages() -
     botlist.page(sql, WOTLK, MARKER)
 
     assert "ORDER BY name, guid" in sql.asked[1][1]
+
+
+# -- paging that survives a list that moves (review, 2026-09-07) -------------
+
+
+def test_a_page_is_asked_for_by_where_the_last_one_ended() -> None:
+    """Keyset paging, not OFFSET.
+
+    Every page is read fresh from a table that changes while the tab is open.
+    With OFFSET, one bot logging out before the boundary shifts every later
+    page by one: a row appears twice, and the row that took its place is never
+    seen at all. A cursor is anchored to a row rather than to a count.
+    """
+    sql = _Reader("2\t2\t0", "")
+
+    botlist.page(sql, WOTLK, MARKER, after=("Guglu", 42))
+
+    rows = sql.asked[1][1]
+    assert "OFFSET" not in rows
+    assert "(name, guid) > ('Guglu', 42)" in rows
+
+
+def test_the_first_page_asks_for_no_cursor_at_all() -> None:
+    sql = _Reader("2\t2\t0", "")
+
+    botlist.page(sql, WOTLK, MARKER)
+
+    rows = sql.asked[1][1]
+    assert ">" not in rows.split("WHERE", 1)[1].split("ORDER BY")[0]
+
+
+def test_a_page_says_where_the_next_one_should_start() -> None:
+    """A FULL page, which is the only kind that can have anything after it."""
+    sql = _Reader("2\t2\t0", "Guglu\t14\t1\tregistry\t7\nRitdy\t3\t0\tprefix\t9\n")
+
+    page = botlist.page(sql, WOTLK, MARKER, limit=2)
+
+    assert page.next_after == ("Ritdy", 9)
+
+
+def test_the_last_page_says_there_is_no_next_one() -> None:
+    """Asked for fifty and given two: there is nothing after them."""
+    sql = _Reader("2\t2\t0", "Guglu\t14\t1\tregistry\t7\nRitdy\t3\t0\tprefix\t9\n")
+
+    page = botlist.page(sql, WOTLK, MARKER, limit=50)
+
+    assert page.next_after is None
+
+
+def test_a_full_page_offers_a_next_one() -> None:
+    rows = "".join(f"Bot{n}\t1\t0\tregistry\t{n}\n" for n in range(2))
+    sql = _Reader("9\t9\t0", rows)
+
+    page = botlist.page(sql, WOTLK, MARKER, limit=2)
+
+    assert page.next_after == ("Bot1", 1)

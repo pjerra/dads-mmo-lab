@@ -111,7 +111,7 @@ class UnsupportedGameError(RuntimeError):
 class BotBrowser(Protocol):
     """What the Bots tab needs (8.5a). One question, asked with a page and a filter."""
 
-    def page(self, *, offset: int = 0, name_like: str = "") -> object: ...
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> object: ...
 
 
 class AccountAdmin(Protocol):
@@ -805,7 +805,7 @@ class _BotBrowser:
         self.server_dir = server_dir
         self._sql = sql
 
-    def page(self, *, offset: int = 0, name_like: str = "") -> botlist.Page:
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
             return botlist.Page(problem=answer.problem or "this install's bot marker is unreadable")
@@ -813,7 +813,7 @@ class _BotBrowser:
             self._sql,
             self.entry,
             answer.marker,
-            offset=offset,
+            after=after,
             name_like=name_like,
         )
 
@@ -2175,18 +2175,19 @@ class ControllerView(QWidget):
         box.addWidget(self.bot_summary)
         box.addWidget(self.bot_list)
         box.addLayout(row)
-        self._bot_offset = 0
+        # A stack of cursors, one per page seen. There is no arithmetic that
+        # turns "where page three starts" into "where page two starts", so the
+        # only way back is the key the earlier page was read with.
+        self._bot_cursors: list[tuple[str, int] | None] = [None]
+        self._bot_next: tuple[str, int] | None = None
         self._bot_total: int | None = None
         self._show_page_buttons()
         self._tabs.addTab(tab, "Bots")
 
     def _show_page_buttons(self) -> None:
         """Neither button offers a page that is not there."""
-        self.previous_bots_button.setEnabled(self._bot_offset > 0)
-        total = self._bot_total
-        self.next_bots_button.setEnabled(
-            total is not None and self._bot_offset + botlist.PAGE_SIZE < total
-        )
+        self.previous_bots_button.setEnabled(len(self._bot_cursors) > 1)
+        self.next_bots_button.setEnabled(self._bot_next is not None)
 
     @Slot()
     def refresh_bots(self) -> None:
@@ -2194,9 +2195,9 @@ class ControllerView(QWidget):
         browser = self.services.bots
         if browser is None:
             return
-        offset, name_like = self._bot_offset, self.bot_filter.text().strip()
+        after, name_like = self._bot_cursors[-1], self.bot_filter.text().strip()
         self._run(
-            lambda: browser.page(offset=offset, name_like=name_like),
+            lambda: browser.page(after=after, name_like=name_like),
             self._bots_listed,
             self._bots_failed,
         )
@@ -2208,19 +2209,23 @@ class ControllerView(QWidget):
         Otherwise a filter typed on page nine shows page nine of a list that may
         now be one page long, which reads as "no bots match".
         """
-        self._bot_offset = 0
+        self._bot_cursors = [None]
         self.refresh_bots()
 
     @Slot()
     def next_bot_page(self) -> None:
-        self._bot_offset += botlist.PAGE_SIZE
+        if self._bot_next is None:
+            return
+        self._bot_cursors.append(self._bot_next)
         self.refresh_bots()
 
     @Slot()
     def previous_bot_page(self) -> None:
-        # Never below zero: a negative OFFSET is a SQL error, and the button
-        # can be pressed by a keyboard even while it is disabled by a mouse.
-        self._bot_offset = max(0, self._bot_offset - botlist.PAGE_SIZE)
+        # The first entry is the first page's absent cursor and is never
+        # popped: the button can be reached by a keyboard while a mouse sees it
+        # disabled.
+        if len(self._bot_cursors) > 1:
+            self._bot_cursors.pop()
         self.refresh_bots()
 
     @Slot(object)
@@ -2228,6 +2233,7 @@ class ControllerView(QWidget):
         self.bot_list.clear()
         problem = getattr(page, "problem", "")
         self._bot_total = getattr(page, "total", None)
+        self._bot_next = getattr(page, "next_after", None)
         if problem:
             self.bot_summary.setText(problem)
             self._show_page_buttons()
@@ -2236,12 +2242,15 @@ class ControllerView(QWidget):
             where = "online" if bot.online else "offline"
             self.bot_list.addItem(f"{bot.name} — level {bot.level} — {where} — {bot.source}")
         total = self._bot_total
-        first = self._bot_offset + 1 if self.bot_list.count() else self._bot_offset
+        # A page number and not a row range: the rows are read by cursor, so
+        # "51-100" would be a count this tab does not have and cannot get
+        # without paying for it on every press.
+        page_number = len(self._bot_cursors)
         said = (
             f"{total} {'bot' if total == 1 else 'bots'}: "
             f"{getattr(page, 'by_registry', 0)} by the playerbots registry, "
             f"{getattr(page, 'by_prefix', 0)} by the account prefix. "
-            f"Showing {first}–{self._bot_offset + self.bot_list.count()}."
+            f"Page {page_number}, {self.bot_list.count()} shown."
         )
         warning = getattr(page, "warning", "")
         self.bot_summary.setText(f"{said} {warning}".strip() if warning else said)

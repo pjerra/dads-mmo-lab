@@ -11,14 +11,17 @@ look.
 Paged because the owner runs 500 and has said the number is his to raise. Read
 live, never cached: the population moves while the tab is open.
 
-**A page is a snapshot, and the population moves.** The order carries a
-tiebreak — `name, guid` — because `ORDER BY name` alone is not a total order and
-rows with equal keys may come back in any order, which would put one bot on two
-pages and another on none. That fixes the ordering; it does not fix `OFFSET`
-over a table that is changing, where a row inserted before the boundary shifts
-every later page by one. Keyset pagination is the answer to that and is not
-written yet (adversarial review, 2026-09-07); what is here is a live list read
-fresh on every press, which is what the box asked for.
+**Paged by where the last page ended, not by how many rows to skip.** The list
+is read fresh on every press from a table that changes while the tab is open,
+and `OFFSET` counts rows: one bot logging out before the boundary shifts every
+later page by one, so a row is shown twice and the row that took its place is
+never shown at all. A cursor is anchored to a row instead — `(name, guid)`,
+which is a total order where `name` alone is not, so equal names cannot swap
+places between two reads (adversarial review, 2026-09-07).
+
+The total beside it is still a separate count and can be a moment older than
+the rows. That is what a live list is; it is labelled rather than pretended
+away.
 
 **The filter is escaped with `!`, not with a backslash.** `NO_BACKSLASH_ESCAPES`
 is a real mode on both MySQL and MariaDB, and under it a backslash is an
@@ -74,6 +77,13 @@ class Page:
     by_prefix: int = 0
     problem: str = ""
     warning: str = ""
+    next_after: tuple[str, int] | None = None
+    """Where the next page starts, or None when this is the last one."""
+
+
+def escape_quotes(text: str) -> str:
+    """A value going inside a quoted literal, with its quote doubled."""
+    return text.replace("'", "''")
 
 
 def escape_like(text: str) -> str:
@@ -93,7 +103,7 @@ def page(
     entry: CatalogEntry,
     marker: Marker,
     *,
-    offset: int = 0,
+    after: tuple[str, int] | None = None,
     limit: int = PAGE_SIZE,
     name_like: str = "",
 ) -> Page:
@@ -121,6 +131,12 @@ def page(
     where = f"({clause})"
     if name_like:
         where += f" AND name LIKE '{escape_like(name_like)}%' ESCAPE '{ESCAPE}'"
+    counted = where
+    if after is not None:
+        # The row comparison, not `name > x OR (name = x AND guid > y)`: it is
+        # the same thing, it is what an index on (name, guid) can seek to, and
+        # it cannot be got subtly wrong.
+        where += f" AND (name, guid) > ('{escape_quotes(after[0])}', {int(after[1])})"
 
     try:
         counts = sql.query(
@@ -128,14 +144,13 @@ def page(
             "SELECT COUNT(*), "
             f"SUM({registry}), "
             f"SUM(NOT ({registry})) "
-            f"FROM {table} WHERE {where};",
+            f"FROM {table} WHERE {counted};",
         )
         rows = sql.query(
             "characters",
             f"SELECT name, level, {online}, "
-            f"CASE WHEN {registry} THEN 'registry' ELSE 'prefix' END "
-            f"FROM {table} WHERE {where} ORDER BY name, guid "
-            f"LIMIT {int(limit)} OFFSET {int(offset)};",
+            f"CASE WHEN {registry} THEN 'registry' ELSE 'prefix' END, guid "
+            f"FROM {table} WHERE {where} ORDER BY name, guid LIMIT {int(limit)};",
         )
     except Exception as exc:  # noqa: BLE001 - every seam failure is one answer here
         logger.warning(f"could not browse {entry.id}'s bots: {exc}")
@@ -161,15 +176,21 @@ def page(
                 f"{characters} characters"
             )
 
-    bots = _rows(rows)
-    if isinstance(bots, str):
-        return Page(problem=bots, total=None)
+    parsed = _rows(rows)
+    if isinstance(parsed, str):
+        return Page(problem=parsed, total=None)
+    bots, keys = parsed
+    # A short page is the last one. A full page MAY be the last one -- the only
+    # way to know is to ask for one more row than is shown, and a spare row per
+    # press is a worse trade than a Next that occasionally lands on nothing.
+    next_after = keys[-1] if len(bots) == limit and keys else None
     return Page(
         bots=bots,
         total=total,
         by_registry=by_registry,
         by_prefix=by_prefix,
         warning=warning,
+        next_after=next_after,
     )
 
 
@@ -213,21 +234,33 @@ def _three(raw: str) -> tuple[int, int, int] | None:
     return out[0], out[1], out[2]
 
 
-def _rows(raw: str) -> list[Bot] | str:
-    """The page's rows, or the sentence explaining why there are none."""
+def _rows(raw: str) -> tuple[list[Bot], list[tuple[str, int]]] | str:
+    """The page's rows and their keys, or the sentence explaining why neither.
+
+    The guid comes back beside each row and is not shown: it is the second half
+    of the cursor, and reading it here is what stops the caller having to ask
+    for it again.
+    """
     bots: list[Bot] = []
+    keys: list[tuple[str, int]] = []
     for line in raw.splitlines():
         if not line.strip():
             continue
         fields = line.split("\t")
-        if len(fields) != 4 or not fields[1].strip().lstrip("-").isdigit():
+        if (
+            len(fields) != 5
+            or not fields[1].strip().lstrip("-").isdigit()
+            or not fields[4].strip().isdigit()
+        ):
             return f"a bot row came back as {line.strip()!r}"
+        name = fields[0].strip()
         bots.append(
             Bot(
-                name=fields[0].strip(),
+                name=name,
                 level=int(fields[1]),
                 online=fields[2].strip() == "1",
                 source=fields[3].strip(),
             )
         )
-    return bots
+        keys.append((name, int(fields[4])))
+    return bots, keys

@@ -2874,11 +2874,12 @@ class _StubBots:
             total=500,
             by_registry=480,
             by_prefix=20,
+            next_after=("Ritdy", 9),
         )
         self.asked: list[tuple[int, str]] = []
 
-    def page(self, *, offset: int = 0, name_like: str = "") -> botlist.Page:
-        self.asked.append((offset, name_like))
+    def page(self, *, after: tuple[str, int] | None = None, name_like: str = "") -> botlist.Page:
+        self.asked.append((after, name_like))
         return self.result
 
 
@@ -2940,7 +2941,13 @@ def test_a_marker_matching_nothing_warns_rather_than_reading_as_no_bots(
     assert "no character matched" in view.bot_summary.text()
 
 
-def test_the_next_page_asks_for_the_next_page(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+def test_the_next_page_starts_where_this_one_ended(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    """A cursor, not a count.
+
+    With OFFSET, one bot logging out before the boundary shifts every later
+    page by one: a row is shown twice and the one that took its place is never
+    shown at all.
+    """
     stub = _StubBots()
     view = ControllerView(
         WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
@@ -2949,13 +2956,12 @@ def test_the_next_page_asks_for_the_next_page(qapp: object, ps: _Ps, tmp_path: P
 
     view.next_bot_page()
 
-    assert stub.asked[-1][0] == botlist.PAGE_SIZE
+    assert stub.asked[-1][0] == ("Ritdy", 9)
 
 
 def test_the_first_page_has_no_previous_to_go_back_to(
     qapp: object, ps: _Ps, tmp_path: Path
 ) -> None:
-    """And the offset never goes negative, which would be a SQL error."""
     stub = _StubBots()
     view = ControllerView(
         WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
@@ -2964,8 +2970,49 @@ def test_the_first_page_has_no_previous_to_go_back_to(
 
     view.previous_bot_page()
 
-    assert stub.asked[-1][0] == 0
+    assert stub.asked[-1][0] is None
     assert view.previous_bots_button.isEnabled() is False
+
+
+def test_going_back_returns_to_the_cursor_the_earlier_page_started_from(
+    qapp: object, ps: _Ps, tmp_path: Path
+) -> None:
+    """Which is why the cursors are kept in a stack.
+
+    There is no arithmetic that turns "where page three starts" into "where
+    page two starts": the only way back is the key the earlier page was read
+    with.
+    """
+    stub = _StubBots()
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+    view.refresh_bots()
+    view.next_bot_page()
+    view.next_bot_page()
+
+    view.previous_bot_page()
+
+    assert stub.asked[-1][0] == ("Ritdy", 9)
+    assert view.previous_bots_button.isEnabled() is True
+
+
+def test_a_last_page_offers_no_next(qapp: object, ps: _Ps, tmp_path: Path) -> None:
+    stub = _StubBots(
+        page=botlist.Page(
+            bots=[botlist.Bot(name="Zed", level=1, online=False, source="registry")],
+            total=1,
+            by_registry=1,
+            next_after=None,
+        )
+    )
+    view = ControllerView(
+        WOTLK, _with_bots(ps, tmp_path, stub), status_poll_ms=0, job_runner=run_inline
+    )
+
+    view.refresh_bots()
+
+    assert view.next_bots_button.isEnabled() is False
 
 
 def test_a_filter_is_passed_through_and_sends_the_list_back_to_the_first_page(
@@ -2982,7 +3029,7 @@ def test_a_filter_is_passed_through_and_sends_the_list_back_to_the_first_page(
 
     view.filter_bots()
 
-    assert stub.asked[-1] == (0, "Gug")
+    assert stub.asked[-1] == (None, "Gug")
 
 
 def test_a_game_with_no_bot_seam_offers_no_tab(qapp: object, ps: _Ps, tmp_path: Path) -> None:
