@@ -158,6 +158,20 @@ class ChannelSetup(Protocol):
     def setup_state(self) -> object: ...
 
 
+_ROW_SETTLE_MS = 750
+"""How long to leave the server to write what it has already reported.
+
+Measured rather than guessed (2026-09-07, WotLK on `yulon-ubuntu`):
+
+    level 55 -> 58: answered in 0.18s, the row changed after 0.30s
+    level 58 -> 59: answered in 0.15s, the row changed after 0.26s
+
+750ms is that with room, and the sentence a person reads does not wait for it:
+the server's own words appear the moment they arrive, and only the LIST is
+scheduled.
+"""
+
+
 _CHARACTER_ACTIONS = (
     "Teleport",
     "Set level",
@@ -2368,7 +2382,8 @@ class ControllerView(QWidget):
             button.setEnabled(True)
         pieces, mails = self._gear_set_size(name)
         if pieces:
-            self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} mails)")
+            plural = "mail" if mails == 1 else "mails"
+            self.send_gear_button.setText(f"Send {name}'s {pieces} worn items ({mails} {plural})")
         else:
             # Nothing worn is not a failure and not a thing to press: the
             # server would refuse an empty mail with a sentence about item ids.
@@ -2433,7 +2448,13 @@ class ControllerView(QWidget):
         said = getattr(outcome, "text", "") if done else getattr(outcome, "problem", "")
         self.character_report.setText(said.strip() or ("Done." if done else "It did not work."))
         if done:
-            self.refresh_characters()
+            # NOT `self.refresh_characters()`. Measured on the live server,
+            # 2026-09-07: the command answers in about 0.15s and its own row
+            # lands about 0.1s after that, so a list re-read the moment the
+            # answer arrives shows the state BEFORE the thing that was just
+            # done -- "You change the level of Aevret to 60" above a row still
+            # reading 55, which reads as the action having failed.
+            QTimer.singleShot(_ROW_SETTLE_MS, self.refresh_characters)
 
     @Slot()
     def teleport_character(self) -> None:

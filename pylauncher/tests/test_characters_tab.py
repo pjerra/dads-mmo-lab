@@ -219,3 +219,47 @@ def test_a_success_says_what_the_server_said(tmp_path: Path) -> None:
     view.revive_character()
 
     assert "revive" in view.character_report.text().lower()
+
+
+def test_the_list_is_not_re_read_the_instant_the_server_answers(tmp_path: Path) -> None:
+    """Measured on the live server, 2026-09-07: the answer beats the write.
+
+        level 55 -> 58: the server answered in 0.18s, the row changed after 0.30s
+        level 58 -> 59: the server answered in 0.15s, the row changed after 0.26s
+
+    So a list re-read the moment the command answers shows a person the state
+    BEFORE the thing they just did — "You change the level of Aevret to 60"
+    above a row that still says 55, which reads as the action having failed.
+
+    The refresh is scheduled instead. What this asserts is the absence: no read
+    between the press and the answer being shown.
+    """
+    play = _Play(characters=_people())
+    view = _view(tmp_path, play=play)
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+    play.calls.clear()
+
+    view.revive_character()
+
+    assert [name for name, _ in play.calls] == ["revive"], play.calls
+    assert view.character_report.text().strip(), "the server's own sentence is shown at once"
+
+
+def test_the_gear_button_counts_in_english(tmp_path: Path) -> None:
+    """ "Send Aevret's 12 worn items (1 mails)" is what the live gate photographed.
+
+    One mail is a mail. It is a small thing and it is on the front of a button
+    somebody is about to press, which is where small things are read.
+    """
+    view = _view(tmp_path, play=_Play(characters=_people(), pieces=12))
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    assert "1 mail)" in view.send_gear_button.text(), view.send_gear_button.text()
+
+    view = _view(tmp_path, play=_Play(characters=_people(), pieces=19))
+    view.refresh_characters()
+    view.character_list.setCurrentRow(0)
+
+    assert "2 mails)" in view.send_gear_button.text(), view.send_gear_button.text()
