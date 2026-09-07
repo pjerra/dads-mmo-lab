@@ -53,6 +53,20 @@ class Answer:
     """Why there is no answer, when there is none. Empty for `yes` and `no`."""
     indeterminate: bool = False
     """True when the command may have run. Only a timeout sets it."""
+    denied: bool = False
+    """True only when the SERVER said it does not accept this credential.
+
+    Every transport failure and every rejection arrives as `unknown`, so a
+    caller reading the outcome alone cannot tell "your password is wrong" from
+    "the server is not there". 8.2a's repair rotates a GM account's password on
+    the strength of that distinction, and an adversarial review found what
+    happens without it: opening the tab against a stopped server read as a bad
+    credential and offered to reset a working one.
+
+    `forbidden` is deliberately NOT denied. The account exists and its password
+    is right; what is wrong is its GM level, and a new password would burn a
+    rotation and change nothing.
+    """
 
     @property
     def known(self) -> bool:
@@ -102,6 +116,7 @@ class SoapChannel:
             return Answer(
                 "unknown",
                 reply.text,
+                denied=True,
                 reason=(
                     "the server did not accept this install's account and password. Its "
                     "credentials may have been changed on the server, or the file this app "

@@ -165,3 +165,41 @@ def test_two_installs_do_not_wait_on_each_other() -> None:
     )
 
     assert first.lock is not second.lock
+
+
+# -- what "the server said no to this credential" means (review, 2026-09-07) --
+
+
+def test_only_a_rejected_credential_is_marked_denied() -> None:
+    """The one outcome that justifies resetting an account's password.
+
+    Every transport failure and every refusal arrives as `unknown`, so a caller
+    reading the outcome alone cannot tell "your password is wrong" from "the
+    server is not there" -- and 8.2a's repair, offered on the strength of that
+    distinction, rotates a GM account's password. An adversarial review found
+    it: opening the tab against a stopped server offered to reset a working
+    credential.
+    """
+    for outcome, denied in (
+        ("unauthorised", True),
+        ("forbidden", False),
+        ("unreachable", False),
+        ("timeout", False),
+        ("unreadable", False),
+        ("answered", False),
+        ("refused", False),
+    ):
+        answer = _channel(_Wire(soap.Reply(outcome, "text", 0))).send("server info")
+        assert answer.denied is denied, f"{outcome} should be denied={denied}"
+
+
+def test_a_level_too_low_is_not_denied_because_a_new_password_would_not_fix_it() -> None:
+    """`forbidden` is a real refusal of this credential, and repair is wrong for it.
+
+    The account exists and its password is right; what is wrong is its GM
+    level. Rotating the password would burn a rotation and change nothing.
+    """
+    answer = _channel(_Wire(soap.Reply("forbidden", "", 403))).send("server info")
+
+    assert answer.denied is False
+    assert "GM level" in answer.reason

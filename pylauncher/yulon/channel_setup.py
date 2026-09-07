@@ -293,7 +293,7 @@ def enable(
     return Enabled(path=target, changed=True)
 
 
-def roll_back(entry: CatalogEntry, server_dir: Path) -> bool:
+def roll_back(entry: CatalogEntry, server_dir: Path, *, expected: str | None = None) -> bool:
     """Undo the press: the configuration this install had, and the port back.
 
     Two halves, and the second is the one the box names. Restoring the
@@ -307,15 +307,39 @@ def roll_back(entry: CatalogEntry, server_dir: Path) -> bool:
     Returns False, writing nothing, when there is no press to undo. Restoring
     "the state before" out of a backup that does not exist would put an empty
     override on top of a good one.
+
+    `expected` is what the press wrote. Given it, the override is restored only
+    if it still says exactly that -- otherwise the file has been changed since,
+    and the port is released without touching it.
     """
     target = server_dir / composegen.OVERRIDE_FILE
     backup = target.with_name(target.name + BACKUP_SUFFIX)
     if not backup.is_file():
         logger.info(f"nothing to roll back for {entry.id}: no {backup.name}")
         return False
+    now = target.read_text(encoding="utf-8") if target.is_file() else ""
+    if expected is not None and now != expected:
+        # Somebody -- a person, or the settings surface that owns this file --
+        # has changed the override since the press. Putting the backup on top
+        # of it would throw those changes away, and the review that found this
+        # is right that the backup can be arbitrarily old: it is written once,
+        # by the FIRST press, and lives until a rollback consumes it. The port
+        # is still released, because the port claim IS this feature's and
+        # giving it back is what makes the server start.
+        logger.warning(
+            f"{entry.id}'s override has changed since the press; releasing the port but "
+            f"leaving {target.name} alone"
+        )
+        composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
+        return True
     target.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
-    backup.unlink()
+    # The `.env` before the unlink, and the unlink last. An interruption then
+    # leaves the backup on disk with the override already restored, and running
+    # this again is a no-op that finishes the job -- whereas deleting the only
+    # copy first and failing on `.env` would leave a restored override paired
+    # with the port it cannot have and nothing to retry from.
     composegen.write_dotenv(server_dir, {HOST_PORT_VAR: RELEASED_HOST_PORT})
+    backup.unlink()
     logger.info(f"rolled {entry.id}'s command channel back and released its host port")
     return True
 
@@ -342,10 +366,22 @@ def blames_the_host_port(message: str, port: int) -> bool:
     which is what is matched now. Requiring "already in use" or "already
     allocated" as well would be a third wording to get wrong, and a bind that
     fails for some OTHER reason is still a bind of our port that failed.
+
+    **Both facts must be on the same LINE.** Compose prints one line per
+    service and this message is the whole of its output, so a bind failure for
+    the database and a mention of the SOAP port somewhere else would otherwise
+    read as our port failing to bind -- and roll the channel back for something
+    that had nothing to do with it (adversarial review, 2026-09-07). `listen`
+    is accepted beside `bind` because the userland proxy's own wording is
+    "listen tcp ...".
     """
-    if "bind" not in message.lower():
-        return False
-    return re.search(rf"[:\s]{port}(?![0-9])", message) is not None
+    for raw in message.replace("\\n", "\n").splitlines():
+        low = raw.lower()
+        if "bind" not in low and "listen" not in low:
+            continue
+        if re.search(rf"[:\s]{port}(?![0-9])", raw):
+            return True
+    return False
 
 
 def _world_env(entry: CatalogEntry, extra: Mapping[str, str]) -> dict[str, str]:
@@ -631,10 +667,16 @@ class InstallChannel:
     def check(self) -> State:
         """Ask whether the saved credential still works, and keep the answer.
 
-        Only a definite rejection downgrades it. `Answer.indeterminate` is the
-        difference between the server saying no and the server not being there,
-        and treating the second as the first would offer a repair that resets a
-        working password because a container was down.
+        Only the SERVER rejecting this credential downgrades it, which is what
+        `Answer.denied` names. Everything else -- a refused connection, a
+        socket error, a reply nothing could parse, a GM level too low -- leaves
+        the credential exactly as it was.
+
+        The first version read "not yes, and not a timeout", and an adversarial
+        review found what that costs: every one of those failures arrives as
+        `unknown` with `indeterminate` false, so opening the tab against a
+        stopped server read as "your password is wrong" and offered to rotate a
+        GM account's password to fix a container that was not running.
         """
         state = self._state
         if not isinstance(state, Verified):
@@ -643,8 +685,8 @@ class InstallChannel:
         answer = channel.send(commands.SERVER_INFO)  # type: ignore[attr-defined]
         if getattr(answer, "outcome", "") == "yes":
             return state
-        if getattr(answer, "indeterminate", False):
-            logger.info(f"{self.entry.id}: could not reach the channel; the credential stands")
+        if not getattr(answer, "denied", False):
+            logger.info(f"{self.entry.id}: the channel did not answer; the credential stands")
             return state
         self._state = refused(
             state,
@@ -704,8 +746,26 @@ class InstallChannel:
         return self.prove()
 
     def roll_back(self) -> bool:
-        """Undo this install's own press, and give its host port back."""
-        return roll_back(self.entry, self.server_dir)
+        """Undo this install's own press, and give its host port back.
+
+        Hands `roll_back()` the text the press would write NOW, so a file that
+        has been changed since is left alone rather than overwritten from a
+        backup that may be arbitrarily old.
+        """
+        operations = self.entry.operations
+        expected: str | None = None
+        if operations is not None:
+            try:
+                expected = composegen.render(
+                    self.entry,
+                    self.server_dir,
+                    templates_root=self.templates_root,
+                    world_env=_world_env(self.entry, operations.enable_env),
+                    db_password=self._db_password,
+                ).override
+            except Exception as exc:  # noqa: BLE001 - an unrenderable plan is not a reason to stop
+                logger.info(f"could not re-render {self.entry.id}'s override to compare: {exc}")
+        return roll_back(self.entry, self.server_dir, expected=expected)
 
     def enable(self, *, world_running: bool) -> Enabled:
         """Write the channel on. Refuses while the world is running."""

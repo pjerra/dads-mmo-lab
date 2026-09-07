@@ -260,3 +260,88 @@ def test_a_start_failure_that_names_our_port_is_told_apart_from_one_that_does_no
     )
     assert setup.blames_the_host_port("Bind for 127.0.0.1:7878 failed", 78) is False
     assert setup.blames_the_host_port("failed to bind host port 127.0.0.1:78780/tcp", 7878) is False
+
+
+# -- what the review found about rolling back (2026-09-07) -------------------
+
+
+def _enabled_text(server_dir: Path) -> str:
+    """What the press writes, re-rendered rather than remembered."""
+    from yulon.catalog import composegen
+
+    return composegen.render(
+        WOTLK,
+        server_dir,
+        templates_root=resources.installers_dir(),
+        world_env=setup._world_env(WOTLK, WOTLK.operations.enable_env),
+    ).override
+
+
+def test_a_rollback_leaves_an_override_somebody_has_edited_since_the_press(
+    tmp_path: Path,
+) -> None:
+    """The backup is written once and can be arbitrarily old.
+
+    The override's own header says the settings surface will read and rewrite
+    it. Putting a months-old copy back on top of that would throw away
+    everything the user changed in between -- to undo a press they may barely
+    remember making. The port is still released, because the port claim IS this
+    feature's and giving it back is what makes the server start.
+    """
+    server_dir = _installed(tmp_path)
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+    override = server_dir / OVERRIDE_FILE
+    edited = override.read_text(encoding="utf-8") + "\n# a person was here\n"
+    override.write_text(edited, encoding="utf-8")
+
+    assert setup.roll_back(WOTLK, server_dir, expected=_enabled_text(server_dir)) is True
+
+    assert override.read_text(encoding="utf-8") == edited
+    env = (server_dir / ".env").read_text(encoding="utf-8")
+    assert f"{setup.HOST_PORT_VAR}={setup.RELEASED_HOST_PORT}" in env
+
+
+def test_a_rollback_interrupted_before_its_last_step_can_simply_be_run_again(
+    tmp_path: Path,
+) -> None:
+    """Which is why the backup is deleted last.
+
+    Deleting the only copy first and then failing on `.env` would leave a
+    restored override paired with the port it cannot have, and nothing to
+    retry from.
+    """
+    server_dir = _installed(tmp_path)
+    original = (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8")
+    setup.enable(WOTLK, server_dir, templates_root=resources.installers_dir(), world_running=False)
+    expected = _enabled_text(server_dir)
+
+    setup.roll_back(WOTLK, server_dir, expected=expected)
+    # The backup is gone, which is what makes a second call a no-op rather than
+    # a second restore of something already restored.
+    assert setup.roll_back(WOTLK, server_dir, expected=expected) is False
+    assert (server_dir / OVERRIDE_FILE).read_text(encoding="utf-8") == original
+
+
+def test_a_bind_failure_for_another_service_does_not_roll_this_channel_back() -> None:
+    """Compose prints one line per service and hands over the whole block.
+
+    A database that could not bind, and our port named on some other line, is
+    two facts about two things. Read as one they turn an unrelated failure into
+    a silent rollback of a channel that was working.
+    """
+    unrelated = (
+        "Container ac-database  Starting\n"
+        "Error response from daemon: failed to bind host port 127.0.0.1:3306/tcp: "
+        "address already in use\n"
+        "the command channel is published on 7878\n"
+    )
+
+    assert setup.blames_the_host_port(unrelated, 7878) is False
+    assert setup.blames_the_host_port(unrelated, 3306) is True
+
+
+def test_the_userland_proxys_own_wording_is_matched_too() -> None:
+    """`listen tcp ...` is the other sentence Docker uses for the same thing."""
+    said = "Error starting userland proxy: listen tcp4 127.0.0.1:7878: bind: address already in use"
+
+    assert setup.blames_the_host_port(said, 7878) is True

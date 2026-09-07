@@ -25,10 +25,18 @@ INSTALL = "ab12cd34"
 class _Answering:
     """A channel that answers the same way every time, and counts the asks."""
 
-    def __init__(self, outcome: str, *, indeterminate: bool = False, text: str = "") -> None:
+    def __init__(
+        self,
+        outcome: str,
+        *,
+        indeterminate: bool = False,
+        text: str = "",
+        denied: bool = False,
+    ) -> None:
         self.outcome = outcome
         self.indeterminate = indeterminate
         self.text = text
+        self.denied = denied
         self.asked = 0
 
     def send(self, _command: object) -> object:
@@ -36,19 +44,38 @@ class _Answering:
         return type(
             "Answer",
             (),
-            {"outcome": self.outcome, "text": self.text, "indeterminate": self.indeterminate},
+            {
+                "outcome": self.outcome,
+                "text": self.text,
+                "indeterminate": self.indeterminate,
+                "denied": self.denied,
+            },
         )()
 
 
 class _Scripted:
-    """A channel whose answers are given in order, one per ask."""
+    """A channel whose answers are given in order, one per ask.
+
+    A "no" here is the server REJECTING the credential -- `denied` -- because
+    that is the only refusal `check()` acts on, and these scripts exist to
+    drive it into the repair path.
+    """
 
     def __init__(self, outcomes: list[str]) -> None:
         self.outcomes = list(outcomes)
 
     def send(self, _command: object) -> object:
         outcome = self.outcomes.pop(0) if self.outcomes else "no"
-        return type("Answer", (), {"outcome": outcome, "text": "", "indeterminate": False})()
+        return type(
+            "Answer",
+            (),
+            {
+                "outcome": outcome,
+                "text": "",
+                "indeterminate": False,
+                "denied": outcome == "no",
+            },
+        )()
 
 
 def _installed(tmp_path: Path) -> Path:
@@ -137,7 +164,7 @@ def test_checking_a_credential_the_server_rejects_downgrades_it_to_refused(
     tmp_path: Path,
 ) -> None:
     _save(tmp_path)
-    channel = _channel(tmp_path, answering=_Answering("no", text="401"))
+    channel = _channel(tmp_path, answering=_Answering("no", text="401", denied=True))
 
     state = channel.check()
 
@@ -159,6 +186,65 @@ def test_a_server_that_cannot_be_reached_leaves_the_credential_alone(
     state = channel.check()
 
     assert isinstance(state, setup.Verified)
+
+
+def test_a_server_that_is_simply_not_there_does_not_offer_to_reset_anything(
+    tmp_path: Path,
+) -> None:
+    """An adversarial review's first finding, 2026-09-07.
+
+    `check()` used to downgrade on anything that was not a yes and not a
+    timeout. Connection refused, a socket error and an unreadable reply all
+    arrive as `unknown` with `indeterminate` false, so opening the tab against
+    a stopped server read as "your password is wrong" and offered to rotate a
+    GM account's password to fix a container that was not running.
+
+    Only the server saying it does not accept this credential may downgrade,
+    which is what `denied` names.
+    """
+    _save(tmp_path)
+    channel = _channel(tmp_path, answering=_Answering("unknown", denied=False))
+
+    assert isinstance(channel.check(), setup.Verified)
+
+
+def test_a_repair_interrupted_after_the_reset_is_recoverable_by_repairing_again(
+    tmp_path: Path,
+) -> None:
+    """The window the review named, and what actually closes it.
+
+    Repair writes the database first and the credential file last, so a crash
+    in between leaves the server accepting a password nothing on disk knows.
+    That is not a dead end: the stale file is refused, which is exactly the
+    state `repair()` exists for, and the account is this app's own -- nobody
+    plays it and nothing else uses it. Rotating again is the recovery, and it
+    is the same button.
+
+    A journal was considered and not written: it would put a second copy of a
+    live credential on disk to protect an account whose only recovery cost is
+    one more reset.
+    """
+    _save(tmp_path, password="stale")
+    resets: list[str] = []
+    # The state is already Refused -- that is what the interrupted attempt
+    # left behind -- so this repair asks once, with the password it has just
+    # written, and the server accepts it.
+    answering = _Scripted(["yes"])
+    channel = _channel(
+        tmp_path,
+        answering=answering,
+        reset=lambda name, _pw: resets.append(name),
+    )
+    channel._state = setup.Refused(
+        setup.account_name(INSTALL), "stale", reason="left behind by an interrupted repair"
+    )
+
+    state = channel.repair()
+
+    assert isinstance(state, setup.Verified)
+    assert resets == [setup.account_name(INSTALL)]
+    saved = setup.load_credential(WOTLK.id, INSTALL, config_dir=tmp_path / "config")
+    assert saved is not None and saved.password != "stale"
 
 
 def test_checking_an_install_with_no_credential_asks_the_server_nothing(
