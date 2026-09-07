@@ -52,6 +52,34 @@ owns those characters' sessions. An online BOT is no good for the online clause
 either: `character level` answered "You changed level of Airaani to 60." and the
 row still read 72 half a minute later, because the module maintains its bots.
 
+## What the adversarial review changed, after this box first passed
+
+The review read the transcript and found the thing this project asks of every
+test: **the assertions were true before the commands ran.** The character was
+already level 60 when the level was set to 60, and already flagged when the
+rename flag was set. Both "passed" and neither demonstrated anything.
+
+So the box now clears the ground first: the level is set somewhere else, the
+rename flag is cleared, and the character is killed — and each action refuses to
+run if the state it produces is the state it starts in. The transcript above
+shows what moved (`level 53 to 60`, `at_login 2048 -> 2049`, `map 1` to `map 0`)
+rather than what merely was.
+
+**That fixed gate found a defect within a minute:** `revive` on an OFFLINE
+character answers success and does nothing — health 0 before, health 0 twenty
+seconds after, `done=True` with an empty message. It acts on a live player
+object. The tab now offers the button only for a character who is logged in and
+says why when it is not, and the clause is proved the other way on a character
+standing in the world: **health 0 → 1010**.
+
+Three more findings from the same review are fixed in the code rather than here:
+the partial gear-set sentence no longer advises an operation nobody has, mail
+text is an allow-list with a cap rather than two characters removed, and the
+list refresh is a bounded re-read with a generation token rather than one fixed
+delay measured on one server. The one that is NOT fixed is recorded instead:
+canonicalising a name fixes case and does not make the target stable, and these
+cores address these commands by name and offer nothing else.
+
 ## Three things this box measured
 
 **1. The server answers before its own write lands.**
