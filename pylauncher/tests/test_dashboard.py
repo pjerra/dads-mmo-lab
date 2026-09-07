@@ -336,25 +336,57 @@ def test_a_marker_problem_does_not_make_a_healthy_server_unstable(tmp_path: Path
     assert verdict.stable is True, "a conf key is not a reason to refuse commands"
 
 
-def test_a_recreated_container_does_not_inherit_the_old_ones_restart_loop(
+def test_a_restarted_container_is_not_called_a_loop_and_is_not_called_settled_either(
     tmp_path: Path,
 ) -> None:
-    """Measured on m910q, 2026-09-07: the tab kept saying `restart loop — 0 restarts`.
+    """Measured on m910q, 2026-09-07: the tab said `restart loop — 0 restarts`.
 
     A watcher left running across 8.1d's crash-loop check went on calling a
-    healthy server a loop for minutes after `docker compose up -d` had built a
-    new container — zero restarts, and still a loop — while a dashboard made
-    fresh at that moment read `up`. The verdict was being carried by history
-    this object held about a container that no longer existed.
+    healthy server a loop for minutes after the world came back — zero restarts,
+    and still a loop — while a dashboard made fresh at that moment read `up`.
+    A count of zero cannot be a loop, and the sentence was simply false.
 
-    The count is what gives it away: within one container's life it only ever
-    grows, so a drop is a different container wearing the same name. The
-    ten-minute settle rule cannot cover this, because it is the rule that keeps
-    the old verdict alive for those ten minutes.
+    But the count resetting is not proof of health either, and the first fix for
+    this treated it as though it were (adversarial review, 2026-09-07). Docker
+    resets `RestartCount` on a MANUAL start as readily as on a recreate — the
+    live run measured `Container tortoise-mangosd Started`, not `Recreated`,
+    with the count going 8 → 0 — so a user pressing Start on a server whose
+    crash cause is still there would have been handed `stable=True` for as long
+    as the world takes to load and die again, which on these trees is minutes.
+    That is the bug 8.1a exists to close, arriving from the other side.
 
-    A fixed server that keeps reading as broken also keeps 8.2a's enable button,
-    interlocked on `stable`, disabled behind it.
+    So the reset moves only the LABEL. The interlock stays shut until this run
+    has outlasted `SETTLED_AFTER`, which is the same evidence the settle rule
+    has always asked for, now measured from the run that is actually going.
     """
+    long_ago = "2026-09-06T12:00:00.000000000Z"
+    three_minutes_in = (NOW - timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    eleven_minutes_in = (NOW - timedelta(minutes=11)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
+    watch = _watch(
+        tmp_path,
+        [
+            _running(long_ago, 8),
+            _running(long_ago, 9),
+            _running(three_minutes_in, 0),
+            _running(eleven_minutes_in, 0),
+        ],
+    )
+
+    watch.tick()
+    looping = watch.tick()
+    restarted = watch.tick()
+    settled = watch.tick()
+
+    assert looping.state == "restart_loop"
+    assert restarted.state == "up", "a container with no restarts is not looping"
+    assert "restart loop" not in dashboard.line(restarted)
+    assert restarted.stable is False, "a reset count is not evidence the crash cause is gone"
+    assert "crash" in dashboard.line(restarted), "the tab must say why it is still holding back"
+    assert settled.stable is True, "ten minutes of this run is what clears it"
+
+
+def test_a_loop_in_the_run_that_followed_is_caught_on_its_own_evidence(tmp_path: Path) -> None:
+    """The new run is watched like any other: its own count growing is a loop again."""
     long_ago = "2026-09-06T12:00:00.000000000Z"
     three_minutes_in = (NOW - timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
     thirty_seconds_in = (NOW - timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%S.000000000Z")
@@ -369,14 +401,11 @@ def test_a_recreated_container_does_not_inherit_the_old_ones_restart_loop(
     )
 
     watch.tick()
-    looping = watch.tick()
-    after_the_recreate = watch.tick()
+    watch.tick()
+    restarted = watch.tick()
     crashing_again = watch.tick()
 
-    assert looping.state == "restart_loop"
-    assert after_the_recreate.state == "up"
-    assert after_the_recreate.stable is True
-    # And forgetting the old container does not leave the new one unwatched.
+    assert restarted.state == "up"
     assert crashing_again.state == "restart_loop"
 
 

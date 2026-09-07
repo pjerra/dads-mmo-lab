@@ -68,6 +68,23 @@ class Verdict:
     bots: int | None = None
     problem: str = ""
     warning: str = ""
+    after_a_loop: bool = False
+    """This run followed a crash loop and has not yet outlasted `SETTLED_AFTER`.
+
+    The label and the interlock are not the same question, and this field is
+    where they part. A restart count that has gone back to zero says the run
+    that looped is over — so calling this one a loop would be false, and the tab
+    said exactly that on m910q for minutes. It does NOT say the crash cause is
+    gone: docker resets the count on a manual start as readily as on a recreate,
+    so a user pressing Start on a server that is still broken would otherwise be
+    handed a steady verdict for as long as the world takes to load and die
+    again, which on these trees is minutes.
+
+    So the reset moves the sentence and not the permission. `stable` stays False
+    until this run has lasted `SETTLED_AFTER`, which is the same evidence the
+    settle rule always asked for, measured against the run that is actually
+    going (adversarial review, 2026-09-07).
+    """
     database_unreachable: bool = False
     """Set only when the READ failed, never when the bot marker was the problem.
 
@@ -96,8 +113,11 @@ class Verdict:
         one and the process stays up retrying the connection — `running`,
         `RestartCount 0`, indefinitely — so `state == "up"` was true of a server
         nobody could play on, and this said yes.
+
+        And so is a run that has only just replaced a crash loop, for the reason
+        `after_a_loop` gives.
         """
-        return self.state == "up" and not self.database_unreachable
+        return self.state == "up" and not self.database_unreachable and not self.after_a_loop
 
 
 def line(verdict: Verdict) -> str:
@@ -128,6 +148,12 @@ def line(verdict: Verdict) -> str:
         parts.append(f"up — {counts}" if counts else "up")
         if verdict.uptime is not None:
             parts[-1] += f", {_uptime(verdict.uptime)}"
+        if verdict.after_a_loop:
+            minutes = int(SETTLED_AFTER.total_seconds() // 60)
+            parts.append(
+                f"restarted after a crash loop — not called steady until this run "
+                f"has lasted {minutes}m"
+            )
     if verdict.warning:
         parts.append(verdict.warning)
     if verdict.problem and verdict.players is not None:
@@ -154,10 +180,13 @@ class Dashboard:
     a non-zero one. What says something is the count CHANGING between two ticks,
     so the previous value is kept here rather than asked for again.
 
-    What is kept is about one container, and `docker compose up -d` can put a
-    different one behind the same name. `_replaced()` is where that is noticed;
-    without it the history outlives its subject and a repaired server goes on
-    reading as the broken one it replaced.
+    What is kept is about one RUN, and a restart -- by hand or by the daemon --
+    ends it and resets docker's count. `_restarted()` is where that is noticed.
+    Without it the loop verdict outlives its own run and a server that is back
+    goes on reading as the broken one it replaced; with it read as proof of
+    health, a server that is still broken reads as steady for as long as its
+    world takes to die again. It is neither, so it moves the sentence and leaves
+    the interlock where it was.
     """
 
     def __init__(
@@ -181,6 +210,7 @@ class Dashboard:
         self._now = now or (lambda: datetime.now(UTC))
         self._last_restarts: int | None = None
         self._looping = False
+        self._loop_is_current = False
 
     def tick(self) -> Verdict:
         """Ask once, and answer with everything that was learned."""
@@ -191,52 +221,67 @@ class Dashboard:
             # it leaves in the field. Kept out of the history, it stays a gap in
             # the record; stored, it makes the next honest read look like growth.
             return Verdict("unknown", state.restart_count, state.started_at, uptime)
-        if self._replaced(state):
-            self._looping = False
+        if self._restarted(state):
+            self._loop_is_current = False
         grew = self._last_restarts is not None and state.restart_count > self._last_restarts
         self._last_restarts = state.restart_count
         if grew:
             self._looping = True
+            self._loop_is_current = True
         elif self._looping and uptime is not None and uptime >= SETTLED_AFTER:
             self._looping = False
 
-        if state.status == "restarting" or (self._looping and state.status == "running"):
+        if state.status == "restarting" or (
+            self._looping and self._loop_is_current and state.status == "running"
+        ):
             return Verdict("restart_loop", state.restart_count, state.started_at, uptime)
         if state.status != "running":
             return Verdict("stopped", state.restart_count, state.started_at, uptime)
-        return self._with_population(state, uptime)
+        return self._with_population(state, uptime, after_a_loop=self._looping)
 
-    def _replaced(self, state: docker.ContainerState) -> bool:
-        """Whether the container this history is about has been replaced under its name.
+    def _restarted(self, state: docker.ContainerState) -> bool:
+        """Whether the run the loop evidence is about has ended.
 
         Measured on m910q, 2026-09-07: a watcher left running across 8.1d's
         crash-loop check went on printing `restart loop — 0 restarts, this run
-        up 3m` for minutes after `docker compose up -d` had built a new
-        container, while a dashboard made fresh at that moment read `up`. The
-        loop had been real; the container it happened to was gone. A fixed
-        server that keeps reading as broken also keeps 8.2a's enable button,
-        interlocked on `stable`, disabled behind it.
+        up 3m` for minutes after the world came back, while a dashboard made
+        fresh at that moment read `up`. A container with no restarts is not
+        looping, and the sentence was false.
 
         The count going BACKWARDS is the evidence, and it needs nothing this
-        module does not already read. Within one container's life the count only
-        ever grows, so a drop cannot be that container — it is a new one wearing
-        the same name, and every count remembered about the old one is now about
-        something that no longer exists.
+        module does not already read: within one run docker's count only ever
+        grows, so a drop means the run it was counting is over. It does NOT say
+        which way it ended, and the live run showed why that matters — compose
+        answered `Container tortoise-mangosd Started`, not `Recreated`, and the
+        count still went 8 → 0. A manual start resets it exactly as a recreate
+        does, so this cannot be read as "somebody fixed it".
 
-        `.Id` would say the same thing more directly and was written first, then
-        taken out: no verdict here differs between the two, because a container
-        fresh enough to have a new id has a count of zero, and one whose count
-        has grown past the old one really is looping. An untestable second
-        source is not a safety net, it is a line nothing pins.
+        That is why only `_loop_is_current` moves here, and never `_looping`
+        itself: the tab stops saying a false sentence, and `stable` stays shut
+        until the new run has lasted `SETTLED_AFTER`. `.Id` was written first
+        and taken out — it would name the two endings apart, and neither ending
+        is evidence of health, so nothing downstream could act on the
+        difference.
         """
         return self._last_restarts is not None and state.restart_count < self._last_restarts
 
-    def _with_population(self, state: docker.ContainerState, uptime: timedelta | None) -> Verdict:
+    def _with_population(
+        self,
+        state: docker.ContainerState,
+        uptime: timedelta | None,
+        *,
+        after_a_loop: bool = False,
+    ) -> Verdict:
         """The two counts, or the reason there are none. Never a wrong number."""
         answer = dbreads.resolve_marker(self.entry, self.server_dir)
         if answer.marker is None:
             return Verdict(
-                "up", state.restart_count, state.started_at, uptime, problem=answer.problem
+                "up",
+                state.restart_count,
+                state.started_at,
+                uptime,
+                problem=answer.problem,
+                after_a_loop=after_a_loop,
             )
         counts = dbreads.population(self.sql, self.entry, answer.marker)
         return Verdict(
@@ -249,6 +294,7 @@ class Dashboard:
             problem=counts.problem,
             warning=counts.warning,
             database_unreachable=bool(counts.problem),
+            after_a_loop=after_a_loop,
         )
 
     def _uptime(self, started_at: str) -> timedelta | None:
