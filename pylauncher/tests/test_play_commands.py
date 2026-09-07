@@ -23,7 +23,6 @@ import pytest
 
 from yulon import commands
 
-
 # -- teleport ---------------------------------------------------------------
 
 
@@ -78,9 +77,7 @@ def test_a_rename_marks_the_character_for_the_next_login() -> None:
 
 def test_mail_with_items_quotes_the_subject_and_the_body() -> None:
     """The server parses the quotes: `"#subject" "#text"` in its own help."""
-    line = commands.mail_items(
-        "Guglu", subject="A gift", body="For you", items=((6948, 1),)
-    )
+    line = commands.mail_items("Guglu", subject="A gift", body="For you", items=((6948, 1),))
 
     assert line == 'send items Guglu "A gift" "For you" 6948:1'
 
